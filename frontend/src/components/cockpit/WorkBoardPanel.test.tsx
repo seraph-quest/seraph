@@ -220,6 +220,7 @@ describe("WorkBoardPanel", () => {
       return Promise.resolve(response({}));
     });
 
+    fetchMock.mockClear();
     render(<WorkBoardPanel />);
     fireEvent.click(await screen.findByRole("button", { name: "Load more tasks" }));
     expect(await screen.findByRole("button", { name: /Open task task-2/i })).toBeInTheDocument();
@@ -701,16 +702,18 @@ describe("WorkBoardPanel", () => {
     expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
   });
 
-  it("shows review evidence status without exposing a reviewer verdict action", async () => {
+  it("shows review evidence and same-card reviewer controls", async () => {
     const reviewTask = {
       ...task,
       status: "review" as const,
       requires_review: true,
       reviewer_id: "reviewer-1",
+      executor_id: "worker-1",
       latest_attempt: {
         attempt_id: "attempt-review",
         task_id: "task-1",
         task_revision_at_claim: 1,
+        executor_id: "worker-1",
         outcome: "succeeded",
         readback_status: null,
         receipt_refs: [{
@@ -733,7 +736,342 @@ describe("WorkBoardPanel", () => {
     expect(screen.getByText(/reviewer reviewer-1 · evidence passed/)).toBeInTheDocument();
     fireEvent.click(card);
     expect(await screen.findByText("review evidence: passed")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Approve|Request changes|Complete review/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Request changes" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Complete review" })).not.toBeDisabled();
+  });
+
+  it("requests review with verified attempt evidence and no client prose", async () => {
+    const runningTask = {
+      ...task,
+      task_id: "running-review-task",
+      title: "Running review candidate",
+      status: "running" as const,
+      executor_id: "worker-1",
+      reviewer_id: "reviewer-1",
+      revision: 2,
+      latest_attempt: {
+        attempt_id: "attempt-running-review",
+        task_id: "running-review-task",
+        workflow_run_id: "run-running-review",
+        task_revision_at_claim: 2,
+        executor_id: "worker-1",
+        outcome: "succeeded",
+        readback_status: "passed",
+        receipt_refs: [{ artifact_id: "artifact-review", effect_id: "effect-review" }],
+      },
+    };
+    let actionBody: Record<string, unknown> | null = null;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/actions") && init?.method === "POST") {
+        actionBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return Promise.resolve(response({ task: { ...runningTask, status: "review", revision: 3 } }));
+      }
+      if (url.includes("/api/work-board/goals/goal-1/execution-limits")) return Promise.resolve(response(executionLimits));
+      if (url.includes("/api/work-board/tasks/running-review-task")) {
+        return Promise.resolve(response({ task: runningTask, attempts: [runningTask.latest_attempt], parents: [], children: [], comments: [], events: [], revision: 2 }));
+      }
+      if (url.includes("/api/work-board/tasks?")) return Promise.resolve(response({ tasks: [runningTask], last_event_id: 7 }));
+      return Promise.resolve(response({}));
+    });
+
+    render(<WorkBoardPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: /Open task running-review-task/i }));
+    fireEvent.click(await screen.findByRole("button", { name: "Request review" }));
+
+    await waitFor(() => expect(actionBody).toEqual({
+      action: "request_review",
+      expected_revision: 2,
+      attempt_id: "attempt-running-review",
+      evidence_refs: ["artifact-review", "effect-review"],
+    }));
+  });
+
+  it("keeps review request unavailable without named reviewer and verified evidence", async () => {
+    const incompleteTask = {
+      ...task,
+      task_id: "incomplete-review-task",
+      title: "Incomplete review candidate",
+      status: "running" as const,
+      executor_id: "worker-1",
+      reviewer_id: null,
+      latest_attempt: {
+        attempt_id: "attempt-incomplete-review",
+        task_id: "incomplete-review-task",
+        task_revision_at_claim: 1,
+        outcome: "running",
+      },
+    };
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/work-board/tasks/incomplete-review-task")) {
+        return Promise.resolve(response({ task: incompleteTask, attempts: [incompleteTask.latest_attempt], parents: [], children: [], comments: [], events: [], revision: 1 }));
+      }
+      if (url.includes("/api/work-board/tasks?")) return Promise.resolve(response({ tasks: [incompleteTask], last_event_id: 7 }));
+      return Promise.resolve(response({}));
+    });
+
+    fetchMock.mockClear();
+    render(<WorkBoardPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: /Open task incomplete-review-task/i }));
+    const requestButton = await screen.findByRole("button", { name: "Request review" });
+    expect(requestButton).toBeDisabled();
+    expect(screen.getByText("Assign a named reviewer before requesting review.")).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+  });
+
+  it("requests bounded changes with the current review revision", async () => {
+    const reviewTask = {
+      ...task,
+      task_id: "changes-review-task",
+      title: "Review requiring changes",
+      status: "review" as const,
+      requires_review: true,
+      reviewer_id: "reviewer-2",
+      executor_id: "worker-1",
+      revision: 5,
+      latest_attempt: {
+        attempt_id: "attempt-changes",
+        task_id: "changes-review-task",
+        workflow_run_id: "run-changes",
+        task_revision_at_claim: 5,
+        executor_id: "worker-1",
+        outcome: "succeeded",
+      },
+    };
+    let actionBody: Record<string, unknown> | null = null;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/actions") && init?.method === "POST") {
+        actionBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return Promise.resolve(response({ task: reviewTask }));
+      }
+      if (url.includes("/api/work-board/goals/goal-1/execution-limits")) return Promise.resolve(response(executionLimits));
+      if (url.includes("/api/work-board/tasks/changes-review-task")) return Promise.resolve(response({ task: reviewTask, attempts: [reviewTask.latest_attempt], parents: [], children: [], comments: [], events: [], revision: 5 }));
+      if (url.includes("/api/work-board/tasks?")) return Promise.resolve(response({ tasks: [reviewTask], last_event_id: 7 }));
+      return Promise.resolve(response({}));
+    });
+
+    render(<WorkBoardPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: /Open task changes-review-task/i }));
+    const changes = await screen.findByLabelText("Required changes");
+    expect(screen.getByRole("button", { name: "Request changes" })).toBeDisabled();
+    fireEvent.change(changes, { target: { value: "Re-run the readback with the approved source." } });
+    fireEvent.click(screen.getByRole("button", { name: "Request changes" }));
+
+    await waitFor(() => expect(actionBody).toEqual({
+      action: "request_changes",
+      expected_revision: 5,
+      reason: "Re-run the readback with the approved source.",
+    }));
+  });
+
+  it("completes review with a separate named reviewer and omits client evidence", async () => {
+    const reviewTask = {
+      ...task,
+      task_id: "complete-review-task",
+      title: "Verified review candidate",
+      status: "review" as const,
+      requires_review: true,
+      reviewer_id: "reviewer-2",
+      executor_id: "worker-1",
+      revision: 6,
+      latest_attempt: {
+        attempt_id: "attempt-complete",
+        task_id: "complete-review-task",
+        workflow_run_id: "run-complete",
+        task_revision_at_claim: 6,
+        executor_id: "worker-1",
+        outcome: "succeeded",
+        readback_status: "passed",
+      },
+    };
+    let actionBody: Record<string, unknown> | null = null;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/actions") && init?.method === "POST") {
+        actionBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return Promise.resolve(response({ task: { ...reviewTask, status: "done", revision: 7 } }));
+      }
+      if (url.includes("/api/work-board/goals/goal-1/execution-limits")) return Promise.resolve(response(executionLimits));
+      if (url.includes("/api/work-board/tasks/complete-review-task")) return Promise.resolve(response({ task: reviewTask, attempts: [reviewTask.latest_attempt], parents: [], children: [], comments: [], events: [], revision: 6 }));
+      if (url.includes("/api/work-board/tasks?")) return Promise.resolve(response({ tasks: [reviewTask], last_event_id: 7 }));
+      return Promise.resolve(response({}));
+    });
+
+    render(<WorkBoardPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: /Open task complete-review-task/i }));
+    await screen.findByRole("dialog", { name: "Verified review candidate" });
+    expect(screen.getByText("Linked workflow run: run-complete")).toBeInTheDocument();
+    expect(screen.getByText("Readback evidence: passed")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Complete review" }));
+
+    await waitFor(() => expect(actionBody).toEqual({
+      action: "complete_review",
+      expected_revision: 6,
+      attempt_id: "attempt-complete",
+    }));
+    expect(actionBody).not.toHaveProperty("evidence_refs");
+  });
+
+  it("blocks self-review completion when reviewer and worker are the same", async () => {
+    const selfReviewTask = {
+      ...task,
+      task_id: "self-review-task",
+      title: "Self review blocked",
+      status: "review" as const,
+      requires_review: true,
+      reviewer_id: "worker-1",
+      executor_id: "worker-1",
+      latest_attempt: {
+        attempt_id: "attempt-self-review",
+        task_id: "self-review-task",
+        task_revision_at_claim: 1,
+        executor_id: "worker-1",
+        outcome: "succeeded",
+      },
+    };
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/work-board/tasks/self-review-task")) return Promise.resolve(response({ task: selfReviewTask, attempts: [selfReviewTask.latest_attempt], parents: [], children: [], comments: [], events: [], revision: 1 }));
+      if (url.includes("/api/work-board/tasks?")) return Promise.resolve(response({ tasks: [selfReviewTask], last_event_id: 7 }));
+      return Promise.resolve(response({}));
+    });
+
+    render(<WorkBoardPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: /Open task self-review-task/i }));
+    await screen.findByRole("dialog", { name: "Self review blocked" });
+    expect(screen.getByRole("button", { name: "Complete review" })).toBeDisabled();
+    expect(screen.getByText(/reviewer must be separate from the worker/i)).toBeInTheDocument();
+  });
+
+  it("previews a proposal and sends explicit accept and reject revisions", async () => {
+    const proposalTask = { ...task, task_id: "proposal-task", title: "Proposal parent", revision: 4 };
+    const proposal = {
+      kind: "decompose",
+      proposal_id: "proposal-1",
+      parent_task_id: "proposal-task",
+      parent_revision: 4,
+      proposal_revision: 2,
+      proposal_digest: "digest-1",
+      expires_at: "2026-09-24T12:00:00Z",
+      proposed_tasks: [{
+        task_id: "child-1",
+        title: "Research child",
+        dependencies: ["proposal-task"],
+        capability_id: "research.read",
+        executor_id: "executor-1",
+        authority: "goal:read",
+        cost_estimate: "0.10",
+      }],
+      proposed_links: [{ parent_task_id: "proposal-task", child_task_id: "child-1" }],
+      estimated_cost: "0.10",
+    };
+    let acceptBody: Record<string, unknown> | null = null;
+    let rejectBody: Record<string, unknown> | null = null;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/decompose") && init?.method === "POST") return Promise.resolve(response(proposal));
+      if (url.endsWith("/proposals/proposal-1/accept") && init?.method === "POST") {
+        acceptBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return Promise.resolve(response({ ok: true }));
+      }
+      if (url.endsWith("/proposals/proposal-1/reject") && init?.method === "POST") {
+        rejectBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return Promise.resolve(response({ ok: true }));
+      }
+      if (url.includes("/api/work-board/goals/goal-1/execution-limits")) return Promise.resolve(response(executionLimits));
+      if (url.includes("/api/work-board/tasks/proposal-task")) return Promise.resolve(response({ task: proposalTask, attempts: [], parents: [], children: [], comments: [], events: [], revision: 4 }));
+      if (url.includes("/api/work-board/tasks?")) return Promise.resolve(response({ tasks: [proposalTask], last_event_id: 7 }));
+      return Promise.resolve(response({}));
+    });
+
+    render(<WorkBoardPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: /Open task proposal-task/i }));
+    await screen.findByRole("dialog", { name: "Proposal parent" });
+    fireEvent.click(await screen.findByRole("button", { name: "Decompose proposal" }));
+    expect(await screen.findByRole("heading", { name: "decompose proposal preview" })).toBeInTheDocument();
+    expect(screen.getByText("Research child")).toBeInTheDocument();
+    expect(screen.getByText(/capability: research\.read · executor: executor-1/)).toBeInTheDocument();
+    expect(screen.getByText(/authority: goal:read · cost: 0\.10/)).toBeInTheDocument();
+    expect(screen.getByText(/Proposed links: proposal-task → child-1/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Accept proposal" }));
+    await waitFor(() => expect(acceptBody).toEqual({
+      expected_proposal_revision: 2,
+      expected_parent_revision: 4,
+    }));
+
+    fireEvent.click(await screen.findByRole("button", { name: "Decompose proposal" }));
+    expect(await screen.findByRole("button", { name: "Reject proposal" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Reject proposal" }));
+    await waitFor(() => expect(rejectBody).toEqual({ expected_proposal_revision: 2 }));
+  });
+
+  it("keeps proposal actions unavailable when proposal_revision is absent", async () => {
+    const proposalTask = { ...task, task_id: "pending-proposal-task", title: "Pending proposal", revision: 1 };
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/specify") && init?.method === "POST") {
+        return Promise.resolve(response({
+          kind: "specify",
+          proposal_id: "proposal-pending",
+          parent_task_id: "pending-proposal-task",
+          parent_revision: 1,
+          proposal_digest: "digest-pending",
+          expires_at: "2026-09-24T12:00:00Z",
+          proposed_tasks: [],
+          proposed_links: [],
+          estimated_cost: null,
+        }));
+      }
+      if (url.includes("/api/work-board/tasks/pending-proposal-task")) return Promise.resolve(response({ task: proposalTask, attempts: [], parents: [], children: [], comments: [], events: [], revision: 1 }));
+      if (url.includes("/api/work-board/tasks?")) return Promise.resolve(response({ tasks: [proposalTask], last_event_id: 7 }));
+      return Promise.resolve(response({}));
+    });
+
+    render(<WorkBoardPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: /Open task pending-proposal-task/i }));
+    await screen.findByRole("dialog", { name: "Pending proposal" });
+    fireEvent.click(await screen.findByRole("button", { name: "Specify proposal" }));
+    expect(await screen.findByText(/missing proposal_revision/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Accept proposal" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Reject proposal" })).toBeDisabled();
+  });
+
+  it("renders only safe structured parent handoff fields", async () => {
+    const handoffTask = { ...task, task_id: "handoff-task", title: "Handoff child" };
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/work-board/tasks/handoff-task")) {
+        return Promise.resolve(response({
+          task: handoffTask,
+          parent_handoffs: [{
+            parent_task_id: "parent-task",
+            child_task_id: "handoff-task",
+            status: "verified",
+            summary: "Safe structured result",
+            artifact_refs: [{ artifact_id: "artifact-safe", secret: "do-not-render" }],
+            result_refs: [{ workflow_run_id: "run-safe", status: "succeeded", verified: true }],
+          }],
+          attempts: [],
+          parents: [],
+          children: [],
+          comments: [],
+          events: [],
+          revision: 1,
+        }));
+      }
+      if (url.includes("/api/work-board/tasks?")) return Promise.resolve(response({ tasks: [handoffTask], last_event_id: 7 }));
+      return Promise.resolve(response({}));
+    });
+
+    render(<WorkBoardPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: /Open task handoff-task/i }));
+    await screen.findByRole("dialog", { name: "Handoff child" });
+    expect(await screen.findByText(/Summary: Safe structured result/)).toBeInTheDocument();
+    expect(screen.getByText(/artifact=artifact-safe/)).toBeInTheDocument();
+    expect(screen.getByText(/run=run-safe/)).toBeInTheDocument();
+    expect(screen.queryByText(/do-not-render/)).not.toBeInTheDocument();
   });
 
   it("renders a server-provided dispatch rank without deriving one in the client", async () => {

@@ -117,12 +117,60 @@ interface WorkBoardReadbackTaskDetail extends WorkBoardTaskDetail {
   readback_refs?: WorkBoardReference[];
   readback_reason?: string | null;
   verification_status?: string | null;
+  parent_handoffs: WorkBoardSafeParentHandoff[];
   attempts: WorkBoardReadbackAttempt[];
+}
+
+interface WorkBoardSafeParentHandoff {
+  parent_task_id: string;
+  child_task_id?: string | null;
+  status?: string | null;
+  summary?: string | null;
+  artifact_refs: WorkBoardReference[];
+  result_refs: WorkBoardReference[];
+}
+
+interface WorkBoardProposalTask {
+  task_id?: string | null;
+  title: string;
+  dependencies: string[];
+  capability_id?: string | null;
+  executor_id?: string | null;
+  authority?: string | null;
+  cost_estimate?: string | number | null;
+}
+
+interface WorkBoardProposalLink {
+  parent_task_id: string;
+  child_task_id: string;
+}
+
+interface WorkBoardProposal {
+  kind: string;
+  proposal_id: string;
+  parent_task_id: string;
+  parent_revision: number;
+  proposal_revision?: number;
+  proposal_digest: string;
+  expires_at: string;
+  proposed_tasks: WorkBoardProposalTask[];
+  proposed_links: WorkBoardProposalLink[];
+  estimated_cost: string | number | null;
+  blocked_reason?: string | null;
 }
 
 type BoardSocketState = "connecting" | "connected" | "reconnecting" | "disconnected";
 
-type WorkBoardAction = "promote" | "unblock" | "retry" | "cancel" | "archive";
+type WorkBoardAction =
+  | "promote"
+  | "block"
+  | "unblock"
+  | "retry"
+  | "cancel"
+  | "archive"
+  | "request_review"
+  | "request_changes"
+  | "complete_review";
 
 class WorkBoardApiError extends Error {
   status: number;
@@ -195,6 +243,111 @@ function normalizeDependencyLinks(
   });
 }
 
+function boundedSafeText(value: unknown, maxLength = 512): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  if (!normalized || normalized.length > maxLength || /[\u0000-\u001f\u007f]/.test(normalized)) return null;
+  return normalized;
+}
+
+function safeReferenceList(value: unknown): WorkBoardReference[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap<WorkBoardReference>((reference): WorkBoardReference[] => {
+    if (typeof reference === "string") return boundedSafeText(reference) ? [reference.trim()] : [];
+    if (!reference || typeof reference !== "object" || Array.isArray(reference)) return [];
+    return [reference as WorkBoardSafeReference];
+  });
+}
+
+function normalizeSafeParentHandoffs(value: unknown): WorkBoardSafeParentHandoff[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((handoff) => {
+    if (!handoff || typeof handoff !== "object" || Array.isArray(handoff)) return [];
+    const record = handoff as Record<string, unknown>;
+    const parentTaskId = boundedSafeText(record.parent_task_id, 128);
+    if (!parentTaskId) return [];
+    return [{
+      parent_task_id: parentTaskId,
+      child_task_id: boundedSafeText(record.child_task_id, 128),
+      status: boundedSafeText(record.status, 128),
+      summary: boundedSafeText(record.summary, 1_000),
+      artifact_refs: safeReferenceList(record.artifact_refs),
+      result_refs: safeReferenceList(record.result_refs),
+    }];
+  });
+}
+
+function proposalTaskFromPayload(value: unknown, index: number): WorkBoardProposalTask | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const dependencies = Array.isArray(record.dependencies)
+    ? record.dependencies.flatMap((dependency) => typeof dependency === "string" ? [dependency.slice(0, 128)] : [])
+    : [];
+  const cost = record.cost_estimate;
+  return {
+    task_id: boundedSafeText(record.task_id, 128),
+    title: boundedSafeText(record.title, MAX_TITLE_LENGTH) ?? `Proposed task ${index + 1}`,
+    dependencies,
+    capability_id: boundedSafeText(record.capability_id, 128),
+    executor_id: boundedSafeText(record.executor_id, 128),
+    authority: boundedSafeText(record.authority, 512),
+    cost_estimate: typeof cost === "number" || typeof cost === "string" ? cost : null,
+  };
+}
+
+function proposalLinkFromPayload(value: unknown): WorkBoardProposalLink | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const parentTaskId = boundedSafeText(record.parent_task_id, 128);
+  const childTaskId = boundedSafeText(record.child_task_id, 128);
+  if (!parentTaskId || !childTaskId) return null;
+  return { parent_task_id: parentTaskId, child_task_id: childTaskId };
+}
+
+function proposalFromPayload(payload: unknown): WorkBoardProposal | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const outer = payload as Record<string, unknown>;
+  const raw = outer.proposal && typeof outer.proposal === "object" && !Array.isArray(outer.proposal)
+    ? outer.proposal as Record<string, unknown>
+    : outer;
+  const kind = boundedSafeText(raw.kind, 64);
+  const proposalId = boundedSafeText(raw.proposal_id, 256);
+  const parentTaskId = boundedSafeText(raw.parent_task_id, 128);
+  const proposalDigest = boundedSafeText(raw.proposal_digest, 256);
+  const expiresAt = boundedSafeText(raw.expires_at, 128);
+  const parentRevision = raw.parent_revision;
+  if (
+    !kind
+    || !proposalId
+    || !parentTaskId
+    || !proposalDigest
+    || !expiresAt
+    || typeof parentRevision !== "number"
+    || !Array.isArray(raw.proposed_tasks)
+    || !Array.isArray(raw.proposed_links)
+  ) return null;
+  const estimatedCost = raw.estimated_cost;
+  return {
+    kind,
+    proposal_id: proposalId,
+    parent_task_id: parentTaskId,
+    parent_revision: parentRevision,
+    proposal_revision: typeof raw.proposal_revision === "number" ? raw.proposal_revision : undefined,
+    proposal_digest: proposalDigest,
+    expires_at: expiresAt,
+    proposed_tasks: raw.proposed_tasks.flatMap((item, index) => {
+      const proposalTask = proposalTaskFromPayload(item, index);
+      return proposalTask ? [proposalTask] : [];
+    }),
+    proposed_links: raw.proposed_links.flatMap((item) => {
+      const proposalLink = proposalLinkFromPayload(item);
+      return proposalLink ? [proposalLink] : [];
+    }),
+    estimated_cost: typeof estimatedCost === "number" || typeof estimatedCost === "string" ? estimatedCost : null,
+    blocked_reason: boundedSafeText(raw.blocked_reason, 1_000),
+  };
+}
+
 function detailFromPayload(payload: unknown): WorkBoardReadbackTaskDetail | null {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
   const record = payload as Record<string, unknown>;
@@ -238,6 +391,9 @@ function detailFromPayload(payload: unknown): WorkBoardReadbackTaskDetail | null
     verification_status: typeof record.verification_status === "string"
       ? record.verification_status
       : typeof taskRecord.verification_status === "string" ? taskRecord.verification_status : null,
+    parent_handoffs: normalizeSafeParentHandoffs(
+      Array.isArray(record.parent_handoffs) ? record.parent_handoffs : taskRecord.parent_handoffs,
+    ),
     recovery_action: typeof record.recovery_action === "string"
       ? record.recovery_action
       : typeof taskRecord.recovery_action === "string" ? taskRecord.recovery_action : null,
@@ -404,6 +560,7 @@ function recoveryEligibility(task: WorkBoardTask | WorkBoardReadbackTaskDetail):
 
 const PENDING_EVIDENCE_STATUSES = new Set(["", "pending", "unknown", "in_progress", "running"]);
 const SUCCESS_EVIDENCE_STATUSES = new Set(["succeeded", "success", "passed", "verified", "complete", "completed"]);
+const VERIFIED_EVIDENCE_STATUSES = new Set(["passed", "verified", "complete", "completed"]);
 
 function evidenceStatusFromReferences(references?: WorkBoardReference[]): string | null {
   if (!references?.length) return null;
@@ -424,8 +581,10 @@ function evidenceStatusFromReferences(references?: WorkBoardReference[]): string
 
 function evidenceStatusFromAttempt(attempt?: WorkBoardReadbackAttempt | null): string | null {
   if (!attempt) return null;
-  const explicit = [attempt.readback_status, attempt.verification_status]
-    .find((value) => typeof value === "string" && value.trim());
+  const explicitValues = [attempt.readback_status, attempt.verification_status]
+    .filter((value): value is string => typeof value === "string" && Boolean(value.trim()));
+  const explicit = explicitValues.find((value) => !PENDING_EVIDENCE_STATUSES.has(value.trim().toLowerCase()))
+    ?? explicitValues[0];
   const normalizedExplicit = typeof explicit === "string" ? explicit.trim().toLowerCase() : "";
   const derived = evidenceStatusFromReferences([
     ...(attempt.receipt_refs ?? []),
@@ -435,10 +594,51 @@ function evidenceStatusFromAttempt(attempt?: WorkBoardReadbackAttempt | null): s
   return derived ?? explicit ?? null;
 }
 
+const SAFE_EVIDENCE_ID_FIELDS: Array<keyof WorkBoardSafeReference> = [
+  "artifact_id",
+  "effect_id",
+];
+
+function evidenceIdsFromAttempt(attempt?: WorkBoardReadbackAttempt | null): string[] {
+  if (!attempt) return [];
+  const references = [
+    ...(attempt.receipt_refs ?? []),
+    ...(attempt.artifact_refs ?? []),
+    ...(attempt.readback_refs ?? []),
+  ];
+  const ids: string[] = [];
+  const add = (value: unknown) => {
+    const normalized = boundedSafeText(value, 512);
+    if (normalized && !ids.includes(normalized)) ids.push(normalized);
+  };
+  references.forEach((reference) => {
+    if (typeof reference === "string") {
+      add(reference);
+      return;
+    }
+    if (!reference || typeof reference !== "object" || Array.isArray(reference)) return;
+    SAFE_EVIDENCE_ID_FIELDS.forEach((field) => add(reference[field]));
+  });
+  return ids.slice(0, 20);
+}
+
+function hasVerifiedLinkedAttempt(attempt?: WorkBoardReadbackAttempt | null): boolean {
+  if (!attempt?.workflow_run_id) return false;
+  const status = evidenceStatusFromAttempt(attempt)?.trim().toLowerCase();
+  if (status && VERIFIED_EVIDENCE_STATUSES.has(status)) return true;
+  return [
+    ...(attempt.receipt_refs ?? []),
+    ...(attempt.artifact_refs ?? []),
+    ...(attempt.readback_refs ?? []),
+  ].some((reference) => Boolean(reference && typeof reference === "object" && !Array.isArray(reference) && reference.verified === true));
+}
+
 function evidenceStatus(task: WorkBoardTask | WorkBoardReadbackTaskDetail): string {
   const detail = task as WorkBoardReadbackTaskDetail;
-  const explicit = [detail.readback_status, detail.verification_status]
-    .find((value) => typeof value === "string" && value.trim());
+  const explicitValues = [detail.readback_status, detail.verification_status]
+    .filter((value): value is string => typeof value === "string" && Boolean(value.trim()));
+  const explicit = explicitValues.find((value) => !PENDING_EVIDENCE_STATUSES.has(value.trim().toLowerCase()))
+    ?? explicitValues[0];
   const normalizedExplicit = typeof explicit === "string" ? explicit.trim().toLowerCase() : "";
   const latestAttempt = detail.attempts?.[detail.attempts.length - 1]
     ?? (task.latest_attempt as WorkBoardReadbackAttempt | null | undefined);
@@ -582,6 +782,10 @@ export function WorkBoardPanel({ onStatus }: WorkBoardPanelProps) {
   const [commentDraft, setCommentDraft] = useState("");
   const [blockReasonDraft, setBlockReasonDraft] = useState("");
   const [unblockResolutionDraft, setUnblockResolutionDraft] = useState("");
+  const [reviewChangesDraft, setReviewChangesDraft] = useState("");
+  const [proposal, setProposal] = useState<WorkBoardProposal | null>(null);
+  const [proposalLoading, setProposalLoading] = useState(false);
+  const [proposalError, setProposalError] = useState<string | null>(null);
   const [detailExecutionLimits, setDetailExecutionLimits] = useState<ExecutionLimits | null>(null);
   const [detailLimitsLoading, setDetailLimitsLoading] = useState(false);
   const [detailLimitsError, setDetailLimitsError] = useState<string | null>(null);
@@ -884,6 +1088,9 @@ export function WorkBoardPanel({ onStatus }: WorkBoardPanelProps) {
         setCommentDraft("");
         setBlockReasonDraft("");
         setUnblockResolutionDraft("");
+        setReviewChangesDraft("");
+        setProposal(null);
+        setProposalError(null);
       }
       setLinkDraft({ parentTaskId: detail.task_id, childTaskId: "", expectedChildRevision: "" });
       if (clearError) setError(null);
@@ -1081,6 +1288,30 @@ export function WorkBoardPanel({ onStatus }: WorkBoardPanelProps) {
 
   const selectedRecoveryAction = selectedTask ? recoveryEligibility(selectedTask) : null;
 
+  const latestSelectedAttempt = selectedTask?.attempts[selectedTask.attempts.length - 1]
+    ?? (selectedTask?.latest_attempt as WorkBoardReadbackAttempt | null | undefined)
+    ?? null;
+  const requestReviewEvidenceIds = evidenceIdsFromAttempt(latestSelectedAttempt);
+  const requestReviewBlockedReason = selectedTask?.status !== "running"
+    ? null
+    : !selectedTask.reviewer_id?.trim()
+      ? "Assign a named reviewer before requesting review."
+      : !latestSelectedAttempt?.workflow_run_id
+        ? "A linked durable workflow run is required before requesting review."
+        : !hasVerifiedLinkedAttempt(latestSelectedAttempt)
+          ? "Verified readback evidence is required before requesting review."
+          : requestReviewEvidenceIds.length === 0
+            ? "A safe readback, artifact, or effect evidence ID is required before requesting review."
+            : null;
+  const reviewWorkerId = latestSelectedAttempt?.executor_id
+    ?? selectedTask?.executor_id
+    ?? selectedTask?.assignee_id
+    ?? null;
+  const reviewerIsSeparate = Boolean(
+    selectedTask?.reviewer_id
+      && (!reviewWorkerId || selectedTask.reviewer_id !== reviewWorkerId),
+  );
+
   const unblockTask = useCallback(async (task: WorkBoardTask) => {
     if (selectedTask?.task_id !== task.task_id || selectedRecoveryAction !== "unblock") return;
     const resolution = unblockResolutionDraft.trim();
@@ -1096,6 +1327,160 @@ export function WorkBoardPanel({ onStatus }: WorkBoardPanelProps) {
       setUnblockResolutionDraft("");
     }
   }, [announce, runAction, selectedRecoveryAction, selectedTask?.task_id, unblockResolutionDraft]);
+
+  const requestReview = useCallback(async () => {
+    if (!selectedTask || selectedTask.status !== "running") return;
+    const attemptId = latestSelectedAttempt?.attempt_id;
+    if (!attemptId || requestReviewBlockedReason) {
+      announce(requestReviewBlockedReason ?? "Review requires a linked durable workflow attempt.");
+      return;
+    }
+    await runAction(selectedTask, "request_review", {
+      attempt_id: attemptId,
+      evidence_refs: requestReviewEvidenceIds,
+    });
+  }, [announce, latestSelectedAttempt, requestReviewBlockedReason, requestReviewEvidenceIds, runAction, selectedTask]);
+
+  const requestChanges = useCallback(async () => {
+    if (!selectedTask || selectedTask.status !== "review") return;
+    const reason = reviewChangesDraft.trim();
+    if (!reason) {
+      announce("A bounded changes-required reason is required.");
+      return;
+    }
+    if (reason.length > 500) {
+      announce("The changes-required reason must be 500 characters or fewer.");
+      return;
+    }
+    if (await runAction(selectedTask, "request_changes", { reason })) {
+      setReviewChangesDraft("");
+    }
+  }, [announce, reviewChangesDraft, runAction, selectedTask]);
+
+  const completeReview = useCallback(async () => {
+    if (!selectedTask || selectedTask.status !== "review") return;
+    const attemptId = selectedTask.attempts[selectedTask.attempts.length - 1]?.attempt_id;
+    if (!attemptId) {
+      announce("Review completion requires the linked durable workflow attempt.");
+      return;
+    }
+    if (!reviewerIsSeparate) {
+      announce("The named reviewer must be separate from the worker before review can be completed.");
+      return;
+    }
+    // The server derives the reviewer identity and fetches authoritative
+    // workflow/readback evidence. Client evidence is intentionally omitted.
+    await runAction(selectedTask, "complete_review", { attempt_id: attemptId });
+  }, [announce, reviewerIsSeparate, runAction, selectedTask]);
+
+  const requestProposal = useCallback(async (kind: "specify" | "decompose") => {
+    if (!selectedTask || selectedTask.status === "archived") return;
+    setProposalLoading(true);
+    setProposalError(null);
+    setMutationKey(`${selectedTask.task_id}:proposal:${kind}`);
+    try {
+      const payload = await requestBoardJson(
+        `/api/work-board/tasks/${encodeURIComponent(selectedTask.task_id)}/${kind}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expected_revision: taskRevision(selectedTask),
+            idempotency_key: makeIdempotencyKey(),
+          }),
+        },
+      );
+      const nextProposal = proposalFromPayload(payload);
+      if (!nextProposal) {
+        throw new Error("The proposal response did not contain the required reviewable proposal fields.");
+      }
+      setProposal(nextProposal);
+      announce(`${actionLabel(kind)} proposal is ready for operator review; no task was changed.`);
+    } catch (caught) {
+      const message = caught instanceof WorkBoardApiError || caught instanceof Error
+        ? caught.message
+        : `${actionLabel(kind)} proposal could not be generated.`;
+      setProposalError(message);
+      setError(message);
+      announce(message);
+    } finally {
+      setProposalLoading(false);
+      setMutationKey(null);
+    }
+  }, [announce, selectedTask]);
+
+  const acceptProposal = useCallback(async () => {
+    if (!selectedTask || !proposal) return;
+    if (proposal.proposal_revision == null) {
+      const message = "Proposal acceptance is blocked until the server returns proposal_revision.";
+      setProposalError(message);
+      announce(message);
+      return;
+    }
+    const currentRevision = taskRevision(selectedTask);
+    if (proposal.parent_task_id !== selectedTask.task_id || proposal.parent_revision !== currentRevision) {
+      const message = "This proposal is stale; refresh the task before accepting it.";
+      setProposalError(message);
+      announce(message);
+      await refreshSelectedTask(selectedTask.task_id);
+      return;
+    }
+    setMutationKey(`${proposal.proposal_id}:accept`);
+    try {
+      await requestBoardJson(`/api/work-board/proposals/${encodeURIComponent(proposal.proposal_id)}/accept`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_proposal_revision: proposal.proposal_revision,
+          expected_parent_revision: currentRevision,
+        }),
+      });
+      announce(`Proposal ${proposal.proposal_id} accepted; proposed tasks are now under server control.`);
+      setProposal(null);
+      setProposalError(null);
+      if (await refreshSelectedTask(selectedTask.task_id)) setError(null);
+    } catch (caught) {
+      const message = caught instanceof WorkBoardApiError || caught instanceof Error
+        ? caught.message
+        : "Proposal acceptance failed; no client-side task state was changed.";
+      setProposalError(message);
+      setError(message);
+      announce(message);
+      await refreshSelectedTask(selectedTask.task_id).catch(() => {});
+    } finally {
+      setMutationKey(null);
+    }
+  }, [announce, proposal, refreshSelectedTask, selectedTask]);
+
+  const rejectProposal = useCallback(async () => {
+    if (!proposal) return;
+    if (proposal.proposal_revision == null) {
+      const message = "Proposal rejection is blocked until the server returns proposal_revision.";
+      setProposalError(message);
+      announce(message);
+      return;
+    }
+    setMutationKey(`${proposal.proposal_id}:reject`);
+    try {
+      await requestBoardJson(`/api/work-board/proposals/${encodeURIComponent(proposal.proposal_id)}/reject`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ expected_proposal_revision: proposal.proposal_revision }),
+      });
+      announce(`Proposal ${proposal.proposal_id} rejected; no task was changed.`);
+      setProposal(null);
+      setProposalError(null);
+    } catch (caught) {
+      const message = caught instanceof WorkBoardApiError || caught instanceof Error
+        ? caught.message
+        : "Proposal rejection failed; no client-side task state was changed.";
+      setProposalError(message);
+      setError(message);
+      announce(message);
+    } finally {
+      setMutationKey(null);
+    }
+  }, [announce, proposal]);
 
   const transitionTask = useCallback(async (task: WorkBoardTask, target: WorkBoardTaskStatus) => {
     const typedRecoveryTransition = target === "todo"
@@ -1138,35 +1523,15 @@ export function WorkBoardPanel({ onStatus }: WorkBoardPanelProps) {
       announce("This task cannot be manually blocked from its current status.");
       return;
     }
-    if (!window.confirm(`Block task ${selectedTask.task_id} with this operator reason?`)) return;
-    setMutationKey(`${selectedTask.task_id}:block`);
-    try {
-      await requestBoardJson(`/api/work-board/tasks/${encodeURIComponent(selectedTask.task_id)}/actions`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "block",
-          expected_revision: taskRevision(selectedTask),
-          block_kind: "operator",
-          reason,
-        }),
-      });
-      announce(`Task ${selectedTask.task_id} was blocked with an operator reason.`);
-      if (await refreshSelectedTask(selectedTask.task_id)) {
-        setBlockReasonDraft("");
-        setError(null);
-      }
-    } catch (caught) {
-      const message = caught instanceof WorkBoardApiError
-        ? caught.detail
-        : "Task could not be blocked; the server state was retained.";
-      setError(message);
-      announce(message);
-      await refreshSelectedTask(selectedTask.task_id).catch(() => {});
-    } finally {
-      setMutationKey(null);
+    if (reason.length > 500) {
+      announce("The block reason must be 500 characters or fewer.");
+      return;
     }
-  }, [announce, blockReasonDraft, refreshSelectedTask, selectedTask]);
+    if (!window.confirm(`Block task ${selectedTask.task_id} with this operator reason?`)) return;
+    if (await runAction(selectedTask, "block", { block_kind: "operator", reason })) {
+      setBlockReasonDraft("");
+    }
+  }, [announce, blockReasonDraft, runAction, selectedTask]);
 
   const saveTask = useCallback(async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -1690,6 +2055,34 @@ export function WorkBoardPanel({ onStatus }: WorkBoardPanelProps) {
                 </div>
               )}
 
+              {selectedTask.status === "review" && (
+                <section className="work-board-detail-section" aria-label="Review evidence and actions">
+                  <h3>Review and verification</h3>
+                  <div>Named reviewer: {selectedTask.reviewer_id ?? "not assigned"}</div>
+                  <div>Review window: 7 days; expired review becomes blocked for recovery.</div>
+                  <div>Linked workflow run: {latestSelectedAttempt?.workflow_run_id ?? "not linked"}</div>
+                  <div>Worker outcome: {latestSelectedAttempt?.outcome ?? "pending"}</div>
+                  <div>Readback evidence: {evidenceStatus(selectedTask)}</div>
+                  {latestSelectedAttempt?.readback_reason ? <div>{latestSelectedAttempt.readback_reason}</div> : null}
+                  {latestSelectedAttempt?.readback_refs?.length ? (
+                    <ReferenceList label="Authoritative readback references" references={latestSelectedAttempt.readback_refs} />
+                  ) : null}
+                  <label>
+                    Required changes
+                    <textarea
+                      maxLength={500}
+                      value={reviewChangesDraft}
+                      onChange={(event) => setReviewChangesDraft(event.target.value)}
+                      placeholder="Explain the bounded changes required for a rerun"
+                    />
+                  </label>
+                  <div className="work-board-form-note">
+                    Completion uses the named reviewer and server-fetched workflow/readback evidence. Client evidence is not accepted.
+                    {!reviewerIsSeparate ? " The reviewer must be separate from the worker." : ""}
+                  </div>
+                </section>
+              )}
+
               <div className="work-board-detail-actions">
                 {selectedTask.status === "triage" && isTargetLegal(selectedTask, "todo") && (
                   <button
@@ -1725,8 +2118,111 @@ export function WorkBoardPanel({ onStatus }: WorkBoardPanelProps) {
                     Cancel durable job
                   </button>
                 )}
+                {selectedTask.status === "running" && (
+                  <>
+                    <button
+                      type="button"
+                      className="cockpit-feedback-button"
+                      disabled={mutationKey != null || Boolean(requestReviewBlockedReason)}
+                      title={requestReviewBlockedReason ?? undefined}
+                      onClick={() => void requestReview()}
+                    >
+                      Request review
+                    </button>
+                    {requestReviewBlockedReason ? <span className="work-board-form-note work-board-form-note--error">{requestReviewBlockedReason}</span> : null}
+                  </>
+                )}
+                {selectedTask.status === "review" && (
+                  <>
+                    <button
+                      type="button"
+                      className="cockpit-feedback-button"
+                      disabled={mutationKey != null || !reviewChangesDraft.trim() || !latestSelectedAttempt}
+                      onClick={() => void requestChanges()}
+                    >
+                      Request changes
+                    </button>
+                    <button
+                      type="button"
+                      className="cockpit-feedback-button cockpit-feedback-button--primary"
+                      disabled={mutationKey != null || !latestSelectedAttempt || !reviewerIsSeparate}
+                      title={!reviewerIsSeparate ? "A named reviewer separate from the worker is required." : undefined}
+                      onClick={() => void completeReview()}
+                    >
+                      Complete review
+                    </button>
+                  </>
+                )}
+                {selectedTask.status !== "archived" && (
+                  <>
+                    <button
+                      type="button"
+                      className="cockpit-feedback-button"
+                      disabled={mutationKey != null || proposalLoading}
+                      onClick={() => void requestProposal("specify")}
+                    >
+                      Specify proposal
+                    </button>
+                    <button
+                      type="button"
+                      className="cockpit-feedback-button"
+                      disabled={mutationKey != null || proposalLoading}
+                      onClick={() => void requestProposal("decompose")}
+                    >
+                      Decompose proposal
+                    </button>
+                  </>
+                )}
                 {selectedTask.status === "done" && <button type="button" className="cockpit-feedback-button" disabled={mutationKey != null} onClick={() => void transitionTask(selectedTask, "archived")}>Archive</button>}
               </div>
+
+              {proposalError ? <div className="work-board-form-note work-board-form-note--error" role="alert">{proposalError}</div> : null}
+              {proposal && (
+                <section className="work-board-detail-section" aria-label={`${proposal.kind} proposal preview`}>
+                  <h3>{proposal.kind} proposal preview</h3>
+                  <div>Proposal {proposal.proposal_id} · parent revision {proposal.parent_revision} · expires {proposal.expires_at}</div>
+                  <div>Digest: <code>{proposal.proposal_digest}</code></div>
+                  {proposal.blocked_reason ? <div className="work-board-card-state work-board-card-state--blocked">Blocked: {proposal.blocked_reason}</div> : null}
+                  <div>Estimated cost: {proposal.estimated_cost ?? "not supplied"}</div>
+                  <ul>
+                    {proposal.proposed_tasks.length ? proposal.proposed_tasks.map((proposedTask, index) => (
+                      <li key={`${proposedTask.task_id ?? proposedTask.title}:${index}`}>
+                        <strong>{proposedTask.title}</strong>
+                        <div>dependencies: {proposedTask.dependencies.length ? proposedTask.dependencies.join(", ") : "none"}</div>
+                        <div>capability: {proposedTask.capability_id ?? "not supplied"} · executor: {proposedTask.executor_id ?? "not supplied"}</div>
+                        <div>authority: {proposedTask.authority ?? "not supplied"} · cost: {proposedTask.cost_estimate ?? "not supplied"}</div>
+                      </li>
+                    )) : <li>No proposed tasks returned.</li>}
+                  </ul>
+                  <div>Proposed links: {proposal.proposed_links.length ? proposal.proposed_links.map((link) => `${link.parent_task_id} → ${link.child_task_id}`).join(", ") : "none"}</div>
+                  {proposal.proposal_revision == null ? (
+                    <div className="work-board-form-note work-board-form-note--error">
+                      This response is missing proposal_revision. Acceptance and rejection remain unavailable until the server supplies the revision required by the action contract.
+                    </div>
+                  ) : null}
+                  {proposal.parent_task_id !== selectedTask.task_id || proposal.parent_revision !== taskRevision(selectedTask) ? (
+                    <div className="work-board-form-note work-board-form-note--error">The parent task changed after this proposal; refresh before accepting it.</div>
+                  ) : null}
+                  <div className="work-board-form-actions">
+                    <button
+                      type="button"
+                      className="cockpit-feedback-button cockpit-feedback-button--primary"
+                      disabled={mutationKey != null || proposal.proposal_revision == null || proposal.blocked_reason != null || proposal.parent_task_id !== selectedTask.task_id || proposal.parent_revision !== taskRevision(selectedTask)}
+                      onClick={() => void acceptProposal()}
+                    >
+                      Accept proposal
+                    </button>
+                    <button
+                      type="button"
+                      className="cockpit-feedback-button"
+                      disabled={mutationKey != null || proposal.proposal_revision == null}
+                      onClick={() => void rejectProposal()}
+                    >
+                      Reject proposal
+                    </button>
+                  </div>
+                </section>
+              )}
 
               {detailExecutionLimits ? (
                 <label className="work-board-checkbox"><input type="checkbox" checked={detailLimitsAcknowledged} onChange={(event) => setDetailLimitsAcknowledged(event.target.checked)} /> I acknowledge the current goal execution limits for this task.</label>
@@ -1734,7 +2230,7 @@ export function WorkBoardPanel({ onStatus }: WorkBoardPanelProps) {
 
               {["triage", "todo", "ready", "review"].includes(selectedTask.status) && (
                 <form className="work-board-block-form" onSubmit={blockTask}>
-                  <label>Block reason<textarea required maxLength={1000} value={blockReasonDraft} onChange={(event) => setBlockReasonDraft(event.target.value)} placeholder="Bounded operator reason" /></label>
+                  <label>Block reason<textarea required maxLength={500} value={blockReasonDraft} onChange={(event) => setBlockReasonDraft(event.target.value)} placeholder="Bounded operator reason" /></label>
                   <button type="submit" className="cockpit-feedback-button" disabled={mutationKey === `${selectedTask.task_id}:block` || !blockReasonDraft.trim()}>Block task</button>
                 </form>
               )}
@@ -1755,6 +2251,18 @@ export function WorkBoardPanel({ onStatus }: WorkBoardPanelProps) {
                     <button type="button" className="cockpit-feedback-button" disabled={mutationKey != null} onClick={() => void removeLink(link)} aria-label={`Remove dependency ${link.parent_task_id} to ${link.child_task_id}`}>Remove</button>
                   </div>
                 ))}
+              </section>
+              <section className="work-board-detail-section">
+                <h3>Safe parent handoff</h3>
+                {selectedTask.parent_handoffs.length ? selectedTask.parent_handoffs.map((handoff, index) => (
+                  <div className="work-board-handoff" key={`${handoff.parent_task_id}:${handoff.child_task_id ?? ""}:${index}`}>
+                    <strong>{handoff.parent_task_id} → {handoff.child_task_id ?? selectedTask.task_id}</strong>
+                    <div>Status: {handoff.status ?? "not supplied"}</div>
+                    <div>Summary: {handoff.summary ?? "not supplied"}</div>
+                    <ReferenceList label="Handoff artifact references" references={handoff.artifact_refs} />
+                    <ReferenceList label="Handoff result references" references={handoff.result_refs} />
+                  </div>
+                )) : <div>No safe structured parent handoff returned.</div>}
               </section>
               <section className="work-board-detail-section">
                 <h3>Attempts and readback</h3>

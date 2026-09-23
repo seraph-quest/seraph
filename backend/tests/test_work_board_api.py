@@ -9,7 +9,7 @@ from src.api.work_board import (
     _event_payload,
     _task_payload as serialize_task_payload,
 )
-from src.db.models import WorkBoardAttempt, WorkBoardEvent, WorkBoardTask
+from src.db.models import WorkBoardAttempt, WorkBoardEvent, WorkBoardStatus, WorkBoardTask
 
 
 def _task_payload(*, key: str = "api-task"):
@@ -86,34 +86,139 @@ async def test_event_cursor_page_and_gap_shape(client):
 
 
 @pytest.mark.asyncio
-async def test_invalid_running_or_done_patch_is_rejected(client, async_db):
-    payload = _task_payload(key="illegal")
+async def test_http_patch_validation_returns_422_for_malformed_inputs(client):
+    payload = _task_payload(key="invalid-patch")
     payload["goal_id"] = await _create_goal(client)
     created = await client.post("/api/work-board/tasks", json=payload)
-    task_id = created.json()["task"]["task_id"]
-    from src.db.models import WorkBoardStatus
-    from src.db.engine import get_session
-    from src.work_board.contracts import WorkBoardOwner
-    from src.api.work_board import repository
+    task = created.json()["task"]
 
-    # The route does not expose a generic status patch.  This check exercises
-    # the repository guard used by M2/M4 integrations.
+    one_sided = await client.patch(
+        f"/api/work-board/tasks/{task['task_id']}",
+        json={
+            "expected_revision": task["task_revision"],
+            "typed_input_ref": "workspace-json:inputs/task.json",
+            "typed_input_digest": None,
+        },
+    )
+    assert one_sided.status_code == 422
+
+    unsafe_reference = await client.patch(
+        f"/api/work-board/tasks/{task['task_id']}",
+        json={
+            "expected_revision": task["task_revision"],
+            "capability_id": "/private/capability",
+        },
+    )
+    assert unsafe_reference.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_http_create_rejects_unsafe_origin_thread_reference(client):
+    payload = _task_payload(key="unsafe-origin-thread")
+    payload["goal_id"] = await _create_goal(client)
+    payload["origin_thread_id"] = "../private/thread"
+
+    response = await client.post("/api/work-board/tasks", json=payload)
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_http_manual_block_accepts_only_operator_kind(client):
+    payload = _task_payload(key="invalid-block-kind")
+    payload["goal_id"] = await _create_goal(client)
+    created = await client.post("/api/work-board/tasks", json=payload)
+    task = created.json()["task"]
+
+    response = await client.post(
+        f"/api/work-board/tasks/{task['task_id']}/actions",
+        json={
+            "action": "block",
+            "expected_revision": task["task_revision"],
+            "block_kind": "unknown_effect",
+            "reason": "This category belongs to internal reconciliation",
+        },
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_http_stale_comment_link_and_action_return_typed_conflicts(client):
+    goal_id = await _create_goal(client, goal_id="goal-http-stale-actions")
+    parent_payload = _task_payload(key="stale-parent")
+    parent_payload["goal_id"] = goal_id
+    child_payload = _task_payload(key="stale-child")
+    child_payload["goal_id"] = goal_id
+    parent = await client.post("/api/work-board/tasks", json=parent_payload)
+    child = await client.post("/api/work-board/tasks", json=child_payload)
+    parent_id = parent.json()["task"]["task_id"]
+    child_data = child.json()["task"]
+    child_id = child_data["task_id"]
+
+    comment = await client.post(
+        f"/api/work-board/tasks/{child_id}/comments",
+        json={"expected_revision": 99, "body": "stale comment"},
+    )
+    assert comment.status_code == 409
+    assert comment.json()["detail"]["code"] == "stale_revision"
+
+    action = await client.post(
+        f"/api/work-board/tasks/{child_id}/actions",
+        json={
+            "action": "block",
+            "expected_revision": 99,
+            "reason": "stale action",
+        },
+    )
+    assert action.status_code == 409
+    assert action.json()["detail"]["code"] == "stale_revision"
+
+    link = await client.post(
+        "/api/work-board/links",
+        json={
+            "parent_task_id": parent_id,
+            "child_task_id": child_id,
+            "expected_child_revision": 99,
+        },
+    )
+    assert link.status_code == 409
+    assert link.json()["detail"]["code"] == "stale_revision"
+
+
+@pytest.mark.asyncio
+async def test_http_link_to_running_child_returns_typed_conflict(client, async_db):
+    goal_id = await _create_goal(client, goal_id="goal-http-running-link")
+    parent_payload = _task_payload(key="running-parent")
+    parent_payload["goal_id"] = goal_id
+    child_payload = _task_payload(key="running-child")
+    child_payload["goal_id"] = goal_id
+    parent = await client.post("/api/work-board/tasks", json=parent_payload)
+    child = await client.post("/api/work-board/tasks", json=child_payload)
+    parent_id = parent.json()["task"]["task_id"]
+    child_id = child.json()["task"]["task_id"]
+
+    from src.api.work_board import repository
+    from src.work_board.contracts import WorkBoardOwner
+
     async with async_db() as db:
-        task = await repository.get_task(
+        running = await repository.get_task(
             db,
             WorkBoardOwner(principal_id="operator:test-bypass", session_id="test-auth-bypass"),
-            task_id,
+            child_id,
         )
-        task.status = WorkBoardStatus.running
-        await db.flush()
-        from src.work_board.contracts import WorkBoardTaskPatch
-        with pytest.raises(Exception):
-            await repository.patch_task(
-                db,
-                WorkBoardOwner(principal_id="operator:test-bypass", session_id="test-auth-bypass"),
-                task_id,
-                WorkBoardTaskPatch(expected_revision=task.task_revision, title="blocked"),
-            )
+        running.status = WorkBoardStatus.running
+        await db.commit()
+
+    response = await client.post(
+        "/api/work-board/links",
+        json={
+            "parent_task_id": parent_id,
+            "child_task_id": child_id,
+            "expected_child_revision": 1,
+        },
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "running_task_dependency"
 
 
 @pytest.mark.asyncio
@@ -253,6 +358,83 @@ def test_detail_reference_serializers_drop_unknown_private_values():
     ]
     assert "PRIVATE" not in serialized
     assert "/private" not in serialized
+
+
+def test_task_and_attempt_serializers_filter_unsafe_operator_references():
+    unsafe_task = WorkBoardTask(
+        task_id="task-unsafe-fields",
+        owner_principal_id="operator:test-bypass",
+        owner_session_id="test-auth-bypass",
+        goal_id="goal-unsafe-fields",
+        title="Unsafe fields",
+        origin_session_id="/private/session",
+        origin_thread_id="/private/thread",
+        capability_id="../capability",
+        typed_input_ref="/private/input.json",
+        typed_input_digest="not-a-digest",
+        executor_id="runs/executor",
+        assignee_id="~/assignee",
+        reviewer_id="../reviewer",
+        block_kind="private block prose",
+        block_source_status="/private/status",
+    )
+    unsafe_attempt = WorkBoardAttempt(
+        task_id=unsafe_task.task_id,
+        lease_owner="/private/lease",
+        executor_id="../executor",
+    )
+
+    unsafe_payload = serialize_task_payload(unsafe_task)
+    unsafe_attempt_payload = _attempt_payload(unsafe_attempt)
+    assert unsafe_payload["origin_thread_id"] is None
+    assert unsafe_payload["origin_session_id"] is None
+    assert unsafe_payload["capability_id"] is None
+    assert unsafe_payload["typed_input_ref"] is None
+    assert unsafe_payload["typed_input_digest"] is None
+    assert unsafe_payload["executor_id"] is None
+    assert unsafe_payload["assignee_id"] is None
+    assert unsafe_payload["reviewer_id"] is None
+    assert unsafe_payload["block_kind"] is None
+    assert unsafe_payload["block_source_status"] is None
+    assert unsafe_attempt_payload["lease_owner"] is None
+    assert unsafe_attempt_payload["executor_id"] is None
+
+    safe_task = WorkBoardTask(
+        task_id="task-safe-fields",
+        owner_principal_id="operator:test-bypass",
+        owner_session_id="test-auth-bypass",
+        goal_id="goal-safe-fields",
+        title="Safe fields",
+        origin_session_id="session:42",
+        origin_thread_id="thread:42",
+        capability_id="guardian.research",
+        typed_input_ref="workspace-json:inputs/task.json",
+        typed_input_digest="b" * 64,
+        executor_id="executor.local",
+        assignee_id="operator:worker",
+        reviewer_id="operator:reviewer",
+        block_kind="unknown_effect",
+        block_source_status="todo",
+    )
+    safe_attempt = WorkBoardAttempt(
+        task_id=safe_task.task_id,
+        lease_owner="worker:1",
+        executor_id="executor.local",
+    )
+    safe_payload = serialize_task_payload(safe_task)
+    safe_attempt_payload = _attempt_payload(safe_attempt)
+    assert safe_payload["origin_thread_id"] == "thread:42"
+    assert safe_payload["origin_session_id"] == "session:42"
+    assert safe_payload["capability_id"] == "guardian.research"
+    assert safe_payload["typed_input_ref"] == "workspace-json:inputs/task.json"
+    assert safe_payload["typed_input_digest"] == "b" * 64
+    assert safe_payload["executor_id"] == "executor.local"
+    assert safe_payload["assignee_id"] == "operator:worker"
+    assert safe_payload["reviewer_id"] == "operator:reviewer"
+    assert safe_payload["block_kind"] == "unknown_effect"
+    assert safe_payload["block_source_status"] == "todo"
+    assert safe_attempt_payload["lease_owner"] == "worker:1"
+    assert safe_attempt_payload["executor_id"] == "executor.local"
 
 
 def test_event_and_attempt_serializers_drop_legacy_prose_secrets_and_paths():

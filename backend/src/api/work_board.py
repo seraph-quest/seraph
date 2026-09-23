@@ -36,6 +36,9 @@ from src.work_board.repository import (
     BoardMutation,
     WorkBoardRepository,
     _safe_receipt_refs,
+    safe_board_reference,
+    safe_board_identifier,
+    safe_sha256_digest,
     safe_workflow_run_id,
 )
 
@@ -93,27 +96,36 @@ def _task_payload(
         "creation_sequence": task.creation_sequence,
         "owner_principal_id": task.owner_principal_id,
         "owner_session_id": task.owner_session_id,
-        "origin_session_id": task.origin_session_id,
-        "origin_thread_id": task.origin_thread_id,
+        "origin_session_id": safe_board_identifier(task.origin_session_id, max_length=512),
+        "origin_thread_id": safe_board_identifier(task.origin_thread_id, max_length=256),
         "goal_id": task.goal_id,
         "goal_revision": task.goal_revision,
         "title": task.title,
         "body": task.body,
-        "capability_id": task.capability_id,
-        "typed_input_ref": task.typed_input_ref,
-        "typed_input_digest": task.typed_input_digest,
-        "executor_id": task.executor_id,
-        "assignee_id": task.assignee_id,
+        "capability_id": safe_board_identifier(task.capability_id, max_length=128),
+        "typed_input_ref": safe_board_reference(task.typed_input_ref, max_length=512),
+        "typed_input_digest": safe_sha256_digest(task.typed_input_digest),
+        "executor_id": safe_board_identifier(task.executor_id, max_length=128),
+        "assignee_id": safe_board_identifier(task.assignee_id, max_length=128),
         "priority": task.priority,
         "idempotency_scope": task.idempotency_scope,
         "idempotency_key": task.idempotency_key,
         "scheduled_at": _json_value(task.scheduled_at),
         "status": _json_value(task.status),
-        "block_kind": task.block_kind,
+        "block_kind": (
+            task.block_kind
+            if isinstance(task.block_kind, str) and task.block_kind in _SAFE_EVENT_BLOCK_KINDS
+            else None
+        ),
         "block_reason": task.block_reason,
-        "block_source_status": task.block_source_status,
+        "block_source_status": (
+            task.block_source_status
+            if isinstance(task.block_source_status, str)
+            and task.block_source_status in _SAFE_EVENT_STATUSES
+            else None
+        ),
         "requires_review": task.requires_review,
-        "reviewer_id": task.reviewer_id,
+        "reviewer_id": safe_board_identifier(task.reviewer_id, max_length=128),
         "dependency_count": dependency_count,
         "completed_dependency_count": completed_dependency_count,
         "task_revision": task.task_revision,
@@ -284,11 +296,11 @@ def _attempt_payload(attempt: WorkBoardAttempt) -> dict[str, Any]:
         "task_id": attempt.task_id,
         "workflow_run_id": safe_workflow_run_id(attempt.workflow_run_id),
         "task_revision_at_claim": attempt.task_revision_at_claim,
-        "lease_owner": attempt.lease_owner,
+        "lease_owner": safe_board_identifier(attempt.lease_owner, max_length=512),
         "lease_expires_at": _json_value(attempt.lease_expires_at),
         "heartbeat_at": _json_value(attempt.heartbeat_at),
         "fencing_token": attempt.fencing_token,
-        "executor_id": attempt.executor_id,
+        "executor_id": safe_board_identifier(attempt.executor_id, max_length=128),
         "started_at": _json_value(attempt.started_at),
         "ended_at": _json_value(attempt.ended_at),
         "outcome": _safe_attempt_outcome(attempt.outcome),

@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import Enum
 import re
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -68,7 +68,13 @@ class WorkBoardTaskCreate(WorkBoardBaseModel):
     reviewer_id: str | None = Field(default=None, min_length=1, max_length=128)
     origin_thread_id: str | None = Field(default=None, min_length=1, max_length=256)
 
-    @field_validator("capability_id", "typed_input_ref", "executor_id", "assignee_id")
+    @field_validator(
+        "capability_id",
+        "typed_input_ref",
+        "executor_id",
+        "assignee_id",
+        "origin_thread_id",
+    )
     @classmethod
     def validate_safe_references(cls, value: str | None, info) -> str | None:
         return _safe_reference(value, field_name=str(info.field_name))
@@ -128,7 +134,14 @@ class WorkBoardTaskPatch(WorkBoardBaseModel):
 
     @model_validator(mode="after")
     def validate_typed_pair(self) -> "WorkBoardTaskPatch":
-        if (self.typed_input_ref is None) != (self.typed_input_digest is None):
+        fields = self.model_fields_set
+        ref_set = "typed_input_ref" in fields
+        digest_set = "typed_input_digest" in fields
+        if ref_set != digest_set or (
+            ref_set
+            and digest_set
+            and (self.typed_input_ref is None) != (self.typed_input_digest is None)
+        ):
             raise ValueError("typed input reference and digest must be supplied together")
         return self
 
@@ -136,7 +149,7 @@ class WorkBoardTaskPatch(WorkBoardBaseModel):
 class WorkBoardActionRequest(WorkBoardBaseModel):
     action: WorkBoardAction
     expected_revision: int = Field(ge=1)
-    block_kind: str | None = Field(default=None, min_length=1, max_length=128)
+    block_kind: Literal["operator"] | None = None
     reason: str | None = Field(default=None, min_length=1, max_length=1_000)
 
     @model_validator(mode="after")

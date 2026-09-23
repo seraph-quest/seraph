@@ -178,6 +178,27 @@ def safe_workflow_run_id(value: Any) -> str | None:
     return reference
 
 
+def safe_board_reference(value: Any, *, max_length: int = 512) -> str | None:
+    """Return a bounded board reference without exposing path escapes."""
+    return _safe_reference(value, max_length=max_length)
+
+
+def safe_board_identifier(value: Any, *, max_length: int = 512) -> str | None:
+    """Return a bounded opaque identifier; relative paths are not identifiers."""
+    reference = safe_board_reference(value, max_length=max_length)
+    if reference is None or "/" in reference or "\\" in reference:
+        return None
+    return reference
+
+
+def safe_sha256_digest(value: Any) -> str | None:
+    """Return only a canonical SHA-256 digest for operator projections."""
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    return normalized if _DIGEST.fullmatch(normalized) else None
+
+
 def _safe_receipt_refs(value: Any, *, limit: int = 32) -> list[dict[str, Any]]:
     """Keep only bounded, structured receipt references in board projections."""
     values = value if isinstance(value, (list, tuple)) else [value]
@@ -544,6 +565,7 @@ class WorkBoardRepository:
         _validate_safe_identifier(request.idempotency_scope, field="idempotency_scope", max_length=128)
         _validate_safe_identifier(request.idempotency_key, field="idempotency_key", max_length=256)
         _validate_safe_identifier(request.reviewer_id, field="reviewer_id", max_length=128)
+        _validate_safe_identifier(request.origin_thread_id, field="origin_thread_id", max_length=256)
         _validate_digest(request.typed_input_digest, field="typed_input_digest")
 
     async def create_task(
@@ -809,6 +831,31 @@ class WorkBoardRepository:
                 elif field == "typed_input_digest":
                     _validate_digest(value, field=field)
                 safe_changes[field] = value
+        typed_fields = {"typed_input_ref", "typed_input_digest"}
+        changed_typed_fields = typed_fields.intersection(safe_changes)
+        if changed_typed_fields and changed_typed_fields != typed_fields:
+            raise BoardError(
+                "typed_spec_required",
+                "Typed input reference and digest must be changed together",
+                status_code=422,
+            )
+        if (
+            changed_typed_fields == typed_fields
+            and safe_changes["typed_input_ref"] is None
+            and safe_changes["typed_input_digest"] is None
+            and (
+                task.status in {WorkBoardStatus.todo, WorkBoardStatus.ready}
+                or task.block_source_status in {
+                    WorkBoardStatus.todo.value,
+                    WorkBoardStatus.ready.value,
+                }
+            )
+        ):
+            raise BoardError(
+                "typed_spec_required",
+                "Todo and Ready tasks cannot lose their complete typed specification",
+                status_code=422,
+            )
         authority_fields = {
             "capability_id",
             "typed_input_ref",
@@ -881,6 +928,12 @@ class WorkBoardRepository:
             else:
                 raise BoardError("illegal_transition", "This task cannot be promoted from its current status")
         elif request.action.value == "block":
+            if request.block_kind not in {None, "operator"}:
+                raise BoardError(
+                    "invalid_block_kind",
+                    "Manual board blocking accepts only the operator block kind",
+                    status_code=422,
+                )
             if task.status not in {
                 WorkBoardStatus.triage,
                 WorkBoardStatus.todo,
@@ -1113,6 +1166,7 @@ class WorkBoardRepository:
         owner: WorkBoardOwner,
         request: WorkBoardLinkDelete,
     ) -> WorkBoardEvent:
+        parent = await self._owned_task(db, owner, request.parent_task_id)
         child = await self._owned_task(db, owner, request.child_task_id)
         if child.task_revision != request.expected_child_revision:
             raise BoardRevisionConflict(child.task_id, request.expected_child_revision, child.task_revision)
@@ -1120,7 +1174,7 @@ class WorkBoardRepository:
             select(WorkBoardLink).where(
                 WorkBoardLink.owner_principal_id == owner.principal_id,
                 WorkBoardLink.owner_session_id == owner.session_id,
-                WorkBoardLink.parent_task_id == request.parent_task_id,
+                WorkBoardLink.parent_task_id == parent.task_id,
                 WorkBoardLink.child_task_id == request.child_task_id,
             )
         )

@@ -12,7 +12,7 @@ from starlette.websockets import WebSocketDisconnect
 from config.settings import settings
 from src.api.ws import websocket_work_board_events
 from src.auth.service import AuthFailure
-from src.db.models import Goal, WorkBoardAttempt
+from src.db.models import Goal, WorkBoardAttempt, WorkBoardStatus
 from src.scheduler.connection_manager import ws_manager
 from src.work_board.contracts import (
     WorkBoardAction,
@@ -125,17 +125,12 @@ async def test_generic_unblock_requires_operator_block_and_current_goal(async_db
     task_id = await _seed_task(async_db, OWNER)
     repository = WorkBoardRepository()
     async with async_db() as db:
-        blocked = await repository.action_task(
-            db,
-            OWNER,
-            task_id,
-            WorkBoardActionRequest(
-                action=WorkBoardAction.block,
-                expected_revision=1,
-                block_kind="unknown_effect",
-                reason="External effect needs reconciliation",
-            ),
-        )
+        task = await repository.get_task(db, OWNER, task_id)
+        task.status = WorkBoardStatus.blocked
+        task.block_source_status = "triage"
+        task.block_kind = "unknown_effect"
+        task.block_reason = "External effect needs reconciliation"
+        await db.commit()
         with pytest.raises(BoardError, match="typed recovery"):
             await repository.action_task(
                 db,
@@ -143,13 +138,14 @@ async def test_generic_unblock_requires_operator_block_and_current_goal(async_db
                 task_id,
                 WorkBoardActionRequest(
                     action=WorkBoardAction.unblock,
-                    expected_revision=blocked.task.task_revision,
+                    expected_revision=task.task_revision,
                 ),
             )
 
     async with async_db() as db:
         task = await repository.get_task(db, OWNER, task_id)
         task.block_kind = "operator"
+        expected_revision = task.task_revision
         await db.flush()
         goal = await db.get(Goal, "goal-operator:test-bypass")
         assert goal is not None
@@ -164,7 +160,7 @@ async def test_generic_unblock_requires_operator_block_and_current_goal(async_db
                 task_id,
                 WorkBoardActionRequest(
                     action=WorkBoardAction.unblock,
-                    expected_revision=2,
+                    expected_revision=expected_revision,
                 ),
             )
 

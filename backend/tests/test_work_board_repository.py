@@ -17,6 +17,7 @@ from src.work_board.contracts import (
     WorkBoardActionRequest,
     WorkBoardCommentCreate,
     WorkBoardLinkCreate,
+    WorkBoardLinkDelete,
     WorkBoardOwner,
     WorkBoardTaskCreate,
     WorkBoardTaskPatch,
@@ -152,6 +153,42 @@ async def test_malformed_cross_owner_comments_are_excluded_from_detail(async_db)
         assert detail["children"] == []
 
 
+@pytest.mark.asyncio
+async def test_delete_link_requires_owner_for_both_endpoints(async_db):
+    repository = WorkBoardRepository()
+    async with async_db() as db:
+        child = await _create(db, key="delete-link-child")
+        foreign_parent = WorkBoardTask(
+            task_id="foreign-delete-parent",
+            owner_principal_id="operator:other",
+            owner_session_id="other-session",
+            goal_id="foreign-delete-goal",
+            title="Foreign parent",
+            idempotency_key="foreign-delete-parent",
+        )
+        db.add(foreign_parent)
+        await db.flush()
+        db.add(
+            WorkBoardLink(
+                owner_principal_id=OWNER.principal_id,
+                owner_session_id=OWNER.session_id,
+                parent_task_id=foreign_parent.task_id,
+                child_task_id=child.task.task_id,
+            )
+        )
+        await db.commit()
+        with pytest.raises(BoardOwnerMismatch):
+            await repository.delete_link(
+                db,
+                OWNER,
+                WorkBoardLinkDelete(
+                    parent_task_id=foreign_parent.task_id,
+                    child_task_id=child.task.task_id,
+                    expected_child_revision=child.task.task_revision,
+                ),
+            )
+
+
 def test_patch_rejects_unsafe_reference_and_digest_inputs():
     digest = sha256(b"typed-input").hexdigest()
     with pytest.raises(ValidationError):
@@ -173,6 +210,68 @@ def test_patch_rejects_unsafe_reference_and_digest_inputs():
             typed_input_ref="workspace-json:inputs/task.json",
             typed_input_digest="not-a-digest",
         )
+
+
+@pytest.mark.asyncio
+async def test_typed_input_patch_requires_pair_and_preserves_complete_changes(async_db):
+    digest = sha256(b"typed-input").hexdigest()
+    with pytest.raises(ValidationError):
+        WorkBoardTaskPatch(
+            expected_revision=1,
+            typed_input_ref="workspace-json:inputs/task.json",
+            typed_input_digest=None,
+        )
+    with pytest.raises(ValidationError):
+        WorkBoardTaskPatch(
+            expected_revision=1,
+            typed_input_ref=None,
+            typed_input_digest=digest,
+        )
+
+    repository = WorkBoardRepository()
+    async with async_db() as db:
+        created = await _create(db, key="typed-pair")
+        first = await repository.patch_task(
+            db,
+            OWNER,
+            created.task.task_id,
+            WorkBoardTaskPatch(
+                expected_revision=created.task.task_revision,
+                typed_input_ref="workspace-json:inputs/first.json",
+                typed_input_digest=digest,
+            ),
+        )
+        assert first.task.typed_input_ref == "workspace-json:inputs/first.json"
+        assert first.task.typed_input_digest == digest
+
+        second_digest = sha256(b"typed-input-second").hexdigest()
+        second = await repository.patch_task(
+            db,
+            OWNER,
+            created.task.task_id,
+            WorkBoardTaskPatch(
+                expected_revision=first.task.task_revision,
+                typed_input_ref="workspace-json:inputs/second.json",
+                typed_input_digest=second_digest,
+            ),
+        )
+        assert second.task.typed_input_ref == "workspace-json:inputs/second.json"
+        assert second.task.typed_input_digest == second_digest
+
+        second.task.status = WorkBoardStatus.todo
+        await db.flush()
+        with pytest.raises(BoardError) as raised:
+            await repository.patch_task(
+                db,
+                OWNER,
+                second.task.task_id,
+                WorkBoardTaskPatch(
+                    expected_revision=second.task.task_revision,
+                    typed_input_ref=None,
+                    typed_input_digest=None,
+                ),
+            )
+        assert raised.value.code == "typed_spec_required"
 
 
 @pytest.mark.asyncio
@@ -309,24 +408,18 @@ async def test_blocked_authority_patch_requires_reconciliation(async_db, block_k
     digest = sha256(b"typed-input").hexdigest()
     async with async_db() as db:
         created = await _create(db, key="blocked-preserve")
-        blocked = await repository.action_task(
-            db,
-            OWNER,
-            created.task.task_id,
-            WorkBoardActionRequest(
-                action=WorkBoardAction.block,
-                expected_revision=created.task.task_revision,
-                block_kind=block_kind,
-                reason="External effect needs reconciliation",
-            ),
-        )
+        created.task.status = WorkBoardStatus.blocked
+        created.task.block_source_status = WorkBoardStatus.triage.value
+        created.task.block_kind = block_kind
+        created.task.block_reason = "External effect needs reconciliation"
+        await db.flush()
         with pytest.raises(BoardError) as raised:
             await repository.patch_task(
                 db,
                 OWNER,
-                blocked.task.task_id,
+                created.task.task_id,
                 WorkBoardTaskPatch(
-                    expected_revision=blocked.task.task_revision,
+                    expected_revision=created.task.task_revision,
                     capability_id="capability.local",
                     typed_input_ref="input:typed",
                     typed_input_digest=digest,
@@ -335,7 +428,7 @@ async def test_blocked_authority_patch_requires_reconciliation(async_db, block_k
                 ),
             )
         assert raised.value.code == "typed_reconcile_required"
-        current = await repository.get_task(db, OWNER, blocked.task.task_id)
+        current = await repository.get_task(db, OWNER, created.task.task_id)
         assert current.status is WorkBoardStatus.blocked
         assert current.block_kind == block_kind
         assert current.block_source_status == "triage"

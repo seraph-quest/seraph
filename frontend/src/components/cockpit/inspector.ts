@@ -1,3 +1,5 @@
+import type { WorkBoardReceiptReference } from "../../types";
+
 export interface CockpitAuditEvent {
   id: string;
   session_id?: string | null;
@@ -25,6 +27,32 @@ export interface ArtifactRecord {
   sizeBytes?: number | null;
   trustBoundary?: Record<string, unknown> | null;
   recoveryHint?: string | null;
+}
+
+export function resolveWorkBoardArtifact(
+  artifacts: ArtifactRecord[],
+  reference: WorkBoardReceiptReference,
+  scope: { ownerSessionId: string | null; workflowRunId: string | null },
+): ArtifactRecord | null {
+  if (scope.workflowRunId) {
+    return artifacts.find((artifact) => {
+      if (artifact.runId !== scope.workflowRunId) return false;
+      if (scope.ownerSessionId && artifact.sessionId !== scope.ownerSessionId) return false;
+      if (reference.content_sha256 && artifact.contentSha256?.toLowerCase() !== reference.content_sha256.toLowerCase()) return false;
+      if (reference.artifact_id) return artifact.id === reference.artifact_id;
+      return Boolean(reference.file_path && reference.content_sha256
+        && artifact.filePath === reference.file_path);
+    }) ?? null;
+  }
+
+  if (!scope.ownerSessionId) return null;
+  return artifacts.find((artifact) => {
+    if (artifact.sessionId !== scope.ownerSessionId) return false;
+    if (reference.content_sha256 && artifact.contentSha256?.toLowerCase() !== reference.content_sha256.toLowerCase()) return false;
+    if (reference.artifact_id) return artifact.id === reference.artifact_id;
+    return Boolean(reference.file_path && reference.content_sha256
+      && artifact.filePath === reference.file_path);
+  }) ?? null;
 }
 
 export interface WorkflowStepRecord {

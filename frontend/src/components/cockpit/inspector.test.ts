@@ -4,6 +4,8 @@ import {
   collectArtifacts,
   collectWorkflowRuns,
   formatInspectorValue,
+  resolveWorkBoardArtifact,
+  type ArtifactRecord,
   type CockpitAuditEvent,
 } from "./inspector";
 
@@ -374,5 +376,68 @@ describe("collectWorkflowRuns", () => {
     expect(secondRun?.arguments).toEqual({ query: "second", file_path: "notes/second.md" });
     expect(secondRun?.artifactPaths).toEqual(["notes/second.md"]);
     expect(secondRun?.artifacts.map((artifact) => artifact.filePath)).toEqual(["notes/second.md"]);
+  });
+});
+
+describe("resolveWorkBoardArtifact", () => {
+  const digestA = "a".repeat(64);
+  const digestB = "b".repeat(64);
+
+  function artifact(overrides: Partial<ArtifactRecord> = {}): ArtifactRecord {
+    return {
+      id: "artifact-a",
+      source: "artifact registry",
+      filePath: "artifacts/result.md",
+      sessionId: "session-a",
+      createdAt: "2026-09-24T08:00:00Z",
+      summary: "safe artifact summary",
+      runId: "run-a",
+      contentSha256: digestA,
+      ...overrides,
+    };
+  }
+
+  it("does not select a same-path artifact from another session", () => {
+    const foreign = artifact({ sessionId: "session-foreign", runId: "run-foreign" });
+    const local = artifact({ id: "artifact-b", sessionId: "session-b", runId: "run-b", contentSha256: digestB });
+
+    expect(resolveWorkBoardArtifact(
+      [foreign, local],
+      { file_path: "artifacts/result.md", content_sha256: digestB },
+      { ownerSessionId: "session-b", workflowRunId: null },
+    )).toBe(local);
+  });
+
+  it("requires the immutable owning run and matching digest for run-scoped path readback", () => {
+    const otherRun = artifact({ id: "same-path-other-run", runId: "run-other" });
+    const owningRun = artifact({ id: "same-path-owning-run", runId: "run-owned" });
+
+    expect(resolveWorkBoardArtifact(
+      [otherRun, owningRun],
+      { file_path: "artifacts/result.md", content_sha256: digestA },
+      { ownerSessionId: "session-a", workflowRunId: "run-owned" },
+    )).toBe(owningRun);
+    expect(resolveWorkBoardArtifact(
+      [owningRun],
+      { file_path: "artifacts/result.md", content_sha256: digestB },
+      { ownerSessionId: "session-a", workflowRunId: "run-owned" },
+    )).toBeNull();
+  });
+
+  it("requires session scope when a receipt has no workflow run", () => {
+    const value = artifact();
+    expect(resolveWorkBoardArtifact(
+      [value],
+      { artifact_id: value.id, content_sha256: digestA },
+      { ownerSessionId: null, workflowRunId: null },
+    )).toBeNull();
+  });
+
+  it("does not resolve an unbound path when the receipt has no digest", () => {
+    expect(resolveWorkBoardArtifact(
+      [artifact()],
+      { file_path: "artifacts/result.md" },
+      { ownerSessionId: "session-a", workflowRunId: null },
+    )).toBeNull();
   });
 });

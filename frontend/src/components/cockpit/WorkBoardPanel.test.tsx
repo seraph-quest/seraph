@@ -535,7 +535,7 @@ describe("WorkBoardPanel", () => {
     expect(fetchMock.mock.calls).toHaveLength(callsBeforeUnmount);
   });
 
-  it("opens task artifact references through the existing artifact inspector callback", async () => {
+  it("opens task artifact references with their source session and run context", async () => {
     const reference = { artifact_id: "artifact:notes/result.md", file_path: "notes/result.md", content_sha256: "b".repeat(64), verified: true };
     const currentTask = task({
       title: "Artifact task",
@@ -547,12 +547,16 @@ describe("WorkBoardPanel", () => {
     render(<WorkBoardPanel onInspectArtifact={onInspectArtifact} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Open task Artifact task" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Inspect artifact notes/result.md" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Inspect execution evidence notes/result.md" }));
 
-    expect(onInspectArtifact).toHaveBeenCalledWith(reference);
+    expect(onInspectArtifact).toHaveBeenCalledWith({
+      reference,
+      ownerSessionId: "operator-session-1",
+      workflowRunId: null,
+    });
   });
 
-  it("opens attempt receipt artifacts through the existing artifact inspector callback", async () => {
+  it("opens attempt receipt artifacts with their immutable workflow run context", async () => {
     const reference = { artifact_id: "artifact:attempt-output", file_path: "artifacts/output.md", verified: true };
     const currentTask = task({ title: "Attempt artifact task" });
     taskResponse(fetchMock, currentTask, 7, detail(currentTask, {
@@ -562,12 +566,16 @@ describe("WorkBoardPanel", () => {
     render(<WorkBoardPanel onInspectArtifact={onInspectArtifact} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Open task Attempt artifact task" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Inspect artifact artifacts/output.md" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Inspect execution evidence artifacts/output.md" }));
 
-    expect(onInspectArtifact).toHaveBeenCalledWith(reference);
+    expect(onInspectArtifact).toHaveBeenCalledWith({
+      reference,
+      ownerSessionId: "operator-session-1",
+      workflowRunId: "workflow-run-1",
+    });
   });
 
-  it("retries an uncertain create with the same payload and idempotency key after remount", async () => {
+  it("retries a create after a transient 429 with the same payload and idempotency key after remount", async () => {
     const goal = {
       id: "goal-pending-create",
       parent_id: null,
@@ -585,8 +593,7 @@ describe("WorkBoardPanel", () => {
     let postCount = 0;
     let accepted = false;
     let retryPayload: Record<string, unknown> | null = null;
-    const firstRequest = { payload: null as Record<string, unknown> | null, signal: null as AbortSignal | null };
-    let resolveFirst: ((value: ReturnType<typeof response>) => void) | null = null;
+    const firstRequest = { payload: null as Record<string, unknown> | null };
     fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) return Promise.resolve(response(page(accepted ? [createdTask] : [])));
@@ -598,8 +605,9 @@ describe("WorkBoardPanel", () => {
         const payload = JSON.parse(String(init.body)) as Record<string, unknown>;
         if (postCount === 1) {
           firstRequest.payload = payload;
-          firstRequest.signal = init.signal as AbortSignal;
-          return new Promise<ReturnType<typeof response>>((resolve) => { resolveFirst = resolve; });
+          // Simulate a gateway rate-limit response after the server accepted the task.
+          accepted = true;
+          return Promise.resolve(response({ detail: { code: "rate_limited", message: "Retry after a short delay." } }, false, 429));
         }
         retryPayload = payload;
         return Promise.resolve(response({ task: createdTask, idempotent_replay: true }));
@@ -614,12 +622,9 @@ describe("WorkBoardPanel", () => {
     fireEvent.change(await screen.findByLabelText("Title"), { target: { value: "Create once" } });
     fireEvent.change(screen.getByLabelText("Goal"), { target: { value: goal.id } });
     fireEvent.click(screen.getByRole("button", { name: "Create in Triage" }));
-    await waitFor(() => expect(resolveFirst).not.toBeNull());
-
+    await waitFor(() => expect(postCount).toBe(1));
+    expect(await within(screen.getByRole("dialog", { name: "Create a goal-linked task" })).findByRole("status")).toHaveTextContent(/unconfirmed receipt/i);
     firstMount.unmount();
-    expect(firstRequest.signal?.aborted).toBe(true);
-    accepted = true;
-    await act(async () => { resolveFirst?.(response({ task: createdTask, idempotent_replay: false })); });
 
     render(<WorkBoardPanel {...props} />);
     const dialog = await screen.findByRole("dialog", { name: "Create a goal-linked task" });
@@ -631,6 +636,69 @@ describe("WorkBoardPanel", () => {
     await waitFor(() => expect(postCount).toBe(2));
     expect(retryPayload).toEqual(firstRequest.payload);
     expect(await screen.findByRole("region", { name: "Task details for Create once" })).toBeInTheDocument();
+  });
+
+  it.each(["edit", "comment", "action"] as const)("does not resume %s work after unmount", async (mutation) => {
+    const blocked = task({ status: "blocked", block_reason: "Waiting for a grant", recovery_action: "unblock" });
+    let resolveMutation: ((value: ReturnType<typeof response>) => void) | null = null;
+    const mutationRequest = { signal: null as AbortSignal | null };
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) return Promise.resolve(response(page([blocked])));
+      if (url.includes("/api/work-board/events")) return Promise.resolve(response(events()));
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
+      if (url.includes("/api/work-board/goals/goal-1/execution-limits")) return Promise.resolve(response(limits()));
+      if (url.endsWith("/api/work-board/tasks/task-1") && !init?.method) return Promise.resolve(response(detail(blocked)));
+      const isEdit = mutation === "edit" && url.endsWith("/api/work-board/tasks/task-1") && init?.method === "PATCH";
+      const isComment = mutation === "comment" && url.endsWith("/api/work-board/tasks/task-1/comments") && init?.method === "POST";
+      const isAction = mutation === "action" && url.endsWith("/api/work-board/tasks/task-1/actions") && init?.method === "POST";
+      if (isEdit || isComment || isAction) {
+        mutationRequest.signal = init?.signal as AbortSignal;
+        return new Promise<ReturnType<typeof response>>((resolve) => { resolveMutation = resolve; });
+      }
+      return Promise.resolve(response({}));
+    });
+
+    const { unmount } = render(<WorkBoardPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Bounded task" }));
+    const details = await screen.findByRole("region", { name: "Task details for Bounded task" });
+    if (mutation === "edit") {
+      fireEvent.click(within(details).getByRole("button", { name: "Edit bounded fields" }));
+      fireEvent.change(within(details).getByLabelText("Title"), { target: { value: "Changed while mounted" } });
+      fireEvent.click(within(details).getByRole("button", { name: "Save with current revision" }));
+    } else if (mutation === "comment") {
+      fireEvent.change(within(details).getByLabelText("Comment"), { target: { value: "A bounded comment" } });
+      fireEvent.click(within(details).getByRole("button", { name: "Add comment" }));
+    } else {
+      fireEvent.change(within(details).getByLabelText("Resolution"), { target: { value: "Grant rechecked" } });
+      fireEvent.click(within(details).getByRole("button", { name: "Unblock after rechecking authority" }));
+    }
+    await waitFor(() => expect(resolveMutation).not.toBeNull());
+    const callsBeforeUnmount = fetchMock.mock.calls.length;
+    unmount();
+    expect(mutationRequest.signal?.aborted).toBe(true);
+    await act(async () => { resolveMutation?.(response({ task: blocked, comment: {} })); });
+    expect(fetchMock.mock.calls).toHaveLength(callsBeforeUnmount);
+  });
+
+  it("opens target-path and effect receipts through the owning workflow evidence action", async () => {
+    const reference = { effect_id: "effect-17", target_path: "artifacts/output.md", workflow_run_id: "workflow-run-1", readback_status: "unknown" as const };
+    const currentTask = task({
+      title: "Readback task",
+      latest_attempt: endedAttempt({ workflow_run_id: "workflow-run-1", receipt_refs: [reference] }),
+    });
+    taskResponse(fetchMock, currentTask, 7, detail(currentTask, { attempts: [endedAttempt({ workflow_run_id: "workflow-run-1", receipt_refs: [reference] })] }));
+    const onInspectArtifact = vi.fn();
+    render(<WorkBoardPanel onInspectArtifact={onInspectArtifact} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Readback task" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Inspect execution evidence artifacts/output.md" }));
+
+    expect(onInspectArtifact).toHaveBeenCalledWith({
+      reference,
+      ownerSessionId: "operator-session-1",
+      workflowRunId: "workflow-run-1",
+    });
   });
 
   it("keeps task details modeless and restores focus to the opener when closed", async () => {

@@ -299,6 +299,134 @@ describe("CockpitView", () => {
     expect(screen.getByRole("button", { name: "Create task" })).toBeInTheDocument();
   });
 
+  it("opens the task's linked run when a same-path artifact belongs to another session", async () => {
+    const reference = {
+      artifact_id: "goal-snapshot:output-1",
+      artifact_type: "markdown_document",
+      file_path: "artifacts/output.md",
+      content_sha256: "a".repeat(64),
+      verified: true,
+      workflow_run_id: "work-board:task-snapshot:attempt-1",
+    };
+    const attempt = {
+      attempt_id: "attempt-1",
+      task_id: "task-snapshot",
+      workflow_run_id: reference.workflow_run_id,
+      task_revision_at_claim: 1,
+      lease_owner: null,
+      cancel_requested_at: null,
+      lease_expires_at: null,
+      heartbeat_at: null,
+      fencing_token: 1,
+      executor_id: "executor.local",
+      started_at: "2026-09-24T08:00:00Z",
+      ended_at: "2026-09-24T08:00:01Z",
+      outcome: "succeeded",
+      readback_status: "verified",
+      verification_status: "passed",
+      receipt_refs: [],
+      result_refs: [],
+      artifact_refs: [reference],
+    };
+    const boardTask = {
+      task_id: "task-snapshot",
+      creation_sequence: 1,
+      owner_principal_id: "operator:one",
+      owner_session_id: "operator-owner-session",
+      origin_session_id: "operator-origin-session",
+      origin_thread_id: null,
+      goal_id: "goal-1",
+      goal_revision: 1,
+      title: "GoalSnapshot result",
+      body: "Inspect the verified task output.",
+      capability_id: "workflow.goal-snapshot-to-file",
+      typed_input_ref: "workspace-json:inputs/snapshot.json",
+      typed_input_digest: "b".repeat(64),
+      executor_id: "executor.local",
+      assignee_id: "operator:one",
+      priority: 50,
+      idempotency_scope: "task",
+      idempotency_key: "task-snapshot-key",
+      scheduled_at: null,
+      status: "done",
+      block_kind: null,
+      block_reason: null,
+      block_source_status: null,
+      cancel_requested_at: null,
+      requires_review: false,
+      reviewer_id: null,
+      dependency_count: 0,
+      completed_dependency_count: 0,
+      dispatch_rank: null,
+      recovery_action: null,
+      readback_status: "verified",
+      verification_status: "passed",
+      task_revision: 2,
+      result_refs: [],
+      artifact_refs: [reference],
+      latest_attempt: attempt,
+      created_at: "2026-09-24T08:00:00Z",
+      updated_at: "2026-09-24T08:00:01Z",
+      completed_at: "2026-09-24T08:00:01Z",
+      archived_at: null,
+    };
+    const workflowRun = {
+      id: reference.workflow_run_id,
+      run_identity: reference.workflow_run_id,
+      tool_name: "workflow_goal_snapshot_to_file",
+      workflow_name: "goal-snapshot-to-file",
+      session_id: "operator-origin-session",
+      status: "succeeded",
+      started_at: "2026-09-24T08:00:00Z",
+      updated_at: "2026-09-24T08:00:01Z",
+      summary: "Exact linked GoalSnapshot execution record",
+      step_tools: [],
+      artifact_paths: ["artifacts/output.md"],
+    };
+    mockCockpitBaselineFetch(fetchMock, {});
+    const baselineFetch = fetchMock.getMockImplementation();
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/auth/session")) {
+        return Promise.resolve(mockResponse({ authenticated: true, principal_id: "operator:one", session_id: "operator-owner-session" }));
+      }
+      if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) {
+        return Promise.resolve(mockResponse({ tasks: [boardTask], next_after: null, last_event_id: 1 }));
+      }
+      if (url.includes("/api/work-board/events")) return Promise.resolve(mockResponse({ events: [], last_event_id: 1, gap: false }));
+      if (url.endsWith("/api/work-board/tasks/task-snapshot")) {
+        return Promise.resolve(mockResponse({ task: boardTask, attempts: [attempt], parents: [], children: [], comments: [], events: [], revision: 2 }));
+      }
+      if (url.includes("/api/audit/events?limit=12")) {
+        return Promise.resolve(mockResponse([{
+          id: "foreign-session-artifact-event",
+          session_id: "other-session",
+          event_type: "integration_succeeded",
+          tool_name: "filesystem:workspace",
+          risk_level: "low",
+          policy_mode: "balanced",
+          summary: "Foreign session wrote the same path",
+          details: { operation: "write", file_path: "artifacts/output.md" },
+          created_at: "2026-09-24T08:00:01Z",
+        }]));
+      }
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [workflowRun] }));
+      if (url.includes("/api/work-board/goals/goal-1/execution-limits")) {
+        return Promise.resolve(mockResponse({ effective_max_runtime_seconds: 300, hard_max_runtime_seconds: 900, limit_source: "goal_default" }));
+      }
+      return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task GoalSnapshot result" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Inspect execution evidence artifacts/output.md" }));
+
+    expect(await screen.findByText("Exact linked GoalSnapshot execution record", { selector: ".cockpit-inspector-body" })).toBeInTheDocument();
+    expect(screen.getByText("goal-snapshot-to-file", { selector: ".cockpit-inspector-title" })).toBeInTheDocument();
+    expect(screen.queryByText("artifacts/output.md", { selector: ".cockpit-inspector-title" })).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/workflows/runs?"))).toBe(true);
+  });
+
   it("binds the current goal to persisted loop outcome data while keeping an unavailable route explicit", async () => {
     mockCockpitBaselineFetch(fetchMock, {
       runtimeStatus: {

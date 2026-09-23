@@ -16,6 +16,23 @@ function mockResponse(data: unknown, ok = true, status = ok ? 200 : 500) {
   };
 }
 
+class MockCockpitWebSocket {
+  readyState = 0;
+  onopen: (() => void) | null = null;
+  onmessage: ((event: MessageEvent) => void) | null = null;
+  onclose: ((event: CloseEvent) => void) | null = null;
+  onerror: (() => void) | null = null;
+
+  constructor(_url: string) {}
+
+  close(code = 1000, reason = "") {
+    this.readyState = 3;
+    this.onclose?.({ code, reason } as CloseEvent);
+  }
+
+  send(_payload: string) {}
+}
+
 function emptyCapabilityOverview(overrides: Record<string, unknown> = {}) {
   return {
     tool_policy_mode: "balanced",
@@ -60,6 +77,12 @@ function mockCockpitBaselineFetch(
 ) {
   fetchMock.mockImplementation((input: RequestInfo | URL) => {
     const url = String(input);
+    if (url.includes("/api/work-board/tasks?")) {
+      return Promise.resolve(mockResponse({ tasks: [], next_after: null, last_event_id: 0 }));
+    }
+    if (url.includes("/api/work-board/events")) {
+      return Promise.resolve(mockResponse({ events: [], last_event_id: 0, gap: false }));
+    }
     if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
     if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
     if (url.includes("/api/goals/dashboard")) {
@@ -163,6 +186,7 @@ describe("CockpitView", () => {
 
   beforeEach(() => {
     vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", MockCockpitWebSocket);
     vi.stubGlobal("localStorage", {
       getItem: vi.fn(() => null),
       setItem: vi.fn(),
@@ -262,6 +286,17 @@ describe("CockpitView", () => {
       "/api/workflows/runs",
     ];
     expect(baselineUrls.some((url) => deniedDeepEndpoints.some((endpoint) => url.includes(endpoint)))).toBe(false);
+  });
+
+  it("mounts the authenticated Kanban board in the default cockpit workspace", async () => {
+    mockCockpitBaselineFetch(fetchMock, {});
+
+    render(<CockpitView onSend={() => {}} />);
+
+    expect(await screen.findByLabelText("Work board")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Triage column" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Ready column" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create task" })).toBeInTheDocument();
   });
 
   it("binds the current goal to persisted loop outcome data while keeping an unavailable route explicit", async () => {
@@ -13137,7 +13172,8 @@ describe("CockpitView", () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     const view = render(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(cockpitFetchCount).toBe(4));
+    // The baseline refresh now also starts the authenticated work-board snapshot.
+    await waitFor(() => expect(cockpitFetchCount).toBe(5));
     view.unmount();
 
     await act(async () => {

@@ -95,6 +95,24 @@ async def test_malformed_cross_owner_comments_are_excluded_from_detail(async_db)
     repository = WorkBoardRepository()
     async with async_db() as db:
         created = await _create(db, key="comment-owner-scope")
+        foreign_parent = WorkBoardTask(
+            task_id="foreign-detail-parent",
+            owner_principal_id="operator:other",
+            owner_session_id="other-session",
+            goal_id="foreign-goal-parent",
+            title="Foreign parent",
+            idempotency_key="foreign-detail-parent",
+        )
+        foreign_child = WorkBoardTask(
+            task_id="foreign-detail-child",
+            owner_principal_id="operator:other",
+            owner_session_id="other-session",
+            goal_id="foreign-goal-child",
+            title="Foreign child",
+            idempotency_key="foreign-detail-child",
+        )
+        db.add_all([foreign_parent, foreign_child])
+        await db.flush()
         db.add_all(
             [
                 WorkBoardComment(
@@ -113,11 +131,25 @@ async def test_malformed_cross_owner_comments_are_excluded_from_detail(async_db)
                     author_session_id="other-session",
                     body="cross owner comment",
                 ),
+                WorkBoardLink(
+                    owner_principal_id=OWNER.principal_id,
+                    owner_session_id=OWNER.session_id,
+                    parent_task_id=foreign_parent.task_id,
+                    child_task_id=created.task.task_id,
+                ),
+                WorkBoardLink(
+                    owner_principal_id=OWNER.principal_id,
+                    owner_session_id=OWNER.session_id,
+                    parent_task_id=created.task.task_id,
+                    child_task_id=foreign_child.task_id,
+                ),
             ]
         )
         await db.commit()
         detail = await repository.get_detail(db, OWNER, created.task.task_id)
         assert detail["comments"] == []
+        assert detail["parents"] == []
+        assert detail["children"] == []
 
 
 def test_patch_rejects_unsafe_reference_and_digest_inputs():
@@ -268,7 +300,11 @@ async def test_ready_child_is_demoted_when_new_parent_is_unfinished(async_db):
 
 
 @pytest.mark.asyncio
-async def test_blocked_authority_patch_preserves_recovery_state(async_db):
+@pytest.mark.parametrize(
+    "block_kind",
+    ["unknown_effect", "cost_liability", "reconcile_admission_binding"],
+)
+async def test_blocked_authority_patch_requires_reconciliation(async_db, block_kind):
     repository = WorkBoardRepository()
     digest = sha256(b"typed-input").hexdigest()
     async with async_db() as db:
@@ -280,26 +316,30 @@ async def test_blocked_authority_patch_preserves_recovery_state(async_db):
             WorkBoardActionRequest(
                 action=WorkBoardAction.block,
                 expected_revision=created.task.task_revision,
-                block_kind="unknown_effect",
+                block_kind=block_kind,
                 reason="External effect needs reconciliation",
             ),
         )
-        patched = await repository.patch_task(
-            db,
-            OWNER,
-            blocked.task.task_id,
-            WorkBoardTaskPatch(
-                expected_revision=blocked.task.task_revision,
-                capability_id="capability.local",
-                typed_input_ref="input:typed",
-                typed_input_digest=digest,
-                executor_id="executor.local",
-            ),
-        )
-        assert patched.task.status is WorkBoardStatus.blocked
-        assert patched.task.block_kind == "unknown_effect"
-        assert patched.task.block_source_status == "triage"
-        assert patched.task.block_reason == "External effect needs reconciliation"
+        with pytest.raises(BoardError) as raised:
+            await repository.patch_task(
+                db,
+                OWNER,
+                blocked.task.task_id,
+                WorkBoardTaskPatch(
+                    expected_revision=blocked.task.task_revision,
+                    capability_id="capability.local",
+                    typed_input_ref="input:typed",
+                    typed_input_digest=digest,
+                    executor_id="executor.local",
+                    assignee_id="operator:worker",
+                ),
+            )
+        assert raised.value.code == "typed_reconcile_required"
+        current = await repository.get_task(db, OWNER, blocked.task.task_id)
+        assert current.status is WorkBoardStatus.blocked
+        assert current.block_kind == block_kind
+        assert current.block_source_status == "triage"
+        assert current.block_reason == "External effect needs reconciliation"
 
 
 @pytest.mark.asyncio

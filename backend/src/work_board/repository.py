@@ -69,6 +69,9 @@ _ALLOWED_RECEIPT_STATUSES = {
     "no_external_effect",
     "not_dispatched",
 }
+_AUTHORITY_RECONCILIATION_BLOCK_KINDS = frozenset(
+    {"unknown_effect", "cost_liability", "reconcile_admission_binding"}
+)
 
 
 async def _begin_sqlite_immediate(db: AsyncSession) -> None:
@@ -797,8 +800,19 @@ class WorkBoardRepository:
             "typed_input_ref",
             "typed_input_digest",
             "executor_id",
+            "assignee_id",
             "scheduled_at",
         }
+        if (
+            authority_fields.intersection(safe_changes)
+            and task.status is WorkBoardStatus.blocked
+            and task.block_kind in _AUTHORITY_RECONCILIATION_BLOCK_KINDS
+        ):
+            raise BoardError(
+                "typed_reconcile_required",
+                "Execution authority cannot change until the blocked attempt is reconciled",
+                status_code=409,
+            )
         if authority_fields.intersection(safe_changes) and task.status is WorkBoardStatus.ready:
             safe_changes["status"] = WorkBoardStatus.todo
         safe_changes["task_revision"] = expected + 1
@@ -1148,24 +1162,34 @@ class WorkBoardRepository:
                 )
             ).scalars().all()
         )
+        parent_task = aliased(WorkBoardTask)
         parents = list(
             (
                 await db.execute(
-                    select(WorkBoardLink.parent_task_id).where(
+                    select(WorkBoardLink.parent_task_id)
+                    .join(parent_task, parent_task.task_id == WorkBoardLink.parent_task_id)
+                    .where(
                         WorkBoardLink.child_task_id == task.task_id,
                         WorkBoardLink.owner_principal_id == owner.principal_id,
                         WorkBoardLink.owner_session_id == owner.session_id,
+                        parent_task.owner_principal_id == owner.principal_id,
+                        parent_task.owner_session_id == owner.session_id,
                     )
                 )
             ).scalars().all()
         )
+        child_task = aliased(WorkBoardTask)
         children = list(
             (
                 await db.execute(
-                    select(WorkBoardLink.child_task_id).where(
+                    select(WorkBoardLink.child_task_id)
+                    .join(child_task, child_task.task_id == WorkBoardLink.child_task_id)
+                    .where(
                         WorkBoardLink.parent_task_id == task.task_id,
                         WorkBoardLink.owner_principal_id == owner.principal_id,
                         WorkBoardLink.owner_session_id == owner.session_id,
+                        child_task.owner_principal_id == owner.principal_id,
+                        child_task.owner_session_id == owner.session_id,
                     )
                 )
             ).scalars().all()

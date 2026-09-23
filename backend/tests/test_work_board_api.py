@@ -4,8 +4,12 @@ import json
 
 import pytest
 
-from src.api.work_board import _attempt_payload, _task_payload as serialize_task_payload
-from src.db.models import WorkBoardAttempt, WorkBoardTask
+from src.api.work_board import (
+    _attempt_payload,
+    _event_payload,
+    _task_payload as serialize_task_payload,
+)
+from src.db.models import WorkBoardAttempt, WorkBoardEvent, WorkBoardTask
 
 
 def _task_payload(*, key: str = "api-task"):
@@ -218,5 +222,46 @@ def test_detail_reference_serializers_drop_unknown_private_values():
     ]
     assert task_payload["result_refs"] == [{"artifact_id": "artifact:1"}]
     assert task_payload["artifact_refs"] == [{"artifact_id": "artifact:2"}]
+    assert "PRIVATE" not in serialized
+    assert "/private" not in serialized
+
+
+def test_event_and_attempt_serializers_drop_legacy_prose_secrets_and_paths():
+    event = WorkBoardEvent(
+        event_id=7,
+        task_id="task-safe-event",
+        kind="/private/event-kind",
+        metadata_json=json.dumps(
+            {
+                "status": "triage",
+                "task_revision": 3,
+                "body": "PRIVATE EVENT BODY",
+                "path": "/private/source.txt",
+                "reason_code": "PRIVATE SECRET",
+                "parent_task_id": "/private/parent",
+                "changed_fields": ["title", "private_field"],
+                "body_digest": "A" * 64,
+            }
+        ),
+    )
+    attempt = WorkBoardAttempt(
+        task_id="task-safe-event",
+        outcome="PRIVATE OUTCOME",
+        workflow_run_id="run:7",
+    )
+
+    event_payload = _event_payload(event)
+    attempt_payload = _attempt_payload(attempt)
+    serialized = json.dumps({"event": event_payload, "attempt": attempt_payload})
+
+    assert event_payload["kind"] == "event.unknown"
+    assert event_payload["metadata"] == {
+        "status": "triage",
+        "task_revision": 3,
+        "changed_fields": ["title"],
+        "body_digest": "a" * 64,
+    }
+    assert attempt_payload["outcome"] is None
+    assert attempt_payload["workflow_run_id"] == "run:7"
     assert "PRIVATE" not in serialized
     assert "/private" not in serialized

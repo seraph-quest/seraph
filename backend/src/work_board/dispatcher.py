@@ -36,7 +36,7 @@ from src.guardian.goal_snapshot_to_file import (
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 from src.workspace import canonical_workspace_root
 from config.settings import settings
-from src.goals.repository import deserialize_admission_budget
+from src.goals.repository import deserialize_admission_budget, deserialize_success_criterion
 from src.work_board.repository import (
     BoardError,
     BoardAttemptProjection,
@@ -72,6 +72,13 @@ DISPATCHER_SESSION = "service-session:work-board"
 # It contains only live server asyncio tasks; it is not persisted or exposed
 # to operators.
 _ACTIVE_WORKER_TASKS: dict[tuple[str, str], asyncio.Task[Any]] = {}
+_GOAL_SNAPSHOT_PREFLIGHT_ERRORS = frozenset(
+    {
+        "goal_snapshot_criterion_missing",
+        "goal_snapshot_verifier_missing",
+        "goal_snapshot_evidence_missing",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -455,13 +462,23 @@ class WorkBoardDispatcher:
                 # change between passes.  Close that gate before claim so no
                 # execution attempt is counted for a pre-admission denial.
                 if task.status is WorkBoardStatus.ready:
+                    block_kind = (
+                        "capability"
+                        if readiness_error in _GOAL_SNAPSHOT_PREFLIGHT_ERRORS
+                        else _stable_reason_code(readiness_error, fallback="capability")
+                    )
+                    block_reason = (
+                        readiness_reason or readiness_error
+                        if readiness_error in _GOAL_SNAPSHOT_PREFLIGHT_ERRORS
+                        else _stable_reason_code(readiness_error, fallback="capability")
+                    )
                     async with self.session_provider() as db:
                         await self.repository.block_ready_task(
                             db,
                             task.task_id,
                             expected_revision=task.task_revision,
-                            block_kind=_stable_reason_code(readiness_error, fallback="capability"),
-                            block_reason=_stable_reason_code(readiness_error, fallback="capability"),
+                            block_kind=block_kind,
+                            block_reason=block_reason,
                             actor_principal_id=self.runner_id,
                             actor_session_id=self.runner_session,
                             now=observed_at,
@@ -1269,6 +1286,23 @@ class WorkBoardDispatcher:
             inputs = _parse_typed_input(task)
         except TypedInputError as exc:
             return exc.code, str(exc)
+        if capability_id == GOAL_SNAPSHOT_CAPABILITY:
+            criterion = deserialize_success_criterion(goal)
+            if criterion is None:
+                return (
+                    "goal_snapshot_criterion_missing",
+                    "GoalSnapshot requires a canonical success criterion before dispatch",
+                )
+            if criterion.verifier_kind is None:
+                return (
+                    "goal_snapshot_verifier_missing",
+                    "GoalSnapshot requires a configured success criterion verifier before dispatch",
+                )
+            if not criterion.evidence_refs:
+                return (
+                    "goal_snapshot_evidence_missing",
+                    "GoalSnapshot requires canonical criterion evidence before dispatch",
+                )
         return await self._capability_preflight(task, goal, inputs)
 
     async def _capability_preflight(

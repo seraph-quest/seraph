@@ -12,6 +12,7 @@ from sqlalchemy import select
 from starlette.websockets import WebSocketDisconnect
 
 from config.settings import settings
+from src.api.work_board import _safe_task_payload
 from src.api.ws import websocket_work_board_events
 from src.auth.service import AuthFailure
 from src.db.models import Goal, WorkBoardAttempt, WorkBoardStatus
@@ -393,6 +394,57 @@ async def _seed_blocked_review_task(
             )
         await db.commit()
     return task_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "receipt_refs",
+    [
+        [{"status": "succeeded", "verified": True}],
+        [
+            {
+                "status": "succeeded",
+                "verified": True,
+                "workflow_run_id": "review-other-run",
+                "content_sha256": "a" * 64,
+            }
+        ],
+    ],
+    ids=["missing-digest", "wrong-workflow-run"],
+)
+async def test_api_projection_does_not_advertise_review_unblock_without_attempt_bound_digest(
+    async_db,
+    monkeypatch,
+    receipt_refs,
+):
+    task_id = await _seed_blocked_review_task(
+        async_db,
+        key_suffix=f"api-projection-{len(receipt_refs[0])}",
+        receipt_refs=receipt_refs,
+    )
+
+    async def authenticated_session(session_id: str, *, touch: bool = False):
+        assert session_id == OWNER.session_id
+        assert touch is False
+        return SimpleNamespace(principal=SimpleNamespace(principal_id=OWNER.principal_id))
+
+    monkeypatch.setattr("src.work_board.dispatcher.authenticate_session", authenticated_session)
+    monkeypatch.setattr(
+        "src.api.work_board.dispatcher",
+        WorkBoardDispatcher(session_provider=async_db),
+    )
+
+    async with async_db() as db:
+        detail = await WorkBoardRepository().get_detail(db, OWNER, task_id)
+        payload = await _safe_task_payload(
+            detail["task"],
+            latest_attempt=detail["attempts"][0],
+            attempt_count=1,
+        )
+
+    assert payload["status"] == WorkBoardStatus.blocked.value
+    assert payload["recovery_action"] == "restore_prerequisite"
+    assert payload["recovery_action"] != "unblock"
 
 
 @pytest.mark.asyncio

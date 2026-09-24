@@ -2,6 +2,7 @@
 
 import json
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -353,7 +354,93 @@ async def test_http_comments_links_and_status_action_success(client):
         },
     )
     assert blocked.status_code == 200
-    assert blocked.json()["task"]["status"] == "blocked"
+    blocked_body = blocked.json()
+    assert blocked_body["task"]["status"] == "blocked"
+    assert {
+        "task_id",
+        "status",
+        "revision",
+        "attempt_id",
+        "reason_code",
+        "recovery_action",
+        "event_id",
+    } <= blocked_body.keys()
+    assert blocked_body["task_id"] == child_id
+    assert blocked_body["status"] == "blocked"
+    assert blocked_body["revision"] == 4
+    assert blocked_body["attempt_id"] is None
+    assert blocked_body["reason_code"] == "operator"
+    assert blocked_body["recovery_action"] == blocked_body["task"]["recovery_action"]
+    assert isinstance(blocked_body["event_id"], int)
+
+    detail = await client.get(f"/api/work-board/tasks/{child_id}")
+    assert detail.status_code == 200
+    assert detail.json()["events"][-1]["event_id"] == blocked_body["event_id"]
+
+
+@pytest.mark.asyncio
+async def test_http_cancel_action_returns_authoritative_event_receipt(client, monkeypatch):
+    task = WorkBoardTask(
+        task_id="api-cancel-task",
+        owner_principal_id="operator:test-bypass",
+        owner_session_id="test-auth-bypass",
+        goal_id="goal-api-cancel",
+        title="Cancel receipt",
+        idempotency_key="api-cancel-task",
+        status=WorkBoardStatus.running,
+        task_revision=5,
+    )
+    attempt = WorkBoardAttempt(
+        task_id=task.task_id,
+        attempt_id="api-cancel-attempt",
+        workflow_run_id="workflow:api-cancel",
+        task_revision_at_claim=4,
+        lease_owner="service:work-board",
+        fencing_token=3,
+        executor_id="executor.local",
+    )
+    event = WorkBoardEvent(
+        event_id=91,
+        task_id=task.task_id,
+        owner_principal_id=task.owner_principal_id,
+        owner_session_id=task.owner_session_id,
+        actor_principal_id=task.owner_principal_id,
+        actor_session_id=task.owner_session_id,
+        kind="attempt.cancel_requested",
+    )
+
+    async def fake_cancel(owner, task_id, *, expected_revision):
+        assert owner.principal_id == task.owner_principal_id
+        assert owner.session_id == task.owner_session_id
+        assert task_id == task.task_id
+        assert expected_revision == 4
+        return SimpleNamespace(task=task, attempt=attempt, event=event)
+
+    monkeypatch.setattr("src.api.work_board.dispatcher.cancel_task", fake_cancel)
+    response = await client.post(
+        f"/api/work-board/tasks/{task.task_id}/actions",
+        json={"action": "cancel", "expected_revision": 4},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert {
+        "task_id",
+        "status",
+        "revision",
+        "attempt_id",
+        "reason_code",
+        "recovery_action",
+        "event_id",
+    } <= body.keys()
+    assert body["task_id"] == task.task_id
+    assert body["status"] == "running"
+    assert body["revision"] == 5
+    assert body["attempt_id"] == attempt.attempt_id
+    assert body["reason_code"] is None
+    assert body["recovery_action"] == "cancel"
+    assert body["event_id"] == event.event_id
+    assert body["task"]["task_id"] == task.task_id
 
 
 def test_detail_reference_serializers_drop_unknown_private_values():

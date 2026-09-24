@@ -300,6 +300,32 @@ def _decode_json_list(value: str | None) -> list[Any]:
     return parsed if isinstance(parsed, list) else []
 
 
+def _action_receipt_payload(
+    task_payload: dict[str, Any],
+    event: Any,
+    *,
+    attempt_id: str | None,
+) -> dict[str, Any]:
+    """Return the authoritative receipt for one persisted board mutation.
+
+    The nested task remains the compatibility projection used by existing
+    callers.  These top-level fields let an operator reconcile one action
+    against the exact append-only event created by the mutation transaction.
+    Only already-safe task projection values are exposed as reason and
+    recovery fields.
+    """
+
+    return {
+        "task_id": task_payload.get("task_id"),
+        "status": task_payload.get("status"),
+        "revision": task_payload.get("task_revision"),
+        "attempt_id": attempt_id,
+        "reason_code": task_payload.get("block_kind"),
+        "recovery_action": task_payload.get("recovery_action"),
+        "event_id": getattr(event, "event_id", None),
+    }
+
+
 def _safe_attempt_outcome(value: Any) -> str | None:
     if isinstance(value, str) and value in _SAFE_EVENT_OUTCOMES:
         return value
@@ -562,12 +588,18 @@ async def action_work_board_task(request: Request, task_id: str, body: WorkBoard
                 task_id,
                 expected_revision=body.expected_revision,
             )
+            task_payload = await _safe_task_payload(
+                projection.task,
+                latest_attempt=projection.attempt,
+                attempt_count=1,
+            )
             payload = {
-                "task": await _safe_task_payload(
-                    projection.task,
-                    latest_attempt=projection.attempt,
-                    attempt_count=1,
+                **_action_receipt_payload(
+                    task_payload,
+                    projection.event,
+                    attempt_id=projection.attempt.attempt_id,
                 ),
+                "task": task_payload,
                 "attempt": _attempt_payload(projection.attempt),
             }
             return payload
@@ -596,7 +628,29 @@ async def action_work_board_task(request: Request, task_id: str, body: WorkBoard
                 )
             else:
                 mutation = await repository.action_task(db, owner, task_id, body)
-            payload = {"task": await _safe_task_payload(mutation.task)}
+            latest_attempt = (
+                await db.execute(
+                    select(WorkBoardAttempt)
+                    .where(WorkBoardAttempt.task_id == mutation.task.task_id)
+                    .order_by(
+                        WorkBoardAttempt.created_at.desc(),
+                        WorkBoardAttempt.attempt_id.desc(),
+                    )
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            task_payload = await _safe_task_payload(
+                mutation.task,
+                latest_attempt=latest_attempt,
+            )
+            payload = {
+                **_action_receipt_payload(
+                    task_payload,
+                    mutation.event,
+                    attempt_id=(latest_attempt.attempt_id if latest_attempt is not None else None),
+                ),
+                "task": task_payload,
+            }
         return payload
     except BoardError as exc:
         _raise_board_error(exc)

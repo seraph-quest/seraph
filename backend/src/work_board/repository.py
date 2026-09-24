@@ -812,6 +812,84 @@ class WorkBoardRepository:
             goal_revision=task.goal_revision,
         )
 
+    async def _validate_review_recovery(
+        self,
+        db: AsyncSession,
+        task: WorkBoardTask,
+    ) -> None:
+        """Require durable, attempt-bound evidence before restoring Review.
+
+        The dispatcher performs the live owner/session and goal preflight.  The
+        repository must still enforce the immutable Review contract at the
+        transition boundary because callers can reach this CAS kernel directly.
+        A worker summary or a receipt for another durable run is not proof of
+        the latest attempt's verified readback.
+        """
+        if not task.requires_review:
+            raise BoardError(
+                "reviewer_required",
+                "Review recovery requires a task marked for review",
+                status_code=409,
+            )
+        reviewer_id = str(task.reviewer_id or "").strip()
+        if not reviewer_id:
+            raise BoardError(
+                "reviewer_required",
+                "Review recovery requires a named reviewer",
+                status_code=409,
+            )
+        _validate_opaque_identifier(reviewer_id, field="reviewer_id", max_length=128)
+
+        latest_attempt = (
+            await db.execute(
+                select(WorkBoardAttempt)
+                .where(WorkBoardAttempt.task_id == task.task_id)
+                .order_by(WorkBoardAttempt.created_at.desc(), WorkBoardAttempt.attempt_id.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if latest_attempt is None or latest_attempt.ended_at is None:
+            raise BoardError(
+                "attempt_reconcile_required",
+                "Review recovery requires the latest execution attempt to be ended",
+                status_code=409,
+            )
+
+        workflow_run_id = safe_workflow_run_id(latest_attempt.workflow_run_id)
+        if not workflow_run_id:
+            raise BoardError(
+                "verified_readback_required",
+                "Review recovery requires a linked durable workflow run",
+                status_code=409,
+            )
+        try:
+            receipt_refs = json.loads(latest_attempt.receipt_refs_json or "[]")
+        except (TypeError, ValueError):
+            receipt_refs = []
+        if not isinstance(receipt_refs, list):
+            receipt_refs = []
+        for receipt in receipt_refs:
+            if not isinstance(receipt, Mapping):
+                continue
+            if str(receipt.get("status") or "").strip() not in {
+                "succeeded",
+                "read_back",
+                "reconciled",
+            }:
+                continue
+            if not bool(receipt.get("verified")):
+                continue
+            if safe_workflow_run_id(receipt.get("workflow_run_id")) != workflow_run_id:
+                continue
+            if safe_sha256_digest(receipt.get("content_sha256")) is None:
+                continue
+            return
+        raise BoardError(
+            "verified_readback_required",
+            "Review recovery requires verified readback for the linked workflow run and digest",
+            status_code=409,
+        )
+
     async def _cas_task_update(
         self,
         db: AsyncSession,
@@ -1434,6 +1512,8 @@ class WorkBoardRepository:
                     "A task with an execution attempt requires typed recovery before unblock",
                     status_code=409,
                 )
+            if source == WorkBoardStatus.review.value:
+                await self._validate_review_recovery(db, task)
             values.update(
                 {
                     # M1 has no capability/authority readiness resolver.  A
@@ -2604,6 +2684,22 @@ class WorkBoardRepository:
                     "The readback proof must identify this attempt's durable run and digest",
                 )
         safe_receipts = _safe_receipt_refs(receipt_refs)
+        if status in {WorkBoardStatus.review, WorkBoardStatus.done}:
+            # Persist the validated proof on the attempt itself.  Adapter
+            # result summaries may omit the digest, so Review recovery must
+            # never depend on a task-level summary or reconstruct proof from
+            # an unrelated run.  The run ID comes from the immutable attempt
+            # link, while the digest comes from the proof checked above.
+            proof_receipt = {
+                "workflow_run_id": str(attempt.workflow_run_id),
+                "content_sha256": proof_digest.lower(),
+                "status": "succeeded",
+                "verified": True,
+                "readback_status": "verified",
+                "verification_status": "passed",
+            }
+            if proof_receipt not in safe_receipts:
+                safe_receipts = [proof_receipt, *safe_receipts[:31]]
         safe_results = _safe_receipt_refs(result_refs)
         safe_artifacts = _safe_receipt_refs(artifact_refs)
         unresolved_receipt = any(

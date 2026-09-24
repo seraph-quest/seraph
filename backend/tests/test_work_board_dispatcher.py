@@ -29,6 +29,7 @@ from src.db.models import (
     WorkflowRunState,
 )
 from src.work_board.contracts import WorkBoardOwner
+from src.goals.contracts import CriterionVerifierKind, GoalSuccessCriterion
 from src.work_board.dispatcher import (
     BoardDispatchClaim,
     GOAL_SNAPSHOT_CAPABILITY,
@@ -847,6 +848,180 @@ async def test_two_racing_dispatch_passes_can_create_only_one_claim():
 
 async def _admitted(*_args, **_kwargs):
     return {"admitted": True, "completed": False, "blocked": False}
+
+
+def _goal_snapshot_readiness_task() -> SimpleNamespace:
+    return SimpleNamespace(
+        task_id="task-goal-snapshot-readiness",
+        task_revision=1,
+        status=WorkBoardStatus.todo,
+        owner_principal_id="operator:goal-snapshot",
+        owner_session_id="goal-snapshot-session",
+        goal_id="goal-goal-snapshot-readiness",
+        goal_revision=7,
+        capability_id=GOAL_SNAPSHOT_CAPABILITY,
+        executor_id="executor.goal-snapshot",
+        typed_input_ref="workspace-json:inputs/goal-snapshot.json",
+        typed_input_digest="a" * 64,
+        scheduled_at=None,
+        priority=50,
+    )
+
+
+def _goal_snapshot_goal(*, criterion: GoalSuccessCriterion | None) -> Goal:
+    return Goal(
+        id="goal-goal-snapshot-readiness",
+        title="GoalSnapshot readiness goal",
+        status="active",
+        revision=7,
+        owner_principal_id="operator:goal-snapshot",
+        owner_session_id="goal-snapshot-session",
+        success_criterion_json=criterion.model_dump_json() if criterion is not None else None,
+    )
+
+
+class _ReadinessResult:
+    def __init__(self, goal: Goal):
+        self.goal = goal
+
+    def scalar_one_or_none(self):
+        return self.goal
+
+
+class _ReadinessSession:
+    def __init__(self, goal: Goal):
+        self.goal = goal
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return None
+
+    async def execute(self, _statement):
+        return _ReadinessResult(self.goal)
+
+
+class _ReadinessRepository:
+    def __init__(self, task: SimpleNamespace):
+        self.task = task
+        self.promotions: list[dict[str, Any]] = []
+
+    async def list_dispatch_candidates(self, _db, **_kwargs):
+        return [self.task]
+
+    async def promote_task_ready(self, _db, task_id, **kwargs):
+        self.promotions.append({"task_id": task_id, **kwargs})
+        blocked_values = vars(self.task).copy()
+        blocked_values["status"] = WorkBoardStatus.blocked
+        blocked = SimpleNamespace(**blocked_values)
+        return SimpleNamespace(task=blocked)
+
+
+class _ReadinessJobs:
+    def __init__(self):
+        self.admit_calls = 0
+
+    async def admit_job(self, _spec):
+        self.admit_calls += 1
+        raise AssertionError("GoalSnapshot readiness must block before durable admission")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("criterion", "expected_error"),
+    [
+        (None, "goal_snapshot_criterion_missing"),
+        (
+            GoalSuccessCriterion(
+                description="Write the goal snapshot",
+                verifier_kind=None,
+                evidence_refs=["operator:goal-snapshot-proof"],
+            ),
+            "goal_snapshot_verifier_missing",
+        ),
+        (
+            GoalSuccessCriterion(
+                description="Write the goal snapshot",
+                verifier_kind=CriterionVerifierKind.artifact_readback,
+                evidence_refs=[],
+            ),
+            "goal_snapshot_evidence_missing",
+        ),
+    ],
+)
+async def test_goal_snapshot_missing_success_contract_blocks_before_claim_or_admission(
+    monkeypatch,
+    criterion: GoalSuccessCriterion | None,
+    expected_error: str,
+):
+    task = _goal_snapshot_readiness_task()
+    goal = _goal_snapshot_goal(criterion=criterion)
+    repository = _ReadinessRepository(task)
+    jobs = _ReadinessJobs()
+    dispatcher = WorkBoardDispatcher(
+        repository=repository,
+        jobs=jobs,
+        session_provider=lambda: _ReadinessSession(goal),
+    )
+    dispatcher.reconcile_pending_attempts = _empty_reconcile
+    dispatcher.reconcile_linked_attempts = _empty_reconcile
+    async def authenticated(*_args, **_kwargs):
+        return SimpleNamespace(
+            principal=SimpleNamespace(principal_id=task.owner_principal_id),
+        )
+
+    monkeypatch.setattr(
+        "src.work_board.dispatcher.authenticate_session",
+        authenticated,
+    )
+    monkeypatch.setattr(
+        "src.work_board.dispatcher._parse_typed_input",
+        lambda _task: {"file_path": "artifacts/goal-snapshot.md"},
+    )
+
+    receipt = await dispatcher.run_pass()
+
+    assert receipt["claimed"] == 0
+    assert receipt["admitted"] == 0
+    assert receipt["blocked"] == 1
+    assert jobs.admit_calls == 0
+    assert repository.promotions[0]["readiness_error"] == expected_error
+    assert repository.promotions[0]["readiness_reason"]
+    assert "private" not in repository.promotions[0]["readiness_reason"].lower()
+
+
+@pytest.mark.asyncio
+async def test_goal_snapshot_artifact_readback_success_contract_passes_readiness(monkeypatch):
+    task = _goal_snapshot_readiness_task()
+    goal = _goal_snapshot_goal(
+        criterion=GoalSuccessCriterion(
+            description="Write the goal snapshot and verify its artifact",
+            verifier_kind=CriterionVerifierKind.artifact_readback,
+            evidence_refs=["operator:goal-snapshot-proof"],
+        )
+    )
+    dispatcher = WorkBoardDispatcher(session_provider=lambda: _ReadinessSession(goal))
+    async def authenticated(*_args, **_kwargs):
+        return SimpleNamespace(
+            principal=SimpleNamespace(principal_id=task.owner_principal_id),
+        )
+
+    monkeypatch.setattr(
+        "src.work_board.dispatcher.authenticate_session",
+        authenticated,
+    )
+    monkeypatch.setattr(
+        "src.work_board.dispatcher._parse_typed_input",
+        lambda _task: {"file_path": "artifacts/goal-snapshot.md"},
+    )
+
+    async def capability_preflight(_task, _goal, _inputs):
+        return None, None
+
+    dispatcher._capability_preflight = capability_preflight
+
+    assert await dispatcher._readiness(task) == (None, None)
 
 
 @pytest.mark.asyncio

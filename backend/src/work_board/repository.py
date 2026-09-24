@@ -74,7 +74,12 @@ _AUTHORITY_RECONCILIATION_BLOCK_KINDS = frozenset(
     {"unknown_effect", "cost_liability", "reconcile_admission_binding"}
 )
 _SAFE_RESTORABLE_PHASES = frozenset(
-    {WorkBoardStatus.triage.value, WorkBoardStatus.todo.value, WorkBoardStatus.ready.value}
+    {
+        WorkBoardStatus.triage.value,
+        WorkBoardStatus.todo.value,
+        WorkBoardStatus.ready.value,
+        WorkBoardStatus.review.value,
+    }
 )
 _UNRESOLVED_RECEIPT_STATUSES = {
     "unknown",
@@ -856,6 +861,7 @@ class WorkBoardRepository:
         )
         db.add(event)
         await db.flush()
+        db.info.setdefault("work_board_events_after_commit", []).append(event)
         return event
 
     @staticmethod

@@ -13,7 +13,13 @@ import { useChatStore } from "../../stores/chatStore";
 import { useQuestStore } from "../../stores/questStore";
 import { useCockpitLayoutStore } from "../../stores/cockpitLayoutStore";
 import { PANEL_MIN_SIZES, usePanelLayoutStore } from "../../stores/panelLayoutStore";
-import type { ChatMessage, ConnectionStatus, GoalInfo, GoalLoopReceipt } from "../../types";
+import type {
+  ChatMessage,
+  ConnectionStatus,
+  GoalInfo,
+  GoalLoopReceipt,
+  WorkBoardReceiptReference,
+} from "../../types";
 import {
   buildWorkflowDraft,
   workflowAcceptsArtifact,
@@ -6271,6 +6277,143 @@ function normalizeWorkflowRun(value: Record<string, unknown>): WorkflowRunRecord
   };
 }
 
+/**
+ * A board evidence run is deliberately kept separate from the generic workflow
+ * index.  The bound API returns the small durable-job projection; this adapter
+ * gives the existing inspector the fields it can render without importing
+ * inputs, private results, or an unscoped workflow record.
+ */
+const BOARD_BOUND_WORKFLOW = Symbol("seraph.board-bound-workflow");
+type BoardBoundWorkflowRun = WorkflowRunRecord & {
+  [BOARD_BOUND_WORKFLOW]: true;
+};
+
+function isBoardBoundWorkflowRun(workflow: WorkflowRunRecord): workflow is BoardBoundWorkflowRun {
+  return (workflow as Partial<BoardBoundWorkflowRun>)[BOARD_BOUND_WORKFLOW] === true;
+}
+
+function boardBoundRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function boardBoundRecords(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value)
+    ? value.flatMap((entry) => {
+        const record = boardBoundRecord(entry);
+        return record ? [record] : [];
+      })
+    : [];
+}
+
+function boardBoundStatus(value: unknown): WorkflowRunRecord["status"] {
+  switch (value) {
+    case "succeeded":
+      return "succeeded";
+    case "failed":
+      return "failed";
+    case "degraded":
+      return "degraded";
+    case "awaiting_approval":
+      return "awaiting_approval";
+    case "approved":
+      return "approved";
+    case "denied":
+      return "denied";
+    case "blocked":
+    case "unknown_external_effect":
+    case "cost_liability":
+    case "cancelled":
+      return "degraded";
+    default:
+      return "running";
+  }
+}
+
+function normalizeBoardBoundWorkflowJob(
+  value: Record<string, unknown>,
+  ownerSessionId: string,
+): BoardBoundWorkflowRun | null {
+  const jobId = typeof value.job_id === "string" && value.job_id.trim() ? value.job_id.trim() : null;
+  if (!jobId || !ownerSessionId) return null;
+  const parentJobId = typeof value.parent_job_id === "string" && value.parent_job_id.trim()
+    ? value.parent_job_id.trim()
+    : null;
+  const jobKind = typeof value.job_kind === "string" && value.job_kind.trim()
+    ? value.job_kind.trim()
+    : "board durable job";
+  const startedAt = typeof value.started_at === "string" ? value.started_at : "";
+  const updatedAt = typeof value.updated_at === "string" ? value.updated_at : startedAt;
+  const artifactReceipts = boardBoundRecords(value.artifacts).filter(
+    (receipt) => typeof receipt.artifact_id === "string" && typeof receipt.file_path === "string",
+  );
+  const effectReceipts = boardBoundRecords(value.effects).map((receipt) => {
+    // Never propagate the opaque raw effect handle into inspector state.
+    // The API returns only its stable 16-hex digest prefix.
+    const safeReceipt = { ...receipt };
+    delete safeReceipt.effect_id;
+    delete safeReceipt.effect_id_digest;
+    const digest = typeof receipt.effect_id_digest === "string"
+      && /^[0-9a-f]{16}$/i.test(receipt.effect_id_digest)
+      ? receipt.effect_id_digest.toLowerCase()
+      : null;
+    return digest ? { ...safeReceipt, effect_id_digest: digest } : safeReceipt;
+  });
+  const normalized = normalizeWorkflowRun({
+    id: jobId,
+    run_identity: jobId,
+    parent_run_identity: parentJobId,
+    tool_name: jobKind,
+    workflow_name: jobKind,
+    session_id: ownerSessionId,
+    status: boardBoundStatus(value.status),
+    started_at: startedAt,
+    updated_at: updatedAt,
+    summary: `Durable board job ${jobId}`,
+    artifact_paths: artifactReceipts.flatMap((receipt) => (
+      typeof receipt.file_path === "string" ? [receipt.file_path] : []
+    )),
+    artifact_registry: artifactReceipts.map((receipt) => ({
+      ...receipt,
+      session_id: ownerSessionId,
+      run_id: jobId,
+    })),
+    effect_receipts: effectReceipts,
+  });
+  return { ...normalized, [BOARD_BOUND_WORKFLOW]: true };
+}
+
+function boardBoundJobMatchesReference(
+  value: Record<string, unknown>,
+  reference: WorkBoardReceiptReference,
+): boolean {
+  const receipts = [...boardBoundRecords(value.artifacts), ...boardBoundRecords(value.effects)];
+  return receipts.some((receipt) => {
+    if (reference.artifact_id && receipt.artifact_id !== reference.artifact_id) return false;
+    if (
+      reference.effect_id_digest
+      && String(receipt.effect_id_digest ?? "").toLowerCase() !== reference.effect_id_digest.toLowerCase()
+    ) return false;
+    if (reference.file_path && receipt.file_path !== reference.file_path) return false;
+    if (reference.target_path && receipt.target_path !== reference.target_path) return false;
+    if (
+      reference.content_sha256
+      && String(receipt.content_sha256 ?? "").toLowerCase() !== reference.content_sha256.toLowerCase()
+    ) return false;
+    if (
+      reference.target_digest
+      && String(receipt.target_digest ?? "").toLowerCase() !== reference.target_digest.toLowerCase()
+    ) return false;
+    return Boolean(
+      reference.artifact_id
+      || reference.effect_id_digest
+      || reference.file_path
+      || reference.target_path,
+    );
+  });
+}
+
 function collectGoalTitles(goals: GoalInfo[], limit: number): string[] {
   const titles: string[] = [];
 
@@ -8395,6 +8538,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     );
   }
   function resolveWorkflowRun(workflow: WorkflowRunRecord): WorkflowRunRecord {
+    if (isBoardBoundWorkflowRun(workflow)) return workflow;
     if (workflow.runIdentity) {
       return workflowRunByIdentity.get(workflow.runIdentity) ?? workflowRunById.get(workflow.id) ?? workflow;
     }
@@ -8853,6 +8997,43 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     if (!workflow) return;
     setSelectedInspector({ kind: "workflow", workflow: resolveWorkflowRun(workflow) });
   }
+
+  async function loadBoardBoundWorkflowRun(
+    workflowRunId: string,
+    ownerSessionId: string,
+    isCurrentInspection: () => boolean,
+  ): Promise<{
+    job: Record<string, unknown> | null;
+    workflow: BoardBoundWorkflowRun | null;
+    status?: number;
+  }> {
+    const result = await fetchCockpitJson(
+      `${API_URL}/api/workflows/jobs/${encodeURIComponent(workflowRunId)}`,
+      5000,
+      () => !isCurrentInspection(),
+    );
+    if (!isCurrentInspection() || !result.ok) {
+      return { job: null, workflow: null, status: result.status };
+    }
+    const payload = boardBoundRecord(result.payload);
+    const job = boardBoundRecord(payload?.job);
+    if (!job || job.job_id !== workflowRunId) {
+      return { job: null, workflow: null, status: result.status };
+    }
+    return {
+      job,
+      workflow: normalizeBoardBoundWorkflowJob(job, ownerSessionId),
+      status: result.status,
+    };
+  }
+
+  function boardWorkflowEvidenceUnavailable(status?: number): string {
+    if (status === 401 || status === 403 || status === 404) {
+      return "The task's linked workflow evidence is unavailable for the current authenticated session. Refresh the task and retry.";
+    }
+    return "Workflow evidence could not be loaded. Refresh workflow evidence and retry.";
+  }
+
   function inspectWorkBoardWorkflowRun(workflowRunId: string, ownerSessionId: string | null) {
     const inspectionGeneration = ++workBoardInspectionGenerationRef.current;
     const isCurrentInspection = () => inspectionGeneration === workBoardInspectionGenerationRef.current;
@@ -8860,29 +9041,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       setOperatorStatus("Task workflow evidence is unavailable because the task's canonical owner session is missing.");
       return;
     }
-    const workflow = workflowRunByIdentity.get(workflowRunId) ?? workflowRunById.get(workflowRunId);
-    if (workflow) {
-      if (workflow.sessionId !== ownerSessionId) {
-        setOperatorStatus("Task workflow evidence is hidden because its session does not match the task's canonical owner session.");
-        return;
-      }
-      focusPane("workflows_pane");
-      inspectWorkflowRun(workflow);
-      return;
-    }
-
     focusPane("workflows_pane");
     setOperatorStatus("Loading workflow evidence for the task's immutable run link.");
-    void loadWorkflowRuns(isCurrentInspection).then((runs) => {
+    void loadBoardBoundWorkflowRun(workflowRunId, ownerSessionId, isCurrentInspection).then(({ workflow, status }) => {
       if (!isCurrentInspection()) return;
-      const loadedWorkflow = runs.find((run) => run.runIdentity === workflowRunId || run.id === workflowRunId);
-      if (!loadedWorkflow) {
-        setOperatorStatus("The task's linked workflow run is not in the current evidence index. Refresh workflow evidence and retry.");
-      } else if (loadedWorkflow.sessionId !== ownerSessionId) {
-        setOperatorStatus("Task workflow evidence is hidden because its session does not match the task's canonical owner session.");
-      } else {
-        inspectWorkflowRun(loadedWorkflow);
+      if (!workflow) {
+        setOperatorStatus(boardWorkflowEvidenceUnavailable(status));
+        return;
       }
+      setSelectedInspector({ kind: "workflow", workflow });
     }).catch(() => {
       if (!isCurrentInspection()) return;
       setOperatorStatus("Workflow evidence could not be loaded. Refresh workflow evidence and retry.");
@@ -8895,59 +9062,33 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     const expectedParentWorkflowRunId = parentWorkflowRunId && parentWorkflowRunId !== workflowRunId
       ? parentWorkflowRunId
       : null;
-    const matchesParentWorkflow = (workflow: WorkflowRunRecord) => (
-      expectedParentWorkflowRunId === null
-      || workflow.parentRunIdentity === expectedParentWorkflowRunId
-    );
     if (workflowRunId) {
       if (!ownerSessionId) {
         setOperatorStatus("Task workflow evidence is unavailable because the task's canonical owner session is missing.");
         return;
       }
-      const workflow = workflowRunByIdentity.get(workflowRunId)
-        ?? workflowRunById.get(workflowRunId);
-      if (workflow && workflow.sessionId !== ownerSessionId) {
-        setOperatorStatus("Task workflow evidence is hidden because its session does not match the task's canonical owner session.");
-        return;
-      }
-      if (workflow && !matchesParentWorkflow(workflow)) {
-        setOperatorStatus("Task child workflow evidence is hidden because its parent does not match the task's immutable run link.");
-        return;
-      }
-      if (workflow) {
+      focusPane("workflows_pane");
+      setOperatorStatus("Loading workflow evidence for the task's immutable run link.");
+      void loadBoardBoundWorkflowRun(workflowRunId, ownerSessionId, isCurrentInspection).then(({ job, workflow, status }) => {
+        if (!isCurrentInspection()) return;
+        if (!job || !workflow) {
+          setOperatorStatus(boardWorkflowEvidenceUnavailable(status));
+          return;
+        }
+        if (expectedParentWorkflowRunId && workflow.parentRunIdentity !== expectedParentWorkflowRunId) {
+          setOperatorStatus("Task child workflow evidence is hidden because its parent does not match the task's immutable run link.");
+          return;
+        }
+        if (!boardBoundJobMatchesReference(job, reference)) {
+          setOperatorStatus("The task's linked artifact is unavailable in the authenticated durable job evidence. Refresh the task and retry.");
+          return;
+        }
         const artifact = resolveWorkBoardArtifact(workflow.artifacts, reference, { ownerSessionId, workflowRunId });
         if (artifact) {
           setSelectedInspector({ kind: "artifact", artifact });
           focusPane("inspector_pane");
         } else {
-          inspectWorkBoardWorkflowRun(workflowRunId, ownerSessionId);
-        }
-        return;
-      }
-
-      focusPane("workflows_pane");
-      setOperatorStatus("Loading workflow evidence for the task's immutable run link.");
-      void loadWorkflowRuns(isCurrentInspection).then((runs) => {
-        if (!isCurrentInspection()) return;
-        const loadedWorkflow = runs.find((run) => run.runIdentity === workflowRunId || run.id === workflowRunId);
-        if (!loadedWorkflow) {
-          setOperatorStatus("The task's linked workflow run is not in the current evidence index. Refresh workflow evidence and retry.");
-          return;
-        }
-        if (loadedWorkflow.sessionId !== ownerSessionId) {
-          setOperatorStatus("Task workflow evidence is hidden because its session does not match the task's canonical owner session.");
-          return;
-        }
-        if (!matchesParentWorkflow(loadedWorkflow)) {
-          setOperatorStatus("Task child workflow evidence is hidden because its parent does not match the task's immutable run link.");
-          return;
-        }
-        const artifact = resolveWorkBoardArtifact(loadedWorkflow.artifacts, reference, { ownerSessionId, workflowRunId });
-        if (artifact) {
-          setSelectedInspector({ kind: "artifact", artifact });
-          focusPane("inspector_pane");
-        } else {
-          inspectWorkflowRun(loadedWorkflow);
+          setSelectedInspector({ kind: "workflow", workflow });
         }
       }).catch(() => {
         if (!isCurrentInspection()) return;

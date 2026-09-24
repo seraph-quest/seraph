@@ -373,7 +373,7 @@ function safeReferenceLabel(reference: WorkBoardReceiptReference): string {
   return reference.artifact_id
     || reference.workflow_run_id
     || reference.job_id
-    || reference.effect_id
+    || reference.effect_id_digest
     || reference.file_path
     || reference.target_path
     || reference.reason_code
@@ -1837,7 +1837,7 @@ function WorkBoardPanel({
                           <div>{receipt.status ?? receipt.outcome ?? "Receipt"}{receipt.verified === true ? " · verified" : ""}{receipt.readback_status ? ` · readback ${READBACK_LABELS[receipt.readback_status]}` : ""}</div>
                           {receipt.content_sha256 && <div className="break-all font-mono text-[10px]">SHA-256 {receipt.content_sha256}</div>}
                           {receipt.file_path && <div className="break-all text-[10px]">Artifact path {receipt.file_path}</div>}
-                          {(receipt.file_path || receipt.artifact_id || receipt.target_path || receipt.effect_id) && onInspectArtifact && <button type="button" className="mt-1 underline" aria-label={`Inspect execution evidence ${receipt.file_path ?? receipt.target_path ?? receipt.artifact_id ?? receipt.effect_id}`} onClick={() => onInspectArtifact({ reference: receipt, ownerSessionId: selectedTask.owner_session_id, workflowRunId: referenceWorkflowRunId(receipt, attempt.workflow_run_id), parentWorkflowRunId: attempt.workflow_run_id })}>{receipt.target_path || receipt.effect_id ? "Inspect readback evidence" : "Inspect artifact"}</button>}
+                          {(receipt.file_path || receipt.artifact_id || receipt.target_path || receipt.effect_id_digest) && onInspectArtifact && <button type="button" className="mt-1 underline" aria-label={`Inspect execution evidence ${receipt.file_path ?? receipt.target_path ?? receipt.artifact_id ?? receipt.effect_id_digest}`} onClick={() => onInspectArtifact({ reference: receipt, ownerSessionId: selectedTask.owner_session_id, workflowRunId: referenceWorkflowRunId(receipt, attempt.workflow_run_id), parentWorkflowRunId: attempt.workflow_run_id })}>{receipt.target_path || receipt.effect_id_digest ? "Inspect readback evidence" : "Inspect artifact"}</button>}
                           {receipt.workflow_run_id && onInspectWorkflowRun && <button type="button" className="underline" onClick={() => onInspectWorkflowRun(receipt.workflow_run_id!, selectedTask.owner_session_id)}>Inspect existing workflow record</button>}
                         </div>
                       ))}
@@ -1849,7 +1849,7 @@ function WorkBoardPanel({
                       <div>{reference.status ?? reference.outcome ?? "Reference"}{reference.verified === true ? " · verified" : ""}</div>
                       {reference.content_sha256 && <div className="break-all font-mono text-[10px]">SHA-256 {reference.content_sha256}</div>}
                       {reference.file_path && <div className="break-all text-[10px]">Artifact path {reference.file_path}</div>}
-                      {(reference.file_path || reference.artifact_id || reference.target_path || reference.effect_id) && onInspectArtifact && <button type="button" className="mt-1 underline" aria-label={`Inspect execution evidence ${reference.file_path ?? reference.target_path ?? reference.artifact_id ?? reference.effect_id}`} onClick={() => onInspectArtifact({ reference, ownerSessionId: selectedTask.owner_session_id, workflowRunId: referenceWorkflowRunId(reference, selectedTask.latest_attempt?.workflow_run_id ?? null), parentWorkflowRunId: selectedTask.latest_attempt?.workflow_run_id ?? null })}>{reference.target_path || reference.effect_id ? "Inspect readback evidence" : "Inspect artifact"}</button>}
+                      {(reference.file_path || reference.artifact_id || reference.target_path || reference.effect_id_digest) && onInspectArtifact && <button type="button" className="mt-1 underline" aria-label={`Inspect execution evidence ${reference.file_path ?? reference.target_path ?? reference.artifact_id ?? reference.effect_id_digest}`} onClick={() => onInspectArtifact({ reference, ownerSessionId: selectedTask.owner_session_id, workflowRunId: referenceWorkflowRunId(reference, selectedTask.latest_attempt?.workflow_run_id ?? null), parentWorkflowRunId: selectedTask.latest_attempt?.workflow_run_id ?? null })}>{reference.target_path || reference.effect_id_digest ? "Inspect readback evidence" : "Inspect artifact"}</button>}
                       {reference.workflow_run_id && onInspectWorkflowRun && <button type="button" className="underline" onClick={() => onInspectWorkflowRun(reference.workflow_run_id!, selectedTask.owner_session_id)}>Open workflow evidence</button>}
                     </div>
                   ))}

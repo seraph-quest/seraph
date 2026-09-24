@@ -44,6 +44,7 @@ from src.work_board.contracts import (
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_.:/-]{1,512}$")
 _SAFE_RECEIPT_IDENTIFIER = re.compile(r"^(?!\.{1,2}$)[A-Za-z0-9_.:-]{1,512}$")
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
+_EFFECT_ID_DIGEST = re.compile(r"^[0-9a-f]{16}$", re.IGNORECASE)
 _EVENT_LIMIT = 100
 _TASK_LIMIT = 100
 _ALLOWED_RECEIPT_STATUSES = {
@@ -102,6 +103,57 @@ _BOARD_BLOCK_KINDS = frozenset(
         "reconcile_admission_binding",
     }
 )
+_PRIVATE_RECEIPT_TOKENS = (
+    "private",
+    "secret",
+    "credential",
+    "password",
+    "token",
+    "prompt",
+    "payload",
+)
+_UNSAFE_RECEIPT_PATH_PARTS = frozenset(
+    {
+        ".aws",
+        ".azure",
+        ".config",
+        ".docker",
+        ".gnupg",
+        ".ssh",
+        "credential",
+        "credentials",
+        "private",
+        "secret",
+        "secrets",
+        "token",
+        "tokens",
+        "vault",
+    }
+)
+_UNSAFE_RECEIPT_FILE_TOKENS = (
+    "api-key",
+    "api_key",
+    "apikey",
+    "credential",
+    "password",
+    "private",
+    "secret",
+    "token",
+)
+_UNSAFE_RECEIPT_FILE_NAMES = frozenset(
+    {
+        ".env",
+        ".env.dev",
+        ".env.local",
+        ".env.production",
+        ".npmrc",
+        ".pypirc",
+        "credentials",
+        "credentials.json",
+        "private_key",
+    }
+)
+_UNSAFE_RECEIPT_FILE_SUFFIXES = (".key", ".p12", ".pem", ".pfx")
 
 
 def _closed_block_kind(value: Any) -> str:
@@ -257,7 +309,53 @@ def safe_sha256_digest(value: Any) -> str | None:
     return normalized if _DIGEST.fullmatch(normalized) else None
 
 
-def _safe_receipt_refs(value: Any, *, limit: int = 32) -> list[dict[str, Any]]:
+def _safe_receipt_type(value: Any) -> str | None:
+    """Keep receipt type labels opaque and free of private-content markers."""
+
+    if not isinstance(value, str):
+        return None
+    bounded = value.strip()
+    if not bounded or len(bounded) > 512 or not _SAFE_RECEIPT_IDENTIFIER.fullmatch(bounded):
+        return None
+    lowered = bounded.casefold()
+    if any(token in lowered for token in _PRIVATE_RECEIPT_TOKENS):
+        return None
+    return bounded
+
+
+def _safe_receipt_path(value: Any) -> str | None:
+    """Keep only relative, non-sensitive workspace path references."""
+
+    if not isinstance(value, str):
+        return None
+    bounded = value.strip().replace("\\", "/")
+    if (
+        not bounded
+        or len(bounded) > 512
+        or bounded.startswith(("/", "~"))
+        or "\x00" in bounded
+        or any(part in {"", ".", ".."} for part in bounded.split("/"))
+        or any(not (char.isalnum() or char in " ./_-") for char in bounded)
+    ):
+        return None
+    parts = [part.casefold() for part in bounded.split("/")]
+    file_name = parts[-1]
+    if (
+        set(parts) & _UNSAFE_RECEIPT_PATH_PARTS
+        or file_name in _UNSAFE_RECEIPT_FILE_NAMES
+        or file_name.endswith(_UNSAFE_RECEIPT_FILE_SUFFIXES)
+        or any(token in file_name for token in _UNSAFE_RECEIPT_FILE_TOKENS)
+    ):
+        return None
+    return bounded
+
+
+def _safe_receipt_refs(
+    value: Any,
+    *,
+    limit: int = 32,
+    preserve_effect_ids: bool = False,
+) -> list[dict[str, Any]]:
     """Keep only bounded, structured receipt references in board projections."""
     values = value if isinstance(value, (list, tuple)) else [value]
     allowed = {
@@ -268,6 +366,7 @@ def _safe_receipt_refs(value: Any, *, limit: int = 32) -> list[dict[str, Any]]:
         "size_bytes",
         "exists",
         "effect_id",
+        "effect_id_digest",
         "effect_type",
         "status",
         "verified",
@@ -301,6 +400,15 @@ def _safe_receipt_refs(value: Any, *, limit: int = 32) -> list[dict[str, Any]]:
                 if key in {"content_sha256", "target_digest"}:
                     if not _DIGEST.fullmatch(bounded.lower()):
                         continue
+                    safe[key] = bounded.lower()
+                elif key == "effect_id_digest":
+                    if not _EFFECT_ID_DIGEST.fullmatch(bounded):
+                        continue
+                    raw_effect_id = item.get("effect_id")
+                    if isinstance(raw_effect_id, str) and raw_effect_id.strip():
+                        expected = _text_digest(raw_effect_id.strip())[:16]
+                        if bounded.lower() != expected:
+                            continue
                     safe[key] = bounded.lower()
                 elif key in {
                     "artifact_id",
@@ -334,6 +442,12 @@ def _safe_receipt_refs(value: Any, *, limit: int = 32) -> list[dict[str, Any]]:
                     )
                     if len(bounded) > 512 or not identifier_pattern.fullmatch(bounded):
                         continue
+                    if key in {"artifact_type", "effect_type"}:
+                        safe_type = _safe_receipt_type(bounded)
+                        if safe_type is None:
+                            continue
+                        safe[key] = safe_type
+                        continue
                     if key == "status" and bounded not in _ALLOWED_RECEIPT_STATUSES:
                         continue
                     if key == "readback_status" and bounded not in {
@@ -352,17 +466,15 @@ def _safe_receipt_refs(value: Any, *, limit: int = 32) -> list[dict[str, Any]]:
                         bounded = _safe_code(bounded) or ""
                         if not bounded:
                             continue
-                    safe[key] = bounded
+                    if key == "effect_id" and not preserve_effect_ids:
+                        safe["effect_id_digest"] = _text_digest(bounded)[:16]
+                    else:
+                        safe[key] = bounded
                 elif key in {"file_path", "target_path"}:
-                    if (
-                        not bounded
-                        or bounded.startswith(("/", "~"))
-                        or "\\" in bounded
-                        or any(part in {"", ".", ".."} for part in bounded.split("/"))
-                        or len(bounded) > 512
-                    ):
+                    safe_path = _safe_receipt_path(bounded)
+                    if safe_path is None:
                         continue
-                    safe[key] = bounded
+                    safe[key] = safe_path
         if safe:
             safe_items.append(safe)
     return safe_items
@@ -391,121 +503,6 @@ def _safe_metadata(metadata: dict[str, Any]) -> str:
         elif isinstance(value, (list, tuple)):
             safe[normalized_key] = [str(item)[:128] for item in value[:16]]
     return _canonical_json(safe)
-
-
-def _safe_receipt_refs(value: Any, *, limit: int = 32) -> list[dict[str, Any]]:
-    """Keep only bounded operator-safe receipt references.
-
-    Durable workflow serializers already redact their ledgers, but board
-    projections are a second trust boundary.  Store identifiers, digests,
-    statuses, and recovery codes only; never copy a workflow result or raw
-    capability input into a task row.
-    """
-
-    values = value if isinstance(value, (list, tuple)) else [value]
-    allowed = {
-        "artifact_id",
-        "artifact_type",
-        "file_path",
-        "content_sha256",
-        "size_bytes",
-        "exists",
-        "effect_id",
-        "effect_type",
-        "status",
-        "verified",
-        "target_digest",
-        "target_path",
-        "job_id",
-        "workflow_run_id",
-        "recovery_action",
-        "reason_code",
-        "error_code",
-        "child_job_id",
-        "readback_status",
-        "verification_status",
-        "outcome",
-    }
-    safe_items: list[dict[str, Any]] = []
-    for item in values[:limit]:
-        if not isinstance(item, Mapping):
-            continue
-        safe: dict[str, Any] = {}
-        for key in allowed:
-            if key not in item:
-                continue
-            candidate = item[key]
-            if isinstance(candidate, bool) or candidate is None:
-                safe[key] = candidate
-            elif isinstance(candidate, int):
-                safe[key] = candidate
-            elif isinstance(candidate, str):
-                bounded = candidate.strip()
-                if key in {"content_sha256", "target_digest"}:
-                    if not _DIGEST.fullmatch(bounded.lower()):
-                        continue
-                    safe[key] = bounded.lower()
-                elif key in {
-                    "artifact_id",
-                    "artifact_type",
-                    "effect_id",
-                    "effect_type",
-                    "status",
-                    "job_id",
-                    "workflow_run_id",
-                    "child_job_id",
-                    "recovery_action",
-                    "reason_code",
-                    "error_code",
-                    "readback_status",
-                    "verification_status",
-                    "outcome",
-                }:
-                    identifier_pattern = (
-                        _SAFE_RECEIPT_IDENTIFIER
-                        if key
-                        in {
-                            "artifact_id",
-                            "artifact_type",
-                            "effect_id",
-                            "effect_type",
-                            "job_id",
-                            "workflow_run_id",
-                            "child_job_id",
-                        }
-                        else _SAFE_ID
-                    )
-                    if not identifier_pattern.fullmatch(bounded[:512]):
-                        continue
-                    if key == "status" and bounded not in _ALLOWED_RECEIPT_STATUSES:
-                        continue
-                    if key == "readback_status" and bounded not in {
-                        "not_started", "pending", "verified", "failed", "unknown", "not_applicable"
-                    }:
-                        continue
-                    if key == "verification_status" and bounded not in {
-                        "not_started", "pending", "passed", "failed", "reconciliation_required", "cancelled"
-                    }:
-                        continue
-                    safe[key] = bounded[:512]
-                elif key in {"file_path", "target_path"}:
-                    # A path is retained only as a normalized workspace
-                    # reference.  Absolute paths, traversal, and prose are
-                    # deliberately omitted from board projections.
-                    if (
-                        not bounded
-                        or bounded.startswith(("/", "~"))
-                        or "\\" in bounded
-                        or any(part in {"", ".", ".."} for part in bounded.split("/"))
-                        or len(bounded) > 512
-                    ):
-                        continue
-                    safe[key] = bounded
-                else:
-                    continue
-        if safe:
-            safe_items.append(safe)
-    return safe_items
 
 
 def _projection_value(projection: Mapping[str, Any], field_name: str) -> Any:
@@ -1775,7 +1772,8 @@ class WorkBoardRepository:
                 latest_receipts = _safe_receipt_refs(
                     json.loads(latest_attempt.receipt_refs_json or "[]")
                     if latest_attempt is not None
-                    else []
+                    else [],
+                    preserve_effect_ids=True,
                 )
             except (TypeError, ValueError):
                 latest_receipts = []
@@ -2683,7 +2681,7 @@ class WorkBoardRepository:
                     "verified_readback_required",
                     "The readback proof must identify this attempt's durable run and digest",
                 )
-        safe_receipts = _safe_receipt_refs(receipt_refs)
+        safe_receipts = _safe_receipt_refs(receipt_refs, preserve_effect_ids=True)
         if status in {WorkBoardStatus.review, WorkBoardStatus.done}:
             # Persist the validated proof on the attempt itself.  Adapter
             # result summaries may omit the digest, so Review recovery must
@@ -2700,8 +2698,8 @@ class WorkBoardRepository:
             }
             if proof_receipt not in safe_receipts:
                 safe_receipts = [proof_receipt, *safe_receipts[:31]]
-        safe_results = _safe_receipt_refs(result_refs)
-        safe_artifacts = _safe_receipt_refs(artifact_refs)
+        safe_results = _safe_receipt_refs(result_refs, preserve_effect_ids=True)
+        safe_artifacts = _safe_receipt_refs(artifact_refs, preserve_effect_ids=True)
         unresolved_receipt = any(
             str(item.get("status") or "") in _UNRESOLVED_RECEIPT_STATUSES
             for item in safe_receipts

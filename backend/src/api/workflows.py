@@ -93,7 +93,6 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 _SAFE_BOARD_JOB_ID = re.compile(r"^[A-Za-z0-9_.:/-]{1,512}$")
-_SAFE_BOARD_DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_BOARD_REASON_CODES = frozenset(
     {
         "adapter_blocked",
@@ -112,6 +111,16 @@ _SAFE_BOARD_REASON_CODES = frozenset(
         "unknown_effect",
         "verified_readback_missing",
     }
+)
+_PRIVATE_BOARD_RECEIPT_TOKENS = (
+    "private",
+    "secret",
+    "credential",
+    "password",
+    "token",
+    "prompt",
+    "source",
+    "payload",
 )
 
 
@@ -137,59 +146,84 @@ def _safe_board_failure_reason(value: Any) -> str | None:
     return "execution_blocked" if candidate else None
 
 
+def _safe_board_receipt_token(value: Any) -> str | None:
+    """Keep public receipt labels inside the established workflow token form."""
+
+    candidate = str(value or "").strip()
+    if not _WORKFLOW_SAFE_TOKEN_RE.fullmatch(candidate):
+        return None
+    lowered = candidate.casefold()
+    if any(token in lowered for token in _PRIVATE_BOARD_RECEIPT_TOKENS):
+        return None
+    return candidate
+
+
 def _safe_board_job_receipts(value: Any) -> list[dict[str, Any]]:
     """Return only artifact/readback identifiers for a board job projection."""
 
     if not isinstance(value, list):
         return []
-    allowed = {
-        "artifact_id",
-        "artifact_type",
-        "effect_id",
-        "effect_type",
-        "job_id",
-        "child_job_id",
-        "workflow_run_id",
-        "status",
-        "verified",
-        "exists",
-        "size_bytes",
-        "content_sha256",
-        "target_digest",
-        "file_path",
-        "target_path",
-        "receipt_kind",
-    }
     result: list[dict[str, Any]] = []
     for item in value[:32]:
         if not isinstance(item, dict):
             continue
         safe: dict[str, Any] = {}
-        for key in allowed:
-            candidate = item.get(key)
-            if isinstance(candidate, bool) or candidate is None:
-                safe[key] = candidate
-            elif isinstance(candidate, int):
-                safe[key] = candidate
-            elif isinstance(candidate, str):
-                text = candidate.strip()
-                if key in {"content_sha256", "target_digest"}:
-                    if _SAFE_BOARD_DIGEST.fullmatch(text.lower()):
-                        safe[key] = text.lower()
-                elif key in {"file_path", "target_path"}:
-                    if (
-                        text
-                        and not text.startswith(("/", "~"))
-                        and "\\" not in text
-                        and len(text) <= 512
-                        and all(part not in {"", ".", ".."} for part in text.split("/"))
-                    ):
-                        safe[key] = text
-                elif _SAFE_BOARD_JOB_ID.fullmatch(text):
-                    safe[key] = text[:512]
+        artifact_id = _safe_workflow_artifact_id(item.get("artifact_id"))
+        if artifact_id is not None:
+            safe["artifact_id"] = artifact_id
+        for key in ("artifact_type", "status", "job_id", "child_job_id", "workflow_run_id"):
+            token = _safe_board_receipt_token(item.get(key))
+            if token is not None:
+                safe[key] = token
+        effect_id = item.get("effect_id")
+        if isinstance(effect_id, str) and effect_id.strip():
+            # Effect identifiers are opaque durable handles.  Preserve a
+            # stable correlation value without returning the provider or
+            # adapter's raw identifier to the cockpit.
+            safe["effect_id_digest"] = _workflow_identity_digest(effect_id.strip())
+        effect_type = _safe_board_receipt_token(item.get("effect_type"))
+        if effect_type is not None:
+            safe["effect_type"] = effect_type
+        receipt_kind = item.get("receipt_kind")
+        if receipt_kind in {"effect", "readback"}:
+            safe["receipt_kind"] = receipt_kind
+        for key in ("verified", "exists"):
+            if isinstance(item.get(key), bool):
+                safe[key] = item[key]
+        if item.get("size_bytes") is not None:
+            try:
+                safe["size_bytes"] = max(0, int(item["size_bytes"]))
+            except (TypeError, ValueError, OverflowError):
+                pass
+        for key in ("content_sha256", "target_digest", "readback_digest"):
+            digest = _safe_workflow_artifact_digest(item.get(key))
+            if digest is not None:
+                safe[key] = digest
+        for key in ("file_path", "target_path"):
+            path = _safe_workflow_artifact_path(item.get(key))
+            if path is not None:
+                safe[key] = path
         if safe:
             result.append(safe)
     return result
+
+
+def _bounded_lineage_expansion(
+    allowed: set[str],
+    values: list[Any],
+    *,
+    limit: int = 256,
+) -> list[str] | None:
+    """Return new lineage identities only when the aggregate bound holds."""
+
+    next_frontier: list[str] = []
+    for value in values:
+        identity = str(value)
+        if identity not in allowed and identity not in next_frontier:
+            next_frontier.append(identity)
+    if len(allowed) + len(next_frontier) > limit:
+        return None
+    return next_frontier
 
 
 def _safe_board_job_projection(run: WorkflowRunState) -> dict[str, Any]:
@@ -6532,9 +6566,39 @@ async def get_board_bound_workflow_job(job_id: str, request: Request):
                     WorkBoardTask.owner_session_id == session_id,
                     WorkBoardAttempt.workflow_run_id.is_not(None),
                 )
+                .limit(257)
             )
         ).scalars().all()
-        allowed = {str(value) for value in root_rows if value}
+        if len(root_rows) > 256:
+            raise HTTPException(status_code=404, detail={"code": "workflow_job_not_found"})
+        root_candidates = {str(value) for value in root_rows if value}
+        root_records = []
+        if root_candidates:
+            root_records = (
+                await db.execute(
+                    select(WorkflowRunState)
+                    .where(WorkflowRunState.run_identity.in_(root_candidates))
+                    .limit(257)
+                )
+            ).scalars().all()
+        if len(root_records) > 256:
+            raise HTTPException(status_code=404, detail={"code": "workflow_job_not_found"})
+
+        def lineage_is_consistent(row: WorkflowRunState) -> bool:
+            parent_job_id = str(getattr(row, "parent_job_id", None) or "").strip()
+            parent_run_identity = str(getattr(row, "parent_run_identity", None) or "").strip()
+            return not (parent_job_id and parent_run_identity and parent_job_id != parent_run_identity)
+
+        # A task attempt is an authorization root only when its durable row
+        # exists, is a true root, and does not carry contradictory lineage.
+        owned_attempt_roots = {
+            str(row.run_identity)
+            for row in root_records
+            if str(getattr(row, "root_run_identity", None) or "").strip() == str(row.run_identity)
+            and str(getattr(row, "operator_session_id", None) or "").strip() == session_id
+            and lineage_is_consistent(row)
+        }
+        allowed = set(owned_attempt_roots)
         if requested not in allowed:
             frontier = list(allowed)
             # Descendant traversal is bounded; a malformed lineage cannot
@@ -6548,16 +6612,39 @@ async def get_board_bound_workflow_job(job_id: str, request: Request):
                             or_(
                                 WorkflowRunState.parent_job_id.in_(frontier),
                                 WorkflowRunState.parent_run_identity.in_(frontier),
-                            )
+                            ),
+                            # Every descendant must retain the exact durable
+                            # root that was proven against the current
+                            # operator's owned task attempt.  A parent pointer
+                            # alone cannot authorize a row whose root is
+                            # missing or belongs to another tree.
+                            WorkflowRunState.root_run_identity.in_(owned_attempt_roots),
+                            # If both durable parent columns are present they
+                            # must identify the same parent.  A contradictory
+                            # pair is not a usable lineage proof.
+                            or_(
+                                WorkflowRunState.parent_job_id.is_(None),
+                                WorkflowRunState.parent_run_identity.is_(None),
+                                WorkflowRunState.parent_job_id == WorkflowRunState.parent_run_identity,
+                            ),
+                            # An explicitly foreign operator session cannot
+                            # become a trusted bridge to a later NULL-session
+                            # descendant.  Only current-session or unbound
+                            # adapter rows may extend the owned lineage.
+                            or_(
+                                WorkflowRunState.operator_session_id.is_(None),
+                                WorkflowRunState.operator_session_id == session_id,
+                            ),
                         )
+                        .limit(257)
                     )
                 ).scalars().all()
-                next_frontier = []
-                for value in descendants:
-                    identity = str(value)
-                    if identity not in allowed:
-                        allowed.add(identity)
-                        next_frontier.append(identity)
+                if len(descendants) > 256:
+                    raise HTTPException(status_code=404, detail={"code": "workflow_job_not_found"})
+                next_frontier = _bounded_lineage_expansion(allowed, descendants)
+                if next_frontier is None:
+                    raise HTTPException(status_code=404, detail={"code": "workflow_job_not_found"})
+                allowed.update(next_frontier)
                 frontier = next_frontier
             if requested not in allowed:
                 raise HTTPException(status_code=404, detail={"code": "workflow_job_not_found"})
@@ -6569,7 +6656,15 @@ async def get_board_bound_workflow_job(job_id: str, request: Request):
         if run is None:
             raise HTTPException(status_code=404, detail={"code": "workflow_job_not_found"})
         bound_session = str(getattr(run, "operator_session_id", None) or "").strip()
-        if bound_session != session_id:
+        # Board wrapper roots carry the authenticated operator session.  The
+        # governed child adapter can omit that field while retaining its
+        # validated parent_job_id; the bounded traversal above proves that
+        # such a child belongs to the current operator's board attempt tree.
+        # An explicit session on any descendant must still match exactly.
+        is_proven_descendant = requested not in owned_attempt_roots and requested in allowed
+        if bound_session and bound_session != session_id:
+            raise HTTPException(status_code=404, detail={"code": "workflow_job_not_found"})
+        if not bound_session and not is_proven_descendant:
             raise HTTPException(status_code=404, detail={"code": "workflow_job_not_found"})
         return {"job": _safe_board_job_projection(run)}
 

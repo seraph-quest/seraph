@@ -18,6 +18,7 @@ from typing import Any, Mapping
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from src.db.models import (
     Goal,
@@ -75,6 +76,42 @@ _UNRESOLVED_RECEIPT_STATUSES = {
     "intent",
     "dispatched",
 }
+
+
+def _safe_reference(value: Any, *, max_length: int = 512) -> str | None:
+    """Return one opaque identifier, or ``None`` when it is unsafe."""
+
+    if not isinstance(value, str):
+        return None
+    bounded = value.strip()
+    if (
+        not bounded
+        or len(bounded) > max_length
+        or not _SAFE_ID.fullmatch(bounded)
+        or bounded.startswith(("/", "~"))
+        or "\\" in bounded
+        or any(part in {"", ".", ".."} for part in bounded.split("/"))
+    ):
+        return None
+    return bounded
+
+
+def _safe_code(value: Any, *, max_length: int = 128) -> str | None:
+    """Normalize a reason/status code without accepting path-like prose."""
+
+    bounded = _safe_reference(value, max_length=max_length)
+    if bounded is None or "/" in bounded or "\\" in bounded:
+        return None
+    return bounded
+
+
+def safe_workflow_run_id(value: Any) -> str | None:
+    """Return a safe durable-run reference for operator projections."""
+
+    reference = _safe_reference(value)
+    if reference is None or "/" in reference or "\\" in reference:
+        return None
+    return reference
 
 
 async def _begin_sqlite_immediate(db: AsyncSession) -> None:
@@ -234,7 +271,7 @@ def _safe_receipt_refs(value: Any, *, limit: int = 32) -> list[dict[str, Any]]:
                     "verification_status",
                     "outcome",
                 }:
-                    if not _SAFE_ID.fullmatch(bounded[:512]):
+                    if len(bounded) > 512 or not _SAFE_ID.fullmatch(bounded):
                         continue
                     if key == "status" and bounded not in _ALLOWED_RECEIPT_STATUSES:
                         continue
@@ -246,6 +283,16 @@ def _safe_receipt_refs(value: Any, *, limit: int = 32) -> list[dict[str, Any]]:
                         "not_started", "pending", "passed", "failed", "reconciliation_required", "cancelled"
                     }:
                         continue
+                    if key == "workflow_run_id":
+                        normalized_run_id = safe_workflow_run_id(bounded)
+                        if normalized_run_id is None:
+                            continue
+                        bounded = normalized_run_id
+                    if key in {"recovery_action", "reason_code", "error_code", "outcome"}:
+                        bounded_code = _safe_code(bounded)
+                        if bounded_code is None:
+                            continue
+                        bounded = bounded_code
                     safe[key] = bounded[:512]
                 elif key in {"file_path", "target_path"}:
                     # A path is retained only as a normalized workspace
@@ -649,7 +696,11 @@ class WorkBoardRepository:
                 raise BoardIdempotencyConflict(request.idempotency_scope, request.idempotency_key)
             latest_event = await db.execute(
                 select(WorkBoardEvent)
-                .where(WorkBoardEvent.task_id == existing.task_id)
+                .where(
+                    WorkBoardEvent.task_id == existing.task_id,
+                    WorkBoardEvent.owner_principal_id == owner.principal_id,
+                    WorkBoardEvent.owner_session_id == owner.session_id,
+                )
                 .order_by(WorkBoardEvent.event_id.desc())
                 .limit(1)
             )
@@ -696,16 +747,60 @@ class WorkBoardRepository:
             requires_review=request.requires_review,
             reviewer_id=request.reviewer_id,
         )
-        db.add(task)
         try:
-            await db.flush()
+            # Keep the caller's transaction usable when another session wins
+            # the idempotency unique index.  A savepoint rolls back only this
+            # insert, allowing the committed winner to be read below.
+            async with db.begin_nested():
+                db.add(task)
+                await db.flush()
         except IntegrityError as exc:
             # A concurrent request can win the unique idempotency index after
-            # the preflight query.  Let the caller retry and read the winner;
-            # never return an uncommitted duplicate projection.
+            # the preflight query.  Refetch only the same owner/session/key
+            # tuple after the savepoint rollback.  This makes both callers
+            # observe one canonical task while preserving a typed conflict for
+            # unrelated integrity failures.
+            winner_result = await db.execute(
+                select(WorkBoardTask).where(
+                    WorkBoardTask.owner_principal_id == owner.principal_id,
+                    WorkBoardTask.owner_session_id == owner.session_id,
+                    WorkBoardTask.idempotency_scope == request.idempotency_scope,
+                    WorkBoardTask.idempotency_key == request.idempotency_key,
+                )
+            )
+            winner = winner_result.scalar_one_or_none()
+            if winner is not None:
+                if winner.idempotency_payload_digest != digest:
+                    raise BoardIdempotencyConflict(
+                        request.idempotency_scope,
+                        request.idempotency_key,
+                    ) from exc
+                latest_event = await db.execute(
+                    select(WorkBoardEvent)
+                    .where(
+                        WorkBoardEvent.task_id == winner.task_id,
+                        WorkBoardEvent.owner_principal_id == owner.principal_id,
+                        WorkBoardEvent.owner_session_id == owner.session_id,
+                    )
+                    .order_by(WorkBoardEvent.event_id.desc())
+                    .limit(1)
+                )
+                event = latest_event.scalar_one_or_none()
+                if event is None:
+                    event = await self._event(
+                        db,
+                        winner,
+                        owner,
+                        kind="task.replayed",
+                        metadata={
+                            "status": winner.status.value,
+                            "task_revision": winner.task_revision,
+                        },
+                    )
+                return BoardMutation(winner, event, idempotent_replay=True)
             raise BoardError(
-                "idempotency_race",
-                "The idempotency key was claimed concurrently; retry the request",
+                "integrity_conflict",
+                "The task could not be persisted because another record conflicts with it",
                 status_code=409,
             ) from exc
         event = await self._event(
@@ -962,6 +1057,14 @@ class WorkBoardRepository:
             if field in {"title", "body"}:
                 safe_changes[field] = await self._safe_text(str(value))
             else:
+                if field in {"capability_id", "typed_input_ref", "executor_id", "assignee_id"}:
+                    _validate_safe_identifier(
+                        value,
+                        field=field,
+                        max_length=128 if field in {"capability_id", "executor_id", "assignee_id"} else 512,
+                    )
+                elif field == "typed_input_digest":
+                    _validate_digest(value, field=field)
                 safe_changes[field] = value
         authority_fields = {
             "capability_id",
@@ -1511,7 +1614,23 @@ class WorkBoardRepository:
             visited.add(current)
             if current == parent_task_id:
                 return True
-            conditions = [WorkBoardLink.parent_task_id == current]
+            child_task = WorkBoardTask
+            parent_task = aliased(WorkBoardTask)
+            conditions = [
+                WorkBoardLink.parent_task_id == current,
+                child_task.owner_principal_id == owner.principal_id
+                if owner is not None
+                else text("1 = 1"),
+                child_task.owner_session_id == owner.session_id
+                if owner is not None
+                else text("1 = 1"),
+                parent_task.owner_principal_id == owner.principal_id
+                if owner is not None
+                else text("1 = 1"),
+                parent_task.owner_session_id == owner.session_id
+                if owner is not None
+                else text("1 = 1"),
+            ]
             if owner is not None:
                 conditions.extend(
                     (
@@ -1519,7 +1638,12 @@ class WorkBoardRepository:
                         WorkBoardLink.owner_session_id == owner.session_id,
                     )
                 )
-            result = await db.execute(select(WorkBoardLink.child_task_id).where(*conditions))
+            result = await db.execute(
+                select(WorkBoardLink.child_task_id)
+                .join(child_task, child_task.task_id == WorkBoardLink.child_task_id)
+                .join(parent_task, parent_task.task_id == WorkBoardLink.parent_task_id)
+                .where(*conditions)
+            )
             frontier.extend(str(value) for value in result.scalars().all())
         return False
 
@@ -2694,7 +2818,11 @@ class WorkBoardRepository:
             (
                 await db.execute(
                     select(WorkBoardComment)
-                    .where(WorkBoardComment.task_id == task.task_id)
+                    .where(
+                        WorkBoardComment.task_id == task.task_id,
+                        WorkBoardComment.owner_principal_id == owner.principal_id,
+                        WorkBoardComment.owner_session_id == owner.session_id,
+                    )
                     .order_by(WorkBoardComment.created_at.asc())
                 )
             ).scalars().all()

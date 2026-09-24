@@ -36,6 +36,8 @@ from src.work_board.repository import (
     BoardError,
     BoardMutation,
     WorkBoardRepository,
+    _safe_receipt_refs,
+    safe_workflow_run_id,
 )
 from src.goals.repository import deserialize_admission_budget
 from src.work_board.dispatcher import _dispatcher
@@ -103,7 +105,7 @@ def _recovery_action(
     if block_kind in {"transient", "cancelled"} and latest_attempt is not None:
         if latest_attempt.ended_at is None or attempt_count >= 2:
             return None
-        refs = _decode_json_list(latest_attempt.receipt_refs_json)
+        refs = _safe_receipt_refs(_decode_json_list(latest_attempt.receipt_refs_json))
         if not refs or any(
             not isinstance(item, dict)
             or str(item.get("status") or "") in {"unknown", "intent", "dispatched", "unknown_external_effect", "cost_liability"}
@@ -204,8 +206,8 @@ def _task_payload(
         "readback_status": readback_status,
         "verification_status": verification_status,
         "task_revision": task.task_revision,
-        "result_refs": _decode_json_list(task.result_refs_json),
-        "artifact_refs": _decode_json_list(task.artifact_refs_json),
+        "result_refs": _safe_receipt_refs(_decode_json_list(task.result_refs_json)),
+        "artifact_refs": _safe_receipt_refs(_decode_json_list(task.artifact_refs_json)),
         "latest_attempt": attempt_payload,
         "created_at": _json_value(task.created_at),
         "updated_at": _json_value(task.updated_at),
@@ -251,9 +253,9 @@ async def _safe_task_payload(
                 task.task_id,
                 expected_revision=task.task_revision,
             )
-        except BoardError as exc:
+        except (BoardError, SQLAlchemyError) as exc:
             payload["recovery_action"] = str(
-                exc.extra.get("recovery_action") or "restore_prerequisite"
+                getattr(exc, "extra", {}).get("recovery_action") or "restore_prerequisite"
             )
     elif payload.get("recovery_action") == "unblock":
         # Generic unblock is only a live operator convenience for an
@@ -268,9 +270,9 @@ async def _safe_task_payload(
                 task.task_id,
                 expected_revision=task.task_revision,
             )
-        except BoardError as exc:
+        except (BoardError, SQLAlchemyError) as exc:
             payload["recovery_action"] = str(
-                exc.extra.get("recovery_action") or "restore_prerequisite"
+                getattr(exc, "extra", {}).get("recovery_action") or "restore_prerequisite"
             )
     return payload
 
@@ -284,7 +286,7 @@ def _decode_json_list(value: str | None) -> list[Any]:
 
 
 def _attempt_payload(attempt: WorkBoardAttempt) -> dict[str, Any]:
-    receipt_refs = _decode_json_list(attempt.receipt_refs_json)
+    receipt_refs = _safe_receipt_refs(_decode_json_list(attempt.receipt_refs_json))
     verified = any(
         isinstance(item, dict)
         and bool(item.get("verified"))
@@ -325,7 +327,7 @@ def _attempt_payload(attempt: WorkBoardAttempt) -> dict[str, Any]:
     return {
         "attempt_id": attempt.attempt_id,
         "task_id": attempt.task_id,
-        "workflow_run_id": attempt.workflow_run_id,
+        "workflow_run_id": safe_workflow_run_id(attempt.workflow_run_id),
         "task_revision_at_claim": attempt.task_revision_at_claim,
         "lease_owner": attempt.lease_owner,
         "cancel_requested_at": _json_value(attempt.cancel_requested_at),

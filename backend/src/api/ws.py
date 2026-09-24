@@ -319,13 +319,27 @@ async def websocket_work_board_events(websocket: WebSocket):
             session_id=operator.session_id,
         )
 
-        async def _send_persisted_event(event) -> None:
-            """Send one replay event while suppressing cursor duplicates."""
+        async def _send_persisted_event(event, *, allow_backfill: bool = False) -> None:
+            """Send one replay event while suppressing cursor duplicates.
+
+            ``event_id`` is global across owners. A committed event for this
+            owner can therefore arrive after a later owner-visible event was
+            already queued. In that case a bounded replay may send the late
+            event without moving the reconnect cursor backwards.
+            """
             nonlocal last_event_id
             payload = _event_payload(event)
             event_id = payload.get("event_id")
             if type(event_id) is int:
-                if event_id <= last_event_id or event_id in delivered_event_ids:
+                if event_id in delivered_event_ids:
+                    return
+                if event_id <= last_event_id:
+                    if not allow_backfill:
+                        return
+                    await websocket.send_json(payload)
+                    if len(delivered_event_ids) >= 512:
+                        delivered_event_ids.clear()
+                    delivered_event_ids.add(event_id)
                     return
                 # The monotonic cursor makes the set naturally redundant for
                 # ordered pages, but bounding it protects long-lived sockets
@@ -336,40 +350,90 @@ async def websocket_work_board_events(websocket: WebSocket):
                 last_event_id = event_id
             await websocket.send_json(payload)
 
-        replay_after = after
-        while True:
-            async with get_session() as db:
-                page = await work_board_repository.list_events(
-                    db,
-                    owner,
-                    after=replay_after,
-                    limit=100,
-                )
-            if page.gap:
-                gap_cursor = int(page.last_event_id or last_event_id)
-                if gap_cursor > last_event_id:
-                    await websocket.send_json(
-                        {"type": "cursor_gap", "last_event_id": gap_cursor}
+        async def _replay_persisted_events(
+            replay_after: int,
+            *,
+            allow_backfill: bool = False,
+        ) -> bool:
+            """Replay committed owner/session events in ascending cursor order.
+
+            Post-commit publishers can enqueue event 12 before event 11 even
+            though both rows are committed. Replaying from the last delivered
+            cursor before accepting a jumped live event gives the socket the
+            persisted order. A late lower event can use a one-event lookback
+            and be delivered as a backfill without rewinding the cursor.
+            """
+            nonlocal last_event_id
+            replay_cursor = replay_after
+            while True:
+                async with get_session() as db:
+                    page = await work_board_repository.list_events(
+                        db,
+                        owner,
+                        after=replay_cursor,
+                        limit=100,
                     )
-                    last_event_id = gap_cursor
-                break
-            for event in page.events:
-                await _send_persisted_event(event)
-            if not page.events or len(page.events) < 100:
-                break
-            next_cursor = next(
-                (
-                    int(event.event_id)
-                    for event in reversed(page.events)
-                    if type(event.event_id) is int
-                ),
-                replay_after,
-            )
-            if next_cursor <= replay_after:
-                # Defensive stop against a malformed repository page; do not
-                # spin forever while holding an authenticated socket.
-                break
-            replay_after = next_cursor
+                if page.gap:
+                    gap_cursor = int(page.last_event_id or last_event_id)
+                    if gap_cursor > last_event_id:
+                        await websocket.send_json(
+                            {"type": "cursor_gap", "last_event_id": gap_cursor}
+                        )
+                        last_event_id = gap_cursor
+                    return False
+                for event in page.events:
+                    await _send_persisted_event(event, allow_backfill=allow_backfill)
+                if not page.events or len(page.events) < 100:
+                    return True
+                next_cursor = next(
+                    (
+                        int(event.event_id)
+                        for event in reversed(page.events)
+                        if type(event.event_id) is int
+                    ),
+                    replay_cursor,
+                )
+                if next_cursor <= replay_cursor:
+                    # Defensive stop against a malformed repository page; do
+                    # not spin forever while holding an authenticated socket.
+                    return True
+                replay_cursor = next_cursor
+
+        await _replay_persisted_events(after)
+
+        async def _send_live_event(payload: dict) -> None:
+            """Reconcile a queued event before advancing the live cursor."""
+            nonlocal last_event_id
+            event_id = payload.get("event_id")
+            if type(event_id) is not int:
+                await websocket.send_json(payload)
+                return
+            if event_id in delivered_event_ids:
+                return
+            if event_id > last_event_id:
+                if event_id != last_event_id + 1:
+                    if not await _replay_persisted_events(last_event_id):
+                        return
+                if event_id in delivered_event_ids:
+                    return
+                await websocket.send_json(payload)
+                if len(delivered_event_ids) >= 512:
+                    delivered_event_ids.clear()
+                delivered_event_ids.add(event_id)
+                last_event_id = event_id
+                return
+
+            # The publisher delivered a lower ID after a later one. Replay
+            # from just before it so the committed owner/session row can be
+            # sent safely; the reconnect cursor remains monotonic.
+            if not await _replay_persisted_events(max(event_id - 1, 0), allow_backfill=True):
+                return
+            if event_id in delivered_event_ids:
+                return
+            await websocket.send_json(payload)
+            if len(delivered_event_ids) >= 512:
+                delivered_event_ids.clear()
+            delivered_event_ids.add(event_id)
 
         # A WebSocket server does not learn that an idle browser went away
         # until it reads the ASGI receive channel.  Keep that read pending
@@ -418,17 +482,7 @@ async def websocket_work_board_events(websocket: WebSocket):
                     await websocket.send_json(payload)
                     last_event_id = gap_cursor
                 continue
-            event_id = payload.get("event_id")
-            if type(event_id) is int and (
-                event_id <= last_event_id or event_id in delivered_event_ids
-            ):
-                continue
-            await websocket.send_json(payload)
-            if type(event_id) is int:
-                if len(delivered_event_ids) >= 512:
-                    delivered_event_ids.clear()
-                delivered_event_ids.add(event_id)
-                last_event_id = event_id
+            await _send_live_event(payload)
     except WebSocketDisconnect:
         logger.info("Work-board websocket client disconnected")
     except BoardError as exc:

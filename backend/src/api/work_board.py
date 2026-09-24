@@ -88,7 +88,6 @@ def _recovery_action(
             and latest_attempt.workflow_run_id
             and latest_attempt.ended_at is None
             and latest_attempt.lease_owner
-            and latest_attempt.cancel_requested_at is None
         ):
             return "cancel"
         return "reconcile_admission_binding" if latest_attempt is not None else None

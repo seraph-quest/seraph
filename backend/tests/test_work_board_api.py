@@ -1,15 +1,42 @@
 """Authenticated HTTP contract checks for work-board M1."""
 
 import json
+from datetime import datetime, timezone
 
 import pytest
 
 from src.api.work_board import (
     _attempt_payload,
     _event_payload,
+    _recovery_action,
     _task_payload as serialize_task_payload,
 )
 from src.db.models import WorkBoardAttempt, WorkBoardEvent, WorkBoardStatus, WorkBoardTask
+
+
+def test_running_task_keeps_cancel_control_visible_while_cancellation_is_pending():
+    task = WorkBoardTask(
+        task_id="cancel-pending-task",
+        owner_principal_id="operator:test",
+        owner_session_id="session:test",
+        goal_id="goal:test",
+        goal_revision=1,
+        title="Cancel pending",
+        idempotency_key="cancel-pending-task",
+        status=WorkBoardStatus.running,
+    )
+    attempt = WorkBoardAttempt(
+        attempt_id="cancel-pending-attempt",
+        task_id=task.task_id,
+        workflow_run_id="workflow:cancel-pending",
+        task_revision_at_claim=1,
+        lease_owner="executor:test",
+        fencing_token=1,
+        executor_id="executor.test",
+        cancel_requested_at=datetime.now(timezone.utc),
+    )
+
+    assert _recovery_action(task, latest_attempt=attempt, attempt_count=1) == "cancel"
 
 
 def _task_payload(*, key: str = "api-task"):

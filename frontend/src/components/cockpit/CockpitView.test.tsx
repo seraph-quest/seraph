@@ -372,59 +372,48 @@ describe("CockpitView", () => {
       completed_at: "2026-09-24T08:00:01Z",
       archived_at: null,
     };
-    const parentWorkflowRun = {
-      id: parentWorkflowRunId,
-      run_identity: parentWorkflowRunId,
-      tool_name: "workflow_goal_snapshot_to_file",
-      workflow_name: "goal-snapshot-to-file",
-      session_id: "operator-owner-session",
+    const boundParentJob = {
+      job_id: parentWorkflowRunId,
+      parent_job_id: null,
       status: "succeeded",
-      started_at: "2026-09-24T08:00:00Z",
-      updated_at: "2026-09-24T08:00:01Z",
-      summary: "Exact linked GoalSnapshot execution record",
-      step_tools: [],
-      artifact_paths: [],
-      artifact_registry: [],
-      effect_receipts: [
+      job_kind: "work-board",
+      artifacts: [],
+      effects: [
         {
-          kind: "effect",
           receipt_kind: "readback",
           effect_type: "board_child_readback",
           status: "succeeded",
-          exists: true,
-          effect_id_digest: "effect-ref-1a2b3c4d",
+          effect_id: "effect-ref-1a2b3c4d",
+          effect_id_digest: "fe383aed9444a142",
           child_job_id: childWorkflowRunId,
           artifact_id: artifactId,
           target_path: artifactPath,
           content_sha256: contentDigest,
           target_digest: contentDigest,
-          readback_digest: contentDigest,
-          operator_visible: true,
         },
       ],
-    };
-    const childWorkflowRun = {
-      id: childWorkflowRunId,
-      run_identity: childWorkflowRunId,
-      parent_run_identity: parentWorkflowRunId,
-      tool_name: "workflow_goal_snapshot_to_file",
-      workflow_name: "goal-snapshot-to-file",
-      session_id: "operator-owner-session",
-      status: "succeeded",
       started_at: "2026-09-24T08:00:00Z",
       updated_at: "2026-09-24T08:00:01Z",
-      summary: "Nested GoalSnapshot capability run",
-      step_tools: [],
-      artifact_paths: [artifactPath],
-      artifact_registry: [
+      finished_at: "2026-09-24T08:00:01Z",
+    };
+    const boundChildJob = {
+      job_id: childWorkflowRunId,
+      parent_job_id: parentWorkflowRunId,
+      status: "succeeded",
+      job_kind: "goal-snapshot-to-file",
+      artifacts: [
         {
           artifact_id: artifactId,
+          artifact_type: "markdown_document",
           file_path: artifactPath,
           content_sha256: contentDigest,
-          session_id: "operator-owner-session",
-          run_id: childWorkflowRunId,
+          exists: true,
         },
       ],
+      effects: [],
+      started_at: "2026-09-24T08:00:00Z",
+      updated_at: "2026-09-24T08:00:01Z",
+      finished_at: "2026-09-24T08:00:01Z",
     };
     mockCockpitBaselineFetch(fetchMock, {});
     const baselineFetch = fetchMock.getMockImplementation();
@@ -453,7 +442,13 @@ describe("CockpitView", () => {
           created_at: "2026-09-24T08:00:01Z",
         }]));
       }
-      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [parentWorkflowRun, childWorkflowRun] }));
+      if (url.endsWith(`/api/workflows/jobs/${encodeURIComponent(childWorkflowRunId)}`)) {
+        return Promise.resolve(mockResponse({ job: boundChildJob }));
+      }
+      if (url.endsWith(`/api/workflows/jobs/${encodeURIComponent(parentWorkflowRunId)}`)) {
+        return Promise.resolve(mockResponse({ job: boundParentJob }));
+      }
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
       if (url.includes("/api/work-board/goals/goal-1/execution-limits")) {
         return Promise.resolve(mockResponse({ effective_max_runtime_seconds: 300, hard_max_runtime_seconds: 900, limit_source: "goal_default" }));
       }
@@ -463,7 +458,6 @@ describe("CockpitView", () => {
     render(<CockpitView onSend={() => {}} />);
     fireEvent.click(await screen.findByRole("button", { name: "Open task GoalSnapshot result" }));
     fireEvent.click(await screen.findByRole("button", { name: "Inspect execution evidence artifacts/output.md" }));
-
     expect(await screen.findByText("artifacts/output.md", { selector: ".cockpit-inspector-title" })).toBeInTheDocument();
     expect(screen.getByText(artifactId)).toBeInTheDocument();
     expect(screen.getByText(contentDigest)).toBeInTheDocument();
@@ -471,14 +465,16 @@ describe("CockpitView", () => {
     fireEvent.click(screen.getAllByRole("button", { name: "Open workflow evidence" })[0]!);
     expect(await screen.findByText("readback receipt")).toBeInTheDocument();
     expect(screen.getByText(/board_child_readback · succeeded/)).toBeInTheDocument();
-    expect(screen.getByText(`effect reference digest effect-ref-1a2b3c4d`)).toBeInTheDocument();
+    expect(screen.getByText("effect reference digest fe383aed9444a142")).toBeInTheDocument();
+    expect(screen.queryByText("effect-ref-1a2b3c4d")).not.toBeInTheDocument();
     expect(screen.getByText(`artifact ${artifactId}`)).toBeInTheDocument();
     expect(screen.getByText(`child workflow run ${childWorkflowRunId}`)).toBeInTheDocument();
     expect(screen.getByText(`readback path ${artifactPath}`)).toBeInTheDocument();
     expect(screen.getByText(`artifact SHA-256 ${contentDigest}`)).toBeInTheDocument();
     expect(screen.getByText(`target SHA-256 ${contentDigest}`)).toBeInTheDocument();
-    expect(screen.getByText(`readback SHA-256 ${contentDigest}`)).toBeInTheDocument();
-    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/workflows/runs?"))).toBe(true);
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes(`/api/workflows/jobs/${encodeURIComponent(parentWorkflowRunId)}`))).toBe(true);
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes(`/api/workflows/jobs/${encodeURIComponent(childWorkflowRunId)}`))).toBe(true);
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/workflows/runs?"))).toBe(false);
   });
 
   it("hides a nested board artifact when its durable child run names a different parent", async () => {
@@ -537,22 +533,21 @@ describe("CockpitView", () => {
       completed_at: "2026-09-24T08:00:01Z",
       archived_at: null,
     };
-    const childWorkflowRun = {
-      id: childWorkflowRunId,
-      run_identity: childWorkflowRunId,
-      parent_run_identity: "different-parent-run",
-      session_id: ownerSessionId,
+    const boundChildJob = {
+      job_id: childWorkflowRunId,
+      parent_job_id: "different-parent-run",
       status: "succeeded",
-      started_at: "2026-09-24T08:00:00Z",
-      updated_at: "2026-09-24T08:00:01Z",
-      workflow_name: "goal-snapshot-to-file",
-      artifact_registry: [{
+      job_kind: "goal-snapshot-to-file",
+      artifacts: [{
         artifact_id: artifactId,
+        artifact_type: "markdown_document",
         file_path: artifactPath,
         content_sha256: "e".repeat(64),
-        session_id: ownerSessionId,
-        run_id: childWorkflowRunId,
+        exists: true,
       }],
+      effects: [],
+      started_at: "2026-09-24T08:00:00Z",
+      updated_at: "2026-09-24T08:00:01Z",
     };
     mockCockpitBaselineFetch(fetchMock, {});
     const baselineFetch = fetchMock.getMockImplementation();
@@ -562,7 +557,10 @@ describe("CockpitView", () => {
       if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) return Promise.resolve(mockResponse({ tasks: [boardTask], next_after: null, last_event_id: 1 }));
       if (url.includes("/api/work-board/events")) return Promise.resolve(mockResponse({ events: [], last_event_id: 1, gap: false }));
       if (url.endsWith("/api/work-board/tasks/task-parent-bound")) return Promise.resolve(mockResponse({ task: boardTask, attempts: [], parents: [], children: [], comments: [], events: [], revision: 2 }));
-      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [childWorkflowRun] }));
+      if (url.endsWith(`/api/workflows/jobs/${encodeURIComponent(childWorkflowRunId)}`)) {
+        return Promise.resolve(mockResponse({ job: boundChildJob }));
+      }
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
       return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
     });
 
@@ -651,19 +649,21 @@ describe("CockpitView", () => {
       events: [],
       revision: 2,
     });
-    const workflowRun = (runId: string, reference: typeof referenceA) => ({
-      id: runId,
-      run_identity: runId,
-      tool_name: "workflow_goal_snapshot_to_file",
-      workflow_name: "goal-snapshot-to-file",
-      session_id: ownerSessionId,
+    const boundJob = (runId: string, reference: typeof referenceA) => ({
+      job_id: runId,
+      parent_job_id: null,
       status: "succeeded",
+      job_kind: "goal-snapshot-to-file",
+      artifacts: [{
+        artifact_id: reference.artifact_id,
+        artifact_type: "markdown_document",
+        file_path: reference.file_path,
+        content_sha256: reference.content_sha256,
+        exists: true,
+      }],
+      effects: [],
       started_at: "2026-09-24T08:00:00Z",
       updated_at: "2026-09-24T08:00:01Z",
-      summary: `Linked ${runId}`,
-      step_tools: [],
-      artifact_paths: [reference.file_path],
-      artifact_registry: [reference],
     });
     const delayedWorkflowLoads: Array<(value: ReturnType<typeof mockResponse>) => void> = [];
     mockCockpitBaselineFetch(fetchMock, {});
@@ -676,7 +676,7 @@ describe("CockpitView", () => {
       if (url.includes("/api/work-board/events")) return Promise.resolve(mockResponse({ events: [], last_event_id: 1, gap: false }));
       if (url.endsWith("/api/work-board/tasks/task-a")) return Promise.resolve(mockResponse(detailFor(taskA)));
       if (url.endsWith("/api/work-board/tasks/task-b")) return Promise.resolve(mockResponse(detailFor(taskB)));
-      if (url.includes("/api/workflows/runs")) {
+      if (url.includes("/api/workflows/jobs/")) {
         return new Promise((resolve) => { delayedWorkflowLoads.push(resolve); });
       }
       return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
@@ -685,26 +685,24 @@ describe("CockpitView", () => {
     render(<CockpitView onSend={() => {}} />);
     fireEvent.click(await screen.findByRole("button", { name: "Open task Board evidence A" }));
     fireEvent.click(await screen.findByRole("button", { name: "Inspect execution evidence notes/task-a.md" }));
-    await waitFor(() => expect(delayedWorkflowLoads).toHaveLength(2));
+    await waitFor(() => expect(delayedWorkflowLoads).toHaveLength(1));
 
     fireEvent.click(screen.getByRole("button", { name: "Close task details" }));
     fireEvent.click(screen.getByRole("button", { name: "Open task Board evidence B" }));
     fireEvent.click(await screen.findByRole("button", { name: "Inspect execution evidence notes/task-b.md" }));
-    await waitFor(() => expect(delayedWorkflowLoads).toHaveLength(4));
+    await waitFor(() => expect(delayedWorkflowLoads).toHaveLength(2));
 
-    const bPayload = mockResponse({ runs: [workflowRun("board-parent-b", referenceB)] });
+    const bPayload = mockResponse({ job: boundJob("board-parent-b", referenceB) });
     await act(async () => {
-      delayedWorkflowLoads[2]?.(bPayload);
-      delayedWorkflowLoads[3]?.(bPayload);
+      delayedWorkflowLoads[1]?.(bPayload);
       await Promise.resolve();
       await Promise.resolve();
     });
     expect(await screen.findByText("notes/task-b.md", { selector: ".cockpit-inspector-title" })).toBeInTheDocument();
 
-    const aPayload = mockResponse({ runs: [workflowRun("board-parent-a", referenceA)] });
+    const aPayload = mockResponse({ job: boundJob("board-parent-a", referenceA) });
     await act(async () => {
       delayedWorkflowLoads[0]?.(aPayload);
-      delayedWorkflowLoads[1]?.(aPayload);
       // Drain the stale response chain before the next test starts.
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
@@ -771,7 +769,7 @@ describe("CockpitView", () => {
       if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) return Promise.resolve(mockResponse({ tasks: [boardTask], next_after: null, last_event_id: 1 }));
       if (url.includes("/api/work-board/events")) return Promise.resolve(mockResponse({ events: [], last_event_id: 1, gap: false }));
       if (url.endsWith("/api/work-board/tasks/task-unmounted")) return Promise.resolve(mockResponse({ task: boardTask, attempts: [], parents: [], children: [], comments: [], events: [], revision: 2 }));
-      if (url.includes("/api/workflows/runs")) return new Promise((resolve) => { delayedWorkflowLoads.push(resolve); });
+      if (url.includes("/api/workflows/jobs/")) return new Promise((resolve) => { delayedWorkflowLoads.push(resolve); });
       return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
     });
 
@@ -779,35 +777,36 @@ describe("CockpitView", () => {
     await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThan(0));
     fireEvent.click(await screen.findByRole("button", { name: "Open task Unmounted evidence" }));
     fireEvent.click(await screen.findByRole("button", { name: "Inspect execution evidence notes/unmounted.md" }));
-    await waitFor(() => expect(delayedWorkflowLoads).toHaveLength(2));
+    await waitFor(() => expect(delayedWorkflowLoads).toHaveLength(1));
     view.unmount();
 
     const zStackAfterUnmount = [...usePanelLayoutStore.getState().zStack];
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     const payload = mockResponse({
-      runs: [{
-        id: reference.workflow_run_id,
-        run_identity: reference.workflow_run_id,
-        session_id: ownerSessionId,
+      job: {
+        job_id: reference.workflow_run_id,
+        parent_job_id: null,
         status: "succeeded",
-        started_at: "2026-09-24T08:00:00Z",
-        updated_at: "2026-09-24T08:00:01Z",
-        workflow_name: "goal-snapshot-to-file",
-        artifact_registry: [{
+        job_kind: "goal-snapshot-to-file",
+        artifacts: [{
           artifact_id: reference.artifact_id,
+          artifact_type: "markdown_document",
           file_path: reference.file_path,
           content_sha256: reference.content_sha256,
-          session_id: ownerSessionId,
-          run_id: reference.workflow_run_id,
+          exists: true,
         }],
-      }],
+        effects: [],
+        started_at: "2026-09-24T08:00:00Z",
+        updated_at: "2026-09-24T08:00:01Z",
+      },
     });
     delayedWorkflowLoads[0]?.(payload);
-    delayedWorkflowLoads[1]?.(payload);
     await act(async () => { await Promise.resolve(); });
     expect(usePanelLayoutStore.getState().zStack).toEqual(zStackAfterUnmount);
     expect(consoleError).not.toHaveBeenCalled();
     expect(screen.queryByText(/Loading workflow evidence/)).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/workflows/jobs/"))).toBe(true);
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/workflows/runs?limit=40"))).toBe(false);
   });
 
   it("fails closed when a linked task run belongs to another session", async () => {
@@ -880,19 +879,6 @@ describe("CockpitView", () => {
       completed_at: "2026-09-24T08:00:01Z",
       archived_at: null,
     };
-    const foreignRun = {
-      id: reference.workflow_run_id,
-      run_identity: reference.workflow_run_id,
-      tool_name: "workflow_goal_snapshot_to_file",
-      workflow_name: "goal-snapshot-to-file",
-      session_id: "another-operator-session",
-      status: "succeeded",
-      started_at: "2026-09-24T08:00:00Z",
-      updated_at: "2026-09-24T08:00:01Z",
-      summary: "PRIVATE OTHER SESSION OUTPUT",
-      step_tools: [],
-      artifact_paths: ["artifacts/foreign-output.md"],
-    };
     mockCockpitBaselineFetch(fetchMock, {});
     const baselineFetch = fetchMock.getMockImplementation();
     fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
@@ -907,7 +893,9 @@ describe("CockpitView", () => {
       if (url.endsWith("/api/work-board/tasks/task-foreign")) {
         return Promise.resolve(mockResponse({ task: boardTask, attempts: [attempt], parents: [], children: [], comments: [], events: [], revision: 2 }));
       }
-      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [foreignRun] }));
+      if (url.endsWith(`/api/workflows/jobs/${encodeURIComponent(reference.workflow_run_id)}`)) {
+        return Promise.resolve(mockResponse({ detail: "workflow_job_not_found" }, false, 404));
+      }
       if (url.includes("/api/work-board/goals/goal-1/execution-limits")) {
         return Promise.resolve(mockResponse({ effective_max_runtime_seconds: 300, hard_max_runtime_seconds: 900, limit_source: "goal_default" }));
       }
@@ -918,9 +906,11 @@ describe("CockpitView", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Open task Foreign linked run" }, { timeout: 5_000 }));
     fireEvent.click(await screen.findByRole("button", { name: "Inspect execution evidence artifacts/foreign-output.md" }));
 
-    expect(await screen.findByText(/hidden because its session does not match the task's canonical owner session/i)).toBeInTheDocument();
+    expect(await screen.findByText(/linked workflow evidence is unavailable for the current authenticated session/i)).toBeInTheDocument();
     expect(screen.queryByText("PRIVATE OTHER SESSION OUTPUT", { selector: ".cockpit-inspector-body" })).not.toBeInTheDocument();
     expect(screen.queryByText("goal-snapshot-to-file", { selector: ".cockpit-inspector-title" })).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes(`/api/workflows/jobs/${encodeURIComponent(reference.workflow_run_id)}`))).toBe(true);
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/workflows/runs?limit=40"))).toBe(false);
   });
 
   it("binds the current goal to persisted loop outcome data while keeping an unavailable route explicit", async () => {

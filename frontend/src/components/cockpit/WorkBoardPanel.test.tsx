@@ -871,7 +871,7 @@ describe("WorkBoardPanel", () => {
   });
 
   it("opens target-path and effect receipts through the owning workflow evidence action", async () => {
-    const reference = { effect_id: "effect-17", target_path: "artifacts/output.md", workflow_run_id: "workflow-run-1", readback_status: "unknown" as const };
+    const reference = { effect_id_digest: "f746f14e3e58f2e3", target_path: "artifacts/output.md", workflow_run_id: "workflow-run-1", readback_status: "unknown" as const };
     const currentTask = task({
       title: "Readback task",
       owner_session_id: "canonical-owner-session",

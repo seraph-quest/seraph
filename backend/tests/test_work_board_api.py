@@ -1,5 +1,6 @@
 """Authenticated HTTP contract checks for work-board M1."""
 
+import hashlib
 import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -12,7 +13,14 @@ from src.api.work_board import (
     _recovery_action,
     _task_payload as serialize_task_payload,
 )
-from src.db.models import WorkBoardAttempt, WorkBoardEvent, WorkBoardStatus, WorkBoardTask
+from src.api.workflows import _bounded_lineage_expansion, _safe_board_job_projection
+from src.db.models import (
+    WorkBoardAttempt,
+    WorkBoardEvent,
+    WorkBoardStatus,
+    WorkBoardTask,
+    WorkflowRunState,
+)
 
 
 def test_running_task_keeps_cancel_control_visible_while_cancellation_is_pending():
@@ -38,6 +46,84 @@ def test_running_task_keeps_cancel_control_visible_while_cancellation_is_pending
     )
 
     assert _recovery_action(task, latest_attempt=attempt, attempt_count=1) == "cancel"
+
+
+def test_board_job_projection_redacts_unsafe_receipt_ids_paths_and_types():
+    safe_artifact_id = "art_" + "a" * 24
+    run = WorkflowRunState(
+        run_identity="work-board:projection-safe",
+        root_run_identity="work-board:projection-safe",
+        workflow_name="board-projection",
+        artifact_receipts_json=json.dumps(
+            [
+                {
+                    "artifact_id": safe_artifact_id,
+                    "artifact_type": "markdown_document",
+                    "file_path": "artifacts/result.md",
+                    "content_sha256": "a" * 64,
+                    "exists": True,
+                },
+                {
+                    "artifact_id": "private/artifact",
+                    "artifact_type": "private_payload",
+                    "file_path": "private/secret.md",
+                    "content_sha256": "not-a-digest",
+                },
+            ]
+        ),
+        effect_receipts_json=json.dumps(
+            [
+                {
+                    "effect_id": "provider/private/effect",
+                    "effect_type": "private_secret_payload",
+                    "receipt_kind": "readback",
+                    "target_path": "artifacts/result.md",
+                    "target_digest": "b" * 64,
+                    "child_job_id": "child/private/job",
+                    "status": "succeeded",
+                },
+                {
+                    "effect_id": "public-effect-1",
+                    "effect_type": "board_child_readback",
+                    "receipt_kind": "readback",
+                    "target_path": "artifacts/result.md",
+                    "target_digest": "b" * 64,
+                    "status": "succeeded",
+                },
+            ]
+        ),
+    )
+
+    projection = _safe_board_job_projection(run)
+
+    assert projection["artifacts"] == [
+        {
+            "artifact_id": safe_artifact_id,
+            "artifact_type": "markdown_document",
+            "file_path": "artifacts/result.md",
+            "content_sha256": "a" * 64,
+            "exists": True,
+        }
+    ]
+    effects = projection["effects"]
+    assert len(effects) == 2
+    assert all("effect_id" not in effect for effect in effects)
+    assert all("child_job_id" not in effect for effect in effects)
+    assert all("private_secret_payload" not in str(effect) for effect in effects)
+    assert effects[0]["effect_id_digest"] == hashlib.sha256(
+        b"provider/private/effect"
+    ).hexdigest()[:16]
+    assert effects[1]["effect_type"] == "board_child_readback"
+
+
+def test_bound_workflow_lineage_cap_counts_owned_roots_and_descendants_together():
+    roots = {f"work-board:root-{index}" for index in range(256)}
+
+    assert _bounded_lineage_expansion(roots, ["goal-snapshot:child"]) is None
+    assert _bounded_lineage_expansion(
+        {f"work-board:root-{index}" for index in range(255)},
+        ["goal-snapshot:child", "goal-snapshot:child"],
+    ) == ["goal-snapshot:child"]
 
 
 def _task_payload(*, key: str = "api-task"):
@@ -111,6 +197,374 @@ async def test_event_cursor_page_and_gap_shape(client):
     assert payload["gap"] is False
     assert payload["last_event_id"] >= 1
     assert payload["events"][0]["kind"] == "task.created"
+
+
+@pytest.mark.asyncio
+async def test_bound_workflow_job_denies_same_principal_from_a_different_operator_session(
+    client,
+    async_db,
+    monkeypatch,
+):
+    """Board evidence stays bound to the task's authenticated owner session."""
+
+    run_identity = "foreign-session:workflow:board-evidence:attempt-1"
+    foreign_session = "foreign-operator-session"
+    task = WorkBoardTask(
+        task_id="foreign-session-board-task",
+        owner_principal_id="operator:test-bypass",
+        owner_session_id="test-auth-bypass",
+        goal_id="goal-foreign-session",
+        title="Foreign session board evidence",
+        idempotency_key="foreign-session-board-task",
+        status=WorkBoardStatus.done,
+    )
+    attempt = WorkBoardAttempt(
+        task_id=task.task_id,
+        attempt_id="foreign-session-board-attempt",
+        workflow_run_id=run_identity,
+        task_revision_at_claim=1,
+        outcome="verified",
+    )
+    run = WorkflowRunState(
+        run_identity=run_identity,
+        root_run_identity=run_identity,
+        workflow_name="board-evidence",
+        owner_kind="user",
+        owner_principal_id="operator:test-bypass",
+        operator_session_id=foreign_session,
+        status="succeeded",
+    )
+    child_identity = "foreign-session:workflow:board-evidence:child"
+    child = WorkflowRunState(
+        run_identity=child_identity,
+        root_run_identity=run_identity,
+        parent_run_identity=run_identity,
+        parent_job_id=run_identity,
+        workflow_name="goal-snapshot-to-file",
+        owner_kind="service",
+        owner_principal_id="service:goal-snapshot",
+        operator_session_id=None,
+        status="succeeded",
+    )
+    monkeypatch.setattr(
+        "src.api.workflows._require_authenticated_capability_operator",
+        lambda _request: SimpleNamespace(
+            principal=SimpleNamespace(principal_id="operator:test-bypass"),
+            session_id="test-auth-bypass",
+        ),
+    )
+    monkeypatch.setattr("src.api.workflows.get_session", async_db)
+    async with async_db() as db:
+        db.add(task)
+        await db.flush()
+        db.add_all([attempt, run, child])
+        await db.commit()
+
+    response = await client.get(f"/api/workflows/jobs/{run_identity}")
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "workflow_job_not_found"
+    child_response = await client.get(f"/api/workflows/jobs/{child_identity}")
+    assert child_response.status_code == 404
+    assert child_response.json()["detail"]["code"] == "workflow_job_not_found"
+
+
+@pytest.mark.asyncio
+async def test_bound_workflow_job_missing_root_cannot_authorize_descendant(
+    client,
+    async_db,
+    monkeypatch,
+):
+    missing_root_identity = "work-board:missing-root"
+    child_identity = "goal-snapshot:orphan-child"
+    task = WorkBoardTask(
+        task_id="orphan-board-task",
+        owner_principal_id="operator:test-bypass",
+        owner_session_id="test-auth-bypass",
+        goal_id="goal-orphan-board",
+        title="Orphan board evidence",
+        idempotency_key="orphan-board-task",
+        status=WorkBoardStatus.done,
+    )
+    attempt = WorkBoardAttempt(
+        task_id=task.task_id,
+        attempt_id="orphan-board-attempt",
+        workflow_run_id=missing_root_identity,
+        task_revision_at_claim=1,
+        outcome="verified",
+    )
+    child = WorkflowRunState(
+        run_identity=child_identity,
+        root_run_identity=missing_root_identity,
+        parent_run_identity=missing_root_identity,
+        parent_job_id=missing_root_identity,
+        workflow_name="goal-snapshot-to-file",
+        owner_kind="service",
+        owner_principal_id="service:goal-snapshot",
+        operator_session_id=None,
+        status="succeeded",
+    )
+    monkeypatch.setattr(
+        "src.api.workflows._require_authenticated_capability_operator",
+        lambda _request: SimpleNamespace(
+            principal=SimpleNamespace(principal_id="operator:test-bypass"),
+            session_id="test-auth-bypass",
+        ),
+    )
+    monkeypatch.setattr("src.api.workflows.get_session", async_db)
+    async with async_db() as db:
+        db.add(task)
+        await db.flush()
+        db.add_all([attempt, child])
+        await db.commit()
+
+    response = await client.get(f"/api/workflows/jobs/{child_identity}")
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "workflow_job_not_found"
+
+
+@pytest.mark.asyncio
+async def test_bound_workflow_job_rejects_parent_identity_mismatch(
+    client,
+    async_db,
+    monkeypatch,
+):
+    root_identity = "work-board:consistent-root"
+    child_identity = "goal-snapshot:mismatched-child"
+    task = WorkBoardTask(
+        task_id="mismatched-board-task",
+        owner_principal_id="operator:test-bypass",
+        owner_session_id="test-auth-bypass",
+        goal_id="goal-mismatched-board",
+        title="Mismatched board evidence",
+        idempotency_key="mismatched-board-task",
+        status=WorkBoardStatus.done,
+    )
+    attempt = WorkBoardAttempt(
+        task_id=task.task_id,
+        attempt_id="mismatched-board-attempt",
+        workflow_run_id=root_identity,
+        task_revision_at_claim=1,
+        outcome="verified",
+    )
+    root = WorkflowRunState(
+        run_identity=root_identity,
+        root_run_identity=root_identity,
+        workflow_name="work-board-root",
+        owner_kind="service",
+        owner_principal_id="service:work-board",
+        operator_session_id="test-auth-bypass",
+        status="succeeded",
+    )
+    child = WorkflowRunState(
+        run_identity=child_identity,
+        root_run_identity=root_identity,
+        parent_run_identity="other-parent",
+        parent_job_id=root_identity,
+        workflow_name="goal-snapshot-to-file",
+        owner_kind="service",
+        owner_principal_id="service:goal-snapshot",
+        operator_session_id=None,
+        status="succeeded",
+    )
+    foreign_root_child_identity = "goal-snapshot:foreign-root-child"
+    foreign_root_child = WorkflowRunState(
+        run_identity=foreign_root_child_identity,
+        root_run_identity="missing-foreign-root",
+        parent_run_identity=root_identity,
+        parent_job_id=root_identity,
+        workflow_name="goal-snapshot-to-file",
+        owner_kind="service",
+        owner_principal_id="service:goal-snapshot",
+        operator_session_id=None,
+        status="succeeded",
+    )
+    monkeypatch.setattr(
+        "src.api.workflows._require_authenticated_capability_operator",
+        lambda _request: SimpleNamespace(
+            principal=SimpleNamespace(principal_id="operator:test-bypass"),
+            session_id="test-auth-bypass",
+        ),
+    )
+    monkeypatch.setattr("src.api.workflows.get_session", async_db)
+    async with async_db() as db:
+        db.add(task)
+        await db.flush()
+        db.add_all([attempt, root, child, foreign_root_child])
+        await db.commit()
+
+    response = await client.get(f"/api/workflows/jobs/{child_identity}")
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "workflow_job_not_found"
+    foreign_root_response = await client.get(f"/api/workflows/jobs/{foreign_root_child_identity}")
+    assert foreign_root_response.status_code == 404
+    assert foreign_root_response.json()["detail"]["code"] == "workflow_job_not_found"
+
+
+@pytest.mark.asyncio
+async def test_bound_workflow_job_allows_null_session_m2_descendant(
+    client,
+    async_db,
+    monkeypatch,
+):
+    """A child adapter row may omit operator_session_id after owned lineage is proven."""
+
+    root_identity = "work-board:owned-root"
+    child_identity = "goal-snapshot:owned-child"
+    task = WorkBoardTask(
+        task_id="owned-board-task",
+        owner_principal_id="operator:test-bypass",
+        owner_session_id="test-auth-bypass",
+        goal_id="goal-owned-board",
+        title="Owned board evidence",
+        idempotency_key="owned-board-task",
+        status=WorkBoardStatus.done,
+    )
+    attempt = WorkBoardAttempt(
+        task_id=task.task_id,
+        attempt_id="owned-board-attempt",
+        workflow_run_id=root_identity,
+        task_revision_at_claim=1,
+        outcome="verified",
+    )
+    root = WorkflowRunState(
+        run_identity=root_identity,
+        root_run_identity=root_identity,
+        workflow_name="work-board-root",
+        owner_kind="service",
+        owner_principal_id="service:work-board",
+        operator_session_id="test-auth-bypass",
+        status="succeeded",
+    )
+    child = WorkflowRunState(
+        run_identity=child_identity,
+        root_run_identity=root_identity,
+        parent_run_identity=root_identity,
+        parent_job_id=root_identity,
+        workflow_name="goal-snapshot-to-file",
+        owner_kind="service",
+        owner_principal_id="service:goal-snapshot",
+        operator_session_id=None,
+        status="succeeded",
+    )
+    mismatched_root_child = WorkflowRunState(
+        run_identity="goal-snapshot:foreign-root-child",
+        root_run_identity="work-board:unproven-root",
+        parent_run_identity=root_identity,
+        parent_job_id=root_identity,
+        workflow_name="goal-snapshot-to-file",
+        owner_kind="service",
+        owner_principal_id="service:goal-snapshot",
+        operator_session_id=None,
+        status="succeeded",
+    )
+    monkeypatch.setattr(
+        "src.api.workflows._require_authenticated_capability_operator",
+        lambda _request: SimpleNamespace(
+            principal=SimpleNamespace(principal_id="operator:test-bypass"),
+            session_id="test-auth-bypass",
+        ),
+    )
+    monkeypatch.setattr("src.api.workflows.get_session", async_db)
+    async with async_db() as db:
+        db.add(task)
+        await db.flush()
+        db.add_all([attempt, root, child, mismatched_root_child])
+        await db.commit()
+
+    response = await client.get(f"/api/workflows/jobs/{child_identity}")
+
+    assert response.status_code == 200
+    assert response.json()["job"]["job_id"] == child_identity
+    assert response.json()["job"]["parent_job_id"] == root_identity
+    mismatched_root_response = await client.get(
+        "/api/workflows/jobs/goal-snapshot:foreign-root-child"
+    )
+    assert mismatched_root_response.status_code == 404
+    assert mismatched_root_response.json()["detail"]["code"] == "workflow_job_not_found"
+
+
+@pytest.mark.asyncio
+async def test_bound_workflow_job_denies_explicit_foreign_session_descendant(
+    client,
+    async_db,
+    monkeypatch,
+):
+    """Lineage alone cannot override an explicit child operator session."""
+
+    root_identity = "work-board:owned-root-explicit-child"
+    child_identity = "goal-snapshot:foreign-child"
+    grandchild_identity = "goal-snapshot:foreign-grandchild"
+    task = WorkBoardTask(
+        task_id="owned-root-explicit-child-task",
+        owner_principal_id="operator:test-bypass",
+        owner_session_id="test-auth-bypass",
+        goal_id="goal-owned-explicit-child",
+        title="Foreign child evidence",
+        idempotency_key="owned-root-explicit-child-task",
+        status=WorkBoardStatus.done,
+    )
+    attempt = WorkBoardAttempt(
+        task_id=task.task_id,
+        attempt_id="owned-root-explicit-child-attempt",
+        workflow_run_id=root_identity,
+        task_revision_at_claim=1,
+        outcome="verified",
+    )
+    root = WorkflowRunState(
+        run_identity=root_identity,
+        root_run_identity=root_identity,
+        workflow_name="work-board-root",
+        owner_kind="service",
+        owner_principal_id="service:work-board",
+        operator_session_id="test-auth-bypass",
+        status="succeeded",
+    )
+    child = WorkflowRunState(
+        run_identity=child_identity,
+        root_run_identity=root_identity,
+        parent_run_identity=root_identity,
+        parent_job_id=root_identity,
+        workflow_name="goal-snapshot-to-file",
+        owner_kind="service",
+        owner_principal_id="service:goal-snapshot",
+        operator_session_id="foreign-operator-session",
+        status="succeeded",
+    )
+    grandchild = WorkflowRunState(
+        run_identity=grandchild_identity,
+        root_run_identity=root_identity,
+        parent_run_identity=child_identity,
+        parent_job_id=child_identity,
+        workflow_name="goal-snapshot-to-file",
+        owner_kind="service",
+        owner_principal_id="service:goal-snapshot",
+        operator_session_id=None,
+        status="succeeded",
+    )
+    monkeypatch.setattr(
+        "src.api.workflows._require_authenticated_capability_operator",
+        lambda _request: SimpleNamespace(
+            principal=SimpleNamespace(principal_id="operator:test-bypass"),
+            session_id="test-auth-bypass",
+        ),
+    )
+    monkeypatch.setattr("src.api.workflows.get_session", async_db)
+    async with async_db() as db:
+        db.add(task)
+        await db.flush()
+        db.add_all([attempt, root, child, grandchild])
+        await db.commit()
+
+    response = await client.get(f"/api/workflows/jobs/{child_identity}")
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "workflow_job_not_found"
+    grandchild_response = await client.get(f"/api/workflows/jobs/{grandchild_identity}")
+    assert grandchild_response.status_code == 404
+    assert grandchild_response.json()["detail"]["code"] == "workflow_job_not_found"
 
 
 @pytest.mark.asyncio
@@ -453,7 +907,7 @@ def test_detail_reference_serializers_drop_unknown_private_values():
                 {
                     "job_id": "job:1",
                     "artifact_id": "/private/run",
-                    "effect_id": "runs/effect",
+                    "effect_id": "public-effect",
                     "child_job_id": "child/jobs",
                     "artifact_type": "goal_snapshot",
                     "effect_type": "readback",
@@ -467,12 +921,13 @@ def test_detail_reference_serializers_drop_unknown_private_values():
                     "verification_status": "passed",
                 },
                 {
-                    "artifact_id": ".",
-                    "effect_id": ".",
+                    "artifact_id": "artifact/path",
+                    "effect_id": "effect/path",
                     "job_id": "..",
                     "child_job_id": "..",
-                    "artifact_type": "private/type",
-                    "effect_type": "effects/type",
+                    "artifact_type": "artifact/type",
+                    "effect_type": "effect/type",
+                    "file_path": "reports/private.txt",
                     "status": "succeeded",
                 },
             ]
@@ -520,6 +975,7 @@ def test_detail_reference_serializers_drop_unknown_private_values():
             "job_id": "job:1",
             "artifact_type": "goal_snapshot",
             "effect_type": "readback",
+            "effect_id_digest": hashlib.sha256(b"public-effect").hexdigest()[:16],
             "target_path": "artifacts/result.txt",
             "status": "succeeded",
             "verified": True,
@@ -528,6 +984,13 @@ def test_detail_reference_serializers_drop_unknown_private_values():
         },
         {"status": "succeeded"},
     ]
+    round_tripped = _attempt_payload(
+        WorkBoardAttempt(
+            task_id="task-safe-refs",
+            receipt_refs_json=json.dumps(attempt_payload["receipt_refs"]),
+        )
+    )
+    assert round_tripped["receipt_refs"] == attempt_payload["receipt_refs"]
     assert task_payload["result_refs"] == [
         {
             "artifact_id": "artifact:1",

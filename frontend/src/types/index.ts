@@ -153,6 +153,7 @@ export interface WorkBoardReceiptReference {
   size_bytes?: number;
   exists?: boolean | null;
   effect_id?: string;
+  effect_id_digest?: string;
   effect_type?: string;
   status?: string;
   verified?: boolean | null;

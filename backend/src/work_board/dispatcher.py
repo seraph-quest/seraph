@@ -756,8 +756,8 @@ class WorkBoardDispatcher:
             if readiness_error:
                 gate_error(readiness_error, readiness_reason or "The Ready execution gates are not satisfied")
         elif source == WorkBoardStatus.review.value:
-            if not _text(task.reviewer_id):
-                gate_error("reviewer_required", "The Review phase has no named reviewer")
+            if not task.requires_review or not _text(task.reviewer_id):
+                gate_error("reviewer_required", "The Review phase has no required named reviewer")
             latest = max(attempts, key=lambda item: item.created_at or datetime.min) if attempts else None
             refs: list[Any] = []
             if latest is not None:

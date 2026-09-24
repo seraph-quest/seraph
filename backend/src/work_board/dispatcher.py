@@ -694,6 +694,15 @@ class WorkBoardDispatcher:
         when they have not yet acquired an executable capability.
         """
 
+        def gate_error(code: str, message: str) -> None:
+            raise BoardError(
+                "unblock_prerequisite",
+                message,
+                status_code=409,
+                reason_code=_stable_reason_code(code, fallback="restore_prerequisite"),
+                recovery_action="restore_prerequisite",
+            )
+
         async with self.session_provider() as db:
             detail = await self.repository.get_detail(db, owner, task_id)
             task = detail["task"]
@@ -735,15 +744,6 @@ class WorkBoardDispatcher:
                     recovery_action="restore_prerequisite",
                 )
 
-        def gate_error(code: str, message: str) -> None:
-            raise BoardError(
-                "unblock_prerequisite",
-                message,
-                status_code=409,
-                reason_code=_stable_reason_code(code, fallback="restore_prerequisite"),
-                recovery_action="restore_prerequisite",
-            )
-
         try:
             operator = await authenticate_session(task.owner_session_id, touch=False)
         except AuthFailure as exc:
@@ -762,6 +762,19 @@ class WorkBoardDispatcher:
                     )
                 )
             ).scalar_one_or_none()
+            if source == WorkBoardStatus.review.value:
+                try:
+                    # Keep dispatcher visibility and repository mutation
+                    # authority on the same immutable, attempt-bound Review
+                    # evidence rule.
+                    await self.repository._validate_review_recovery(db, task)
+                except BoardError as exc:
+                    gate_error(
+                        exc.code,
+                        "The Review phase has no required named reviewer"
+                        if exc.code == "reviewer_required"
+                        else exc.message,
+                    )
         if goal is None:
             gate_error("goal_revision_stale", "The task goal is missing, stale, or no longer owner-bound")
         goal_status = _text(getattr(goal, "status", None))
@@ -772,24 +785,6 @@ class WorkBoardDispatcher:
             readiness_error, readiness_reason = await self._readiness(task)
             if readiness_error:
                 gate_error(readiness_error, readiness_reason or "The Ready execution gates are not satisfied")
-        elif source == WorkBoardStatus.review.value:
-            if not _text(task.reviewer_id):
-                gate_error("reviewer_required", "The Review phase has no named reviewer")
-            latest = max(attempts, key=lambda item: item.created_at or datetime.min) if attempts else None
-            refs: list[Any] = []
-            if latest is not None:
-                try:
-                    parsed = json.loads(latest.receipt_refs_json or "[]")
-                except (TypeError, ValueError):
-                    parsed = []
-                refs = parsed if isinstance(parsed, list) else []
-            if latest is None or latest.ended_at is None or not any(
-                isinstance(item, Mapping)
-                and bool(item.get("verified"))
-                and _text(item.get("status")) in {"succeeded", "read_back", "reconciled"}
-                for item in refs
-            ):
-                gate_error("verified_readback_missing", "Review requires verified readback evidence")
 
     async def cancel_task(
         self,
@@ -2535,6 +2530,7 @@ class WorkBoardDispatcher:
                     "workspace_contained": True,
                     "goal_id_read_back": True,
                     "child_job_id": outcome.get("child_job_id"),
+                    "artifact_id": _text((outcome.get("result_refs") or [{}])[0].get("artifact_id")),
                 },
                 owner=owner,
                 fencing_token=fence,

@@ -3,13 +3,16 @@
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import select
 from starlette.websockets import WebSocketDisconnect
 
 from config.settings import settings
+from src.api.work_board import _safe_task_payload
 from src.api.ws import websocket_work_board_events
 from src.auth.service import AuthFailure
 from src.db.models import Goal, WorkBoardAttempt, WorkBoardStatus
@@ -29,6 +32,7 @@ from src.work_board.repository import (
     WorkBoardRepository,
 )
 from src.work_board.repository import BoardEventPage
+from src.work_board.dispatcher import WorkBoardDispatcher
 
 
 OWNER = WorkBoardOwner(
@@ -222,6 +226,417 @@ async def test_generic_unblock_demotes_ready_phase_for_fresh_admission(async_db)
             ),
         )
         assert mutation.task.status is WorkBoardStatus.todo
+
+
+@pytest.mark.asyncio
+async def test_generic_unblock_restores_review_phase_for_named_reviewer(async_db, monkeypatch):
+    task_id = await _seed_task(async_db, OWNER, key_suffix="review-phase")
+    repository = WorkBoardRepository()
+    async with async_db() as db:
+        task = await repository.get_task(db, OWNER, task_id)
+        task.status = WorkBoardStatus.blocked
+        task.block_source_status = WorkBoardStatus.review.value
+        task.block_kind = "operator"
+        task.block_reason = "Reviewer needs the artifact link restored"
+        task.requires_review = True
+        task.reviewer_id = "operator:reviewer"
+        db.add(
+            WorkBoardAttempt(
+                task_id=task_id,
+                workflow_run_id="review-phase-run",
+                task_revision_at_claim=task.task_revision,
+                lease_owner="executor.local",
+                fencing_token=1,
+                executor_id="executor.local",
+                started_at=datetime.now(timezone.utc),
+                ended_at=datetime.now(timezone.utc),
+                outcome="succeeded",
+                receipt_refs_json=json.dumps(
+                    [
+                        {
+                            "status": "succeeded",
+                            "verified": True,
+                            "workflow_run_id": "review-phase-run",
+                            "content_sha256": "a" * 64,
+                            "readback_status": "verified",
+                        }
+                    ]
+                ),
+            )
+        )
+        await db.commit()
+
+    async def authenticated_session(session_id: str, *, touch: bool = False):
+        assert session_id == OWNER.session_id
+        assert touch is False
+        return SimpleNamespace(principal=SimpleNamespace(principal_id=OWNER.principal_id))
+
+    # The production API runs this live preflight before its repository CAS.
+    monkeypatch.setattr("src.work_board.dispatcher.authenticate_session", authenticated_session)
+    dispatcher = WorkBoardDispatcher(session_provider=async_db)
+    await dispatcher.validate_unblock(OWNER, task_id, expected_revision=1)
+
+    async with async_db() as db:
+        current = await repository.get_task(db, OWNER, task_id)
+        mutation = await repository.action_task(
+            db,
+            OWNER,
+            task_id,
+            WorkBoardActionRequest(
+                action=WorkBoardAction.unblock,
+                expected_revision=current.task_revision,
+                resolution="The artifact link was restored and checked.",
+            ),
+        )
+
+        assert mutation.task.status is WorkBoardStatus.review
+        assert mutation.task.requires_review is True
+        assert mutation.task.reviewer_id == "operator:reviewer"
+        assert mutation.task.block_source_status is None
+        assert mutation.task.block_kind is None
+        assert mutation.event.kind == "task.unblock"
+        assert mutation.event.metadata_json is not None
+        detail = await repository.get_detail(db, OWNER, task_id)
+        assert len(detail["attempts"]) == 1
+        assert json.loads(detail["attempts"][0].receipt_refs_json) == [
+            {
+                "status": "succeeded",
+                "verified": True,
+                "workflow_run_id": "review-phase-run",
+                "content_sha256": "a" * 64,
+                "readback_status": "verified",
+            }
+        ]
+
+
+@pytest.mark.asyncio
+async def test_review_unblock_preflight_requires_review_contract(async_db, monkeypatch):
+    task_id = await _seed_task(async_db, OWNER, key_suffix="review-not-required")
+    async with async_db() as db:
+        task = await WorkBoardRepository().get_task(db, OWNER, task_id)
+        task.status = WorkBoardStatus.blocked
+        task.block_source_status = WorkBoardStatus.review.value
+        task.block_kind = "operator"
+        task.requires_review = False
+        task.reviewer_id = "operator:reviewer"
+        db.add(
+            WorkBoardAttempt(
+                task_id=task_id,
+                workflow_run_id="review-not-required-run",
+                task_revision_at_claim=task.task_revision,
+                lease_owner="executor.local",
+                fencing_token=1,
+                executor_id="executor.local",
+                started_at=datetime.now(timezone.utc),
+                ended_at=datetime.now(timezone.utc),
+                outcome="succeeded",
+                receipt_refs_json=json.dumps([{"status": "succeeded", "verified": True}]),
+            )
+        )
+        await db.commit()
+
+    async def authenticated_session(session_id: str, *, touch: bool = False):
+        return SimpleNamespace(principal=SimpleNamespace(principal_id=OWNER.principal_id))
+
+    monkeypatch.setattr("src.work_board.dispatcher.authenticate_session", authenticated_session)
+    dispatcher = WorkBoardDispatcher(session_provider=async_db)
+    with pytest.raises(BoardError, match="required named reviewer") as raised:
+        await dispatcher.validate_unblock(OWNER, task_id, expected_revision=1)
+
+    assert raised.value.extra["recovery_action"] == "restore_prerequisite"
+
+
+async def _seed_blocked_review_task(
+    async_db,
+    *,
+    key_suffix: str,
+    requires_review: bool = True,
+    reviewer_id: str | None = "operator:reviewer",
+    attempt_ended: bool = True,
+    receipt_refs: list[dict[str, object]] | None = None,
+    add_attempt: bool = True,
+) -> str:
+    task_id = await _seed_task(async_db, OWNER, key_suffix=key_suffix)
+    workflow_run_id = f"review-{key_suffix}-run"
+    async with async_db() as db:
+        task = await WorkBoardRepository().get_task(db, OWNER, task_id)
+        task.status = WorkBoardStatus.blocked
+        task.block_source_status = WorkBoardStatus.review.value
+        task.block_kind = "operator"
+        task.block_reason = "Operator recovery"
+        task.requires_review = requires_review
+        task.reviewer_id = reviewer_id
+        if add_attempt:
+            db.add(
+                WorkBoardAttempt(
+                    task_id=task_id,
+                    workflow_run_id=workflow_run_id,
+                    task_revision_at_claim=task.task_revision,
+                    lease_owner="executor.local" if not attempt_ended else None,
+                    fencing_token=1,
+                    executor_id="executor.local",
+                    started_at=datetime.now(timezone.utc),
+                    ended_at=datetime.now(timezone.utc) if attempt_ended else None,
+                    outcome="succeeded" if attempt_ended else "running",
+                    receipt_refs_json=json.dumps(
+                        receipt_refs
+                        if receipt_refs is not None
+                        else [
+                            {
+                                "status": "succeeded",
+                                "verified": True,
+                                "workflow_run_id": workflow_run_id,
+                                "content_sha256": "a" * 64,
+                            }
+                        ]
+                    ),
+                )
+            )
+        await db.commit()
+    return task_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "receipt_refs",
+    [
+        [{"status": "succeeded", "verified": True}],
+        [
+            {
+                "status": "succeeded",
+                "verified": True,
+                "workflow_run_id": "review-other-run",
+                "content_sha256": "a" * 64,
+            }
+        ],
+    ],
+    ids=["missing-digest", "wrong-workflow-run"],
+)
+async def test_api_projection_does_not_advertise_review_unblock_without_attempt_bound_digest(
+    async_db,
+    monkeypatch,
+    receipt_refs,
+):
+    task_id = await _seed_blocked_review_task(
+        async_db,
+        key_suffix=f"api-projection-{len(receipt_refs[0])}",
+        receipt_refs=receipt_refs,
+    )
+
+    async def authenticated_session(session_id: str, *, touch: bool = False):
+        assert session_id == OWNER.session_id
+        assert touch is False
+        return SimpleNamespace(principal=SimpleNamespace(principal_id=OWNER.principal_id))
+
+    monkeypatch.setattr("src.work_board.dispatcher.authenticate_session", authenticated_session)
+    monkeypatch.setattr(
+        "src.api.work_board.dispatcher",
+        WorkBoardDispatcher(session_provider=async_db),
+    )
+
+    async with async_db() as db:
+        detail = await WorkBoardRepository().get_detail(db, OWNER, task_id)
+        payload = await _safe_task_payload(
+            detail["task"],
+            latest_attempt=detail["attempts"][0],
+            attempt_count=1,
+        )
+
+    assert payload["status"] == WorkBoardStatus.blocked.value
+    assert payload["recovery_action"] == "restore_prerequisite"
+    assert payload["recovery_action"] != "unblock"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case", "requires_review", "reviewer_id", "attempt_ended", "receipt_refs", "add_attempt", "code"),
+    [
+        ("missing-flag", False, "operator:reviewer", True, None, True, "reviewer_required"),
+        ("missing-reviewer", True, None, True, None, True, "reviewer_required"),
+        ("invalid-reviewer", True, "operator/reviewer", True, None, True, "invalid_reference"),
+        ("unfinished-attempt", True, "operator:reviewer", False, None, True, "attempt_reconcile_required"),
+        (
+            "missing-readback-digest",
+            True,
+            "operator:reviewer",
+            True,
+            [{"status": "succeeded", "verified": True}],
+            True,
+            "verified_readback_required",
+        ),
+        (
+            "readback-for-wrong-run",
+            True,
+            "operator:reviewer",
+            True,
+            [
+                {
+                    "status": "succeeded",
+                    "verified": True,
+                    "workflow_run_id": "review-other-run",
+                    "content_sha256": "a" * 64,
+                }
+            ],
+            True,
+            "verified_readback_required",
+        ),
+    ],
+)
+async def test_repository_review_unblock_requires_attempt_bound_verified_readback(
+    async_db,
+    case,
+    requires_review,
+    reviewer_id,
+    attempt_ended,
+    receipt_refs,
+    add_attempt,
+    code,
+):
+    task_id = await _seed_blocked_review_task(
+        async_db,
+        key_suffix=f"contract-{case}",
+        requires_review=requires_review,
+        reviewer_id=reviewer_id,
+        attempt_ended=attempt_ended,
+        receipt_refs=receipt_refs,
+        add_attempt=add_attempt,
+    )
+    repository = WorkBoardRepository()
+    async with async_db() as db:
+        with pytest.raises(BoardError) as raised:
+            await repository.action_task(
+                db,
+                OWNER,
+                task_id,
+                WorkBoardActionRequest(
+                    action=WorkBoardAction.unblock,
+                    expected_revision=1,
+                    resolution="restore review recovery",
+                ),
+            )
+        assert raised.value.code == code
+        current = await repository.get_task(db, OWNER, task_id)
+        assert current.status is WorkBoardStatus.blocked
+        assert current.task_revision == 1
+
+
+@pytest.mark.asyncio
+async def test_repository_review_unblock_preserves_attempt_and_revision_cas(async_db):
+    task_id = await _seed_blocked_review_task(async_db, key_suffix="contract-positive")
+    repository = WorkBoardRepository()
+    async with async_db() as db:
+        mutation = await repository.action_task(
+            db,
+            OWNER,
+            task_id,
+            WorkBoardActionRequest(
+                action=WorkBoardAction.unblock,
+                expected_revision=1,
+                resolution="restore review recovery",
+            ),
+        )
+        assert mutation.task.status is WorkBoardStatus.review
+        assert mutation.task.task_revision == 2
+        assert mutation.task.requires_review is True
+        assert mutation.task.reviewer_id == "operator:reviewer"
+        assert mutation.task.block_source_status is None
+        assert mutation.task.block_kind is None
+        detail = await repository.get_detail(db, OWNER, task_id)
+        assert len(detail["attempts"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_projected_review_persists_attempt_bound_readback_for_recovery(async_db):
+    task_id = await _seed_task(async_db, OWNER, key_suffix="projected-review")
+    repository = WorkBoardRepository()
+    workflow_run_id = "projected-review-run"
+    digest = "b" * 64
+    async with async_db() as db:
+        task = await repository.get_task(db, OWNER, task_id)
+        task.status = WorkBoardStatus.running
+        task.requires_review = True
+        task.reviewer_id = "operator:reviewer"
+        db.add(
+            WorkBoardAttempt(
+                task_id=task_id,
+                workflow_run_id=workflow_run_id,
+                task_revision_at_claim=task.task_revision,
+                lease_owner="executor.local",
+                fencing_token=1,
+                executor_id="executor.local",
+                started_at=datetime.now(timezone.utc),
+            )
+        )
+        await db.commit()
+
+    async with async_db() as db:
+        projected = await repository.project_attempt(
+            db,
+            task_id,
+            (
+                await db.execute(select(WorkBoardAttempt.attempt_id).where(WorkBoardAttempt.task_id == task_id))
+            ).scalar_one(),
+            expected_revision=1,
+            board_fence=1,
+            lease_owner="executor.local",
+            status=WorkBoardStatus.review,
+            outcome="verified",
+            receipt_refs=[
+                {"workflow_run_id": workflow_run_id, "status": "succeeded", "verified": True}
+            ],
+            verified_readback={
+                "source": "workflow_run",
+                "status": "succeeded",
+                "verified": True,
+                "workflow_run_id": workflow_run_id,
+                "content_sha256": digest,
+            },
+        )
+        assert projected.task.status is WorkBoardStatus.review
+        assert projected.attempt.ended_at is not None
+        assert json.loads(projected.attempt.receipt_refs_json) == [
+            {
+                "workflow_run_id": workflow_run_id,
+                "content_sha256": digest,
+                "status": "succeeded",
+                "verified": True,
+                "readback_status": "verified",
+                "verification_status": "passed",
+            },
+            {"workflow_run_id": workflow_run_id, "status": "succeeded", "verified": True},
+        ]
+        await db.commit()
+
+    async with async_db() as db:
+        current = await repository.get_task(db, OWNER, task_id)
+        blocked = await repository.action_task(
+            db,
+            OWNER,
+            task_id,
+            WorkBoardActionRequest(
+                action=WorkBoardAction.block,
+                expected_revision=current.task_revision,
+                block_kind="operator",
+                reason="Reviewer requested a bounded retry of the review step",
+            ),
+        )
+        await db.commit()
+        assert blocked.task.status is WorkBoardStatus.blocked
+
+    async with async_db() as db:
+        current = await repository.get_task(db, OWNER, task_id)
+        recovered = await repository.action_task(
+            db,
+            OWNER,
+            task_id,
+            WorkBoardActionRequest(
+                action=WorkBoardAction.unblock,
+                expected_revision=current.task_revision,
+                resolution="The reviewed artifact remains valid.",
+            ),
+        )
+        assert recovered.task.status is WorkBoardStatus.review
+        assert recovered.task.task_revision == 4
 
 
 @pytest.mark.asyncio

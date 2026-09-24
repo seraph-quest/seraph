@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from datetime import datetime
 import json
-import re
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -16,13 +15,11 @@ from src.db.engine import get_session
 from src.db.models import (
     WorkBoardAttempt,
     WorkBoardComment,
-    WorkBoardEvent,
     WorkBoardLink,
     WorkBoardStatus,
     WorkBoardTask,
     Goal,
 )
-from src.scheduler.connection_manager import ws_manager
 from src.vault import redaction as vault_redaction
 from src.work_board.contracts import (
     WorkBoardActionRequest,
@@ -42,6 +39,12 @@ from src.work_board.repository import (
     safe_board_identifier,
     safe_sha256_digest,
     safe_workflow_run_id,
+)
+from src.work_board.events import (
+    _SAFE_EVENT_BLOCK_KINDS,
+    _SAFE_EVENT_OUTCOMES,
+    _SAFE_EVENT_STATUSES,
+    _event_payload,
 )
 from src.goals.repository import deserialize_admission_budget
 from src.work_board.dispatcher import _dispatcher
@@ -85,7 +88,6 @@ def _recovery_action(
             and latest_attempt.workflow_run_id
             and latest_attempt.ended_at is None
             and latest_attempt.lease_owner
-            and latest_attempt.cancel_requested_at is None
         ):
             return "cancel"
         return "reconcile_admission_binding" if latest_attempt is not None else None
@@ -298,127 +300,30 @@ def _decode_json_list(value: str | None) -> list[Any]:
     return parsed if isinstance(parsed, list) else []
 
 
-_SAFE_EVENT_TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
-_SAFE_EVENT_DIGEST = re.compile(r"^[0-9a-f]{64}$")
-_SAFE_EVENT_STATUSES = frozenset(item.value for item in WorkBoardStatus)
-_SAFE_EVENT_BLOCK_KINDS = frozenset(
-    {
-        "operator",
-        "unknown_effect",
-        "cost_liability",
-        "reconcile_admission_binding",
-        "capability",
-        "needs_input",
-        "transient",
-        "cancelled",
-    }
-)
-_SAFE_EVENT_OUTCOMES = frozenset(
-    {
-        "accepted",
-        "queued",
-        "running",
-        "succeeded",
-        "degraded",
-        "settled",
-        "failed",
-        "blocked",
-        "cancelled",
-        "awaiting_approval",
-        "needs_input",
-        "capability",
-        "transient",
-        "read_back",
-        "reconciled",
-        "verified",
-        "unknown",
-        "unknown_external_effect",
-        "cost_liability",
-        "intent",
-        "dispatched",
-        "no_external_effect",
-        "not_dispatched",
-    }
-)
-_SAFE_EVENT_RECOVERY_ACTIONS = frozenset(
-    {
-        "unblock",
-        "retry",
-        "cancel",
-        "approve_existing_run",
-        "reconcile_external_effect",
-        "reconcile_admission_binding",
-        "restore_prerequisite",
-    }
-)
-_SAFE_EVENT_CHANGED_FIELDS = frozenset(
-    {
-        "title",
-        "body",
-        "priority",
-        "capability_id",
-        "typed_input_ref",
-        "typed_input_digest",
-        "executor_id",
-        "assignee_id",
-        "scheduled_at",
-        "status",
-        "task_revision",
-        "updated_at",
-    }
-)
-_SAFE_EVENT_REFERENCE_FIELDS = frozenset(
-    {"parent_task_id", "child_task_id", "comment_id", "attempt_id", "workflow_run_id"}
-)
+def _action_receipt_payload(
+    task_payload: dict[str, Any],
+    event: Any,
+    *,
+    attempt_id: str | None,
+) -> dict[str, Any]:
+    """Return the authoritative receipt for one persisted board mutation.
 
+    The nested task remains the compatibility projection used by existing
+    callers.  These top-level fields let an operator reconcile one action
+    against the exact append-only event created by the mutation transaction.
+    Only already-safe task projection values are exposed as reason and
+    recovery fields.
+    """
 
-def _safe_event_metadata(value: Any) -> dict[str, Any]:
-    """Redact legacy event rows again at the API and websocket boundary."""
-    if not isinstance(value, dict):
-        return {}
-    safe: dict[str, Any] = {}
-    for key, candidate in value.items():
-        if key in {"task_revision", "expected_revision", "event_id"}:
-            if isinstance(candidate, int) and not isinstance(candidate, bool) and 0 <= candidate <= 2**63 - 1:
-                safe[key] = candidate
-        elif key == "ready_demoted":
-            if isinstance(candidate, bool):
-                safe[key] = candidate
-        elif key in {"status", "from_status"}:
-            if isinstance(candidate, str) and candidate in _SAFE_EVENT_STATUSES:
-                safe[key] = candidate
-        elif key == "block_kind":
-            if isinstance(candidate, str) and candidate in _SAFE_EVENT_BLOCK_KINDS:
-                safe[key] = candidate
-        elif key in {"outcome", "reason_code", "error_code"}:
-            if isinstance(candidate, str) and candidate in _SAFE_EVENT_OUTCOMES:
-                safe[key] = candidate
-        elif key == "recovery_action":
-            if isinstance(candidate, str) and candidate in _SAFE_EVENT_RECOVERY_ACTIONS:
-                safe[key] = candidate
-        elif key in _SAFE_EVENT_REFERENCE_FIELDS:
-            reference = safe_workflow_run_id(candidate)
-            if reference is not None:
-                safe[key] = reference
-        elif key == "body_digest":
-            if isinstance(candidate, str) and _SAFE_EVENT_DIGEST.fullmatch(candidate.lower()):
-                safe[key] = candidate.lower()
-        elif key == "changed_fields":
-            if isinstance(candidate, (list, tuple)):
-                fields = [
-                    item
-                    for item in candidate[:32]
-                    if isinstance(item, str) and item in _SAFE_EVENT_CHANGED_FIELDS
-                ]
-                if fields:
-                    safe[key] = fields
-    return safe
-
-
-def _safe_event_kind(value: Any) -> str:
-    if isinstance(value, str) and _SAFE_EVENT_TOKEN.fullmatch(value):
-        return value
-    return "event.unknown"
+    return {
+        "task_id": task_payload.get("task_id"),
+        "status": task_payload.get("status"),
+        "revision": task_payload.get("task_revision"),
+        "attempt_id": attempt_id,
+        "reason_code": task_payload.get("block_kind"),
+        "recovery_action": task_payload.get("recovery_action"),
+        "event_id": getattr(event, "event_id", None),
+    }
 
 
 def _safe_attempt_outcome(value: Any) -> str | None:
@@ -497,32 +402,6 @@ async def _safe_comment_payload(comment: WorkBoardComment) -> dict[str, Any]:
         "body": await vault_redaction.redact_secrets_in_text(comment.body, fail_closed=True),
         "created_at": _json_value(comment.created_at),
     }
-
-
-def _event_payload(event: WorkBoardEvent) -> dict[str, Any]:
-    try:
-        metadata = json.loads(event.metadata_json or "{}")
-    except (TypeError, ValueError):
-        metadata = {}
-    if not isinstance(metadata, dict):
-        metadata = {}
-    return {
-        "event_id": event.event_id,
-        "task_id": event.task_id,
-        "kind": _safe_event_kind(event.kind),
-        "metadata": _safe_event_metadata(metadata),
-        "created_at": _json_value(event.created_at),
-    }
-
-
-async def _broadcast(event: WorkBoardEvent) -> None:
-    if event.event_id is None:
-        return
-    await ws_manager.broadcast_work_board_event(
-        _event_payload(event),
-        owner_principal_id=event.owner_principal_id,
-        operator_session_id=event.owner_session_id,
-    )
 
 
 @router.get("/tasks")
@@ -640,8 +519,6 @@ async def create_work_board_task(request: Request, body: WorkBoardTaskCreate):
                 "task": await _safe_task_payload(mutation.task),
                 "idempotent_replay": mutation.idempotent_replay,
             }
-        if not mutation.idempotent_replay:
-            await _broadcast(mutation.event)
         return payload
     except BoardError as exc:
         _raise_board_error(exc)
@@ -662,6 +539,7 @@ async def get_work_board_task(request: Request, task_id: str):
             return {
                 "task": await _safe_task_payload(
                     detail["task"],
+                    dependency_counts=detail["dependency_counts"],
                     latest_attempt=(detail["attempts"][0] if detail["attempts"] else None),
                     attempt_count=len(detail["attempts"]),
                     dispatch_rank=dispatch_rank,
@@ -689,7 +567,6 @@ async def patch_work_board_task(request: Request, task_id: str, body: WorkBoardT
         async with get_session() as db:
             mutation = await repository.patch_task(db, _owner(operator), task_id, body)
             payload = {"task": await _safe_task_payload(mutation.task)}
-        await _broadcast(mutation.event)
         return payload
     except BoardError as exc:
         _raise_board_error(exc)
@@ -711,15 +588,20 @@ async def action_work_board_task(request: Request, task_id: str, body: WorkBoard
                 task_id,
                 expected_revision=body.expected_revision,
             )
+            task_payload = await _safe_task_payload(
+                projection.task,
+                latest_attempt=projection.attempt,
+                attempt_count=1,
+            )
             payload = {
-                "task": await _safe_task_payload(
-                    projection.task,
-                    latest_attempt=projection.attempt,
-                    attempt_count=1,
+                **_action_receipt_payload(
+                    task_payload,
+                    projection.event,
+                    attempt_id=projection.attempt.attempt_id,
                 ),
+                "task": task_payload,
                 "attempt": _attempt_payload(projection.attempt),
             }
-            await _broadcast(projection.event)
             return payload
         if body.action.value == "retry":
             await dispatcher.validate_retry(
@@ -746,8 +628,29 @@ async def action_work_board_task(request: Request, task_id: str, body: WorkBoard
                 )
             else:
                 mutation = await repository.action_task(db, owner, task_id, body)
-            payload = {"task": await _safe_task_payload(mutation.task)}
-        await _broadcast(mutation.event)
+            latest_attempt = (
+                await db.execute(
+                    select(WorkBoardAttempt)
+                    .where(WorkBoardAttempt.task_id == mutation.task.task_id)
+                    .order_by(
+                        WorkBoardAttempt.created_at.desc(),
+                        WorkBoardAttempt.attempt_id.desc(),
+                    )
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            task_payload = await _safe_task_payload(
+                mutation.task,
+                latest_attempt=latest_attempt,
+            )
+            payload = {
+                **_action_receipt_payload(
+                    task_payload,
+                    mutation.event,
+                    attempt_id=(latest_attempt.attempt_id if latest_attempt is not None else None),
+                ),
+                "task": task_payload,
+            }
         return payload
     except BoardError as exc:
         _raise_board_error(exc)
@@ -765,7 +668,6 @@ async def add_work_board_comment(request: Request, task_id: str, body: WorkBoard
         async with get_session() as db:
             comment, event = await repository.add_comment(db, _owner(operator), task_id, body)
             payload = {"comment": await _safe_comment_payload(comment)}
-        await _broadcast(event)
         return payload
     except BoardError as exc:
         _raise_board_error(exc)
@@ -790,7 +692,6 @@ async def add_work_board_link(request: Request, body: WorkBoardLinkCreate):
                     "created_at": _json_value(link.created_at),
                 }
             }
-        await _broadcast(event)
         return payload
     except BoardError as exc:
         _raise_board_error(exc)
@@ -807,7 +708,6 @@ async def delete_work_board_link(request: Request, body: WorkBoardLinkDelete):
     try:
         async with get_session() as db:
             event = await repository.delete_link(db, _owner(operator), body)
-        await _broadcast(event)
         return {"deleted": True, "event_id": event.event_id}
     except BoardError as exc:
         _raise_board_error(exc)

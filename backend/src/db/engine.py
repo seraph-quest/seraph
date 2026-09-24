@@ -963,8 +963,18 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
         try:
             yield session
             await session.commit()
+            pending_work_board_events = session.info.pop(
+                "work_board_events_after_commit", []
+            )
+            if pending_work_board_events:
+                # The durable row is authoritative.  Queue a safe live update
+                # only after commit so sockets never observe rolled-back state.
+                from src.work_board.events import publish_work_board_events
+
+                await publish_work_board_events(pending_work_board_events)
         except Exception:
             await session.rollback()
+            session.info.pop("work_board_events_after_commit", None)
             raise
 
 

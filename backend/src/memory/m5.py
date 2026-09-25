@@ -1052,6 +1052,7 @@ async def evaluate_goal_candidate_memory(
                                 "source_baseline_integrity_unverifiable",
                                 "receipt_integrity_unverifiable",
                                 "rollback_binding_unverifiable",
+                                "recovery_parent_binding_mismatch",
                             ]
                         ),
                     )
@@ -2434,6 +2435,7 @@ async def _canonical_accept(
         proposal.memory_scope_json = m5_canonical_json(scope)
     provenance = _decode_object(proposal.provenance_json)
     correction_target = None
+    correction_target_content_digest = None
     if corrects_memory_id:
         correction_target = (
             await db.execute(select(Memory).where(Memory.id == corrects_memory_id))
@@ -2450,11 +2452,13 @@ async def _canonical_accept(
             raise ValueError("correction_target_deleted")
         if _canonical_memory_deletion_marker(correction_target) is not None:
             raise ValueError("correction_target_deleted")
+        correction_target_content_digest = m5_text_digest(correction_target.content)
         proposal.corrects_memory_id = correction_target.id
         provenance.update(
             {
                 "corrects_memory_id": correction_target.id,
                 "corrected_memory_previous_status": correction_target.status.value,
+                "corrected_memory_content_digest": correction_target_content_digest,
             }
         )
     # Memory.scope_key is unique by design.  Include the proposal identity so
@@ -2501,6 +2505,7 @@ async def _canonical_accept(
         memory_scope=scope,
         corrects_memory_id=proposal.corrects_memory_id,
         corrected_memory_previous_status=provenance.get("corrected_memory_previous_status"),
+        corrected_memory_content_digest=correction_target_content_digest,
         recovered_from_proposal_id=proposal.recovered_from_proposal_id,
     )
     metadata_json = m5_canonical_json({"work_board_provenance": provenance})

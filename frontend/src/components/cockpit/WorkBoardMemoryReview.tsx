@@ -15,7 +15,7 @@ type ProposalStatus =
   | "pending_inference"
   | "accepting";
 
-interface TaskMemoryProposal {
+export interface TaskMemoryProposal {
   proposal_id: string;
   recovered_from_proposal_id?: string | null;
   task_id?: string;
@@ -38,6 +38,7 @@ interface TaskMemoryProposal {
   recovery_action: string;
   accepted_memory_id: string | null;
   accepted_memory_content_digest?: string | null;
+  corrects_memory_id?: string | null;
   decision_effect?: "none" | "require_operator_confirmation";
   preferred_capability_id?: string | null;
   registered_capabilities?: { capability_id: string; version: string }[];
@@ -453,7 +454,7 @@ function WorkBoardMemoryReview({
           return (
             <article key={proposal.proposal_id} className="rounded bg-black/20 p-2" aria-label={`Memory proposal ${proposal.status}`}>
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <strong>{proposal.status.replaceAll("_", " ")}</strong>
+                <strong>{proposal.status.replace(/_/g, " ")}</strong>
                 <span className="text-[10px] opacity-70">revision {proposal.revision} · expires {safeDate(proposal.expires_at)}</span>
               </div>
               <div className="mt-1">Attempt {proposal.attempt_id} · workflow {proposal.workflow_run_id}</div>
@@ -467,8 +468,8 @@ function WorkBoardMemoryReview({
               {proposal.memory_kind && <div className="mt-1">Memory type {proposal.memory_kind}</div>}
               {typeof scope.preferred_capability_id === "string" && <div className="mt-1">Preferred registered capability: {scope.preferred_capability_id}</div>}
               {proposal.confidence !== null && <div className="mt-1">Confidence {proposal.confidence.toFixed(2)}</div>}
-              {proposal.reason_code && <div className="mt-1">Reason {proposal.reason_code.replaceAll("_", " ")}</div>}
-              {proposal.recovery_action && <div className="mt-1 text-amber-200">Recovery: {proposal.recovery_action.replaceAll("_", " ")}</div>}
+              {proposal.reason_code && <div className="mt-1">Reason {proposal.reason_code.replace(/_/g, " ")}</div>}
+              {proposal.recovery_action && <div className="mt-1 text-amber-200">Recovery: {proposal.recovery_action.replace(/_/g, " ")}</div>}
               {proposal.corrects_memory_id && <div className="mt-1 text-amber-100">If accepted, this review will supersede prior canonical memory {proposal.corrects_memory_id}.</div>}
               {evidenceRefs.length > 0 && (
                 <div className="mt-2" aria-label="Memory evidence references">
@@ -610,7 +611,7 @@ function WorkBoardMemoryReview({
           </button>
           {candidateResult && (
             <div role="status" className="rounded bg-black/20 p-2 text-xs">
-              <div>{candidateResult.decision.decision_status.replaceAll("_", " ")} · {candidateResult.decision.reason}</div>
+              <div>{candidateResult.decision.decision_status.replace(/_/g, " ")} · {candidateResult.decision.reason}</div>
               <div className="mt-1 break-all">Before: {candidateResult.decision.before_selected_capability_id ?? "No comparable action"} → After: {candidateResult.decision.after_selected_capability_id ?? "No comparable action"}</div>
               <div className="mt-1 break-all font-mono text-[10px]">Input digests {digestLabel(candidateResult.decision.before_input_digest)} → {digestLabel(candidateResult.decision.after_input_digest)}</div>
               {candidateResult.decision.evidence_ids.length > 0 && <div className="mt-1 break-all text-[10px]">Verified source evidence: {candidateResult.decision.evidence_ids.join(", ")}</div>}
@@ -624,14 +625,14 @@ function WorkBoardMemoryReview({
           <div className="font-semibold">Comparable decision receipts</div>
           {receipts.map((receipt) => (
             <article key={receipt.receipt_id} className="rounded border border-white/10 bg-black/20 p-2">
-              <div className="font-semibold">{receipt.decision_status.replaceAll("_", " ")} · {receipt.receipt_stage.replaceAll("_", " ")}</div>
+              <div className="font-semibold">{receipt.decision_status.replace(/_/g, " ")} · {receipt.receipt_stage.replace(/_/g, " ")}</div>
               <div className="mt-1 break-all">Task {receipt.later_task_id} · goal {receipt.goal_id}</div>
               <div className="mt-1 break-all">Before: {receipt.before_action_id || "No comparable action"} → After: {receipt.after_action_id || "No comparable action"}</div>
               <div className="mt-1 break-all font-mono text-[10px]">Input digests {digestLabel(receipt.before_input_digest)} → {digestLabel(receipt.after_input_digest)}</div>
               <div className="mt-1">{receipt.reason}</div>
               {receipt.integrity_status && receipt.integrity_status !== "verified" && (
                 <div className="mt-1 text-amber-200" role="status">
-                  Receipt evidence is quarantined ({receipt.integrity_status.replaceAll("_", " ")}). Recompute from current verified source before relying on it.
+                  Receipt evidence is quarantined ({receipt.integrity_status.replace(/_/g, " ")}). Recompute from current verified source before relying on it.
                 </div>
               )}
               {receipt.source_baseline_receipt_id && <div className="mt-1 font-mono text-[10px]">Compared against source baseline {receipt.source_baseline_receipt_id}</div>}

@@ -359,15 +359,20 @@ def _m5_correction_binding(value: Any) -> dict[str, str | None] | None:
 
     target_id = str(_field("corrects_memory_id") or "").strip() or None
     previous_status = str(_field("corrected_memory_previous_status") or "").strip() or None
-    if bool(target_id) != bool(previous_status):
+    raw_target_digest = str(_field("corrected_memory_content_digest") or "").strip().lower()
+    target_digest = raw_target_digest or None
+    if bool(target_id) != bool(previous_status) or bool(target_id) != bool(target_digest):
         return None
     if target_id and not _M5_RECOVERY_ID.fullmatch(target_id):
+        return None
+    if target_digest and not _M5_RECOVERY_DIGEST.fullmatch(target_digest):
         return None
     if previous_status and previous_status not in {"active", "superseded", "archived"}:
         return None
     return {
         "corrects_memory_id": target_id,
         "corrected_memory_previous_status": previous_status,
+        "corrected_memory_content_digest": target_digest,
     }
 
 
@@ -456,6 +461,7 @@ def _m5_selection_binding_mac(
     memory_scope: Any,
     corrects_memory_id: str | None = None,
     corrected_memory_previous_status: str | None = None,
+    corrected_memory_content_digest: str | None = None,
     recovered_from_proposal_id: str | None = None,
     lifecycle_state: str = "active",
     lifecycle_at: str | None = None,
@@ -489,6 +495,7 @@ def _m5_selection_binding_mac(
         {
             "corrects_memory_id": corrects_memory_id,
             "corrected_memory_previous_status": corrected_memory_previous_status,
+            "corrected_memory_content_digest": corrected_memory_content_digest,
         }
     )
     if canonical_correction is None:
@@ -602,6 +609,9 @@ def _m5_selection_binding_matches(
             memory_scope=canonical_scope,
             corrects_memory_id=canonical_correction["corrects_memory_id"],
             corrected_memory_previous_status=canonical_correction["corrected_memory_previous_status"],
+            corrected_memory_content_digest=canonical_correction[
+                "corrected_memory_content_digest"
+            ],
             recovered_from_proposal_id=canonical_recovery_parent,
             lifecycle_state="active",
         )
@@ -685,6 +695,9 @@ def _m5_selection_binding_failure_reason(
             memory_scope=canonical_scope,
             corrects_memory_id=canonical_correction["corrects_memory_id"],
             corrected_memory_previous_status=canonical_correction["corrected_memory_previous_status"],
+            corrected_memory_content_digest=canonical_correction[
+                "corrected_memory_content_digest"
+            ],
             recovered_from_proposal_id=canonical_recovery_parent,
             lifecycle_state="active",
         )
@@ -769,6 +782,11 @@ def _m5_rollback_lifecycle_state(
             else None,
             corrected_memory_previous_status=_m5_correction_binding(provenance)[
                 "corrected_memory_previous_status"
+            ]
+            if _m5_correction_binding(provenance) is not None
+            else None,
+            corrected_memory_content_digest=_m5_correction_binding(provenance)[
+                "corrected_memory_content_digest"
             ]
             if _m5_correction_binding(provenance) is not None
             else None,
@@ -2535,6 +2553,9 @@ class MemoryRepository:
                 raise ValueError("correction_target_rollback_binding_invalid") from exc
             if previous_status is not MemoryStatus.active or target.status is not MemoryStatus.superseded:
                 raise ValueError("correction_target_changed_before_rollback")
+            target_digest = hashlib.sha256(target.content.encode("utf-8")).hexdigest()
+            if target_digest != correction_binding["corrected_memory_content_digest"]:
+                raise ValueError("correction_target_changed_before_rollback")
             later_supersession = (
                 await db.execute(
                     select(MemoryEdge).where(
@@ -2580,6 +2601,9 @@ class MemoryRepository:
                 corrects_memory_id=correction_binding["corrects_memory_id"],
                 corrected_memory_previous_status=correction_binding[
                     "corrected_memory_previous_status"
+                ],
+                corrected_memory_content_digest=correction_binding[
+                    "corrected_memory_content_digest"
                 ],
                 recovered_from_proposal_id=provenance.get("recovered_from_proposal_id"),
                 lifecycle_state="rolled_back",
@@ -2835,6 +2859,27 @@ class MemoryRepository:
                 block_proposal("accepted_memory_binding_mismatch")
                 quarantine_memory(memory)
                 continue
+            if proposal.recovered_from_proposal_id:
+                recovery_parent = (
+                    await db.execute(
+                        select(MemoryProposal).where(
+                            MemoryProposal.proposal_id
+                            == proposal.recovered_from_proposal_id,
+                            MemoryProposal.owner_principal_id == owner_principal_id,
+                            MemoryProposal.owner_session_id == owner_session_id,
+                        )
+                    )
+                ).scalars().first()
+                from src.memory.m5 import _m5_authenticated_recovery_link
+
+                if recovery_parent is None or not _m5_authenticated_recovery_link(
+                    recovery_parent,
+                    proposal,
+                    memory,
+                ):
+                    block_proposal("recovery_parent_binding_mismatch")
+                    quarantine_memory(memory)
+                    continue
             eligible.append((proposal, memory))
         return eligible
 
@@ -5314,6 +5359,73 @@ class MemoryRepository:
                     db.add(MemoryProposal(**candidate))
                     await db.flush()
                     m5_restored_proposal_ids.append(candidate["proposal_id"])
+
+                # A recovery child is eligible only while its blocked/expired
+                # source proposal is present and the complete recovery link
+                # still authenticates. Validate after the proposal batch so
+                # archive ordering cannot affect the result.
+                from src.memory.m5 import _m5_authenticated_recovery_link
+
+                for candidate in normalized_m5_proposals:
+                    if (
+                        candidate["proposal_id"] not in m5_restored_proposal_ids
+                        or not candidate["recovered_from_proposal_id"]
+                    ):
+                        continue
+                    recovered = (
+                        await db.execute(
+                            select(MemoryProposal).where(
+                                MemoryProposal.proposal_id == candidate["proposal_id"],
+                                MemoryProposal.owner_principal_id == normalized_actor,
+                                MemoryProposal.owner_session_id == normalized_owner,
+                            )
+                        )
+                    ).scalars().first()
+                    if recovered is None or recovered.status is not MemoryProposalStatus.accepted:
+                        continue
+                    recovery_parent = (
+                        await db.execute(
+                            select(MemoryProposal).where(
+                                MemoryProposal.proposal_id
+                                == recovered.recovered_from_proposal_id,
+                                MemoryProposal.owner_principal_id == normalized_actor,
+                                MemoryProposal.owner_session_id == normalized_owner,
+                            )
+                        )
+                    ).scalars().first()
+                    recovered_memory = (
+                        await db.execute(
+                            select(Memory).where(Memory.id == recovered.accepted_memory_id)
+                        )
+                    ).scalars().first()
+                    if (
+                        recovery_parent is not None
+                        and recovered_memory is not None
+                        and _m5_authenticated_recovery_link(
+                            recovery_parent,
+                            recovered,
+                            recovered_memory,
+                        )
+                    ):
+                        continue
+                    recovered.status = MemoryProposalStatus.blocked
+                    recovered.reason_code = "recovery_parent_binding_mismatch"
+                    recovered.recovery_action = "request_verified_proposal_again"
+                    recovered.revision = int(recovered.revision or 0) + 1
+                    recovered.updated_at = _now()
+                    db.add(recovered)
+                    if (
+                        recovered_memory is not None
+                        and recovered_memory.source_session_id == normalized_owner
+                        and recovered_memory.status is MemoryStatus.active
+                        and _canonical_memory_deletion_marker(recovered_memory) is None
+                    ):
+                        recovered_memory.status = MemoryStatus.archived
+                        recovered_memory.updated_at = _now()
+                        db.add(recovered_memory)
+                    if recovered.proposal_id not in m5_blocked_proposal_ids:
+                        m5_blocked_proposal_ids.append(recovered.proposal_id)
+                    await db.flush()
 
                 for candidate in normalized_m5_receipts:
                     receipt_candidate = dict(candidate)

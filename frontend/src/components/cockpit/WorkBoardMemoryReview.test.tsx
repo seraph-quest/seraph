@@ -3,7 +3,7 @@ import "@testing-library/jest-dom/vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { WorkBoardAttempt, WorkBoardTask } from "../../types";
-import { WorkBoardMemoryReview } from "./WorkBoardMemoryReview";
+import { WorkBoardMemoryReview, type TaskMemoryProposal } from "./WorkBoardMemoryReview";
 
 function response(payload: unknown, ok = true, status = ok ? 200 : 500) {
   return { ok, status, json: async () => payload };
@@ -79,7 +79,7 @@ function task(overrides: Partial<WorkBoardTask> = {}): WorkBoardTask {
   };
 }
 
-const proposal = {
+const proposal: TaskMemoryProposal = {
   proposal_id: "proposal-1",
   source_task_id: "task-1",
   attempt_id: "attempt-1",
@@ -106,7 +106,7 @@ const proposal = {
   revision: 1,
   created_at: "2026-09-25T06:00:00Z",
   expires_at: "2026-09-25T06:15:00Z",
-} as const;
+};
 
 const changedReceipt = {
   receipt_id: "decision-1",
@@ -255,7 +255,7 @@ describe("WorkBoardMemoryReview", () => {
   });
 
   it("shows accepted-memory signing recovery when the server key is unavailable", async () => {
-    let currentProposal = proposal;
+    let currentProposal: TaskMemoryProposal = proposal;
     let actionCalls = 0;
     fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -300,7 +300,7 @@ describe("WorkBoardMemoryReview", () => {
   });
 
   it("reverifies a quarantined source before requiring fresh operator acceptance", async () => {
-    let currentProposal = {
+    let currentProposal: TaskMemoryProposal = {
       ...proposal,
       status: "blocked",
       reason_code: "accepted_memory_binding_unverifiable",
@@ -363,7 +363,7 @@ describe("WorkBoardMemoryReview", () => {
   });
 
   it("offers the advertised recovery for a missing source baseline", async () => {
-    let currentProposal = {
+    let currentProposal: TaskMemoryProposal = {
       ...proposal,
       status: "blocked",
       reason_code: "source_baseline_missing",
@@ -409,7 +409,7 @@ describe("WorkBoardMemoryReview", () => {
   });
 
   it("executes the restored proposal recovery when preview text is unavailable", async () => {
-    let currentProposal = {
+    let currentProposal: TaskMemoryProposal = {
       ...proposal,
       status: "blocked",
       proposed_text: null,

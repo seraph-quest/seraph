@@ -1304,8 +1304,9 @@ async def test_m5_export_restore_preserves_scope_for_later_decision(async_db, mo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("omit_recovery_parent", [False, True])
 async def test_m5_export_restore_preserves_recovery_generation_for_later_decision(
-    async_db, monkeypatch
+    async_db, monkeypatch, omit_recovery_parent
 ):
     """A recovered accepted proposal survives restore beside its blocked parent."""
     bypass = make_test_bypass_operator()
@@ -1413,15 +1414,35 @@ async def test_m5_export_restore_preserves_recovery_generation_for_later_decisio
             owner_session_id=operator.session_id,
             authenticated_session_id=operator.session_id,
         )
+    if omit_recovery_parent:
+        archive["m5_proposals"] = [
+            item
+            for item in archive["m5_proposals"]
+            if item["proposal_id"] != proposal["proposal_id"]
+        ]
+        archive["counts"]["m5_proposals"] = len(archive["m5_proposals"])
+        archive["export_hash"] = _recovery_json_hash(
+            _memory_export_integrity_payload(archive)
+        )
+        archive["artifact_path"] = (
+            f"artifacts/memory-recovery/export-{archive['export_hash'][:24]}.json"
+        )
+        archive["artifact_sha256"] = _recovery_json_hash(
+            _memory_export_artifact_payload(archive)
+        )
     proposal_archives = {
         item["proposal_id"]: item for item in archive["m5_proposals"]
     }
-    assert proposal_archives[proposal["proposal_id"]]["status"] == MemoryProposalStatus.blocked.value
+    if omit_recovery_parent:
+        assert proposal["proposal_id"] not in proposal_archives
+    else:
+        assert proposal_archives[proposal["proposal_id"]]["status"] == MemoryProposalStatus.blocked.value
     assert proposal_archives[recovered["proposal_id"]]["status"] == MemoryProposalStatus.accepted.value
-    assert (
-        proposal_archives[proposal["proposal_id"]]["preview_text_digest"]
-        == proposal_archives[recovered["proposal_id"]]["preview_text_digest"]
-    )
+    if not omit_recovery_parent:
+        assert (
+            proposal_archives[proposal["proposal_id"]]["preview_text_digest"]
+            == proposal_archives[recovered["proposal_id"]]["preview_text_digest"]
+        )
 
     memory_ids = [item["id"] for item in archive["memories"]]
     async with async_db() as db:
@@ -1457,19 +1478,17 @@ async def test_m5_export_restore_preserves_recovery_generation_for_later_decisio
             owner_session_id=operator.session_id,
             authenticated_session_id=operator.session_id,
         )
-    assert set(restored["m5_restored_proposal_ids"]) >= {
-        proposal["proposal_id"],
-        recovered["proposal_id"],
-    }
+    if omit_recovery_parent:
+        assert recovered["proposal_id"] in restored["m5_restored_proposal_ids"]
+        assert proposal["proposal_id"] not in restored["m5_restored_proposal_ids"]
+        assert recovered["proposal_id"] in restored["m5_blocked_proposal_ids"]
+    else:
+        assert set(restored["m5_restored_proposal_ids"]) >= {
+            proposal["proposal_id"],
+            recovered["proposal_id"],
+        }
 
     async with async_db() as db:
-        restored_parent = (
-            await db.execute(
-                select(MemoryProposal).where(
-                    MemoryProposal.proposal_id == proposal["proposal_id"]
-                )
-            )
-        ).scalar_one()
         restored_child = (
             await db.execute(
                 select(MemoryProposal).where(
@@ -1477,9 +1496,42 @@ async def test_m5_export_restore_preserves_recovery_generation_for_later_decisio
                 )
             )
         ).scalar_one()
-        assert restored_parent.status is MemoryProposalStatus.blocked
-        assert restored_child.status is MemoryProposalStatus.accepted
+        if omit_recovery_parent:
+            assert (
+                await db.execute(
+                    select(MemoryProposal).where(
+                        MemoryProposal.proposal_id == proposal["proposal_id"]
+                    )
+                )
+            ).scalar_one_or_none() is None
+            assert restored_child.status is MemoryProposalStatus.blocked
+            assert restored_child.reason_code == "recovery_parent_binding_mismatch"
+        else:
+            restored_parent = (
+                await db.execute(
+                    select(MemoryProposal).where(
+                        MemoryProposal.proposal_id == proposal["proposal_id"]
+                    )
+                )
+            ).scalar_one()
+            assert restored_parent.status is MemoryProposalStatus.blocked
+            assert restored_child.status is MemoryProposalStatus.accepted
         assert restored_child.accepted_memory_id == accepted_recovery["accepted_memory_id"]
+        recovered_memory = (
+            await db.execute(
+                select(Memory).where(Memory.id == accepted_recovery["accepted_memory_id"])
+            )
+        ).scalar_one()
+        if omit_recovery_parent:
+            assert recovered_memory.status is MemoryStatus.archived
+            # Simulate a damaged legacy row that bypassed restore quarantine;
+            # the live selection path must still reject the orphan.
+            restored_child.status = MemoryProposalStatus.accepted
+            restored_child.reason_code = "accepted"
+            recovered_memory.status = MemoryStatus.active
+            db.add(restored_child)
+            db.add(recovered_memory)
+            await db.flush()
         after_restore = WorkBoardTask(
             task_id="m5-recovery-roundtrip-after-restore-task",
             owner_principal_id=operator.principal.principal_id,
@@ -1509,9 +1561,29 @@ async def test_m5_export_restore_preserves_recovery_generation_for_later_decisio
         expected_task_revision=1,
         expected_goal_revision=goal.revision,
     )
-    assert later_result["decision"]["decision_status"] == "changed"
-    assert later_result["decision"]["after_selected_capability_id"] == ALTERNATE_CAPABILITY
-    assert later_result["decision"]["accepted_memory_id"] == accepted_recovery["accepted_memory_id"]
+    if omit_recovery_parent:
+        assert later_result["decision"]["after_selected_capability_id"] == SOURCE_CAPABILITY
+        assert ALTERNATE_CAPABILITY not in later_result["decision"]["evidence_ids"]
+        async with async_db() as db:
+            orphan = (
+                await db.execute(
+                    select(MemoryProposal).where(
+                        MemoryProposal.proposal_id == recovered["proposal_id"]
+                    )
+                )
+            ).scalar_one()
+            quarantined_memory = (
+                await db.execute(
+                    select(Memory).where(Memory.id == accepted_recovery["accepted_memory_id"])
+                )
+            ).scalar_one()
+            assert orphan.status is MemoryProposalStatus.blocked
+            assert orphan.reason_code == "recovery_parent_binding_mismatch"
+            assert quarantined_memory.status is MemoryStatus.archived
+    else:
+        assert later_result["decision"]["decision_status"] == "changed"
+        assert later_result["decision"]["after_selected_capability_id"] == ALTERNATE_CAPABILITY
+        assert later_result["decision"]["accepted_memory_id"] == accepted_recovery["accepted_memory_id"]
 
 
 @pytest.mark.asyncio
@@ -1734,6 +1806,40 @@ async def test_rehashed_correction_target_cannot_change_acceptance_or_rollback(a
         assert memory.status is MemoryStatus.active
         memory.metadata_json = original_metadata_json
         db.add(memory)
+        await db.flush()
+
+    async with async_db() as db:
+        correction_target = (
+            await db.execute(select(Memory).where(Memory.id == prior.id))
+        ).scalar_one()
+        assert correction_target.status is MemoryStatus.superseded
+        correction_target.content = "Changed after the correction was accepted"
+        db.add(correction_target)
+        await db.flush()
+
+    with pytest.raises(ValueError, match="correction_target_changed_before_rollback"):
+        await m5.apply_memory_proposal_action(
+            owner_principal_id=operator.principal.principal_id,
+            owner_session_id=operator.session_id,
+            proposal_id=proposal["proposal_id"],
+            action="rollback",
+            expected_revision=accepted["revision"],
+            expected_task_revision=source.task_revision,
+            expected_goal_revision=goal.revision,
+            reason="Do not reactivate a changed correction target.",
+        )
+    async with async_db() as db:
+        correction_target = (
+            await db.execute(select(Memory).where(Memory.id == prior.id))
+        ).scalar_one()
+        memory = (
+            await db.execute(select(Memory).where(Memory.id == accepted_memory_id))
+        ).scalar_one()
+        assert correction_target.status is MemoryStatus.superseded
+        assert correction_target.content == "Changed after the correction was accepted"
+        assert memory.status is MemoryStatus.active
+        correction_target.content = "Prior reviewed preference"
+        db.add(correction_target)
         await db.flush()
 
     with _runtime_operator(operator):

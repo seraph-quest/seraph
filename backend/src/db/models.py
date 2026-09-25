@@ -1115,7 +1115,14 @@ class MemoryProposal(SQLModel, table=True):
             "source_attempt_id",
             "preview_text_digest",
             unique=True,
-            sqlite_where=text("preview_text_digest IS NOT NULL"),
+            # A blocked/expired proposal is an immutable historical review
+            # projection.  Recovery creates a distinct proposal generation
+            # with the same verified preview, so terminal recovery rows must
+            # not consume the active-generation uniqueness slot.
+            sqlite_where=text(
+                "preview_text_digest IS NOT NULL "
+                "AND status NOT IN ('blocked', 'expired')"
+            ),
         ),
         Index(
             "ux_memory_proposals_owner_attempt_no_learning",
@@ -1178,6 +1185,7 @@ class MemoryProposal(SQLModel, table=True):
     )
     confidence: Optional[float] = Field(default=None)
     corrects_memory_id: Optional[str] = Field(default=None, index=True)
+    recovered_from_proposal_id: Optional[str] = Field(default=None, index=True)
     provenance_json: str = Field(default="{}")
     source_refs_json: str = Field(default="[]")
     reason_code: str = Field(default="pending", index=True)

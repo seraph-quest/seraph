@@ -21,6 +21,7 @@ from sqlmodel import col, select
 
 from src.db.engine import get_session
 from src.db.models import (
+    AuditEvent,
     Memory,
     MemoryCategory,
     MemoryEdge,
@@ -245,6 +246,65 @@ _M5_SCOPE_KEYS = frozenset(
     }
 )
 _M5_SOURCE_EVIDENCE_LIMIT = 20
+
+_M5_ROLLBACK_BINDING_SCHEMA_VERSION = "work-board-m5-rollback-binding.v2"
+_M5_SELECTION_BINDING_SCHEMA_VERSION = "work-board-m5-selection-binding.v3"
+
+
+def _m5_rollback_binding_key_id() -> str:
+    """Return a non-secret identifier for the active rollback signing key."""
+
+    return hashlib.sha256(
+        b"seraph-m5-rollback-key-id-v1:" + _effect_mac_key()
+    ).hexdigest()[:24]
+
+
+def _m5_rollback_binding_mac(
+    *,
+    memory_id: str,
+    proposal_id: str,
+    accepted_content_digest: str,
+    owner_principal_id: str,
+    owner_session_id: str,
+    rollback_at: datetime | str,
+    rollback_reason: str,
+) -> str:
+    """Authenticate one operator rollback marker with existing server key material."""
+
+    if isinstance(rollback_at, datetime):
+        normalized_rollback_at = _recovery_timestamp(_normalize_utc_timestamp(rollback_at))
+    else:
+        parsed_rollback_at = _parse_recovery_timestamp(
+            rollback_at,
+            field_name="rollback_at",
+        )
+        normalized_rollback_at = _recovery_timestamp(parsed_rollback_at)
+    values = {
+        "memory_id": str(memory_id or "").strip(),
+        "proposal_id": str(proposal_id or "").strip(),
+        "accepted_content_digest": str(accepted_content_digest or "").strip().lower(),
+        "owner_principal_id": str(owner_principal_id or "").strip(),
+        "owner_session_id": str(owner_session_id or "").strip(),
+        "rollback_at": normalized_rollback_at,
+        "rollback_reason": str(rollback_reason or "")[:500],
+        "key_id": _m5_rollback_binding_key_id(),
+    }
+    if (
+        not values["memory_id"]
+        or not values["proposal_id"]
+        or not _M5_RECOVERY_DIGEST.fullmatch(values["accepted_content_digest"])
+        or not values["owner_principal_id"]
+        or not values["owner_session_id"]
+        or not values["rollback_at"]
+    ):
+        raise ValueError("M5 rollback binding identity is invalid")
+    return _mac(
+        {
+            "version": _M5_ROLLBACK_BINDING_SCHEMA_VERSION,
+            "rollback": values,
+        },
+        key=_effect_mac_key(),
+    )
 def _m5_selection_scope(value: Any) -> dict[str, Any] | None:
     """Project the selection fields bound into an accepted M5 memory.
 
@@ -276,6 +336,38 @@ def _m5_selection_scope(value: Any) -> dict[str, Any] | None:
         "preferred_capability_id": value.get("preferred_capability_id"),
         "preferred_capability_version": value.get("preferred_capability_version"),
         "candidate_capability_ids": list(candidate_ids),
+    }
+
+
+def _m5_correction_binding(value: Any) -> dict[str, str | None] | None:
+    """Return the bounded supersession target covered by an M5 signature.
+
+    A correction changes the rollback boundary: undoing the new memory may
+    reinstate the target's previous status.  Keep both values in the keyed
+    binding so a rehashed archive cannot redirect or alter that boundary.
+    """
+
+    if isinstance(value, dict):
+        source = value
+    else:
+        source = value
+
+    def _field(name: str) -> Any:
+        if isinstance(source, dict):
+            return source.get(name)
+        return getattr(source, name, None)
+
+    target_id = str(_field("corrects_memory_id") or "").strip() or None
+    previous_status = str(_field("corrected_memory_previous_status") or "").strip() or None
+    if bool(target_id) != bool(previous_status):
+        return None
+    if target_id and not _M5_RECOVERY_ID.fullmatch(target_id):
+        return None
+    if previous_status and previous_status not in {"active", "superseded", "archived"}:
+        return None
+    return {
+        "corrects_memory_id": target_id,
+        "corrected_memory_previous_status": previous_status,
     }
 
 
@@ -362,6 +454,12 @@ def _m5_selection_binding_mac(
     source_binding: Any,
     decision_effect: Any,
     memory_scope: Any,
+    corrects_memory_id: str | None = None,
+    corrected_memory_previous_status: str | None = None,
+    recovered_from_proposal_id: str | None = None,
+    lifecycle_state: str = "active",
+    lifecycle_at: str | None = None,
+    lifecycle_reason: str | None = None,
 ) -> str:
     """Authenticate the accepted M5 selection with existing server key material."""
 
@@ -387,20 +485,42 @@ def _m5_selection_binding_mac(
     canonical_effect = str(getattr(decision_effect, "value", decision_effect) or "").strip()
     if not canonical_effect:
         raise ValueError("M5 decision effect is invalid")
-    return _mac(
+    canonical_correction = _m5_correction_binding(
         {
-            "version": "work-board-m5-selection-binding.v1",
-            "proposal_id": proposal_id,
-            "accepted_content_digest": accepted_content_digest,
-            "owner_principal_id": owner_principal_id,
-            "owner_session_id": owner_session_id,
-            "source_context_digest": source_context_digest,
-            "verified_source_binding": canonical_source,
-            "decision_effect": canonical_effect,
-            "memory_scope": canonical_scope,
-        },
-        key=_effect_mac_key(),
+            "corrects_memory_id": corrects_memory_id,
+            "corrected_memory_previous_status": corrected_memory_previous_status,
+        }
     )
+    if canonical_correction is None:
+        raise ValueError("M5 correction target binding is invalid")
+    canonical_recovery_parent = str(recovered_from_proposal_id or "").strip() or None
+    if canonical_recovery_parent and not _M5_RECOVERY_ID.fullmatch(canonical_recovery_parent):
+        raise ValueError("M5 recovery parent binding is invalid")
+    canonical_lifecycle_state = str(lifecycle_state or "").strip()
+    if canonical_lifecycle_state not in {"active", "rolled_back"}:
+        raise ValueError("M5 selection lifecycle state is invalid")
+    payload = {
+        "version": _M5_SELECTION_BINDING_SCHEMA_VERSION,
+        "proposal_id": proposal_id,
+        "accepted_content_digest": accepted_content_digest,
+        "owner_principal_id": owner_principal_id,
+        "owner_session_id": owner_session_id,
+        "source_context_digest": source_context_digest,
+        "verified_source_binding": canonical_source,
+        "decision_effect": canonical_effect,
+        "memory_scope": canonical_scope,
+        "correction_target": canonical_correction,
+        "recovered_from_proposal_id": canonical_recovery_parent,
+        "lifecycle_state": canonical_lifecycle_state,
+    }
+    if canonical_lifecycle_state == "rolled_back":
+        normalized_lifecycle_at = str(lifecycle_at or "").strip()
+        normalized_lifecycle_reason = str(lifecycle_reason or "").strip()
+        if not normalized_lifecycle_at or not normalized_lifecycle_reason or len(normalized_lifecycle_reason) > 500:
+            raise ValueError("M5 rollback lifecycle metadata is invalid")
+        payload["lifecycle_at"] = normalized_lifecycle_at
+        payload["lifecycle_reason"] = normalized_lifecycle_reason
+    return _mac(payload, key=_effect_mac_key())
 
 
 def _m5_selection_binding_matches(
@@ -411,6 +531,8 @@ def _m5_selection_binding_matches(
     decision_effect: Any,
     memory_scope: Any,
     source_binding: Any,
+    corrects_memory_id: str | None = None,
+    recovered_from_proposal_id: str | None = None,
 ) -> bool:
     """Confirm that an accepted proposal still matches canonical memory.
 
@@ -425,6 +547,9 @@ def _m5_selection_binding_matches(
         return False
     if provenance.get("accepted_content_digest") != accepted_content_digest:
         return False
+    lifecycle_state = provenance.get("lifecycle_state")
+    if lifecycle_state != "active":
+        return False
     expected_effect = str(getattr(decision_effect, "value", decision_effect) or "").strip()
     canonical_effect = str(provenance.get("decision_effect") or "").strip()
     if not expected_effect or canonical_effect != expected_effect:
@@ -436,6 +561,28 @@ def _m5_selection_binding_matches(
     expected_source = _m5_verified_source_binding(source_binding)
     canonical_source = _m5_verified_source_binding(provenance.get("verified_source_binding"))
     if expected_source is None or canonical_source != expected_source:
+        return False
+    expected_recovery_parent = (
+        str(recovered_from_proposal_id).strip()
+        if recovered_from_proposal_id is not None
+        else str(getattr(source_binding, "recovered_from_proposal_id", "") or "").strip()
+        if not isinstance(source_binding, dict)
+        else str(source_binding.get("recovered_from_proposal_id") or "").strip()
+    ) or None
+    canonical_recovery_parent = str(provenance.get("recovered_from_proposal_id") or "").strip() or None
+    if canonical_recovery_parent != expected_recovery_parent:
+        return False
+    expected_correction_id = (
+        str(corrects_memory_id).strip()
+        if corrects_memory_id is not None
+        else str(getattr(source_binding, "corrects_memory_id", "") or "").strip()
+        if not isinstance(source_binding, dict)
+        else str(source_binding.get("corrects_memory_id") or "").strip()
+    ) or None
+    canonical_correction = _m5_correction_binding(provenance)
+    if canonical_correction is None or canonical_correction["corrects_memory_id"] != expected_correction_id:
+        return False
+    if expected_correction_id and canonical_correction["corrected_memory_previous_status"] != "active":
         return False
     try:
         active_key_id = _m5_selection_binding_key_id()
@@ -453,6 +600,10 @@ def _m5_selection_binding_matches(
             source_binding=canonical_source,
             decision_effect=canonical_effect,
             memory_scope=canonical_scope,
+            corrects_memory_id=canonical_correction["corrects_memory_id"],
+            corrected_memory_previous_status=canonical_correction["corrected_memory_previous_status"],
+            recovered_from_proposal_id=canonical_recovery_parent,
+            lifecycle_state="active",
         )
     except (CapabilityJournalError, TypeError, ValueError):
         return False
@@ -468,6 +619,8 @@ def _m5_selection_binding_failure_reason(
     decision_effect: Any,
     memory_scope: Any,
     source_binding: Any,
+    corrects_memory_id: str | None = None,
+    recovered_from_proposal_id: str | None = None,
 ) -> str:
     """Classify a rejected accepted-memory binding without exposing key state."""
 
@@ -475,6 +628,8 @@ def _m5_selection_binding_failure_reason(
         return "unverifiable"
     if not provenance.get("selection_binding_mac") or not provenance.get("verified_source_binding"):
         return "unverifiable"
+    if provenance.get("lifecycle_state") != "active":
+        return "mismatch" if provenance.get("lifecycle_state") == "rolled_back" else "unverifiable"
     try:
         active_key_id = _m5_selection_binding_key_id()
     except CapabilityJournalError:
@@ -494,6 +649,30 @@ def _m5_selection_binding_failure_reason(
         return "unverifiable"
     if canonical_source != expected_source or canonical_scope != expected_scope:
         return "mismatch"
+    expected_recovery_parent = (
+        str(recovered_from_proposal_id).strip()
+        if recovered_from_proposal_id is not None
+        else str(getattr(source_binding, "recovered_from_proposal_id", "") or "").strip()
+        if not isinstance(source_binding, dict)
+        else str(source_binding.get("recovered_from_proposal_id") or "").strip()
+    ) or None
+    canonical_recovery_parent = str(provenance.get("recovered_from_proposal_id") or "").strip() or None
+    if canonical_recovery_parent != expected_recovery_parent:
+        return "mismatch"
+    expected_correction_id = (
+        str(corrects_memory_id).strip()
+        if corrects_memory_id is not None
+        else str(getattr(source_binding, "corrects_memory_id", "") or "").strip()
+        if not isinstance(source_binding, dict)
+        else str(source_binding.get("corrects_memory_id") or "").strip()
+    ) or None
+    canonical_correction = _m5_correction_binding(provenance)
+    if canonical_correction is None:
+        return "unverifiable"
+    if canonical_correction["corrects_memory_id"] != expected_correction_id:
+        return "mismatch"
+    if expected_correction_id and canonical_correction["corrected_memory_previous_status"] != "active":
+        return "mismatch"
     try:
         expected_mac = _m5_selection_binding_mac(
             proposal_id=proposal_id,
@@ -504,6 +683,10 @@ def _m5_selection_binding_failure_reason(
             source_binding=canonical_source,
             decision_effect=decision_effect,
             memory_scope=canonical_scope,
+            corrects_memory_id=canonical_correction["corrects_memory_id"],
+            corrected_memory_previous_status=canonical_correction["corrected_memory_previous_status"],
+            recovered_from_proposal_id=canonical_recovery_parent,
+            lifecycle_state="active",
         )
     except CapabilityJournalError:
         return "unverifiable"
@@ -517,6 +700,88 @@ def _m5_selection_binding_failure_reason(
     ):
         return "mismatch"
     return "mismatch"
+
+
+def _m5_rollback_lifecycle_state(
+    provenance: Any,
+    *,
+    proposal_id: str,
+    accepted_content_digest: str,
+    owner_principal_id: str,
+    owner_session_id: str,
+) -> str:
+    """Verify rollback state retained in the accepted-memory signature.
+
+    The separate rollback marker carries a user-facing reason and timestamp,
+    but an archive may omit that marker and recompute its public hashes. The
+    selection signature is therefore re-signed at rollback with the terminal
+    lifecycle, timestamp, and reason so removing the marker cannot reactivate
+    the former acceptance.
+    """
+
+    if not isinstance(provenance, dict):
+        return "absent"
+    lifecycle_state = provenance.get("lifecycle_state")
+    if lifecycle_state in {None, "active"}:
+        return "absent"
+    if lifecycle_state != "rolled_back":
+        return "unverifiable"
+    try:
+        active_key_id = _m5_selection_binding_key_id()
+        lifecycle_at = str(provenance.get("lifecycle_at") or "").strip()
+        lifecycle_reason = str(provenance.get("lifecycle_reason") or "").strip()
+        stored_key_id = provenance.get("selection_binding_key_id")
+        stored_mac = provenance.get("selection_binding_mac")
+        if (
+            not isinstance(stored_key_id, str)
+            or not re.fullmatch(r"[0-9a-f]{24}", stored_key_id)
+            or not hmac.compare_digest(stored_key_id, active_key_id)
+            or not isinstance(stored_mac, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", stored_mac)
+            or not lifecycle_at
+            or not lifecycle_reason
+            or len(lifecycle_reason) > 500
+        ):
+            return "unverifiable"
+        normalized_at = _recovery_timestamp(
+            _parse_recovery_timestamp(lifecycle_at, field_name="M5 rollback lifecycle timestamp")
+        )
+        if normalized_at is None or normalized_at != lifecycle_at:
+            return "unverifiable"
+        if (
+            provenance.get("proposal_id") != proposal_id
+            or provenance.get("accepted_content_digest") != accepted_content_digest
+            or provenance.get("owner_principal_id") != owner_principal_id
+            or provenance.get("owner_session_id") != owner_session_id
+        ):
+            return "mismatch"
+        expected_mac = _m5_selection_binding_mac(
+            proposal_id=proposal_id,
+            accepted_content_digest=accepted_content_digest,
+            owner_principal_id=owner_principal_id,
+            owner_session_id=owner_session_id,
+            source_context_digest=str(provenance.get("source_context_digest") or ""),
+            source_binding=provenance.get("verified_source_binding"),
+            decision_effect=provenance.get("decision_effect"),
+            memory_scope=provenance.get("memory_scope"),
+            corrects_memory_id=_m5_correction_binding(provenance)["corrects_memory_id"]
+            if _m5_correction_binding(provenance) is not None
+            else None,
+            corrected_memory_previous_status=_m5_correction_binding(provenance)[
+                "corrected_memory_previous_status"
+            ]
+            if _m5_correction_binding(provenance) is not None
+            else None,
+            recovered_from_proposal_id=provenance.get("recovered_from_proposal_id"),
+            lifecycle_state="rolled_back",
+            lifecycle_at=lifecycle_at,
+            lifecycle_reason=lifecycle_reason,
+        )
+    except CapabilityJournalError:
+        return "unverifiable"
+    except (TypeError, ValueError):
+        return "mismatch"
+    return "valid" if hmac.compare_digest(stored_mac, expected_mac) else "mismatch"
 
 
 def _m5_receipt_field(value: Any, name: str, default: Any = None) -> Any:
@@ -661,6 +926,7 @@ def _m5_receipt_binding_digest(receipt: Any, proposal: Any | None = None) -> str
                 "source_context_digest": str(_m5_receipt_field(receipt, "source_context_digest") or "").lower(),
                 "candidate_set_digest": _m5_receipt_field(receipt, "candidate_set_digest") or "",
                 "accepted_proposal_id": _m5_receipt_field(receipt, "source_proposal_id") or M5_NONE_PROPOSAL,
+                "source_proposal_revision": int(_m5_receipt_field(receipt, "source_proposal_revision") or 0),
                 "accepted_memory_id": _m5_receipt_field(receipt, "accepted_memory_id") or M5_NONE_MEMORY,
                 "accepted_memory_content_digest": _m5_receipt_field(receipt, "accepted_memory_content_digest") or M5_NONE_DIGEST,
             }
@@ -677,6 +943,7 @@ def _m5_receipt_binding_digest(receipt: Any, proposal: Any | None = None) -> str
                 "source_attempt_id": _m5_receipt_field(receipt, "source_attempt_id"),
                 "source_task_revision": int(_m5_receipt_field(receipt, "source_task_revision") or 0),
                 "source_proposal_id": _m5_receipt_field(receipt, "source_proposal_id"),
+                "source_proposal_revision": int(_m5_receipt_field(receipt, "source_proposal_revision") or 0),
             }
         )
     if proposal is None:
@@ -692,6 +959,7 @@ def _m5_receipt_binding_digest(receipt: Any, proposal: Any | None = None) -> str
             "source_task_revision": int(_m5_receipt_field(receipt, "source_task_revision") or 0),
             "source_attempt_id": _m5_receipt_field(receipt, "source_attempt_id"),
             "source_proposal_id": _m5_receipt_field(receipt, "source_proposal_id"),
+            "source_proposal_revision": int(_m5_receipt_field(receipt, "source_proposal_revision") or 0),
             "status": status,
             "reason": _m5_receipt_field(receipt, "reason") or "",
         }
@@ -703,6 +971,13 @@ def _m5_receipt_source_matches_proposal(receipt: Any, proposal: Any) -> bool:
     if source is None:
         return False
     if _m5_receipt_field(receipt, "source_proposal_id") != _m5_receipt_field(proposal, "proposal_id"):
+        return False
+    try:
+        source_proposal_revision = int(_m5_receipt_field(receipt, "source_proposal_revision") or 0)
+        current_proposal_revision = int(_m5_receipt_field(proposal, "revision") or 0)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if source_proposal_revision < 1 or source_proposal_revision > current_proposal_revision:
         return False
     for receipt_name, source_name in (
         ("owner_principal_id", "owner_principal_id"),
@@ -948,6 +1223,7 @@ def _m5_proposal_archive_payload(proposal: MemoryProposal) -> dict[str, Any]:
 
     return {
         "proposal_id": proposal.proposal_id,
+        "recovered_from_proposal_id": proposal.recovered_from_proposal_id,
         "schema_version": proposal.schema_version,
         "owner_principal_id": proposal.owner_principal_id,
         "owner_session_id": proposal.owner_session_id,
@@ -1089,6 +1365,12 @@ def _m5_normalize_proposal_record(
     if not isinstance(record, dict):
         raise ValueError("memory restore archive contains an invalid M5 proposal")
     proposal_id = _m5_recovery_id(record.get("proposal_id"), field_name="proposal_id", required=True)
+    recovered_from_proposal_id = _m5_normalize_optional_id(
+        record.get("recovered_from_proposal_id"),
+        field_name="recovered_from_proposal_id",
+    )
+    if recovered_from_proposal_id == proposal_id:
+        raise ValueError(f"memory restore M5 proposal {proposal_id} cannot recover from itself")
     if record.get("schema_version") != "memory_proposal.v1":
         raise ValueError(f"memory restore M5 proposal {proposal_id} has an invalid schema version")
     _m5_normalize_owner(record.get("owner_principal_id"), field_name="proposal owner principal", expected=owner_principal_id)
@@ -1214,6 +1496,7 @@ def _m5_normalize_proposal_record(
         recovery_action = "request_verified_proposal_again"
     return {
         "proposal_id": proposal_id,
+        "recovered_from_proposal_id": recovered_from_proposal_id,
         "schema_version": "memory_proposal.v1",
         "owner_principal_id": owner_principal_id,
         "owner_session_id": owner_session_id,
@@ -1726,6 +2009,157 @@ def _canonical_memory_deletion_marker(memory: Memory) -> str | None:
     return None
 
 
+def _m5_rollback_marker_from_memory(value: Any) -> dict[str, Any] | None:
+    """Return a parsed durable M5 rollback marker from a memory payload."""
+
+    metadata = value
+    if isinstance(value, Memory):
+        try:
+            metadata = json.loads(value.metadata_json or "{}")
+        except (TypeError, ValueError):
+            return None
+    elif isinstance(value, dict):
+        metadata = value.get("metadata", value.get("metadata_json", value))
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata or "{}")
+            except (TypeError, ValueError):
+                return None
+    if not isinstance(metadata, dict):
+        return None
+    marker = metadata.get("work_board_rollback")
+    return marker if isinstance(marker, dict) else None
+
+
+def _m5_rollback_proposal_id_from_memory(value: Any) -> str | None:
+    """Return the proposal identifier from a durable rollback marker.
+
+    Current database rows retain this identifier as a rollback barrier for
+    compatibility with the canonical rollback audit.  Archive restore uses
+    ``_m5_rollback_marker_state`` below before treating the marker as
+    authoritative because public archive hashes are recomputable.
+    """
+
+    marker = _m5_rollback_marker_from_memory(value)
+    if marker is None:
+        return None
+    proposal_id = marker.get("proposal_id")
+    if not isinstance(proposal_id, str):
+        return None
+    proposal_id = proposal_id.strip()
+    return proposal_id or None
+
+
+def _m5_rollback_marker_state(
+    value: Any,
+    *,
+    memory_id: str,
+    proposal_id: str,
+    accepted_content_digest: str,
+    owner_principal_id: str,
+    owner_session_id: str,
+) -> str:
+    """Classify an archive rollback marker without trusting public hashes.
+
+    ``mismatch`` means a structurally complete marker carries the active key
+    identifier but its signed identity does not match.  Such a marker is
+    ignored so a rehashed archive cannot change an active memory's lifecycle.
+    ``unverifiable`` means the marker is legacy, malformed, or cannot be
+    checked with the active key.  Restore quarantines that memory/proposal and
+    requires explicit re-verification instead of activating it.
+    """
+
+    marker = _m5_rollback_marker_from_memory(value)
+    if marker is None:
+        return "absent"
+    if marker.get("version") != _M5_ROLLBACK_BINDING_SCHEMA_VERSION:
+        return "unverifiable"
+    required_fields = (
+        "memory_id",
+        "proposal_id",
+        "accepted_content_digest",
+        "owner_principal_id",
+        "owner_session_id",
+        "rollback_at",
+        "key_id",
+        "binding_mac",
+    )
+    if any(not isinstance(marker.get(field), str) or not marker[field].strip() for field in required_fields):
+        return "unverifiable"
+    marker_values = {
+        field: marker[field].strip()
+        for field in required_fields
+        if field != "binding_mac"
+    }
+    rollback_reason = marker.get("rollback_reason")
+    if not isinstance(rollback_reason, str) or len(rollback_reason) > 500:
+        return "unverifiable"
+    marker_values["rollback_reason"] = rollback_reason
+    marker_values["accepted_content_digest"] = marker_values[
+        "accepted_content_digest"
+    ].lower()
+    marker_values["binding_mac"] = marker["binding_mac"].strip().lower()
+    if not _M5_RECOVERY_DIGEST.fullmatch(marker_values["accepted_content_digest"]):
+        return "unverifiable"
+    if not re.fullmatch(r"[0-9a-f]{24}", marker_values["key_id"]):
+        return "unverifiable"
+    if not _M5_RECOVERY_DIGEST.fullmatch(marker_values["binding_mac"]):
+        return "unverifiable"
+    try:
+        parsed_rollback_at = _parse_recovery_timestamp(
+            marker_values["rollback_at"],
+            field_name="work_board_rollback.rollback_at",
+        )
+        active_key_id = _m5_rollback_binding_key_id()
+    except (CapabilityJournalError, TypeError, ValueError):
+        return "unverifiable"
+    normalized_rollback_at = _recovery_timestamp(parsed_rollback_at)
+    if normalized_rollback_at is None:
+        return "unverifiable"
+    legacy_at = marker.get("at")
+    if legacy_at is not None:
+        try:
+            normalized_legacy_at = _recovery_timestamp(
+                _parse_recovery_timestamp(
+                    legacy_at,
+                    field_name="work_board_rollback.at",
+                )
+            )
+        except (TypeError, ValueError):
+            return "unverifiable"
+        if normalized_legacy_at != normalized_rollback_at:
+            return "mismatch"
+    if marker_values["key_id"] != active_key_id:
+        return "unverifiable"
+    expected_identity = {
+        "memory_id": str(memory_id or "").strip(),
+        "proposal_id": str(proposal_id or "").strip(),
+        "accepted_content_digest": str(accepted_content_digest or "").strip().lower(),
+        "owner_principal_id": str(owner_principal_id or "").strip(),
+        "owner_session_id": str(owner_session_id or "").strip(),
+    }
+    for field, expected in expected_identity.items():
+        if marker_values[field] != expected:
+            return "mismatch"
+    try:
+        expected_mac = _m5_rollback_binding_mac(
+            memory_id=marker_values["memory_id"],
+            proposal_id=marker_values["proposal_id"],
+            accepted_content_digest=marker_values["accepted_content_digest"],
+            owner_principal_id=marker_values["owner_principal_id"],
+            owner_session_id=marker_values["owner_session_id"],
+            rollback_at=normalized_rollback_at,
+            rollback_reason=marker_values["rollback_reason"],
+        )
+    except (CapabilityJournalError, TypeError, ValueError):
+        return "unverifiable"
+    return (
+        "valid"
+        if hmac.compare_digest(marker_values["binding_mac"], expected_mac)
+        else "mismatch"
+    )
+
+
 def _sqlite_json_object_path(key: str) -> str:
     if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
         return f"$.{key}"
@@ -2031,6 +2465,7 @@ class MemoryRepository:
         memory_id: str,
         expected_content_digest: str,
         expected_proposal_id: str,
+        rollback_reason: str,
     ) -> Memory:
         """Conditionally suppress an M5 memory inside its caller transaction."""
 
@@ -2051,6 +2486,33 @@ class MemoryRepository:
         actual_digest = hashlib.sha256(memory.content.encode("utf-8")).hexdigest()
         if actual_digest != expected_content_digest or memory.status is not MemoryStatus.active:
             raise ValueError("memory_changed_before_rollback")
+        correction_binding = _m5_correction_binding(provenance)
+        if correction_binding is None:
+            raise ValueError("correction_target_binding_invalid")
+        try:
+            _m5_selection_binding_key_id()
+        except CapabilityJournalError:
+            # A rollback of a memory without a correction target is still a
+            # canonical operator action when the selection-MAC key is down.
+            # A correction target has a second state transition to protect;
+            # without the binding key it must remain fail-closed.
+            if correction_binding["corrects_memory_id"] is not None:
+                raise ValueError("correction_target_binding_mismatch")
+        else:
+            if not _m5_selection_binding_matches(
+                provenance,
+                proposal_id=expected_proposal_id,
+                accepted_content_digest=actual_digest,
+                decision_effect=provenance.get("decision_effect"),
+                memory_scope=provenance.get("memory_scope"),
+                source_binding=provenance.get("verified_source_binding"),
+                corrects_memory_id=correction_binding["corrects_memory_id"],
+                recovered_from_proposal_id=provenance.get("recovered_from_proposal_id"),
+            ):
+                raise ValueError("correction_target_binding_mismatch")
+        normalized_rollback_reason = str(rollback_reason or "").strip()
+        if not normalized_rollback_reason or len(normalized_rollback_reason) > 500:
+            raise ValueError("rollback_reason_invalid")
         corrected_memory_id = str(provenance.get("corrects_memory_id") or "").strip()
         if corrected_memory_id:
             target = (
@@ -2087,13 +2549,91 @@ class MemoryRepository:
             target.status = previous_status
             target.updated_at = _now()
             db.add(target)
-        metadata["work_board_rollback"] = {
+        owner_principal_id = str(provenance.get("owner_principal_id") or "").strip()
+        owner_session_id = str(
+            provenance.get("owner_session_id") or memory.source_session_id or ""
+        ).strip()
+        if (
+            not owner_principal_id
+            or not owner_session_id
+            or owner_session_id != str(memory.source_session_id or "").strip()
+        ):
+            raise ValueError("memory_provenance_mismatch")
+        rollback_at = _now()
+        rollback_at_value = _recovery_timestamp(rollback_at)
+        if rollback_at_value is None:  # pragma: no cover - _now() is always aware.
+            raise ValueError("rollback_timestamp_unavailable")
+        provenance["lifecycle_state"] = "rolled_back"
+        provenance["lifecycle_at"] = rollback_at_value
+        provenance["lifecycle_reason"] = normalized_rollback_reason
+        try:
+            provenance["selection_binding_key_id"] = _m5_selection_binding_key_id()
+            provenance["selection_binding_mac"] = _m5_selection_binding_mac(
+                proposal_id=str(provenance.get("proposal_id") or ""),
+                accepted_content_digest=actual_digest,
+                owner_principal_id=owner_principal_id,
+                owner_session_id=owner_session_id,
+                source_context_digest=str(provenance.get("source_context_digest") or ""),
+                source_binding=provenance.get("verified_source_binding"),
+                decision_effect=provenance.get("decision_effect"),
+                memory_scope=provenance.get("memory_scope"),
+                corrects_memory_id=correction_binding["corrects_memory_id"],
+                corrected_memory_previous_status=correction_binding[
+                    "corrected_memory_previous_status"
+                ],
+                recovered_from_proposal_id=provenance.get("recovered_from_proposal_id"),
+                lifecycle_state="rolled_back",
+                lifecycle_at=rollback_at_value,
+                lifecycle_reason=normalized_rollback_reason,
+            )
+        except (CapabilityJournalError, TypeError, ValueError):
+            # A rolled-back memory must no longer carry an active acceptance
+            # signature, even if signing is unavailable at rollback time.
+            provenance["selection_binding_key_id"] = ""
+            provenance["selection_binding_mac"] = ""
+        metadata["work_board_provenance"] = provenance
+        # Rollback itself remains canonical when the existing execution MAC
+        # key is unavailable.  In that case keep only the historical marker;
+        # archive restore treats it as unverifiable and quarantines the
+        # memory/proposal rather than treating it as an activation authority.
+        rollback_marker = {
             "proposal_id": expected_proposal_id,
-            "at": _now().isoformat(),
+            "at": rollback_at_value,
+            "rollback_reason": normalized_rollback_reason,
         }
+        try:
+            signed_rollback_marker = {
+                "version": _M5_ROLLBACK_BINDING_SCHEMA_VERSION,
+                "memory_id": memory.id,
+                "proposal_id": expected_proposal_id,
+                "accepted_content_digest": actual_digest,
+                "owner_principal_id": owner_principal_id,
+                "owner_session_id": owner_session_id,
+                "rollback_at": rollback_at_value,
+                "rollback_reason": normalized_rollback_reason,
+                # Keep the historical alias for content-free archive readers;
+                # the canonical timestamp above is the field covered by the
+                # MAC.
+                "at": rollback_at_value,
+                "key_id": _m5_rollback_binding_key_id(),
+            }
+            signed_rollback_marker["binding_mac"] = _m5_rollback_binding_mac(
+                memory_id=memory.id,
+                proposal_id=expected_proposal_id,
+                accepted_content_digest=actual_digest,
+                owner_principal_id=owner_principal_id,
+                owner_session_id=owner_session_id,
+                rollback_at=rollback_at_value,
+                rollback_reason=normalized_rollback_reason,
+            )
+        except (CapabilityJournalError, TypeError, ValueError):
+            signed_rollback_marker = None
+        if signed_rollback_marker is not None:
+            rollback_marker = signed_rollback_marker
+        metadata["work_board_rollback"] = rollback_marker
         memory.status = MemoryStatus.archived
         memory.metadata_json = json.dumps(metadata, sort_keys=True, ensure_ascii=False)
-        memory.updated_at = _now()
+        memory.updated_at = rollback_at
         db.add(memory)
         await db.flush()
         return memory
@@ -2183,6 +2723,7 @@ class MemoryRepository:
                 decision_effect=proposal.decision_effect,
                 memory_scope=proposal_scope,
                 source_binding=proposal,
+                recovered_from_proposal_id=proposal.recovered_from_proposal_id,
             ):
                 failure_reason = _m5_selection_binding_failure_reason(
                     provenance,
@@ -2191,6 +2732,7 @@ class MemoryRepository:
                     decision_effect=proposal.decision_effect,
                     memory_scope=proposal_scope,
                     source_binding=proposal,
+                    recovered_from_proposal_id=proposal.recovered_from_proposal_id,
                 )
                 proposal.status = MemoryProposalStatus.blocked
                 proposal.reason_code = (
@@ -3905,6 +4447,7 @@ class MemoryRepository:
         m5_blocked_receipt_ids: list[str] = []
         m5_receipt_conflict_ids: list[str] = []
         m5_owner_conflict_ids: list[str] = []
+        m5_rollback_quarantined_memory_ids: list[str] = []
 
         def _mark_m5_receipt_blocked(receipt_id: str) -> None:
             if receipt_id not in m5_blocked_receipt_ids:
@@ -3994,7 +4537,10 @@ class MemoryRepository:
             try:
                 metadata = json.loads(memory.metadata_json or "{}")
             except (TypeError, ValueError):
-                return "unverifiable"
+                # This helper is a boolean admission gate.  Returning the
+                # diagnostic string here would be truthy and could let an
+                # accepted proposal survive a malformed canonical row.
+                return False
             provenance = metadata.get("work_board_provenance") if isinstance(metadata, dict) else None
             if not isinstance(provenance, dict):
                 return False
@@ -4108,6 +4654,51 @@ class MemoryRepository:
                     tombstone.memory_id: tombstone for tombstone in current_tombstones
                 }
                 current_by_id = {tombstone.id: tombstone for tombstone in current_tombstones}
+                # Rollback is a canonical operator decision, but unlike a
+                # deletion it is represented by the M5 proposal/memory
+                # projections and their audit event.  Keep those markers as
+                # restore barriers so a public archive rehash cannot turn a
+                # rolled-back decision back into an active one.
+                rolled_back_memory_ids: set[str] = set()
+                rolled_back_proposal_ids: set[str] = set()
+                archive_rollback_proposal_ids: set[str] = set()
+                archive_unverifiable_rollback_proposal_ids: set[str] = set()
+                archive_rollback_markers: dict[str, dict[str, Any]] = {}
+                current_rolled_back_proposals = (
+                    await db.execute(
+                        select(MemoryProposal).where(
+                            MemoryProposal.owner_principal_id == normalized_actor,
+                            MemoryProposal.owner_session_id == normalized_owner,
+                            MemoryProposal.status == MemoryProposalStatus.rolled_back,
+                        )
+                    )
+                ).scalars().all()
+                for proposal in current_rolled_back_proposals:
+                    rolled_back_proposal_ids.add(proposal.proposal_id)
+                    if proposal.accepted_memory_id:
+                        rolled_back_memory_ids.add(proposal.accepted_memory_id)
+                rollback_audits = (
+                    await db.execute(
+                        select(AuditEvent).where(
+                            AuditEvent.actor == normalized_actor,
+                            AuditEvent.session_id == normalized_owner,
+                            AuditEvent.event_type == "memory_learning_rolled_back",
+                        )
+                    )
+                ).scalars().all()
+                for audit in rollback_audits:
+                    try:
+                        audit_details = json.loads(audit.details_json or "{}")
+                    except (TypeError, ValueError):
+                        continue
+                    if not isinstance(audit_details, dict):
+                        continue
+                    audit_proposal_id = audit_details.get("proposal_id")
+                    audit_memory_id = audit_details.get("accepted_memory_id")
+                    if isinstance(audit_proposal_id, str) and audit_proposal_id.strip():
+                        rolled_back_proposal_ids.add(audit_proposal_id.strip())
+                    if isinstance(audit_memory_id, str) and audit_memory_id.strip():
+                        rolled_back_memory_ids.add(audit_memory_id.strip())
                 archive_tombstones_applied = False
                 for candidate in normalized_tombstones:
                     memory = (
@@ -4150,14 +4741,113 @@ class MemoryRepository:
                     )
                     await db.flush()
                 tombstoned_ids = set(current_by_memory)
+                proposal_archive_by_id = {
+                    candidate["proposal_id"]: candidate
+                    for candidate in normalized_m5_proposals
+                }
                 for record in normalized_records:
                     memory_id = record["id"]
-                    if memory_id in tombstoned_ids:
-                        suppressed_ids.append(memory_id)
-                        continue
                     existing = (
                         await db.execute(select(Memory).where(Memory.id == memory_id))
                     ).scalars().first()
+                    current_rollback_proposal_id = (
+                        _m5_rollback_proposal_id_from_memory(existing)
+                        if existing is not None
+                        else None
+                    )
+                    if current_rollback_proposal_id:
+                        rolled_back_memory_ids.add(memory_id)
+                        rolled_back_proposal_ids.add(current_rollback_proposal_id)
+                    archive_rollback_marker = _m5_rollback_marker_from_memory(record)
+                    archive_rollback_proposal_id = (
+                        _m5_rollback_proposal_id_from_memory(record)
+                        if archive_rollback_marker is not None
+                        else None
+                    )
+                    try:
+                        record_metadata = json.loads(record["metadata_json"] or "{}")
+                    except (TypeError, ValueError):
+                        record_metadata = {}
+                    record_provenance = (
+                        record_metadata.get("work_board_provenance")
+                        if isinstance(record_metadata, dict)
+                        else None
+                    )
+                    if archive_rollback_proposal_id is None and isinstance(record_provenance, dict):
+                        lifecycle_proposal_id = record_provenance.get("proposal_id")
+                        if isinstance(lifecycle_proposal_id, str) and lifecycle_proposal_id.strip():
+                            archive_rollback_proposal_id = lifecycle_proposal_id.strip()
+                    rollback_marker_state = "absent"
+                    if archive_rollback_proposal_id and archive_rollback_marker is not None:
+                        rollback_marker_state = _m5_rollback_marker_state(
+                            record,
+                            memory_id=memory_id,
+                            proposal_id=archive_rollback_proposal_id,
+                            accepted_content_digest=hashlib.sha256(
+                                record["content"].encode("utf-8")
+                            ).hexdigest(),
+                            owner_principal_id=normalized_actor,
+                            owner_session_id=normalized_owner,
+                        )
+                    proposal_archive = proposal_archive_by_id.get(archive_rollback_proposal_id or "")
+                    proposal_digest = str(
+                        proposal_archive.get("accepted_memory_content_digest") or ""
+                    ).strip().lower() if proposal_archive else ""
+                    record_digest = hashlib.sha256(record["content"].encode("utf-8")).hexdigest()
+                    linked_rollback = bool(
+                        proposal_archive
+                        and proposal_archive.get("accepted_memory_id") == memory_id
+                        and proposal_digest == record_digest
+                    )
+                    lifecycle_state = (
+                        _m5_rollback_lifecycle_state(
+                            record_provenance,
+                            proposal_id=archive_rollback_proposal_id or "",
+                            accepted_content_digest=record_digest,
+                            owner_principal_id=normalized_actor,
+                            owner_session_id=normalized_owner,
+                        )
+                        if linked_rollback
+                        else "unverifiable"
+                        if isinstance(record_provenance, dict)
+                        and record_provenance.get("lifecycle_state") == "rolled_back"
+                        else "absent"
+                    )
+                    if rollback_marker_state == "valid" or lifecycle_state == "valid":
+                        # Either signed record can preserve a terminal rollback.
+                        # The selection signature remains authoritative even if
+                        # an archive editor removes the separate marker and
+                        # recomputes the public envelope hashes.
+                        archive_rollback_proposal_ids.add(archive_rollback_proposal_id)
+                        if rollback_marker_state == "valid":
+                            archive_rollback_markers[archive_rollback_proposal_id] = dict(
+                                archive_rollback_marker or {}
+                            )
+                        else:
+                            archive_rollback_markers[archive_rollback_proposal_id] = {
+                                "rollback_at": record_provenance.get("lifecycle_at"),
+                                "rollback_reason": record_provenance.get("lifecycle_reason"),
+                            }
+                        record["status"] = MemoryStatus.archived
+                    elif (
+                        rollback_marker_state == "unverifiable"
+                        or lifecycle_state in {"mismatch", "unverifiable"}
+                    ):
+                        # An unverifiable rollback projection must not restore
+                        # as active. Keep the record quarantined for explicit
+                        # source verification and a fresh operator decision.
+                        archive_unverifiable_rollback_proposal_ids.add(
+                            archive_rollback_proposal_id or ""
+                        )
+                        if memory_id not in m5_rollback_quarantined_memory_ids:
+                            m5_rollback_quarantined_memory_ids.append(memory_id)
+                        continue
+                    # A structurally complete active-key marker with a bad
+                    # MAC is a public-archive forgery. Ignore it when the
+                    # signed accepted-memory lifecycle remains active.
+                    if memory_id in tombstoned_ids or memory_id in rolled_back_memory_ids:
+                        suppressed_ids.append(memory_id)
+                        continue
                     if existing is not None and _canonical_memory_deletion_marker(existing) is not None:
                         suppressed_ids.append(memory_id)
                         continue
@@ -4268,16 +4958,138 @@ class MemoryRepository:
                         source_count += 1
                     await db.flush()
 
+                # An accepted proposal is only a recoverable decision source
+                # when its original verified source has an authenticated
+                # baseline receipt in the same archive.  Public envelope
+                # hashes do not authenticate this relationship, so validate it
+                # before any proposal can be inserted.
+                proposal_by_id = {
+                    candidate["proposal_id"]: candidate
+                    for candidate in normalized_m5_proposals
+                }
+                # Receipt bindings describe the accepted source journey.  A
+                # restore may quarantine or roll back its proposal projection,
+                # but that lifecycle mutation must not invalidate the
+                # independently authenticated source-baseline receipt needed
+                # for explicit re-verification.
+                proposal_binding_by_id: dict[str, dict[str, Any]] = {}
+                for candidate in normalized_m5_proposals:
+                    binding_candidate = dict(candidate)
+                    if binding_candidate["status"] in {
+                        MemoryProposalStatus.blocked,
+                        MemoryProposalStatus.rolled_back,
+                    }:
+                        binding_candidate["status"] = MemoryProposalStatus.accepted
+                    proposal_binding_by_id[candidate["proposal_id"]] = binding_candidate
+                source_baseline_state: dict[str, str] = {}
+                for receipt_candidate in normalized_m5_receipts:
+                    if (
+                        receipt_candidate["receipt_stage"]
+                        is not WorkBoardDecisionReceiptStage.source_baseline
+                        or not receipt_candidate["source_proposal_id"]
+                    ):
+                        continue
+                    proposal_candidate = proposal_by_id.get(
+                        receipt_candidate["source_proposal_id"]
+                    )
+                    state = "unverifiable"
+                    if proposal_candidate is not None:
+                        binding_proposal_candidate = proposal_binding_by_id.get(
+                            receipt_candidate["source_proposal_id"],
+                            proposal_candidate,
+                        )
+                        if not _m5_receipt_integrity_matches(receipt_candidate):
+                            state = "unverifiable"
+                        elif not _m5_receipt_binding_matches(
+                            receipt_candidate,
+                            binding_proposal_candidate,
+                        ):
+                            state = "mismatch"
+                        elif (
+                            receipt_candidate["decision_status"]
+                            is WorkBoardDecisionStatus.blocked
+                        ):
+                            state = "unverifiable"
+                        else:
+                            state = "valid"
+                    previous_state = source_baseline_state.get(
+                        receipt_candidate["source_proposal_id"]
+                    )
+                    if previous_state != "valid":
+                        source_baseline_state[receipt_candidate["source_proposal_id"]] = state
+
                 # Restore only the content-free M5 projections.  Raw proposal
                 # text/provenance/source bodies are intentionally absent.  A
                 # bounded matching scope and safe evidence identifiers may be
                 # restored after validation.
                 for candidate in normalized_m5_proposals:
-                    if candidate["status"] is MemoryProposalStatus.accepted:
+                    proposal_state_before = {
+                        field: candidate[field]
+                        for field in (
+                            "status",
+                            "reason_code",
+                            "recovery_action",
+                            "rollback_by_principal_id",
+                            "rollback_by_session_id",
+                            "rollback_at",
+                            "rollback_reason",
+                        )
+                    }
+                    rollback_authoritative = candidate["proposal_id"] in (
+                        rolled_back_proposal_ids | archive_rollback_proposal_ids
+                    )
+                    rollback_unverifiable = candidate["proposal_id"] in (
+                        archive_unverifiable_rollback_proposal_ids
+                    )
+                    if rollback_authoritative:
+                        # Keep a canonical rollback terminal.  A public archive
+                        # can change the enum and rebuild its hashes, but it
+                        # cannot override the current proposal/memory marker or
+                        # the rollback audit event.
+                        candidate["status"] = MemoryProposalStatus.rolled_back
+                        candidate["reason_code"] = "rolled_back"
+                        candidate["recovery_action"] = "none"
+                        archive_marker = archive_rollback_markers.get(candidate["proposal_id"])
+                        if archive_marker is not None:
+                            candidate["rollback_by_principal_id"] = normalized_actor
+                            candidate["rollback_by_session_id"] = normalized_owner
+                            candidate["rollback_at"] = _parse_recovery_timestamp(
+                                archive_marker.get("rollback_at"),
+                                field_name="work_board_rollback.rollback_at",
+                            )
+                            candidate["rollback_reason"] = str(archive_marker.get("rollback_reason") or "")
+                    elif rollback_unverifiable:
                         if candidate["privacy_state"] is MemoryProposalPrivacyState.redacted:
                             m5_suppressed_proposal_ids.append(candidate["proposal_id"])
                             continue
-                        if candidate["proposal_id"] in unverifiable_receipt_proposal_ids:
+                        candidate["status"] = MemoryProposalStatus.blocked
+                        candidate["reason_code"] = "rollback_binding_unverifiable"
+                        candidate["recovery_action"] = "verify_source_and_reaccept"
+                        if candidate["proposal_id"] not in m5_blocked_proposal_ids:
+                            m5_blocked_proposal_ids.append(candidate["proposal_id"])
+                    elif candidate["status"] is MemoryProposalStatus.accepted:
+                        if candidate["privacy_state"] is MemoryProposalPrivacyState.redacted:
+                            m5_suppressed_proposal_ids.append(candidate["proposal_id"])
+                            continue
+                        baseline_state = source_baseline_state.get(candidate["proposal_id"])
+                        if baseline_state != "valid":
+                            candidate["status"] = MemoryProposalStatus.blocked
+                            candidate["reason_code"] = {
+                                None: "source_baseline_missing",
+                                "mismatch": "source_baseline_binding_mismatch",
+                                "unverifiable": "source_baseline_integrity_unverifiable",
+                            }.get(
+                                baseline_state,
+                                "source_baseline_integrity_unverifiable",
+                            )
+                            candidate["recovery_action"] = "verify_source_and_reaccept"
+                            m5_blocked_proposal_ids.append(candidate["proposal_id"])
+                            # Without an authenticated source baseline there is
+                            # no verified journey to recover, even if the
+                            # accepted memory row itself is still present.
+                            binding_active = False
+                            selection_binding_state = "unverifiable"
+                        elif candidate["proposal_id"] in unverifiable_receipt_proposal_ids:
                             candidate["status"] = MemoryProposalStatus.blocked
                             candidate["reason_code"] = "receipt_integrity_unverifiable"
                             candidate["recovery_action"] = "verify_source_and_reaccept"
@@ -4318,11 +5130,31 @@ class MemoryRepository:
                                     source_binding=candidate,
                                 )
                             if selection_binding_state in {"mismatch", "unverifiable", False}:
-                                # Keep the accepted row visible for operator
-                                # recovery, but never let a rehashed archive
-                                # alter a later decision without acceptance.
+                                # A present row with a failed selection MAC is
+                                # historical data, not an active memory. Keep
+                                # it visible for operator recovery while
+                                # ensuring general memory queries cannot treat
+                                # a rehashed archive as an accepted decision.
                                 candidate["status"] = MemoryProposalStatus.blocked
-                                if candidate["proposal_id"] not in unverifiable_receipt_proposal_ids:
+                                invalid_memory = (
+                                    await db.execute(
+                                        select(Memory).where(
+                                            Memory.id == candidate["accepted_memory_id"]
+                                        )
+                                    )
+                                ).scalars().first()
+                                if (
+                                    invalid_memory is not None
+                                    and invalid_memory.source_session_id == normalized_owner
+                                    and _canonical_memory_deletion_marker(invalid_memory) is None
+                                ):
+                                    invalid_memory.status = MemoryStatus.archived
+                                    invalid_memory.updated_at = _now()
+                                    db.add(invalid_memory)
+                                if (
+                                    candidate["proposal_id"] not in unverifiable_receipt_proposal_ids
+                                    and baseline_state == "valid"
+                                ):
                                     candidate["reason_code"] = (
                                         "accepted_memory_binding_unverifiable"
                                         if selection_binding_state == "unverifiable"
@@ -4339,11 +5171,17 @@ class MemoryRepository:
                                 m5_suppressed_proposal_ids.append(candidate["proposal_id"])
                             # A missing/tombstoned memory keeps the existing
                             # suppression behavior; a present mismatched row
-                            # is restored as blocked for explicit recovery.
+                            # stays archived until source review and acceptance.
                             if selection_binding_state not in {"mismatch", "unverifiable", False}:
                                 continue
                     elif candidate["status"] is MemoryProposalStatus.blocked:
                         m5_blocked_proposal_ids.append(candidate["proposal_id"])
+                    if any(
+                        candidate[field] != previous
+                        for field, previous in proposal_state_before.items()
+                    ):
+                        candidate["revision"] = max(1, int(candidate["revision"] or 0)) + 1
+                        candidate["updated_at"] = _now()
                     existing = (
                         await db.execute(
                             select(MemoryProposal).where(
@@ -4398,6 +5236,10 @@ class MemoryRepository:
 
                 for candidate in normalized_m5_receipts:
                     receipt_candidate = dict(candidate)
+                    receipt_state_before = {
+                        field: receipt_candidate[field]
+                        for field in ("decision_status", "admission_status", "reason")
+                    }
                     receipt_integrity_valid = _m5_receipt_integrity_matches(receipt_candidate)
                     linked_proposal = None
                     if receipt_candidate["source_proposal_id"]:
@@ -4410,26 +5252,45 @@ class MemoryRepository:
                                 )
                             )
                         ).scalars().first()
+                    binding_proposal = linked_proposal
+                    if receipt_candidate["source_proposal_id"]:
+                        binding_proposal = proposal_binding_by_id.get(
+                            receipt_candidate["source_proposal_id"],
+                            binding_proposal,
+                        )
                     if not receipt_integrity_valid:
                         receipt_candidate["decision_status"] = WorkBoardDecisionStatus.blocked
                         receipt_candidate["admission_status"] = WorkBoardDecisionAdmissionStatus.blocked
                         receipt_candidate["reason"] = "receipt_integrity_unverifiable"
                         _mark_m5_receipt_blocked(receipt_candidate["receipt_id"])
-                    elif not _m5_receipt_binding_matches(receipt_candidate, linked_proposal):
+                    elif not _m5_receipt_binding_matches(receipt_candidate, binding_proposal):
                         receipt_candidate["decision_status"] = WorkBoardDecisionStatus.blocked
                         receipt_candidate["admission_status"] = WorkBoardDecisionAdmissionStatus.blocked
                         receipt_candidate["reason"] = "receipt_binding_mismatch"
                         _mark_m5_receipt_blocked(receipt_candidate["receipt_id"])
-                    elif receipt_candidate["source_proposal_id"] and (
+                    elif (
+                        receipt_candidate["receipt_stage"]
+                        is WorkBoardDecisionReceiptStage.later_comparison
+                        and receipt_candidate["source_proposal_id"]
+                        and (
                         linked_proposal is None
-                        or linked_proposal.status is MemoryProposalStatus.blocked
+                            or linked_proposal.status
+                            in {
+                                MemoryProposalStatus.blocked,
+                                MemoryProposalStatus.rolled_back,
+                            }
+                        )
                     ):
                         receipt_candidate["decision_status"] = WorkBoardDecisionStatus.blocked
                         receipt_candidate["admission_status"] = WorkBoardDecisionAdmissionStatus.blocked
                         receipt_candidate["reason"] = "source_proposal_unavailable_on_restore"
                         _mark_m5_receipt_blocked(receipt_candidate["receipt_id"])
                     if (
-                        receipt_candidate["accepted_memory_id"]
+                        receipt_candidate["receipt_stage"]
+                        is WorkBoardDecisionReceiptStage.later_comparison
+                        and receipt_candidate["decision_status"]
+                        is not WorkBoardDecisionStatus.blocked
+                        and receipt_candidate["accepted_memory_id"]
                         and receipt_integrity_valid
                     ):
                         memory_available = await _m5_memory_binding_is_active(
@@ -4443,7 +5304,17 @@ class MemoryRepository:
                             receipt_candidate["admission_status"] = WorkBoardDecisionAdmissionStatus.blocked
                             receipt_candidate["reason"] = "accepted_memory_unavailable_on_restore"
                             _mark_m5_receipt_blocked(receipt_candidate["receipt_id"])
-                    if receipt_integrity_valid and receipt_candidate["reason"] != candidate["reason"]:
+                    receipt_mutated = any(
+                        receipt_candidate[field] != previous
+                        for field, previous in receipt_state_before.items()
+                    )
+                    if receipt_mutated:
+                        receipt_candidate["revision"] = max(
+                            1,
+                            int(receipt_candidate["revision"] or 0),
+                        ) + 1
+                        receipt_candidate["updated_at"] = _now()
+                    if receipt_integrity_valid and receipt_mutated:
                         # A valid receipt may be blocked by a current source or
                         # memory check during restore.  Seal that local,
                         # operator-visible state with the same server key.
@@ -4532,6 +5403,7 @@ class MemoryRepository:
             "m5_blocked_receipt_ids": m5_blocked_receipt_ids,
             "m5_receipt_conflict_ids": m5_receipt_conflict_ids,
             "m5_owner_conflict_ids": m5_owner_conflict_ids,
+            "m5_rollback_quarantined_memory_ids": m5_rollback_quarantined_memory_ids,
             "m5_restored_proposal_count": len(m5_restored_proposal_ids),
             "m5_suppressed_proposal_count": len(m5_suppressed_proposal_ids),
             "m5_blocked_proposal_count": len(m5_blocked_proposal_ids),

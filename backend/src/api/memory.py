@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.auth.service import AuthenticatedOperator
+from src.extensions.capability_execution import CapabilityJournalError
 from src.memory.benchmark import build_guardian_memory_benchmark_report
 from src.memory.control import (
     _apply_provider_quarantine_overlay,
@@ -375,13 +376,22 @@ async def create_memory_task_proposal(
 
     context = authenticated_memory_context(http_request)
     try:
-        return await create_memory_proposal(
+        result = await create_memory_proposal(
             owner_principal_id=context.actor,
             owner_session_id=context.session_id,
             task_id=request.task_id,
             expected_task_revision=request.expected_task_revision,
             attempt_id=request.attempt_id,
         )
+        if result.get("error_code") in {
+            "accepted_binding_unavailable",
+            "decision_receipt_signing_unavailable",
+        }:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": result["error_code"], "proposal": result},
+            )
+        return result
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail={"code": "memory_owner_session_forbidden"}) from exc
     except ValueError as exc:
@@ -449,6 +459,14 @@ async def act_on_memory_task_proposal(
                 },
             )
         return result
+    except CapabilityJournalError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "accepted_binding_unavailable",
+                "recovery": "Restore the workspace signing key, then reverify the source and review the proposal again.",
+            },
+        ) from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail={"code": str(exc)}) from exc
     except ValueError as exc:

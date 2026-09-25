@@ -740,10 +740,17 @@ async def _ensure_telegram_transport_columns(conn) -> None:
 async def _ensure_m5_indexes(conn) -> None:
     """Reassert the bounded M5 lookup indexes on an existing workspace."""
 
+    # Recovery keeps the blocked/expired source projection and writes a new
+    # proposal generation with the same preview digest.  Replace the original
+    # pre-recovery index shape on existing SQLite workspaces before recreating
+    # it with the terminal-row exclusion.
+    await conn.exec_driver_sql(
+        "DROP INDEX IF EXISTS ux_memory_proposals_owner_attempt_preview"
+    )
     statements = (
         "CREATE UNIQUE INDEX IF NOT EXISTS ux_memory_proposals_owner_attempt_preview "
         "ON memory_proposals (owner_principal_id, owner_session_id, source_task_id, source_attempt_id, preview_text_digest) "
-        "WHERE preview_text_digest IS NOT NULL",
+        "WHERE preview_text_digest IS NOT NULL AND status NOT IN ('blocked', 'expired')",
         "CREATE UNIQUE INDEX IF NOT EXISTS ux_memory_proposals_owner_attempt_no_learning "
         "ON memory_proposals (owner_principal_id, owner_session_id, source_task_id, source_attempt_id) "
         "WHERE status = 'no_learning'",
@@ -772,6 +779,7 @@ async def _ensure_m5_columns(conn) -> None:
         "artifact_ref": "VARCHAR",
         "artifact_digest": "VARCHAR",
         "rollback_reason": "VARCHAR DEFAULT ''",
+        "recovered_from_proposal_id": "VARCHAR",
     }
     for column_name, sql_type in columns_to_add.items():
         if existing and column_name not in existing:

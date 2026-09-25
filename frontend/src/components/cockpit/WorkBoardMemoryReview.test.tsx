@@ -299,6 +299,164 @@ describe("WorkBoardMemoryReview", () => {
     );
   });
 
+  it("reverifies a quarantined source before requiring fresh operator acceptance", async () => {
+    let currentProposal = {
+      ...proposal,
+      status: "blocked",
+      reason_code: "accepted_memory_binding_unverifiable",
+      recovery_action: "verify_source_and_reaccept",
+      accepted_memory_id: "memory-old",
+      revision: 2,
+    };
+    const actionBodies: Record<string, unknown>[] = [];
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/memory/task-proposals?") && init?.method !== "POST") {
+        return response({ proposals: [currentProposal] });
+      }
+      if (url.includes("/api/memory/task-decisions?")) {
+        return response({ receipts: [{
+          ...changedReceipt,
+          decision_status: "blocked",
+          before_action_id: "",
+          after_action_id: "",
+          before_input_digest: "",
+          after_input_digest: "",
+          reason: "receipt_signature_mismatch",
+          integrity_status: "signature_mismatch",
+        }] });
+      }
+      if (url.endsWith("/actions") && init?.method === "POST") {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        actionBodies.push(body);
+        currentProposal = {
+          ...proposal,
+          status: "proposed",
+          reason_code: "verified_source_reverified",
+          recovery_action: "none",
+          accepted_memory_id: null,
+          corrects_memory_id: "memory-old",
+          revision: 3,
+        };
+        return response(currentProposal);
+      }
+      return response({}, false, 404);
+    });
+
+    render(<WorkBoardMemoryReview task={task()} ownerPrincipalId="operator:one" ownerSessionId="operator-session-1" />);
+
+    await screen.findByRole("article", { name: "Memory proposal blocked" });
+    expect(screen.getByText(/Receipt evidence is quarantined \(signature mismatch\)/)).toBeInTheDocument();
+    expect(screen.getByText(/Before: No comparable action → After: No comparable action/)).toBeInTheDocument();
+    expect(screen.queryByText(/Before: guardian\.research-watch\.v1 → After: work\.github-followthrough\.v1/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Verify source and review again" }));
+
+    expect(await screen.findByRole("article", { name: "Memory proposal proposed" })).toBeInTheDocument();
+    expect(screen.getByText(/If accepted, this review will supersede prior canonical memory memory-old/)).toBeInTheDocument();
+    expect(actionBodies[0]).toMatchObject({
+      action: "recover",
+      expected_revision: 2,
+      expected_preview_text_digest: proposal.proposed_text_digest,
+      expected_task_revision: 6,
+      expected_goal_revision: 4,
+    });
+  });
+
+  it("offers the advertised recovery for a missing source baseline", async () => {
+    let currentProposal = {
+      ...proposal,
+      status: "blocked",
+      reason_code: "source_baseline_missing",
+      recovery_action: "verify_source_and_reaccept",
+      revision: 4,
+    };
+    const actionBodies: Record<string, unknown>[] = [];
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/memory/task-proposals?") && init?.method !== "POST") {
+        return response({ proposals: [currentProposal] });
+      }
+      if (url.includes("/api/memory/task-decisions?")) return response({ receipts: [] });
+      if (url.endsWith("/actions") && init?.method === "POST") {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        actionBodies.push(body);
+        currentProposal = {
+          ...proposal,
+          status: "proposed",
+          reason_code: "verified_source_reverified",
+          recovery_action: "none",
+          accepted_memory_id: null,
+          revision: 5,
+        };
+        return response(currentProposal);
+      }
+      return response({}, false, 404);
+    });
+
+    render(<WorkBoardMemoryReview task={task()} ownerPrincipalId="operator:one" ownerSessionId="operator-session-1" />);
+
+    await screen.findByRole("article", { name: "Memory proposal blocked" });
+    expect(screen.getByText(/Recovery: verify source and reaccept/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Verify source and review again" }));
+
+    expect(await screen.findByRole("article", { name: "Memory proposal proposed" })).toBeInTheDocument();
+    expect(actionBodies[0]).toMatchObject({
+      action: "recover",
+      expected_revision: 4,
+      expected_task_revision: 6,
+      expected_goal_revision: 4,
+    });
+  });
+
+  it("executes the restored proposal recovery when preview text is unavailable", async () => {
+    let currentProposal = {
+      ...proposal,
+      status: "blocked",
+      proposed_text: null,
+      proposed_text_digest: null,
+      preview_text: null,
+      preview_text_digest: null,
+      reason_code: "proposal_preview_not_restored",
+      recovery_action: "request_verified_proposal_again",
+      revision: 7,
+    };
+    const actionBodies: Record<string, unknown>[] = [];
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/memory/task-proposals?") && init?.method !== "POST") {
+        return response({ proposals: [currentProposal] });
+      }
+      if (url.includes("/api/memory/task-decisions?")) return response({ receipts: [] });
+      if (url.endsWith("/actions") && init?.method === "POST") {
+        actionBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+        currentProposal = {
+          ...proposal,
+          status: "proposed",
+          reason_code: "verified_source_reverified",
+          recovery_action: "none",
+          revision: 8,
+        };
+        return response(currentProposal);
+      }
+      return response({}, false, 404);
+    });
+
+    render(<WorkBoardMemoryReview task={task()} ownerPrincipalId="operator:one" ownerSessionId="operator-session-1" />);
+
+    await screen.findByRole("article", { name: "Memory proposal blocked" });
+    expect(screen.getByText(/Recovery: request verified proposal again/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Verify source and review again" }));
+
+    expect(await screen.findByRole("article", { name: "Memory proposal proposed" })).toBeInTheDocument();
+    expect(actionBodies[0]).toMatchObject({
+      action: "recover",
+      expected_revision: 7,
+      expected_preview_text_digest: null,
+      expected_task_revision: 6,
+      expected_goal_revision: 4,
+    });
+  });
+
   it("keeps unverified tasks from requesting learning and records explicit no-learning receipts", async () => {
     const noLearning = { ...proposal, status: "no_learning", proposed_text: null, proposed_text_digest: null, reason_code: "unknown_effect" };
     fetchMock.mockImplementation(async (input: RequestInfo | URL) => {

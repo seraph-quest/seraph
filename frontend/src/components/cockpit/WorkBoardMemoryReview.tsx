@@ -17,6 +17,7 @@ type ProposalStatus =
 
 interface TaskMemoryProposal {
   proposal_id: string;
+  recovered_from_proposal_id?: string | null;
   task_id?: string;
   source_task_id?: string;
   attempt_id: string;
@@ -66,6 +67,8 @@ interface SafeDecisionReceipt {
   evidence_ids?: string[];
   retrieval_evidence_ids?: string[];
   admission_status?: string;
+  integrity_status?: string;
+  recovery_action?: string;
   receipt_binding_digest?: string;
   accepted_proposal_id?: string | null;
   accepted_memory_content_digest?: string | null;
@@ -129,6 +132,7 @@ const SAFE_ERROR_MESSAGES: Record<string, string> = {
   memory_owner_session_unbound: "The memory review has no authenticated owner session. Reopen the task in the task owner’s session before trying again.",
   accepted_memory_owner_mismatch: "The accepted memory belongs to another operator session. Use the task owner’s authenticated session to undo it.",
   accepted_binding_unavailable: "Memory could not be signed. The proposal is blocked until its source is reverified and accepted again.",
+  decision_receipt_signing_unavailable: "The decision receipt could not be signed. The choice is blocked until the workspace signing key is restored and the source is reviewed again.",
   owner_session_mismatch: "The authenticated operator session does not match this memory review. Switch to the task owner’s session and try again.",
 };
 
@@ -303,7 +307,7 @@ function WorkBoardMemoryReview({
 
   const actOnProposal = useCallback(async (
     proposal: TaskMemoryProposal,
-    action: "accept" | "edit_accept" | "reject" | "rollback",
+    action: "accept" | "edit_accept" | "reject" | "rollback" | "recover",
   ) => {
     if (!ownsTask) return;
     const reason = rollbackReasons[proposal.proposal_id]?.trim() ?? "";
@@ -453,6 +457,11 @@ function WorkBoardMemoryReview({
                 <span className="text-[10px] opacity-70">revision {proposal.revision} · expires {safeDate(proposal.expires_at)}</span>
               </div>
               <div className="mt-1">Attempt {proposal.attempt_id} · workflow {proposal.workflow_run_id}</div>
+              {proposal.recovered_from_proposal_id && (
+                <div className="mt-1 text-[10px] text-sky-200">
+                  Fresh recovery generation from proposal {proposal.recovered_from_proposal_id}
+                </div>
+              )}
               {proposalText && <p className="mt-2 whitespace-pre-wrap break-words">{proposalText}</p>}
               {(proposal.proposed_text_digest ?? proposal.preview_text_digest) && <div className="mt-1 font-mono text-[10px]">Proposal {digestLabel(proposal.proposed_text_digest ?? proposal.preview_text_digest ?? "")}</div>}
               {proposal.memory_kind && <div className="mt-1">Memory type {proposal.memory_kind}</div>}
@@ -460,6 +469,7 @@ function WorkBoardMemoryReview({
               {proposal.confidence !== null && <div className="mt-1">Confidence {proposal.confidence.toFixed(2)}</div>}
               {proposal.reason_code && <div className="mt-1">Reason {proposal.reason_code.replaceAll("_", " ")}</div>}
               {proposal.recovery_action && <div className="mt-1 text-amber-200">Recovery: {proposal.recovery_action.replaceAll("_", " ")}</div>}
+              {proposal.corrects_memory_id && <div className="mt-1 text-amber-100">If accepted, this review will supersede prior canonical memory {proposal.corrects_memory_id}.</div>}
               {evidenceRefs.length > 0 && (
                 <div className="mt-2" aria-label="Memory evidence references">
                   <div className="text-[10px] uppercase opacity-70">Verified evidence references</div>
@@ -535,6 +545,22 @@ function WorkBoardMemoryReview({
                   </div>
                 </div>
               )}
+              {(proposal.status === "blocked" || proposal.status === "expired")
+                && (proposal.recovery_action === "verify_source_and_reaccept"
+                  || proposal.recovery_action === "request_verified_proposal_again")
+                && ownsTask && (
+                  <div className="mt-2 grid gap-2">
+                    <p className="text-xs">Seraph will recheck this task’s current verified run and readback, then regenerate a fresh proposal. Review and accept it again before it can update canonical memory.</p>
+                    <button
+                      type="button"
+                      className="cockpit-feedback-button self-start"
+                      disabled={waiting || busyAction !== null}
+                      onClick={() => void actOnProposal(proposal, "recover")}
+                    >
+                      {waiting ? "Rechecking verified source…" : "Verify source and review again"}
+                    </button>
+                  </div>
+                )}
               {proposal.status === "accepted" && ownsTask && (
                 <div className="mt-2 grid gap-2">
                   <div>Accepted canonical memory {proposal.accepted_memory_id ?? "receipt unavailable"}</div>
@@ -603,6 +629,11 @@ function WorkBoardMemoryReview({
               <div className="mt-1 break-all">Before: {receipt.before_action_id || "No comparable action"} → After: {receipt.after_action_id || "No comparable action"}</div>
               <div className="mt-1 break-all font-mono text-[10px]">Input digests {digestLabel(receipt.before_input_digest)} → {digestLabel(receipt.after_input_digest)}</div>
               <div className="mt-1">{receipt.reason}</div>
+              {receipt.integrity_status && receipt.integrity_status !== "verified" && (
+                <div className="mt-1 text-amber-200" role="status">
+                  Receipt evidence is quarantined ({receipt.integrity_status.replaceAll("_", " ")}). Recompute from current verified source before relying on it.
+                </div>
+              )}
               {receipt.source_baseline_receipt_id && <div className="mt-1 font-mono text-[10px]">Compared against source baseline {receipt.source_baseline_receipt_id}</div>}
               {(receipt.evidence_ids ?? receipt.retrieval_evidence_ids ?? []).length > 0 && <div className="mt-1 break-all text-[10px]">Evidence IDs: {(receipt.evidence_ids ?? receipt.retrieval_evidence_ids ?? []).join(", ")}</div>}
               <div className="mt-1 text-[10px] opacity-70">Recorded {safeDate(receipt.created_at)}</div>

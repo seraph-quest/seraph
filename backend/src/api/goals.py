@@ -10,6 +10,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from src.audit.repository import audit_repository
 from src.auth.service import AuthenticatedOperator
+from src.extensions.capability_execution import CapabilityJournalError
 from src.goals.contracts import (
     GoalAdmissionBudget,
     GoalCandidateRequest,
@@ -1157,6 +1158,14 @@ async def propose_goal_loop_candidate(
         raise HTTPException(status_code=404, detail="Goal not found") from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail={"code": str(exc)}) from exc
+    except CapabilityJournalError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "decision_receipt_signing_unavailable",
+                "recovery": "Restore the workspace signing key, then recompute this decision from the current task candidates.",
+            },
+        ) from exc
     except ValueError as exc:
         code = str(exc)
         status = 409 if code == "stale_goal_revision" else 422
@@ -1197,6 +1206,14 @@ async def propose_goal_loop_candidate_set(
         raise HTTPException(status_code=404, detail="Goal not found") from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail={"code": str(exc)}) from exc
+    except CapabilityJournalError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "decision_receipt_signing_unavailable",
+                "recovery": "Restore the workspace signing key, then recompute this decision from the current task candidates.",
+            },
+        ) from exc
     except ValueError as exc:
         code = str(exc)
         status = 409 if code.startswith("stale_") else 422

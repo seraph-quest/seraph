@@ -4,6 +4,7 @@ import type { FormEvent, MouseEvent } from "react";
 import { API_URL, WS_URL } from "../../config/constants";
 import { resolveWebSocketUrl } from "../../hooks/useWebSocket";
 import { apiFetch } from "../../lib/api";
+import { WorkBoardMemoryReview } from "./WorkBoardMemoryReview";
 import type {
   GoalInfo,
   WorkBoardActionRequest,
@@ -2190,6 +2191,12 @@ function WorkBoardPanel({
                   {(!selectedDetail?.attempts.length && !selectedTask.result_refs.length && !selectedTask.artifact_refs.length) && <div className="cockpit-empty">No attempts or output references yet.</div>}
                 </div>
               </section>
+
+              <WorkBoardMemoryReview
+                task={selectedTask}
+                ownerPrincipalId={ownerPrincipalId}
+                ownerSessionId={ownerSessionId}
+              />
 
               {selectedDetail?.parent_handoffs && selectedDetail.parent_handoffs.length > 0 && (
                 <section className="rounded border border-white/10 p-3" aria-label="Safe parent handoffs">

@@ -648,7 +648,7 @@ async def test_memory_live_controls_decay_and_delete_export_are_bounded_operator
             "privacy_boundary": "sensitive",
         },
     )
-    stored = await memory_repository.get_memory(created.memory_id)
+    stored = await memory_repository.get_memory(created.memory_id, include_deleted=True)
 
     assert exported.status_code == 200
     assert stored is not None
@@ -666,7 +666,10 @@ async def test_memory_live_controls_decay_and_delete_export_are_bounded_operator
             "reason": "A deleted canonical memory must not be revived.",
         },
     )
-    stored_after_rollback = await memory_repository.get_memory(created.memory_id)
+    stored_after_rollback = await memory_repository.get_memory(
+        created.memory_id,
+        include_deleted=True,
+    )
 
     assert rollback.status_code == 400
     assert "operator delete/export redaction" in rollback.json()["detail"]

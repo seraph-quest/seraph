@@ -5,10 +5,11 @@ from typing import Any
 from fastapi import APIRouter
 from fastapi import HTTPException
 from fastapi import Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.auth.service import AuthenticatedOperator
+from src.extensions.capability_execution import CapabilityJournalError
 from src.memory.benchmark import build_guardian_memory_benchmark_report
 from src.memory.control import (
     _apply_provider_quarantine_overlay,
@@ -19,6 +20,11 @@ from src.memory.control import (
     forget_memory,
     get_memory_live_controls_snapshot,
     list_memory_audit_receipts,
+    list_memory_proposals,
+    list_work_board_decision_receipts,
+    create_memory_proposal,
+    apply_memory_proposal_action,
+    m5_registered_capability_contracts,
     memory_operator_policy_payload,
     memory_recovery_status,
     pin_memory,
@@ -93,6 +99,29 @@ class MemoryRestoreRequest(BaseModel):
     source_session_id: str | None = None
     source_role: str = "operator"
     actor: str = "operator"
+
+
+class MemoryTaskProposalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    task_id: str = Field(min_length=1, max_length=512)
+    expected_task_revision: int = Field(ge=1)
+    attempt_id: str = Field(min_length=1, max_length=512)
+
+
+class MemoryTaskProposalActionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: str = Field(min_length=1, max_length=32)
+    expected_revision: int = Field(ge=1)
+    expected_preview_text_digest: str | None = Field(default=None, min_length=64, max_length=64)
+    expected_task_revision: int = Field(ge=1)
+    expected_goal_revision: int = Field(ge=1)
+    edited_text: str | None = Field(default=None, max_length=2_000)
+    decision_effect: str | None = Field(default=None, max_length=64)
+    preferred_capability_id: str | None = Field(default=None, min_length=1, max_length=160)
+    corrects_memory_id: str | None = Field(default=None, min_length=1, max_length=255)
+    reason: str | None = Field(default=None, max_length=500)
 
 
 @dataclass(frozen=True)
@@ -336,6 +365,139 @@ async def create_memory_correction(http_request: Request, request: MemoryCorrect
         raise HTTPException(status_code=403, detail={"code": "memory_authority_forbidden", "reason": str(exc)}) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/memory/task-proposals", status_code=201)
+async def create_memory_task_proposal(
+    http_request: Request,
+    request: MemoryTaskProposalRequest,
+):
+    """Create one owner/session-fenced proposal from a verified Done card."""
+
+    context = authenticated_memory_context(http_request)
+    try:
+        result = await create_memory_proposal(
+            owner_principal_id=context.actor,
+            owner_session_id=context.session_id,
+            task_id=request.task_id,
+            expected_task_revision=request.expected_task_revision,
+            attempt_id=request.attempt_id,
+        )
+        if result.get("error_code") in {
+            "accepted_binding_unavailable",
+            "decision_receipt_signing_unavailable",
+        }:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": result["error_code"], "proposal": result},
+            )
+        return result
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail={"code": "memory_owner_session_forbidden"}) from exc
+    except ValueError as exc:
+        code = str(exc)
+        status = 409 if code in {
+            "source_not_verified",
+            "stale_task_revision",
+            "proposal_source_binding_conflict",
+        } else 400
+        raise HTTPException(status_code=status, detail={"code": code}) from exc
+
+
+@router.get("/memory/task-proposals")
+async def get_memory_task_proposals(
+    http_request: Request,
+    task_id: str | None = None,
+):
+    context = authenticated_memory_context(http_request)
+    return {
+        "proposals": await list_memory_proposals(
+            owner_principal_id=context.actor,
+            owner_session_id=context.session_id,
+            task_id=task_id,
+        )
+    }
+
+
+@router.get("/memory/task-decision-capabilities")
+async def get_memory_task_decision_capabilities(http_request: Request):
+    """List registered typed inputs available for proposal-only comparison."""
+
+    authenticated_memory_context(http_request)
+    return {"capabilities": m5_registered_capability_contracts()}
+
+
+@router.post("/memory/task-proposals/{proposal_id}/actions")
+async def act_on_memory_task_proposal(
+    http_request: Request,
+    proposal_id: str,
+    request: MemoryTaskProposalActionRequest,
+):
+    context = authenticated_memory_context(http_request)
+    try:
+        result = await apply_memory_proposal_action(
+            owner_principal_id=context.actor,
+            owner_session_id=context.session_id,
+            proposal_id=proposal_id,
+            action=request.action,
+            expected_revision=request.expected_revision,
+            expected_preview_text_digest=request.expected_preview_text_digest,
+            expected_task_revision=request.expected_task_revision,
+            expected_goal_revision=request.expected_goal_revision,
+            edited_text=request.edited_text,
+            decision_effect=request.decision_effect,
+            preferred_capability_id=request.preferred_capability_id,
+            corrects_memory_id=request.corrects_memory_id,
+            reason=request.reason,
+        )
+        if result.get("error_code") == "accepted_binding_unavailable":
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "accepted_binding_unavailable",
+                    "proposal": result,
+                },
+            )
+        return result
+    except CapabilityJournalError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "accepted_binding_unavailable",
+                "recovery": "Restore the workspace signing key, then reverify the source and review the proposal again.",
+            },
+        ) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail={"code": str(exc)}) from exc
+    except ValueError as exc:
+        code = str(exc)
+        status = 422 if code in {
+            "unknown_proposal_action",
+            "edited_text_requires_edit_accept",
+            "preview_digest_required",
+            "memory_kind_invalid",
+            "decision_effect_invalid",
+            "preferred_capability_unregistered",
+            "rollback_reason_invalid",
+        } else 409
+        raise HTTPException(status_code=status, detail={"code": code}) from exc
+
+
+@router.get("/memory/task-decisions")
+async def get_memory_task_decisions(
+    http_request: Request,
+    task_id: str | None = None,
+):
+    """Return content-free same-card decision mechanics for the cockpit."""
+
+    context = authenticated_memory_context(http_request)
+    return {
+        "receipts": await list_work_board_decision_receipts(
+            owner_principal_id=context.actor,
+            owner_session_id=context.session_id,
+            task_id=task_id,
+        )
+    }
 
 
 @router.post("/memory/{memory_id}/pin")

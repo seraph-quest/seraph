@@ -71,6 +71,8 @@ OPERATOR_REQUIRED_TABLES = (
     "work_board_events",
     "work_board_proposals",
     "work_board_handoffs",
+    "memory_proposals",
+    "work_board_decision_receipts",
 )
 
 _LEGACY_WORKFLOW_STATUS_MAP = {
@@ -735,6 +737,68 @@ async def _ensure_telegram_transport_columns(conn) -> None:
                 )
 
 
+async def _ensure_m5_indexes(conn) -> None:
+    """Reassert the bounded M5 lookup indexes on an existing workspace."""
+
+    # Recovery keeps the blocked/expired source projection and writes a new
+    # proposal generation with the same preview digest.  Replace the original
+    # pre-recovery index shape on existing SQLite workspaces before recreating
+    # it with the terminal-row exclusion.
+    await conn.exec_driver_sql(
+        "DROP INDEX IF EXISTS ux_memory_proposals_owner_attempt_preview"
+    )
+    statements = (
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_memory_proposals_owner_attempt_preview "
+        "ON memory_proposals (owner_principal_id, owner_session_id, source_task_id, source_attempt_id, preview_text_digest) "
+        "WHERE preview_text_digest IS NOT NULL AND status NOT IN ('blocked', 'expired')",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_memory_proposals_owner_attempt_no_learning "
+        "ON memory_proposals (owner_principal_id, owner_session_id, source_task_id, source_attempt_id) "
+        "WHERE status = 'no_learning'",
+        "CREATE INDEX IF NOT EXISTS ix_memory_proposals_exact_comparison "
+        "ON memory_proposals (owner_principal_id, owner_session_id, goal_id, goal_revision, "
+        "capability_id, capability_version, typed_input_digest, source_context_digest, status, proposal_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_work_board_decision_receipts_binding "
+        "ON work_board_decision_receipts (receipt_binding_digest)",
+        "CREATE INDEX IF NOT EXISTS ix_work_board_decision_receipts_exact_intent "
+        "ON work_board_decision_receipts (owner_principal_id, owner_session_id, later_task_id, "
+        "later_task_revision, task_intent_digest, goal_id, goal_revision, capability_id, "
+        "capability_version, typed_input_digest, source_context_digest, receipt_id)",
+    )
+    for statement in statements:
+        await conn.exec_driver_sql(statement)
+
+
+async def _ensure_m5_columns(conn) -> None:
+    """Additive M5 columns for workspaces created by an earlier M5 build."""
+
+    result = await conn.exec_driver_sql("PRAGMA table_info(memory_proposals)")
+    existing = {row[1] for row in result.fetchall()}
+    columns_to_add = {
+        "candidate_set_digest": "VARCHAR DEFAULT ''",
+        "acceptance_binding_digest": "VARCHAR",
+        "artifact_ref": "VARCHAR",
+        "artifact_digest": "VARCHAR",
+        "rollback_reason": "VARCHAR DEFAULT ''",
+        "recovered_from_proposal_id": "VARCHAR",
+    }
+    for column_name, sql_type in columns_to_add.items():
+        if existing and column_name not in existing:
+            await conn.exec_driver_sql(
+                f"ALTER TABLE memory_proposals ADD COLUMN {column_name} {sql_type}"
+            )
+
+    result = await conn.exec_driver_sql("PRAGMA table_info(work_board_decision_receipts)")
+    receipt_columns = {row[1] for row in result.fetchall()}
+    if receipt_columns and "candidate_set_digest" not in receipt_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE work_board_decision_receipts ADD COLUMN candidate_set_digest VARCHAR DEFAULT ''"
+        )
+    if receipt_columns and "receipt_integrity_mac" not in receipt_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE work_board_decision_receipts ADD COLUMN receipt_integrity_mac VARCHAR"
+        )
+
+
 async def _ensure_search_indexes(conn) -> None:
     await conn.exec_driver_sql(
         """
@@ -1157,7 +1221,9 @@ async def init_db() -> None:
         await _ensure_telegram_transport_columns(conn)
         await _ensure_work_board_columns(conn)
         await conn.run_sync(SQLModel.metadata.create_all)
+        await _ensure_m5_columns(conn)
         await _ensure_work_board_indexes(conn)
+        await _ensure_m5_indexes(conn)
         await conn.exec_driver_sql(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS ux_work_board_attempts_workflow_run

@@ -425,7 +425,7 @@ async def act_on_memory_task_proposal(
 ):
     context = authenticated_memory_context(http_request)
     try:
-        return await apply_memory_proposal_action(
+        result = await apply_memory_proposal_action(
             owner_principal_id=context.actor,
             owner_session_id=context.session_id,
             proposal_id=proposal_id,
@@ -440,6 +440,15 @@ async def act_on_memory_task_proposal(
             corrects_memory_id=request.corrects_memory_id,
             reason=request.reason,
         )
+        if result.get("error_code") == "accepted_binding_unavailable":
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "accepted_binding_unavailable",
+                    "proposal": result,
+                },
+            )
+        return result
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail={"code": str(exc)}) from exc
     except ValueError as exc:

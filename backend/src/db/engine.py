@@ -785,6 +785,10 @@ async def _ensure_m5_columns(conn) -> None:
         await conn.exec_driver_sql(
             "ALTER TABLE work_board_decision_receipts ADD COLUMN candidate_set_digest VARCHAR DEFAULT ''"
         )
+    if receipt_columns and "receipt_integrity_mac" not in receipt_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE work_board_decision_receipts ADD COLUMN receipt_integrity_mac VARCHAR"
+        )
 
 
 async def _ensure_search_indexes(conn) -> None:

@@ -53,6 +53,9 @@ from src.memory.repository import (
     _MAX_RECOVERY_SOURCES_PER_RECORD,
     _memory_export_artifact_payload,
     _memory_export_integrity_payload,
+    _m5_receipt_binding_digest,
+    _m5_receipt_integrity_mac,
+    _m5_selection_binding_key_id,
     _m5_selection_binding_mac,
     _recovery_json_hash,
     memory_repository,
@@ -190,12 +193,40 @@ async def _seed_m5_verified_records(get_session, operator):
         "preferred_capability_version": None,
         "candidate_capability_ids": ["local-deterministic"],
     }
+    source_binding = {
+        "owner_principal_id": operator.principal.principal_id,
+        "owner_session_id": owner_session,
+        "source_task_id": "task-recovery-1",
+        "source_task_revision": 1,
+        "source_attempt_id": "attempt-recovery-1",
+        "source_attempt_fence": 1,
+        "workflow_run_id": "run-recovery-1",
+        "workflow_run_revision": 1,
+        "goal_id": "goal-recovery-1",
+        "goal_revision": 1,
+        "capability_id": "local-deterministic",
+        "capability_version": "v1",
+        "typed_input_digest": _test_digest("typed-input"),
+        "source_context_digest": source_context_digest,
+        "candidate_set_digest": _test_digest("candidate-set"),
+        "evidence_digest": _test_digest("evidence"),
+        "readback_kind": "artifact",
+        "readback_ref": "readback:recovery-1",
+        "readback_digest": _test_digest("readback"),
+        "artifact_ref": "artifact:recovery-1",
+        "artifact_digest": _test_digest("artifact"),
+        "proposal_job_id": "",
+        "request_idempotency_key": _test_digest("idempotency"),
+        "request_binding_digest": _test_digest("binding"),
+        "source_evidence_ids": ["readback:recovery-1", "artifact:recovery-1"],
+    }
     selection_binding_mac = _m5_selection_binding_mac(
         proposal_id=proposal_id,
         accepted_content_digest=_test_digest(memory_content),
         owner_principal_id=operator.principal.principal_id,
         owner_session_id=owner_session,
         source_context_digest=source_context_digest,
+        source_binding=source_binding,
         decision_effect="none",
         memory_scope=memory_scope,
     )
@@ -206,6 +237,8 @@ async def _seed_m5_verified_records(get_session, operator):
         "source_context_digest": source_context_digest,
         "decision_effect": "none",
         "memory_scope": memory_scope,
+        "verified_source_binding": source_binding,
+        "selection_binding_key_id": _m5_selection_binding_key_id(),
         "accepted_content_digest": _test_digest(memory_content),
         "selection_binding_mac": selection_binding_mac,
     }
@@ -278,7 +311,7 @@ async def _seed_m5_verified_records(get_session, operator):
         receipt = WorkBoardDecisionReceipt(
             receipt_id=receipt_id,
             receipt_stage=WorkBoardDecisionReceiptStage.later_comparison,
-            receipt_binding_digest=_test_digest("receipt-binding"),
+            receipt_binding_digest="",
             owner_principal_id=operator.principal.principal_id,
             owner_session_id=owner_session,
             source_proposal_id=proposal_id,
@@ -308,7 +341,9 @@ async def _seed_m5_verified_records(get_session, operator):
             before_selected_capability_id="local-deterministic",
             after_selected_capability_id="local-deterministic",
             comparison_context_digest=_test_digest("comparison"),
-            retrieval_evidence_ids_json=json.dumps(["artifact:recovery-1"]),
+            retrieval_evidence_ids_json=json.dumps(
+                ["readback:recovery-1", "artifact:recovery-1"]
+            ),
             decision_status=WorkBoardDecisionStatus.changed,
             admission_status=WorkBoardDecisionAdmissionStatus.not_required,
             reason="accepted memory selected",
@@ -316,6 +351,8 @@ async def _seed_m5_verified_records(get_session, operator):
             updated_at=now,
             revision=1,
         )
+        receipt.receipt_binding_digest = _m5_receipt_binding_digest(receipt, proposal) or ""
+        receipt.receipt_integrity_mac = _m5_receipt_integrity_mac(receipt)
         db.add(proposal)
         db.add(receipt)
         await db.flush()
@@ -411,6 +448,129 @@ async def test_m5_export_restore_round_trip_is_content_free_and_authenticated(lo
     assert (await memory_repository.get_memory(seeded["memory_id"])).content.startswith(
         "The verified recovery procedure"
     )
+
+
+@pytest.mark.asyncio
+async def test_m5_restore_quarantines_legacy_unsigned_accepted_memory(local_memory_db):
+    get_session, database_path = local_memory_db
+    operator = make_test_bypass_operator()
+    owner_session = operator.session_id
+    seeded = await _seed_m5_verified_records(get_session, operator)
+    with _runtime_operator(operator):
+        archive = await memory_repository.export_canonical_memory_state(
+            actor=operator.principal.principal_id,
+            owner_session_id=owner_session,
+            authenticated_session_id=owner_session,
+        )
+
+    # Pre-binding M5 exports contain neither the source projection nor its
+    # keyed selection signature. Keep the newer receipt intact so this test
+    # isolates legacy accepted-memory compatibility.
+    legacy = json.loads(json.dumps(archive))
+    memory_record = next(item for item in legacy["memories"] if item["id"] == seeded["memory_id"])
+    memory_provenance = memory_record["metadata"]["work_board_provenance"]
+    memory_provenance.pop("verified_source_binding", None)
+    memory_provenance.pop("selection_binding_key_id", None)
+    memory_provenance.pop("selection_binding_mac", None)
+    legacy["export_hash"] = _recovery_json_hash(_memory_export_integrity_payload(legacy))
+    legacy["artifact_path"] = f"artifacts/memory-recovery/export-{legacy['export_hash'][:24]}.json"
+    legacy["artifact_sha256"] = _recovery_json_hash(_memory_export_artifact_payload(legacy))
+
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute("DELETE FROM work_board_decision_receipts")
+        connection.execute("DELETE FROM memory_proposals")
+        connection.execute("DELETE FROM memory_sources WHERE memory_id = ?", (seeded["memory_id"],))
+        connection.execute("DELETE FROM memories WHERE id = ?", (seeded["memory_id"],))
+        connection.commit()
+    finally:
+        connection.close()
+
+    with _runtime_operator(operator):
+        restored = await memory_repository.restore_canonical_memory_state(
+            legacy,
+            actor=operator.principal.principal_id,
+            owner_session_id=owner_session,
+            authenticated_session_id=owner_session,
+        )
+    assert restored["m5_blocked_proposal_ids"] == [seeded["proposal_id"]]
+
+    async with get_session() as db:
+        proposal = (
+            await db.execute(
+                select(MemoryProposal).where(MemoryProposal.proposal_id == seeded["proposal_id"])
+            )
+        ).scalar_one()
+    assert proposal.status is MemoryProposalStatus.blocked
+    assert proposal.reason_code == "accepted_memory_binding_unverifiable"
+    assert proposal.recovery_action == "verify_source_and_reaccept"
+
+
+@pytest.mark.asyncio
+async def test_m5_restore_quarantines_rehashed_receipt_tampering(local_memory_db):
+    get_session, database_path = local_memory_db
+    operator = make_test_bypass_operator()
+    owner_session = operator.session_id
+    seeded = await _seed_m5_verified_records(get_session, operator)
+    with _runtime_operator(operator):
+        archive = await memory_repository.export_canonical_memory_state(
+            actor=operator.principal.principal_id,
+            owner_session_id=owner_session,
+            authenticated_session_id=owner_session,
+        )
+
+    tampered = json.loads(json.dumps(archive))
+    receipt_record = next(
+        item for item in tampered["m5_decision_receipts"] if item["receipt_id"] == seeded["receipt_id"]
+    )
+    receipt_record["after_action_id"] = "dispatch:forged-capability"
+    receipt_record["after_selected_capability_id"] = "forged-capability"
+    receipt_record["retrieval_evidence_ids"] = ["evidence:forged"]
+    tampered["export_hash"] = _recovery_json_hash(_memory_export_integrity_payload(tampered))
+    tampered["artifact_path"] = f"artifacts/memory-recovery/export-{tampered['export_hash'][:24]}.json"
+    tampered["artifact_sha256"] = _recovery_json_hash(_memory_export_artifact_payload(tampered))
+
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute("DELETE FROM work_board_decision_receipts")
+        connection.execute("DELETE FROM memory_proposals")
+        connection.execute("DELETE FROM memory_sources WHERE memory_id = ?", (seeded["memory_id"],))
+        connection.execute("DELETE FROM memories WHERE id = ?", (seeded["memory_id"],))
+        connection.commit()
+    finally:
+        connection.close()
+
+    with _runtime_operator(operator):
+        restored = await memory_repository.restore_canonical_memory_state(
+            tampered,
+            actor=operator.principal.principal_id,
+            owner_session_id=owner_session,
+            authenticated_session_id=owner_session,
+        )
+    assert restored["m5_blocked_proposal_ids"] == [seeded["proposal_id"]]
+    assert restored["m5_blocked_receipt_ids"] == [seeded["receipt_id"]]
+
+    async with get_session() as db:
+        proposal = (
+            await db.execute(
+                select(MemoryProposal).where(MemoryProposal.proposal_id == seeded["proposal_id"])
+            )
+        ).scalar_one()
+        receipt = (
+            await db.execute(
+                select(WorkBoardDecisionReceipt).where(
+                    WorkBoardDecisionReceipt.receipt_id == seeded["receipt_id"]
+                )
+            )
+        ).scalar_one()
+    assert proposal.status is MemoryProposalStatus.blocked
+    assert proposal.reason_code == "receipt_integrity_unverifiable"
+    assert proposal.recovery_action == "verify_source_and_reaccept"
+    assert receipt.decision_status is WorkBoardDecisionStatus.blocked
+    assert receipt.admission_status is WorkBoardDecisionAdmissionStatus.blocked
+    assert receipt.reason == "receipt_integrity_unverifiable"
 
 
 @pytest.mark.asyncio

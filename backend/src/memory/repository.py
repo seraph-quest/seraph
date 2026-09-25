@@ -245,8 +245,6 @@ _M5_SCOPE_KEYS = frozenset(
     }
 )
 _M5_SOURCE_EVIDENCE_LIMIT = 20
-
-
 def _m5_selection_scope(value: Any) -> dict[str, Any] | None:
     """Project the selection fields bound into an accepted M5 memory.
 
@@ -281,6 +279,79 @@ def _m5_selection_scope(value: Any) -> dict[str, Any] | None:
     }
 
 
+def _m5_verified_source_binding(value: Any) -> dict[str, Any] | None:
+    """Return the bounded immutable source fields used by M5 decisions."""
+
+    if isinstance(value, dict):
+        raw = value.get("verified_source_binding", value)
+
+        def get_field(name: str, default: Any = None) -> Any:
+            return raw.get(name, default) if isinstance(raw, dict) else default
+
+    else:
+
+        def get_field(name: str, default: Any = None) -> Any:
+            return getattr(value, name, default)
+
+    if isinstance(value, dict) and isinstance(raw, dict) and "source_evidence_ids" in raw:
+        evidence_value = raw.get("source_evidence_ids")
+    else:
+        evidence_value = get_field("source_evidence_ids")
+        if evidence_value is None:
+            evidence_value = get_field("source_refs_json", "[]")
+    if isinstance(evidence_value, str):
+        try:
+            evidence_value = json.loads(evidence_value)
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(evidence_value, list) or any(not isinstance(item, str) for item in evidence_value):
+        return None
+
+    try:
+        normalized = {
+            "owner_principal_id": str(get_field("owner_principal_id") or ""),
+            "owner_session_id": str(get_field("owner_session_id") or ""),
+            "source_task_id": str(get_field("source_task_id") or ""),
+            "source_task_revision": int(get_field("source_task_revision") or 0),
+            "source_attempt_id": str(get_field("source_attempt_id") or ""),
+            "source_attempt_fence": int(get_field("source_attempt_fence") or 0),
+            "workflow_run_id": str(get_field("workflow_run_id") or ""),
+            "workflow_run_revision": int(get_field("workflow_run_revision") or 0),
+            "goal_id": str(get_field("goal_id") or ""),
+            "goal_revision": int(get_field("goal_revision") or 0),
+            "capability_id": str(get_field("capability_id") or ""),
+            "capability_version": str(get_field("capability_version") or ""),
+            "typed_input_digest": str(get_field("typed_input_digest") or ""),
+            "source_context_digest": str(get_field("source_context_digest") or ""),
+            "candidate_set_digest": str(get_field("candidate_set_digest") or ""),
+            "evidence_digest": str(get_field("evidence_digest") or ""),
+            "readback_kind": str(get_field("readback_kind") or ""),
+            "readback_ref": str(get_field("readback_ref") or ""),
+            "readback_digest": str(get_field("readback_digest") or ""),
+            "artifact_ref": str(get_field("artifact_ref") or ""),
+            "artifact_digest": str(get_field("artifact_digest") or ""),
+            "proposal_job_id": str(get_field("proposal_job_id") or ""),
+            "request_idempotency_key": str(get_field("request_idempotency_key") or ""),
+            "request_binding_digest": str(get_field("request_binding_digest") or ""),
+            "source_evidence_ids": list(evidence_value),
+        }
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not normalized["owner_principal_id"] or not normalized["owner_session_id"]:
+        return None
+    if not normalized["source_task_id"] or not normalized["source_attempt_id"]:
+        return None
+    if not normalized["goal_id"] or not normalized["capability_id"]:
+        return None
+    return normalized
+
+
+def _m5_selection_binding_key_id() -> str:
+    """Return a non-secret identifier for the active M5 signing key."""
+
+    return hashlib.sha256(b"seraph-m5-selection-key-id-v1:" + _effect_mac_key()).hexdigest()[:24]
+
+
 def _m5_selection_binding_mac(
     *,
     proposal_id: str,
@@ -288,6 +359,7 @@ def _m5_selection_binding_mac(
     owner_principal_id: str,
     owner_session_id: str,
     source_context_digest: str,
+    source_binding: Any,
     decision_effect: Any,
     memory_scope: Any,
 ) -> str:
@@ -303,6 +375,15 @@ def _m5_selection_binding_mac(
         or source_context_digest != canonical_scope["source_context_digest"]
     ):
         raise ValueError("M5 selection binding identity is invalid")
+    canonical_source = _m5_verified_source_binding(source_binding)
+    if canonical_source is None:
+        raise ValueError("M5 verified source binding is invalid")
+    if (
+        canonical_source["owner_principal_id"] != owner_principal_id
+        or canonical_source["owner_session_id"] != owner_session_id
+        or canonical_source["source_context_digest"] != source_context_digest
+    ):
+        raise ValueError("M5 verified source identity is invalid")
     canonical_effect = str(getattr(decision_effect, "value", decision_effect) or "").strip()
     if not canonical_effect:
         raise ValueError("M5 decision effect is invalid")
@@ -314,6 +395,7 @@ def _m5_selection_binding_mac(
             "owner_principal_id": owner_principal_id,
             "owner_session_id": owner_session_id,
             "source_context_digest": source_context_digest,
+            "verified_source_binding": canonical_source,
             "decision_effect": canonical_effect,
             "memory_scope": canonical_scope,
         },
@@ -328,6 +410,7 @@ def _m5_selection_binding_matches(
     accepted_content_digest: Any,
     decision_effect: Any,
     memory_scope: Any,
+    source_binding: Any,
 ) -> bool:
     """Confirm that an accepted proposal still matches canonical memory.
 
@@ -350,13 +433,24 @@ def _m5_selection_binding_matches(
     canonical_scope = _m5_selection_scope(provenance.get("memory_scope"))
     if expected_scope is None or canonical_scope != expected_scope:
         return False
+    expected_source = _m5_verified_source_binding(source_binding)
+    canonical_source = _m5_verified_source_binding(provenance.get("verified_source_binding"))
+    if expected_source is None or canonical_source != expected_source:
+        return False
     try:
+        active_key_id = _m5_selection_binding_key_id()
+        stored_key_id = provenance.get("selection_binding_key_id")
+        if not hmac.compare_digest(
+            stored_key_id if isinstance(stored_key_id, str) else "", active_key_id
+        ):
+            return False
         expected_mac = _m5_selection_binding_mac(
             proposal_id=proposal_id,
             accepted_content_digest=accepted_content_digest,
             owner_principal_id=str(provenance.get("owner_principal_id") or ""),
             owner_session_id=str(provenance.get("owner_session_id") or ""),
             source_context_digest=str(provenance.get("source_context_digest") or ""),
+            source_binding=canonical_source,
             decision_effect=canonical_effect,
             memory_scope=canonical_scope,
         )
@@ -364,6 +458,288 @@ def _m5_selection_binding_matches(
         return False
     stored_mac = provenance.get("selection_binding_mac")
     return isinstance(stored_mac, str) and hmac.compare_digest(stored_mac, expected_mac)
+
+
+def _m5_selection_binding_failure_reason(
+    provenance: Any,
+    *,
+    proposal_id: Any,
+    accepted_content_digest: Any,
+    decision_effect: Any,
+    memory_scope: Any,
+    source_binding: Any,
+) -> str:
+    """Classify a rejected accepted-memory binding without exposing key state."""
+
+    if not isinstance(provenance, dict):
+        return "unverifiable"
+    if not provenance.get("selection_binding_mac") or not provenance.get("verified_source_binding"):
+        return "unverifiable"
+    try:
+        active_key_id = _m5_selection_binding_key_id()
+    except CapabilityJournalError:
+        return "unverifiable"
+    stored_key_id = provenance.get("selection_binding_key_id")
+    if (
+        not isinstance(stored_key_id, str)
+        or not re.fullmatch(r"[0-9a-f]{24}", stored_key_id)
+        or not hmac.compare_digest(stored_key_id, active_key_id)
+    ):
+        return "unverifiable"
+    expected_source = _m5_verified_source_binding(source_binding)
+    canonical_source = _m5_verified_source_binding(provenance.get("verified_source_binding"))
+    expected_scope = _m5_selection_scope(memory_scope)
+    canonical_scope = _m5_selection_scope(provenance.get("memory_scope"))
+    if expected_source is None or canonical_source is None or expected_scope is None:
+        return "unverifiable"
+    if canonical_source != expected_source or canonical_scope != expected_scope:
+        return "mismatch"
+    try:
+        expected_mac = _m5_selection_binding_mac(
+            proposal_id=proposal_id,
+            accepted_content_digest=accepted_content_digest,
+            owner_principal_id=str(provenance.get("owner_principal_id") or ""),
+            owner_session_id=str(provenance.get("owner_session_id") or ""),
+            source_context_digest=str(provenance.get("source_context_digest") or ""),
+            source_binding=canonical_source,
+            decision_effect=decision_effect,
+            memory_scope=canonical_scope,
+        )
+    except CapabilityJournalError:
+        return "unverifiable"
+    except (TypeError, ValueError):
+        return "mismatch"
+    stored_mac = provenance.get("selection_binding_mac")
+    if (
+        not isinstance(stored_mac, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", stored_mac)
+        or not hmac.compare_digest(stored_mac, expected_mac)
+    ):
+        return "mismatch"
+    return "mismatch"
+
+
+def _m5_receipt_field(value: Any, name: str, default: Any = None) -> Any:
+    if isinstance(value, dict):
+        return value.get(name, default)
+    return getattr(value, name, default)
+
+
+_M5_RECEIPT_INTEGRITY_FIELDS = (
+    "receipt_id",
+    "schema_version",
+    "receipt_stage",
+    "receipt_binding_digest",
+    "owner_principal_id",
+    "owner_session_id",
+    "source_proposal_id",
+    "source_proposal_revision",
+    "source_baseline_receipt_id",
+    "source_task_id",
+    "source_task_revision",
+    "source_attempt_id",
+    "source_attempt_fence",
+    "source_workflow_run_id",
+    "source_workflow_run_revision",
+    "later_task_id",
+    "later_task_revision",
+    "later_attempt_id",
+    "later_workflow_run_id",
+    "later_attempt_fence",
+    "goal_id",
+    "goal_revision",
+    "capability_id",
+    "capability_version",
+    "typed_input_digest",
+    "task_intent_digest",
+    "source_context_digest",
+    "candidate_set_digest",
+    "accepted_memory_id",
+    "accepted_memory_content_digest",
+    "before_input_digest",
+    "after_input_digest",
+    "before_action_id",
+    "after_action_id",
+    "before_selected_capability_id",
+    "after_selected_capability_id",
+    "confirmed_action_id",
+    "comparison_context_digest",
+    "retrieval_evidence_ids",
+    "decision_status",
+    "admission_status",
+    "reason",
+    "confirmer_principal_id",
+    "confirmer_session_id",
+    "confirmed_at",
+    "confirmation_binding_digest",
+    "consumed_at",
+    "revision",
+    "created_at",
+    "updated_at",
+)
+
+
+def _m5_receipt_integrity_payload(value: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for field_name in _M5_RECEIPT_INTEGRITY_FIELDS:
+        if field_name == "retrieval_evidence_ids":
+            raw_evidence = _m5_receipt_field(value, field_name)
+            if raw_evidence is None:
+                raw_evidence = _m5_receipt_field(value, "retrieval_evidence_ids_json", "[]")
+            if isinstance(raw_evidence, str):
+                try:
+                    raw_evidence = json.loads(raw_evidence)
+                except (TypeError, ValueError):
+                    raw_evidence = []
+            payload[field_name] = raw_evidence if isinstance(raw_evidence, list) else []
+            continue
+        raw = _m5_receipt_field(value, field_name)
+        if field_name in {"receipt_stage", "decision_status", "admission_status"}:
+            raw = getattr(raw, "value", raw)
+        elif field_name in {"confirmed_at", "consumed_at", "created_at", "updated_at"}:
+            if raw is not None:
+                if isinstance(raw, datetime):
+                    raw = _recovery_timestamp(raw)
+                elif isinstance(raw, str):
+                    try:
+                        raw = _recovery_timestamp(
+                            _parse_recovery_timestamp(raw, field_name=f"receipt.{field_name}")
+                        )
+                    except ValueError:
+                        # Normalized restore records have already validated
+                        # timestamps.  Keep malformed values deterministic for
+                        # the comparison helper, which will fail closed.
+                        raw = str(raw)
+                else:
+                    raw = str(raw)
+        payload[field_name] = raw
+    return payload
+
+
+def _m5_receipt_integrity_mac(value: Any) -> str:
+    return _mac(
+        {
+            "version": "work-board-m5-receipt-integrity.v1",
+            "receipt": _m5_receipt_integrity_payload(value),
+        },
+        key=_effect_mac_key(),
+    )
+
+
+def _m5_receipt_integrity_matches(value: Any) -> bool:
+    """Verify the complete receipt record with the configured server key."""
+
+    supplied = _m5_receipt_field(value, "receipt_integrity_mac")
+    if not isinstance(supplied, str) or not _M5_RECOVERY_DIGEST.fullmatch(supplied):
+        return False
+    try:
+        expected = _m5_receipt_integrity_mac(value)
+    except (CapabilityJournalError, TypeError, ValueError):
+        return False
+    return hmac.compare_digest(supplied, expected)
+
+
+def _m5_receipt_binding_digest(receipt: Any, proposal: Any | None = None) -> str | None:
+    """Recompute one historical M5 receipt binding from canonical fields."""
+
+    from src.memory.m5 import M5_NONE_DIGEST, M5_NONE_MEMORY, M5_NONE_PROPOSAL, M5_RECEIPT_SCHEMA_VERSION, m5_digest
+
+    stage = str(getattr(_m5_receipt_field(receipt, "receipt_stage"), "value", _m5_receipt_field(receipt, "receipt_stage") or ""))
+    owner_principal_id = str(_m5_receipt_field(receipt, "owner_principal_id") or "")
+    owner_session_id = str(_m5_receipt_field(receipt, "owner_session_id") or "")
+    if stage == "later_comparison":
+        return m5_digest(
+            {
+                "version": M5_RECEIPT_SCHEMA_VERSION,
+                "stage": stage,
+                "owner_principal_id": owner_principal_id,
+                "owner_session_id": owner_session_id,
+                "later_task_id": _m5_receipt_field(receipt, "later_task_id"),
+                "later_task_revision": int(_m5_receipt_field(receipt, "later_task_revision") or 0),
+                "goal_id": _m5_receipt_field(receipt, "goal_id"),
+                "goal_revision": int(_m5_receipt_field(receipt, "goal_revision") or 0),
+                "source_context_digest": str(_m5_receipt_field(receipt, "source_context_digest") or "").lower(),
+                "candidate_set_digest": _m5_receipt_field(receipt, "candidate_set_digest") or "",
+                "accepted_proposal_id": _m5_receipt_field(receipt, "source_proposal_id") or M5_NONE_PROPOSAL,
+                "accepted_memory_id": _m5_receipt_field(receipt, "accepted_memory_id") or M5_NONE_MEMORY,
+                "accepted_memory_content_digest": _m5_receipt_field(receipt, "accepted_memory_content_digest") or M5_NONE_DIGEST,
+            }
+        )
+    if stage != "source_baseline":
+        return None
+    if str(_m5_receipt_field(receipt, "reason") or "") == "source_baseline":
+        return m5_digest(
+            {
+                "version": M5_RECEIPT_SCHEMA_VERSION,
+                "stage": stage,
+                "owner_principal_id": owner_principal_id,
+                "owner_session_id": owner_session_id,
+                "source_attempt_id": _m5_receipt_field(receipt, "source_attempt_id"),
+                "source_task_revision": int(_m5_receipt_field(receipt, "source_task_revision") or 0),
+                "source_proposal_id": _m5_receipt_field(receipt, "source_proposal_id"),
+            }
+        )
+    if proposal is None:
+        return None
+    status = str(getattr(_m5_receipt_field(proposal, "status"), "value", _m5_receipt_field(proposal, "status") or ""))
+    return m5_digest(
+        {
+            "version": M5_RECEIPT_SCHEMA_VERSION,
+            "stage": stage,
+            "owner_principal_id": owner_principal_id,
+            "owner_session_id": owner_session_id,
+            "source_task_id": _m5_receipt_field(receipt, "source_task_id"),
+            "source_task_revision": int(_m5_receipt_field(receipt, "source_task_revision") or 0),
+            "source_attempt_id": _m5_receipt_field(receipt, "source_attempt_id"),
+            "source_proposal_id": _m5_receipt_field(receipt, "source_proposal_id"),
+            "status": status,
+            "reason": _m5_receipt_field(receipt, "reason") or "",
+        }
+    )
+
+
+def _m5_receipt_source_matches_proposal(receipt: Any, proposal: Any) -> bool:
+    source = _m5_verified_source_binding(proposal)
+    if source is None:
+        return False
+    if _m5_receipt_field(receipt, "source_proposal_id") != _m5_receipt_field(proposal, "proposal_id"):
+        return False
+    for receipt_name, source_name in (
+        ("owner_principal_id", "owner_principal_id"),
+        ("owner_session_id", "owner_session_id"),
+        ("source_task_id", "source_task_id"),
+        ("source_task_revision", "source_task_revision"),
+        ("source_attempt_id", "source_attempt_id"),
+        ("source_attempt_fence", "source_attempt_fence"),
+        ("source_workflow_run_id", "workflow_run_id"),
+        ("source_workflow_run_revision", "workflow_run_revision"),
+        ("goal_id", "goal_id"),
+        ("goal_revision", "goal_revision"),
+        ("source_context_digest", "source_context_digest"),
+    ):
+        receipt_value = _m5_receipt_field(receipt, receipt_name)
+        if receipt_name == "source_workflow_run_id" and receipt_value is None:
+            receipt_value = ""
+        if str(receipt_value or "") != str(source.get(source_name) or ""):
+            return False
+    try:
+        receipt_evidence = json.loads(_m5_receipt_field(receipt, "retrieval_evidence_ids_json") or "[]")
+    except (TypeError, ValueError):
+        return False
+    return receipt_evidence == source["source_evidence_ids"]
+
+
+def _m5_receipt_binding_matches(receipt: Any, proposal: Any | None = None) -> bool:
+    if proposal is not None and not _m5_receipt_source_matches_proposal(receipt, proposal):
+        return False
+    expected = _m5_receipt_binding_digest(receipt, proposal)
+    supplied = _m5_receipt_field(receipt, "receipt_binding_digest")
+    return bool(
+        expected
+        and isinstance(supplied, str)
+        and _M5_RECOVERY_DIGEST.fullmatch(supplied)
+        and hmac.compare_digest(supplied, expected)
+    )
 
 
 def _m5_recovery_id(value: Any, *, field_name: str, required: bool = False) -> str | None:
@@ -639,6 +1015,7 @@ def _m5_receipt_archive_payload(receipt: WorkBoardDecisionReceipt) -> dict[str, 
         "schema_version": receipt.schema_version,
         "receipt_stage": _m5_export_enum(receipt.receipt_stage),
         "receipt_binding_digest": receipt.receipt_binding_digest,
+        "receipt_integrity_mac": receipt.receipt_integrity_mac,
         "owner_principal_id": receipt.owner_principal_id,
         "owner_session_id": receipt.owner_session_id,
         "source_proposal_id": receipt.source_proposal_id,
@@ -956,6 +1333,12 @@ def _m5_normalize_receipt_record(
         "schema_version": "work_board_decision_receipt.v1",
         "receipt_stage": _m5_recovery_enum(record.get("receipt_stage"), WorkBoardDecisionReceiptStage, field_name="receipt stage"),
         "receipt_binding_digest": receipt_binding_digest,
+        # This is optional only for legacy archives.  Restore never treats a
+        # missing or invalid value as authenticated; the receipt/proposal is
+        # quarantined below until the operator re-verifies and accepts it.
+        "receipt_integrity_mac": _m5_normalize_optional_digest(
+            record.get("receipt_integrity_mac"), field_name="receipt_integrity_mac"
+        ),
         "owner_principal_id": owner_principal_id,
         "owner_session_id": owner_session_id,
         "source_proposal_id": _m5_normalize_optional_id(record.get("source_proposal_id"), field_name="source_proposal_id"),
@@ -1799,7 +2182,30 @@ class MemoryRepository:
                 accepted_content_digest=expected_digest,
                 decision_effect=proposal.decision_effect,
                 memory_scope=proposal_scope,
+                source_binding=proposal,
             ):
+                failure_reason = _m5_selection_binding_failure_reason(
+                    provenance,
+                    proposal_id=proposal.proposal_id,
+                    accepted_content_digest=expected_digest,
+                    decision_effect=proposal.decision_effect,
+                    memory_scope=proposal_scope,
+                    source_binding=proposal,
+                )
+                proposal.status = MemoryProposalStatus.blocked
+                proposal.reason_code = (
+                    "accepted_memory_binding_unverifiable"
+                    if failure_reason == "unverifiable"
+                    else "accepted_memory_binding_mismatch"
+                )
+                proposal.recovery_action = (
+                    "verify_source_and_reaccept"
+                    if failure_reason == "unverifiable"
+                    else "request_verified_proposal_again"
+                )
+                proposal.revision = int(proposal.revision or 0) + 1
+                proposal.updated_at = _now()
+                db.add(proposal)
                 continue
             has_source = (
                 await db.execute(
@@ -3500,6 +3906,16 @@ class MemoryRepository:
         m5_receipt_conflict_ids: list[str] = []
         m5_owner_conflict_ids: list[str] = []
 
+        def _mark_m5_receipt_blocked(receipt_id: str) -> None:
+            if receipt_id not in m5_blocked_receipt_ids:
+                m5_blocked_receipt_ids.append(receipt_id)
+
+        unverifiable_receipt_proposal_ids = {
+            candidate["source_proposal_id"]
+            for candidate in normalized_m5_receipts
+            if candidate["source_proposal_id"] and not _m5_receipt_integrity_matches(candidate)
+        }
+
         async def _redact_memory_for_tombstone(db, memory: Memory, tombstone: MemoryTombstone) -> None:
             try:
                 metadata = json.loads(memory.metadata_json or "{}")
@@ -3554,6 +3970,7 @@ class MemoryRepository:
             source_context_digest: str | None = None,
             decision_effect: Any | None = None,
             memory_scope: Any | None = None,
+            source_binding: Any | None = None,
         ) -> bool:
             if not memory_id or not content_digest:
                 return False
@@ -3577,7 +3994,7 @@ class MemoryRepository:
             try:
                 metadata = json.loads(memory.metadata_json or "{}")
             except (TypeError, ValueError):
-                return False
+                return "unverifiable"
             provenance = metadata.get("work_board_provenance") if isinstance(metadata, dict) else None
             if not isinstance(provenance, dict):
                 return False
@@ -3590,7 +4007,8 @@ class MemoryRepository:
                 return False
             if source_context_digest and provenance.get("source_context_digest") != source_context_digest:
                 return False
-            if decision_effect is None or memory_scope is None:
+            linked_proposal = None
+            if decision_effect is None or memory_scope is None or source_binding is None:
                 if not proposal_id:
                     return False
                 linked_proposal = (
@@ -3608,12 +4026,15 @@ class MemoryRepository:
                     memory_scope = json.loads(linked_proposal.memory_scope_json or "{}")
                 except (TypeError, ValueError):
                     return False
+                if source_binding is None:
+                    source_binding = linked_proposal
             if not _m5_selection_binding_matches(
                 provenance,
                 proposal_id=proposal_id,
                 accepted_content_digest=content_digest,
                 decision_effect=decision_effect,
                 memory_scope=memory_scope,
+                source_binding=source_binding,
             ):
                 return False
             return True
@@ -3626,13 +4047,16 @@ class MemoryRepository:
             content_digest: str | None,
             decision_effect: Any,
             memory_scope: Any,
-        ) -> bool | None:
+            source_binding: Any,
+        ) -> bool | str | None:
             """Return canonical selection binding state for restore diagnostics.
 
-            ``None`` means the canonical memory row is unavailable.  ``False``
+            ``None`` means the canonical memory row is unavailable.  ``"mismatch"``
             means a row exists but its accepted selection binding disagrees;
-            this distinction lets restore keep tombstone/missing-row behavior
-            while quarantining a forged accepted choice as blocked.
+            ``"unverifiable"`` means its keyed binding is absent or cannot be
+            checked with the current server key.  These distinctions let
+            restore keep tombstone/missing-row behavior while quarantining a
+            forged or legacy accepted choice as blocked.
             """
 
             if not memory_id:
@@ -3655,14 +4079,24 @@ class MemoryRepository:
             try:
                 metadata = json.loads(memory.metadata_json or "{}")
             except (TypeError, ValueError):
-                return False
+                return "unverifiable"
             provenance = metadata.get("work_board_provenance") if isinstance(metadata, dict) else None
-            return _m5_selection_binding_matches(
+            if _m5_selection_binding_matches(
                 provenance,
                 proposal_id=proposal_id,
                 accepted_content_digest=content_digest,
                 decision_effect=decision_effect,
                 memory_scope=memory_scope,
+                source_binding=source_binding,
+            ):
+                return True
+            return _m5_selection_binding_failure_reason(
+                provenance,
+                proposal_id=proposal_id,
+                accepted_content_digest=content_digest,
+                decision_effect=decision_effect,
+                memory_scope=memory_scope,
+                source_binding=source_binding,
             )
 
         async with self._canonical_memory_lock:
@@ -3843,43 +4277,70 @@ class MemoryRepository:
                         if candidate["privacy_state"] is MemoryProposalPrivacyState.redacted:
                             m5_suppressed_proposal_ids.append(candidate["proposal_id"])
                             continue
+                        if candidate["proposal_id"] in unverifiable_receipt_proposal_ids:
+                            candidate["status"] = MemoryProposalStatus.blocked
+                            candidate["reason_code"] = "receipt_integrity_unverifiable"
+                            candidate["recovery_action"] = "verify_source_and_reaccept"
+                            m5_blocked_proposal_ids.append(candidate["proposal_id"])
+                            # The source receipt is not trustworthy enough to
+                            # allow this proposal to become a decision source.
+                            # Keep the projection visible for re-review.
+                            binding_active = False
+                            selection_binding_state = "unverifiable"
+                        else:
+                            binding_active = None
+                            selection_binding_state = None
                         selection_scope = None
                         try:
                             selection_scope = json.loads(candidate["memory_scope_json"] or "{}")
                         except (TypeError, ValueError):
                             selection_scope = None
-                        binding_active = await _m5_memory_binding_is_active(
-                            db,
-                            memory_id=candidate["accepted_memory_id"],
-                            content_digest=candidate["accepted_memory_content_digest"],
-                            proposal_id=candidate["proposal_id"],
-                            source_context_digest=candidate["source_context_digest"],
-                            decision_effect=candidate["decision_effect"],
-                            memory_scope=selection_scope,
-                        )
-                        if not binding_active:
-                            selection_binding_state = await _m5_memory_selection_binding_state(
+                        if binding_active is None:
+                            binding_active = await _m5_memory_binding_is_active(
                                 db,
                                 memory_id=candidate["accepted_memory_id"],
-                                proposal_id=candidate["proposal_id"],
                                 content_digest=candidate["accepted_memory_content_digest"],
+                                proposal_id=candidate["proposal_id"],
+                                source_context_digest=candidate["source_context_digest"],
                                 decision_effect=candidate["decision_effect"],
                                 memory_scope=selection_scope,
+                                source_binding=candidate,
                             )
-                            if selection_binding_state is False:
+                        if not binding_active:
+                            if selection_binding_state is None:
+                                selection_binding_state = await _m5_memory_selection_binding_state(
+                                    db,
+                                    memory_id=candidate["accepted_memory_id"],
+                                    proposal_id=candidate["proposal_id"],
+                                    content_digest=candidate["accepted_memory_content_digest"],
+                                    decision_effect=candidate["decision_effect"],
+                                    memory_scope=selection_scope,
+                                    source_binding=candidate,
+                                )
+                            if selection_binding_state in {"mismatch", "unverifiable", False}:
                                 # Keep the accepted row visible for operator
                                 # recovery, but never let a rehashed archive
                                 # alter a later decision without acceptance.
                                 candidate["status"] = MemoryProposalStatus.blocked
-                                candidate["reason_code"] = "accepted_memory_binding_mismatch"
-                                candidate["recovery_action"] = "request_verified_proposal_again"
-                                m5_blocked_proposal_ids.append(candidate["proposal_id"])
+                                if candidate["proposal_id"] not in unverifiable_receipt_proposal_ids:
+                                    candidate["reason_code"] = (
+                                        "accepted_memory_binding_unverifiable"
+                                        if selection_binding_state == "unverifiable"
+                                        else "accepted_memory_binding_mismatch"
+                                    )
+                                    candidate["recovery_action"] = (
+                                        "verify_source_and_reaccept"
+                                        if selection_binding_state == "unverifiable"
+                                        else "request_verified_proposal_again"
+                                    )
+                                if candidate["proposal_id"] not in m5_blocked_proposal_ids:
+                                    m5_blocked_proposal_ids.append(candidate["proposal_id"])
                             else:
                                 m5_suppressed_proposal_ids.append(candidate["proposal_id"])
                             # A missing/tombstoned memory keeps the existing
                             # suppression behavior; a present mismatched row
                             # is restored as blocked for explicit recovery.
-                            if selection_binding_state is not False:
+                            if selection_binding_state not in {"mismatch", "unverifiable", False}:
                                 continue
                     elif candidate["status"] is MemoryProposalStatus.blocked:
                         m5_blocked_proposal_ids.append(candidate["proposal_id"])
@@ -3937,7 +4398,40 @@ class MemoryRepository:
 
                 for candidate in normalized_m5_receipts:
                     receipt_candidate = dict(candidate)
-                    if receipt_candidate["accepted_memory_id"]:
+                    receipt_integrity_valid = _m5_receipt_integrity_matches(receipt_candidate)
+                    linked_proposal = None
+                    if receipt_candidate["source_proposal_id"]:
+                        linked_proposal = (
+                            await db.execute(
+                                select(MemoryProposal).where(
+                                    MemoryProposal.proposal_id == receipt_candidate["source_proposal_id"],
+                                    MemoryProposal.owner_principal_id == normalized_actor,
+                                    MemoryProposal.owner_session_id == normalized_owner,
+                                )
+                            )
+                        ).scalars().first()
+                    if not receipt_integrity_valid:
+                        receipt_candidate["decision_status"] = WorkBoardDecisionStatus.blocked
+                        receipt_candidate["admission_status"] = WorkBoardDecisionAdmissionStatus.blocked
+                        receipt_candidate["reason"] = "receipt_integrity_unverifiable"
+                        _mark_m5_receipt_blocked(receipt_candidate["receipt_id"])
+                    elif not _m5_receipt_binding_matches(receipt_candidate, linked_proposal):
+                        receipt_candidate["decision_status"] = WorkBoardDecisionStatus.blocked
+                        receipt_candidate["admission_status"] = WorkBoardDecisionAdmissionStatus.blocked
+                        receipt_candidate["reason"] = "receipt_binding_mismatch"
+                        _mark_m5_receipt_blocked(receipt_candidate["receipt_id"])
+                    elif receipt_candidate["source_proposal_id"] and (
+                        linked_proposal is None
+                        or linked_proposal.status is MemoryProposalStatus.blocked
+                    ):
+                        receipt_candidate["decision_status"] = WorkBoardDecisionStatus.blocked
+                        receipt_candidate["admission_status"] = WorkBoardDecisionAdmissionStatus.blocked
+                        receipt_candidate["reason"] = "source_proposal_unavailable_on_restore"
+                        _mark_m5_receipt_blocked(receipt_candidate["receipt_id"])
+                    if (
+                        receipt_candidate["accepted_memory_id"]
+                        and receipt_integrity_valid
+                    ):
                         memory_available = await _m5_memory_binding_is_active(
                             db,
                             memory_id=receipt_candidate["accepted_memory_id"],
@@ -3948,7 +4442,17 @@ class MemoryRepository:
                             receipt_candidate["decision_status"] = WorkBoardDecisionStatus.blocked
                             receipt_candidate["admission_status"] = WorkBoardDecisionAdmissionStatus.blocked
                             receipt_candidate["reason"] = "accepted_memory_unavailable_on_restore"
-                            m5_blocked_receipt_ids.append(receipt_candidate["receipt_id"])
+                            _mark_m5_receipt_blocked(receipt_candidate["receipt_id"])
+                    if receipt_integrity_valid and receipt_candidate["reason"] != candidate["reason"]:
+                        # A valid receipt may be blocked by a current source or
+                        # memory check during restore.  Seal that local,
+                        # operator-visible state with the same server key.
+                        try:
+                            receipt_candidate["receipt_integrity_mac"] = _m5_receipt_integrity_mac(
+                                receipt_candidate
+                            )
+                        except CapabilityJournalError:
+                            receipt_candidate["receipt_integrity_mac"] = None
                     existing = (
                         await db.execute(
                             select(WorkBoardDecisionReceipt).where(

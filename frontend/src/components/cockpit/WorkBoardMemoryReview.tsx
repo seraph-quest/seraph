@@ -128,6 +128,7 @@ const SAFE_ERROR_MESSAGES: Record<string, string> = {
   memory_owner_session_forbidden: "This memory review is limited to the task owner’s authenticated session. Switch to that session and try again.",
   memory_owner_session_unbound: "The memory review has no authenticated owner session. Reopen the task in the task owner’s session before trying again.",
   accepted_memory_owner_mismatch: "The accepted memory belongs to another operator session. Use the task owner’s authenticated session to undo it.",
+  accepted_binding_unavailable: "Memory could not be signed. The proposal is blocked until its source is reverified and accepted again.",
   owner_session_mismatch: "The authenticated operator session does not match this memory review. Switch to the task owner’s session and try again.",
 };
 

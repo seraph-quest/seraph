@@ -1245,6 +1245,7 @@ class WorkBoardDecisionReceipt(SQLModel, table=True):
     schema_version: str = Field(default="work_board_decision_receipt.v1", index=True)
     receipt_stage: WorkBoardDecisionReceiptStage = Field(index=True)
     receipt_binding_digest: str = Field(default="", index=True)
+    receipt_integrity_mac: Optional[str] = Field(default=None)
     owner_principal_id: str = Field(index=True)
     owner_session_id: str = Field(index=True)
     source_proposal_id: Optional[str] = Field(default=None, index=True)

@@ -254,6 +254,51 @@ describe("WorkBoardMemoryReview", () => {
     );
   });
 
+  it("shows accepted-memory signing recovery when the server key is unavailable", async () => {
+    let currentProposal = proposal;
+    let actionCalls = 0;
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/memory/task-proposals?") && init?.method !== "POST") {
+        return response({ proposals: [currentProposal] });
+      }
+      if (url.includes("/api/memory/task-decisions?")) return response({ receipts: [] });
+      if (url.endsWith("/actions") && init?.method === "POST") {
+        actionCalls += 1;
+        currentProposal = {
+          ...proposal,
+          status: "blocked",
+          reason_code: "accepted_memory_binding_unverifiable",
+          recovery_action: "verify_source_and_reaccept",
+          revision: 2,
+        };
+        return response(
+          {
+            detail: {
+              code: "accepted_binding_unavailable",
+              proposal: currentProposal,
+            },
+          },
+          false,
+          503,
+        );
+      }
+      return response({}, false, 404);
+    });
+
+    render(<WorkBoardMemoryReview task={task()} ownerPrincipalId="operator:one" ownerSessionId="operator-session-1" />);
+
+    await screen.findByRole("article", { name: "Memory proposal proposed" });
+    fireEvent.click(screen.getByRole("button", { name: "Accept proposal" }));
+
+    await waitFor(() => expect(actionCalls).toBe(1));
+    expect(await screen.findByRole("article", { name: "Memory proposal blocked" })).toBeInTheDocument();
+    expect(screen.getByText(/Recovery: verify source and reaccept/)).toBeInTheDocument();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Memory could not be signed. The proposal is blocked until its source is reverified and accepted again.",
+    );
+  });
+
   it("keeps unverified tasks from requesting learning and records explicit no-learning receipts", async () => {
     const noLearning = { ...proposal, status: "no_learning", proposed_text: null, proposed_text_digest: null, reason_code: "unknown_effect" };
     fetchMock.mockImplementation(async (input: RequestInfo | URL) => {

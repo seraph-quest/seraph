@@ -14,10 +14,12 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import delete
 from sqlmodel import select
 
 from src.api import goals as goals_api
+from src.api import memory as memory_api
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.auth.service import test_bypass_operator as make_test_bypass_operator
 from src.db.models import (
@@ -45,9 +47,11 @@ from src.goals.contracts import (
 )
 from src.guardian.goal_conditioned_loop import propose_goal_candidate_set
 from src.memory import m5
+from src.memory import repository as memory_repository_module
 from src.memory.repository import (
     _memory_export_artifact_payload,
     _memory_export_integrity_payload,
+    _m5_receipt_integrity_matches,
     _recovery_json_hash,
     memory_repository,
 )
@@ -441,6 +445,156 @@ async def test_fresh_conversation_uses_accepted_correction(async_db, monkeypatch
         ).scalar_one()
         assert receipt.decision_status.value == "blocked"
         assert receipt.reason == "memory_rolled_back"
+        assert _m5_receipt_integrity_matches(receipt)
+
+
+@pytest.mark.asyncio
+async def test_rotated_m5_key_blocks_learning_with_recovery_reason(async_db, monkeypatch):
+    async with async_db() as db:
+        goal, source, later = await _goal_and_tasks(db, goal_id="m5-rotated-key-goal")
+        attempt = await _verified_attempt(db, source)
+    _patch_m5_sessions(monkeypatch, async_db)
+
+    proposal = await m5.create_memory_proposal(
+        owner_principal_id=OWNER.principal_id,
+        owner_session_id=OWNER.session_id,
+        task_id=source.task_id,
+        expected_task_revision=source.task_revision,
+        attempt_id=attempt.attempt_id,
+        decision_effect=MemoryProposalDecisionEffect.require_operator_confirmation,
+    )
+    accepted = await m5.apply_memory_proposal_action(
+        owner_principal_id=OWNER.principal_id,
+        owner_session_id=OWNER.session_id,
+        proposal_id=proposal["proposal_id"],
+        action="accept",
+        expected_revision=proposal["revision"],
+        expected_preview_text_digest=proposal["proposed_text_digest"],
+        expected_task_revision=source.task_revision,
+        expected_goal_revision=goal.revision,
+        decision_effect=MemoryProposalDecisionEffect.require_operator_confirmation,
+        preferred_capability_id=ALTERNATE_CAPABILITY,
+    )
+    assert accepted["status"] == MemoryProposalStatus.accepted.value
+
+    monkeypatch.setattr(memory_repository_module, "_effect_mac_key", lambda: b"rotated-m5-key")
+    later_result = await propose_goal_candidate_set(
+        goal_id=goal.id,
+        task_id=later.task_id,
+        candidates=[_candidate(SOURCE_CAPABILITY), _candidate(ALTERNATE_CAPABILITY)],
+        owner_principal_id=OWNER.principal_id,
+        owner_session_id=OWNER.session_id,
+        expected_task_revision=later.task_revision,
+        expected_goal_revision=goal.revision,
+    )
+    assert later_result["decision"]["decision_status"] == "blocked"
+    assert later_result["decision"]["reason"] == "accepted_memory_binding_unverifiable"
+
+    async with async_db() as db:
+        blocked = (
+            await db.execute(
+                select(MemoryProposal).where(MemoryProposal.proposal_id == proposal["proposal_id"])
+            )
+        ).scalar_one()
+    assert blocked.status is MemoryProposalStatus.blocked
+    assert blocked.reason_code == "accepted_memory_binding_unverifiable"
+    assert blocked.recovery_action == "verify_source_and_reaccept"
+
+
+@pytest.mark.asyncio
+async def test_tampered_source_baseline_blocks_later_decision(async_db, monkeypatch):
+    async with async_db() as db:
+        goal, source, later = await _goal_and_tasks(db, goal_id="m5-tampered-baseline-goal")
+        attempt = await _verified_attempt(db, source)
+    _patch_m5_sessions(monkeypatch, async_db)
+    proposal = await m5.create_memory_proposal(
+        owner_principal_id=OWNER.principal_id,
+        owner_session_id=OWNER.session_id,
+        task_id=source.task_id,
+        expected_task_revision=source.task_revision,
+        attempt_id=attempt.attempt_id,
+        decision_effect=MemoryProposalDecisionEffect.require_operator_confirmation,
+    )
+    await m5.apply_memory_proposal_action(
+        owner_principal_id=OWNER.principal_id,
+        owner_session_id=OWNER.session_id,
+        proposal_id=proposal["proposal_id"],
+        action="accept",
+        expected_revision=proposal["revision"],
+        expected_preview_text_digest=proposal["proposed_text_digest"],
+        expected_task_revision=source.task_revision,
+        expected_goal_revision=goal.revision,
+        decision_effect=MemoryProposalDecisionEffect.require_operator_confirmation,
+        preferred_capability_id=ALTERNATE_CAPABILITY,
+    )
+
+    async with async_db() as db:
+        baseline = (
+            await db.execute(
+                select(WorkBoardDecisionReceipt).where(
+                    WorkBoardDecisionReceipt.receipt_stage == WorkBoardDecisionReceiptStage.source_baseline,
+                    WorkBoardDecisionReceipt.source_proposal_id == proposal["proposal_id"],
+                )
+            )
+        ).scalar_one()
+        baseline.before_selected_capability_id = ALTERNATE_CAPABILITY
+        db.add(baseline)
+        await db.flush()
+
+    later_result = await propose_goal_candidate_set(
+        goal_id=goal.id,
+        task_id=later.task_id,
+        candidates=[_candidate(SOURCE_CAPABILITY), _candidate(ALTERNATE_CAPABILITY)],
+        owner_principal_id=OWNER.principal_id,
+        owner_session_id=OWNER.session_id,
+        expected_task_revision=later.task_revision,
+        expected_goal_revision=goal.revision,
+    )
+    assert later_result["decision"]["decision_status"] == "blocked"
+    assert later_result["decision"]["reason"] == "source_baseline_integrity_unverifiable"
+    assert later_result["decision"]["after_selected_capability_id"] == SOURCE_CAPABILITY
+
+
+@pytest.mark.asyncio
+async def test_missing_m5_key_returns_recovery_http_error_after_quarantine(async_db, monkeypatch):
+    from src.extensions.capability_execution import CapabilityJournalError
+
+    async with async_db() as db:
+        goal, source, _later = await _goal_and_tasks(db, goal_id="m5-missing-key-goal")
+        attempt = await _verified_attempt(db, source)
+    _patch_m5_sessions(monkeypatch, async_db)
+    proposal = await m5.create_memory_proposal(
+        owner_principal_id=OWNER.principal_id,
+        owner_session_id=OWNER.session_id,
+        task_id=source.task_id,
+        expected_task_revision=source.task_revision,
+        attempt_id=attempt.attempt_id,
+        decision_effect=MemoryProposalDecisionEffect.none,
+    )
+    monkeypatch.setattr(
+        memory_api,
+        "authenticated_memory_context",
+        lambda _request: SimpleNamespace(actor=OWNER.principal_id, session_id=OWNER.session_id),
+    )
+
+    def missing_key():
+        raise CapabilityJournalError("execution journal MAC key unavailable")
+
+    monkeypatch.setattr(memory_repository_module, "_effect_mac_key", missing_key)
+    request = memory_api.MemoryTaskProposalActionRequest(
+        action="accept",
+        expected_revision=proposal["revision"],
+        expected_preview_text_digest=proposal["proposed_text_digest"],
+        expected_task_revision=source.task_revision,
+        expected_goal_revision=goal.revision,
+        decision_effect=MemoryProposalDecisionEffect.none.value,
+    )
+    with pytest.raises(HTTPException) as captured:
+        await memory_api.act_on_memory_task_proposal(SimpleNamespace(), proposal["proposal_id"], request)
+    assert captured.value.status_code == 503
+    assert captured.value.detail["code"] == "accepted_binding_unavailable"
+    assert captured.value.detail["proposal"]["status"] == MemoryProposalStatus.blocked.value
+    assert captured.value.detail["proposal"]["recovery_action"] == "verify_source_and_reaccept"
 
 
 @pytest.mark.asyncio
@@ -607,6 +761,13 @@ async def test_m5_restore_blocks_rehashed_forged_selection_binding(
     forged_proposal["memory_scope"]["preferred_capability_id"] = ALTERNATE_CAPABILITY
     forged_proposal["memory_scope"]["preferred_capability_version"] = "1"
     forged_proposal["memory_scope"]["candidate_capability_ids"] = [ALTERNATE_CAPABILITY]
+    forged_proposal["source_task_id"] = "forged-source-task"
+    forged_proposal["source_attempt_id"] = "forged-source-attempt"
+    forged_proposal["workflow_run_id"] = "forged-workflow-run"
+    forged_proposal["evidence_digest"] = _recovery_json_hash({"forged": "evidence"})
+    forged_proposal["readback_digest"] = _recovery_json_hash({"forged": "readback"})
+    forged_proposal["artifact_digest"] = _recovery_json_hash({"forged": "artifact"})
+    forged_proposal["source_evidence_ids"] = ["forged-evidence"]
     if tamper_canonical_provenance:
         forged_memory = next(
             item for item in tampered["memories"] if item["id"] == accepted["accepted_memory_id"]
@@ -616,6 +777,14 @@ async def test_m5_restore_blocks_rehashed_forged_selection_binding(
         forged_provenance["memory_scope"]["preferred_capability_id"] = ALTERNATE_CAPABILITY
         forged_provenance["memory_scope"]["preferred_capability_version"] = "1"
         forged_provenance["memory_scope"]["candidate_capability_ids"] = [ALTERNATE_CAPABILITY]
+        forged_source = forged_provenance["verified_source_binding"]
+        forged_source["source_task_id"] = forged_proposal["source_task_id"]
+        forged_source["source_attempt_id"] = forged_proposal["source_attempt_id"]
+        forged_source["workflow_run_id"] = forged_proposal["workflow_run_id"]
+        forged_source["evidence_digest"] = forged_proposal["evidence_digest"]
+        forged_source["readback_digest"] = forged_proposal["readback_digest"]
+        forged_source["artifact_digest"] = forged_proposal["artifact_digest"]
+        forged_source["source_evidence_ids"] = list(forged_proposal["source_evidence_ids"])
     tampered["export_hash"] = _recovery_json_hash(_memory_export_integrity_payload(tampered))
     tampered["artifact_path"] = f"artifacts/memory-recovery/export-{tampered['export_hash'][:24]}.json"
     tampered["artifact_sha256"] = _recovery_json_hash(_memory_export_artifact_payload(tampered))
@@ -644,6 +813,7 @@ async def test_m5_restore_blocks_rehashed_forged_selection_binding(
         )
     assert restored["m5_blocked_proposal_ids"] == [proposal["proposal_id"]]
     assert restored["m5_restored_proposal_ids"] == [proposal["proposal_id"]]
+    assert restored["m5_blocked_receipt_ids"] == [tampered["m5_decision_receipts"][0]["receipt_id"]]
 
     async with async_db() as db:
         restored_proposal = (

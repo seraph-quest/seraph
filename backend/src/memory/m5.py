@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import ValidationError
 
@@ -49,8 +49,17 @@ from src.db.models import (
     WorkBoardTask,
     WorkflowRunState,
 )
-from src.memory.repository import _canonical_memory_deletion_marker, _m5_selection_binding_mac
+from src.memory.repository import (
+    _canonical_memory_deletion_marker,
+    _m5_receipt_binding_matches,
+    _m5_receipt_integrity_mac,
+    _m5_receipt_integrity_matches,
+    _m5_selection_binding_key_id,
+    _m5_selection_binding_mac,
+    _m5_verified_source_binding,
+)
 from src.memory.repository import memory_repository
+from src.extensions.capability_execution import CapabilityJournalError
 from src.vault import redaction as vault_redaction
 
 M5_SCHEMA_VERSION = "memory_proposal.v1"
@@ -893,7 +902,31 @@ async def evaluate_goal_candidate_memory(
                     == int(goal_revision)
                 )
             ]
-            if len(eligible) > 1:
+            binding_block = (
+                await db.execute(
+                    select(MemoryProposal)
+                    .where(
+                        MemoryProposal.owner_principal_id == owner_principal_id,
+                        MemoryProposal.owner_session_id == owner_session_id,
+                        MemoryProposal.goal_id == goal_id,
+                        MemoryProposal.goal_revision == int(goal_revision),
+                        MemoryProposal.source_context_digest == str(context).lower(),
+                        MemoryProposal.status == MemoryProposalStatus.blocked,
+                        MemoryProposal.reason_code.in_(
+                            [
+                                "accepted_memory_binding_unverifiable",
+                                "accepted_memory_binding_mismatch",
+                            ]
+                        ),
+                    )
+                    .order_by(MemoryProposal.updated_at.desc(), MemoryProposal.proposal_id.asc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if binding_block is not None:
+                status = WorkBoardDecisionStatus.blocked
+                reason = binding_block.reason_code
+            elif len(eligible) > 1:
                 status = WorkBoardDecisionStatus.blocked
                 reason = "ambiguous_accepted_memory"
             elif eligible:
@@ -926,6 +959,12 @@ async def evaluate_goal_candidate_memory(
                 if source_baseline is None:
                     status = WorkBoardDecisionStatus.no_comparable
                     reason = "source_baseline_missing"
+                elif not _m5_receipt_integrity_matches(source_baseline):
+                    status = WorkBoardDecisionStatus.blocked
+                    reason = "source_baseline_integrity_unverifiable"
+                elif not _m5_receipt_binding_matches(source_baseline, proposal):
+                    status = WorkBoardDecisionStatus.blocked
+                    reason = "source_baseline_binding_mismatch"
                 elif proposal.decision_effect is not MemoryProposalDecisionEffect.require_operator_confirmation:
                     reason = "accepted_memory_effect_none"
                 elif not isinstance(preferred, str) or preferred not in candidate_ids:
@@ -1030,6 +1069,7 @@ async def evaluate_goal_candidate_memory(
                 capability_version=selected["capability_version"] if selected else "",
                 typed_input_digest=selected["typed_input_digest"] if selected else "",
             )
+            receipt.receipt_integrity_mac = _m5_receipt_integrity_mac(receipt)
             db.add(receipt)
             await db.flush()
 
@@ -1288,6 +1328,7 @@ async def _write_source_baseline(db: AsyncSession, proof: M5SourceProof, proposa
         admission_status=WorkBoardDecisionAdmissionStatus.not_required,
         reason="source_baseline",
     )
+    receipt.receipt_integrity_mac = _m5_receipt_integrity_mac(receipt)
     db.add(receipt)
     await db.flush()
     return receipt
@@ -1474,6 +1515,7 @@ async def _write_source_failure_proposal(
         ),
         reason=reason,
     )
+    receipt.receipt_integrity_mac = _m5_receipt_integrity_mac(receipt)
     db.add(receipt)
     await db.flush()
     return _proposal_payload(proposal)
@@ -1854,6 +1896,11 @@ async def _canonical_accept(
             "decision_effect": decision_effect.value,
         }
     )
+    source_binding = _m5_verified_source_binding(proposal)
+    if source_binding is None:
+        raise ValueError("verified_source_binding_invalid")
+    provenance["verified_source_binding"] = source_binding
+    provenance["selection_binding_key_id"] = _m5_selection_binding_key_id()
     provenance["selection_binding_mac"] = _m5_selection_binding_mac(
         proposal_id=proposal.proposal_id,
         accepted_content_digest=m5_text_digest(text),
@@ -1862,6 +1909,7 @@ async def _canonical_accept(
         source_context_digest=str(
             provenance.get("source_context_digest") or scope.get("source_context_digest") or ""
         ),
+        source_binding=source_binding,
         decision_effect=decision_effect,
         memory_scope=scope,
     )
@@ -2040,16 +2088,32 @@ async def apply_memory_proposal_action(
                 if preferred_capability_id
                 else str(_decode_object(proposal.memory_scope_json).get("preferred_capability_id") or "")
             ) or None
-            await _canonical_accept(
-                db,
-                proposal,
-                actor_principal_id=owner_principal_id,
-                actor_session_id=owner_session_id,
-                edited_text=edited_text,
-                decision_effect=effect or MemoryProposalDecisionEffect.none,
-                corrects_memory_id=proposal.corrects_memory_id,
-                preferred_capability_id=selected_capability,
-            )
+            try:
+                await _canonical_accept(
+                    db,
+                    proposal,
+                    actor_principal_id=owner_principal_id,
+                    actor_session_id=owner_session_id,
+                    edited_text=edited_text,
+                    decision_effect=effect or MemoryProposalDecisionEffect.none,
+                    corrects_memory_id=proposal.corrects_memory_id,
+                    preferred_capability_id=selected_capability,
+                )
+            except CapabilityJournalError:
+                # A server-key outage must never turn operator acceptance into
+                # an HTTP 500 or an unsigned canonical memory.  Persist a
+                # visible recovery state and return the normal typed proposal
+                # payload so the API can surface re-review/re-accept guidance.
+                proposal.status = MemoryProposalStatus.blocked
+                proposal.reason_code = "accepted_binding_unavailable"
+                proposal.recovery_action = "verify_source_and_reaccept"
+                proposal.revision += 1
+                proposal.updated_at = _now()
+                db.add(proposal)
+                await db.flush()
+                payload = _proposal_payload(proposal)
+                payload["error_code"] = "accepted_binding_unavailable"
+                return payload
             proposal.acceptance_binding_digest = acceptance_binding
         elif action == "reject":
             if proposal.status is not MemoryProposalStatus.proposed:
@@ -2090,17 +2154,22 @@ async def apply_memory_proposal_action(
             proposal.rollback_reason = normalized_rollback_reason or ""
             proposal.revision += 1
             proposal.updated_at = _now()
-            await db.execute(
-                update(WorkBoardDecisionReceipt)
-                .where(WorkBoardDecisionReceipt.accepted_memory_id == memory.id)
-                .values(
-                    decision_status=WorkBoardDecisionStatus.blocked,
-                    admission_status=WorkBoardDecisionAdmissionStatus.superseded,
-                    reason="memory_rolled_back",
-                    revision=WorkBoardDecisionReceipt.revision + 1,
-                    updated_at=_now(),
+            affected_receipts = (
+                await db.execute(
+                    select(WorkBoardDecisionReceipt).where(
+                        WorkBoardDecisionReceipt.accepted_memory_id == memory.id
+                    )
                 )
-            )
+            ).scalars().all()
+            receipt_updated_at = _now()
+            for receipt in affected_receipts:
+                receipt.decision_status = WorkBoardDecisionStatus.blocked
+                receipt.admission_status = WorkBoardDecisionAdmissionStatus.superseded
+                receipt.reason = "memory_rolled_back"
+                receipt.revision += 1
+                receipt.updated_at = receipt_updated_at
+                receipt.receipt_integrity_mac = _m5_receipt_integrity_mac(receipt)
+                db.add(receipt)
         else:
             raise ValueError("proposal_recovery_not_supported")
         audit_action = action
@@ -2130,16 +2199,21 @@ async def redact_m5_memory_references(db: AsyncSession, memory_id: str) -> None:
         proposal.provenance_json = m5_canonical_json({"schema_version": M5_PROVENANCE_SCHEMA_VERSION, "redacted": True})
         proposal.updated_at = _now()
         db.add(proposal)
-    await db.execute(
-        update(WorkBoardDecisionReceipt)
-        .where(WorkBoardDecisionReceipt.accepted_memory_id == memory_id)
-        .values(
-            decision_status=WorkBoardDecisionStatus.blocked,
-            admission_status=WorkBoardDecisionAdmissionStatus.superseded,
-            reason="memory_deleted_or_export_redacted",
-            updated_at=_now(),
+    affected_receipts = (
+        await db.execute(
+            select(WorkBoardDecisionReceipt).where(
+                WorkBoardDecisionReceipt.accepted_memory_id == memory_id
+            )
         )
-    )
+    ).scalars().all()
+    receipt_updated_at = _now()
+    for receipt in affected_receipts:
+        receipt.decision_status = WorkBoardDecisionStatus.blocked
+        receipt.admission_status = WorkBoardDecisionAdmissionStatus.superseded
+        receipt.reason = "memory_deleted_or_export_redacted"
+        receipt.updated_at = receipt_updated_at
+        receipt.receipt_integrity_mac = _m5_receipt_integrity_mac(receipt)
+        db.add(receipt)
 
 
 __all__ = [

@@ -45,6 +45,11 @@ from src.db.models import (
     WorkBoardDecisionReceiptStage,
     WorkBoardDecisionStatus,
 )
+from src.extensions.capability_execution import (
+    CapabilityJournalError,
+    _effect_mac_key,
+    _mac,
+)
 from src.approval.runtime import get_current_session_id, get_current_trust_principal
 from src.auth.cancellation import assert_runtime_not_revoked
 from src.security.trust_contract import AuthorityGrant, PrincipalType
@@ -240,6 +245,125 @@ _M5_SCOPE_KEYS = frozenset(
     }
 )
 _M5_SOURCE_EVIDENCE_LIMIT = 20
+
+
+def _m5_selection_scope(value: Any) -> dict[str, Any] | None:
+    """Project the selection fields bound into an accepted M5 memory.
+
+    ``m5_memory_scope`` also contains owner and source execution fields.  The
+    recovery archive intentionally keeps only the bounded scope fields, so the
+    comparison must use the same projection on both sides.  A missing or
+    malformed canonical projection fails closed.
+    """
+
+    if not isinstance(value, dict) or value.get("schema_version") != _M5_SCOPE_SCHEMA_VERSION:
+        return None
+    required = {
+        "goal_id",
+        "goal_revision",
+        "source_context_digest",
+        "preferred_capability_id",
+        "candidate_capability_ids",
+    }
+    if not required.issubset(value):
+        return None
+    candidate_ids = value.get("candidate_capability_ids")
+    if not isinstance(candidate_ids, list) or any(not isinstance(item, str) for item in candidate_ids):
+        return None
+    return {
+        "schema_version": value["schema_version"],
+        "goal_id": value["goal_id"],
+        "goal_revision": value["goal_revision"],
+        "source_context_digest": value["source_context_digest"],
+        "preferred_capability_id": value.get("preferred_capability_id"),
+        "preferred_capability_version": value.get("preferred_capability_version"),
+        "candidate_capability_ids": list(candidate_ids),
+    }
+
+
+def _m5_selection_binding_mac(
+    *,
+    proposal_id: str,
+    accepted_content_digest: str,
+    owner_principal_id: str,
+    owner_session_id: str,
+    source_context_digest: str,
+    decision_effect: Any,
+    memory_scope: Any,
+) -> str:
+    """Authenticate the accepted M5 selection with existing server key material."""
+
+    canonical_scope = _m5_selection_scope(memory_scope)
+    if canonical_scope is None:
+        raise ValueError("M5 selection scope is invalid")
+    if (
+        not owner_principal_id
+        or not owner_session_id
+        or not source_context_digest
+        or source_context_digest != canonical_scope["source_context_digest"]
+    ):
+        raise ValueError("M5 selection binding identity is invalid")
+    canonical_effect = str(getattr(decision_effect, "value", decision_effect) or "").strip()
+    if not canonical_effect:
+        raise ValueError("M5 decision effect is invalid")
+    return _mac(
+        {
+            "version": "work-board-m5-selection-binding.v1",
+            "proposal_id": proposal_id,
+            "accepted_content_digest": accepted_content_digest,
+            "owner_principal_id": owner_principal_id,
+            "owner_session_id": owner_session_id,
+            "source_context_digest": source_context_digest,
+            "decision_effect": canonical_effect,
+            "memory_scope": canonical_scope,
+        },
+        key=_effect_mac_key(),
+    )
+
+
+def _m5_selection_binding_matches(
+    provenance: Any,
+    *,
+    proposal_id: Any,
+    accepted_content_digest: Any,
+    decision_effect: Any,
+    memory_scope: Any,
+) -> bool:
+    """Confirm that an accepted proposal still matches canonical memory.
+
+    Recovery archive hashes are public integrity checks, not an operator
+    signature.  The canonical Memory provenance therefore remains the binding
+    authority for fields that can change a later task decision.
+    """
+
+    if not isinstance(provenance, dict):
+        return False
+    if provenance.get("proposal_id") != proposal_id:
+        return False
+    if provenance.get("accepted_content_digest") != accepted_content_digest:
+        return False
+    expected_effect = str(getattr(decision_effect, "value", decision_effect) or "").strip()
+    canonical_effect = str(provenance.get("decision_effect") or "").strip()
+    if not expected_effect or canonical_effect != expected_effect:
+        return False
+    expected_scope = _m5_selection_scope(memory_scope)
+    canonical_scope = _m5_selection_scope(provenance.get("memory_scope"))
+    if expected_scope is None or canonical_scope != expected_scope:
+        return False
+    try:
+        expected_mac = _m5_selection_binding_mac(
+            proposal_id=proposal_id,
+            accepted_content_digest=accepted_content_digest,
+            owner_principal_id=str(provenance.get("owner_principal_id") or ""),
+            owner_session_id=str(provenance.get("owner_session_id") or ""),
+            source_context_digest=str(provenance.get("source_context_digest") or ""),
+            decision_effect=canonical_effect,
+            memory_scope=canonical_scope,
+        )
+    except (CapabilityJournalError, TypeError, ValueError):
+        return False
+    stored_mac = provenance.get("selection_binding_mac")
+    return isinstance(stored_mac, str) and hmac.compare_digest(stored_mac, expected_mac)
 
 
 def _m5_recovery_id(value: Any, *, field_name: str, required: bool = False) -> str | None:
@@ -1663,6 +1787,18 @@ class MemoryRepository:
                 or provenance.get("owner_principal_id") != owner_principal_id
                 or provenance.get("owner_session_id") != owner_session_id
                 or provenance.get("source_context_digest") != source_context_digest
+            ):
+                continue
+            try:
+                proposal_scope = json.loads(proposal.memory_scope_json or "{}")
+            except (TypeError, ValueError):
+                proposal_scope = None
+            if not _m5_selection_binding_matches(
+                provenance,
+                proposal_id=proposal.proposal_id,
+                accepted_content_digest=expected_digest,
+                decision_effect=proposal.decision_effect,
+                memory_scope=proposal_scope,
             ):
                 continue
             has_source = (
@@ -3416,6 +3552,8 @@ class MemoryRepository:
             content_digest: str | None,
             proposal_id: str | None,
             source_context_digest: str | None = None,
+            decision_effect: Any | None = None,
+            memory_scope: Any | None = None,
         ) -> bool:
             if not memory_id or not content_digest:
                 return False
@@ -3452,7 +3590,80 @@ class MemoryRepository:
                 return False
             if source_context_digest and provenance.get("source_context_digest") != source_context_digest:
                 return False
+            if decision_effect is None or memory_scope is None:
+                if not proposal_id:
+                    return False
+                linked_proposal = (
+                    await db.execute(
+                        select(MemoryProposal).where(
+                            MemoryProposal.proposal_id == proposal_id,
+                            MemoryProposal.status == MemoryProposalStatus.accepted,
+                        )
+                    )
+                ).scalars().first()
+                if linked_proposal is None:
+                    return False
+                decision_effect = linked_proposal.decision_effect
+                try:
+                    memory_scope = json.loads(linked_proposal.memory_scope_json or "{}")
+                except (TypeError, ValueError):
+                    return False
+            if not _m5_selection_binding_matches(
+                provenance,
+                proposal_id=proposal_id,
+                accepted_content_digest=content_digest,
+                decision_effect=decision_effect,
+                memory_scope=memory_scope,
+            ):
+                return False
             return True
+
+        async def _m5_memory_selection_binding_state(
+            db,
+            *,
+            memory_id: str | None,
+            proposal_id: str,
+            content_digest: str | None,
+            decision_effect: Any,
+            memory_scope: Any,
+        ) -> bool | None:
+            """Return canonical selection binding state for restore diagnostics.
+
+            ``None`` means the canonical memory row is unavailable.  ``False``
+            means a row exists but its accepted selection binding disagrees;
+            this distinction lets restore keep tombstone/missing-row behavior
+            while quarantining a forged accepted choice as blocked.
+            """
+
+            if not memory_id:
+                return False
+            memory = (
+                await db.execute(select(Memory).where(Memory.id == memory_id))
+            ).scalars().first()
+            if memory is None:
+                return None
+            if str(memory.source_session_id or "").strip() != normalized_owner:
+                return None
+            if _canonical_memory_deletion_marker(memory) is not None:
+                return None
+            if (
+                await db.execute(
+                    select(MemoryTombstone).where(MemoryTombstone.memory_id == memory_id)
+                )
+            ).scalars().first() is not None:
+                return None
+            try:
+                metadata = json.loads(memory.metadata_json or "{}")
+            except (TypeError, ValueError):
+                return False
+            provenance = metadata.get("work_board_provenance") if isinstance(metadata, dict) else None
+            return _m5_selection_binding_matches(
+                provenance,
+                proposal_id=proposal_id,
+                accepted_content_digest=content_digest,
+                decision_effect=decision_effect,
+                memory_scope=memory_scope,
+            )
 
         async with self._canonical_memory_lock:
             async with get_session() as db:
@@ -3629,18 +3840,47 @@ class MemoryRepository:
                 # restored after validation.
                 for candidate in normalized_m5_proposals:
                     if candidate["status"] is MemoryProposalStatus.accepted:
-                        if (
-                            candidate["privacy_state"] is MemoryProposalPrivacyState.redacted
-                            or not await _m5_memory_binding_is_active(
-                                db,
-                                memory_id=candidate["accepted_memory_id"],
-                                content_digest=candidate["accepted_memory_content_digest"],
-                                proposal_id=candidate["proposal_id"],
-                                source_context_digest=candidate["source_context_digest"],
-                            )
-                        ):
+                        if candidate["privacy_state"] is MemoryProposalPrivacyState.redacted:
                             m5_suppressed_proposal_ids.append(candidate["proposal_id"])
                             continue
+                        selection_scope = None
+                        try:
+                            selection_scope = json.loads(candidate["memory_scope_json"] or "{}")
+                        except (TypeError, ValueError):
+                            selection_scope = None
+                        binding_active = await _m5_memory_binding_is_active(
+                            db,
+                            memory_id=candidate["accepted_memory_id"],
+                            content_digest=candidate["accepted_memory_content_digest"],
+                            proposal_id=candidate["proposal_id"],
+                            source_context_digest=candidate["source_context_digest"],
+                            decision_effect=candidate["decision_effect"],
+                            memory_scope=selection_scope,
+                        )
+                        if not binding_active:
+                            selection_binding_state = await _m5_memory_selection_binding_state(
+                                db,
+                                memory_id=candidate["accepted_memory_id"],
+                                proposal_id=candidate["proposal_id"],
+                                content_digest=candidate["accepted_memory_content_digest"],
+                                decision_effect=candidate["decision_effect"],
+                                memory_scope=selection_scope,
+                            )
+                            if selection_binding_state is False:
+                                # Keep the accepted row visible for operator
+                                # recovery, but never let a rehashed archive
+                                # alter a later decision without acceptance.
+                                candidate["status"] = MemoryProposalStatus.blocked
+                                candidate["reason_code"] = "accepted_memory_binding_mismatch"
+                                candidate["recovery_action"] = "request_verified_proposal_again"
+                                m5_blocked_proposal_ids.append(candidate["proposal_id"])
+                            else:
+                                m5_suppressed_proposal_ids.append(candidate["proposal_id"])
+                            # A missing/tombstoned memory keeps the existing
+                            # suppression behavior; a present mismatched row
+                            # is restored as blocked for explicit recovery.
+                            if selection_binding_state is not False:
+                                continue
                     elif candidate["status"] is MemoryProposalStatus.blocked:
                         m5_blocked_proposal_ids.append(candidate["proposal_id"])
                     existing = (

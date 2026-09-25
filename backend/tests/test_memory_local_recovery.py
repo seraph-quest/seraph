@@ -53,6 +53,7 @@ from src.memory.repository import (
     _MAX_RECOVERY_SOURCES_PER_RECORD,
     _memory_export_artifact_payload,
     _memory_export_integrity_payload,
+    _m5_selection_binding_mac,
     _recovery_json_hash,
     memory_repository,
 )
@@ -180,18 +181,39 @@ async def _seed_m5_verified_records(get_session, operator):
     receipt_id = "receipt-recovery-1"
     source_context_digest = _test_digest("source-context")
     memory_content = "The verified recovery procedure uses the bounded local capability."
+    memory_scope = {
+        "schema_version": "memory_scope.v1",
+        "goal_id": "goal-recovery-1",
+        "goal_revision": 1,
+        "source_context_digest": source_context_digest,
+        "preferred_capability_id": "local-deterministic",
+        "preferred_capability_version": None,
+        "candidate_capability_ids": ["local-deterministic"],
+    }
+    selection_binding_mac = _m5_selection_binding_mac(
+        proposal_id=proposal_id,
+        accepted_content_digest=_test_digest(memory_content),
+        owner_principal_id=operator.principal.principal_id,
+        owner_session_id=owner_session,
+        source_context_digest=source_context_digest,
+        decision_effect="none",
+        memory_scope=memory_scope,
+    )
+    canonical_provenance = {
+        "proposal_id": proposal_id,
+        "owner_principal_id": operator.principal.principal_id,
+        "owner_session_id": owner_session,
+        "source_context_digest": source_context_digest,
+        "decision_effect": "none",
+        "memory_scope": memory_scope,
+        "accepted_content_digest": _test_digest(memory_content),
+        "selection_binding_mac": selection_binding_mac,
+    }
     memory = await memory_repository.create_memory(
         content=memory_content,
         source_session_id=owner_session,
         source_type="work_board_m5",
-        metadata={
-            "work_board_provenance": {
-                "proposal_id": proposal_id,
-                "owner_principal_id": operator.principal.principal_id,
-                "owner_session_id": owner_session,
-                "source_context_digest": source_context_digest,
-            }
-        },
+        metadata={"work_board_provenance": canonical_provenance},
     )
     content_digest = _test_digest(memory_content)
     now = datetime.now(timezone.utc)
@@ -200,15 +222,7 @@ async def _seed_m5_verified_records(get_session, operator):
             await db.execute(select(Memory).where(Memory.id == memory.memory_id))
         ).scalars().one()
         stored_memory.metadata_json = json.dumps(
-            {
-                "work_board_provenance": {
-                    "proposal_id": proposal_id,
-                    "owner_principal_id": operator.principal.principal_id,
-                    "owner_session_id": owner_session,
-                    "source_context_digest": source_context_digest,
-                }
-            },
-            sort_keys=True,
+            {"work_board_provenance": canonical_provenance}, sort_keys=True
         )
         proposal = MemoryProposal(
             proposal_id=proposal_id,
@@ -239,14 +253,7 @@ async def _seed_m5_verified_records(get_session, operator):
             preview_text="PRIVATE RAW PROPOSAL TEXT MUST NOT BE EXPORTED",
             preview_text_digest=_test_digest("PRIVATE RAW PROPOSAL TEXT MUST NOT BE EXPORTED"),
             memory_scope_json=json.dumps(
-                {
-                    "schema_version": "memory_scope.v1",
-                    "goal_id": "goal-recovery-1",
-                    "goal_revision": 1,
-                    "source_context_digest": source_context_digest,
-                    "preferred_capability_id": "local-deterministic",
-                    "candidate_capability_ids": ["local-deterministic"],
-                }
+                memory_scope
             ),
             provenance_json=json.dumps({"private": "provenance"}),
             source_refs_json=json.dumps(["readback:recovery-1", "artifact:recovery-1"]),

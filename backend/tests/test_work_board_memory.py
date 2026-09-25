@@ -45,7 +45,12 @@ from src.goals.contracts import (
 )
 from src.guardian.goal_conditioned_loop import propose_goal_candidate_set
 from src.memory import m5
-from src.memory.repository import memory_repository
+from src.memory.repository import (
+    _memory_export_artifact_payload,
+    _memory_export_integrity_payload,
+    _recovery_json_hash,
+    memory_repository,
+)
 
 
 OWNER = SimpleNamespace(principal_id="operator:m5-test", session_id="session:m5-test")
@@ -537,6 +542,129 @@ async def test_m5_export_restore_preserves_scope_for_later_decision(async_db, mo
     assert decision["decision_status"] == "changed"
     assert decision["after_selected_capability_id"] == ALTERNATE_CAPABILITY
     assert set(proposal_archive["source_evidence_ids"]).issubset(set(decision["evidence_ids"]))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tamper_canonical_provenance",
+    [False, True],
+    ids=["proposal-only", "proposal-and-memory-provenance"],
+)
+async def test_m5_restore_blocks_rehashed_forged_selection_binding(
+    async_db, monkeypatch, tamper_canonical_provenance
+):
+    """A public archive digest cannot change an operator-accepted choice."""
+
+    bypass = make_test_bypass_operator()
+    operator = replace(
+        bypass,
+        session_id=OWNER.session_id,
+        principal=replace(
+            bypass.principal,
+            principal_id=OWNER.principal_id,
+            session_id=OWNER.session_id,
+            operator_session_id=OWNER.session_id,
+        ),
+    )
+    async with async_db() as db:
+        goal, source, later = await _goal_and_tasks(db, goal_id="m5-forged-binding-goal")
+        attempt = await _verified_attempt(db, source)
+    _patch_m5_sessions(monkeypatch, async_db)
+
+    proposal = await m5.create_memory_proposal(
+        owner_principal_id=operator.principal.principal_id,
+        owner_session_id=operator.session_id,
+        task_id=source.task_id,
+        expected_task_revision=source.task_revision,
+        attempt_id=attempt.attempt_id,
+        candidate_text="The verified source was accepted without changing the later choice.",
+        decision_effect=MemoryProposalDecisionEffect.none,
+    )
+    accepted = await m5.apply_memory_proposal_action(
+        owner_principal_id=operator.principal.principal_id,
+        owner_session_id=operator.session_id,
+        proposal_id=proposal["proposal_id"],
+        action="accept",
+        expected_revision=proposal["revision"],
+        expected_preview_text_digest=proposal["proposed_text_digest"],
+        expected_task_revision=source.task_revision,
+        expected_goal_revision=goal.revision,
+        decision_effect=MemoryProposalDecisionEffect.none,
+    )
+
+    with _runtime_operator(operator):
+        archive = await memory_repository.export_canonical_memory_state(
+            actor=operator.principal.principal_id,
+            owner_session_id=operator.session_id,
+            authenticated_session_id=operator.session_id,
+        )
+
+    tampered = json.loads(json.dumps(archive))
+    forged_proposal = next(
+        item for item in tampered["m5_proposals"] if item["proposal_id"] == proposal["proposal_id"]
+    )
+    forged_proposal["decision_effect"] = MemoryProposalDecisionEffect.require_operator_confirmation.value
+    forged_proposal["memory_scope"]["preferred_capability_id"] = ALTERNATE_CAPABILITY
+    forged_proposal["memory_scope"]["preferred_capability_version"] = "1"
+    forged_proposal["memory_scope"]["candidate_capability_ids"] = [ALTERNATE_CAPABILITY]
+    if tamper_canonical_provenance:
+        forged_memory = next(
+            item for item in tampered["memories"] if item["id"] == accepted["accepted_memory_id"]
+        )
+        forged_provenance = forged_memory["metadata"]["work_board_provenance"]
+        forged_provenance["decision_effect"] = forged_proposal["decision_effect"]
+        forged_provenance["memory_scope"]["preferred_capability_id"] = ALTERNATE_CAPABILITY
+        forged_provenance["memory_scope"]["preferred_capability_version"] = "1"
+        forged_provenance["memory_scope"]["candidate_capability_ids"] = [ALTERNATE_CAPABILITY]
+    tampered["export_hash"] = _recovery_json_hash(_memory_export_integrity_payload(tampered))
+    tampered["artifact_path"] = f"artifacts/memory-recovery/export-{tampered['export_hash'][:24]}.json"
+    tampered["artifact_sha256"] = _recovery_json_hash(_memory_export_artifact_payload(tampered))
+
+    async with async_db() as db:
+        await db.execute(
+            delete(WorkBoardDecisionReceipt).where(
+                WorkBoardDecisionReceipt.owner_session_id == operator.session_id
+            )
+        )
+        await db.execute(
+            delete(MemoryProposal).where(MemoryProposal.owner_session_id == operator.session_id)
+        )
+        await db.execute(
+            delete(MemorySource).where(MemorySource.memory_id == accepted["accepted_memory_id"])
+        )
+        await db.execute(delete(Memory).where(Memory.id == accepted["accepted_memory_id"]))
+        await db.flush()
+
+    with _runtime_operator(operator):
+        restored = await memory_repository.restore_canonical_memory_state(
+            tampered,
+            actor=operator.principal.principal_id,
+            owner_session_id=operator.session_id,
+            authenticated_session_id=operator.session_id,
+        )
+    assert restored["m5_blocked_proposal_ids"] == [proposal["proposal_id"]]
+    assert restored["m5_restored_proposal_ids"] == [proposal["proposal_id"]]
+
+    async with async_db() as db:
+        restored_proposal = (
+            await db.execute(
+                select(MemoryProposal).where(MemoryProposal.proposal_id == proposal["proposal_id"])
+            )
+        ).scalar_one()
+    assert restored_proposal.status is MemoryProposalStatus.blocked
+    assert restored_proposal.reason_code == "accepted_memory_binding_mismatch"
+
+    decision = await propose_goal_candidate_set(
+        goal_id=goal.id,
+        task_id=later.task_id,
+        candidates=[_candidate(SOURCE_CAPABILITY), _candidate(ALTERNATE_CAPABILITY)],
+        owner_principal_id=operator.principal.principal_id,
+        owner_session_id=operator.session_id,
+        expected_task_revision=later.task_revision,
+        expected_goal_revision=goal.revision,
+    )
+    assert decision["decision"]["after_selected_capability_id"] == SOURCE_CAPABILITY
+    assert ALTERNATE_CAPABILITY not in decision["decision"]["evidence_ids"]
 
 
 @pytest.mark.asyncio

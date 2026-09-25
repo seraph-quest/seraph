@@ -49,7 +49,7 @@ from src.db.models import (
     WorkBoardTask,
     WorkflowRunState,
 )
-from src.memory.repository import _canonical_memory_deletion_marker
+from src.memory.repository import _canonical_memory_deletion_marker, _m5_selection_binding_mac
 from src.memory.repository import memory_repository
 from src.vault import redaction as vault_redaction
 
@@ -1853,6 +1853,17 @@ async def _canonical_accept(
             "memory_scope": scope,
             "decision_effect": decision_effect.value,
         }
+    )
+    provenance["selection_binding_mac"] = _m5_selection_binding_mac(
+        proposal_id=proposal.proposal_id,
+        accepted_content_digest=m5_text_digest(text),
+        owner_principal_id=str(provenance.get("owner_principal_id") or actor_principal_id),
+        owner_session_id=str(provenance.get("owner_session_id") or actor_session_id),
+        source_context_digest=str(
+            provenance.get("source_context_digest") or scope.get("source_context_digest") or ""
+        ),
+        decision_effect=decision_effect,
+        memory_scope=scope,
     )
     metadata_json = m5_canonical_json({"work_board_provenance": provenance})
     memory = await memory_repository.create_m5_memory_in_session(

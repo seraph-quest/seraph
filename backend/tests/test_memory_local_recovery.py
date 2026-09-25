@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import replace
+from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 import sqlite3
@@ -31,11 +33,20 @@ from src.db.models import (
     MemoryCategory,
     MemoryEntity,
     MemoryKind,
+    MemoryProposal,
+    MemoryProposalDecisionEffect,
+    MemoryProposalPrivacyState,
+    MemoryProposalProviderContactState,
+    MemoryProposalStatus,
     MemorySnapshot,
     MemorySource,
     MemoryStatus,
     MemoryTombstone,
     Session as SessionModel,
+    WorkBoardDecisionAdmissionStatus,
+    WorkBoardDecisionReceipt,
+    WorkBoardDecisionReceiptStage,
+    WorkBoardDecisionStatus,
 )
 from src.memory.repository import (
     _EMPTY_TOMBSTONE_REVISION,
@@ -125,6 +136,8 @@ def local_memory_db(tmp_path, monkeypatch):
             Memory.__table__,
             MemorySource.__table__,
             MemoryTombstone.__table__,
+            MemoryProposal.__table__,
+            WorkBoardDecisionReceipt.__table__,
             MemorySnapshot.__table__,
             AuditEvent.__table__,
             SessionModel.__table__,
@@ -155,6 +168,332 @@ def local_memory_db(tmp_path, monkeypatch):
 async def _memory_row(get_session, memory_id: str) -> Memory | None:
     async with get_session() as db:
         return (await db.execute(select(Memory).where(Memory.id == memory_id))).scalars().first()
+
+
+def _test_digest(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+async def _seed_m5_verified_records(get_session, operator):
+    owner_session = operator.session_id
+    proposal_id = "proposal-recovery-1"
+    receipt_id = "receipt-recovery-1"
+    source_context_digest = _test_digest("source-context")
+    memory_content = "The verified recovery procedure uses the bounded local capability."
+    memory = await memory_repository.create_memory(
+        content=memory_content,
+        source_session_id=owner_session,
+        source_type="work_board_m5",
+        metadata={
+            "work_board_provenance": {
+                "proposal_id": proposal_id,
+                "owner_principal_id": operator.principal.principal_id,
+                "owner_session_id": owner_session,
+                "source_context_digest": source_context_digest,
+            }
+        },
+    )
+    content_digest = _test_digest(memory_content)
+    now = datetime.now(timezone.utc)
+    async with get_session() as db:
+        stored_memory = (
+            await db.execute(select(Memory).where(Memory.id == memory.memory_id))
+        ).scalars().one()
+        stored_memory.metadata_json = json.dumps(
+            {
+                "work_board_provenance": {
+                    "proposal_id": proposal_id,
+                    "owner_principal_id": operator.principal.principal_id,
+                    "owner_session_id": owner_session,
+                    "source_context_digest": source_context_digest,
+                }
+            },
+            sort_keys=True,
+        )
+        proposal = MemoryProposal(
+            proposal_id=proposal_id,
+            owner_principal_id=operator.principal.principal_id,
+            owner_session_id=owner_session,
+            source_task_id="task-recovery-1",
+            source_task_revision=1,
+            source_attempt_id="attempt-recovery-1",
+            source_attempt_fence=1,
+            workflow_run_id="run-recovery-1",
+            workflow_run_revision=1,
+            goal_id="goal-recovery-1",
+            goal_revision=1,
+            capability_id="local-deterministic",
+            capability_version="v1",
+            typed_input_digest=_test_digest("typed-input"),
+            source_context_digest=source_context_digest,
+            candidate_set_digest=_test_digest("candidate-set"),
+            evidence_digest=_test_digest("evidence"),
+            readback_kind="artifact",
+            readback_ref="readback:recovery-1",
+            readback_digest=_test_digest("readback"),
+            artifact_ref="artifact:recovery-1",
+            artifact_digest=_test_digest("artifact"),
+            request_idempotency_key=_test_digest("idempotency"),
+            request_binding_digest=_test_digest("binding"),
+            memory_kind=MemoryKind.fact,
+            preview_text="PRIVATE RAW PROPOSAL TEXT MUST NOT BE EXPORTED",
+            preview_text_digest=_test_digest("PRIVATE RAW PROPOSAL TEXT MUST NOT BE EXPORTED"),
+            memory_scope_json=json.dumps({"private": "scope"}),
+            provenance_json=json.dumps({"private": "provenance"}),
+            source_refs_json=json.dumps(["private-source-body"]),
+            decision_effect=MemoryProposalDecisionEffect.none,
+            confidence=0.9,
+            reason_code="accepted",
+            recovery_action="none",
+            provider_contact_started=False,
+            provider_contact_state=MemoryProposalProviderContactState.not_started,
+            provider_contact_count=0,
+            privacy_state=MemoryProposalPrivacyState.visible,
+            status=MemoryProposalStatus.accepted,
+            accepted_memory_id=memory.memory_id,
+            accepted_memory_content_digest=content_digest,
+            accepted_by_principal_id=operator.principal.principal_id,
+            accepted_by_session_id=owner_session,
+            accepted_at=now,
+            created_at=now,
+            updated_at=now,
+            revision=1,
+        )
+        receipt = WorkBoardDecisionReceipt(
+            receipt_id=receipt_id,
+            receipt_stage=WorkBoardDecisionReceiptStage.later_comparison,
+            receipt_binding_digest=_test_digest("receipt-binding"),
+            owner_principal_id=operator.principal.principal_id,
+            owner_session_id=owner_session,
+            source_proposal_id=proposal_id,
+            source_proposal_revision=1,
+            source_task_id="task-recovery-1",
+            source_task_revision=1,
+            source_attempt_id="attempt-recovery-1",
+            source_attempt_fence=1,
+            source_workflow_run_id="run-recovery-1",
+            source_workflow_run_revision=1,
+            later_task_id="task-later-1",
+            later_task_revision=1,
+            goal_id="goal-recovery-1",
+            goal_revision=1,
+            capability_id="local-deterministic",
+            capability_version="v1",
+            typed_input_digest=_test_digest("later-input"),
+            task_intent_digest=_test_digest("intent"),
+            source_context_digest=source_context_digest,
+            candidate_set_digest=_test_digest("later-candidate-set"),
+            accepted_memory_id=memory.memory_id,
+            accepted_memory_content_digest=content_digest,
+            before_input_digest=_test_digest("before-input"),
+            after_input_digest=_test_digest("after-input"),
+            before_action_id="dispatch:before",
+            after_action_id="dispatch:after",
+            before_selected_capability_id="local-deterministic",
+            after_selected_capability_id="local-deterministic",
+            comparison_context_digest=_test_digest("comparison"),
+            retrieval_evidence_ids_json=json.dumps(["artifact:recovery-1"]),
+            decision_status=WorkBoardDecisionStatus.changed,
+            admission_status=WorkBoardDecisionAdmissionStatus.not_required,
+            reason="accepted memory selected",
+            created_at=now,
+            updated_at=now,
+            revision=1,
+        )
+        db.add(proposal)
+        db.add(receipt)
+        await db.flush()
+    return {
+        "memory_id": memory.memory_id,
+        "proposal_id": proposal_id,
+        "receipt_id": receipt_id,
+        "content_digest": content_digest,
+    }
+
+
+@pytest.mark.asyncio
+async def test_m5_export_restore_round_trip_is_content_free_and_authenticated(local_memory_db):
+    get_session, database_path = local_memory_db
+    operator = make_test_bypass_operator()
+    owner_session = operator.session_id
+    seeded = await _seed_m5_verified_records(get_session, operator)
+
+    with _runtime_operator(operator):
+        archive = await memory_repository.export_canonical_memory_state(
+            actor=operator.principal.principal_id,
+            owner_session_id=owner_session,
+            authenticated_session_id=owner_session,
+        )
+    assert archive["counts"]["m5_proposals"] == 1
+    assert archive["counts"]["m5_decision_receipts"] == 1
+    proposal_archive = archive["m5_proposals"][0]
+    for forbidden in ("preview_text", "memory_scope_json", "provenance_json", "source_refs_json"):
+        assert forbidden not in proposal_archive
+    tampered = json.loads(json.dumps(archive))
+    tampered["m5_proposals"][0]["reason_code"] = "tampered"
+    with _runtime_operator(operator):
+        with pytest.raises(ValueError, match="archive hash mismatch"):
+            await memory_repository.restore_canonical_memory_state(
+                tampered,
+                actor=operator.principal.principal_id,
+                owner_session_id=owner_session,
+                authenticated_session_id=owner_session,
+            )
+
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute("DELETE FROM work_board_decision_receipts")
+        connection.execute("DELETE FROM memory_proposals")
+        connection.execute("DELETE FROM memory_sources WHERE memory_id = ?", (seeded["memory_id"],))
+        connection.execute("DELETE FROM memories WHERE id = ?", (seeded["memory_id"],))
+        connection.commit()
+    finally:
+        connection.close()
+
+    with _runtime_operator(operator):
+        restored = await memory_repository.restore_canonical_memory_state(
+            archive,
+            actor=operator.principal.principal_id,
+            owner_session_id=owner_session,
+            authenticated_session_id=owner_session,
+        )
+    assert restored["m5_restored_proposal_ids"] == [seeded["proposal_id"]]
+    assert restored["m5_restored_receipt_ids"] == [seeded["receipt_id"]]
+    async with get_session() as db:
+        proposal = (
+            await db.execute(
+                select(MemoryProposal).where(MemoryProposal.proposal_id == seeded["proposal_id"])
+            )
+        ).scalars().one()
+        receipt = (
+            await db.execute(
+                select(WorkBoardDecisionReceipt).where(
+                    WorkBoardDecisionReceipt.receipt_id == seeded["receipt_id"]
+                )
+            )
+        ).scalars().one()
+    assert proposal.status is MemoryProposalStatus.accepted
+    assert proposal.preview_text is None
+    assert proposal.memory_scope_json is None
+    assert proposal.provenance_json == "{}"
+    assert proposal.source_refs_json == "[]"
+    assert receipt.accepted_memory_id == seeded["memory_id"]
+    assert receipt.decision_status is WorkBoardDecisionStatus.changed
+    assert receipt.candidate_set_digest == _test_digest("later-candidate-set")
+    assert (await memory_repository.get_memory(seeded["memory_id"])).content.startswith(
+        "The verified recovery procedure"
+    )
+
+
+@pytest.mark.asyncio
+async def test_m5_restore_blocks_receipt_and_suppresses_proposal_for_current_tombstone(local_memory_db):
+    get_session, _database_path = local_memory_db
+    operator = make_test_bypass_operator()
+    owner_session = operator.session_id
+    seeded = await _seed_m5_verified_records(get_session, operator)
+    with _runtime_operator(operator):
+        archive = await memory_repository.export_canonical_memory_state(
+            actor=operator.principal.principal_id,
+            owner_session_id=owner_session,
+            authenticated_session_id=owner_session,
+        )
+    async with get_session() as db:
+        db.add(
+            MemoryTombstone(
+                id="current-tombstone-m5",
+                memory_id=seeded["memory_id"],
+                actor=operator.principal.principal_id,
+                reason="operator deleted verified memory",
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        await db.flush()
+    connection = sqlite3.connect(_database_path)
+    try:
+        connection.execute("DELETE FROM work_board_decision_receipts")
+        connection.execute("DELETE FROM memory_proposals")
+        connection.commit()
+    finally:
+        connection.close()
+
+    with _runtime_operator(operator):
+        restored = await memory_repository.restore_canonical_memory_state(
+            archive,
+            actor=operator.principal.principal_id,
+            owner_session_id=owner_session,
+            authenticated_session_id=owner_session,
+        )
+    assert restored["m5_suppressed_proposal_ids"] == [seeded["proposal_id"]]
+    assert restored["m5_blocked_receipt_ids"] == [seeded["receipt_id"]]
+    async with get_session() as db:
+        proposal = (
+            await db.execute(
+                select(MemoryProposal).where(MemoryProposal.proposal_id == seeded["proposal_id"])
+            )
+        ).scalars().first()
+        receipt = (
+            await db.execute(
+                select(WorkBoardDecisionReceipt).where(
+                    WorkBoardDecisionReceipt.receipt_id == seeded["receipt_id"]
+                )
+            )
+        ).scalars().one()
+    assert proposal is None
+    assert receipt.decision_status is WorkBoardDecisionStatus.blocked
+    assert receipt.admission_status is WorkBoardDecisionAdmissionStatus.blocked
+    assert receipt.reason == "accepted_memory_unavailable_on_restore"
+
+
+@pytest.mark.asyncio
+async def test_m5_restore_blocks_receipt_when_archive_omits_accepted_memory(local_memory_db):
+    get_session, database_path = local_memory_db
+    operator = make_test_bypass_operator()
+    owner_session = operator.session_id
+    seeded = await _seed_m5_verified_records(get_session, operator)
+    with _runtime_operator(operator):
+        archive = await memory_repository.export_canonical_memory_state(
+            actor=operator.principal.principal_id,
+            owner_session_id=owner_session,
+            authenticated_session_id=owner_session,
+        )
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute("DELETE FROM work_board_decision_receipts")
+        connection.execute("DELETE FROM memory_proposals")
+        connection.execute("DELETE FROM memory_sources WHERE memory_id = ?", (seeded["memory_id"],))
+        connection.execute("DELETE FROM memories WHERE id = ?", (seeded["memory_id"],))
+        connection.commit()
+    finally:
+        connection.close()
+
+    archive = json.loads(json.dumps(archive))
+    archive["memories"] = []
+    archive["memory_ids"] = []
+    archive["counts"]["memories"] = 0
+    archive["export_hash"] = _recovery_json_hash(_memory_export_integrity_payload(archive))
+    archive["artifact_path"] = f"artifacts/memory-recovery/export-{archive['export_hash'][:24]}.json"
+    archive["artifact_sha256"] = _recovery_json_hash(_memory_export_artifact_payload(archive))
+    with _runtime_operator(operator):
+        restored = await memory_repository.restore_canonical_memory_state(
+            archive,
+            actor=operator.principal.principal_id,
+            owner_session_id=owner_session,
+            authenticated_session_id=owner_session,
+        )
+    assert restored["m5_suppressed_proposal_ids"] == [seeded["proposal_id"]]
+    assert restored["m5_blocked_receipt_ids"] == [seeded["receipt_id"]]
+    assert await memory_repository.get_memory(seeded["memory_id"]) is None
+    async with get_session() as db:
+        receipt = (
+            await db.execute(
+                select(WorkBoardDecisionReceipt).where(
+                    WorkBoardDecisionReceipt.receipt_id == seeded["receipt_id"]
+                )
+            )
+        ).scalars().one()
+    assert receipt.decision_status is WorkBoardDecisionStatus.blocked
 
 
 @pytest.mark.asyncio

@@ -157,6 +157,17 @@ class GoalCandidateRequest(BaseModel):
         return result
 
 
+class GoalCandidateSetRequest(BaseModel):
+    """Bounded ordered candidate set for an authenticated later decision."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    task_id: str = Field(min_length=1, max_length=512)
+    expected_task_revision: int = Field(ge=1)
+    expected_goal_revision: int = Field(ge=1)
+    candidates: list[GoalCandidateRequest] = Field(min_length=1, max_length=20)
+
+
 class GoalCandidateDecision(BaseModel):
     """An inspectable candidate decision tied to one goal revision."""
 

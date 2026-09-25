@@ -165,6 +165,12 @@ def _closed_block_kind(value: Any) -> str:
     code = str(value or "").strip().lower()
     if code in _BOARD_BLOCK_KINDS:
         return code
+    if code in {
+        "m5_memory_confirmation_required",
+        "m5_memory_binding_blocked",
+        "accepted_memory_requires_operator_confirmation",
+    }:
+        return "needs_input"
     if any(token in code for token in ("unknown", "effect", "cost", "reconcile")):
         return "unknown_effect"
     # A missing or malformed board input is a capability specification

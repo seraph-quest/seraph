@@ -6,6 +6,7 @@ from config.settings import settings
 from src.db.engine import (
     _configure_sqlite_connection,
     _ensure_legacy_columns,
+    _ensure_m5_columns,
     _ensure_search_indexes,
 )
 from src.db.models import (
@@ -13,6 +14,44 @@ from src.db.models import (
     ModelRouteAttemptReceiptRecord,
     ModelRouteReceiptRecord,
 )
+
+
+async def test_ensure_m5_columns_adds_m5_candidate_digests(tmp_path):
+    db_path = tmp_path / "legacy-m5-receipts.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    event.listen(engine.sync_engine, "connect", _configure_sqlite_connection)
+
+    try:
+        async with engine.begin() as conn:
+            await conn.exec_driver_sql(
+                "CREATE TABLE memory_proposals (proposal_id VARCHAR PRIMARY KEY)"
+            )
+            await conn.exec_driver_sql(
+                "CREATE TABLE work_board_decision_receipts (receipt_id VARCHAR PRIMARY KEY)"
+            )
+            await _ensure_m5_columns(conn)
+            await _ensure_m5_columns(conn)
+            receipt_columns = {
+                row[1]
+                for row in (
+                    await conn.exec_driver_sql(
+                        "PRAGMA table_info(work_board_decision_receipts)"
+                    )
+                ).fetchall()
+            }
+            proposal_columns = {
+                row[1]
+                for row in (
+                    await conn.exec_driver_sql("PRAGMA table_info(memory_proposals)")
+                ).fetchall()
+            }
+        assert "candidate_set_digest" in proposal_columns
+        assert "acceptance_binding_digest" in proposal_columns
+        assert "artifact_ref" in proposal_columns
+        assert "artifact_digest" in proposal_columns
+        assert "candidate_set_digest" in receipt_columns
+    finally:
+        await engine.dispose()
 
 
 async def test_ensure_legacy_columns_backfills_kind_from_category(tmp_path):

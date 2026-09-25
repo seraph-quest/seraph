@@ -35,6 +35,15 @@ from src.db.models import (
     MemorySource,
     MemoryStatus,
     MemoryTombstone,
+    MemoryProposal,
+    MemoryProposalDecisionEffect,
+    MemoryProposalProviderContactState,
+    MemoryProposalPrivacyState,
+    MemoryProposalStatus,
+    WorkBoardDecisionReceipt,
+    WorkBoardDecisionAdmissionStatus,
+    WorkBoardDecisionReceiptStage,
+    WorkBoardDecisionStatus,
 )
 from src.approval.runtime import get_current_session_id, get_current_trust_principal
 from src.auth.cancellation import assert_runtime_not_revoked
@@ -200,6 +209,8 @@ _MEMORY_EXPORT_ENVELOPE_FIELDS = (
     "canonical_tombstone_revision",
     "memories",
     "tombstones",
+    "m5_proposals",
+    "m5_decision_receipts",
     "generated_at",
     "status",
     "operator_status",
@@ -210,6 +221,515 @@ _MEMORY_EXPORT_ENVELOPE_FIELDS = (
     "memory_ids",
     "tombstone_ids",
 )
+
+# Recovery archives are operator-authenticated snapshots.  These validators
+# keep M5 rows as identifiers/digests/enums only; proposal text, scope,
+# provenance, and source bodies never cross the archive boundary.
+_M5_RECOVERY_ID = re.compile(r"^[A-Za-z0-9_.:/-]{1,512}$")
+_M5_RECOVERY_DIGEST = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _m5_recovery_id(value: Any, *, field_name: str, required: bool = False) -> str | None:
+    candidate = str(value or "").strip()
+    if not candidate:
+        if required:
+            raise ValueError(f"memory restore M5 {field_name} is required")
+        return None
+    if not _M5_RECOVERY_ID.fullmatch(candidate):
+        raise ValueError(f"memory restore M5 {field_name} is not a safe identifier")
+    return candidate
+
+
+def _m5_recovery_text(value: Any, *, field_name: str, maximum: int = 1000) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str) or "\x00" in value or len(value) > maximum:
+        raise ValueError(f"memory restore M5 {field_name} is invalid")
+    return value
+
+
+def _m5_recovery_digest(
+    value: Any,
+    *,
+    field_name: str,
+    required: bool = False,
+) -> str | None:
+    if value is None or value == "":
+        if required:
+            raise ValueError(f"memory restore M5 {field_name} is required")
+        return None
+    candidate = str(value).strip().lower()
+    if not _M5_RECOVERY_DIGEST.fullmatch(candidate):
+        raise ValueError(f"memory restore M5 {field_name} must be a SHA-256 digest")
+    return candidate
+
+
+def _m5_recovery_int(
+    value: Any,
+    *,
+    field_name: str,
+    minimum: int = 0,
+    maximum: int = 2**31 - 1,
+) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"memory restore M5 {field_name} is invalid")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"memory restore M5 {field_name} is invalid") from exc
+    if parsed < minimum or parsed > maximum:
+        raise ValueError(f"memory restore M5 {field_name} is out of bounds")
+    return parsed
+
+
+def _m5_recovery_enum(value: Any, enum_cls: type, *, field_name: str) -> Any:
+    try:
+        return value if isinstance(value, enum_cls) else enum_cls(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"memory restore M5 {field_name} is invalid") from exc
+
+
+def _m5_recovery_timestamp(value: Any, *, field_name: str, required: bool = False) -> datetime | None:
+    parsed = _parse_recovery_timestamp(value, field_name=field_name)
+    if required and parsed is None:
+        raise ValueError(f"memory restore M5 {field_name} is required")
+    return parsed
+
+
+def _m5_recovery_evidence_ids(value: Any) -> str:
+    if value is None:
+        return "[]"
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("memory restore M5 receipt evidence ids are invalid") from exc
+    if not isinstance(value, list) or len(value) > _MAX_RECOVERY_SOURCES_PER_RECORD:
+        raise ValueError("memory restore M5 receipt evidence ids are invalid")
+    normalized: list[str] = []
+    for index, item in enumerate(value):
+        normalized_id = _m5_recovery_id(
+            item,
+            field_name=f"receipt evidence id {index}",
+            required=True,
+        )
+        if normalized_id is None:  # pragma: no cover - required=True raises first
+            raise ValueError("memory restore M5 receipt evidence ids are invalid")
+        normalized.append(normalized_id)
+    return json.dumps(normalized, separators=(",", ":"))
+
+
+def _m5_export_enum(value: Any) -> str | None:
+    if value is None:
+        return None
+    return str(getattr(value, "value", value))
+
+
+def _m5_export_evidence_ids(value: Any) -> list[str]:
+    try:
+        parsed = json.loads(value or "[]") if isinstance(value, str) else value
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [
+        item.strip()
+        for item in parsed
+        if isinstance(item, str) and _M5_RECOVERY_ID.fullmatch(item.strip())
+    ]
+
+
+def _m5_proposal_archive_payload(proposal: MemoryProposal) -> dict[str, Any]:
+    """Serialize the non-content fields needed to recover one M5 proposal."""
+
+    return {
+        "proposal_id": proposal.proposal_id,
+        "schema_version": proposal.schema_version,
+        "owner_principal_id": proposal.owner_principal_id,
+        "owner_session_id": proposal.owner_session_id,
+        "source_task_id": proposal.source_task_id,
+        "source_task_revision": proposal.source_task_revision,
+        "source_attempt_id": proposal.source_attempt_id,
+        "source_attempt_fence": proposal.source_attempt_fence,
+        "workflow_run_id": proposal.workflow_run_id,
+        "workflow_run_revision": proposal.workflow_run_revision,
+        "goal_id": proposal.goal_id,
+        "goal_revision": proposal.goal_revision,
+        "capability_id": proposal.capability_id,
+        "capability_version": proposal.capability_version,
+        "typed_input_digest": proposal.typed_input_digest,
+        "source_context_digest": proposal.source_context_digest,
+        "candidate_set_digest": proposal.candidate_set_digest,
+        "evidence_digest": proposal.evidence_digest,
+        "readback_kind": proposal.readback_kind,
+        "readback_ref": proposal.readback_ref,
+        "readback_digest": proposal.readback_digest,
+        "artifact_ref": proposal.artifact_ref,
+        "artifact_digest": proposal.artifact_digest,
+        "proposal_job_id": proposal.proposal_job_id,
+        "request_idempotency_key": proposal.request_idempotency_key,
+        "request_binding_digest": proposal.request_binding_digest,
+        "acceptance_binding_digest": proposal.acceptance_binding_digest,
+        "memory_kind": _m5_export_enum(proposal.memory_kind),
+        "preview_text_digest": proposal.preview_text_digest,
+        "decision_effect": _m5_export_enum(proposal.decision_effect),
+        "confidence": proposal.confidence,
+        "corrects_memory_id": proposal.corrects_memory_id,
+        "reason_code": proposal.reason_code,
+        "recovery_action": proposal.recovery_action,
+        "provider_contact_started": bool(proposal.provider_contact_started),
+        "provider_contact_state": _m5_export_enum(proposal.provider_contact_state),
+        "provider_contact_count": proposal.provider_contact_count,
+        "privacy_state": _m5_export_enum(proposal.privacy_state),
+        "status": _m5_export_enum(proposal.status),
+        "accepted_memory_id": proposal.accepted_memory_id,
+        "accepted_memory_content_digest": proposal.accepted_memory_content_digest,
+        "accepted_by_principal_id": proposal.accepted_by_principal_id,
+        "accepted_by_session_id": proposal.accepted_by_session_id,
+        "accepted_at": _recovery_timestamp(proposal.accepted_at),
+        "rejected_by_principal_id": proposal.rejected_by_principal_id,
+        "rejected_by_session_id": proposal.rejected_by_session_id,
+        "rejected_at": _recovery_timestamp(proposal.rejected_at),
+        "rollback_by_principal_id": proposal.rollback_by_principal_id,
+        "rollback_by_session_id": proposal.rollback_by_session_id,
+        "rollback_at": _recovery_timestamp(proposal.rollback_at),
+        "expires_at": _recovery_timestamp(proposal.expires_at),
+        "revision": proposal.revision,
+        "created_at": _recovery_timestamp(proposal.created_at),
+        "updated_at": _recovery_timestamp(proposal.updated_at),
+    }
+
+
+def _m5_receipt_archive_payload(receipt: WorkBoardDecisionReceipt) -> dict[str, Any]:
+    """Serialize the non-content fields needed to recover one decision receipt."""
+
+    return {
+        "receipt_id": receipt.receipt_id,
+        "schema_version": receipt.schema_version,
+        "receipt_stage": _m5_export_enum(receipt.receipt_stage),
+        "receipt_binding_digest": receipt.receipt_binding_digest,
+        "owner_principal_id": receipt.owner_principal_id,
+        "owner_session_id": receipt.owner_session_id,
+        "source_proposal_id": receipt.source_proposal_id,
+        "source_proposal_revision": receipt.source_proposal_revision,
+        "source_baseline_receipt_id": receipt.source_baseline_receipt_id,
+        "source_task_id": receipt.source_task_id,
+        "source_task_revision": receipt.source_task_revision,
+        "source_attempt_id": receipt.source_attempt_id,
+        "source_attempt_fence": receipt.source_attempt_fence,
+        "source_workflow_run_id": receipt.source_workflow_run_id,
+        "source_workflow_run_revision": receipt.source_workflow_run_revision,
+        "later_task_id": receipt.later_task_id,
+        "later_task_revision": receipt.later_task_revision,
+        "later_attempt_id": receipt.later_attempt_id,
+        "later_workflow_run_id": receipt.later_workflow_run_id,
+        "later_attempt_fence": receipt.later_attempt_fence,
+        "goal_id": receipt.goal_id,
+        "goal_revision": receipt.goal_revision,
+        "capability_id": receipt.capability_id,
+        "capability_version": receipt.capability_version,
+        "typed_input_digest": receipt.typed_input_digest,
+        "task_intent_digest": receipt.task_intent_digest,
+        "source_context_digest": receipt.source_context_digest,
+        "candidate_set_digest": getattr(receipt, "candidate_set_digest", ""),
+        "accepted_memory_id": receipt.accepted_memory_id,
+        "accepted_memory_content_digest": receipt.accepted_memory_content_digest,
+        "before_input_digest": receipt.before_input_digest,
+        "after_input_digest": receipt.after_input_digest,
+        "before_action_id": receipt.before_action_id,
+        "after_action_id": receipt.after_action_id,
+        "before_selected_capability_id": receipt.before_selected_capability_id,
+        "after_selected_capability_id": receipt.after_selected_capability_id,
+        "confirmed_action_id": receipt.confirmed_action_id,
+        "comparison_context_digest": receipt.comparison_context_digest,
+        "retrieval_evidence_ids": _m5_export_evidence_ids(receipt.retrieval_evidence_ids_json),
+        "decision_status": _m5_export_enum(receipt.decision_status),
+        "admission_status": _m5_export_enum(receipt.admission_status),
+        "reason": receipt.reason,
+        "confirmer_principal_id": receipt.confirmer_principal_id,
+        "confirmer_session_id": receipt.confirmer_session_id,
+        "confirmed_at": _recovery_timestamp(receipt.confirmed_at),
+        "confirmation_binding_digest": receipt.confirmation_binding_digest,
+        "consumed_at": _recovery_timestamp(receipt.consumed_at),
+        "revision": receipt.revision,
+        "created_at": _recovery_timestamp(receipt.created_at),
+        "updated_at": _recovery_timestamp(receipt.updated_at),
+    }
+
+
+def _m5_normalize_owner(value: Any, *, field_name: str, expected: str) -> str:
+    actual = _m5_recovery_id(value, field_name=field_name, required=True)
+    if actual != expected:
+        raise PermissionError(f"memory restore M5 {field_name} does not match the authenticated owner")
+    return actual
+
+
+def _m5_normalize_optional_id(value: Any, *, field_name: str) -> str | None:
+    return _m5_recovery_id(value, field_name=field_name)
+
+
+def _m5_normalize_optional_digest(value: Any, *, field_name: str) -> str | None:
+    return _m5_recovery_digest(value, field_name=field_name)
+
+
+def _m5_normalize_proposal_record(
+    record: Any,
+    *,
+    owner_principal_id: str,
+    owner_session_id: str,
+) -> dict[str, Any]:
+    if not isinstance(record, dict):
+        raise ValueError("memory restore archive contains an invalid M5 proposal")
+    proposal_id = _m5_recovery_id(record.get("proposal_id"), field_name="proposal_id", required=True)
+    if record.get("schema_version") != "memory_proposal.v1":
+        raise ValueError(f"memory restore M5 proposal {proposal_id} has an invalid schema version")
+    _m5_normalize_owner(record.get("owner_principal_id"), field_name="proposal owner principal", expected=owner_principal_id)
+    _m5_normalize_owner(record.get("owner_session_id"), field_name="proposal owner session", expected=owner_session_id)
+    source_task_id = _m5_recovery_id(record.get("source_task_id"), field_name="source_task_id", required=True)
+    source_attempt_id = _m5_recovery_id(record.get("source_attempt_id"), field_name="source_attempt_id", required=True)
+    workflow_run_id = _m5_recovery_id(record.get("workflow_run_id"), field_name="workflow_run_id")
+    goal_id = _m5_recovery_id(record.get("goal_id"), field_name="goal_id", required=True)
+    capability_id = _m5_recovery_id(record.get("capability_id"), field_name="capability_id", required=True)
+    typed_input_digest = _m5_recovery_digest(
+        record.get("typed_input_digest"), field_name="typed_input_digest"
+    ) or ""
+    source_context_digest = _m5_recovery_digest(
+        record.get("source_context_digest"), field_name="source_context_digest", required=True
+    )
+    candidate_set_digest = _m5_recovery_digest(
+        record.get("candidate_set_digest"), field_name="candidate_set_digest"
+    ) or ""
+    request_binding_digest = _m5_recovery_digest(
+        record.get("request_binding_digest"), field_name="request_binding_digest", required=True
+    )
+    accepted_memory_id = _m5_normalize_optional_id(
+        record.get("accepted_memory_id"), field_name="accepted_memory_id"
+    )
+    accepted_memory_digest = _m5_normalize_optional_digest(
+        record.get("accepted_memory_content_digest"), field_name="accepted_memory_content_digest"
+    )
+    if bool(accepted_memory_id) != bool(accepted_memory_digest):
+        raise ValueError(f"memory restore M5 proposal {proposal_id} has an incomplete accepted memory binding")
+    accepted_by_principal_id = _m5_normalize_optional_id(
+        record.get("accepted_by_principal_id"), field_name="accepted_by_principal_id"
+    )
+    accepted_by_session_id = _m5_normalize_optional_id(
+        record.get("accepted_by_session_id"), field_name="accepted_by_session_id"
+    )
+    for field_name, value, expected in (
+        ("accepted_by_principal_id", accepted_by_principal_id, owner_principal_id),
+        ("accepted_by_session_id", accepted_by_session_id, owner_session_id),
+    ):
+        if value and value != expected:
+            raise PermissionError(f"memory restore M5 proposal {proposal_id} {field_name} does not match the owner")
+    rejected_by_principal_id = _m5_normalize_optional_id(
+        record.get("rejected_by_principal_id"), field_name="rejected_by_principal_id"
+    )
+    rejected_by_session_id = _m5_normalize_optional_id(
+        record.get("rejected_by_session_id"), field_name="rejected_by_session_id"
+    )
+    rollback_by_principal_id = _m5_normalize_optional_id(
+        record.get("rollback_by_principal_id"), field_name="rollback_by_principal_id"
+    )
+    rollback_by_session_id = _m5_normalize_optional_id(
+        record.get("rollback_by_session_id"), field_name="rollback_by_session_id"
+    )
+    for field_name, value, expected in (
+        ("rejected_by_principal_id", rejected_by_principal_id, owner_principal_id),
+        ("rejected_by_session_id", rejected_by_session_id, owner_session_id),
+        ("rollback_by_principal_id", rollback_by_principal_id, owner_principal_id),
+        ("rollback_by_session_id", rollback_by_session_id, owner_session_id),
+    ):
+        if value and value != expected:
+            raise PermissionError(f"memory restore M5 proposal {proposal_id} {field_name} does not match the owner")
+    status = _m5_recovery_enum(record.get("status"), MemoryProposalStatus, field_name="proposal status")
+    privacy_state = _m5_recovery_enum(
+        record.get("privacy_state"), MemoryProposalPrivacyState, field_name="proposal privacy state"
+    )
+    memory_kind = record.get("memory_kind")
+    normalized_memory_kind = _m5_recovery_enum(memory_kind, MemoryKind, field_name="proposal memory kind") if memory_kind else None
+    if normalized_memory_kind is not None and normalized_memory_kind not in {MemoryKind.fact, MemoryKind.pattern}:
+        raise ValueError(f"memory restore M5 proposal {proposal_id} has an invalid memory kind")
+    decision_effect = _m5_recovery_enum(
+        record.get("decision_effect"), MemoryProposalDecisionEffect, field_name="proposal decision effect"
+    )
+    provider_contact_state = _m5_recovery_enum(
+        record.get("provider_contact_state"),
+        MemoryProposalProviderContactState,
+        field_name="proposal provider contact state",
+    )
+    confidence = record.get("confidence")
+    if confidence is not None:
+        if isinstance(confidence, bool):
+            raise ValueError(f"memory restore M5 proposal {proposal_id} confidence is invalid")
+        try:
+            confidence = float(confidence)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"memory restore M5 proposal {proposal_id} confidence is invalid") from exc
+        if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+            raise ValueError(f"memory restore M5 proposal {proposal_id} confidence is invalid")
+    created_at = _m5_recovery_timestamp(record.get("created_at"), field_name="proposal.created_at", required=True)
+    updated_at = _m5_recovery_timestamp(record.get("updated_at"), field_name="proposal.updated_at", required=True)
+    provider_contact_started = record.get("provider_contact_started", False)
+    if not isinstance(provider_contact_started, bool):
+        raise ValueError(f"memory restore M5 proposal {proposal_id} provider contact flag is invalid")
+    return {
+        "proposal_id": proposal_id,
+        "schema_version": "memory_proposal.v1",
+        "owner_principal_id": owner_principal_id,
+        "owner_session_id": owner_session_id,
+        "source_task_id": source_task_id,
+        "source_task_revision": _m5_recovery_int(record.get("source_task_revision"), field_name="source_task_revision", minimum=1),
+        "source_attempt_id": source_attempt_id,
+        "source_attempt_fence": _m5_recovery_int(record.get("source_attempt_fence"), field_name="source_attempt_fence"),
+        "workflow_run_id": workflow_run_id or "",
+        "workflow_run_revision": _m5_recovery_int(record.get("workflow_run_revision"), field_name="workflow_run_revision"),
+        "goal_id": goal_id,
+        "goal_revision": _m5_recovery_int(record.get("goal_revision"), field_name="goal_revision", minimum=1),
+        "capability_id": capability_id,
+        "capability_version": _m5_recovery_text(record.get("capability_version"), field_name="capability_version", maximum=255),
+        "typed_input_digest": typed_input_digest,
+        "source_context_digest": source_context_digest,
+        "candidate_set_digest": candidate_set_digest,
+        "evidence_digest": _m5_normalize_optional_digest(record.get("evidence_digest"), field_name="evidence_digest"),
+        "readback_kind": _m5_recovery_text(record.get("readback_kind"), field_name="readback_kind", maximum=255),
+        "readback_ref": _m5_recovery_text(record.get("readback_ref"), field_name="readback_ref", maximum=512) or None,
+        "readback_digest": _m5_normalize_optional_digest(record.get("readback_digest"), field_name="readback_digest"),
+        "artifact_ref": _m5_recovery_text(record.get("artifact_ref"), field_name="artifact_ref", maximum=512) or None,
+        "artifact_digest": _m5_normalize_optional_digest(record.get("artifact_digest"), field_name="artifact_digest"),
+        "proposal_job_id": _m5_normalize_optional_id(record.get("proposal_job_id"), field_name="proposal_job_id"),
+        "request_idempotency_key": _m5_recovery_text(record.get("request_idempotency_key"), field_name="request_idempotency_key", maximum=512),
+        "request_binding_digest": request_binding_digest,
+        "acceptance_binding_digest": _m5_normalize_optional_digest(record.get("acceptance_binding_digest"), field_name="acceptance_binding_digest"),
+        "memory_kind": normalized_memory_kind,
+        # Deliberately discard memory_scope_json, preview_text, provenance_json,
+        # and source_refs_json from any hand-edited archive.
+        "memory_scope_json": None,
+        "preview_text": None,
+        "preview_text_digest": _m5_normalize_optional_digest(record.get("preview_text_digest"), field_name="preview_text_digest"),
+        "decision_effect": decision_effect,
+        "confidence": confidence,
+        "corrects_memory_id": _m5_normalize_optional_id(record.get("corrects_memory_id"), field_name="corrects_memory_id"),
+        "provenance_json": "{}",
+        "source_refs_json": "[]",
+        "reason_code": _m5_recovery_text(record.get("reason_code"), field_name="reason_code"),
+        "recovery_action": _m5_recovery_text(record.get("recovery_action"), field_name="recovery_action"),
+        "provider_contact_started": provider_contact_started,
+        "provider_contact_state": provider_contact_state,
+        "provider_contact_count": _m5_recovery_int(record.get("provider_contact_count"), field_name="provider_contact_count", maximum=10000),
+        "privacy_state": privacy_state,
+        "status": status,
+        "accepted_memory_id": accepted_memory_id,
+        "accepted_memory_content_digest": accepted_memory_digest,
+        "accepted_by_principal_id": accepted_by_principal_id,
+        "accepted_by_session_id": accepted_by_session_id,
+        "accepted_at": _m5_recovery_timestamp(record.get("accepted_at"), field_name="proposal.accepted_at"),
+        "rejected_by_principal_id": rejected_by_principal_id,
+        "rejected_by_session_id": rejected_by_session_id,
+        "rejected_at": _m5_recovery_timestamp(record.get("rejected_at"), field_name="proposal.rejected_at"),
+        "rollback_by_principal_id": rollback_by_principal_id,
+        "rollback_by_session_id": rollback_by_session_id,
+        "rollback_at": _m5_recovery_timestamp(record.get("rollback_at"), field_name="proposal.rollback_at"),
+        "expires_at": _m5_recovery_timestamp(record.get("expires_at"), field_name="proposal.expires_at"),
+        "revision": _m5_recovery_int(record.get("revision"), field_name="revision", minimum=1),
+        "created_at": created_at,
+        "updated_at": updated_at,
+    }
+
+
+def _m5_normalize_receipt_record(
+    record: Any,
+    *,
+    owner_principal_id: str,
+    owner_session_id: str,
+) -> dict[str, Any]:
+    if not isinstance(record, dict):
+        raise ValueError("memory restore archive contains an invalid M5 decision receipt")
+    receipt_id = _m5_recovery_id(record.get("receipt_id"), field_name="receipt_id", required=True)
+    if record.get("schema_version") != "work_board_decision_receipt.v1":
+        raise ValueError(f"memory restore M5 receipt {receipt_id} has an invalid schema version")
+    _m5_normalize_owner(record.get("owner_principal_id"), field_name="receipt owner principal", expected=owner_principal_id)
+    _m5_normalize_owner(record.get("owner_session_id"), field_name="receipt owner session", expected=owner_session_id)
+    receipt_binding_digest = _m5_recovery_digest(
+        record.get("receipt_binding_digest"), field_name="receipt_binding_digest", required=True
+    )
+    accepted_memory_id = _m5_normalize_optional_id(record.get("accepted_memory_id"), field_name="receipt accepted_memory_id")
+    accepted_memory_digest = _m5_normalize_optional_digest(
+        record.get("accepted_memory_content_digest"), field_name="receipt accepted_memory_content_digest"
+    )
+    if bool(accepted_memory_id) != bool(accepted_memory_digest):
+        raise ValueError(f"memory restore M5 receipt {receipt_id} has an incomplete accepted memory binding")
+    created_at = _m5_recovery_timestamp(record.get("created_at"), field_name="receipt.created_at", required=True)
+    updated_at = _m5_recovery_timestamp(record.get("updated_at"), field_name="receipt.updated_at", required=True)
+    digest_fields = (
+        "typed_input_digest",
+        "task_intent_digest",
+        "source_context_digest",
+        "candidate_set_digest",
+        "before_input_digest",
+        "after_input_digest",
+        "comparison_context_digest",
+    )
+    normalized_digests = {
+        field: _m5_recovery_digest(record.get(field), field_name=f"receipt.{field}") or ""
+        for field in digest_fields
+    }
+    confirmer_principal_id = _m5_normalize_optional_id(
+        record.get("confirmer_principal_id"), field_name="confirmer_principal_id"
+    )
+    confirmer_session_id = _m5_normalize_optional_id(
+        record.get("confirmer_session_id"), field_name="confirmer_session_id"
+    )
+    if confirmer_principal_id and confirmer_principal_id != owner_principal_id:
+        raise PermissionError(f"memory restore M5 receipt {receipt_id} confirmer principal does not match the owner")
+    if confirmer_session_id and confirmer_session_id != owner_session_id:
+        raise PermissionError(f"memory restore M5 receipt {receipt_id} confirmer session does not match the owner")
+    return {
+        "receipt_id": receipt_id,
+        "schema_version": "work_board_decision_receipt.v1",
+        "receipt_stage": _m5_recovery_enum(record.get("receipt_stage"), WorkBoardDecisionReceiptStage, field_name="receipt stage"),
+        "receipt_binding_digest": receipt_binding_digest,
+        "owner_principal_id": owner_principal_id,
+        "owner_session_id": owner_session_id,
+        "source_proposal_id": _m5_normalize_optional_id(record.get("source_proposal_id"), field_name="source_proposal_id"),
+        "source_proposal_revision": _m5_recovery_int(record.get("source_proposal_revision"), field_name="source_proposal_revision"),
+        "source_baseline_receipt_id": _m5_normalize_optional_id(record.get("source_baseline_receipt_id"), field_name="source_baseline_receipt_id"),
+        "source_task_id": _m5_normalize_optional_id(record.get("source_task_id"), field_name="source_task_id"),
+        "source_task_revision": _m5_recovery_int(record.get("source_task_revision"), field_name="source_task_revision"),
+        "source_attempt_id": _m5_normalize_optional_id(record.get("source_attempt_id"), field_name="source_attempt_id"),
+        "source_attempt_fence": _m5_recovery_int(record.get("source_attempt_fence"), field_name="source_attempt_fence"),
+        "source_workflow_run_id": _m5_normalize_optional_id(record.get("source_workflow_run_id"), field_name="source_workflow_run_id"),
+        "source_workflow_run_revision": _m5_recovery_int(record.get("source_workflow_run_revision"), field_name="source_workflow_run_revision"),
+        "later_task_id": _m5_recovery_id(record.get("later_task_id"), field_name="later_task_id", required=True),
+        "later_task_revision": _m5_recovery_int(record.get("later_task_revision"), field_name="later_task_revision", minimum=1),
+        "later_attempt_id": _m5_normalize_optional_id(record.get("later_attempt_id"), field_name="later_attempt_id"),
+        "later_workflow_run_id": _m5_normalize_optional_id(record.get("later_workflow_run_id"), field_name="later_workflow_run_id"),
+        "later_attempt_fence": _m5_recovery_int(record.get("later_attempt_fence"), field_name="later_attempt_fence"),
+        "goal_id": _m5_recovery_id(record.get("goal_id"), field_name="receipt.goal_id", required=True),
+        "goal_revision": _m5_recovery_int(record.get("goal_revision"), field_name="receipt.goal_revision", minimum=1),
+        "capability_id": _m5_recovery_id(record.get("capability_id"), field_name="receipt.capability_id", required=True),
+        "capability_version": _m5_recovery_text(record.get("capability_version"), field_name="receipt.capability_version", maximum=255),
+        **normalized_digests,
+        "accepted_memory_id": accepted_memory_id,
+        "accepted_memory_content_digest": accepted_memory_digest,
+        "before_action_id": _m5_recovery_text(record.get("before_action_id"), field_name="receipt.before_action_id", maximum=512),
+        "after_action_id": _m5_recovery_text(record.get("after_action_id"), field_name="receipt.after_action_id", maximum=512),
+        "before_selected_capability_id": _m5_normalize_optional_id(record.get("before_selected_capability_id"), field_name="before_selected_capability_id"),
+        "after_selected_capability_id": _m5_normalize_optional_id(record.get("after_selected_capability_id"), field_name="after_selected_capability_id"),
+        "confirmed_action_id": _m5_recovery_text(record.get("confirmed_action_id"), field_name="receipt.confirmed_action_id", maximum=512) or None,
+        "retrieval_evidence_ids_json": _m5_recovery_evidence_ids(record.get("retrieval_evidence_ids", [])),
+        "decision_status": _m5_recovery_enum(record.get("decision_status"), WorkBoardDecisionStatus, field_name="receipt decision status"),
+        "admission_status": _m5_recovery_enum(record.get("admission_status"), WorkBoardDecisionAdmissionStatus, field_name="receipt admission status"),
+        "reason": _m5_recovery_text(record.get("reason"), field_name="receipt.reason"),
+        "confirmer_principal_id": confirmer_principal_id,
+        "confirmer_session_id": confirmer_session_id,
+        "confirmed_at": _m5_recovery_timestamp(record.get("confirmed_at"), field_name="receipt.confirmed_at"),
+        "confirmation_binding_digest": _m5_normalize_optional_digest(record.get("confirmation_binding_digest"), field_name="confirmation_binding_digest"),
+        "consumed_at": _m5_recovery_timestamp(record.get("consumed_at"), field_name="receipt.consumed_at"),
+        "revision": _m5_recovery_int(record.get("revision"), field_name="receipt.revision", minimum=1),
+        "created_at": created_at,
+        "updated_at": updated_at,
+    }
 
 
 def _memory_export_integrity_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -740,6 +1260,282 @@ class MemoryRepository:
                 entity = result.scalars().one()
             db.expunge(entity)
             return entity
+
+    async def create_m5_memory_in_session(
+        self,
+        db,
+        *,
+        content: str,
+        kind: MemoryKind,
+        source_session_id: str,
+        scope_key: str,
+        metadata_json: str,
+        confidence: float,
+        corrects_memory_id: str | None = None,
+        proposal_id: str = "",
+    ) -> Memory:
+        """Write one M5 memory through the canonical repository transaction.
+
+        The caller owns ``BEGIN IMMEDIATE``.  This is the transaction-aware
+        counterpart to the public correction writer; it preserves the same
+        Memory/MemorySource/edge/tombstone authority without opening a second
+        session or creating another memory store.
+        """
+
+        normalized_content = content.strip()
+        if not normalized_content:
+            raise ValueError("content must be non-empty")
+        normalized_kind = _coerce_enum(kind, MemoryKind)
+        if normalized_kind not in {MemoryKind.fact, MemoryKind.pattern}:
+            raise ValueError("M5 memories must be fact or pattern")
+        existing = (
+            await db.execute(
+                select(Memory).where(
+                    Memory.kind == normalized_kind,
+                    Memory.scope_key == scope_key,
+                )
+            )
+        ).scalars().first()
+        if existing is not None:
+            existing_provenance = {}
+            try:
+                existing_provenance = json.loads(existing.metadata_json or "{}").get(
+                    "work_board_provenance", {}
+                )
+            except (TypeError, ValueError, AttributeError):
+                existing_provenance = {}
+            if (
+                existing.source_session_id != source_session_id
+                or existing_provenance.get("proposal_id") != proposal_id
+                or existing.content != normalized_content
+                or _canonical_memory_deletion_marker(existing) is not None
+            ):
+                raise ValueError("canonical_write_conflict")
+            return existing
+
+        memory = Memory(
+            content=normalized_content,
+            category=MemoryCategory.fact if normalized_kind is MemoryKind.fact else MemoryCategory.pattern,
+            kind=normalized_kind,
+            summary=None,
+            confidence=max(0.0, min(1.0, float(confidence))),
+            importance=0.5,
+            reinforcement=1.0,
+            status=MemoryStatus.active,
+            source_session_id=source_session_id,
+            scope_key=scope_key,
+            metadata_json=metadata_json,
+            last_confirmed_at=_now(),
+        )
+        db.add(memory)
+        await db.flush()
+        db.add(
+            MemorySource(
+                memory_id=memory.id,
+                source_type="work_board_m5",
+                source_session_id=source_session_id,
+                source_message_id=None,
+                snippet=None,
+            )
+        )
+        if corrects_memory_id:
+            target = (
+                await db.execute(select(Memory).where(Memory.id == corrects_memory_id))
+            ).scalars().first()
+            if target is None or target.source_session_id != source_session_id:
+                raise PermissionError("correction_target_owner_mismatch")
+            target_tombstone = (
+                await db.execute(
+                    select(MemoryTombstone).where(MemoryTombstone.memory_id == corrects_memory_id)
+                )
+            ).scalars().first()
+            if target_tombstone is not None or _canonical_memory_deletion_marker(target) is not None:
+                raise ValueError("correction_target_deleted")
+            target.status = MemoryStatus.superseded
+            target.updated_at = _now()
+            db.add(target)
+            edge_metadata = json.dumps({"proposal_id": proposal_id}, sort_keys=True)
+            db.add(
+                MemoryEdge(
+                    from_memory_id=memory.id,
+                    to_memory_id=target.id,
+                    edge_type=MemoryEdgeType.supersedes,
+                    metadata_json=edge_metadata,
+                )
+            )
+            db.add(
+                MemoryEdge(
+                    from_memory_id=memory.id,
+                    to_memory_id=target.id,
+                    edge_type=MemoryEdgeType.contradicts,
+                    metadata_json=edge_metadata,
+                )
+            )
+        await db.flush()
+        return memory
+
+    async def rollback_m5_memory_in_session(
+        self,
+        db,
+        *,
+        memory_id: str,
+        expected_content_digest: str,
+        expected_proposal_id: str,
+    ) -> Memory:
+        """Conditionally suppress an M5 memory inside its caller transaction."""
+
+        memory = (
+            await db.execute(select(Memory).where(Memory.id == memory_id))
+        ).scalars().first()
+        if memory is None:
+            raise ValueError("accepted_memory_not_found")
+        if memory.source_session_id is None or _canonical_memory_deletion_marker(memory) is not None:
+            raise ValueError("memory_deleted_or_export_redacted")
+        try:
+            metadata = json.loads(memory.metadata_json or "{}")
+        except (TypeError, ValueError):
+            metadata = {}
+        provenance = metadata.get("work_board_provenance") if isinstance(metadata, dict) else {}
+        if not isinstance(provenance, dict) or provenance.get("proposal_id") != expected_proposal_id:
+            raise ValueError("memory_provenance_mismatch")
+        actual_digest = hashlib.sha256(memory.content.encode("utf-8")).hexdigest()
+        if actual_digest != expected_content_digest or memory.status is not MemoryStatus.active:
+            raise ValueError("memory_changed_before_rollback")
+        corrected_memory_id = str(provenance.get("corrects_memory_id") or "").strip()
+        if corrected_memory_id:
+            target = (
+                await db.execute(select(Memory).where(Memory.id == corrected_memory_id))
+            ).scalars().first()
+            if target is None or target.source_session_id != memory.source_session_id:
+                raise ValueError("correction_target_unavailable")
+            target_tombstone = (
+                await db.execute(
+                    select(MemoryTombstone).where(MemoryTombstone.memory_id == corrected_memory_id)
+                )
+            ).scalars().first()
+            if target_tombstone is not None or _canonical_memory_deletion_marker(target) is not None:
+                raise ValueError("correction_target_deleted")
+            try:
+                previous_status = MemoryStatus(
+                    str(provenance.get("corrected_memory_previous_status") or "")
+                )
+            except ValueError as exc:
+                raise ValueError("correction_target_rollback_binding_invalid") from exc
+            if previous_status is not MemoryStatus.active or target.status is not MemoryStatus.superseded:
+                raise ValueError("correction_target_changed_before_rollback")
+            later_supersession = (
+                await db.execute(
+                    select(MemoryEdge).where(
+                        MemoryEdge.to_memory_id == corrected_memory_id,
+                        MemoryEdge.edge_type == MemoryEdgeType.supersedes,
+                        MemoryEdge.from_memory_id != memory_id,
+                    ).limit(1)
+                )
+            ).scalars().first()
+            if later_supersession is not None:
+                raise ValueError("correction_target_has_later_supersession")
+            target.status = previous_status
+            target.updated_at = _now()
+            db.add(target)
+        metadata["work_board_rollback"] = {
+            "proposal_id": expected_proposal_id,
+            "at": _now().isoformat(),
+        }
+        memory.status = MemoryStatus.archived
+        memory.metadata_json = json.dumps(metadata, sort_keys=True, ensure_ascii=False)
+        memory.updated_at = _now()
+        db.add(memory)
+        await db.flush()
+        return memory
+
+    async def list_m5_accepted_memory_candidates(
+        self,
+        db,
+        *,
+        owner_principal_id: str,
+        owner_session_id: str,
+        goal_id: str,
+        goal_revision: int,
+        source_context_digest: str,
+        limit: int = 3,
+    ) -> list[tuple[MemoryProposal, Memory]]:
+        """Resolve active M5 memory only through canonical repository rules.
+
+        Goal and board selectors share this bounded owner/session/provenance
+        lookup.  Callers never search raw ``Memory`` rows or content; a
+        proposal is eligible only when its accepted memory, digest, source
+        session, tombstone state, and reserved provenance all agree.
+        """
+
+        rows = list(
+            (
+                await db.execute(
+                    select(MemoryProposal)
+                    .where(
+                        MemoryProposal.owner_principal_id == owner_principal_id,
+                        MemoryProposal.owner_session_id == owner_session_id,
+                        MemoryProposal.goal_id == goal_id,
+                        MemoryProposal.goal_revision == int(goal_revision),
+                        MemoryProposal.source_context_digest == source_context_digest,
+                        MemoryProposal.status == MemoryProposalStatus.accepted,
+                    )
+                    .order_by(MemoryProposal.proposal_id.asc())
+                    .limit(max(1, min(int(limit), 3)))
+                )
+            ).scalars().all()
+        )
+        eligible: list[tuple[MemoryProposal, Memory]] = []
+        for proposal in rows:
+            if proposal.privacy_state is MemoryProposalPrivacyState.redacted:
+                continue
+            memory_id = str(proposal.accepted_memory_id or "").strip()
+            expected_digest = str(proposal.accepted_memory_content_digest or "").strip().lower()
+            if not memory_id or not expected_digest:
+                continue
+            memory = (
+                await db.execute(select(Memory).where(Memory.id == memory_id))
+            ).scalars().first()
+            if memory is None or memory.status is not MemoryStatus.active:
+                continue
+            if memory.source_session_id != owner_session_id:
+                continue
+            if _canonical_memory_deletion_marker(memory) is not None:
+                continue
+            if hashlib.sha256(memory.content.encode("utf-8")).hexdigest() != expected_digest:
+                continue
+            tombstone = (
+                await db.execute(select(MemoryTombstone).where(MemoryTombstone.memory_id == memory.id))
+            ).scalars().first()
+            if tombstone is not None:
+                continue
+            provenance = {}
+            try:
+                provenance = json.loads(memory.metadata_json or "{}").get("work_board_provenance", {})
+            except (TypeError, ValueError, AttributeError):
+                provenance = {}
+            if not isinstance(provenance, dict):
+                continue
+            if (
+                provenance.get("proposal_id") != proposal.proposal_id
+                or provenance.get("owner_principal_id") != owner_principal_id
+                or provenance.get("owner_session_id") != owner_session_id
+                or provenance.get("source_context_digest") != source_context_digest
+            ):
+                continue
+            has_source = (
+                await db.execute(
+                    select(MemorySource).where(
+                        MemorySource.memory_id == memory.id,
+                        MemorySource.source_type == "work_board_m5",
+                        MemorySource.source_session_id == owner_session_id,
+                        MemorySource.source_message_id.is_(None),
+                    )
+                )
+            ).scalars().first()
+            if has_source is None:
+                continue
+            eligible.append((proposal, memory))
+        return eligible
 
     async def create_memory(
         self,
@@ -1833,6 +2629,8 @@ class MemoryRepository:
                 "reconciliation": reconciliation,
                 "memories": [],
                 "tombstones": [],
+                "m5_proposals": [],
+                "m5_decision_receipts": [],
                 "memory_ids": [],
                 "tombstone_ids": [],
                 "artifact_path": None,
@@ -1907,6 +2705,38 @@ class MemoryRepository:
                     }
                     for tombstone in tombstones
                 ]
+                # M5 exports are content free and owner scoped.  Candidate
+                # text/scope is omitted so an archive cannot become a second
+                # retrieval store; canonical memory rows and tombstones remain
+                # the authority on restore.
+                proposals = (
+                    await db.execute(
+                        select(MemoryProposal)
+                        .where(
+                            MemoryProposal.owner_principal_id == normalized_actor,
+                            MemoryProposal.owner_session_id == normalized_owner,
+                        )
+                        .order_by(MemoryProposal.created_at.asc(), MemoryProposal.proposal_id.asc())
+                        .limit(bounded_limit)
+                    )
+                ).scalars().all()
+                m5_proposal_payloads = [
+                    _m5_proposal_archive_payload(proposal) for proposal in proposals
+                ]
+                receipts = (
+                    await db.execute(
+                        select(WorkBoardDecisionReceipt)
+                        .where(
+                            WorkBoardDecisionReceipt.owner_principal_id == normalized_actor,
+                            WorkBoardDecisionReceipt.owner_session_id == normalized_owner,
+                        )
+                        .order_by(WorkBoardDecisionReceipt.created_at.asc(), WorkBoardDecisionReceipt.receipt_id.asc())
+                        .limit(bounded_limit)
+                    )
+                ).scalars().all()
+                m5_receipt_payloads = [
+                    _m5_receipt_archive_payload(receipt) for receipt in receipts
+                ]
 
         body: dict[str, Any] = {
             "schema_version": _MEMORY_EXPORT_SCHEMA_VERSION,
@@ -1914,6 +2744,8 @@ class MemoryRepository:
             "canonical_tombstone_revision": current_revision,
             "memories": memory_payloads,
             "tombstones": tombstone_payloads,
+            "m5_proposals": m5_proposal_payloads,
+            "m5_decision_receipts": m5_receipt_payloads,
         }
         payload = {
             **body,
@@ -1933,6 +2765,8 @@ class MemoryRepository:
                 "memories": len(memory_payloads),
                 "tombstones": len(tombstone_payloads),
                 "sources": sum(len(item.get("sources", [])) for item in memory_payloads),
+                "m5_proposals": len(m5_proposal_payloads),
+                "m5_decision_receipts": len(m5_receipt_payloads),
                 "limit": bounded_limit,
             },
             "memory_ids": [item["id"] for item in memory_payloads],
@@ -2098,7 +2932,9 @@ class MemoryRepository:
         ):
             raise ValueError("memory restore archive export hash is required")
         missing_envelope_fields = [
-            field for field in _MEMORY_EXPORT_ENVELOPE_FIELDS if field not in archive
+            field
+            for field in _MEMORY_EXPORT_ENVELOPE_FIELDS
+            if field not in archive and field not in {"m5_proposals", "m5_decision_receipts"}
         ]
         if missing_envelope_fields:
             raise ValueError(
@@ -2126,8 +2962,65 @@ class MemoryRepository:
         if archive.get("status") != "ready":
             raise ValueError("memory restore archive status is not ready")
         provenance = archive.get("provenance")
-        if not isinstance(provenance, dict) or provenance.get("owner_session_id") != normalized_owner:
+        if (
+            not isinstance(provenance, dict)
+            or provenance.get("actor") != normalized_actor
+            or provenance.get("owner_session_id") != normalized_owner
+        ):
             raise PermissionError("memory restore archive provenance owner does not match the authenticated session")
+        archive_m5_proposals = archive.get("m5_proposals", [])
+        if not isinstance(archive_m5_proposals, list):
+            raise ValueError("memory restore archive M5 proposals must be a list")
+        if len(archive_m5_proposals) > _MAX_RECOVERY_RECORDS:
+            raise ValueError("memory restore archive M5 proposals are too large")
+        archive_m5_receipts = archive.get("m5_decision_receipts", [])
+        if not isinstance(archive_m5_receipts, list):
+            raise ValueError("memory restore archive M5 decision receipts must be a list")
+        if len(archive_m5_receipts) > _MAX_RECOVERY_RECORDS:
+            raise ValueError("memory restore archive M5 decision receipts are too large")
+        counts = archive.get("counts")
+        if not isinstance(counts, dict):
+            raise ValueError("memory restore archive counts must be an object")
+        for count_name, actual_count in (
+            ("memories", len(records)),
+            ("tombstones", len(archive_tombstones)),
+            ("m5_proposals", len(archive_m5_proposals)),
+            ("m5_decision_receipts", len(archive_m5_receipts)),
+        ):
+            supplied_count = counts.get(count_name)
+            if count_name in {"m5_proposals", "m5_decision_receipts"} and count_name not in counts:
+                supplied_count = 0
+            if isinstance(supplied_count, bool) or not isinstance(supplied_count, int) or supplied_count != actual_count:
+                raise ValueError(f"memory restore archive count mismatch for {count_name}")
+        memory_ids = archive.get("memory_ids")
+        if not isinstance(memory_ids, list) or memory_ids != [record.get("id") for record in records]:
+            raise ValueError("memory restore archive memory ids do not match records")
+        tombstone_ids = archive.get("tombstone_ids")
+        if not isinstance(tombstone_ids, list) or tombstone_ids != [record.get("id") for record in archive_tombstones]:
+            raise ValueError("memory restore archive tombstone ids do not match records")
+        normalized_m5_proposals = [
+            _m5_normalize_proposal_record(
+                record,
+                owner_principal_id=normalized_actor,
+                owner_session_id=normalized_owner,
+            )
+            for record in archive_m5_proposals
+        ]
+        normalized_m5_receipts = [
+            _m5_normalize_receipt_record(
+                record,
+                owner_principal_id=normalized_actor,
+                owner_session_id=normalized_owner,
+            )
+            for record in archive_m5_receipts
+        ]
+        if len({record["proposal_id"] for record in normalized_m5_proposals}) != len(normalized_m5_proposals):
+            raise ValueError("memory restore archive contains duplicate M5 proposal ids")
+        receipt_binding_digests = [record["receipt_binding_digest"] for record in normalized_m5_receipts]
+        if len({record["receipt_id"] for record in normalized_m5_receipts}) != len(normalized_m5_receipts):
+            raise ValueError("memory restore archive contains duplicate M5 receipt ids")
+        if len(set(receipt_binding_digests)) != len(receipt_binding_digests):
+            raise ValueError("memory restore archive contains duplicate M5 receipt bindings")
         normalized_tombstones: list[dict[str, Any]] = []
         seen_tombstone_ids: set[str] = set()
         seen_tombstone_memory_ids: set[str] = set()
@@ -2319,6 +3212,13 @@ class MemoryRepository:
         owner_conflict_ids: list[str] = []
         source_count = 0
         applied_tombstone_ids: list[str] = []
+        m5_restored_proposal_ids: list[str] = []
+        m5_suppressed_proposal_ids: list[str] = []
+        m5_proposal_conflict_ids: list[str] = []
+        m5_restored_receipt_ids: list[str] = []
+        m5_blocked_receipt_ids: list[str] = []
+        m5_receipt_conflict_ids: list[str] = []
+        m5_owner_conflict_ids: list[str] = []
 
         async def _redact_memory_for_tombstone(db, memory: Memory, tombstone: MemoryTombstone) -> None:
             try:
@@ -2364,6 +3264,51 @@ class MemoryRepository:
                 .where(MemorySource.snippet.is_not(None))
                 .values(snippet=None)
             )
+
+        async def _m5_memory_binding_is_active(
+            db,
+            *,
+            memory_id: str | None,
+            content_digest: str | None,
+            proposal_id: str | None,
+            source_context_digest: str | None = None,
+        ) -> bool:
+            if not memory_id or not content_digest:
+                return False
+            memory = (
+                await db.execute(select(Memory).where(Memory.id == memory_id))
+            ).scalars().first()
+            if (
+                memory is None
+                or str(memory.source_session_id or "").strip() != normalized_owner
+                or not _canonical_memory_is_active(memory)
+                or _canonical_memory_deletion_marker(memory) is not None
+            ):
+                return False
+            tombstone = (
+                await db.execute(select(MemoryTombstone).where(MemoryTombstone.memory_id == memory_id))
+            ).scalars().first()
+            if tombstone is not None:
+                return False
+            if hashlib.sha256(memory.content.encode("utf-8")).hexdigest() != content_digest:
+                return False
+            try:
+                metadata = json.loads(memory.metadata_json or "{}")
+            except (TypeError, ValueError):
+                return False
+            provenance = metadata.get("work_board_provenance") if isinstance(metadata, dict) else None
+            if not isinstance(provenance, dict):
+                return False
+            if proposal_id and provenance.get("proposal_id") != proposal_id:
+                return False
+            if (
+                provenance.get("owner_principal_id") != normalized_actor
+                or provenance.get("owner_session_id") != normalized_owner
+            ):
+                return False
+            if source_context_digest and provenance.get("source_context_digest") != source_context_digest:
+                return False
+            return True
 
         async with self._canonical_memory_lock:
             async with get_session() as db:
@@ -2533,6 +3478,123 @@ class MemoryRepository:
                         )
                         source_count += 1
                     await db.flush()
+
+                # Restore only the content-free M5 projections.  Raw proposal
+                # text/scope/provenance/source refs are intentionally absent
+                # from the normalized records and are never reconstructed.
+                for candidate in normalized_m5_proposals:
+                    if (
+                        candidate["status"] is MemoryProposalStatus.accepted
+                        and candidate["privacy_state"] is not MemoryProposalPrivacyState.redacted
+                    ):
+                        if not await _m5_memory_binding_is_active(
+                            db,
+                            memory_id=candidate["accepted_memory_id"],
+                            content_digest=candidate["accepted_memory_content_digest"],
+                            proposal_id=candidate["proposal_id"],
+                            source_context_digest=candidate["source_context_digest"],
+                        ):
+                            m5_suppressed_proposal_ids.append(candidate["proposal_id"])
+                            continue
+                    elif candidate["status"] is MemoryProposalStatus.accepted:
+                        m5_suppressed_proposal_ids.append(candidate["proposal_id"])
+                        continue
+                    existing = (
+                        await db.execute(
+                            select(MemoryProposal).where(
+                                MemoryProposal.proposal_id == candidate["proposal_id"]
+                            )
+                        )
+                    ).scalars().first()
+                    if existing is not None:
+                        if (
+                            existing.owner_principal_id != normalized_actor
+                            or existing.owner_session_id != normalized_owner
+                        ):
+                            m5_owner_conflict_ids.append(candidate["proposal_id"])
+                        elif existing.request_binding_digest != candidate["request_binding_digest"]:
+                            m5_proposal_conflict_ids.append(candidate["proposal_id"])
+                        else:
+                            m5_proposal_conflict_ids.append(candidate["proposal_id"])
+                        continue
+                    if candidate["preview_text_digest"]:
+                        duplicate_preview = (
+                            await db.execute(
+                                select(MemoryProposal).where(
+                                    MemoryProposal.owner_principal_id == normalized_actor,
+                                    MemoryProposal.owner_session_id == normalized_owner,
+                                    MemoryProposal.source_task_id == candidate["source_task_id"],
+                                    MemoryProposal.source_attempt_id == candidate["source_attempt_id"],
+                                    MemoryProposal.preview_text_digest == candidate["preview_text_digest"],
+                                )
+                            )
+                        ).scalars().first()
+                        if duplicate_preview is not None:
+                            m5_proposal_conflict_ids.append(candidate["proposal_id"])
+                            continue
+                    if candidate["status"] is MemoryProposalStatus.no_learning:
+                        duplicate_no_learning = (
+                            await db.execute(
+                                select(MemoryProposal).where(
+                                    MemoryProposal.owner_principal_id == normalized_actor,
+                                    MemoryProposal.owner_session_id == normalized_owner,
+                                    MemoryProposal.source_task_id == candidate["source_task_id"],
+                                    MemoryProposal.source_attempt_id == candidate["source_attempt_id"],
+                                    MemoryProposal.status == MemoryProposalStatus.no_learning,
+                                )
+                            )
+                        ).scalars().first()
+                        if duplicate_no_learning is not None:
+                            m5_proposal_conflict_ids.append(candidate["proposal_id"])
+                            continue
+                    db.add(MemoryProposal(**candidate))
+                    await db.flush()
+                    m5_restored_proposal_ids.append(candidate["proposal_id"])
+
+                for candidate in normalized_m5_receipts:
+                    receipt_candidate = dict(candidate)
+                    if receipt_candidate["accepted_memory_id"]:
+                        memory_available = await _m5_memory_binding_is_active(
+                            db,
+                            memory_id=receipt_candidate["accepted_memory_id"],
+                            content_digest=receipt_candidate["accepted_memory_content_digest"],
+                            proposal_id=receipt_candidate["source_proposal_id"],
+                        )
+                        if not memory_available:
+                            receipt_candidate["decision_status"] = WorkBoardDecisionStatus.blocked
+                            receipt_candidate["admission_status"] = WorkBoardDecisionAdmissionStatus.blocked
+                            receipt_candidate["reason"] = "accepted_memory_unavailable_on_restore"
+                            m5_blocked_receipt_ids.append(receipt_candidate["receipt_id"])
+                    existing = (
+                        await db.execute(
+                            select(WorkBoardDecisionReceipt).where(
+                                WorkBoardDecisionReceipt.receipt_id == receipt_candidate["receipt_id"]
+                            )
+                        )
+                    ).scalars().first()
+                    if existing is not None:
+                        if (
+                            existing.owner_principal_id != normalized_actor
+                            or existing.owner_session_id != normalized_owner
+                        ):
+                            m5_owner_conflict_ids.append(receipt_candidate["receipt_id"])
+                        else:
+                            m5_receipt_conflict_ids.append(receipt_candidate["receipt_id"])
+                        continue
+                    duplicate_binding = (
+                        await db.execute(
+                            select(WorkBoardDecisionReceipt).where(
+                                WorkBoardDecisionReceipt.receipt_binding_digest
+                                == receipt_candidate["receipt_binding_digest"]
+                            )
+                        )
+                    ).scalars().first()
+                    if duplicate_binding is not None:
+                        m5_receipt_conflict_ids.append(receipt_candidate["receipt_id"])
+                        continue
+                    db.add(WorkBoardDecisionReceipt(**receipt_candidate))
+                    await db.flush()
+                    m5_restored_receipt_ids.append(receipt_candidate["receipt_id"])
         reconciliation = await self.reconcile_memory_tombstones(owner_session_id=normalized_owner)
         if owner_conflict_ids:
             reconciliation = {
@@ -2574,6 +3636,17 @@ class MemoryRepository:
             "owner_conflict_count": len(owner_conflict_ids),
             "conflict_memory_ids": [*conflict_ids, *owner_conflict_ids],
             "conflict_count": len(conflict_ids) + len(owner_conflict_ids),
+            "m5_restored_proposal_ids": m5_restored_proposal_ids,
+            "m5_suppressed_proposal_ids": m5_suppressed_proposal_ids,
+            "m5_proposal_conflict_ids": m5_proposal_conflict_ids,
+            "m5_restored_receipt_ids": m5_restored_receipt_ids,
+            "m5_blocked_receipt_ids": m5_blocked_receipt_ids,
+            "m5_receipt_conflict_ids": m5_receipt_conflict_ids,
+            "m5_owner_conflict_ids": m5_owner_conflict_ids,
+            "m5_restored_proposal_count": len(m5_restored_proposal_ids),
+            "m5_suppressed_proposal_count": len(m5_suppressed_proposal_ids),
+            "m5_restored_receipt_count": len(m5_restored_receipt_ids),
+            "m5_blocked_receipt_count": len(m5_blocked_receipt_ids),
             "restored_source_count": source_count,
             "applied_archive_tombstone_ids": applied_tombstone_ids,
             "current_tombstone_revision": await self.get_memory_tombstone_revision(
@@ -2718,6 +3791,13 @@ class MemoryRepository:
                 .where(MemorySource.snippet.is_not(None))
                 .values(snippet=None)
             )
+            # M5 proposal previews and decision receipts are a privacy
+            # projection of canonical memory.  The tombstone wins in the
+            # same immediate transaction and invalidates any pending/confirmed
+            # dispatch effect before commit.
+            from src.memory.m5 import redact_m5_memory_references
+
+            await redact_m5_memory_references(db, normalized_memory_id)
             await db.execute(
                 update(MemorySnapshot)
                 .values(content="", source_hash=None, updated_at=tombstone.created_at)

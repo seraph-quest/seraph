@@ -713,12 +713,12 @@ function start_local_frontend() {
     echo "Starting local frontend on http://127.0.0.1:$LOCAL_FRONTEND_PORT ..."
     nohup /bin/bash -c '
         cd "$1" || exit 1
-        export VITE_API_URL="$2" VITE_WS_URL="$3" SERAPH_LOCAL_SERVICE=frontend
+        export VITE_API_URL="$2" VITE_WS_URL="$3" VITE_API_PROXY_TARGET="$5" SERAPH_LOCAL_SERVICE=frontend
         if [ -x ./node_modules/.bin/vite ]; then
             exec ./node_modules/.bin/vite --host 127.0.0.1 --port "$4"
         fi
         exec npm run dev -- --host 127.0.0.1 --port "$4"
-    ' seraph-local-frontend "$SCRIPT_DIR/frontend" "/api" "ws://127.0.0.1:$LOCAL_BACKEND_PORT/ws/chat" "$LOCAL_FRONTEND_PORT" </dev/null >> "$LOCAL_FRONTEND_LOG_FILE" 2>&1 &
+    ' seraph-local-frontend "$SCRIPT_DIR/frontend" "/api" "ws://127.0.0.1:$LOCAL_BACKEND_PORT/ws/chat" "$LOCAL_FRONTEND_PORT" "http://127.0.0.1:$LOCAL_BACKEND_PORT" </dev/null >> "$LOCAL_FRONTEND_LOG_FILE" 2>&1 &
     local pid=$!
     echo "$pid" > "$LOCAL_FRONTEND_PID_FILE"
     disown "$pid" 2>/dev/null || true

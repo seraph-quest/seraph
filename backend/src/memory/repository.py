@@ -2678,32 +2678,100 @@ class MemoryRepository:
         for proposal in rows:
             if proposal.privacy_state is MemoryProposalPrivacyState.redacted:
                 continue
+
+            def block_proposal(reason_code: str) -> None:
+                proposal.status = MemoryProposalStatus.blocked
+                proposal.reason_code = reason_code
+                proposal.recovery_action = (
+                    "verify_source_and_reaccept"
+                    if reason_code == "accepted_memory_binding_unverifiable"
+                    else "request_verified_proposal_again"
+                )
+                proposal.revision = int(proposal.revision or 0) + 1
+                proposal.updated_at = _now()
+                db.add(proposal)
+
+            def quarantine_memory(memory_row: Memory) -> None:
+                # Keep an unexpected active M5 record out of ordinary
+                # canonical-memory retrieval while the operator reviews a
+                # fresh source-bound proposal. Never change another session's
+                # memory or override an existing deletion marker.
+                if (
+                    memory_row.source_session_id == owner_session_id
+                    and memory_row.status is MemoryStatus.active
+                    and _canonical_memory_deletion_marker(memory_row) is None
+                ):
+                    memory_row.status = MemoryStatus.archived
+                    memory_row.updated_at = _now()
+                    db.add(memory_row)
+
             memory_id = str(proposal.accepted_memory_id or "").strip()
             expected_digest = str(proposal.accepted_memory_content_digest or "").strip().lower()
-            if not memory_id or not expected_digest:
+            if not memory_id or not _M5_RECOVERY_DIGEST.fullmatch(expected_digest):
+                block_proposal("accepted_memory_binding_unverifiable")
                 continue
             memory = (
                 await db.execute(select(Memory).where(Memory.id == memory_id))
             ).scalars().first()
-            if memory is None or memory.status is not MemoryStatus.active:
-                continue
-            if memory.source_session_id != owner_session_id:
+            if memory is None:
+                tombstone = (
+                    await db.execute(
+                        select(MemoryTombstone).where(MemoryTombstone.memory_id == memory_id)
+                    )
+                ).scalars().first()
+                if tombstone is not None:
+                    continue
+                block_proposal("accepted_memory_binding_unverifiable")
                 continue
             if _canonical_memory_deletion_marker(memory) is not None:
-                continue
-            if hashlib.sha256(memory.content.encode("utf-8")).hexdigest() != expected_digest:
                 continue
             tombstone = (
                 await db.execute(select(MemoryTombstone).where(MemoryTombstone.memory_id == memory.id))
             ).scalars().first()
             if tombstone is not None:
                 continue
-            provenance = {}
+            if memory.status is MemoryStatus.superseded:
+                # A reviewed correction has replaced this accepted version.
+                continue
+            metadata: dict[str, Any] = {}
+            provenance: Any = {}
             try:
-                provenance = json.loads(memory.metadata_json or "{}").get("work_board_provenance", {})
+                parsed_metadata = json.loads(memory.metadata_json or "{}")
+                if isinstance(parsed_metadata, dict):
+                    metadata = parsed_metadata
+                    provenance = parsed_metadata.get("work_board_provenance", {})
             except (TypeError, ValueError, AttributeError):
-                provenance = {}
+                pass
+            if memory.status is MemoryStatus.archived:
+                operator_control = metadata.get("operator_control")
+                if not isinstance(operator_control, dict):
+                    operator_control = {}
+                # Respect explicit canonical controls; never turn an operator
+                # forget, rejection, or rollback into a recovery proposal.
+                if (
+                    metadata.get("archived_reason") == "operator_forget"
+                    or operator_control.get("review_outcome") == "rejected"
+                    or (
+                        isinstance(provenance, dict)
+                        and provenance.get("lifecycle_state") == "rolled_back"
+                    )
+                ):
+                    continue
+                block_proposal("accepted_memory_binding_mismatch")
+                continue
+            if memory.status is not MemoryStatus.active:
+                block_proposal("accepted_memory_binding_unverifiable")
+                continue
+            if memory.source_session_id != owner_session_id:
+                block_proposal("accepted_memory_binding_mismatch")
+                continue
+            if hashlib.sha256(memory.content.encode("utf-8")).hexdigest() != expected_digest:
+                block_proposal("accepted_memory_binding_mismatch")
+                quarantine_memory(memory)
+                continue
             if not isinstance(provenance, dict):
+                block_proposal("accepted_memory_binding_mismatch")
+                quarantine_memory(memory)
                 continue
             if (
                 provenance.get("proposal_id") != proposal.proposal_id
@@ -2711,6 +2779,8 @@ class MemoryRepository:
                 or provenance.get("owner_session_id") != owner_session_id
                 or provenance.get("source_context_digest") != source_context_digest
             ):
+                block_proposal("accepted_memory_binding_mismatch")
+                quarantine_memory(memory)
                 continue
             try:
                 proposal_scope = json.loads(proposal.memory_scope_json or "{}")
@@ -2748,6 +2818,8 @@ class MemoryRepository:
                 proposal.revision = int(proposal.revision or 0) + 1
                 proposal.updated_at = _now()
                 db.add(proposal)
+                if failure_reason == "mismatch":
+                    quarantine_memory(memory)
                 continue
             has_source = (
                 await db.execute(
@@ -2760,6 +2832,8 @@ class MemoryRepository:
                 )
             ).scalars().first()
             if has_source is None:
+                block_proposal("accepted_memory_binding_mismatch")
+                quarantine_memory(memory)
                 continue
             eligible.append((proposal, memory))
         return eligible
@@ -5200,7 +5274,11 @@ class MemoryRepository:
                         else:
                             m5_proposal_conflict_ids.append(candidate["proposal_id"])
                         continue
-                    if candidate["preview_text_digest"]:
+                    if (
+                        candidate["preview_text_digest"]
+                        and candidate["status"]
+                        not in {MemoryProposalStatus.blocked, MemoryProposalStatus.expired}
+                    ):
                         duplicate_preview = (
                             await db.execute(
                                 select(MemoryProposal).where(
@@ -5209,6 +5287,9 @@ class MemoryRepository:
                                     MemoryProposal.source_task_id == candidate["source_task_id"],
                                     MemoryProposal.source_attempt_id == candidate["source_attempt_id"],
                                     MemoryProposal.preview_text_digest == candidate["preview_text_digest"],
+                                    MemoryProposal.status.notin_(
+                                        [MemoryProposalStatus.blocked, MemoryProposalStatus.expired]
+                                    ),
                                 )
                             )
                         ).scalars().first()

@@ -798,6 +798,92 @@ async def test_authenticated_receipt_listing_quarantines_missing_source_proposal
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "corruption,expected_reason",
+    [
+        ("missing_memory", "accepted_memory_binding_unverifiable"),
+        ("changed_content", "accepted_memory_binding_mismatch"),
+        ("missing_source", "accepted_memory_binding_mismatch"),
+        ("changed_provenance", "accepted_memory_binding_mismatch"),
+    ],
+)
+async def test_corrupt_accepted_memory_blocks_later_decision_with_recovery(
+    async_db,
+    monkeypatch,
+    corruption,
+    expected_reason,
+):
+    goal, _source, accepted, _decision = await _accepted_m5_memory_with_later_receipt(
+        async_db,
+        monkeypatch,
+        goal_id=f"m5-corrupt-canonical-{corruption}-goal",
+    )
+    later_task_id = f"{goal.id.removesuffix('-goal')}-later-task"
+    async with async_db() as db:
+        await db.execute(
+            delete(WorkBoardDecisionReceipt).where(
+                WorkBoardDecisionReceipt.later_task_id == later_task_id
+            )
+        )
+        memory = (
+            await db.execute(select(Memory).where(Memory.id == accepted["accepted_memory_id"]))
+        ).scalar_one_or_none()
+        if corruption == "missing_memory":
+            await db.execute(
+                delete(MemorySource).where(MemorySource.memory_id == accepted["accepted_memory_id"])
+            )
+            await db.flush()
+            await db.execute(delete(Memory).where(Memory.id == accepted["accepted_memory_id"]))
+        elif corruption == "changed_content":
+            assert memory is not None
+            memory.content = "Canonical content changed without a reviewed correction."
+            db.add(memory)
+        elif corruption == "missing_source":
+            assert memory is not None
+            await db.execute(
+                delete(MemorySource).where(MemorySource.memory_id == accepted["accepted_memory_id"])
+            )
+        elif corruption == "changed_provenance":
+            assert memory is not None
+            memory.metadata_json = json.dumps({"work_board_provenance": {"proposal_id": "forged"}})
+            db.add(memory)
+        await db.flush()
+
+    blocked = await propose_goal_candidate_set(
+        goal_id=goal.id,
+        task_id=later_task_id,
+        candidates=[_candidate(SOURCE_CAPABILITY), _candidate(ALTERNATE_CAPABILITY)],
+        owner_principal_id=OWNER.principal_id,
+        owner_session_id=OWNER.session_id,
+        expected_task_revision=1,
+        expected_goal_revision=goal.revision,
+    )
+    assert blocked["decision"]["decision_status"] == "blocked"
+    assert blocked["decision"]["reason"] == expected_reason
+    async with async_db() as db:
+        proposal = (
+            await db.execute(
+                select(MemoryProposal).where(
+                    MemoryProposal.proposal_id == accepted["proposal_id"]
+                )
+            )
+        ).scalar_one()
+        if corruption != "missing_memory":
+            quarantined_memory = (
+                await db.execute(
+                    select(Memory).where(Memory.id == accepted["accepted_memory_id"])
+                )
+            ).scalar_one()
+            assert quarantined_memory.status is MemoryStatus.archived
+    assert proposal.status is MemoryProposalStatus.blocked
+    assert proposal.reason_code == expected_reason
+    assert proposal.recovery_action in {
+        "verify_source_and_reaccept",
+        "request_verified_proposal_again",
+    }
+
+
+@pytest.mark.asyncio
 async def test_receipt_source_proposal_revision_must_not_exceed_linked_proposal(async_db, monkeypatch):
     _goal, _source, accepted, decision = await _accepted_m5_memory_with_later_receipt(
         async_db,
@@ -1215,6 +1301,217 @@ async def test_m5_export_restore_preserves_scope_for_later_decision(async_db, mo
     assert decision["decision_status"] == "changed"
     assert decision["after_selected_capability_id"] == ALTERNATE_CAPABILITY
     assert set(proposal_archive["source_evidence_ids"]).issubset(set(decision["evidence_ids"]))
+
+
+@pytest.mark.asyncio
+async def test_m5_export_restore_preserves_recovery_generation_for_later_decision(
+    async_db, monkeypatch
+):
+    """A recovered accepted proposal survives restore beside its blocked parent."""
+    bypass = make_test_bypass_operator()
+    operator = replace(
+        bypass,
+        session_id=OWNER.session_id,
+        principal=replace(
+            bypass.principal,
+            principal_id=OWNER.principal_id,
+            session_id=OWNER.session_id,
+            operator_session_id=OWNER.session_id,
+        ),
+    )
+    async with async_db() as db:
+        goal, source, later = await _goal_and_tasks(
+            db, goal_id="m5-recovery-roundtrip-goal"
+        )
+        attempt = await _verified_attempt(db, source)
+    _patch_m5_sessions(monkeypatch, async_db)
+
+    proposal = await m5.create_memory_proposal(
+        owner_principal_id=operator.principal.principal_id,
+        owner_session_id=operator.session_id,
+        task_id=source.task_id,
+        expected_task_revision=source.task_revision,
+        attempt_id=attempt.attempt_id,
+        decision_effect=MemoryProposalDecisionEffect.require_operator_confirmation,
+    )
+    accepted = await m5.apply_memory_proposal_action(
+        owner_principal_id=operator.principal.principal_id,
+        owner_session_id=operator.session_id,
+        proposal_id=proposal["proposal_id"],
+        action="accept",
+        expected_revision=proposal["revision"],
+        expected_preview_text_digest=proposal["proposed_text_digest"],
+        expected_task_revision=source.task_revision,
+        expected_goal_revision=goal.revision,
+        decision_effect=MemoryProposalDecisionEffect.require_operator_confirmation,
+        preferred_capability_id=ALTERNATE_CAPABILITY,
+    )
+
+    # Corrupt the original source-baseline receipt so the accepted proposal
+    # enters the supported source re-verification path.
+    async with async_db() as db:
+        baseline = (
+            await db.execute(
+                select(WorkBoardDecisionReceipt).where(
+                    WorkBoardDecisionReceipt.receipt_stage
+                    == WorkBoardDecisionReceiptStage.source_baseline,
+                    WorkBoardDecisionReceipt.source_proposal_id == proposal["proposal_id"],
+                )
+            )
+        ).scalar_one()
+        baseline.before_selected_capability_id = ALTERNATE_CAPABILITY
+        db.add(baseline)
+        await db.flush()
+
+    blocked_decision = await propose_goal_candidate_set(
+        goal_id=goal.id,
+        task_id=later.task_id,
+        candidates=[_candidate(SOURCE_CAPABILITY), _candidate(ALTERNATE_CAPABILITY)],
+        owner_principal_id=operator.principal.principal_id,
+        owner_session_id=operator.session_id,
+        expected_task_revision=later.task_revision,
+        expected_goal_revision=goal.revision,
+    )
+    assert blocked_decision["decision"]["decision_status"] == "blocked"
+    assert blocked_decision["decision"]["reason"] == "source_baseline_integrity_unverifiable"
+
+    stored = await m5.list_memory_proposals(
+        owner_principal_id=operator.principal.principal_id,
+        owner_session_id=operator.session_id,
+        task_id=source.task_id,
+    )
+    blocked_parent = next(
+        row for row in stored if row["proposal_id"] == proposal["proposal_id"]
+    )
+    recovered = await m5.apply_memory_proposal_action(
+        owner_principal_id=operator.principal.principal_id,
+        owner_session_id=operator.session_id,
+        proposal_id=proposal["proposal_id"],
+        action="recover",
+        expected_revision=blocked_parent["revision"],
+        expected_task_revision=source.task_revision,
+        expected_goal_revision=goal.revision,
+    )
+    accepted_recovery = await m5.apply_memory_proposal_action(
+        owner_principal_id=operator.principal.principal_id,
+        owner_session_id=operator.session_id,
+        proposal_id=recovered["proposal_id"],
+        action="accept",
+        expected_revision=recovered["revision"],
+        expected_preview_text_digest=recovered["proposed_text_digest"],
+        expected_task_revision=source.task_revision,
+        expected_goal_revision=goal.revision,
+        decision_effect=MemoryProposalDecisionEffect.require_operator_confirmation,
+        preferred_capability_id=ALTERNATE_CAPABILITY,
+    )
+    assert accepted_recovery["status"] == MemoryProposalStatus.accepted.value
+    assert accepted_recovery["accepted_memory_id"] != accepted["accepted_memory_id"]
+
+    with _runtime_operator(operator):
+        archive = await memory_repository.export_canonical_memory_state(
+            actor=operator.principal.principal_id,
+            owner_session_id=operator.session_id,
+            authenticated_session_id=operator.session_id,
+        )
+    proposal_archives = {
+        item["proposal_id"]: item for item in archive["m5_proposals"]
+    }
+    assert proposal_archives[proposal["proposal_id"]]["status"] == MemoryProposalStatus.blocked.value
+    assert proposal_archives[recovered["proposal_id"]]["status"] == MemoryProposalStatus.accepted.value
+    assert (
+        proposal_archives[proposal["proposal_id"]]["preview_text_digest"]
+        == proposal_archives[recovered["proposal_id"]]["preview_text_digest"]
+    )
+
+    memory_ids = [item["id"] for item in archive["memories"]]
+    async with async_db() as db:
+        await db.execute(
+            delete(WorkBoardDecisionReceipt).where(
+                WorkBoardDecisionReceipt.owner_session_id == operator.session_id
+            )
+        )
+        await db.execute(
+            delete(MemoryProposal).where(
+                MemoryProposal.owner_session_id == operator.session_id
+            )
+        )
+        await db.flush()
+        if memory_ids:
+            await db.execute(
+                delete(MemoryEdge).where(
+                    MemoryEdge.from_memory_id.in_(memory_ids)
+                    | MemoryEdge.to_memory_id.in_(memory_ids)
+                )
+            )
+            await db.execute(
+                delete(MemorySource).where(MemorySource.memory_id.in_(memory_ids))
+            )
+            await db.flush()
+            await db.execute(delete(Memory).where(Memory.id.in_(memory_ids)))
+            await db.flush()
+
+    with _runtime_operator(operator):
+        restored = await memory_repository.restore_canonical_memory_state(
+            archive,
+            actor=operator.principal.principal_id,
+            owner_session_id=operator.session_id,
+            authenticated_session_id=operator.session_id,
+        )
+    assert set(restored["m5_restored_proposal_ids"]) >= {
+        proposal["proposal_id"],
+        recovered["proposal_id"],
+    }
+
+    async with async_db() as db:
+        restored_parent = (
+            await db.execute(
+                select(MemoryProposal).where(
+                    MemoryProposal.proposal_id == proposal["proposal_id"]
+                )
+            )
+        ).scalar_one()
+        restored_child = (
+            await db.execute(
+                select(MemoryProposal).where(
+                    MemoryProposal.proposal_id == recovered["proposal_id"]
+                )
+            )
+        ).scalar_one()
+        assert restored_parent.status is MemoryProposalStatus.blocked
+        assert restored_child.status is MemoryProposalStatus.accepted
+        assert restored_child.accepted_memory_id == accepted_recovery["accepted_memory_id"]
+        after_restore = WorkBoardTask(
+            task_id="m5-recovery-roundtrip-after-restore-task",
+            owner_principal_id=operator.principal.principal_id,
+            owner_session_id=operator.session_id,
+            origin_session_id=operator.session_id,
+            goal_id=goal.id,
+            goal_revision=goal.revision,
+            title=source.title,
+            body=source.body,
+            capability_id=SOURCE_CAPABILITY,
+            typed_input_ref="input:m5-recovery-roundtrip-after-restore",
+            typed_input_digest=source.typed_input_digest,
+            executor_id=f"seraph-work-board:{SOURCE_CAPABILITY}",
+            idempotency_key="m5-recovery-roundtrip-after-restore-key",
+            task_revision=1,
+            status=WorkBoardStatus.todo,
+        )
+        db.add(after_restore)
+        await db.flush()
+
+    later_result = await propose_goal_candidate_set(
+        goal_id=goal.id,
+        task_id="m5-recovery-roundtrip-after-restore-task",
+        candidates=[_candidate(SOURCE_CAPABILITY), _candidate(ALTERNATE_CAPABILITY)],
+        owner_principal_id=operator.principal.principal_id,
+        owner_session_id=operator.session_id,
+        expected_task_revision=1,
+        expected_goal_revision=goal.revision,
+    )
+    assert later_result["decision"]["decision_status"] == "changed"
+    assert later_result["decision"]["after_selected_capability_id"] == ALTERNATE_CAPABILITY
+    assert later_result["decision"]["accepted_memory_id"] == accepted_recovery["accepted_memory_id"]
 
 
 @pytest.mark.asyncio

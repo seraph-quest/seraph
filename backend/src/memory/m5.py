@@ -100,6 +100,7 @@ _M5_REVERIFY_REASON_CODES = _M5_SOURCE_RECOVERY_REASON_CODES | frozenset(
         "memory_scope_not_restored",
         "proposal_preview_not_restored",
         "proposal_expired",
+        "recovery_parent_binding_mismatch",
     }
 )
 

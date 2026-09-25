@@ -2553,7 +2553,12 @@ class MemoryRepository:
                 raise ValueError("correction_target_rollback_binding_invalid") from exc
             if previous_status is not MemoryStatus.active or target.status is not MemoryStatus.superseded:
                 raise ValueError("correction_target_changed_before_rollback")
-            target_digest = hashlib.sha256(target.content.encode("utf-8")).hexdigest()
+            from src.memory.m5 import m5_text_digest
+
+            try:
+                target_digest = m5_text_digest(target.content)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("correction_target_changed_before_rollback") from exc
             if target_digest != correction_binding["corrected_memory_content_digest"]:
                 raise ValueError("correction_target_changed_before_rollback")
             later_supersession = (

@@ -1580,6 +1580,63 @@ async def test_m5_export_restore_preserves_recovery_generation_for_later_decisio
             assert orphan.status is MemoryProposalStatus.blocked
             assert orphan.reason_code == "recovery_parent_binding_mismatch"
             assert quarantined_memory.status is MemoryStatus.archived
+
+        reverified = await m5.apply_memory_proposal_action(
+            owner_principal_id=operator.principal.principal_id,
+            owner_session_id=operator.session_id,
+            proposal_id=recovered["proposal_id"],
+            action="recover",
+            expected_revision=orphan.revision,
+            expected_task_revision=source.task_revision,
+            expected_goal_revision=goal.revision,
+        )
+        assert reverified["status"] == MemoryProposalStatus.proposed.value
+        reaccepted = await m5.apply_memory_proposal_action(
+            owner_principal_id=operator.principal.principal_id,
+            owner_session_id=operator.session_id,
+            proposal_id=reverified["proposal_id"],
+            action="accept",
+            expected_revision=reverified["revision"],
+            expected_preview_text_digest=reverified["proposed_text_digest"],
+            expected_task_revision=source.task_revision,
+            expected_goal_revision=goal.revision,
+            decision_effect=MemoryProposalDecisionEffect.require_operator_confirmation,
+            preferred_capability_id=ALTERNATE_CAPABILITY,
+        )
+        assert reaccepted["status"] == MemoryProposalStatus.accepted.value
+
+        async with async_db() as db:
+            after_recovery = WorkBoardTask(
+                task_id="m5-recovery-roundtrip-after-orphan-recovery-task",
+                owner_principal_id=operator.principal.principal_id,
+                owner_session_id=operator.session_id,
+                origin_session_id=operator.session_id,
+                goal_id=goal.id,
+                goal_revision=goal.revision,
+                title=source.title,
+                body=source.body,
+                capability_id=SOURCE_CAPABILITY,
+                typed_input_ref="input:m5-recovery-roundtrip-after-orphan-recovery",
+                typed_input_digest=source.typed_input_digest,
+                executor_id=f"seraph-work-board:{SOURCE_CAPABILITY}",
+                idempotency_key="m5-recovery-roundtrip-after-orphan-recovery-key",
+                task_revision=1,
+                status=WorkBoardStatus.todo,
+            )
+            db.add(after_recovery)
+            await db.flush()
+        recovered_again_decision = await propose_goal_candidate_set(
+            goal_id=goal.id,
+            task_id="m5-recovery-roundtrip-after-orphan-recovery-task",
+            candidates=[_candidate(SOURCE_CAPABILITY), _candidate(ALTERNATE_CAPABILITY)],
+            owner_principal_id=operator.principal.principal_id,
+            owner_session_id=operator.session_id,
+            expected_task_revision=1,
+            expected_goal_revision=goal.revision,
+        )
+        assert recovered_again_decision["decision"]["decision_status"] == "changed"
+        assert recovered_again_decision["decision"]["after_selected_capability_id"] == ALTERNATE_CAPABILITY
+        assert recovered_again_decision["decision"]["accepted_memory_id"] == reaccepted["accepted_memory_id"]
     else:
         assert later_result["decision"]["decision_status"] == "changed"
         assert later_result["decision"]["after_selected_capability_id"] == ALTERNATE_CAPABILITY
@@ -1898,6 +1955,80 @@ async def test_rehashed_correction_target_cannot_change_acceptance_or_rollback(a
     )
     assert decision["decision"]["after_selected_capability_id"] == SOURCE_CAPABILITY
     assert ALTERNATE_CAPABILITY not in decision["decision"]["evidence_ids"]
+
+
+@pytest.mark.asyncio
+async def test_m5_rollback_accepts_unchanged_normalized_correction_target(async_db, monkeypatch):
+    """Rollback hashes correction text with the same Unicode/newline rules as acceptance."""
+    bypass = make_test_bypass_operator()
+    operator = replace(
+        bypass,
+        session_id=OWNER.session_id,
+        principal=replace(
+            bypass.principal,
+            principal_id=OWNER.principal_id,
+            session_id=OWNER.session_id,
+            operator_session_id=OWNER.session_id,
+        ),
+    )
+    original_content = "Cafe\u0301 reviewed wording\r\nsecond line"
+    async with async_db() as db:
+        goal, source, _later = await _goal_and_tasks(
+            db, goal_id="m5-normalized-correction-target-goal"
+        )
+        attempt = await _verified_attempt(db, source)
+        prior = Memory(
+            id="m5-normalized-correction-target",
+            content=original_content,
+            kind=MemoryKind.fact,
+            status=MemoryStatus.active,
+            source_session_id=OWNER.session_id,
+            scope_key="m5-normalized-correction-target-scope",
+            metadata_json="{}",
+        )
+        db.add(prior)
+        await db.flush()
+    _patch_m5_sessions(monkeypatch, async_db)
+
+    proposal = await m5.create_memory_proposal(
+        owner_principal_id=operator.principal.principal_id,
+        owner_session_id=operator.session_id,
+        task_id=source.task_id,
+        expected_task_revision=source.task_revision,
+        attempt_id=attempt.attempt_id,
+        candidate_text="A verified replacement that can be rolled back.",
+        decision_effect=MemoryProposalDecisionEffect.require_operator_confirmation,
+    )
+    accepted = await m5.apply_memory_proposal_action(
+        owner_principal_id=operator.principal.principal_id,
+        owner_session_id=operator.session_id,
+        proposal_id=proposal["proposal_id"],
+        action="accept",
+        expected_revision=proposal["revision"],
+        expected_preview_text_digest=proposal["proposed_text_digest"],
+        expected_task_revision=source.task_revision,
+        expected_goal_revision=goal.revision,
+        decision_effect=MemoryProposalDecisionEffect.require_operator_confirmation,
+        preferred_capability_id=ALTERNATE_CAPABILITY,
+        corrects_memory_id=prior.id,
+    )
+    rolled_back = await m5.apply_memory_proposal_action(
+        owner_principal_id=operator.principal.principal_id,
+        owner_session_id=operator.session_id,
+        proposal_id=proposal["proposal_id"],
+        action="rollback",
+        expected_revision=accepted["revision"],
+        expected_task_revision=source.task_revision,
+        expected_goal_revision=goal.revision,
+        reason="Restore the unchanged prior reviewed wording.",
+    )
+    assert rolled_back["status"] == MemoryProposalStatus.rolled_back.value
+    async with async_db() as db:
+        prior_after_rollback = (
+            await db.execute(select(Memory).where(Memory.id == prior.id))
+        ).scalar_one()
+        assert prior_after_rollback.status is MemoryStatus.active
+        assert prior_after_rollback.content == original_content
 
 
 @pytest.mark.asyncio

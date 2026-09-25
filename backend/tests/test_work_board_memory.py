@@ -8,13 +8,17 @@ mock or insert an already accepted M5 preference.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import delete
 from sqlmodel import select
 
 from src.api import goals as goals_api
+from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.auth.service import test_bypass_operator as make_test_bypass_operator
 from src.db.models import (
     AuditEvent,
@@ -25,6 +29,7 @@ from src.db.models import (
     MemoryProposalStatus,
     MemoryKind,
     MemoryStatus,
+    MemorySource,
     Session,
     WorkBoardAttempt,
     WorkBoardDecisionReceipt,
@@ -40,6 +45,7 @@ from src.goals.contracts import (
 )
 from src.guardian.goal_conditioned_loop import propose_goal_candidate_set
 from src.memory import m5
+from src.memory.repository import memory_repository
 
 
 OWNER = SimpleNamespace(principal_id="operator:m5-test", session_id="session:m5-test")
@@ -50,6 +56,19 @@ ALTERNATE_CAPABILITY = "guardian.research-watch.v1"
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+@contextmanager
+def _runtime_operator(operator):
+    tokens = set_runtime_context(
+        operator.session_id,
+        "off",
+        trust_principal=operator.principal,
+    )
+    try:
+        yield
+    finally:
+        reset_runtime_context(tokens)
 
 
 def _typed_input_digest(inputs: dict[str, object]) -> str:
@@ -380,6 +399,7 @@ async def test_fresh_conversation_uses_accepted_correction(async_db, monkeypatch
         expected_revision=accepted["revision"],
         expected_task_revision=source.task_revision,
         expected_goal_revision=goal.revision,
+        reason="The reviewed correction was intentionally withdrawn.",
     )
     assert rolled_back["status"] == MemoryProposalStatus.rolled_back.value
     assert rolled_back["audit_event_id"]
@@ -398,9 +418,7 @@ async def test_fresh_conversation_uses_accepted_correction(async_db, monkeypatch
                 select(AuditEvent)
                 .where(
                     AuditEvent.session_id == OWNER.session_id,
-                    AuditEvent.event_type.in_(
-                        ("memory_corrected", "memory_learning_rolled_back")
-                    ),
+                    AuditEvent.event_type.in_(("memory_corrected", "memory_learning_rolled_back")),
                 )
                 .order_by(AuditEvent.created_at.asc())
             )
@@ -418,6 +436,107 @@ async def test_fresh_conversation_uses_accepted_correction(async_db, monkeypatch
         ).scalar_one()
         assert receipt.decision_status.value == "blocked"
         assert receipt.reason == "memory_rolled_back"
+
+
+@pytest.mark.asyncio
+async def test_m5_export_restore_preserves_scope_for_later_decision(async_db, monkeypatch):
+    bypass = make_test_bypass_operator()
+    operator = replace(
+        bypass,
+        session_id=OWNER.session_id,
+        principal=replace(
+            bypass.principal,
+            principal_id=OWNER.principal_id,
+            session_id=OWNER.session_id,
+            operator_session_id=OWNER.session_id,
+        ),
+    )
+    async with async_db() as db:
+        goal, source, later = await _goal_and_tasks(db, goal_id="m5-recovery-goal")
+        attempt = await _verified_attempt(db, source)
+    _patch_m5_sessions(monkeypatch, async_db)
+
+    proposal = await m5.create_memory_proposal(
+        owner_principal_id=operator.principal.principal_id,
+        owner_session_id=operator.session_id,
+        task_id=source.task_id,
+        expected_task_revision=source.task_revision,
+        attempt_id=attempt.attempt_id,
+        candidate_text="The verified source supports the reviewed research route.",
+        decision_effect=MemoryProposalDecisionEffect.require_operator_confirmation,
+    )
+    accepted = await m5.apply_memory_proposal_action(
+        owner_principal_id=operator.principal.principal_id,
+        owner_session_id=operator.session_id,
+        proposal_id=proposal["proposal_id"],
+        action="accept",
+        expected_revision=proposal["revision"],
+        expected_preview_text_digest=proposal["proposed_text_digest"],
+        expected_task_revision=source.task_revision,
+        expected_goal_revision=goal.revision,
+        decision_effect=MemoryProposalDecisionEffect.require_operator_confirmation,
+        preferred_capability_id=ALTERNATE_CAPABILITY,
+    )
+
+    with _runtime_operator(operator):
+        archive = await memory_repository.export_canonical_memory_state(
+            actor=operator.principal.principal_id,
+            owner_session_id=operator.session_id,
+            authenticated_session_id=operator.session_id,
+        )
+
+    proposal_archive = next(
+        item for item in archive["m5_proposals"] if item["proposal_id"] == proposal["proposal_id"]
+    )
+    assert proposal_archive["memory_scope"]["goal_id"] == goal.id
+    assert proposal_archive["memory_scope"]["goal_revision"] == goal.revision
+    assert proposal_archive["memory_scope"]["preferred_capability_id"] == ALTERNATE_CAPABILITY
+    assert proposal_archive["source_evidence_ids"]
+
+    async with async_db() as db:
+        await db.execute(
+            delete(WorkBoardDecisionReceipt).where(
+                WorkBoardDecisionReceipt.owner_session_id == operator.session_id
+            )
+        )
+        await db.execute(
+            delete(MemoryProposal).where(
+                MemoryProposal.owner_session_id == operator.session_id
+            )
+        )
+        await db.flush()
+        await db.execute(
+            delete(MemorySource).where(MemorySource.memory_id == accepted["accepted_memory_id"])
+        )
+        await db.flush()
+        await db.execute(
+            delete(Memory).where(Memory.id == accepted["accepted_memory_id"])
+        )
+        await db.flush()
+
+    with _runtime_operator(operator):
+        restored = await memory_repository.restore_canonical_memory_state(
+            archive,
+            actor=operator.principal.principal_id,
+            owner_session_id=operator.session_id,
+            authenticated_session_id=operator.session_id,
+        )
+    assert restored["m5_restored_proposal_ids"] == [proposal["proposal_id"]]
+    assert restored["m5_restored_receipt_ids"]
+
+    restored_decision = await propose_goal_candidate_set(
+        goal_id=goal.id,
+        task_id=later.task_id,
+        candidates=[_candidate(SOURCE_CAPABILITY), _candidate(ALTERNATE_CAPABILITY)],
+        owner_principal_id=operator.principal.principal_id,
+        owner_session_id=operator.session_id,
+        expected_task_revision=later.task_revision,
+        expected_goal_revision=goal.revision,
+    )
+    decision = restored_decision["decision"]
+    assert decision["decision_status"] == "changed"
+    assert decision["after_selected_capability_id"] == ALTERNATE_CAPABILITY
+    assert set(proposal_archive["source_evidence_ids"]).issubset(set(decision["evidence_ids"]))
 
 
 @pytest.mark.asyncio
@@ -673,14 +792,35 @@ async def test_reject_and_rollback_preserve_audit(async_db, monkeypatch):
         expected_goal_revision=next_goal.revision,
         decision_effect=MemoryProposalDecisionEffect.none,
     )
+    with pytest.raises(ValueError, match="rollback_reason_invalid"):
+        await m5.apply_memory_proposal_action(
+            owner_principal_id=OWNER.principal_id,
+            owner_session_id=OWNER.session_id,
+            proposal_id=accepted["proposal_id"],
+            action="rollback",
+            expected_revision=accepted["revision"],
+            reason="   ",
+        )
+    with pytest.raises(ValueError, match="rollback_reason_invalid"):
+        await m5.apply_memory_proposal_action(
+            owner_principal_id=OWNER.principal_id,
+            owner_session_id=OWNER.session_id,
+            proposal_id=accepted["proposal_id"],
+            action="rollback",
+            expected_revision=accepted["revision"],
+            reason="x" * 501,
+        )
+    rollback_reason = "The verified source was superseded by a newer reviewed outcome."
     rolled_back = await m5.apply_memory_proposal_action(
         owner_principal_id=OWNER.principal_id,
         owner_session_id=OWNER.session_id,
         proposal_id=accepted["proposal_id"],
         action="rollback",
         expected_revision=accepted["revision"],
+        reason=rollback_reason,
     )
     assert rolled_back["status"] == MemoryProposalStatus.rolled_back.value
+    assert rolled_back["rollback_reason"] == rollback_reason
     assert rolled_back["audit_event_id"]
 
     async with async_db() as db:
@@ -711,6 +851,16 @@ async def test_reject_and_rollback_preserve_audit(async_db, monkeypatch):
             )
         ).scalar_one()
         assert restored_memory.status is MemoryStatus.archived
+        rolled_back_proposal = (
+            await db.execute(
+                select(MemoryProposal).where(
+                    MemoryProposal.proposal_id == accepted["proposal_id"]
+                )
+            )
+        ).scalar_one()
+        assert rolled_back_proposal.rollback_reason == rollback_reason
+        rollback_event = events[-1]
+        assert json.loads(rollback_event.details_json)["rollback_reason"] == rollback_reason
 
 
 @pytest.mark.asyncio

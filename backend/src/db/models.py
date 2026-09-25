@@ -1207,6 +1207,7 @@ class MemoryProposal(SQLModel, table=True):
     rollback_by_principal_id: Optional[str] = Field(default=None, index=True)
     rollback_by_session_id: Optional[str] = Field(default=None, index=True)
     rollback_at: Optional[datetime] = Field(default=None, index=True)
+    rollback_reason: str = Field(default="", max_length=500)
     created_at: datetime = Field(default_factory=_now, index=True)
     updated_at: datetime = Field(default_factory=_now, index=True)
     expires_at: Optional[datetime] = Field(default=None, index=True)

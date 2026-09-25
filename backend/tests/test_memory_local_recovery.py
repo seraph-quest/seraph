@@ -238,9 +238,18 @@ async def _seed_m5_verified_records(get_session, operator):
             memory_kind=MemoryKind.fact,
             preview_text="PRIVATE RAW PROPOSAL TEXT MUST NOT BE EXPORTED",
             preview_text_digest=_test_digest("PRIVATE RAW PROPOSAL TEXT MUST NOT BE EXPORTED"),
-            memory_scope_json=json.dumps({"private": "scope"}),
+            memory_scope_json=json.dumps(
+                {
+                    "schema_version": "memory_scope.v1",
+                    "goal_id": "goal-recovery-1",
+                    "goal_revision": 1,
+                    "source_context_digest": source_context_digest,
+                    "preferred_capability_id": "local-deterministic",
+                    "candidate_capability_ids": ["local-deterministic"],
+                }
+            ),
             provenance_json=json.dumps({"private": "provenance"}),
-            source_refs_json=json.dumps(["private-source-body"]),
+            source_refs_json=json.dumps(["readback:recovery-1", "artifact:recovery-1"]),
             decision_effect=MemoryProposalDecisionEffect.none,
             confidence=0.9,
             reason_code="accepted",
@@ -308,6 +317,7 @@ async def _seed_m5_verified_records(get_session, operator):
         "proposal_id": proposal_id,
         "receipt_id": receipt_id,
         "content_digest": content_digest,
+        "source_context_digest": source_context_digest,
     }
 
 
@@ -329,6 +339,16 @@ async def test_m5_export_restore_round_trip_is_content_free_and_authenticated(lo
     proposal_archive = archive["m5_proposals"][0]
     for forbidden in ("preview_text", "memory_scope_json", "provenance_json", "source_refs_json"):
         assert forbidden not in proposal_archive
+    assert proposal_archive["memory_scope"] == {
+        "candidate_capability_ids": ["local-deterministic"],
+        "goal_id": "goal-recovery-1",
+        "goal_revision": 1,
+        "preferred_capability_id": "local-deterministic",
+        "preferred_capability_version": None,
+        "schema_version": "memory_scope.v1",
+        "source_context_digest": seeded["source_context_digest"],
+    }
+    assert proposal_archive["source_evidence_ids"] == ["readback:recovery-1", "artifact:recovery-1"]
     tampered = json.loads(json.dumps(archive))
     tampered["m5_proposals"][0]["reason_code"] = "tampered"
     with _runtime_operator(operator):
@@ -375,15 +395,111 @@ async def test_m5_export_restore_round_trip_is_content_free_and_authenticated(lo
         ).scalars().one()
     assert proposal.status is MemoryProposalStatus.accepted
     assert proposal.preview_text is None
-    assert proposal.memory_scope_json is None
+    assert json.loads(proposal.memory_scope_json or "{}") == proposal_archive["memory_scope"]
     assert proposal.provenance_json == "{}"
-    assert proposal.source_refs_json == "[]"
+    assert json.loads(proposal.source_refs_json) == proposal_archive["source_evidence_ids"]
     assert receipt.accepted_memory_id == seeded["memory_id"]
     assert receipt.decision_status is WorkBoardDecisionStatus.changed
     assert receipt.candidate_set_digest == _test_digest("later-candidate-set")
     assert (await memory_repository.get_memory(seeded["memory_id"])).content.startswith(
         "The verified recovery procedure"
     )
+
+
+@pytest.mark.asyncio
+async def test_m5_restore_blocks_accepted_scope_mismatch(local_memory_db):
+    get_session, database_path = local_memory_db
+    operator = make_test_bypass_operator()
+    owner_session = operator.session_id
+    seeded = await _seed_m5_verified_records(get_session, operator)
+    with _runtime_operator(operator):
+        archive = await memory_repository.export_canonical_memory_state(
+            actor=operator.principal.principal_id,
+            owner_session_id=owner_session,
+            authenticated_session_id=owner_session,
+        )
+    tampered = json.loads(json.dumps(archive))
+    tampered["m5_proposals"][0]["memory_scope"]["source_context_digest"] = _test_digest(
+        "rebound-scope"
+    )
+    tampered["export_hash"] = _recovery_json_hash(_memory_export_integrity_payload(tampered))
+    tampered["artifact_path"] = f"artifacts/memory-recovery/export-{tampered['export_hash'][:24]}.json"
+    tampered["artifact_sha256"] = _recovery_json_hash(_memory_export_artifact_payload(tampered))
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.execute("DELETE FROM work_board_decision_receipts")
+        connection.execute("DELETE FROM memory_proposals")
+        connection.commit()
+    finally:
+        connection.close()
+    with _runtime_operator(operator):
+        restored = await memory_repository.restore_canonical_memory_state(
+            tampered,
+            actor=operator.principal.principal_id,
+            owner_session_id=owner_session,
+            authenticated_session_id=owner_session,
+        )
+    assert restored["m5_blocked_proposal_ids"] == [seeded["proposal_id"]]
+    async with get_session() as db:
+        restored_proposal = (
+            await db.execute(
+                select(MemoryProposal).where(MemoryProposal.proposal_id == seeded["proposal_id"])
+            )
+        ).scalars().one()
+    assert restored_proposal.status is MemoryProposalStatus.blocked
+    assert restored_proposal.reason_code == "memory_scope_not_restored"
+    assert restored_proposal.recovery_action == "request_verified_proposal_again"
+
+
+@pytest.mark.asyncio
+async def test_m5_restore_blocks_proposal_without_preview_or_scope(local_memory_db):
+    get_session, database_path = local_memory_db
+    operator = make_test_bypass_operator()
+    owner_session = operator.session_id
+    seeded = await _seed_m5_verified_records(get_session, operator)
+    with _runtime_operator(operator):
+        archive = await memory_repository.export_canonical_memory_state(
+            actor=operator.principal.principal_id,
+            owner_session_id=owner_session,
+            authenticated_session_id=owner_session,
+        )
+    proposed = json.loads(json.dumps(archive["m5_proposals"][0]))
+    proposed["status"] = "proposed"
+    proposed["memory_scope"] = None
+    proposed["accepted_memory_id"] = None
+    proposed["accepted_memory_content_digest"] = None
+    archive["m5_proposals"] = [proposed]
+    archive["counts"]["m5_proposals"] = 1
+    archive["export_hash"] = _recovery_json_hash(_memory_export_integrity_payload(archive))
+    archive["artifact_path"] = f"artifacts/memory-recovery/export-{archive['export_hash'][:24]}.json"
+    archive["artifact_sha256"] = _recovery_json_hash(_memory_export_artifact_payload(archive))
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute("DELETE FROM work_board_decision_receipts")
+        connection.execute("DELETE FROM memory_proposals")
+        connection.execute("DELETE FROM memory_sources WHERE memory_id = ?", (seeded["memory_id"],))
+        connection.execute("DELETE FROM memories WHERE id = ?", (seeded["memory_id"],))
+        connection.commit()
+    finally:
+        connection.close()
+    with _runtime_operator(operator):
+        restored = await memory_repository.restore_canonical_memory_state(
+            archive,
+            actor=operator.principal.principal_id,
+            owner_session_id=owner_session,
+            authenticated_session_id=owner_session,
+        )
+    assert restored["m5_blocked_proposal_ids"] == [seeded["proposal_id"]]
+    async with get_session() as db:
+        restored_proposal = (
+            await db.execute(
+                select(MemoryProposal).where(MemoryProposal.proposal_id == seeded["proposal_id"])
+            )
+        ).scalar_one()
+    assert restored_proposal.status is MemoryProposalStatus.blocked
+    assert restored_proposal.reason_code == "proposal_preview_not_restored"
+    assert restored_proposal.recovery_action == "request_verified_proposal_again"
 
 
 @pytest.mark.asyncio

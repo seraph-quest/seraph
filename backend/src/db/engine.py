@@ -771,6 +771,7 @@ async def _ensure_m5_columns(conn) -> None:
         "acceptance_binding_digest": "VARCHAR",
         "artifact_ref": "VARCHAR",
         "artifact_digest": "VARCHAR",
+        "rollback_reason": "VARCHAR DEFAULT ''",
     }
     for column_name, sql_type in columns_to_add.items():
         if existing and column_name not in existing:

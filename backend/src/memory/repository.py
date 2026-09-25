@@ -227,6 +227,19 @@ _MEMORY_EXPORT_ENVELOPE_FIELDS = (
 # provenance, and source bodies never cross the archive boundary.
 _M5_RECOVERY_ID = re.compile(r"^[A-Za-z0-9_.:/-]{1,512}$")
 _M5_RECOVERY_DIGEST = re.compile(r"^[0-9a-f]{64}$")
+_M5_SCOPE_SCHEMA_VERSION = "memory_scope.v1"
+_M5_SCOPE_KEYS = frozenset(
+    {
+        "schema_version",
+        "goal_id",
+        "goal_revision",
+        "source_context_digest",
+        "preferred_capability_id",
+        "preferred_capability_version",
+        "candidate_capability_ids",
+    }
+)
+_M5_SOURCE_EVIDENCE_LIMIT = 20
 
 
 def _m5_recovery_id(value: Any, *, field_name: str, required: bool = False) -> str | None:
@@ -296,25 +309,30 @@ def _m5_recovery_timestamp(value: Any, *, field_name: str, required: bool = Fals
     return parsed
 
 
-def _m5_recovery_evidence_ids(value: Any) -> str:
+def _m5_recovery_evidence_ids(
+    value: Any,
+    *,
+    field_name: str = "receipt evidence ids",
+    maximum: int = _MAX_RECOVERY_SOURCES_PER_RECORD,
+) -> str:
     if value is None:
         return "[]"
     if isinstance(value, str):
         try:
             value = json.loads(value)
         except (TypeError, ValueError) as exc:
-            raise ValueError("memory restore M5 receipt evidence ids are invalid") from exc
-    if not isinstance(value, list) or len(value) > _MAX_RECOVERY_SOURCES_PER_RECORD:
-        raise ValueError("memory restore M5 receipt evidence ids are invalid")
+            raise ValueError(f"memory restore M5 {field_name} are invalid") from exc
+    if not isinstance(value, list) or len(value) > maximum:
+        raise ValueError(f"memory restore M5 {field_name} are invalid")
     normalized: list[str] = []
     for index, item in enumerate(value):
         normalized_id = _m5_recovery_id(
             item,
-            field_name=f"receipt evidence id {index}",
+            field_name=f"{field_name[:-1] if field_name.endswith('s') else field_name} {index}",
             required=True,
         )
         if normalized_id is None:  # pragma: no cover - required=True raises first
-            raise ValueError("memory restore M5 receipt evidence ids are invalid")
+            raise ValueError(f"memory restore M5 {field_name} are invalid")
         normalized.append(normalized_id)
     return json.dumps(normalized, separators=(",", ":"))
 
@@ -339,8 +357,94 @@ def _m5_export_evidence_ids(value: Any) -> list[str]:
     ]
 
 
+def _m5_export_source_evidence_ids(value: Any) -> list[str]:
+    return _m5_export_evidence_ids(value)[:_M5_SOURCE_EVIDENCE_LIMIT]
+
+
+def _m5_recovery_scope(
+    value: Any,
+    *,
+    require_preferred_version: bool = False,
+    reject_unknown_keys: bool = True,
+) -> tuple[str | None, bool]:
+    """Keep only the bounded scope needed for later M5 candidate matching.
+
+    Old archives do not contain this object, and malformed or over-broad scope
+    is treated as unavailable.  The caller can then restore the proposal as a
+    visible blocked record with recovery guidance instead of granting an
+    implicit decision source.
+    """
+
+    if value is None or value == "":
+        return None, False
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            return None, False
+    if not isinstance(value, dict) or (
+        reject_unknown_keys and not set(value).issubset(_M5_SCOPE_KEYS)
+    ):
+        return None, False
+    try:
+        if value.get("schema_version") != _M5_SCOPE_SCHEMA_VERSION:
+            return None, False
+        goal_id = _m5_recovery_id(value.get("goal_id"), field_name="scope goal_id", required=True)
+        goal_revision = _m5_recovery_int(
+            value.get("goal_revision"), field_name="scope goal_revision", minimum=1
+        )
+        source_context_digest = _m5_recovery_digest(
+            value.get("source_context_digest"),
+            field_name="scope source_context_digest",
+            required=True,
+        )
+        preferred_capability_id = _m5_recovery_id(
+            value.get("preferred_capability_id"), field_name="scope preferred_capability_id"
+        )
+        preferred_capability_version = _m5_recovery_id(
+            value.get("preferred_capability_version"),
+            field_name="scope preferred_capability_version",
+        )
+        if preferred_capability_version and not preferred_capability_id:
+            return None, False
+        if require_preferred_version and preferred_capability_id and not preferred_capability_version:
+            return None, False
+        candidate_values = value.get("candidate_capability_ids")
+        if not isinstance(candidate_values, list) or len(candidate_values) > _M5_SOURCE_EVIDENCE_LIMIT:
+            return None, False
+        candidate_capability_ids: list[str] = []
+        for index, candidate in enumerate(candidate_values):
+            normalized_candidate = _m5_recovery_id(
+                candidate,
+                field_name=f"scope candidate_capability_id {index}",
+                required=True,
+            )
+            if normalized_candidate is not None and normalized_candidate not in candidate_capability_ids:
+                candidate_capability_ids.append(normalized_candidate)
+        if preferred_capability_id and preferred_capability_id not in candidate_capability_ids:
+            return None, False
+    except (TypeError, ValueError, OverflowError):
+        return None, False
+    normalized = {
+        "schema_version": _M5_SCOPE_SCHEMA_VERSION,
+        "goal_id": goal_id,
+        "goal_revision": goal_revision,
+        "source_context_digest": source_context_digest,
+        "preferred_capability_id": preferred_capability_id,
+        "preferred_capability_version": preferred_capability_version,
+        "candidate_capability_ids": candidate_capability_ids,
+    }
+    return json.dumps(normalized, sort_keys=True, separators=(",", ":")), True
+
+
 def _m5_proposal_archive_payload(proposal: MemoryProposal) -> dict[str, Any]:
     """Serialize the non-content fields needed to recover one M5 proposal."""
+
+    scope_json, _scope_valid = _m5_recovery_scope(
+        proposal.memory_scope_json,
+        reject_unknown_keys=False,
+    )
+    scope = json.loads(scope_json) if scope_json else None
 
     return {
         "proposal_id": proposal.proposal_id,
@@ -371,7 +475,9 @@ def _m5_proposal_archive_payload(proposal: MemoryProposal) -> dict[str, Any]:
         "request_binding_digest": proposal.request_binding_digest,
         "acceptance_binding_digest": proposal.acceptance_binding_digest,
         "memory_kind": _m5_export_enum(proposal.memory_kind),
+        "memory_scope": scope,
         "preview_text_digest": proposal.preview_text_digest,
+        "source_evidence_ids": _m5_export_source_evidence_ids(proposal.source_refs_json),
         "decision_effect": _m5_export_enum(proposal.decision_effect),
         "confidence": proposal.confidence,
         "corrects_memory_id": proposal.corrects_memory_id,
@@ -393,6 +499,7 @@ def _m5_proposal_archive_payload(proposal: MemoryProposal) -> dict[str, Any]:
         "rollback_by_principal_id": proposal.rollback_by_principal_id,
         "rollback_by_session_id": proposal.rollback_by_session_id,
         "rollback_at": _recovery_timestamp(proposal.rollback_at),
+        "rollback_reason": proposal.rollback_reason,
         "expires_at": _recovery_timestamp(proposal.expires_at),
         "revision": proposal.revision,
         "created_at": _recovery_timestamp(proposal.created_at),
@@ -489,6 +596,7 @@ def _m5_normalize_proposal_record(
     source_attempt_id = _m5_recovery_id(record.get("source_attempt_id"), field_name="source_attempt_id", required=True)
     workflow_run_id = _m5_recovery_id(record.get("workflow_run_id"), field_name="workflow_run_id")
     goal_id = _m5_recovery_id(record.get("goal_id"), field_name="goal_id", required=True)
+    goal_revision = _m5_recovery_int(record.get("goal_revision"), field_name="goal_revision", minimum=1)
     capability_id = _m5_recovery_id(record.get("capability_id"), field_name="capability_id", required=True)
     typed_input_digest = _m5_recovery_digest(
         record.get("typed_input_digest"), field_name="typed_input_digest"
@@ -573,6 +681,36 @@ def _m5_normalize_proposal_record(
     provider_contact_started = record.get("provider_contact_started", False)
     if not isinstance(provider_contact_started, bool):
         raise ValueError(f"memory restore M5 proposal {proposal_id} provider contact flag is invalid")
+    scope_json, scope_valid = _m5_recovery_scope(
+        record.get("memory_scope"),
+        require_preferred_version=(
+            decision_effect is MemoryProposalDecisionEffect.require_operator_confirmation
+        ),
+    )
+    if scope_valid:
+        scope = json.loads(scope_json or "{}")
+        if (
+            scope.get("goal_id") != goal_id
+            or int(scope.get("goal_revision") or 0) != goal_revision
+            or scope.get("source_context_digest") != source_context_digest
+        ):
+            scope_json = None
+            scope_valid = False
+    if status is MemoryProposalStatus.accepted and not scope_valid:
+        # A legacy accepted row without the bounded matching scope must remain
+        # visible for recovery, but it cannot become a later decision source.
+        status = MemoryProposalStatus.blocked
+        reason_code = "memory_scope_not_restored"
+        recovery_action = "request_verified_proposal_again"
+    else:
+        reason_code = _m5_recovery_text(record.get("reason_code"), field_name="reason_code")
+        recovery_action = _m5_recovery_text(record.get("recovery_action"), field_name="recovery_action")
+    if status is MemoryProposalStatus.proposed:
+        # Proposal text is intentionally never exported.  Do not recreate an
+        # apparently actionable proposal with a digest but no review content.
+        status = MemoryProposalStatus.blocked
+        reason_code = "proposal_preview_not_restored"
+        recovery_action = "request_verified_proposal_again"
     return {
         "proposal_id": proposal_id,
         "schema_version": "memory_proposal.v1",
@@ -585,7 +723,7 @@ def _m5_normalize_proposal_record(
         "workflow_run_id": workflow_run_id or "",
         "workflow_run_revision": _m5_recovery_int(record.get("workflow_run_revision"), field_name="workflow_run_revision"),
         "goal_id": goal_id,
-        "goal_revision": _m5_recovery_int(record.get("goal_revision"), field_name="goal_revision", minimum=1),
+        "goal_revision": goal_revision,
         "capability_id": capability_id,
         "capability_version": _m5_recovery_text(record.get("capability_version"), field_name="capability_version", maximum=255),
         "typed_input_digest": typed_input_digest,
@@ -602,18 +740,22 @@ def _m5_normalize_proposal_record(
         "request_binding_digest": request_binding_digest,
         "acceptance_binding_digest": _m5_normalize_optional_digest(record.get("acceptance_binding_digest"), field_name="acceptance_binding_digest"),
         "memory_kind": normalized_memory_kind,
-        # Deliberately discard memory_scope_json, preview_text, provenance_json,
-        # and source_refs_json from any hand-edited archive.
-        "memory_scope_json": None,
+        # Only the allowlisted matching scope survives recovery.  Owner and
+        # session are always taken from the authenticated restore context.
+        "memory_scope_json": scope_json,
         "preview_text": None,
         "preview_text_digest": _m5_normalize_optional_digest(record.get("preview_text_digest"), field_name="preview_text_digest"),
         "decision_effect": decision_effect,
         "confidence": confidence,
         "corrects_memory_id": _m5_normalize_optional_id(record.get("corrects_memory_id"), field_name="corrects_memory_id"),
         "provenance_json": "{}",
-        "source_refs_json": "[]",
-        "reason_code": _m5_recovery_text(record.get("reason_code"), field_name="reason_code"),
-        "recovery_action": _m5_recovery_text(record.get("recovery_action"), field_name="recovery_action"),
+        "source_refs_json": _m5_recovery_evidence_ids(
+            record.get("source_evidence_ids"),
+            field_name="proposal source evidence ids",
+            maximum=_M5_SOURCE_EVIDENCE_LIMIT,
+        ),
+        "reason_code": reason_code,
+        "recovery_action": recovery_action,
         "provider_contact_started": provider_contact_started,
         "provider_contact_state": provider_contact_state,
         "provider_contact_count": _m5_recovery_int(record.get("provider_contact_count"), field_name="provider_contact_count", maximum=10000),
@@ -630,6 +772,7 @@ def _m5_normalize_proposal_record(
         "rollback_by_principal_id": rollback_by_principal_id,
         "rollback_by_session_id": rollback_by_session_id,
         "rollback_at": _m5_recovery_timestamp(record.get("rollback_at"), field_name="proposal.rollback_at"),
+        "rollback_reason": _m5_recovery_text(record.get("rollback_reason"), field_name="proposal.rollback_reason", maximum=500),
         "expires_at": _m5_recovery_timestamp(record.get("expires_at"), field_name="proposal.expires_at"),
         "revision": _m5_recovery_int(record.get("revision"), field_name="revision", minimum=1),
         "created_at": created_at,
@@ -3214,6 +3357,7 @@ class MemoryRepository:
         applied_tombstone_ids: list[str] = []
         m5_restored_proposal_ids: list[str] = []
         m5_suppressed_proposal_ids: list[str] = []
+        m5_blocked_proposal_ids: list[str] = []
         m5_proposal_conflict_ids: list[str] = []
         m5_restored_receipt_ids: list[str] = []
         m5_blocked_receipt_ids: list[str] = []
@@ -3480,25 +3624,25 @@ class MemoryRepository:
                     await db.flush()
 
                 # Restore only the content-free M5 projections.  Raw proposal
-                # text/scope/provenance/source refs are intentionally absent
-                # from the normalized records and are never reconstructed.
+                # text/provenance/source bodies are intentionally absent.  A
+                # bounded matching scope and safe evidence identifiers may be
+                # restored after validation.
                 for candidate in normalized_m5_proposals:
-                    if (
-                        candidate["status"] is MemoryProposalStatus.accepted
-                        and candidate["privacy_state"] is not MemoryProposalPrivacyState.redacted
-                    ):
-                        if not await _m5_memory_binding_is_active(
-                            db,
-                            memory_id=candidate["accepted_memory_id"],
-                            content_digest=candidate["accepted_memory_content_digest"],
-                            proposal_id=candidate["proposal_id"],
-                            source_context_digest=candidate["source_context_digest"],
+                    if candidate["status"] is MemoryProposalStatus.accepted:
+                        if (
+                            candidate["privacy_state"] is MemoryProposalPrivacyState.redacted
+                            or not await _m5_memory_binding_is_active(
+                                db,
+                                memory_id=candidate["accepted_memory_id"],
+                                content_digest=candidate["accepted_memory_content_digest"],
+                                proposal_id=candidate["proposal_id"],
+                                source_context_digest=candidate["source_context_digest"],
+                            )
                         ):
                             m5_suppressed_proposal_ids.append(candidate["proposal_id"])
                             continue
-                    elif candidate["status"] is MemoryProposalStatus.accepted:
-                        m5_suppressed_proposal_ids.append(candidate["proposal_id"])
-                        continue
+                    elif candidate["status"] is MemoryProposalStatus.blocked:
+                        m5_blocked_proposal_ids.append(candidate["proposal_id"])
                     existing = (
                         await db.execute(
                             select(MemoryProposal).where(
@@ -3638,6 +3782,7 @@ class MemoryRepository:
             "conflict_count": len(conflict_ids) + len(owner_conflict_ids),
             "m5_restored_proposal_ids": m5_restored_proposal_ids,
             "m5_suppressed_proposal_ids": m5_suppressed_proposal_ids,
+            "m5_blocked_proposal_ids": m5_blocked_proposal_ids,
             "m5_proposal_conflict_ids": m5_proposal_conflict_ids,
             "m5_restored_receipt_ids": m5_restored_receipt_ids,
             "m5_blocked_receipt_ids": m5_blocked_receipt_ids,
@@ -3645,6 +3790,7 @@ class MemoryRepository:
             "m5_owner_conflict_ids": m5_owner_conflict_ids,
             "m5_restored_proposal_count": len(m5_restored_proposal_ids),
             "m5_suppressed_proposal_count": len(m5_suppressed_proposal_ids),
+            "m5_blocked_proposal_count": len(m5_blocked_proposal_ids),
             "m5_restored_receipt_count": len(m5_restored_receipt_ids),
             "m5_blocked_receipt_count": len(m5_blocked_receipt_ids),
             "restored_source_count": source_count,

@@ -109,19 +109,39 @@ interface ApiErrorBody {
   detail?: string | { code?: string; message?: string; recovery?: string };
 }
 
+interface RefreshOptions {
+  preserveError?: boolean;
+}
+
 interface WorkBoardMemoryReviewProps {
   task: WorkBoardTask;
   ownerPrincipalId?: string | null;
   ownerSessionId?: string | null;
 }
 
+const SAFE_ERROR_MESSAGES: Record<string, string> = {
+  stale_proposal_revision: "The proposal revision is stale. Refresh the proposal, review the current revision, and try the action again.",
+  stale_task_revision: "The task changed while this proposal was open. Refresh the task and review the proposal again before retrying.",
+  stale_goal_revision: "The goal changed while this proposal was open. Refresh the task and review the proposal again before retrying.",
+  stale_preview_digest: "The proposal preview changed while this proposal was open. Refresh the proposal and review the current text before retrying.",
+  proposal_owner_mismatch: "This proposal belongs to another operator session. Open it from the task owner’s authenticated session and try again.",
+  memory_owner_session_forbidden: "This memory review is limited to the task owner’s authenticated session. Switch to that session and try again.",
+  memory_owner_session_unbound: "The memory review has no authenticated owner session. Reopen the task in the task owner’s session before trying again.",
+  accepted_memory_owner_mismatch: "The accepted memory belongs to another operator session. Use the task owner’s authenticated session to undo it.",
+  owner_session_mismatch: "The authenticated operator session does not match this memory review. Switch to the task owner’s session and try again.",
+};
+
 function responseMessage(payload: unknown, fallback: string): string {
   const detail = payload && typeof payload === "object"
     ? (payload as ApiErrorBody).detail
     : null;
-  if (typeof detail === "string" && detail.trim()) return detail.trim().slice(0, 500);
-  if (detail && typeof detail === "object" && typeof detail.message === "string") {
-    return detail.message.trim().slice(0, 500) || fallback;
+  const code = typeof detail === "string"
+    ? detail.trim()
+    : detail && typeof detail === "object"
+      ? detail.code?.trim()
+      : "";
+  if (code && SAFE_ERROR_MESSAGES[code]) {
+    return SAFE_ERROR_MESSAGES[code];
   }
   return fallback;
 }
@@ -180,9 +200,9 @@ function WorkBoardMemoryReview({
     [task.task_id],
   );
 
-  const refresh = useCallback(async (signal?: AbortSignal) => {
+  const refresh = useCallback(async (signal?: AbortSignal, options: RefreshOptions = {}) => {
     setLoading(true);
-    setError(null);
+    if (!options.preserveError) setError(null);
     try {
       const [proposalResponse, decisionResponse] = await Promise.all([
         memoryRequest<ProposalListResponse>(proposalUrl, { signal }),
@@ -202,7 +222,7 @@ function WorkBoardMemoryReview({
         current[item.proposal_id] ?? item.proposed_text ?? item.preview_text ?? "",
       ])));
     } catch (caught) {
-      if (!signal?.aborted) {
+      if (!signal?.aborted && !options.preserveError) {
         setError(caught instanceof Error ? caught.message : "Could not load memory review receipts.");
       }
     } finally {
@@ -342,7 +362,7 @@ function WorkBoardMemoryReview({
       await refresh();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not update the memory proposal.");
-      await refresh();
+      await refresh(undefined, { preserveError: true });
     } finally {
       setBusyAction(null);
     }

@@ -221,6 +221,39 @@ describe("WorkBoardMemoryReview", () => {
     expect(actionBodies[1]).toMatchObject({ action: "rollback", reason: "The source was no longer relevant." });
   });
 
+  it("keeps a stale proposal recovery error visible after refreshing the proposal", async () => {
+    let proposalListCalls = 0;
+    let actionCalls = 0;
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/memory/task-proposals?") && init?.method !== "POST") {
+        proposalListCalls += 1;
+        return response({ proposals: [proposal] });
+      }
+      if (url.includes("/api/memory/task-decisions?")) return response({ receipts: [] });
+      if (url.endsWith("/actions") && init?.method === "POST") {
+        actionCalls += 1;
+        return response(
+          { detail: { code: "stale_proposal_revision", message: "The proposal revision is stale." } },
+          false,
+          409,
+        );
+      }
+      return response({}, false, 404);
+    });
+
+    render(<WorkBoardMemoryReview task={task()} ownerPrincipalId="operator:one" ownerSessionId="operator-session-1" />);
+
+    await screen.findByRole("article", { name: "Memory proposal proposed" });
+    fireEvent.click(screen.getByRole("button", { name: "Accept proposal" }));
+
+    await waitFor(() => expect(actionCalls).toBe(1));
+    await waitFor(() => expect(proposalListCalls).toBeGreaterThan(1));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "The proposal revision is stale. Refresh the proposal, review the current revision, and try the action again.",
+    );
+  });
+
   it("keeps unverified tasks from requesting learning and records explicit no-learning receipts", async () => {
     const noLearning = { ...proposal, status: "no_learning", proposed_text: null, proposed_text_digest: null, reason_code: "unknown_effect" };
     fetchMock.mockImplementation(async (input: RequestInfo | URL) => {

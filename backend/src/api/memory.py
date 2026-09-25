@@ -451,6 +451,7 @@ async def act_on_memory_task_proposal(
             "memory_kind_invalid",
             "decision_effect_invalid",
             "preferred_capability_unregistered",
+            "rollback_reason_invalid",
         } else 409
         raise HTTPException(status_code=status, detail={"code": code}) from exc
 

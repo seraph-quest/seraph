@@ -652,6 +652,7 @@ def _proposal_payload(proposal: MemoryProposal, *, include_preview: bool = True)
         "confidence": proposal.confidence,
         "reason_code": proposal.reason_code,
         "recovery_action": proposal.recovery_action,
+        "rollback_reason": proposal.rollback_reason,
         "provider_contact_started": bool(proposal.provider_contact_started),
         "provider_contact_state": _enum_value(proposal.provider_contact_state),
         "provider_contact_count": int(proposal.provider_contact_count or 0),
@@ -1214,6 +1215,11 @@ async def _write_memory_action_audit(
                 "accepted_memory_id": memory_id,
                 "corrects_memory_id": proposal.corrects_memory_id,
                 "action": action,
+                **(
+                    {"rollback_reason": proposal.rollback_reason}
+                    if action == "rollback"
+                    else {}
+                ),
             }
         ),
     )
@@ -1895,6 +1901,11 @@ async def apply_memory_proposal_action(
     action = str(action or "").strip().lower()
     if action not in {"accept", "edit_accept", "reject", "rollback", "recover"}:
         raise ValueError("unknown_proposal_action")
+    normalized_rollback_reason: str | None = None
+    if action == "rollback":
+        if not isinstance(reason, str) or not reason.strip() or len(reason.strip()) > 500:
+            raise ValueError("rollback_reason_invalid")
+        normalized_rollback_reason = reason.strip()
     async with get_session() as db:
         from src.work_board.repository import _begin_sqlite_immediate
 
@@ -2065,6 +2076,7 @@ async def apply_memory_proposal_action(
             proposal.rollback_by_principal_id = owner_principal_id
             proposal.rollback_by_session_id = owner_session_id
             proposal.rollback_at = _now()
+            proposal.rollback_reason = normalized_rollback_reason or ""
             proposal.revision += 1
             proposal.updated_at = _now()
             await db.execute(

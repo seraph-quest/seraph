@@ -49,6 +49,7 @@ async def test_ensure_m5_columns_adds_m5_candidate_digests(tmp_path):
         assert "acceptance_binding_digest" in proposal_columns
         assert "artifact_ref" in proposal_columns
         assert "artifact_digest" in proposal_columns
+        assert "rollback_reason" in proposal_columns
         assert "candidate_set_digest" in receipt_columns
     finally:
         await engine.dispose()

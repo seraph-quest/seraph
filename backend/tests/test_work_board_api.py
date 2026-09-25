@@ -14,13 +14,17 @@ from src.api.work_board import (
     _task_payload as serialize_task_payload,
 )
 from src.api.workflows import _bounded_lineage_expansion, _safe_board_job_projection
+from src.work_board.dispatcher import registered_executor_id
 from src.db.models import (
+    Goal,
     WorkBoardAttempt,
     WorkBoardEvent,
     WorkBoardStatus,
     WorkBoardTask,
     WorkflowRunState,
 )
+from src.work_board.contracts import WorkBoardOwner, WorkBoardTaskCreate, WorkBoardTaskPatch
+from src.work_board.repository import WorkBoardRepository
 
 
 def test_running_task_keeps_cancel_control_visible_while_cancellation_is_pending():
@@ -46,6 +50,134 @@ def test_running_task_keeps_cancel_control_visible_while_cancellation_is_pending
     )
 
     assert _recovery_action(task, latest_attempt=attempt, attempt_count=1) == "cancel"
+
+
+def test_task_payload_marks_sqlite_naive_schedule_as_utc():
+    task = WorkBoardTask(
+        task_id="utc-schedule-task",
+        owner_principal_id="operator:test",
+        owner_session_id="session:test",
+        goal_id="goal:test",
+        goal_revision=1,
+        title="UTC schedule",
+        idempotency_key="utc-schedule-task",
+        scheduled_at=datetime(2026, 9, 25, 12, 0, 0),
+    )
+
+    assert serialize_task_payload(task)["scheduled_at"] == "2026-09-25T12:00:00Z"
+
+
+def test_event_payload_marks_sqlite_naive_timestamp_as_utc():
+    event = WorkBoardEvent(
+        event_id=1000,
+        task_id="utc-event-task",
+        owner_principal_id="operator:test",
+        owner_session_id="session:test",
+        kind="task.updated",
+        metadata_json="{}",
+        created_at=datetime(2026, 9, 25, 12, 0, 0),
+    )
+
+    assert _event_payload(event)["created_at"] == "2026-09-25T12:00:00Z"
+
+
+def test_create_and_patch_normalize_offset_schedules_to_the_same_utc_instant():
+    from_offset_create = WorkBoardTaskCreate(
+        title="Offset schedule",
+        goal_id="goal:test",
+        goal_revision=1,
+        idempotency_key="offset-schedule",
+        scheduled_at="2026-09-25T14:00:00+02:00",
+    )
+    from_utc_create = WorkBoardTaskCreate(
+        title="UTC schedule",
+        goal_id="goal:test",
+        goal_revision=1,
+        idempotency_key="utc-schedule",
+        scheduled_at="2026-09-25T12:00:00Z",
+    )
+    from_offset_patch = WorkBoardTaskPatch(
+        expected_revision=1,
+        scheduled_at="2026-09-25T14:00:00+02:00",
+    )
+    from_utc_patch = WorkBoardTaskPatch(
+        expected_revision=1,
+        scheduled_at="2026-09-25T12:00:00Z",
+    )
+
+    expected = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+    assert from_offset_create.scheduled_at == from_utc_create.scheduled_at == expected
+    assert from_offset_patch.scheduled_at == from_utc_patch.scheduled_at == expected
+
+
+def test_pre_admission_capability_block_exposes_live_recheck_retry():
+    task = WorkBoardTask(
+        task_id="preflight-recovery-task",
+        owner_principal_id="operator:test",
+        owner_session_id="session:test",
+        goal_id="goal:test",
+        goal_revision=1,
+        title="Restore typed input",
+        idempotency_key="preflight-recovery-task",
+        status=WorkBoardStatus.blocked,
+        block_kind="capability",
+        block_source_status=WorkBoardStatus.todo.value,
+        block_reason="typed_input_missing",
+    )
+
+    assert _recovery_action(task, attempt_count=0) == "retry"
+    assert _recovery_action(task, attempt_count=1) == "restore_prerequisite"
+
+
+def test_attempt_limit_is_visible_and_has_no_retry_recovery_action():
+    task = WorkBoardTask(
+        task_id="exhausted-attempt-task",
+        owner_principal_id="operator:test-bypass",
+        owner_session_id="test-auth-bypass",
+        goal_id="goal:attempt-limit",
+        goal_revision=1,
+        title="Exhausted attempt task",
+        idempotency_key="exhausted-attempt-task",
+        status=WorkBoardStatus.blocked,
+        block_kind="attempt_limit",
+        block_reason="The board attempt limit has been exhausted.",
+        block_source_status=WorkBoardStatus.review.value,
+    )
+
+    payload = serialize_task_payload(task)
+    assert payload["block_kind"] == "attempt_limit"
+    assert payload["recovery_action"] is None
+    assert _recovery_action(task, attempt_count=2) is None
+
+    event = WorkBoardEvent(
+        event_id=999,
+        task_id=task.task_id,
+        owner_principal_id=task.owner_principal_id,
+        owner_session_id=task.owner_session_id,
+        kind="task.attempt_limit",
+        metadata_json=json.dumps({"block_kind": "attempt_limit"}),
+    )
+    assert _event_payload(event)["metadata"]["block_kind"] == "attempt_limit"
+
+
+def test_verified_handoff_reconciliation_exposes_manual_recovery():
+    task = WorkBoardTask(
+        task_id="handoff-recovery-task",
+        owner_principal_id="operator:test",
+        owner_session_id="session:test",
+        goal_id="goal:test",
+        goal_revision=1,
+        title="Recover verified handoff",
+        idempotency_key="handoff-recovery-task",
+        status=WorkBoardStatus.blocked,
+        block_kind="dependency",
+        block_reason=(
+            "A completed parent handoff needs verified readback reconciliation before dispatch"
+        ),
+        block_source_status=WorkBoardStatus.ready.value,
+    )
+
+    assert _recovery_action(task) == "unblock"
 
 
 def test_board_job_projection_redacts_unsafe_receipt_ids_paths_and_types():
@@ -135,6 +267,31 @@ def _task_payload(*, key: str = "api-task"):
         "idempotency_scope": "test",
         "idempotency_key": key,
     }
+
+
+async def _seed_action_task(async_db, *, key: str):
+    owner = WorkBoardOwner(principal_id="operator:test-bypass", session_id="test-auth-bypass")
+    async with async_db() as db:
+        goal = Goal(
+            id=f"goal-{key}",
+            title="Block contract goal",
+            owner_principal_id=owner.principal_id,
+            owner_session_id=owner.session_id,
+            revision=1,
+        )
+        db.add(goal)
+        await db.flush()
+        mutation = await WorkBoardRepository().create_task(
+            db,
+            owner,
+            WorkBoardTaskCreate(
+                title="Block contract task",
+                goal_id=goal.id,
+                goal_revision=1,
+                idempotency_key=key,
+            ),
+        )
+        return mutation.task.task_id, mutation.task.task_revision
 
 
 async def _create_goal(client, *, goal_id: str = "goal-api"):
@@ -602,12 +759,18 @@ async def test_http_patch_validation_returns_422_for_malformed_inputs(client):
 async def test_http_create_rejects_path_shaped_opaque_identifiers(client, field):
     payload = _task_payload(key=f"invalid-create-{field}")
     payload["goal_id"] = await _create_goal(client)
+    if field == "executor_id":
+        payload["capability_id"] = "guardian.research-watch.v1"
     payload[field] = "guardian/research"
 
     rejected = await client.post("/api/work-board/tasks", json=payload)
     assert rejected.status_code == 422
 
-    payload[field] = "guardian.research"
+    payload[field] = (
+        registered_executor_id("guardian.research-watch.v1")
+        if field == "executor_id"
+        else "guardian.research"
+    )
     accepted = await client.post("/api/work-board/tasks", json=payload)
     assert accepted.status_code == 200
 
@@ -681,6 +844,7 @@ async def test_http_manual_block_accepts_only_operator_kind(client):
             "action": "block",
             "expected_revision": task["task_revision"],
             "block_kind": "unknown_effect",
+            "source_status": "triage",
             "reason": "This category belongs to internal reconciliation",
         },
     )
@@ -712,6 +876,8 @@ async def test_http_stale_comment_link_and_action_return_typed_conflicts(client)
         json={
             "action": "block",
             "expected_revision": 99,
+            "block_kind": "operator",
+            "source_status": "triage",
             "reason": "stale action",
         },
     )
@@ -804,6 +970,7 @@ async def test_http_comments_links_and_status_action_success(client):
             "action": "block",
             "expected_revision": 3,
             "block_kind": "operator",
+            "source_status": "triage",
             "reason": "Operator needs to revise the specification",
         },
     )
@@ -830,6 +997,97 @@ async def test_http_comments_links_and_status_action_success(client):
     detail = await client.get(f"/api/work-board/tasks/{child_id}")
     assert detail.status_code == 200
     assert detail.json()["events"][-1]["event_id"] == blocked_body["event_id"]
+
+
+@pytest.mark.asyncio
+async def test_http_capability_block_records_typed_recovery_and_guidance(client, async_db):
+    task_id, task_revision = await _seed_action_task(async_db, key="capability-block")
+
+    response = await client.post(
+        f"/api/work-board/tasks/{task_id}/actions",
+        json={
+            "action": "block",
+            "expected_revision": task_revision,
+            "block_kind": "capability",
+            "source_status": "triage",
+            "reason": "The registered capability grant is not ready",
+        },
+    )
+
+    assert response.status_code == 200
+    blocked = response.json()
+    assert blocked["task"]["status"] == "blocked"
+    assert blocked["task"]["block_kind"] == "capability"
+    assert blocked["task"]["block_source_status"] == "triage"
+    assert blocked["task"]["recovery_action"] == "restore_prerequisite"
+
+
+@pytest.mark.asyncio
+async def test_http_operator_block_response_keeps_unblock_recovery_action(client, async_db):
+    task_id, task_revision = await _seed_action_task(async_db, key="operator-block-recovery")
+
+    response = await client.post(
+        f"/api/work-board/tasks/{task_id}/actions",
+        json={
+            "action": "block",
+            "expected_revision": task_revision,
+            "block_kind": "operator",
+            "source_status": "triage",
+            "reason": "Operator needs to revise the specification",
+        },
+    )
+
+    assert response.status_code == 200
+    blocked = response.json()
+    assert blocked["task"]["status"] == "blocked"
+    assert blocked["task"]["block_kind"] == "operator"
+    assert blocked["task"]["recovery_action"] == "unblock"
+    assert blocked["recovery_action"] == "unblock"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"source_status": "triage"},
+        {"block_kind": "capability"},
+        {"block_kind": "not-a-block-kind", "source_status": "triage"},
+    ],
+)
+async def test_http_block_requires_typed_kind_and_current_source(client, async_db, patch):
+    task_id, task_revision = await _seed_action_task(async_db, key="invalid-block-contract")
+    body = {
+        "action": "block",
+        "expected_revision": task_revision,
+        "reason": "bounded operator reason",
+        **patch,
+    }
+
+    response = await client.post(
+        f"/api/work-board/tasks/{task_id}/actions",
+        json=body,
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_http_block_rejects_stale_source_status(client, async_db):
+    task_id, task_revision = await _seed_action_task(async_db, key="stale-block-source")
+
+    response = await client.post(
+        f"/api/work-board/tasks/{task_id}/actions",
+        json={
+            "action": "block",
+            "expected_revision": task_revision,
+            "block_kind": "capability",
+            "source_status": "todo",
+            "reason": "stale source phase",
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "stale_source_status"
 
 
 @pytest.mark.asyncio
@@ -1129,3 +1387,27 @@ def test_attempt_serializer_preserves_verified_outcome():
     attempt = WorkBoardAttempt(task_id="task-verified", outcome="verified")
 
     assert _attempt_payload(attempt)["outcome"] == "verified"
+
+
+def test_generic_verified_receipt_does_not_claim_independent_readback():
+    attempt = WorkBoardAttempt(
+        task_id="task-generic-verified-receipt",
+        workflow_run_id="run:generic-verified-receipt",
+        ended_at=datetime.now(timezone.utc),
+        outcome="verified",
+        receipt_refs_json=json.dumps(
+            [
+                {
+                    "workflow_run_id": "run:generic-verified-receipt",
+                    "status": "succeeded",
+                    "verified": True,
+                    "content_sha256": "a" * 64,
+                }
+            ]
+        ),
+    )
+
+    payload = _attempt_payload(attempt)
+
+    assert payload["readback_status"] == "unknown"
+    assert payload["verification_status"] == "reconciliation_required"

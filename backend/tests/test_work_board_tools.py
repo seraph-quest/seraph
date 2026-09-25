@@ -1,5 +1,8 @@
 """Provider-free proofs for bound worker-only board controls."""
 
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
 import pytest
 from pydantic import ValidationError
 from sqlalchemy import select
@@ -14,6 +17,15 @@ from src.tools.work_board_tools import (
 from src.db.models import WorkBoardAttempt, WorkBoardStatus, WorkBoardTask
 from src.work_board.repository import WorkBoardRepository
 from src.work_board.tools import WorkBoardWorkerBlock, WorkBoardWorkerEvidence, WorkBoardWorkerRequest, WorkBoardWorkerTools
+from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
+
+
+def _future_lease() -> datetime:
+    return datetime.now(timezone.utc) + timedelta(minutes=5)
+
+
+def _future_lease_iso() -> str:
+    return _future_lease().isoformat()
 
 
 def _request() -> WorkBoardWorkerRequest:
@@ -75,6 +87,178 @@ def test_bound_worker_context_is_the_only_runtime_injection_path():
 
 
 @pytest.mark.asyncio
+async def test_native_tools_accept_only_the_canonical_goal_snapshot_child(monkeypatch):
+    task = WorkBoardTask(
+        task_id="task-native-lineage",
+        owner_principal_id="operator:native",
+        owner_session_id="native-session",
+        goal_id="goal-native",
+        goal_revision=3,
+        capability_id="workflow.goal-snapshot-to-file",
+        executor_id="executor-native",
+        status=WorkBoardStatus.running,
+        task_revision=8,
+    )
+    attempt = WorkBoardAttempt(
+        task_id=task.task_id,
+        attempt_id="attempt-native-lineage",
+        workflow_run_id="work-board:task-native-lineage:attempt-native-lineage",
+        lease_owner="service:work-board",
+        lease_expires_at=_future_lease(),
+        fencing_token=2,
+        executor_id=task.executor_id,
+    )
+    root_id = attempt.workflow_run_id
+    child_id = f"goal-snapshot-work-board:{task.task_id}:{attempt.attempt_id}"
+    nested_id = "goal-snapshot-to-file:child-run"
+    root = {
+        "job_id": root_id,
+        "run_identity": root_id,
+        "root_run_identity": root_id,
+        "job_kind": task.capability_id,
+        "owner": {
+            "kind": "service",
+            "principal_id": "service:work-board",
+            "service_id": "service:work-board",
+        },
+        "session_id": task.owner_session_id,
+        "goal_id": task.goal_id,
+        "goal_revision": task.goal_revision,
+        "status": "running",
+        "lease": {
+            "owner": "service:work-board:attempt-native-lineage",
+            "fencing_token": 4,
+            "expires_at": _future_lease_iso(),
+        },
+    }
+    child = {
+        "job_id": child_id,
+        "run_identity": child_id,
+        "root_run_identity": root_id,
+        "parent_run_identity": root_id,
+        "parent_job_id": root_id,
+        "parent_fencing_token": 4,
+        "job_kind": "workflow.goal-snapshot-to-file",
+        "capability_version": "1",
+        "owner": {
+            "kind": "service",
+            "principal_id": "service:goal-snapshot",
+            "service_id": "service:goal-snapshot",
+        },
+        "session_id": task.owner_session_id,
+        "goal_id": task.goal_id,
+        "goal_revision": task.goal_revision,
+        "status": "running",
+        "declared_authority": {
+            "principal": "service:goal-snapshot",
+            "owner_principal_id": "service:goal-snapshot",
+            "service_id": "service:goal-snapshot",
+            "session_id": task.owner_session_id,
+            "goal_revision": task.goal_revision,
+        },
+        "lease": {
+            "owner": "service:goal-snapshot:child",
+            "fencing_token": 7,
+            "expires_at": _future_lease_iso(),
+        },
+    }
+    nested = {
+        "job_id": nested_id,
+        "run_identity": nested_id,
+        "root_run_identity": root_id,
+        "parent_run_identity": child_id,
+        "parent_job_id": child_id,
+        "parent_fencing_token": 7,
+        "job_kind": "goal-snapshot-to-file",
+        "capability_version": "workflow-v2",
+        "owner": {
+            "kind": "service",
+            "principal_id": "service:goal-snapshot",
+            "service_id": "service:goal-snapshot",
+        },
+        "session_id": task.owner_session_id,
+        "goal_id": task.goal_id,
+        "goal_revision": task.goal_revision,
+        "status": "running",
+        "declared_authority": {
+            "principal": "service:goal-snapshot",
+            "owner_kind": "service",
+            "service_id": "service:goal-snapshot",
+            "session_id": task.owner_session_id,
+            "capability": "workflow_goal_snapshot_to_file",
+        },
+        "lease": {
+            "owner": "goal-snapshot-step",
+            "fencing_token": 8,
+            "expires_at": _future_lease_iso(),
+        },
+    }
+
+    class _Jobs:
+        def __init__(self):
+            self.rows = {root_id: root, child_id: child, nested_id: nested}
+
+        async def get_job(self, job_id):
+            return self.rows.get(job_id)
+
+    class _Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    worker = WorkBoardWorkerTools(jobs=_Jobs(), session_provider=lambda: _Session())
+
+    async def fake_bound(_db, _request):
+        return SimpleNamespace(principal_id=task.owner_principal_id, session_id=task.owner_session_id), task, attempt, root
+
+    worker._bound = fake_bound
+    request = WorkBoardWorkerRequest(
+        task_id=task.task_id,
+        attempt_id=attempt.attempt_id,
+        expected_task_revision=task.task_revision,
+        board_fencing_token=attempt.fencing_token,
+        workflow_run_id=root_id,
+        workflow_fencing_token=4,
+    )
+    principal = TrustPrincipal(
+        principal_id="service:goal-snapshot",
+        principal_type=PrincipalType.SERVICE,
+        authenticated=True,
+        grants=(AuthorityGrant.CAPABILITY_EXECUTE,),
+        session_id=task.owner_session_id,
+        job_id=nested_id,
+    )
+
+    await worker.validate_native_principal(request, principal)
+
+    foreign_session_principal = TrustPrincipal(
+        principal_id=principal.principal_id,
+        principal_type=principal.principal_type,
+        authenticated=True,
+        grants=principal.grants,
+        session_id="foreign-session",
+        job_id=nested_id,
+    )
+    with pytest.raises(PermissionError, match="session"):
+        await worker.validate_native_principal(request, foreign_session_principal)
+
+    worker.jobs.rows[child_id]["goal_revision"] = "invalid"
+    with pytest.raises(PermissionError):
+        await worker.validate_native_principal(request, principal)
+    worker.jobs.rows[child_id]["goal_revision"] = task.goal_revision
+    worker.jobs.rows[nested_id]["parent_fencing_token"] = "invalid"
+    with pytest.raises(PermissionError):
+        await worker.validate_native_principal(request, principal)
+    worker.jobs.rows[nested_id]["parent_fencing_token"] = 7
+
+    worker.jobs.rows[nested_id]["parent_run_identity"] = "foreign-descendant"
+    with pytest.raises(PermissionError, match="delegated"):
+        await worker.validate_native_principal(request, principal)
+
+
+@pytest.mark.asyncio
 async def test_worker_block_reconciles_authoritative_workflow_before_projection(async_db):
     task_id = "task-worker-block-reconcile"
     attempt_id = "attempt-worker-block-reconcile"
@@ -103,6 +287,7 @@ async def test_worker_block_reconciles_authoritative_workflow_before_projection(
                 workflow_run_id=run_id,
                 task_revision_at_claim=3,
                 lease_owner="executor-worker",
+                lease_expires_at=_future_lease(),
                 fencing_token=7,
                 executor_id="executor-worker",
             )
@@ -118,7 +303,11 @@ async def test_worker_block_reconciles_authoritative_workflow_before_projection(
                 "job_id": run_id,
                 "status": "running",
                 "revision": 9,
-                "lease": {"owner": "workflow-worker", "fencing_token": 11},
+                "lease": {
+                    "owner": "workflow-worker",
+                    "fencing_token": 11,
+                    "expires_at": _future_lease_iso(),
+                },
                 "effects": [],
             }
 
@@ -128,7 +317,11 @@ async def test_worker_block_reconciles_authoritative_workflow_before_projection(
                 "job_id": job_id,
                 "status": "blocked",
                 "revision": 10,
-                "lease": {"owner": "workflow-worker", "fencing_token": 11},
+                "lease": {
+                    "owner": "workflow-worker",
+                    "fencing_token": 11,
+                    "expires_at": _future_lease_iso(),
+                },
                 "effects": [],
             }
 
@@ -192,6 +385,7 @@ async def test_worker_block_does_not_project_when_workflow_reconciliation_fails(
                 workflow_run_id=run_id,
                 task_revision_at_claim=3,
                 lease_owner="executor-worker",
+                lease_expires_at=_future_lease(),
                 fencing_token=7,
                 executor_id="executor-worker",
             )
@@ -204,7 +398,11 @@ async def test_worker_block_does_not_project_when_workflow_reconciliation_fails(
                 "job_id": run_id,
                 "status": "running",
                 "revision": 9,
-                "lease": {"owner": "workflow-worker", "fencing_token": 11},
+                "lease": {
+                    "owner": "workflow-worker",
+                    "fencing_token": 11,
+                    "expires_at": _future_lease_iso(),
+                },
                 "effects": [],
             }
 

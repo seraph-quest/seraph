@@ -269,6 +269,28 @@ def _dump(value: Any) -> str:
     return json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
 
 
+def _work_board_handoff_inputs(
+    task_id: str | None,
+    context: list[dict[str, Any]] | None,
+    digest: str | None,
+) -> dict[str, Any]:
+    rows = list(context or [])
+    if not rows:
+        if digest:
+            raise SourceWatchError("work_board_handoff_binding_invalid")
+        return {}
+    if not task_id or _sha(_dump(rows)) != str(digest or "") or len(_dump(rows).encode("utf-8")) > 32_768:
+        raise SourceWatchError("work_board_handoff_binding_invalid")
+    if any(
+        not isinstance(item, dict)
+        or item.get("status") != "verified"
+        or item.get("child_task_id") != task_id
+        for item in rows
+    ):
+        raise SourceWatchError("work_board_handoff_binding_invalid")
+    return {"parent_handoff_context": rows, "parent_handoff_digest": str(digest)}
+
+
 def _load(value: str | None, fallback: Any) -> Any:
     if not value:
         return fallback
@@ -1749,9 +1771,16 @@ class SourceWatchService:
         budget: Any,
         work_board_task_id: str | None = None,
         work_board_attempt_id: str | None = None,
+        work_board_parent_handoff_context: list[dict[str, Any]] | None = None,
+        work_board_parent_handoff_digest: str | None = None,
     ) -> dict[str, Any]:
         if (work_board_task_id is None) != (work_board_attempt_id is None):
             raise SourceWatchError("work_board_binding_invalid")
+        parent_handoff_inputs = _work_board_handoff_inputs(
+            work_board_task_id,
+            work_board_parent_handoff_context,
+            work_board_parent_handoff_digest,
+        )
         job_id = f"source-watch:{watch.id}:{occurrence_id}"
         async with db_engine.get_session() as db:
             live_watch = (
@@ -1804,6 +1833,8 @@ class SourceWatchService:
             "delivery_surface": "cockpit_approval_queue",
             "priority": priority,
         }
+        if parent_handoff_inputs:
+            authority["parent_handoff_digest"] = parent_handoff_inputs["parent_handoff_digest"]
         idempotency_scope = "work-board-attempt" if work_board_task_id else "guardian-source-watch"
         idempotency_key = (
             f"{work_board_task_id}:{work_board_attempt_id}"
@@ -1822,7 +1853,7 @@ class SourceWatchService:
         admitted = await durable_job_repository.admit_job(
             DurableJobSpec(
                 identity=identity,
-                inputs={"watch_id": watch.id, "occurrence_id": occurrence_id},
+                inputs={"watch_id": watch.id, "occurrence_id": occurrence_id, **parent_handoff_inputs},
                 session_id=watch.owner_session_id,
                 operator_session_id=watch.owner_session_id,
                 goal_id=watch.goal_id,
@@ -1888,10 +1919,20 @@ class SourceWatchService:
         expected_owner_session_id: str | None = None,
         work_board_task_id: str | None = None,
         work_board_attempt_id: str | None = None,
+        work_board_parent_handoff_context: list[dict[str, Any]] | None = None,
+        work_board_parent_handoff_digest: str | None = None,
         admit_only: bool = False,
     ) -> dict[str, Any]:
         if (work_board_task_id is None) != (work_board_attempt_id is None):
             return {"status": "blocked", "reason_code": "work_board_binding_invalid", "operator_visible": True}
+        try:
+            parent_handoff_inputs = _work_board_handoff_inputs(
+                work_board_task_id,
+                work_board_parent_handoff_context,
+                work_board_parent_handoff_digest,
+            )
+        except SourceWatchError as exc:
+            return {"status": "blocked", "reason_code": exc.code, "operator_visible": True}
         occurrence = occurrence_id or str(uuid.uuid4())
         job_id = f"source-watch:{watch_id}:{occurrence}"
         # Admit the durable occurrence before reserving the watch.  A crash
@@ -1971,6 +2012,8 @@ class SourceWatchService:
                 budget=budget,
                 work_board_task_id=work_board_task_id,
                 work_board_attempt_id=work_board_attempt_id,
+                work_board_parent_handoff_context=work_board_parent_handoff_context,
+                work_board_parent_handoff_digest=work_board_parent_handoff_digest,
             )
             job = await self._resume_admitted_job(job)
             if admit_only:

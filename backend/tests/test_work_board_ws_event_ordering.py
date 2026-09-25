@@ -13,6 +13,7 @@ from src.api.ws import websocket_work_board_events
 from src.scheduler.connection_manager import ws_manager
 from src.work_board.contracts import WorkBoardOwner
 from src.work_board.repository import BoardEventPage
+from src.work_board.time import serialize_utc_datetime
 
 
 OWNER = WorkBoardOwner(
@@ -163,7 +164,7 @@ async def test_websocket_replay_keeps_other_owner_and_session_events_hidden(monk
             "task_id": owner_event.task_id,
             "kind": owner_event.kind,
             "metadata": {},
-            "created_at": owner_event.created_at.isoformat(),
+            "created_at": serialize_utc_datetime(owner_event.created_at),
         }
     ]
     assert seen_owners == [OWNER]

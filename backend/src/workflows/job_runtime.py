@@ -3812,6 +3812,8 @@ class DurableJobRepository:
         adapter_idempotency_key: str | None = None,
         status: str = "succeeded",
         content_sha256: str | None = None,
+        readback_id: str | None = None,
+        verified_at: str | None = None,
         details: dict[str, Any] | None = None,
         receipt_kind: str = "effect",
         owner: str | None = None,
@@ -3840,6 +3842,8 @@ class DurableJobRepository:
         target_digest = _text(target_digest) or None
         approval_id = _text(approval_id) or None
         adapter_idempotency_key = _text(adapter_idempotency_key) or None
+        readback_id = _text(readback_id) or None
+        verified_at = _text(verified_at) or None
         if content_sha256 is not None and not _text(content_sha256):
             content_sha256 = None
         safe_details = _safe_structure(details or {})
@@ -3907,6 +3911,7 @@ class DurableJobRepository:
                     )
             else:
                 self._assert_lease(run, owner=owner, fencing_token=fencing_token)
+            recorded_at = _utc_now().isoformat()
             receipt = {
                 "effect_id": effect_id,
                 "receipt_kind": receipt_kind,
@@ -3918,9 +3923,18 @@ class DurableJobRepository:
                 "status": status,
                 "content_sha256": content_sha256,
                 "details": safe_details,
-                "recorded_at": _utc_now().isoformat(),
+                "recorded_at": recorded_at,
                 "fencing_token": fencing_token,
             }
+            if receipt_kind == "readback":
+                # Readback identity and verification time must come from the
+                # capability's actual verifier.  The durable runtime stores
+                # them when supplied; it never promotes an operation ID or its
+                # insertion time into proof fields.
+                if readback_id:
+                    receipt["readback_id"] = readback_id
+                if verified_at:
+                    receipt["verified_at"] = verified_at
             existing = _effect_ledger_or_raise(run.effect_receipts_json)
             previous = next(
                 (
@@ -3954,6 +3968,10 @@ class DurableJobRepository:
                 for field_name in ("approval_id", "adapter_idempotency_key"):
                     if not receipt.get(field_name):
                         receipt[field_name] = previous.get(field_name)
+                if receipt_kind == "readback":
+                    for field_name in ("readback_id", "verified_at"):
+                        if not receipt.get(field_name):
+                            receipt[field_name] = previous.get(field_name)
             previous_status = _text(previous.get("status")) if previous is not None else ""
             remote_terminal_settlement = (
                 effect_type == "remote_inference_admission"
@@ -4131,6 +4149,8 @@ class DurableJobRepository:
         effect_type: str | None = None,
         target_digest: str | None = None,
         content_sha256: str | None = None,
+        readback_id: str | None = None,
+        verified_at: str | None = None,
         details: dict[str, Any] | None = None,
         owner: str | None = None,
         fencing_token: int | None = None,
@@ -4159,6 +4179,8 @@ class DurableJobRepository:
             target_digest=target_digest,
             status=status,
             content_sha256=content_sha256,
+            readback_id=readback_id,
+            verified_at=verified_at,
             details=details,
             owner=owner,
             fencing_token=fencing_token,

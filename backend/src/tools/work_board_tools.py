@@ -44,8 +44,13 @@ def _bound() -> tuple[WorkBoardWorkerTools, WorkBoardWorkerRequest]:
         raise PermissionError("work-board worker authority is not bound by the server")
     _worker, request = value
     principal = get_current_trust_principal()
-    if principal is None or str(getattr(principal, "job_id", "") or "") != request.workflow_run_id:
-        raise PermissionError("work-board worker authority is not bound to this durable run")
+    if principal is None:
+        raise PermissionError("work-board worker authority is not bound to a durable principal")
+    # A governed GoalSnapshot WorkflowTool runs under its own durable child
+    # identity.  The worker service validates that child is the exact
+    # one-level descendant of this board root before any native control runs;
+    # arbitrary delegated descendants do not inherit board authority.
+    _run(_worker.validate_native_principal(request, principal))
     return value
 
 

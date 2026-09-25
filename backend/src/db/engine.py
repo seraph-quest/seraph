@@ -65,9 +65,12 @@ OPERATOR_REQUIRED_TABLES = (
     "audio_consent_grants",
     "work_board_tasks",
     "work_board_attempts",
+    "work_board_review_intents",
     "work_board_links",
     "work_board_comments",
     "work_board_events",
+    "work_board_proposals",
+    "work_board_handoffs",
 )
 
 _LEGACY_WORKFLOW_STATUS_MAP = {
@@ -898,11 +901,85 @@ async def _ensure_memory_indexes(conn) -> None:
 async def _ensure_work_board_indexes(conn) -> None:
     """Add the M2 attempt uniqueness fences to existing workspaces."""
 
+    # SQLModel metadata does not retrofit ``index=True`` columns added by an
+    # ALTER TABLE on an existing workspace.  Review expiry is a bounded
+    # scheduler sweep, so keep the upgraded schema indexed explicitly.
+    await conn.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_work_board_tasks_review_expires_at "
+        "ON work_board_tasks (review_expires_at)"
+    )
     await conn.exec_driver_sql(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS ux_work_board_attempts_active_task
         ON work_board_attempts (task_id)
         WHERE ended_at IS NULL
+        """
+    )
+    # Handoff rows are immutable versions.  Older WIP databases used a
+    # parent/child-only uniqueness key, which would discard a later verified
+    # attempt.  Remove that obsolete index before installing the versioned
+    # identity; the canonical row data remains intact.
+    await conn.exec_driver_sql(
+        "DROP INDEX IF EXISTS ux_work_board_handoffs_parent_child"
+    )
+    # Proposal idempotency is scoped to the exact parent revision. Older M4
+    # workspaces may have either the revision-scoped index or the stricter
+    # task-lifetime index. Upgrade both to the issue contract while preserving
+    # historical rows. If malformed legacy data already has duplicate rows
+    # for the exact scoped key, leave the rows intact and let the proposal
+    # kernel return its typed reconciliation conflict.
+    proposal_index = await conn.exec_driver_sql(
+        "PRAGMA index_info(ux_work_board_proposals_idempotency)"
+    )
+    proposal_index_columns = [row[2] for row in proposal_index.fetchall()]
+    expected_proposal_index_columns = [
+        "owner_principal_id",
+        "owner_session_id",
+        "parent_task_id",
+        "parent_revision",
+        "kind",
+        "idempotency_key",
+    ]
+    if proposal_index_columns != expected_proposal_index_columns:
+        duplicate_result = await conn.exec_driver_sql(
+            "SELECT owner_principal_id, owner_session_id, parent_task_id, parent_revision, kind, idempotency_key "
+            "FROM work_board_proposals "
+            "GROUP BY owner_principal_id, owner_session_id, parent_task_id, parent_revision, kind, idempotency_key "
+            "HAVING COUNT(*) > 1 LIMIT 1"
+        )
+        if not duplicate_result.fetchone():
+            await conn.exec_driver_sql("DROP INDEX IF EXISTS ux_work_board_proposals_idempotency")
+            await conn.exec_driver_sql(
+                """
+                CREATE UNIQUE INDEX ux_work_board_proposals_idempotency
+                ON work_board_proposals (
+                    owner_principal_id,
+                    owner_session_id,
+                    parent_task_id,
+                    parent_revision,
+                    kind,
+                    idempotency_key
+                )
+                """
+            )
+    # A prior WIP created this name without link_id.  SQLite's IF NOT EXISTS
+    # would preserve that weaker shape, so recreate it to match the canonical
+    # WorkBoardHandoff metadata exactly.
+    await conn.exec_driver_sql(
+        "DROP INDEX IF EXISTS ux_work_board_handoffs_version"
+    )
+    await conn.exec_driver_sql(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_work_board_handoffs_version
+        ON work_board_handoffs (
+            owner_principal_id,
+            owner_session_id,
+            parent_task_id,
+            child_task_id,
+            link_id,
+            source_attempt_id,
+            source_task_revision
+        )
         """
     )
 
@@ -912,9 +989,150 @@ async def _ensure_work_board_columns(conn) -> None:
 
     result = await conn.exec_driver_sql("PRAGMA table_info(work_board_attempts)")
     columns = {row[1] for row in result.fetchall()}
-    if columns and "cancel_requested_at" not in columns:
+    attempt_additions = {
+        "cancel_requested_at": "DATETIME",
+        "parent_handoff_context_json": "VARCHAR DEFAULT '[]'",
+        "parent_handoff_digest": "VARCHAR",
+    }
+    for column, sql_type in attempt_additions.items():
+        if columns and column not in columns:
+            await conn.exec_driver_sql(
+                f"ALTER TABLE work_board_attempts ADD COLUMN {column} {sql_type}"
+            )
+    task_result = await conn.exec_driver_sql("PRAGMA table_info(work_board_tasks)")
+    task_columns = {row[1] for row in task_result.fetchall()}
+    task_additions = {
+        "review_expires_at": "DATETIME",
+        "review_request_attempt_id": "VARCHAR",
+        "review_request_fence": "INTEGER",
+        "review_request_revision": "INTEGER",
+        "review_request_digest": "VARCHAR",
+        "review_request_evidence_json": "VARCHAR DEFAULT '[]'",
+        "review_requested_at": "DATETIME",
+    }
+    for column, sql_type in task_additions.items():
+        if task_columns and column not in task_columns:
+            await conn.exec_driver_sql(
+                f"ALTER TABLE work_board_tasks ADD COLUMN {column} {sql_type}"
+            )
+    if task_columns:
+        # One-time legacy backfill: new review projections always persist an
+        # expiry, so a NULL value identifies a row created before this
+        # migration.  The predicate becomes false after this update and never
+        # resets a later review window on startup.
         await conn.exec_driver_sql(
-            "ALTER TABLE work_board_attempts ADD COLUMN cancel_requested_at DATETIME"
+            "UPDATE work_board_tasks SET review_expires_at = "
+            "datetime('now', '+7 days') "
+            "WHERE status = 'review' AND review_expires_at IS NULL"
+        )
+    review_intent_result = await conn.exec_driver_sql(
+        "PRAGMA table_info(work_board_review_intents)"
+    )
+    review_intent_columns = {row[1] for row in review_intent_result.fetchall()}
+    if review_intent_columns and "workflow_run_id" not in review_intent_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE work_board_review_intents ADD COLUMN workflow_run_id VARCHAR DEFAULT ''"
+        )
+    if review_intent_columns:
+        await conn.exec_driver_sql(
+            "UPDATE work_board_review_intents SET workflow_run_id = ("
+            "SELECT workflow_run_id FROM work_board_attempts a "
+            "WHERE a.attempt_id = work_board_review_intents.attempt_id "
+            "AND a.task_id = work_board_review_intents.task_id LIMIT 1) "
+            "WHERE workflow_run_id IS NULL OR workflow_run_id = ''"
+        )
+    proposal_result = await conn.exec_driver_sql("PRAGMA table_info(work_board_proposals)")
+    proposal_columns = {row[1] for row in proposal_result.fetchall()}
+    proposal_additions = {
+        "request_digest": "VARCHAR DEFAULT ''",
+        "capability_id": "VARCHAR DEFAULT 'strategist_agent'",
+        "capability_version": "VARCHAR DEFAULT ''",
+        "authority_digest": "VARCHAR DEFAULT ''",
+        "grant_revision": "INTEGER DEFAULT 1",
+        "input_digest": "VARCHAR DEFAULT ''",
+        "route_id": "VARCHAR DEFAULT 'strategist_agent'",
+        "admission_job_id": "VARCHAR DEFAULT ''",
+        "effect_id_digest": "VARCHAR DEFAULT ''",
+        "provider_contact_started": "BOOLEAN DEFAULT 0",
+        "provider_contact_state": "VARCHAR DEFAULT 'not_started'",
+    }
+    for column, sql_type in proposal_additions.items():
+        if proposal_columns and column not in proposal_columns:
+            await conn.exec_driver_sql(
+                f"ALTER TABLE work_board_proposals ADD COLUMN {column} {sql_type}"
+            )
+    if proposal_columns:
+        # Legacy proposal rows predate the durable operation binding.  Give
+        # each one a stable private identity before SQLModel creates the
+        # unique index; never reuse an empty value across rows.
+        await conn.exec_driver_sql(
+            "UPDATE work_board_proposals SET admission_job_id = "
+            "'legacy:proposal:' || proposal_id "
+            "WHERE admission_job_id IS NULL OR admission_job_id = ''"
+        )
+    handoff_result = await conn.exec_driver_sql("PRAGMA table_info(work_board_handoffs)")
+    handoff_columns = {row[1] for row in handoff_result.fetchall()}
+    handoff_additions = {
+        "schema_version": "VARCHAR DEFAULT 'work_board_handoff.v1'",
+        "link_id": "VARCHAR",
+        # Older WIP rows only retained the workflow run, so add an explicit
+        # empty sentinel first. The backfill binds only a unique exact
+        # run/task match; unprovable history stays unverified.
+        "source_attempt_id": "VARCHAR NOT NULL DEFAULT ''",
+        "source_task_revision": "INTEGER DEFAULT 1",
+        "risks_json": "VARCHAR DEFAULT '[]'",
+    }
+    added_source_attempt_id = bool(
+        handoff_columns and "source_attempt_id" not in handoff_columns
+    )
+    for column, sql_type in handoff_additions.items():
+        if handoff_columns and column not in handoff_columns:
+            await conn.exec_driver_sql(
+                f"ALTER TABLE work_board_handoffs ADD COLUMN {column} {sql_type}"
+            )
+    if added_source_attempt_id:
+        attempt_result = await conn.exec_driver_sql(
+            "PRAGMA table_info(work_board_attempts)"
+        )
+        attempt_columns = {row[1] for row in attempt_result.fetchall()}
+        if {"attempt_id", "task_id", "workflow_run_id"}.issubset(attempt_columns):
+            # A run ID identifies one source attempt only if it matches a
+            # unique attempt for the parent. Ambiguous or missing history
+            # retains the empty sentinel and fails normal proof validation.
+            await conn.exec_driver_sql(
+                "UPDATE work_board_handoffs SET source_attempt_id = ("
+                "SELECT a.attempt_id FROM work_board_attempts a "
+                "WHERE a.task_id = work_board_handoffs.parent_task_id "
+                "AND a.workflow_run_id = work_board_handoffs.workflow_run_id "
+                "LIMIT 1) WHERE source_attempt_id = '' AND ("
+                "SELECT COUNT(*) FROM work_board_attempts a "
+                "WHERE a.task_id = work_board_handoffs.parent_task_id "
+                "AND a.workflow_run_id = work_board_handoffs.workflow_run_id"
+                ") = 1"
+            )
+    if handoff_columns:
+        await conn.exec_driver_sql(
+            "UPDATE work_board_handoffs SET schema_version = 'work_board_handoff.v1' "
+            "WHERE schema_version IS NULL OR schema_version = ''"
+        )
+    link_result = await conn.exec_driver_sql("PRAGMA table_info(work_board_links)")
+    link_columns = {row[1] for row in link_result.fetchall()}
+    if link_columns and "current_handoff_id" not in link_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE work_board_links ADD COLUMN current_handoff_id VARCHAR"
+        )
+    if handoff_columns:
+        # Existing handoffs were one-row-per-dependency.  Bind them to the
+        # canonical link once; later attempts/revisions append new immutable
+        # versions instead of overwriting this history.
+        await conn.exec_driver_sql(
+            "UPDATE work_board_handoffs SET link_id = ("
+            "SELECT link_id FROM work_board_links l "
+            "WHERE l.parent_task_id = work_board_handoffs.parent_task_id "
+            "AND l.child_task_id = work_board_handoffs.child_task_id "
+            "AND l.owner_principal_id = work_board_handoffs.owner_principal_id "
+            "AND l.owner_session_id = work_board_handoffs.owner_session_id "
+            "LIMIT 1) WHERE link_id IS NULL OR link_id = ''"
         )
 
 
@@ -949,6 +1167,25 @@ async def init_db() -> None:
         )
         await _ensure_memory_indexes(conn)
         await _ensure_search_indexes(conn)
+
+    # Reconcile legacy Done-parent links once the additive board schema exists.
+    # The helper only materializes proof-backed handoffs; rows without an
+    # independently verified readback remain pointerless and therefore
+    # ineligible for child dispatch.
+    from src.work_board.review import backfill_verified_handoffs
+
+    # Build this migration session from the current engine object.  Tests and
+    # managed workspace lifecycle code may replace ``engine`` for an isolated
+    # canonical workspace while leaving the module-level factory bound to the
+    # default database.
+    migration_factory = sessionmaker(
+        engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+    )
+    async with migration_factory() as migration_session:
+        await backfill_verified_handoffs(migration_session)
+        await migration_session.commit()
 
 
 async def close_db() -> None:

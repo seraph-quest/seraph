@@ -10,6 +10,7 @@ from datetime import datetime
 
 from src.db.models import WorkBoardEvent, WorkBoardStatus
 from src.work_board.repository import safe_workflow_run_id
+from src.work_board.time import serialize_utc_datetime
 
 logger = logging.getLogger(__name__)
 _SAFE_EVENT_TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
@@ -18,6 +19,7 @@ _SAFE_EVENT_STATUSES = frozenset(item.value for item in WorkBoardStatus)
 _SAFE_EVENT_BLOCK_KINDS = frozenset(
     {
         "operator",
+        "dependency",
         "unknown_effect",
         "cost_liability",
         "reconcile_admission_binding",
@@ -25,6 +27,8 @@ _SAFE_EVENT_BLOCK_KINDS = frozenset(
         "needs_input",
         "transient",
         "cancelled",
+        "review_expired",
+        "attempt_limit",
     }
 )
 _SAFE_EVENT_OUTCOMES = frozenset(
@@ -63,6 +67,8 @@ _SAFE_EVENT_RECOVERY_ACTIONS = frozenset(
         "reconcile_external_effect",
         "reconcile_admission_binding",
         "restore_prerequisite",
+        "configure_goal_success_criterion",
+        "renew_review",
     }
 )
 _SAFE_EVENT_CHANGED_FIELDS = frozenset(
@@ -144,7 +150,7 @@ def _event_payload(event: WorkBoardEvent) -> dict[str, object]:
         metadata = {}
     created_at = event.created_at
     if isinstance(created_at, datetime):
-        created_at = created_at.isoformat()
+        created_at = serialize_utc_datetime(created_at)
     elif hasattr(created_at, "value"):
         created_at = created_at.value
     return {

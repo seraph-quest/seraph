@@ -6,7 +6,7 @@ Execution authority stays in ``WorkflowRunState`` and the durable job runtime.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 import re
 from typing import Any, Literal
@@ -27,6 +27,39 @@ class WorkBoardAction(str, Enum):
     retry = "retry"
     cancel = "cancel"
     archive = "archive"
+    request_review = "request_review"
+    request_changes = "request_changes"
+    complete_review = "complete_review"
+    renew_review = "renew_review"
+
+
+# ``operator`` is retained for the M1 operator-correction path.  The other
+# public kinds are the bounded M4 recovery categories.  Workflow/effect
+# reconciliation kinds (for example ``unknown_effect``) remain representable
+# in projections, but are never accepted by the generic authenticated action
+# endpoint; only the authoritative reconciliation paths may create them.
+WORK_BOARD_BLOCK_KINDS = frozenset(
+    {
+        "operator",
+        "dependency",
+        "needs_input",
+        "capability",
+        "transient",
+        "cancelled",
+        "review_expired",
+        "unknown_effect",
+    }
+)
+WORK_BOARD_AUTHENTICATED_BLOCK_KINDS = frozenset(
+    {
+        "operator",
+        "dependency",
+        "needs_input",
+        "capability",
+        "transient",
+        "cancelled",
+    }
+)
 
 
 class WorkBoardBaseModel(BaseModel):
@@ -59,6 +92,15 @@ def _safe_opaque_identifier(value: str | None, *, field_name: str) -> str | None
     return normalized
 
 
+def _normalize_schedule_utc(value: datetime | None) -> datetime | None:
+    """Normalize schedules before SQLite drops timezone offsets on bind."""
+    if value is None:
+        return None
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 class WorkBoardTaskCreate(WorkBoardBaseModel):
     title: str = Field(min_length=1, max_length=200)
     body: str = Field(default="", max_length=4_000)
@@ -77,6 +119,11 @@ class WorkBoardTaskCreate(WorkBoardBaseModel):
     requires_review: bool = False
     reviewer_id: str | None = Field(default=None, min_length=1, max_length=128)
     origin_thread_id: str | None = Field(default=None, min_length=1, max_length=256)
+
+    @field_validator("scheduled_at")
+    @classmethod
+    def normalize_scheduled_at(cls, value: datetime | None) -> datetime | None:
+        return _normalize_schedule_utc(value)
 
     @field_validator(
         "capability_id",
@@ -117,8 +164,6 @@ class WorkBoardTaskCreate(WorkBoardBaseModel):
             raise ValueError("typed_input_ref requires typed_input_digest")
         if self.typed_input_digest and not self.typed_input_ref:
             raise ValueError("typed_input_digest requires typed_input_ref")
-        if self.requires_review and not self.reviewer_id:
-            raise ValueError("requires_review tasks require a reviewer_id")
         return self
 
 
@@ -133,6 +178,11 @@ class WorkBoardTaskPatch(WorkBoardBaseModel):
     executor_id: str | None = Field(default=None, min_length=1, max_length=128)
     assignee_id: str | None = Field(default=None, min_length=1, max_length=128)
     scheduled_at: datetime | None = None
+
+    @field_validator("scheduled_at")
+    @classmethod
+    def normalize_scheduled_at(cls, value: datetime | None) -> datetime | None:
+        return _normalize_schedule_utc(value)
 
     @field_validator("capability_id", "executor_id", "assignee_id")
     @classmethod
@@ -171,23 +221,96 @@ class WorkBoardTaskPatch(WorkBoardBaseModel):
 class WorkBoardActionRequest(WorkBoardBaseModel):
     action: WorkBoardAction
     expected_revision: int = Field(ge=1)
-    block_kind: Literal["operator"] | None = None
-    reason: str | None = Field(default=None, min_length=1, max_length=1_000)
+    block_kind: Literal[
+        "operator",
+        "dependency",
+        "needs_input",
+        "capability",
+        "transient",
+        "cancelled",
+        "review_expired",
+        "unknown_effect",
+    ] | None = None
+    source_status: WorkBoardStatus | None = None
+    attempt_id: str | None = Field(default=None, min_length=1, max_length=128)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=20)
+    reason: str | None = Field(default=None, min_length=1, max_length=500)
     resolution: str | None = Field(default=None, min_length=1, max_length=1_000)
+
+    @field_validator("attempt_id")
+    @classmethod
+    def validate_attempt_id(cls, value: str | None) -> str | None:
+        return _safe_opaque_identifier(value, field_name="attempt_id")
+
+    @field_validator("evidence_refs")
+    @classmethod
+    def validate_evidence_refs(cls, values: list[str]) -> list[str]:
+        return [
+            _safe_reference(value, field_name="evidence_refs") or ""
+            for value in values
+        ]
 
     @model_validator(mode="after")
     def validate_action_fields(self) -> "WorkBoardActionRequest":
-        if self.action is WorkBoardAction.block and not self.reason:
-            raise ValueError("block action requires a reason")
-        if self.action is WorkBoardAction.block and self.block_kind not in {None, "operator"}:
-            raise ValueError("manual block actions must use block_kind=operator")
+        if self.action is WorkBoardAction.block:
+            if not self.block_kind:
+                raise ValueError("block action requires a typed block_kind")
+            if not self.reason:
+                raise ValueError("block action requires a reason")
+            if self.source_status is None:
+                raise ValueError("block action requires the current source_status")
+        if self.action is not WorkBoardAction.block and self.source_status is not None:
+            raise ValueError("source_status is valid only for block action")
         if self.action is WorkBoardAction.unblock and not self.resolution:
             raise ValueError("unblock action requires an explicit resolution")
-        if self.action is not WorkBoardAction.block and (self.block_kind or self.reason):
+        if self.action is WorkBoardAction.request_review:
+            if not self.attempt_id:
+                raise ValueError("request_review requires attempt_id")
+        if self.action is WorkBoardAction.request_changes and not self.reason:
+            raise ValueError("request_changes requires a reason")
+        if self.action is WorkBoardAction.complete_review and not self.attempt_id:
+            raise ValueError("complete_review requires attempt_id")
+        if self.action is WorkBoardAction.block and self.attempt_id:
+            raise ValueError("attempt_id is valid only for review actions")
+        if self.action not in {
+            WorkBoardAction.block,
+            WorkBoardAction.request_changes,
+        } and self.block_kind:
             raise ValueError("block fields are valid only for block action")
+        if self.action not in {
+            WorkBoardAction.block,
+            WorkBoardAction.request_changes,
+        } and self.reason:
+            raise ValueError("reason is valid only for block or request_changes action")
         if self.action is not WorkBoardAction.unblock and self.resolution:
             raise ValueError("resolution is valid only for unblock action")
+        if self.action not in {
+            WorkBoardAction.request_review,
+            WorkBoardAction.complete_review,
+        } and self.attempt_id:
+            raise ValueError("attempt_id is valid only for review actions")
+        if self.action is not WorkBoardAction.request_review and self.evidence_refs:
+            raise ValueError("evidence_refs are valid only for request_review")
         return self
+
+
+class WorkBoardProposalRequest(WorkBoardBaseModel):
+    expected_revision: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=256)
+
+    @field_validator("idempotency_key")
+    @classmethod
+    def validate_idempotency_key(cls, value: str) -> str:
+        return _safe_opaque_identifier(value, field_name="idempotency_key") or ""
+
+
+class WorkBoardProposalAccept(WorkBoardBaseModel):
+    expected_proposal_revision: int = Field(ge=1)
+    expected_parent_revision: int = Field(ge=1)
+
+
+class WorkBoardProposalReject(WorkBoardBaseModel):
+    expected_proposal_revision: int = Field(ge=1)
 
 
 class WorkBoardCommentCreate(WorkBoardBaseModel):
@@ -231,6 +354,9 @@ __all__ = [
     "WorkBoardLinkCreate",
     "WorkBoardLinkDelete",
     "WorkBoardOwner",
+    "WorkBoardProposalAccept",
+    "WorkBoardProposalReject",
+    "WorkBoardProposalRequest",
     "WorkBoardStatus",
     "WorkBoardTaskCreate",
     "WorkBoardTaskPatch",

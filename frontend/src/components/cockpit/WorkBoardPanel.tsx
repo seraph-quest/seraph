@@ -17,6 +17,7 @@ import type {
   WorkBoardReadbackStatus,
   WorkBoardReceiptReference,
   WorkBoardRecoveryAction,
+  WorkBoardProposal,
   WorkBoardStatus,
   WorkBoardTask,
   WorkBoardTaskCreateRequest,
@@ -71,8 +72,10 @@ const RECOVERY_LABELS: Record<WorkBoardRecoveryAction, string> = {
   retry: "Retry task",
   approve_existing_run: "Open existing approval",
   restore_prerequisite: "Restore a required capability or grant",
+  configure_goal_success_criterion: "Complete the goal's success criterion, verifier, and evidence",
   reconcile_admission_binding: "Reconcile the pending job admission",
   reconcile_external_effect: "Reconcile the external effect before retrying",
+  renew_review: "Renew the review window",
 };
 
 const TASK_LIMIT = 100;
@@ -373,11 +376,29 @@ function safeReferenceLabel(reference: WorkBoardReceiptReference): string {
   return reference.artifact_id
     || reference.workflow_run_id
     || reference.job_id
+    || reference.readback_id
+    || reference.verification_id
     || reference.effect_id_digest
     || reference.file_path
     || reference.target_path
     || reference.reason_code
     || "Safe reference";
+}
+
+function proposalStatusLabel(proposal: WorkBoardProposal): string {
+  return (proposal.status ?? "unknown").replace(/_/g, " ");
+}
+
+function hasServerAuthorityPreview(authority: unknown): authority is string {
+  if (typeof authority !== "string") return false;
+  const currentPreflight = authority.includes("Current provider-free preflight: READY;")
+    || /Current provider-free preflight: BLOCKED code=[a-z0-9_]+;/.test(authority);
+  return authority.includes("Owner: authenticated owner/session; goal ")
+    && authority.includes("Capability-specific authority requirements: ")
+    && currentPreflight
+    && /\b[1-9]\d{0,2}s effective goal\/job runtime/.test(authority)
+    && authority.includes("Accepting creates Todo only and grants no authority or external-effect approval")
+    && authority.includes("required independent readback");
 }
 
 function referenceWorkflowRunId(
@@ -440,6 +461,10 @@ function WorkBoardPanel({
   const [blockReason, setBlockReason] = useState("");
   const [blockConfirmed, setBlockConfirmed] = useState(false);
   const [unblockResolution, setUnblockResolution] = useState("");
+  const [reviewChangesReason, setReviewChangesReason] = useState("");
+  const [proposal, setProposal] = useState<WorkBoardProposal | null>(null);
+  const [proposalBusy, setProposalBusy] = useState(false);
+  const [proposalError, setProposalError] = useState<string | null>(null);
   const [commentDraft, setCommentDraft] = useState("");
   const [parentTaskIdDraft, setParentTaskIdDraft] = useState("");
   const [childTaskIdDraft, setChildTaskIdDraft] = useState("");
@@ -461,6 +486,8 @@ function WorkBoardPanel({
   const requestControllersRef = useRef(new Set<AbortController>());
   const createDialogRef = useRef<HTMLFormElement | null>(null);
   const createOpenerRef = useRef<HTMLElement | null>(null);
+  const proposalKeysRef = useRef(new Map<string, string>());
+  const proposalSelectionVersionRef = useRef(0);
   const createBusyRef = useRef(createBusy);
   const taskDetailPanelRef = useRef<HTMLElement | null>(null);
   const taskDetailOpenerRef = useRef<HTMLElement | null>(null);
@@ -930,6 +957,44 @@ function WorkBoardPanel({
   }, [readTaskDetail, selectedTaskId]);
 
   useEffect(() => {
+    const selectionVersion = proposalSelectionVersionRef.current + 1;
+    proposalSelectionVersionRef.current = selectionVersion;
+    setProposal(null);
+    setProposalError(null);
+    setProposalBusy(false);
+    if (!selectedTaskId) {
+      return;
+    }
+    const taskId = selectedTaskId;
+    let active = true;
+    void requestBoard<{ proposals: WorkBoardProposal[] }>(
+      `/tasks/${encodeURIComponent(taskId)}/proposals`,
+    ).then((payload) => {
+      if (!active || stoppedRef.current
+        || proposalSelectionVersionRef.current !== selectionVersion
+        || selectedTaskIdRef.current !== taskId) return;
+      const proposals = Array.isArray(payload?.proposals) ? payload.proposals : [];
+      const nextProposal = proposals.find((item) => item.status === "proposed" || item.status === "pending_inference")
+        ?? proposals[0]
+        ?? null;
+      if (nextProposal?.idempotency_key) {
+        const scope = `${nextProposal.parent_task_id}:${nextProposal.parent_revision}:${nextProposal.kind}`;
+        proposalKeysRef.current.set(scope, nextProposal.idempotency_key);
+      }
+      setProposal(nextProposal);
+      setProposalError(nextProposal?.blocked_reason ?? null);
+    }).catch((error) => {
+      if (active && !stoppedRef.current
+        && proposalSelectionVersionRef.current === selectionVersion
+        && selectedTaskIdRef.current === taskId
+        && !(error instanceof Error && error.name === "AbortError")) {
+        setProposalError(errorText(error));
+      }
+    });
+    return () => { active = false; };
+  }, [requestBoard, selectedTaskId]);
+
+  useEffect(() => {
     if (selectedTaskId) {
       taskDetailPanelRef.current?.focus();
       return;
@@ -1103,6 +1168,9 @@ function WorkBoardPanel({
     setBlockReason("");
     setBlockConfirmed(false);
     setUnblockResolution("");
+    setReviewChangesReason("");
+    setProposal(null);
+    setProposalError(null);
     setCommentDraft("");
     setSelectedTaskId(taskId);
     setEditMode(false);
@@ -1363,6 +1431,165 @@ function WorkBoardPanel({
     }
   };
 
+  const currentAttempt = selectedTask?.latest_attempt
+    ?? selectedDetail?.attempts[0]
+    ?? null;
+  const currentOwnerSession = Boolean(
+    selectedTask
+    && ownerPrincipalId
+    && ownerSessionId
+    && selectedTask.owner_principal_id === ownerPrincipalId
+    && selectedTask.owner_session_id === ownerSessionId,
+  );
+  const namedReviewer = Boolean(
+    selectedTask
+    && currentOwnerSession
+    && ownerPrincipalId
+    && selectedTask.reviewer_id === ownerPrincipalId,
+  );
+  const requestReview = () => {
+    if (!selectedTask || !currentAttempt) return;
+    if (!currentAttempt.attempt_id || !currentAttempt.workflow_run_id) {
+      setActionError("Review requires the active fenced attempt with its linked durable workflow run.");
+      return;
+    }
+    void performAction("request_review", {
+      attempt_id: currentAttempt.attempt_id,
+    });
+  };
+
+  const requestChanges = () => {
+    const reason = reviewChangesReason.trim();
+    if (!reason || reason.length > 500) {
+      setActionError("Enter requested changes between 1 and 500 characters.");
+      return;
+    }
+    void performAction("request_changes", { reason });
+  };
+
+  const proposalKey = (
+    kind: WorkBoardProposal["kind"],
+    task: WorkBoardTask,
+    forceNew = false,
+  ): string => {
+    const scope = `${task.task_id}:${task.task_revision}:${kind}`;
+    if (forceNew) proposalKeysRef.current.delete(scope);
+    const existing = proposalKeysRef.current.get(scope);
+    if (existing) return existing;
+    const key = makeIdempotencyKey();
+    proposalKeysRef.current.set(scope, key);
+    return key;
+  };
+
+  const requestProposal = async (kind: WorkBoardProposal["kind"], forceNew = false) => {
+    if (!selectedTask || !["triage", "todo"].includes(selectedTask.status)) return;
+    const taskId = selectedTask.task_id;
+    // Invalidate an in-flight hydration GET before issuing the operator's
+    // explicit POST.  The POST response is the newest preview for this card;
+    // a slower GET must not overwrite it with an older persisted row.
+    const selectionVersion = proposalSelectionVersionRef.current + 1;
+    proposalSelectionVersionRef.current = selectionVersion;
+    setProposalBusy(true);
+    setProposalError(null);
+    setProposal(null);
+    try {
+      const nextProposal = await requestBoard<WorkBoardProposal>(
+        `/tasks/${encodeURIComponent(taskId)}/${kind}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expected_revision: selectedTask.task_revision,
+            idempotency_key: proposalKey(kind, selectedTask, forceNew),
+          }),
+        },
+      );
+      if (stoppedRef.current
+        || proposalSelectionVersionRef.current !== selectionVersion
+        || selectedTaskIdRef.current !== taskId) return;
+      setProposal(nextProposal);
+      if (nextProposal.status === "blocked") {
+        setProposalError(nextProposal.blocked_reason ?? "The governed proposal route is blocked. Follow the recovery guidance before retrying.");
+      }
+      setAnnouncement(`${kind === "specify" ? "Specify" : "Decompose"} returned a reviewable proposal.`);
+    } catch (error) {
+      if (stoppedRef.current
+        || proposalSelectionVersionRef.current !== selectionVersion
+        || selectedTaskIdRef.current !== taskId) return;
+      setProposalError(inputErrorMessage(error));
+      if (error instanceof WorkBoardApiError && error.status === 409) {
+        setStale(true);
+        await refreshSnapshot();
+        if (stoppedRef.current
+          || proposalSelectionVersionRef.current !== selectionVersion
+          || selectedTaskIdRef.current !== taskId) return;
+        await refreshSelectedTask();
+      }
+    } finally {
+      if (!stoppedRef.current
+        && proposalSelectionVersionRef.current === selectionVersion
+        && selectedTaskIdRef.current === taskId) setProposalBusy(false);
+    }
+  };
+
+  const decideProposal = async (decision: "accept" | "reject") => {
+    if (!proposal) return;
+    const taskId = selectedTaskIdRef.current;
+    const selectionVersion = proposalSelectionVersionRef.current;
+    const proposalId = proposal.proposal_id;
+    setProposalBusy(true);
+    setProposalError(null);
+    const path = `/proposals/${encodeURIComponent(proposal.proposal_id)}/${decision}`;
+    const body = decision === "accept"
+      ? {
+        expected_proposal_revision: proposal.proposal_revision,
+        expected_parent_revision: proposal.parent_revision,
+      }
+      : { expected_proposal_revision: proposal.proposal_revision };
+    try {
+      const receipt = await requestBoard<{
+        proposal_id: string;
+        status: string;
+        proposal_revision: number;
+        task_ids?: string[];
+      }>(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (stoppedRef.current
+        || proposalSelectionVersionRef.current !== selectionVersion
+        || selectedTaskIdRef.current !== taskId) return;
+      setProposal((current) => current
+        ? { ...current, status: receipt.status, proposal_revision: receipt.proposal_revision }
+        : current);
+      setAnnouncement(decision === "accept" ? "The reviewed proposal was accepted into the canonical board." : "The proposal was rejected.");
+      await refreshSnapshot();
+      if (stoppedRef.current
+        || proposalSelectionVersionRef.current !== selectionVersion
+        || selectedTaskIdRef.current !== taskId) return;
+      await refreshSelectedTask();
+    } catch (error) {
+      if (stoppedRef.current
+        || proposalSelectionVersionRef.current !== selectionVersion
+        || selectedTaskIdRef.current !== taskId) return;
+      setProposalError(inputErrorMessage(error));
+      if (error instanceof WorkBoardApiError && error.status === 409) {
+        setStale(true);
+        await refreshSnapshot();
+        if (stoppedRef.current
+          || proposalSelectionVersionRef.current !== selectionVersion
+          || selectedTaskIdRef.current !== taskId) return;
+        await refreshSelectedTask();
+      }
+    } finally {
+      if (!stoppedRef.current
+        && proposalSelectionVersionRef.current === selectionVersion
+        && selectedTaskIdRef.current === taskId
+        && proposal?.proposal_id === proposalId) setProposalBusy(false);
+    }
+  };
+
   const addComment = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!selectedTask || !commentDraft.trim()) return;
@@ -1499,7 +1726,7 @@ function WorkBoardPanel({
   };
 
   const canManuallyBlock = (task: WorkBoardTask) => {
-    return ["triage", "todo", "ready", "review"].includes(task.status)
+    return ["triage", "todo", "ready"].includes(task.status)
       && !isActiveAttempt(task)
       && task.status !== "running";
   };
@@ -1522,6 +1749,11 @@ function WorkBoardPanel({
 
   const statusOptions: Array<"all" | WorkBoardStatus> = ["all", ...BOARD_COLUMNS, "archived"];
   const activeCount = tasks.filter((task) => task.status === "running").length;
+  const proposalAuthorityComplete = Boolean(
+    proposal
+    && proposal.proposed_tasks.length > 0
+    && proposal.proposed_tasks.every((task) => hasServerAuthorityPreview(task.authority)),
+  );
 
   return (
     <section className="cockpit-panel cockpit-panel--embedded min-w-0" aria-label="Work board">
@@ -1744,9 +1976,30 @@ function WorkBoardPanel({
                 <div className="font-semibold">Actions and recovery</div>
                 <div className="mt-1">{selectedTask.status === "blocked" ? `Blocked: ${selectedTask.block_reason || "No safe reason was supplied."}` : `Current state: ${STATUS_LABELS[selectedTask.status]}`}</div>
                 {selectedTask.recovery_action && <div className="mt-1">Server recovery action: {RECOVERY_LABELS[selectedTask.recovery_action]}</div>}
+                {selectedTask.status === "review" && selectedTask.review_expires_at && (
+                  <div className="mt-1" role="status">
+                    Review deadline: {safeDateTime(selectedTask.review_expires_at)}
+                    {new Date(selectedTask.review_expires_at).getTime() <= Date.now() ? " · expired; renewal is required" : ""}
+                  </div>
+                )}
                 <div className="mt-2 flex flex-wrap gap-2">
                   {selectedTask.status === "triage" && (
                     <button type="button" className="cockpit-feedback-button" disabled={!canPromote || busyAction} onClick={() => void performAction("promote")} title={!canPromote ? "Complete the typed specification and acknowledge the current server limit first." : undefined}>Promote to Todo</button>
+                  )}
+                  {["triage", "todo"].includes(selectedTask.status) && currentOwnerSession && (
+                    <button type="button" className="cockpit-feedback-button" disabled={busyAction || proposalBusy} onClick={() => void requestProposal("specify")}>Specify for review</button>
+                  )}
+                  {selectedTask.status === "todo" && currentOwnerSession && (
+                    <button type="button" className="cockpit-feedback-button" disabled={busyAction || proposalBusy} onClick={() => void requestProposal("decompose")}>Decompose for review</button>
+                  )}
+                  {selectedTask.status === "running" && currentOwnerSession && (
+                    <button
+                      type="button"
+                      className="cockpit-feedback-button"
+                      disabled={busyAction || !currentAttempt?.attempt_id || !currentAttempt.workflow_run_id}
+                      title={!currentAttempt?.attempt_id || !currentAttempt.workflow_run_id ? "Wait for the active fenced attempt with its linked durable workflow run." : undefined}
+                      onClick={requestReview}
+                    >Request review</button>
                   )}
                   {selectedTask.status === "blocked" && selectedTask.recovery_action === "unblock" && (
                     <form className="flex min-w-full flex-col gap-2" onSubmit={(event) => { event.preventDefault(); const resolution = unblockResolution.trim(); if (!resolution || resolution.length > 1000) { setActionError("Enter a resolution between 1 and 1000 characters."); return; } void performAction("unblock", { resolution }); }}>
@@ -1782,14 +2035,95 @@ function WorkBoardPanel({
                     <button type="button" className="cockpit-feedback-button" disabled={busyAction} onClick={() => void performAction("archive", {}, true)}>Archive completed task</button>
                   )}
                   {canManuallyBlock(selectedTask) && (
-                    <form className="flex min-w-full flex-col gap-2" onSubmit={(event) => { event.preventDefault(); if (!blockConfirmed) { setActionError("Confirm the operator block before submitting."); return; } const reason = blockReason.trim(); if (!reason || reason.length > 1000) { setActionError("Enter a block reason between 1 and 1000 characters."); return; } void performAction("block", { block_kind: "operator", reason }); }}>
-                      <label>Manual block reason<textarea className="cockpit-input mt-1 w-full" maxLength={1000} rows={2} value={blockReason} onChange={(event) => setBlockReason(event.currentTarget.value)} /></label>
+                    <form className="flex min-w-full flex-col gap-2" onSubmit={(event) => { event.preventDefault(); if (!blockConfirmed) { setActionError("Confirm the operator block before submitting."); return; } const reason = blockReason.trim(); if (!reason || reason.length > 500) { setActionError("Enter a block reason between 1 and 500 characters."); return; } void performAction("block", { block_kind: "operator", source_status: selectedTask.status, reason }); }}>
+                      <label>Manual block reason<textarea className="cockpit-input mt-1 w-full" maxLength={500} rows={2} value={blockReason} onChange={(event) => setBlockReason(event.currentTarget.value)} /></label>
                       <label className="flex items-center gap-2"><input type="checkbox" checked={blockConfirmed} onChange={(event) => setBlockConfirmed(event.currentTarget.checked)} />Confirm this operator block</label>
-                      <button type="submit" className="cockpit-feedback-button self-start" disabled={busyAction || !blockConfirmed || !blockReason.trim() || blockReason.trim().length > 1000}>Block task</button>
+                      <button type="submit" className="cockpit-feedback-button self-start" disabled={busyAction || !blockConfirmed || !blockReason.trim() || blockReason.trim().length > 500}>Block task</button>
                     </form>
                   )}
-                  {selectedTask.status === "review" && <div className="w-full rounded bg-slate-900 p-2">Awaiting {selectedTask.reviewer_id ?? "the named reviewer"}. Evidence: {READBACK_LABELS[selectedTask.readback_status]} readback · {VERIFICATION_LABELS[selectedTask.verification_status]} verification. Reviewer verdict controls appear only when authorized by the server.</div>}
+                  {selectedTask.status === "review" && (
+                    <div className="w-full rounded bg-slate-900 p-2">
+                      <div>Awaiting {selectedTask.reviewer_id ?? "the named reviewer"}. Evidence: {READBACK_LABELS[selectedTask.readback_status]} readback · {VERIFICATION_LABELS[selectedTask.verification_status]} verification.</div>
+                      {namedReviewer ? (
+                        <div className="mt-2 grid gap-2">
+                          <div className="text-[10px] opacity-80">You are the authenticated named reviewer for this task. Approval requires the current revision and the same verified attempt.</div>
+                          <div className="flex flex-wrap gap-2">
+                            <button type="button" className="cockpit-feedback-button" disabled={busyAction || !currentAttempt?.attempt_id} onClick={() => currentAttempt?.attempt_id && void performAction("complete_review", { attempt_id: currentAttempt.attempt_id }, true)}>Approve review</button>
+                            <button type="button" className="cockpit-feedback-button" disabled={busyAction} onClick={requestChanges}>Request changes</button>
+                          </div>
+                          <label>Required changes<textarea className="cockpit-input mt-1 w-full" maxLength={500} rows={2} value={reviewChangesReason} onChange={(event) => setReviewChangesReason(event.currentTarget.value)} /></label>
+                        </div>
+                      ) : <div className="mt-1 text-[10px] opacity-75">Reviewer verdict controls appear only for the exact authenticated owner session named by the server.</div>}
+                    </div>
+                  )}
+                  {selectedTask.status === "blocked" && selectedTask.block_kind === "review_expired" && (
+                    <div className="w-full rounded bg-amber-950/20 p-2" role="status">
+                      <div>This review expired. Generic unblock and retry cannot restore it; the named reviewer must renew the same verified attempt.</div>
+                      {namedReviewer && <button type="button" className="cockpit-feedback-button mt-2" disabled={busyAction} onClick={() => void performAction("renew_review", {}, true)}>Renew review window</button>}
+                    </div>
+                  )}
+                  {selectedTask.status === "blocked" && selectedTask.block_kind === "attempt_limit" && (
+                    <div className="w-full rounded bg-amber-950/20 p-2" role="status">
+                      <div>This task has used its two-attempt limit. Retry is unavailable; create a new linked task for further work.</div>
+                    </div>
+                  )}
                 </div>
+                {proposalError && <div className="mt-2 rounded border border-amber-500/40 p-2" role="alert">{proposalError}</div>}
+                {proposal && (
+                  <section className="mt-3 rounded border border-white/10 bg-black/20 p-3" aria-label="Triage proposal preview">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="font-semibold">{proposal.kind === "specify" ? "Specify" : "Decompose"} proposal preview</div>
+                      <span className="text-[10px] uppercase opacity-70">{proposalStatusLabel(proposal)} · revision {proposal.proposal_revision}</span>
+                    </div>
+                    {proposal.blocked_reason && <div className="mt-2 rounded border border-amber-500/40 p-2" role="status">
+                      Blocked: {proposal.blocked_reason}. {proposal.recovery_action === "reconcile_external_effect"
+                        ? "Reconcile the durable provider receipt before any retry; this page will not replay a contacted request."
+                        : proposal.recovery_action === "reconcile_admission_binding"
+                          ? "The bounded durable admission needs operator reconciliation; this idempotency key cannot be retried. Resolve the receipt or create a new explicitly accepted request after recovery."
+                          : "Resolve the prerequisite, then retry the unchanged request only when its durable receipt proves that provider contact never started; a changed binding requires a new request key."}
+                    </div>}
+                    {proposal.recovery_action === "retry_same_binding_after_prerequisite"
+                      && selectedTask
+                      && ["triage", "todo"].includes(selectedTask.status)
+                      && currentOwnerSession
+                      && (
+                        <button
+                          type="button"
+                          className="cockpit-feedback-button mt-2"
+                          disabled={proposalBusy}
+                          onClick={() => void requestProposal(proposal.kind, true)}
+                        >Retry with new request key</button>
+                      )}
+                    <div className="mt-2">Estimated cost: {proposal.estimated_cost ?? "Not provided"}</div>
+                    <div className="mt-1 break-all">Proposal capability: {proposal.capability_id ?? "Governed proposal route"}{proposal.capability_version ? ` · version ${proposal.capability_version}` : ""}</div>
+                    <div className="mt-1">Parent revision: {proposal.parent_revision} · expires {safeDateTime(proposal.expires_at)}</div>
+                    <div className="mt-2 grid gap-2">
+                      {proposal.proposed_tasks.map((proposedTask, index) => (
+                        <article key={proposedTask.task_id ?? `${proposal.proposal_id}:task:${index}`} className="rounded border border-white/10 p-2">
+                          <div className="font-medium">{proposedTask.title}</div>
+                          {proposedTask.body && <div className="mt-1 whitespace-pre-wrap break-words">{proposedTask.body}</div>}
+                          <div className="mt-1">Capability: {proposedTask.capability_id} · version {proposedTask.capability_version ?? "current"}</div>
+                          <div className="break-all">Typed input: {proposedTask.typed_input_ref ?? "Not provided"} · digest {proposedTask.typed_input_digest ?? "Not provided"}</div>
+                          <div>Executor: {proposedTask.executor_id} · authority: {hasServerAuthorityPreview(proposedTask.authority) ? proposedTask.authority : "unavailable; this preview cannot be accepted"}</div>
+                          {proposedTask.dependencies?.length ? <div>Dependencies: {proposedTask.dependencies.join(", ")}</div> : <div>Dependencies: none proposed</div>}
+                          {proposedTask.cost_estimate && <div>Task cost estimate: {proposedTask.cost_estimate}</div>}
+                        </article>
+                      ))}
+                      {proposal.proposed_tasks.length === 0 && <div className="cockpit-empty">No executable task proposal was returned.</div>}
+                    </div>
+                    {proposal.proposed_links.length > 0 && <div className="mt-2">Proposed dependencies: {proposal.proposed_links.map((link) => `${link.parent_task_id} → ${link.child_task_id}`).join(" · ")}</div>}
+                    {proposal.status === "proposed" && !proposalAuthorityComplete && (
+                      <div className="mt-2 text-amber-200" role="status">A complete server-derived authority preview is missing. Request a fresh proposal before accepting this one.</div>
+                    )}
+                    {proposal.status === "proposed" && (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <button type="button" className="cockpit-feedback-button" disabled={proposalBusy || !proposalAuthorityComplete} onClick={() => void decideProposal("accept")}>Accept proposal</button>
+                        <button type="button" className="cockpit-feedback-button" disabled={proposalBusy} onClick={() => void decideProposal("reject")}>Reject proposal</button>
+                      </div>
+                    )}
+                    {proposal.status === "pending_inference" && <div className="mt-2 text-amber-200" role="status">The governed proposal request is pending. Refresh or retry the same request only after its durable receipt is reconciled.</div>}
+                  </section>
+                )}
                 {selectedTask.status === "blocked" && (selectedTask.block_kind === "unknown_effect" || selectedTask.block_kind === "cost_liability" || selectedTask.recovery_action === "reconcile_external_effect") && (
                   <div className="mt-2 rounded border border-amber-500/40 p-2" role="status">External effect or cost is unresolved. Reconcile independent readback before any new attempt; retry is unavailable.</div>
                 )}
@@ -1837,7 +2171,7 @@ function WorkBoardPanel({
                           <div>{receipt.status ?? receipt.outcome ?? "Receipt"}{receipt.verified === true ? " · verified" : ""}{receipt.readback_status ? ` · readback ${READBACK_LABELS[receipt.readback_status]}` : ""}</div>
                           {receipt.content_sha256 && <div className="break-all font-mono text-[10px]">SHA-256 {receipt.content_sha256}</div>}
                           {receipt.file_path && <div className="break-all text-[10px]">Artifact path {receipt.file_path}</div>}
-                          {(receipt.file_path || receipt.artifact_id || receipt.target_path || receipt.effect_id_digest) && onInspectArtifact && <button type="button" className="mt-1 underline" aria-label={`Inspect execution evidence ${receipt.file_path ?? receipt.target_path ?? receipt.artifact_id ?? receipt.effect_id_digest}`} onClick={() => onInspectArtifact({ reference: receipt, ownerSessionId: selectedTask.owner_session_id, workflowRunId: referenceWorkflowRunId(receipt, attempt.workflow_run_id), parentWorkflowRunId: attempt.workflow_run_id })}>{receipt.target_path || receipt.effect_id_digest ? "Inspect readback evidence" : "Inspect artifact"}</button>}
+                          {(receipt.file_path || receipt.artifact_id || receipt.target_path || receipt.effect_id_digest || receipt.readback_id || receipt.verification_id) && onInspectArtifact && <button type="button" className="mt-1 underline" aria-label={`Inspect execution evidence ${receipt.file_path ?? receipt.target_path ?? receipt.artifact_id ?? receipt.effect_id_digest ?? receipt.readback_id ?? receipt.verification_id}`} onClick={() => onInspectArtifact({ reference: receipt, ownerSessionId: selectedTask.owner_session_id, workflowRunId: referenceWorkflowRunId(receipt, attempt.workflow_run_id), parentWorkflowRunId: attempt.workflow_run_id })}>{receipt.target_path || receipt.effect_id_digest || receipt.readback_id || receipt.verification_id ? "Inspect readback evidence" : "Inspect artifact"}</button>}
                           {receipt.workflow_run_id && onInspectWorkflowRun && <button type="button" className="underline" onClick={() => onInspectWorkflowRun(receipt.workflow_run_id!, selectedTask.owner_session_id)}>Inspect existing workflow record</button>}
                         </div>
                       ))}
@@ -1849,13 +2183,55 @@ function WorkBoardPanel({
                       <div>{reference.status ?? reference.outcome ?? "Reference"}{reference.verified === true ? " · verified" : ""}</div>
                       {reference.content_sha256 && <div className="break-all font-mono text-[10px]">SHA-256 {reference.content_sha256}</div>}
                       {reference.file_path && <div className="break-all text-[10px]">Artifact path {reference.file_path}</div>}
-                      {(reference.file_path || reference.artifact_id || reference.target_path || reference.effect_id_digest) && onInspectArtifact && <button type="button" className="mt-1 underline" aria-label={`Inspect execution evidence ${reference.file_path ?? reference.target_path ?? reference.artifact_id ?? reference.effect_id_digest}`} onClick={() => onInspectArtifact({ reference, ownerSessionId: selectedTask.owner_session_id, workflowRunId: referenceWorkflowRunId(reference, selectedTask.latest_attempt?.workflow_run_id ?? null), parentWorkflowRunId: selectedTask.latest_attempt?.workflow_run_id ?? null })}>{reference.target_path || reference.effect_id_digest ? "Inspect readback evidence" : "Inspect artifact"}</button>}
+                      {(reference.file_path || reference.artifact_id || reference.target_path || reference.effect_id_digest || reference.readback_id || reference.verification_id) && onInspectArtifact && <button type="button" className="mt-1 underline" aria-label={`Inspect execution evidence ${reference.file_path ?? reference.target_path ?? reference.artifact_id ?? reference.effect_id_digest ?? reference.readback_id ?? reference.verification_id}`} onClick={() => onInspectArtifact({ reference, ownerSessionId: selectedTask.owner_session_id, workflowRunId: referenceWorkflowRunId(reference, selectedTask.latest_attempt?.workflow_run_id ?? null), parentWorkflowRunId: selectedTask.latest_attempt?.workflow_run_id ?? null })}>{reference.target_path || reference.effect_id_digest || reference.readback_id || reference.verification_id ? "Inspect readback evidence" : "Inspect artifact"}</button>}
                       {reference.workflow_run_id && onInspectWorkflowRun && <button type="button" className="underline" onClick={() => onInspectWorkflowRun(reference.workflow_run_id!, selectedTask.owner_session_id)}>Open workflow evidence</button>}
                     </div>
                   ))}
                   {(!selectedDetail?.attempts.length && !selectedTask.result_refs.length && !selectedTask.artifact_refs.length) && <div className="cockpit-empty">No attempts or output references yet.</div>}
                 </div>
               </section>
+
+              {selectedDetail?.parent_handoffs && selectedDetail.parent_handoffs.length > 0 && (
+                <section className="rounded border border-white/10 p-3" aria-label="Safe parent handoffs">
+                  <div className="font-semibold">Safe parent handoffs</div>
+                  <div className="mt-1 text-[10px] opacity-75">Verified parent results are evidence and input only. They do not grant authority, change this task capability, or bypass approval.</div>
+                  <div className="mt-2 grid gap-2">
+                    {selectedDetail.parent_handoffs.map((handoff) => (
+                      <article key={handoff.handoff_id || `${handoff.parent_task_id}:${handoff.source_task_revision}`} className="rounded bg-black/20 p-2">
+                        {(() => {
+                          const handoffWorkflowRunId = typeof handoff.verification_receipt.workflow_run_id === "string"
+                            ? handoff.verification_receipt.workflow_run_id
+                            : null;
+                          const evidenceRefs = [...handoff.artifact_refs, ...handoff.result_refs];
+                          return (
+                            <>
+                        <div>Parent {handoff.parent_task_id} · {handoff.status} · source attempt {handoff.source_attempt_id ?? "unavailable"} · source revision {handoff.source_task_revision}</div>
+                        <div className="mt-1 whitespace-pre-wrap break-words">{handoff.summary || "No safe summary supplied."}</div>
+                        <div className="mt-1">Verification: {String(handoff.verification_receipt.status ?? "unknown")}{handoff.risks.length ? ` · risks: ${handoff.risks.join(", ")}` : ""}</div>
+                        {handoffWorkflowRunId && onInspectWorkflowRun && <button type="button" className="mt-1 underline" onClick={() => onInspectWorkflowRun(handoffWorkflowRunId, selectedTask.owner_session_id)}>Open parent workflow evidence</button>}
+                        {evidenceRefs.length > 0 && (
+                          <div className="mt-1 grid gap-1" aria-label={`Evidence references from parent ${handoff.parent_task_id}`}>
+                            {evidenceRefs.map((reference, index) => {
+                              const referenceId = reference.file_path ?? reference.target_path ?? reference.artifact_id ?? reference.effect_id_digest ?? reference.readback_id ?? reference.verification_id ?? reference.job_id ?? `reference-${index + 1}`;
+                              const inspectable = Boolean(reference.file_path || reference.artifact_id || reference.target_path || reference.effect_id_digest || reference.readback_id || reference.verification_id);
+                              return (
+                                <div key={`${handoff.handoff_id}:evidence:${index}`} className="border-t border-white/10 pt-1">
+                                  <div>{receiptTitle(reference)} · {safeReferenceLabel(reference)}{reference.verified === true ? " · verified" : ""}{reference.readback_status ? ` · readback ${READBACK_LABELS[reference.readback_status]}` : ""}</div>
+                                  {reference.content_sha256 && <div className="break-all font-mono text-[10px]">SHA-256 {reference.content_sha256}</div>}
+                                  {inspectable && onInspectArtifact && <button type="button" className="mt-1 underline" aria-label={`Inspect parent handoff evidence ${referenceId}`} onClick={() => onInspectArtifact({ reference, ownerSessionId: selectedTask.owner_session_id, workflowRunId: referenceWorkflowRunId(reference, handoffWorkflowRunId), parentWorkflowRunId: handoffWorkflowRunId })}>Inspect parent handoff evidence</button>}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                            </>
+                          );
+                        })()}
+                      </article>
+                    ))}
+                  </div>
+                </section>
+              )}
 
               <section className="rounded border border-white/10 p-3">
                 <div className="font-semibold">Comments</div>

@@ -14,6 +14,7 @@ from src.db.models import (
     OperatorSession,
     Session,
     WorkBoardAttempt,
+    WorkBoardReviewIntent,
     WorkBoardStatus,
     WorkBoardTask,
     WorkflowRunState,
@@ -24,10 +25,14 @@ from src.work_board.dispatcher import (
     TypedInputError,
     WorkBoardDispatcher,
     _parse_typed_input,
+    registered_executor_id,
 )
 from src.guardian.goal_snapshot_to_file import GoalSnapshotToFileService
 from src.goals.contracts import GoalOutcomeReceipt
+from src.work_board import review as review_service
+from src.work_board.contracts import WorkBoardOwner
 from src.work_board.repository import WorkBoardRepository
+from src.work_board.tools import WorkBoardWorkerRequest, WorkBoardWorkerTools
 
 
 class _VerticalJobs:
@@ -42,16 +47,55 @@ class _VerticalJobs:
         row = self.jobs[job_id]
         return {
             "job_id": job_id,
+            "run_identity": job_id,
+            "root_run_identity": row.get("root_run_identity"),
+            "parent_run_identity": row.get("parent_run_identity"),
+            "parent_job_id": row.get("parent_job_id"),
+            "parent_fencing_token": row.get("parent_fencing_token"),
+            "owner": row.get("owner"),
+            "job_kind": row.get("job_kind"),
+            "capability_version": row.get("capability_version"),
+            "session_id": row.get("session_id"),
+            "operator_session_id": row.get("operator_session_id"),
+            "goal_id": row.get("goal_id"),
+            "goal_revision": row.get("goal_revision"),
+            "idempotency": row.get("idempotency"),
+            "declared_authority": row.get("declared_authority"),
             "status": row["status"],
             "revision": row.get("revision", 1),
-            "lease": {"owner": row.get("owner"), "fencing_token": row.get("fence", 1)},
+            "lease": {"owner": row.get("lease_owner"), "fencing_token": row.get("fence", 1)},
             "effects": list(row.get("effects", [])),
             "artifacts": list(row.get("artifacts", [])),
             "result": row.get("result"),
         }
 
     async def admit_job(self, spec):
-        self.jobs[spec.identity.job_id] = {"status": "accepted", "revision": 1, "effects": [], "artifacts": []}
+        self.jobs[spec.identity.job_id] = {
+            "status": "accepted",
+            "revision": 1,
+            "effects": [],
+            "artifacts": [],
+            "root_run_identity": spec.parent_job_id or spec.identity.job_id,
+            "parent_run_identity": spec.parent_job_id,
+            "parent_job_id": spec.parent_job_id,
+            "parent_fencing_token": spec.parent_fencing_token,
+            "owner": {
+                "kind": spec.identity.owner_kind,
+                "principal_id": spec.identity.owner_principal_id,
+                "service_id": spec.service_id,
+            },
+            "job_kind": spec.identity.job_kind,
+            "capability_version": spec.identity.capability_version,
+            "session_id": spec.session_id,
+            "operator_session_id": spec.operator_session_id,
+            "goal_id": spec.goal_id,
+            "goal_revision": spec.goal_revision,
+            "idempotency": {
+                "scope": spec.identity.idempotency_scope,
+                "key": spec.identity.idempotency_key,
+            },
+            "declared_authority": dict(spec.declared_authority),
+        }
         return self._view(spec.identity.job_id)
 
     async def queue_job(self, job_id, **_kwargs):
@@ -60,7 +104,7 @@ class _VerticalJobs:
         return self._view(job_id)
 
     async def claim_job(self, job_id, *, owner, lease_seconds, **_kwargs):
-        self.jobs[job_id].update(status="running", owner=owner, fence=1)
+        self.jobs[job_id].update(status="running", lease_owner=owner, fence=1)
         self.jobs[job_id]["revision"] += 1
         return self._view(job_id)
 
@@ -184,7 +228,7 @@ def test_goal_snapshot_builds_only_the_board_wrapper_identity(monkeypatch, tmp_p
         goal_id="goal-1",
         goal_revision=2,
         capability_id=GOAL_SNAPSHOT_CAPABILITY,
-        executor_id="executor-local",
+        executor_id=registered_executor_id(GOAL_SNAPSHOT_CAPABILITY),
         task_revision=1,
         priority=70,
         typed_input_ref=reference,
@@ -432,7 +476,7 @@ async def test_goal_snapshot_board_vertical_slice_executes_real_file_and_readbac
         task_revision=1,
         capability_id=GOAL_SNAPSHOT_CAPABILITY,
         priority=50,
-        executor_id="executor-local",
+        executor_id=registered_executor_id(GOAL_SNAPSHOT_CAPABILITY),
         typed_input_ref=reference,
         typed_input_digest=digest,
         requires_review=False,
@@ -474,7 +518,14 @@ async def test_goal_snapshot_board_vertical_slice_executes_real_file_and_readbac
     assert parent["status"] == "succeeded", parent
 
 
-async def _run_real_board_goal_snapshot(async_db, monkeypatch, tmp_path, *, observe_link: bool = False):
+async def _run_real_board_goal_snapshot(
+    async_db,
+    monkeypatch,
+    tmp_path,
+    *,
+    observe_link: bool = False,
+    request_review: bool = False,
+):
     """Run the board path against the real SQLite and durable job stores."""
 
     reference, digest = _write_input(
@@ -506,7 +557,7 @@ async def _run_real_board_goal_snapshot(async_db, monkeypatch, tmp_path, *, obse
         capability_id=GOAL_SNAPSHOT_CAPABILITY,
         typed_input_ref=reference,
         typed_input_digest=digest,
-        executor_id="executor-local",
+        executor_id=registered_executor_id(GOAL_SNAPSHOT_CAPABILITY),
         priority=80,
         status=WorkBoardStatus.ready,
     )
@@ -621,7 +672,7 @@ async def _run_real_board_goal_snapshot(async_db, monkeypatch, tmp_path, *, obse
         assert claim is not None
         await db.commit()
 
-    if observe_link:
+    if observe_link or request_review:
         original_run = GoalSnapshotToFileService.run
 
         async def observed_run(service, request, **kwargs):
@@ -631,9 +682,46 @@ async def _run_real_board_goal_snapshot(async_db, monkeypatch, tmp_path, *, obse
                         select(WorkBoardAttempt).where(
                             WorkBoardAttempt.attempt_id == claim.attempt.attempt_id,
                         )
-                    )
+                )
                 ).scalar_one()
                 assert linked_attempt.workflow_run_id == request.parent_job_id
+                linked_task = (
+                    await db.execute(
+                        select(WorkBoardTask).where(
+                            WorkBoardTask.task_id == task_id,
+                        )
+                    )
+                ).scalar_one()
+                worker = WorkBoardWorkerTools(session_provider=async_db)
+                current_request = WorkBoardWorkerRequest(
+                    task_id=task_id,
+                    attempt_id=linked_attempt.attempt_id,
+                    expected_task_revision=linked_task.task_revision,
+                    board_fencing_token=linked_attempt.fencing_token,
+                    workflow_run_id=request.parent_job_id,
+                    workflow_fencing_token=request.parent_fencing_token,
+                )
+                heartbeat = await worker.heartbeat(current_request)
+                assert heartbeat["status"] == "ok"
+                stale_request = current_request.model_copy(
+                    update={"expected_task_revision": claim.task.task_revision}
+                )
+                with pytest.raises(Exception) as stale_error:
+                    await worker.heartbeat(stale_request)
+                assert getattr(stale_error.value, "code", None) == "stale_revision"
+                if request_review:
+                    requested = await review_service.request_review(
+                        db,
+                        WorkBoardOwner(
+                            principal_id=task.owner_principal_id,
+                            session_id=task.owner_session_id,
+                        ),
+                        task_id,
+                        expected_revision=linked_task.task_revision,
+                        attempt_id=linked_attempt.attempt_id,
+                        evidence_refs=[],
+                    )
+                    assert requested.task.requires_review is True
             return await original_run(service, request, **kwargs)
 
         monkeypatch.setattr(GoalSnapshotToFileService, "run", observed_run)
@@ -724,3 +812,30 @@ async def test_attempt_run_link_persisted_before_adapter_execution(async_db, mon
     )
     assert outcome["completed"] is True, outcome
     assert attempt.workflow_run_id == f"work-board:{task.task_id}:{attempt.attempt_id}"
+
+
+@pytest.mark.asyncio
+async def test_goal_snapshot_dynamic_review_survives_stale_done_projection(async_db, monkeypatch, tmp_path):
+    """The real GoalSnapshot dispatcher path preserves a worker review request."""
+
+    outcome, task, attempt, _runs = await _run_real_board_goal_snapshot(
+        async_db,
+        monkeypatch,
+        tmp_path,
+        observe_link=True,
+        request_review=True,
+    )
+    assert outcome["completed"] is True, outcome
+    assert task.status is WorkBoardStatus.review
+    assert task.requires_review is True
+    async with async_db() as db:
+        intent = (
+            await db.execute(
+                select(WorkBoardReviewIntent).where(
+                    WorkBoardReviewIntent.task_id == task.task_id,
+                    WorkBoardReviewIntent.attempt_id == attempt.attempt_id,
+                )
+            )
+        ).scalar_one()
+        assert intent.workflow_run_id == attempt.workflow_run_id
+        assert intent.status == "projected"

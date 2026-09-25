@@ -19,8 +19,15 @@ from sqlalchemy import select
 
 from src.db.engine import get_session
 from src.db.models import WorkBoardAttempt, WorkBoardStatus, WorkBoardTask
+from src.work_board import review as review_service
 from src.work_board.contracts import WorkBoardCommentCreate, WorkBoardOwner
-from src.work_board.repository import BoardError, BoardAttemptProjection, WorkBoardRepository
+from src.work_board.repository import (
+    BoardError,
+    BoardAttemptProjection,
+    WorkBoardRepository,
+    _begin_sqlite_immediate,
+)
+from src.work_board.time import serialize_utc_datetime
 from src.workflows.job_runtime import durable_job_repository
 
 
@@ -88,6 +95,203 @@ class WorkBoardWorkerTools:
         self.jobs = jobs or durable_job_repository
         self.session_provider = session_provider or get_session
 
+    @staticmethod
+    def _lease_expiry_is_future(value: Any) -> bool:
+        raw = value if isinstance(value, datetime) else _text(value)
+        if not raw:
+            return False
+        try:
+            expiry = raw if isinstance(raw, datetime) else datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
+        return expiry > datetime.now(timezone.utc)
+
+    @staticmethod
+    def _principal_type(principal: Any) -> str:
+        value = getattr(principal, "principal_type", None)
+        return _text(getattr(value, "value", value)).lower()
+
+    @staticmethod
+    def _principal_grants(principal: Any) -> set[str]:
+        return {
+            _text(getattr(grant, "value", grant))
+            for grant in (getattr(principal, "grants", ()) or ())
+        }
+
+    @staticmethod
+    def _int_or_none(value: Any) -> int | None:
+        try:
+            return int(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    async def validate_native_principal(
+        self,
+        request: WorkBoardWorkerRequest,
+        principal: Any,
+    ) -> None:
+        """Validate the durable lineage before a native task tool runs.
+
+        Native board controls are injected into the governed GoalSnapshot
+        WorkflowTool.  The nested workflow run may carry a different durable
+        job identity than the board root, so equality with
+        ``request.workflow_run_id`` alone is insufficient.  The only allowed
+        delegation is one running ``goal-snapshot-to-file`` child whose parent
+        is the exact GoalSnapshot board child for this task/attempt.  A deeper
+        or unrelated delegated run is rejected.
+        """
+
+        if principal is None:
+            raise PermissionError("work-board worker authority requires an authenticated durable principal")
+        if (
+            self._principal_type(principal) != "service"
+            or not bool(getattr(principal, "authenticated", False))
+            or bool(getattr(principal, "revoked", False))
+            or "capability_execute" not in self._principal_grants(principal)
+        ):
+            raise PermissionError("work-board worker authority requires a current service capability principal")
+        if _text(getattr(principal, "session_id", None)) == "":
+            raise PermissionError("work-board worker authority requires a session-bound principal")
+
+        async with self.session_provider() as db:
+            _owner, task, attempt, root = await self._bound(db, request)
+
+        if _text(getattr(principal, "session_id", None)) != _text(task.owner_session_id):
+            raise PermissionError("work-board worker principal session is mismatched")
+
+        root_owner = root.get("owner") if isinstance(root.get("owner"), Mapping) else {}
+        root_lease = root.get("lease") if isinstance(root.get("lease"), Mapping) else {}
+        root_goal_revision = self._int_or_none(root.get("goal_revision"))
+        expected_goal_revision = self._int_or_none(task.goal_revision)
+        root_fence = self._int_or_none(root_lease.get("fencing_token"))
+        expected_root_fence = self._int_or_none(request.workflow_fencing_token)
+        if (
+            _text(root.get("job_id") or root.get("run_identity")) != request.workflow_run_id
+            or _text(root.get("root_run_identity")) != request.workflow_run_id
+            or _text(root.get("job_kind")) != _text(task.capability_id)
+            or _text(root_owner.get("kind")) != "service"
+            or _text(root_owner.get("principal_id")) != "service:work-board"
+            or _text(root_owner.get("service_id")) != "service:work-board"
+            or _text(root.get("goal_id")) != _text(task.goal_id)
+            or root_goal_revision is None
+            or expected_goal_revision is None
+            or root_goal_revision != expected_goal_revision
+            or _text(root.get("session_id")) != _text(task.owner_session_id)
+            or _text(root_lease.get("owner")) == ""
+            or root_fence is None
+            or expected_root_fence is None
+            or root_fence != expected_root_fence
+            or not self._lease_expiry_is_future(root_lease.get("expires_at"))
+        ):
+            raise PermissionError("work-board worker root lineage is stale or mismatched")
+
+        principal_job_id = _text(getattr(principal, "job_id", None))
+        if principal_job_id == request.workflow_run_id:
+            if _text(getattr(principal, "principal_id", None)) != _text(root_owner.get("principal_id")):
+                raise PermissionError("work-board worker root principal is mismatched")
+            return
+
+        if _text(task.capability_id) != "workflow.goal-snapshot-to-file":
+            raise PermissionError("native work-board controls are unavailable to this capability")
+
+        expected_child_id = f"goal-snapshot-work-board:{task.task_id}:{attempt.attempt_id}"
+        child = await self.jobs.get_job(expected_child_id)
+        nested = await self.jobs.get_job(principal_job_id) if principal_job_id else None
+        if not isinstance(child, Mapping) or not isinstance(nested, Mapping):
+            raise PermissionError("work-board worker child lineage is unavailable")
+        child_owner = child.get("owner") if isinstance(child.get("owner"), Mapping) else {}
+        child_lease = child.get("lease") if isinstance(child.get("lease"), Mapping) else {}
+        child_authority = child.get("declared_authority") if isinstance(child.get("declared_authority"), Mapping) else {}
+        child_fence = self._int_or_none(child_lease.get("fencing_token"))
+        child_parent_fence = self._int_or_none(child.get("parent_fencing_token"))
+        expected_child_goal_revision = self._int_or_none(child.get("goal_revision"))
+        child_authority_goal_revision = self._int_or_none(child_authority.get("goal_revision"))
+        if (
+            _text(child.get("job_id") or child.get("run_identity")) != expected_child_id
+            or _text(child.get("root_run_identity")) != request.workflow_run_id
+            or _text(child.get("parent_run_identity")) != request.workflow_run_id
+            or _text(child.get("parent_job_id")) != request.workflow_run_id
+            or child_parent_fence is None
+            or expected_root_fence is None
+            or child_parent_fence != expected_root_fence
+            or _text(child.get("status")) != "running"
+            or _text(child_owner.get("kind")) != "service"
+            or _text(child_owner.get("principal_id")) != "service:goal-snapshot"
+            or _text(child_owner.get("service_id")) != "service:goal-snapshot"
+            or _text(child.get("job_kind")) != "workflow.goal-snapshot-to-file"
+            or _text(child.get("capability_version")) != "1"
+            or _text(child.get("session_id")) != _text(task.owner_session_id)
+            or _text(child.get("goal_id")) != _text(task.goal_id)
+            or expected_child_goal_revision is None
+            or expected_goal_revision is None
+            or expected_child_goal_revision != expected_goal_revision
+            or _text(child_authority.get("principal")) != "service:goal-snapshot"
+            or _text(child_authority.get("owner_principal_id")) != "service:goal-snapshot"
+            or _text(child_authority.get("service_id")) != "service:goal-snapshot"
+            or _text(child_authority.get("session_id")) != _text(task.owner_session_id)
+            or child_authority_goal_revision is None
+            or expected_goal_revision is None
+            or child_authority_goal_revision != expected_goal_revision
+            or child_fence is None
+            or child_fence < 1
+            or _text(child_lease.get("owner")) == ""
+            or not self._lease_expiry_is_future(child_lease.get("expires_at"))
+        ):
+            raise PermissionError("work-board worker GoalSnapshot child lineage is stale or mismatched")
+
+        nested_owner = nested.get("owner") if isinstance(nested.get("owner"), Mapping) else {}
+        nested_lease = nested.get("lease") if isinstance(nested.get("lease"), Mapping) else {}
+        nested_authority = nested.get("declared_authority") if isinstance(nested.get("declared_authority"), Mapping) else {}
+        nested_parent_fence = self._int_or_none(nested.get("parent_fencing_token"))
+        nested_fence = self._int_or_none(nested_lease.get("fencing_token"))
+        raw_nested_goal_revision = nested.get("goal_revision")
+        nested_goal_revision = (
+            None
+            if raw_nested_goal_revision is None
+            else self._int_or_none(raw_nested_goal_revision)
+        )
+        if (
+            _text(nested.get("job_id") or nested.get("run_identity")) != principal_job_id
+            or _text(nested.get("root_run_identity")) != request.workflow_run_id
+            or _text(nested.get("parent_run_identity")) != expected_child_id
+            or _text(nested.get("parent_job_id")) != expected_child_id
+            or nested_parent_fence is None
+            or child_fence is None
+            or nested_parent_fence != child_fence
+            or _text(nested.get("status")) != "running"
+            or _text(nested_owner.get("kind")) != "service"
+            or _text(nested_owner.get("principal_id")) != "service:goal-snapshot"
+            or _text(nested_owner.get("service_id")) != "service:goal-snapshot"
+            or _text(nested.get("job_kind")) != "goal-snapshot-to-file"
+            or _text(nested.get("capability_version")) != "workflow-v2"
+            or _text(nested.get("session_id")) != _text(task.owner_session_id)
+            or (
+                _text(nested.get("goal_id"))
+                and _text(nested.get("goal_id")) != _text(task.goal_id)
+            )
+            or (
+                raw_nested_goal_revision is not None
+                and nested_goal_revision is None
+            )
+            or (
+                nested_goal_revision is not None
+                and expected_goal_revision is not None
+                and nested_goal_revision != expected_goal_revision
+            )
+            or _text(nested_authority.get("principal")) != "service:goal-snapshot"
+            or _text(nested_authority.get("owner_kind")) != "service"
+            or _text(nested_authority.get("service_id")) != "service:goal-snapshot"
+            or _text(nested_authority.get("session_id")) != _text(task.owner_session_id)
+            or _text(nested_authority.get("capability")) != "workflow_goal_snapshot_to_file"
+            or _text(nested_lease.get("owner")) == ""
+            or nested_fence is None
+            or nested_fence < 1
+            or not self._lease_expiry_is_future(nested_lease.get("expires_at"))
+        ):
+            raise PermissionError("work-board worker nested workflow lineage is stale or delegated")
+
     async def _bound(
         self,
         db: Any,
@@ -124,19 +328,37 @@ class WorkBoardWorkerTools:
             or attempt.workflow_run_id != request.workflow_run_id
         ):
             raise BoardError("stale_fence", "The board attempt fence is stale", status_code=409)
-        if attempt.lease_expires_at is not None:
-            expiry = attempt.lease_expires_at
-            if expiry.tzinfo is None:
-                expiry = expiry.replace(tzinfo=timezone.utc)
-            if expiry <= datetime.now(timezone.utc):
-                raise BoardError("stale_fence", "The board attempt lease has expired", status_code=409)
+        raw_board_expiry = attempt.lease_expires_at
+        if raw_board_expiry is None:
+            raise BoardError("stale_fence", "The board attempt lease is missing", status_code=409)
+        if isinstance(raw_board_expiry, datetime):
+            expiry = raw_board_expiry
+        else:
+            try:
+                expiry = datetime.fromisoformat(str(raw_board_expiry).replace("Z", "+00:00"))
+            except (TypeError, ValueError) as exc:
+                raise BoardError("stale_fence", "The board attempt lease is malformed", status_code=409) from exc
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
+        if expiry <= datetime.now(timezone.utc):
+            raise BoardError("stale_fence", "The board attempt lease has expired", status_code=409)
         workflow = await self.jobs.get_job(request.workflow_run_id)
         if not isinstance(workflow, Mapping):
             raise BoardError("workflow_run_not_found", "The authoritative workflow run does not exist", status_code=409)
         lease = workflow.get("lease") if isinstance(workflow.get("lease"), Mapping) else {}
+        raw_expiry = lease.get("expires_at")
+        if not _text(lease.get("owner")) or not isinstance(raw_expiry, str) or not raw_expiry.strip():
+            raise BoardError("stale_workflow_fence", "The authoritative workflow lease is not active", status_code=409)
+        try:
+            workflow_expiry = datetime.fromisoformat(raw_expiry.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise BoardError("stale_workflow_fence", "The authoritative workflow lease is malformed", status_code=409) from exc
+        if workflow_expiry.tzinfo is None:
+            workflow_expiry = workflow_expiry.replace(tzinfo=timezone.utc)
         if (
             _text(workflow.get("status")) != "running"
             or int(lease.get("fencing_token") or 0) != request.workflow_fencing_token
+            or workflow_expiry <= datetime.now(timezone.utc)
         ):
             raise BoardError("stale_workflow_fence", "The workflow fence is stale", status_code=409)
         return owner, task, attempt, workflow
@@ -157,9 +379,9 @@ class WorkBoardWorkerTools:
                 "goal_id": task.goal_id,
                 "goal_revision": task.goal_revision,
                 "attempt": {
-                    "started_at": attempt.started_at.isoformat() if attempt.started_at else None,
-                    "heartbeat_at": attempt.heartbeat_at.isoformat() if attempt.heartbeat_at else None,
-                    "lease_expires_at": attempt.lease_expires_at.isoformat() if attempt.lease_expires_at else None,
+                    "started_at": serialize_utc_datetime(attempt.started_at),
+                    "heartbeat_at": serialize_utc_datetime(attempt.heartbeat_at),
+                    "lease_expires_at": serialize_utc_datetime(attempt.lease_expires_at),
                     "outcome": attempt.outcome,
                 },
                 "workflow": {
@@ -168,7 +390,17 @@ class WorkBoardWorkerTools:
                     "revision": workflow.get("revision"),
                 },
                 "dependency_count": len(detail.get("parents", [])),
+                "parent_handoff_context": self._attempt_parent_handoffs(attempt),
+                "parent_handoff_digest": attempt.parent_handoff_digest,
             }
+
+    @staticmethod
+    def _attempt_parent_handoffs(attempt: WorkBoardAttempt) -> list[dict[str, Any]]:
+        """Expose only the immutable, digest-checked context captured at claim."""
+
+        from src.work_board.dispatcher import WorkBoardDispatcher
+
+        return WorkBoardDispatcher._attempt_parent_handoffs(attempt)
 
     async def heartbeat(self, request: WorkBoardWorkerRequest, *, lease_seconds: int = 300) -> dict[str, Any]:
         async with self.session_provider() as db:
@@ -186,7 +418,7 @@ class WorkBoardWorkerTools:
                 "status": "ok",
                 "task_id": request.task_id,
                 "attempt_id": request.attempt_id,
-                "lease_expires_at": refreshed.lease_expires_at.isoformat() if refreshed.lease_expires_at else None,
+                "lease_expires_at": serialize_utc_datetime(refreshed.lease_expires_at),
                 "board_fencing_token": refreshed.fencing_token,
                 "workflow_fencing_token": request.workflow_fencing_token,
             }
@@ -325,9 +557,42 @@ class WorkBoardWorkerTools:
             }
 
     async def request_review(self, request: WorkBoardWorkerEvidence) -> dict[str, Any]:
-        """Record a review request; dispatcher verification owns Review status."""
+        """Persist an attempt/fence-bound review intent.
 
-        return await self._evidence_comment(request, kind="review_requested")
+        The worker never changes the board phase and never supplies reviewer
+        authority.  ``review_service`` records the durable intent while this
+        server-bound attempt is still active; the dispatcher later verifies
+        the authoritative run and readback before projecting Review.
+        """
+
+        async with self.session_provider() as db:
+            # Serialize the worker's live binding read with dispatcher
+            # projection.  review_service.request_review keeps this same
+            # transaction open instead of committing and reopening between
+            # the bound check and intent insert.
+            await _begin_sqlite_immediate(db)
+            owner, task, attempt, _workflow = await self._bound(db, request)
+            mutation = await review_service.request_review(
+                db,
+                owner,
+                task.task_id,
+                expected_revision=request.expected_task_revision,
+                attempt_id=attempt.attempt_id,
+                evidence_refs=request.evidence_refs,
+                repository=self.repository,
+                transaction_locked=True,
+            )
+            return {
+                "status": "review_requested",
+                "task_id": task.task_id,
+                "attempt_id": attempt.attempt_id,
+                "workflow_run_id": attempt.workflow_run_id,
+                "task_revision": mutation.task.task_revision,
+                "event_id": mutation.event.event_id,
+                "evidence_refs": list(request.evidence_refs),
+                "projection": "dispatcher_verification_required",
+                "idempotent_replay": mutation.idempotent_replay,
+            }
 
     async def completion_request(self, request: WorkBoardWorkerEvidence) -> dict[str, Any]:
         """Record completion evidence request without granting Done."""

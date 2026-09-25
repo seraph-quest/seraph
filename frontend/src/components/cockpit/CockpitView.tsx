@@ -6397,6 +6397,8 @@ function boardBoundJobMatchesReference(
     ) return false;
     if (reference.file_path && receipt.file_path !== reference.file_path) return false;
     if (reference.target_path && receipt.target_path !== reference.target_path) return false;
+    if (reference.readback_id && receipt.readback_id !== reference.readback_id) return false;
+    if (reference.verification_id && receipt.verification_id !== reference.verification_id) return false;
     if (
       reference.content_sha256
       && String(receipt.content_sha256 ?? "").toLowerCase() !== reference.content_sha256.toLowerCase()
@@ -6409,7 +6411,9 @@ function boardBoundJobMatchesReference(
       reference.artifact_id
       || reference.effect_id_digest
       || reference.file_path
-      || reference.target_path,
+      || reference.target_path
+      || reference.readback_id
+      || reference.verification_id,
     );
   });
 }

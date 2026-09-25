@@ -556,7 +556,7 @@ describe("WorkBoardPanel", () => {
       return Promise.resolve(response({}));
     });
 
-    render(<WorkBoardPanel />);
+    render(<WorkBoardPanel ownerPrincipalId="operator:one" ownerSessionId="operator-session-1" />);
     fireEvent.click(await screen.findByRole("button", { name: "Open task Task A" }));
     const comment = await screen.findByLabelText("Comment");
     fireEvent.change(comment, { target: { value: "refresh after posting" } });
@@ -569,6 +569,139 @@ describe("WorkBoardPanel", () => {
     await act(async () => { resolveLateA?.(response(detail({ ...taskA, title: "Stale Task A response", task_revision: 99 }))); });
     expect(within(taskDetails).getByText("Task B")).toBeInTheDocument();
     expect(screen.queryByText("Stale Task A response")).not.toBeInTheDocument();
+  });
+
+  it("does not surface a late proposal response after switching cards", async () => {
+    const taskA = task({ task_id: "task-a", title: "Task A", status: "todo" });
+    const taskB = task({ task_id: "task-b", creation_sequence: 2, title: "Task B", status: "todo" });
+    let resolveProposal: ((value: ReturnType<typeof response>) => void) | null = null;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) {
+        return Promise.resolve(response(page([taskA, taskB])));
+      }
+      if (url.includes("/api/work-board/events")) return Promise.resolve(response(events()));
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
+      if (url.includes("/api/work-board/goals/goal-1/execution-limits")) return Promise.resolve(response(limits()));
+      if (url.endsWith("/api/work-board/tasks/task-a/proposals")
+        || url.endsWith("/api/work-board/tasks/task-b/proposals")) {
+        return Promise.resolve(response({ proposals: [] }));
+      }
+      if (url.endsWith("/api/work-board/tasks/task-a/decompose") && init?.method === "POST") {
+        return new Promise<ReturnType<typeof response>>((resolve) => { resolveProposal = resolve; });
+      }
+      if (url.endsWith("/api/work-board/tasks/task-a")) return Promise.resolve(response(detail(taskA)));
+      if (url.endsWith("/api/work-board/tasks/task-b")) return Promise.resolve(response(detail(taskB)));
+      return Promise.resolve(response({}));
+    });
+
+    render(<WorkBoardPanel ownerPrincipalId="operator:one" ownerSessionId="operator-session-1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Task A" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Decompose for review" }));
+    await waitFor(() => expect(resolveProposal).not.toBeNull());
+
+    fireEvent.click(screen.getByRole("button", { name: "Open task Task B" }));
+    expect(await screen.findByRole("region", { name: "Task details for Task B" })).toBeInTheDocument();
+    await act(async () => {
+      resolveProposal?.(response({
+        kind: "decompose",
+        proposal_id: "late-proposal",
+        proposal_revision: 1,
+        parent_task_id: taskA.task_id,
+        parent_revision: taskA.task_revision,
+        proposal_digest: "d".repeat(64),
+        expires_at: "2099-01-03T00:00:00Z",
+        proposed_tasks: [],
+        proposed_links: [],
+        estimated_cost: "0 local units",
+        blocked_reason: null,
+        status: "proposed",
+        capability_id: "work-board-proposal",
+        capability_version: "1",
+      }));
+      await Promise.resolve();
+    });
+    expect(screen.queryByRole("region", { name: "Triage proposal preview" })).not.toBeInTheDocument();
+    expect(screen.queryByText("late-proposal")).not.toBeInTheDocument();
+  });
+
+  it("does not let late proposal hydration overwrite a newer POST preview", async () => {
+    const taskA = task({ task_id: "task-a", title: "Task A", status: "todo" });
+    let resolveHydration: ((value: ReturnType<typeof response>) => void) | null = null;
+    let resolveProposal: ((value: ReturnType<typeof response>) => void) | null = null;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) return Promise.resolve(response(page([taskA])));
+      if (url.includes("/api/work-board/events")) return Promise.resolve(response(events()));
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
+      if (url.includes("/api/work-board/goals/goal-1/execution-limits")) return Promise.resolve(response(limits()));
+      if (url.endsWith("/api/work-board/tasks/task-a")) return Promise.resolve(response(detail(taskA)));
+      if (url.endsWith("/api/work-board/tasks/task-a/proposals") && (!init?.method || init.method === "GET")) {
+        return new Promise<ReturnType<typeof response>>((resolve) => { resolveHydration = resolve; });
+      }
+      if (url.endsWith("/api/work-board/tasks/task-a/decompose") && init?.method === "POST") {
+        return new Promise<ReturnType<typeof response>>((resolve) => { resolveProposal = resolve; });
+      }
+      return Promise.resolve(response({}));
+    });
+
+    render(<WorkBoardPanel ownerPrincipalId="operator:one" ownerSessionId="operator-session-1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Task A" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Decompose for review" }));
+    await waitFor(() => expect(resolveProposal).not.toBeNull());
+
+    await act(async () => {
+      resolveProposal?.(response({
+        kind: "decompose",
+        proposal_id: "new-proposal",
+        proposal_revision: 1,
+        parent_task_id: taskA.task_id,
+        parent_revision: taskA.task_revision,
+        proposal_digest: "d".repeat(64),
+        expires_at: "2099-01-03T00:00:00Z",
+        proposed_tasks: [{
+          task_id: "new-child",
+          title: "Fresh POST preview",
+          capability_id: "goal-snapshot-to-file",
+          typed_input_ref: "workspace-json:inputs/fresh.json",
+          typed_input_digest: "e".repeat(64),
+          executor_id: "executor-local",
+        }],
+        proposed_links: [],
+        estimated_cost: "0 local units",
+        blocked_reason: null,
+        status: "proposed",
+      }));
+      await Promise.resolve();
+    });
+    expect(await screen.findByText("Fresh POST preview")).toBeInTheDocument();
+
+    await act(async () => {
+      resolveHydration?.(response({
+        proposals: [{
+          kind: "decompose",
+          proposal_id: "old-proposal",
+          proposal_revision: 1,
+          parent_task_id: taskA.task_id,
+          parent_revision: taskA.task_revision,
+          proposal_digest: "f".repeat(64),
+          expires_at: "2099-01-03T00:00:00Z",
+          proposed_tasks: [{
+            task_id: "old-child",
+            title: "Stale persisted preview",
+            capability_id: "goal-snapshot-to-file",
+            executor_id: "executor-local",
+          }],
+          proposed_links: [],
+          estimated_cost: "0 local units",
+          blocked_reason: null,
+          status: "proposed",
+        }],
+      }));
+      await Promise.resolve();
+    });
+    expect(screen.getByText("Fresh POST preview")).toBeInTheDocument();
+    expect(screen.queryByText("Stale persisted preview")).not.toBeInTheDocument();
   });
 
   it("aborts a pending dependency link on unmount without refreshing after cleanup", async () => {

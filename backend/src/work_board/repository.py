@@ -26,11 +26,14 @@ from src.db.models import (
     WorkBoardComment,
     WorkBoardEvent,
     WorkBoardLink,
+    WorkBoardProposal,
+    WorkBoardReviewIntent,
     WorkBoardStatus,
     WorkBoardTask,
 )
 from src.vault import redaction as vault_redaction
 from src.work_board.contracts import (
+    WORK_BOARD_AUTHENTICATED_BLOCK_KINDS,
     WorkBoardActionRequest,
     WorkBoardCommentCreate,
     WorkBoardLinkCreate,
@@ -47,6 +50,7 @@ _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _EFFECT_ID_DIGEST = re.compile(r"^[0-9a-f]{16}$", re.IGNORECASE)
 _EVENT_LIMIT = 100
 _TASK_LIMIT = 100
+_MAX_PARENT_HANDOFF_CONTEXT_BYTES = 32_768
 _ALLOWED_RECEIPT_STATUSES = {
     "accepted",
     "queued",
@@ -101,6 +105,7 @@ _BOARD_BLOCK_KINDS = frozenset(
         "unknown_effect",
         "cost_liability",
         "reconcile_admission_binding",
+        "attempt_limit",
     }
 )
 _PRIVATE_RECEIPT_TOKENS = (
@@ -162,15 +167,58 @@ def _closed_block_kind(value: Any) -> str:
         return code
     if any(token in code for token in ("unknown", "effect", "cost", "reconcile")):
         return "unknown_effect"
+    # A missing or malformed board input is a capability specification
+    # prerequisite, not an approval request. Keep it out of the generic
+    # "input" -> needs_input mapping below so the cockpit offers the
+    # prerequisite-recheck path instead of linking to an unrelated approval.
+    if code.startswith("typed_input_"):
+        return "capability"
     if any(token in code for token in ("approval", "input", "consent", "review")):
         return "needs_input"
+    if "handoff" in code or "depend" in code:
+        return "dependency"
     if any(token in code for token in ("goal", "capability", "credential", "grant", "authority", "route", "config", "profile", "executor", "typed")):
         return "capability"
-    if "depend" in code:
-        return "dependency"
     if "cancel" in code:
         return "cancelled"
     return "transient"
+
+
+def _registered_executor_lane(capability_id: Any) -> str | None:
+    """Resolve the server-owned lane from the dispatcher registry.
+
+    Import lazily because the dispatcher uses this repository for its board
+    projection.  The helper is still the single registry-derived lane source;
+    repository mutations never trust a caller-provided executor value.
+    """
+
+    from src.work_board.dispatcher import registered_executor_id
+
+    return registered_executor_id(str(capability_id or "").strip())
+
+
+def _executor_lane_error(
+    capability_id: Any,
+    executor_id: Any,
+) -> tuple[str, str] | None:
+    capability = str(capability_id or "").strip()
+    if not capability:
+        return None
+    expected = _registered_executor_lane(capability)
+    if expected is None:
+        return (
+            "capability_unregistered",
+            "The task names no registered Seraph capability",
+        )
+    supplied = str(executor_id or "").strip()
+    if not supplied:
+        return "executor_missing", "The task has no registered executor"
+    if supplied != expected:
+        return (
+            "executor_lane_mismatch",
+            "The task executor does not match the registered capability lane",
+        )
+    return None
 
 
 async def _begin_sqlite_immediate(db: AsyncSession) -> None:
@@ -209,6 +257,14 @@ async def _begin_read_snapshot(db: AsyncSession) -> None:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _utc_datetime(value: datetime) -> datetime:
+    """Normalize a persisted SQLite datetime before comparing eligibility."""
+
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _canonical_json(value: object) -> str:
@@ -361,6 +417,10 @@ def _safe_receipt_refs(
     allowed = {
         "artifact_id",
         "artifact_type",
+        "receipt_kind",
+        "readback_id",
+        "verifier_id",
+        "verification_id",
         "file_path",
         "content_sha256",
         "size_bytes",
@@ -380,6 +440,7 @@ def _safe_receipt_refs(
         "child_job_id",
         "readback_status",
         "verification_status",
+        "verified_at",
         "outcome",
     }
     safe_items: list[dict[str, Any]] = []
@@ -413,6 +474,10 @@ def _safe_receipt_refs(
                 elif key in {
                     "artifact_id",
                     "artifact_type",
+                    "receipt_kind",
+                    "readback_id",
+                    "verifier_id",
+                    "verification_id",
                     "effect_id",
                     "effect_type",
                     "status",
@@ -432,6 +497,9 @@ def _safe_receipt_refs(
                         in {
                             "artifact_id",
                             "artifact_type",
+                            "readback_id",
+                            "verifier_id",
+                            "verification_id",
                             "effect_id",
                             "effect_type",
                             "job_id",
@@ -447,6 +515,11 @@ def _safe_receipt_refs(
                         if safe_type is None:
                             continue
                         safe[key] = safe_type
+                        continue
+                    if key == "receipt_kind":
+                        if bounded not in {"effect", "readback"}:
+                            continue
+                        safe[key] = bounded
                         continue
                     if key == "status" and bounded not in _ALLOWED_RECEIPT_STATUSES:
                         continue
@@ -470,6 +543,10 @@ def _safe_receipt_refs(
                         safe["effect_id_digest"] = _text_digest(bounded)[:16]
                     else:
                         safe[key] = bounded
+                elif key == "verified_at":
+                    if len(bounded) > 64 or "\n" in bounded or "\r" in bounded:
+                        continue
+                    safe[key] = bounded
                 elif key in {"file_path", "target_path"}:
                     safe_path = _safe_receipt_path(bounded)
                     if safe_path is None:
@@ -726,6 +803,10 @@ class BoardDispatchClaim:
     task: WorkBoardTask
     attempt: WorkBoardAttempt
     event: WorkBoardEvent
+    # Server-derived, verified dependency context attached by the dispatcher
+    # immediately after the fenced claim. It is never accepted from an API
+    # request or persisted as task authority.
+    parent_handoffs: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -793,6 +874,14 @@ class WorkBoardRepository:
         current_revision = max(int(getattr(goal, "revision", 1) or 1), 1)
         if current_revision != int(goal_revision):
             raise BoardGoalRevisionConflict(goal_id, int(goal_revision), current_revision)
+        goal_status = getattr(goal.status, "value", goal.status)
+        if str(goal_status or "") != "active":
+            raise BoardError(
+                "goal_not_active",
+                "The task goal is no longer active",
+                status_code=409,
+                goal_id=goal_id,
+            )
         return goal
 
     async def validate_task_goal(
@@ -868,6 +957,12 @@ class WorkBoardRepository:
         for receipt in receipt_refs:
             if not isinstance(receipt, Mapping):
                 continue
+            # Review recovery is allowed to consume only the same typed,
+            # inspectable readback proof that the live dispatcher stores.
+            # Legacy summary receipts with a matching run ID and digest are
+            # not enough to put a task back into Review.
+            if str(receipt.get("receipt_kind") or "").strip() != "readback":
+                continue
             if str(receipt.get("status") or "").strip() not in {
                 "succeeded",
                 "read_back",
@@ -879,6 +974,13 @@ class WorkBoardRepository:
             if safe_workflow_run_id(receipt.get("workflow_run_id")) != workflow_run_id:
                 continue
             if safe_sha256_digest(receipt.get("content_sha256")) is None:
+                continue
+            if not _SAFE_RECEIPT_IDENTIFIER.fullmatch(
+                str(receipt.get("readback_id") or "").strip()
+            ):
+                continue
+            verified_at = str(receipt.get("verified_at") or "").strip()
+            if not verified_at or len(verified_at) > 64 or "\n" in verified_at or "\r" in verified_at:
                 continue
             return
         raise BoardError(
@@ -961,6 +1063,27 @@ class WorkBoardRepository:
         origin_session_id: str | None = None,
     ) -> BoardMutation:
         self._validate_task_fields(request)
+        # Triage rows may remain unbound until Specify/Decompose acceptance,
+        # but an executable Todo row must use the lane derived from the live
+        # capability registry.  Normalize a missing lane and reject a forged
+        # one before the idempotency digest is calculated.
+        expected_executor = _registered_executor_lane(request.capability_id)
+        supplied_executor = str(request.executor_id or "").strip() or None
+        if expected_executor is None and supplied_executor is not None:
+            raise BoardError(
+                "executor_requires_capability",
+                "An executor lane requires a registered capability",
+                status_code=422,
+            )
+        if expected_executor is not None:
+            if supplied_executor is not None and supplied_executor != expected_executor:
+                raise BoardError(
+                    "executor_lane_mismatch",
+                    "The task executor does not match the registered capability lane",
+                    status_code=422,
+                )
+            if request.status is WorkBoardStatus.todo:
+                request = request.model_copy(update={"executor_id": expected_executor})
         digest = _payload_digest(request)
         existing_result = await db.execute(
             select(WorkBoardTask).where(
@@ -1001,6 +1124,15 @@ class WorkBoardRepository:
             goal_id=request.goal_id,
             goal_revision=request.goal_revision,
         )
+        reviewer_id = request.reviewer_id
+        if request.requires_review:
+            if reviewer_id is not None and reviewer_id != owner.principal_id:
+                raise BoardError(
+                    "reviewer_binding_mismatch",
+                    "The named reviewer is bound to the authenticated task owner",
+                    status_code=403,
+                )
+            reviewer_id = owner.principal_id
         safe_title = await self._safe_text(request.title)
         safe_body = await self._safe_text(request.body)
 
@@ -1025,7 +1157,7 @@ class WorkBoardRepository:
             scheduled_at=request.scheduled_at,
             status=request.status,
             requires_review=request.requires_review,
-            reviewer_id=request.reviewer_id,
+            reviewer_id=reviewer_id,
         )
         try:
             # Keep a concurrent unique-key loser usable for the winner
@@ -1343,6 +1475,38 @@ class WorkBoardRepository:
                 elif field == "typed_input_digest":
                     _validate_digest(value, field=field)
                 safe_changes[field] = value
+        post_capability = safe_changes.get("capability_id", task.capability_id)
+        expected_executor = _registered_executor_lane(post_capability)
+        explicit_executor = "executor_id" in safe_changes
+        supplied_executor = safe_changes.get("executor_id", task.executor_id)
+        if expected_executor is None:
+            if explicit_executor and supplied_executor is not None:
+                raise BoardError(
+                    "executor_requires_capability",
+                    "An executor lane requires a registered capability",
+                    status_code=422,
+                )
+            if "capability_id" in safe_changes and safe_changes.get("capability_id") is None:
+                safe_changes["executor_id"] = None
+        if expected_executor is not None:
+            if supplied_executor is not None and supplied_executor != expected_executor:
+                raise BoardError(
+                    "executor_lane_mismatch",
+                    "The task executor does not match the registered capability lane",
+                    status_code=422,
+                )
+            executable_phase = task.status in {
+                WorkBoardStatus.todo,
+                WorkBoardStatus.ready,
+            } or task.block_source_status in {
+                WorkBoardStatus.todo.value,
+                WorkBoardStatus.ready.value,
+            }
+            # A typed executable task always carries the server-derived lane.
+            # Triage may intentionally remain unbound until acceptance; an
+            # explicit non-empty lane there is still checked above.
+            if executable_phase or (explicit_executor and supplied_executor is not None):
+                safe_changes["executor_id"] = expected_executor
         typed_fields = {"typed_input_ref", "typed_input_digest"}
         changed_typed_fields = typed_fields.intersection(safe_changes)
         if changed_typed_fields and changed_typed_fields != typed_fields:
@@ -1436,7 +1600,16 @@ class WorkBoardRepository:
                         "capability_required",
                         "Triage must name a registered capability before promotion",
                     )
+                expected_executor = _registered_executor_lane(task.capability_id)
+                if expected_executor is not None and task.executor_id and task.executor_id != expected_executor:
+                    raise BoardError(
+                        "executor_lane_mismatch",
+                        "The task executor does not match the registered capability lane",
+                        status_code=409,
+                    )
                 values["status"] = WorkBoardStatus.todo
+                if expected_executor is not None:
+                    values["executor_id"] = expected_executor
             elif task.status is WorkBoardStatus.todo:
                 raise BoardError(
                     "dispatcher_readiness_required",
@@ -1445,10 +1618,10 @@ class WorkBoardRepository:
             else:
                 raise BoardError("illegal_transition", "This task cannot be promoted from its current status")
         elif request.action.value == "block":
-            if request.block_kind not in {None, "operator"}:
+            if request.block_kind not in WORK_BOARD_AUTHENTICATED_BLOCK_KINDS:
                 raise BoardError(
                     "invalid_block_kind",
-                    "Manual board blocking accepts only the operator block kind",
+                    "Manual board blocking accepts only a bounded recovery block kind",
                     status_code=422,
                 )
             if task.status not in {
@@ -1458,6 +1631,30 @@ class WorkBoardRepository:
                 WorkBoardStatus.review,
             }:
                 raise BoardError("illegal_transition", "This task cannot be manually blocked from its current status")
+            if task.status is WorkBoardStatus.review:
+                raise BoardError(
+                    "review_typed_recovery_required",
+                    "Review tasks use reviewer completion or typed expiry recovery",
+                    status_code=409,
+                )
+            if not str(request.reason or "").strip():
+                raise BoardError("reason_required", "Manual blocking requires a bounded reason", status_code=422)
+            # The source phase is part of the authenticated action contract.
+            # Compare it to the row loaded under the owner and expected
+            # revision before persisting; never infer or trust a caller's
+            # claimed prior phase.
+            if request.source_status is None:
+                raise BoardError(
+                    "source_status_required",
+                    "Manual blocking requires the current source status",
+                    status_code=422,
+                )
+            if request.source_status is not task.status:
+                raise BoardError(
+                    "stale_source_status",
+                    "The block source status no longer matches the current task",
+                    status_code=409,
+                )
             active_attempt = await db.scalar(
                 select(WorkBoardAttempt.attempt_id).where(
                     WorkBoardAttempt.task_id == task.task_id,
@@ -1472,8 +1669,8 @@ class WorkBoardRepository:
                 )
             values.update(
                 {
-                    "block_source_status": task.status.value,
-                    "block_kind": request.block_kind or "operator",
+                    "block_source_status": request.source_status.value,
+                    "block_kind": request.block_kind,
                     "block_reason": await self._safe_text(request.reason or ""),
                     "status": WorkBoardStatus.blocked,
                 }
@@ -1511,6 +1708,12 @@ class WorkBoardRepository:
                 )
             if source == WorkBoardStatus.review.value:
                 await self._validate_review_recovery(db, task)
+                if task.review_expires_at is None:
+                    raise BoardError(
+                        "review_renewal_required",
+                        "A Review task without an active expiry must be renewed by the named reviewer",
+                        status_code=409,
+                    )
             values.update(
                 {
                     # M1 has no capability/authority readiness resolver.  A
@@ -1552,6 +1755,7 @@ class WorkBoardRepository:
                 "status": task.status.value,
                 "task_revision": task.task_revision,
                 "block_kind": task.block_kind,
+                "source_status": task.block_source_status,
             },
         )
         return BoardMutation(task, event)
@@ -1701,7 +1905,7 @@ class WorkBoardRepository:
                 status_code=409,
             )
         await self.validate_task_goal(db, owner, task)
-        if task.scheduled_at is not None and task.scheduled_at > _now():
+        if task.scheduled_at is not None and _utc_datetime(task.scheduled_at) > _now():
             raise BoardError(
                 "retry_prerequisite",
                 "The task schedule has not reached its retry eligibility time",
@@ -1801,9 +2005,29 @@ class WorkBoardRepository:
                 "block_source_status": None,
                 "block_kind": None,
                 "block_reason": None,
+                "review_request_attempt_id": None,
+                "review_request_fence": None,
+                "review_request_revision": None,
+                "review_request_digest": None,
+                "review_request_evidence_json": "[]",
+                "review_requested_at": None,
+                "review_expires_at": None,
                 "task_revision": expected + 1,
                 "updated_at": _now(),
             },
+        )
+        # A retry is a new attempt boundary.  Preserve old intent rows as
+        # history, but make every still-pending intent terminal so it cannot
+        # later project Review for the replacement attempt.
+        await db.execute(
+            update(WorkBoardReviewIntent)
+            .where(
+                WorkBoardReviewIntent.task_id == task.task_id,
+                WorkBoardReviewIntent.owner_principal_id == owner.principal_id,
+                WorkBoardReviewIntent.owner_session_id == owner.session_id,
+                WorkBoardReviewIntent.status == "pending",
+            )
+            .values(status="superseded")
         )
         event = await self._event(
             db,
@@ -1898,12 +2122,18 @@ class WorkBoardRepository:
         db: AsyncSession,
         owner: WorkBoardOwner,
         request: WorkBoardLinkCreate,
+        *,
+        acquire_lock: bool = True,
     ) -> tuple[WorkBoardLink, WorkBoardEvent]:
         if request.parent_task_id == request.child_task_id:
             raise BoardError("dependency_cycle", "A task cannot depend on itself")
         # The cycle check and link insert are one cross-process critical
-        # section.  This must happen before the first graph read.
-        await _begin_sqlite_immediate(db)
+        # section.  This must happen before the first graph read.  Proposal
+        # acceptance already owns one enclosing transaction and lock across
+        # child creation plus every edge; it passes acquire_lock=False so a
+        # duplicate edge cannot commit the earlier child rows implicitly.
+        if acquire_lock:
+            await _begin_sqlite_immediate(db)
         parent = await self._owned_task(db, owner, request.parent_task_id)
         child = await self._owned_task(db, owner, request.child_task_id)
         if child.task_revision != request.expected_child_revision:
@@ -1953,6 +2183,21 @@ class WorkBoardRepository:
             await db.flush()
         except IntegrityError as exc:
             raise BoardError("link_exists", "The dependency link already exists") from exc
+        if parent.status is WorkBoardStatus.done:
+            # The edge and its immutable proof must commit together.  A
+            # completed parent with no verified readback aborts this whole
+            # transaction, leaving no dependency edge to bypass provenance.
+            from src.work_board.review import materialize_handoff_for_link
+
+            handoff = await materialize_handoff_for_link(
+                db,
+                owner,
+                parent,
+                child,
+                link,
+            )
+        else:
+            handoff = None
         event = await self._event(
             db,
             child,
@@ -1962,6 +2207,7 @@ class WorkBoardRepository:
                 "parent_task_id": parent.task_id,
                 "task_revision": child.task_revision,
                 "ready_demoted": demote_ready,
+                "handoff_id": handoff.handoff_id if handoff is not None else None,
             },
         )
         return link, event
@@ -2053,6 +2299,15 @@ class WorkBoardRepository:
             select(WorkBoardTask)
             .where(
                 WorkBoardTask.status == WorkBoardStatus.todo,
+                ~select(WorkBoardProposal.proposal_id)
+                .where(
+                    WorkBoardProposal.owner_principal_id == WorkBoardTask.owner_principal_id,
+                    WorkBoardProposal.owner_session_id == WorkBoardTask.owner_session_id,
+                    WorkBoardProposal.parent_task_id == WorkBoardTask.task_id,
+                    WorkBoardProposal.parent_revision == WorkBoardTask.task_revision,
+                    WorkBoardProposal.status.in_(("pending_inference", "proposed")),
+                )
+                .exists(),
                 (
                     WorkBoardTask.scheduled_at.is_(None)
                     | (WorkBoardTask.scheduled_at <= observed_at)
@@ -2094,17 +2349,37 @@ class WorkBoardRepository:
             return None
         if task.task_revision != int(expected_revision):
             raise BoardRevisionConflict(task.task_id, int(expected_revision), task.task_revision)
-        if task.scheduled_at is not None and task.scheduled_at > observed_at:
+        if task.scheduled_at is not None and _utc_datetime(task.scheduled_at) > _utc_datetime(observed_at):
+            return None
+
+        pending_proposal = await db.scalar(
+            select(WorkBoardProposal.proposal_id)
+            .where(
+                WorkBoardProposal.owner_principal_id == task.owner_principal_id,
+                WorkBoardProposal.owner_session_id == task.owner_session_id,
+                WorkBoardProposal.parent_task_id == task.task_id,
+                WorkBoardProposal.parent_revision == task.task_revision,
+                WorkBoardProposal.status.in_(("pending_inference", "proposed")),
+            )
+            .limit(1)
+        )
+        if pending_proposal is not None:
             return None
 
         owner = WorkBoardOwner(
             principal_id=task.owner_principal_id,
             session_id=task.owner_session_id,
         )
-        parents = list(
+        parent_rows = list(
             (
                 await db.execute(
-                    select(WorkBoardTask.status)
+                    select(
+                        WorkBoardTask.task_id,
+                        WorkBoardTask.task_revision,
+                        WorkBoardTask.status,
+                        WorkBoardLink.link_id,
+                        WorkBoardLink.current_handoff_id,
+                    )
                     .join(
                         WorkBoardLink,
                         WorkBoardTask.task_id == WorkBoardLink.parent_task_id,
@@ -2117,10 +2392,51 @@ class WorkBoardRepository:
                         WorkBoardTask.owner_session_id == task.owner_session_id,
                     )
                 )
-            ).scalars().all()
+            ).all()
         )
-        if any(status is not WorkBoardStatus.done for status in parents):
+        if any(
+            status is not WorkBoardStatus.done
+            for _parent_id, _parent_revision, status, _link_id, _handoff_id in parent_rows
+        ):
             return None
+        if any(
+            not handoff_id
+            for _parent_id, _parent_revision, _status, _link_id, handoff_id in parent_rows
+        ):
+            readiness_error = readiness_error or "handoff_materialization_required"
+            readiness_reason = readiness_reason or (
+                "Every completed parent must have a verified handoff before dispatch"
+            )
+        if not readiness_error:
+            from src.work_board.review import current_handoff_is_verified
+
+            for parent_id, _parent_revision, _status, link_id, _handoff_id in parent_rows:
+                parent = await db.get(WorkBoardTask, parent_id)
+                link = (
+                    await db.execute(
+                        select(WorkBoardLink).where(
+                            WorkBoardLink.link_id == link_id,
+                            WorkBoardLink.child_task_id == task.task_id,
+                            WorkBoardLink.owner_principal_id == task.owner_principal_id,
+                            WorkBoardLink.owner_session_id == task.owner_session_id,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if (
+                    parent is None
+                    or link is None
+                    or not await current_handoff_is_verified(db, owner, parent, task, link)
+                ):
+                    readiness_error = "handoff_materialization_required"
+                    readiness_reason = (
+                        "A completed parent handoff is missing, stale, or no longer independently verified"
+                    )
+                    break
+
+        lane_error = _executor_lane_error(task.capability_id, task.executor_id)
+        if lane_error is not None:
+            readiness_error = readiness_error or lane_error[0]
+            readiness_reason = readiness_reason or lane_error[1]
 
         if readiness_error is None:
             try:
@@ -2198,7 +2514,7 @@ class WorkBoardRepository:
             return None
         if task.task_revision != int(expected_revision):
             raise BoardRevisionConflict(task.task_id, int(expected_revision), task.task_revision)
-        if task.scheduled_at is not None and task.scheduled_at > observed_at:
+        if task.scheduled_at is not None and _utc_datetime(task.scheduled_at) > _utc_datetime(observed_at):
             return None
 
         owner = WorkBoardOwner(
@@ -2209,6 +2525,9 @@ class WorkBoardRepository:
         # that creates the board claim.  The preflight pass is advisory; a
         # concurrent revision/owner/status change must not launch stale work.
         try:
+            lane_error = _executor_lane_error(task.capability_id, task.executor_id)
+            if lane_error is not None:
+                raise BoardError(lane_error[0], lane_error[1])
             live_goal = await self.validate_task_goal(db, owner, task)
             live_goal_status = str(getattr(live_goal.status, "value", live_goal.status) or "")
             if live_goal_status and live_goal_status != "active":
@@ -2239,6 +2558,7 @@ class WorkBoardRepository:
                 actor_session_id=actor_session_id or "work-board-dispatch",
             )
             return None
+
         parent_statuses = list(
             (
                 await db.execute(
@@ -2283,6 +2603,31 @@ class WorkBoardRepository:
             )
             return None
 
+        parent_handoff_context: list[dict[str, Any]] = []
+        parent_handoff_digest: str | None = None
+        if parent_statuses:
+            # Capture the exact source-verified parent payload while the task
+            # claim transaction is still open.  The attempt and every
+            # downstream durable input then share one immutable binding.
+            from src.work_board.review import parent_handoffs
+
+            parent_handoff_context = await parent_handoffs(db, owner, task)
+            if (
+                len(parent_handoff_context) != len(parent_statuses)
+                or any(
+                    not isinstance(item, Mapping) or item.get("status") != "verified"
+                    for item in parent_handoff_context
+                )
+            ):
+                return None
+            parent_handoff_context.sort(
+                key=lambda item: (str(item.get("parent_task_id") or ""), str(item.get("handoff_id") or ""))
+            )
+            encoded_handoffs = _canonical_json(parent_handoff_context)
+            if len(encoded_handoffs.encode("utf-8")) > _MAX_PARENT_HANDOFF_CONTEXT_BYTES:
+                return None
+            parent_handoff_digest = hashlib.sha256(encoded_handoffs.encode("utf-8")).hexdigest()
+
         active_count = int(
             await db.scalar(
                 select(func.count(WorkBoardTask.task_id)).where(
@@ -2324,7 +2669,7 @@ class WorkBoardRepository:
                 values={
                     "status": WorkBoardStatus.blocked,
                     "block_source_status": WorkBoardStatus.ready.value,
-                    "block_kind": "transient",
+                    "block_kind": "attempt_limit",
                     "block_reason": safe_reason,
                     "task_revision": int(expected_revision) + 1,
                     "updated_at": observed_at,
@@ -2335,7 +2680,11 @@ class WorkBoardRepository:
                 task,
                 owner,
                 kind="task.attempt_limit",
-                metadata={"status": task.status.value, "task_revision": task.task_revision},
+                metadata={
+                    "status": task.status.value,
+                    "task_revision": task.task_revision,
+                    "block_kind": "attempt_limit",
+                },
                 actor_principal_id=actor_principal_id or lease_owner,
                 actor_session_id=actor_session_id or "work-board-dispatch",
             )
@@ -2367,6 +2716,8 @@ class WorkBoardRepository:
             executor_id=(task.executor_id or "")[:128],
             started_at=observed_at,
             outcome="pending_admission",
+            parent_handoff_context_json=_canonical_json(parent_handoff_context),
+            parent_handoff_digest=parent_handoff_digest,
         )
         db.add(attempt)
         await self._cas_task_update(
@@ -2395,7 +2746,7 @@ class WorkBoardRepository:
             actor_principal_id=actor_principal_id or lease_owner,
             actor_session_id=actor_session_id or "work-board-dispatch",
         )
-        return BoardDispatchClaim(task, attempt, event)
+        return BoardDispatchClaim(task, attempt, event, tuple(parent_handoff_context))
 
     async def link_attempt_workflow_run(
         self,
@@ -2643,6 +2994,11 @@ class WorkBoardRepository:
                 str(verified_readback.get("source") or "") != "workflow_run"
                 or str(verified_readback.get("status") or "") != "succeeded"
                 or not bool(verified_readback.get("verified"))
+                or not _SAFE_RECEIPT_IDENTIFIER.fullmatch(str(verified_readback.get("readback_id") or "").strip())
+                or not str(verified_readback.get("verified_at") or "").strip()
+                or len(str(verified_readback.get("verified_at") or "").strip()) > 64
+                or "\n" in str(verified_readback.get("verified_at") or "")
+                or "\r" in str(verified_readback.get("verified_at") or "")
             ):
                 raise BoardError(
                     "verified_readback_required",
@@ -2661,6 +3017,19 @@ class WorkBoardRepository:
             raise BoardError("task_not_running", "Only a running task can be projected")
         if task.task_revision != int(expected_revision):
             raise BoardRevisionConflict(task.task_id, int(expected_revision), task.task_revision)
+        if status in {WorkBoardStatus.review, WorkBoardStatus.done}:
+            try:
+                await self.validate_task_goal(db, owner, task)
+            except BoardError as exc:
+                # A long-running attempt cannot turn stale or revoked goal
+                # authority into a terminal board result.  End the attempt in
+                # an explicit recoverable block while preserving the durable
+                # run and its evidence for operator reconciliation.
+                status = WorkBoardStatus.blocked
+                outcome = "goal_authority_stale"
+                block_kind = "capability"
+                block_reason = f"goal_authority_stale:{exc.code}"
+                verified_readback = None
         attempt = (
             await db.execute(
                 select(WorkBoardAttempt).where(
@@ -2673,6 +3042,58 @@ class WorkBoardRepository:
             raise BoardError("attempt_not_found", "The board attempt does not exist", status_code=404)
         if attempt.lease_owner != lease_owner or attempt.fencing_token != int(board_fence) or attempt.ended_at is not None:
             raise BoardError("stale_fence", "The board attempt fence is stale")
+        # A worker can request review after the dispatcher has taken its
+        # in-memory claim snapshot.  Treat the exact pending intent as a
+        # durable projection override when the stale snapshot asks for Done.
+        # The query binds every identity that can fence a late worker: owner,
+        # session, task, attempt, durable run, fence, and board revision.
+        intent = None
+        promoted_review_intent = False
+        if status in {WorkBoardStatus.review, WorkBoardStatus.done}:
+            intent = (
+                await db.execute(
+                    select(WorkBoardReviewIntent).where(
+                        WorkBoardReviewIntent.owner_principal_id == owner.principal_id,
+                        WorkBoardReviewIntent.owner_session_id == owner.session_id,
+                        WorkBoardReviewIntent.task_id == task.task_id,
+                        WorkBoardReviewIntent.attempt_id == attempt.attempt_id,
+                        WorkBoardReviewIntent.workflow_run_id == str(attempt.workflow_run_id or ""),
+                        WorkBoardReviewIntent.fencing_token == int(board_fence),
+                        WorkBoardReviewIntent.task_revision == int(expected_revision),
+                        WorkBoardReviewIntent.status == "pending",
+                    )
+                )
+            ).scalar_one_or_none()
+        if status is WorkBoardStatus.done and intent is not None:
+            status = WorkBoardStatus.review
+            promoted_review_intent = True
+            # The dedicated intent is canonical for this race.  Refresh the
+            # compatibility projection from it before the review checks below
+            # so a stale dispatcher copy cannot clear a valid request.
+            task.requires_review = True
+            task.reviewer_id = owner.principal_id
+            task.review_request_attempt_id = intent.attempt_id
+            task.review_request_fence = int(intent.fencing_token)
+            task.review_request_revision = int(intent.task_revision)
+            task.review_request_digest = intent.request_digest
+            task.review_request_evidence_json = intent.evidence_refs_json
+            task.review_requested_at = intent.created_at
+            task.review_expires_at = None
+        if status is WorkBoardStatus.review and task.review_request_attempt_id:
+            if intent is None:
+                raise BoardError(
+                    "review_intent_stale",
+                    "The durable review intent is missing or no longer current",
+                )
+            if (
+                task.review_request_attempt_id != attempt.attempt_id
+                or task.review_request_fence != int(board_fence)
+                or task.review_request_revision not in {None, int(expected_revision)}
+            ):
+                raise BoardError(
+                    "review_intent_stale",
+                    "The review intent is bound to a different attempt or fence",
+                )
         if status in {WorkBoardStatus.review, WorkBoardStatus.done}:
             proof_run_id = str(verified_readback.get("workflow_run_id") or "")
             proof_digest = str(verified_readback.get("content_sha256") or "")
@@ -2688,7 +3109,13 @@ class WorkBoardRepository:
             # never depend on a task-level summary or reconstruct proof from
             # an unrelated run.  The run ID comes from the immutable attempt
             # link, while the digest comes from the proof checked above.
+            proof_fields = _safe_receipt_refs(
+                [verified_readback],
+                limit=1,
+                preserve_effect_ids=False,
+            )
             proof_receipt = {
+                **(proof_fields[0] if proof_fields else {}),
                 "workflow_run_id": str(attempt.workflow_run_id),
                 "content_sha256": proof_digest.lower(),
                 "status": "succeeded",
@@ -2727,6 +3154,36 @@ class WorkBoardRepository:
             "artifact_refs_json": _canonical_json(safe_artifacts),
             "updated_at": observed_at,
         }
+        if promoted_review_intent:
+            values.update(
+                {
+                    "requires_review": True,
+                    "reviewer_id": owner.principal_id,
+                    "review_request_attempt_id": intent.attempt_id,
+                    "review_request_fence": int(intent.fencing_token),
+                    "review_request_revision": int(intent.task_revision),
+                    "review_request_digest": intent.request_digest,
+                    "review_request_evidence_json": intent.evidence_refs_json,
+                    "review_requested_at": intent.created_at,
+                    "review_expires_at": None,
+                }
+            )
+        if status is WorkBoardStatus.review:
+            values["review_expires_at"] = observed_at + timedelta(days=7)
+        elif status in {WorkBoardStatus.blocked, WorkBoardStatus.done}:
+            # A failed/blocked or directly completed attempt cannot leave a
+            # review intent attached to a later retry or terminal card.
+            values.update(
+                {
+                    "review_request_attempt_id": None,
+                    "review_request_fence": None,
+                    "review_request_revision": None,
+                    "review_request_digest": None,
+                    "review_request_evidence_json": "[]",
+                    "review_requested_at": None,
+                    "review_expires_at": None,
+                }
+            )
         if status is WorkBoardStatus.done:
             values.update(
                 {
@@ -2752,6 +3209,46 @@ class WorkBoardRepository:
             expected_revision=int(expected_revision),
             values=values,
         )
+        if status is WorkBoardStatus.done:
+            # A successful dispatcher projection is the second handoff
+            # materialization boundary (the first is linking an already-Done
+            # parent).  Keep this local import to avoid a repository/review
+            # module cycle while preserving one transaction for the parent
+            # projection and all child handoff pointers.
+            from src.work_board.review import _persist_child_handoffs
+
+            await _persist_child_handoffs(
+                db,
+                owner,
+                task,
+                attempt,
+                proof=verified_readback,
+            )
+        if status in {WorkBoardStatus.blocked, WorkBoardStatus.done}:
+            await db.execute(
+                update(WorkBoardReviewIntent)
+                .where(
+                    WorkBoardReviewIntent.task_id == task.task_id,
+                    WorkBoardReviewIntent.owner_principal_id == owner.principal_id,
+                    WorkBoardReviewIntent.owner_session_id == owner.session_id,
+                    WorkBoardReviewIntent.status == "pending",
+                )
+                .values(status="superseded")
+            )
+        if status is WorkBoardStatus.review and task.review_request_attempt_id:
+            await db.execute(
+                update(WorkBoardReviewIntent)
+                .where(
+                    WorkBoardReviewIntent.owner_principal_id == owner.principal_id,
+                    WorkBoardReviewIntent.owner_session_id == owner.session_id,
+                    WorkBoardReviewIntent.task_id == task.task_id,
+                    WorkBoardReviewIntent.attempt_id == attempt.attempt_id,
+                    WorkBoardReviewIntent.fencing_token == int(board_fence),
+                    WorkBoardReviewIntent.task_revision == int(expected_revision),
+                    WorkBoardReviewIntent.status == "pending",
+                )
+                .values(status="projected")
+            )
         await db.flush()
         event = await self._event(
             db,
@@ -2818,6 +3315,8 @@ class WorkBoardRepository:
         board_fence: int,
         lease_owner: str,
         absence_proven: bool,
+        block_kind: str = "reconcile_admission_binding",
+        block_reason: str | None = None,
         actor_principal_id: str | None = None,
         actor_session_id: str | None = None,
         now: datetime | None = None,
@@ -2870,6 +3369,15 @@ class WorkBoardRepository:
             )
         if attempt.fencing_token != int(board_fence) or attempt.lease_owner != lease_owner:
             raise BoardError("stale_fence", "The board attempt fence is stale")
+        closed_kind = _closed_block_kind(block_kind)
+        safe_reason = await self._safe_text(
+            block_reason
+            or (
+                "No durable run exists for the pending admission binding; operator reconciliation is required."
+                if closed_kind == "reconcile_admission_binding"
+                else "The typed capability input disappeared before durable admission; repair it and retry."
+            )
+        )
         await db.delete(attempt)
         await db.flush()
         await self._cas_task_update(
@@ -2880,10 +3388,8 @@ class WorkBoardRepository:
             values={
                 "status": WorkBoardStatus.blocked,
                 "block_source_status": WorkBoardStatus.running.value,
-                "block_kind": "reconcile_admission_binding",
-                "block_reason": await self._safe_text(
-                    "No durable run exists for the pending admission binding; operator reconciliation is required."
-                ),
+                "block_kind": closed_kind,
+                "block_reason": safe_reason,
                 "task_revision": int(expected_revision) + 1,
                 "updated_at": observed_at,
             },
@@ -2896,8 +3402,10 @@ class WorkBoardRepository:
             metadata={
                 "attempt_id": attempt_id,
                 "status": WorkBoardStatus.blocked.value,
-                "block_kind": "reconcile_admission_binding",
-                "recovery_action": "reconcile_admission_binding",
+                "block_kind": closed_kind,
+                "recovery_action": (
+                    "retry" if closed_kind == "capability" else "reconcile_admission_binding"
+                ),
                 "task_revision": task.task_revision,
             },
             actor_principal_id=actor_principal_id or lease_owner,
@@ -2985,9 +3493,24 @@ class WorkBoardRepository:
                     "block_reason": await self._safe_text(
                         "The board attempt limit has been exhausted"
                     ),
+                    "review_request_attempt_id": None,
+                    "review_request_fence": None,
+                    "review_request_revision": None,
+                    "review_request_digest": None,
+                    "review_request_evidence_json": "[]",
+                    "review_requested_at": None,
+                    "review_expires_at": None,
                     "task_revision": int(expected_revision) + 1,
                     "updated_at": observed_at,
                 },
+            )
+            await db.execute(
+                update(WorkBoardReviewIntent)
+                .where(
+                    WorkBoardReviewIntent.task_id == task.task_id,
+                    WorkBoardReviewIntent.status == "pending",
+                )
+                .values(status="superseded")
             )
             event = await self._event(
                 db,
@@ -3012,6 +3535,15 @@ class WorkBoardRepository:
         attempt.updated_at = observed_at
         attempt.outcome = "lease_expired"
         await db.flush()
+        await db.execute(
+            update(WorkBoardReviewIntent)
+            .where(
+                WorkBoardReviewIntent.task_id == task.task_id,
+                WorkBoardReviewIntent.attempt_id == attempt.attempt_id,
+                WorkBoardReviewIntent.status == "pending",
+            )
+            .values(status="superseded")
+        )
         replacement = WorkBoardAttempt(
             task_id=task.task_id,
             task_revision_at_claim=int(expected_revision),
@@ -3029,7 +3561,17 @@ class WorkBoardRepository:
             owner,
             task,
             expected_revision=int(expected_revision),
-            values={"task_revision": int(expected_revision) + 1, "updated_at": observed_at},
+            values={
+                "task_revision": int(expected_revision) + 1,
+                "review_request_attempt_id": None,
+                "review_request_fence": None,
+                "review_request_revision": None,
+                "review_request_digest": None,
+                "review_request_evidence_json": "[]",
+                "review_requested_at": None,
+                "review_expires_at": None,
+                "updated_at": observed_at,
+            },
         )
         await db.flush()
         event = await self._event(

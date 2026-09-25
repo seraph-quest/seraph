@@ -1,6 +1,7 @@
 """Focused persistence and transition checks for work-board M1."""
 
 from hashlib import sha256
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 import pytest
@@ -9,6 +10,7 @@ from src.db.models import (
     Goal,
     WorkBoardComment,
     WorkBoardLink,
+    WorkBoardProposal,
     WorkBoardStatus,
     WorkBoardTask,
 )
@@ -31,11 +33,19 @@ from src.work_board.repository import (
     BoardOwnerMismatch,
     BoardRevisionConflict,
     WorkBoardRepository,
+    _closed_block_kind,
 )
+from src.work_board.dispatcher import registered_executor_id
 from pydantic import ValidationError
 
 
 OWNER = WorkBoardOwner(principal_id="operator:test-bypass", session_id="test-auth-bypass")
+
+
+def test_typed_input_preflight_blocks_as_capability_prerequisite_not_approval():
+    assert _closed_block_kind("typed_input_missing") == "capability"
+    assert _closed_block_kind("typed_input_invalid") == "capability"
+    assert _closed_block_kind("approval_required") == "needs_input"
 
 
 async def _create(db, *, key: str, title: str = "Task"):
@@ -81,6 +91,47 @@ async def test_duplicate_idempotency_returns_same_task(async_db):
         replay = await _create(db, key="same")
         assert replay.task.task_id == first.task.task_id
         assert replay.idempotent_replay is True
+
+
+@pytest.mark.asyncio
+async def test_pending_decompose_proposal_holds_source_from_dispatch(async_db):
+    repository = WorkBoardRepository()
+    async with async_db() as db:
+        created = await _create(db, key="pending-decompose-source")
+        task = created.task
+        task.status = WorkBoardStatus.todo
+        await db.flush()
+        db.add(
+            WorkBoardProposal(
+                owner_principal_id=OWNER.principal_id,
+                owner_session_id=OWNER.session_id,
+                parent_task_id=task.task_id,
+                parent_revision=task.task_revision,
+                goal_revision=task.goal_revision,
+                kind="decompose",
+                idempotency_key="pending-decompose",
+                status="proposed",
+                proposal_json='{"proposed_tasks":[],"proposed_links":[]}',
+                expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+            )
+        )
+        await db.flush()
+        task_id = task.task_id
+        revision = task.task_revision
+
+        candidates = await repository.list_dispatch_candidates(db)
+        assert task_id not in {candidate.task_id for candidate in candidates}
+
+        promoted = await repository.promote_task_ready(
+            db,
+            task_id,
+            expected_revision=revision,
+            actor_principal_id="service:work-board",
+        )
+
+        assert promoted is None
+        assert task.status is WorkBoardStatus.todo
+        assert task.task_revision == revision
 
 
 @pytest.mark.asyncio
@@ -263,8 +314,8 @@ async def test_create_preserves_safe_relative_typed_input_reference(async_db):
                 title="Typed input task",
                 goal_id="goal-1",
                 goal_revision=1,
-                capability_id="guardian.research",
-                executor_id="executor.local",
+                capability_id="guardian.research-watch.v1",
+                executor_id=registered_executor_id("guardian.research-watch.v1"),
                 assignee_id="operator.worker",
                 typed_input_ref="workspace-json:inputs/task.json",
                 typed_input_digest=digest,
@@ -599,10 +650,10 @@ async def test_blocked_authority_patch_requires_reconciliation(async_db, block_k
                 created.task.task_id,
                 WorkBoardTaskPatch(
                     expected_revision=created.task.task_revision,
-                    capability_id="capability.local",
+                    capability_id="guardian.research-watch.v1",
                     typed_input_ref="input:typed",
                     typed_input_digest=digest,
-                    executor_id="executor.local",
+                    executor_id=registered_executor_id("guardian.research-watch.v1"),
                     assignee_id="operator:worker",
                 ),
             )
@@ -744,7 +795,48 @@ async def test_vault_redaction_applies_before_task_comment_and_block_persistence
             WorkBoardActionRequest(
                 action=WorkBoardAction.block,
                 expected_revision=2,
+                block_kind="operator",
+                source_status=WorkBoardStatus.triage,
                 reason="reason super-secret-value",
             ),
         )
         assert "super-secret-value" not in (blocked.task.block_reason or "")
+
+
+@pytest.mark.asyncio
+async def test_typed_capability_block_requires_current_source_and_persists_kind(async_db):
+    repository = WorkBoardRepository()
+    async with async_db() as db:
+        created = await _create(db, key="capability-block-contract")
+        blocked = await repository.action_task(
+            db,
+            OWNER,
+            created.task.task_id,
+            WorkBoardActionRequest(
+                action=WorkBoardAction.block,
+                expected_revision=created.task.task_revision,
+                block_kind="capability",
+                source_status=WorkBoardStatus.triage,
+                reason="The capability grant is not ready",
+            ),
+        )
+        assert blocked.task.status is WorkBoardStatus.blocked
+        assert blocked.task.block_kind == "capability"
+        assert blocked.task.block_source_status == WorkBoardStatus.triage.value
+
+    async with async_db() as db:
+        created = await _create(db, key="stale-capability-block-contract")
+        with pytest.raises(BoardError) as raised:
+            await repository.action_task(
+                db,
+                OWNER,
+                created.task.task_id,
+                WorkBoardActionRequest(
+                    action=WorkBoardAction.block,
+                    expected_revision=created.task.task_revision,
+                    block_kind="capability",
+                    source_status=WorkBoardStatus.todo,
+                    reason="The source phase is stale",
+                ),
+            )
+        assert raised.value.code == "stale_source_status"

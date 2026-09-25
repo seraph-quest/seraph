@@ -229,7 +229,7 @@ async def test_generic_unblock_demotes_ready_phase_for_fresh_admission(async_db)
 
 
 @pytest.mark.asyncio
-async def test_generic_unblock_restores_review_phase_for_named_reviewer(async_db, monkeypatch):
+async def test_generic_unblock_does_not_restore_review_without_explicit_renewal(async_db, monkeypatch):
     task_id = await _seed_task(async_db, OWNER, key_suffix="review-phase")
     repository = WorkBoardRepository()
     async with async_db() as db:
@@ -254,10 +254,14 @@ async def test_generic_unblock_restores_review_phase_for_named_reviewer(async_db
                 receipt_refs_json=json.dumps(
                     [
                         {
+                            "receipt_kind": "readback",
+                            "effect_type": "readback",
                             "status": "succeeded",
                             "verified": True,
                             "workflow_run_id": "review-phase-run",
+                            "readback_id": "artifact-review-phase",
                             "content_sha256": "a" * 64,
+                            "verified_at": datetime.now(timezone.utc).isoformat(),
                             "readback_status": "verified",
                         }
                     ]
@@ -278,35 +282,19 @@ async def test_generic_unblock_restores_review_phase_for_named_reviewer(async_db
 
     async with async_db() as db:
         current = await repository.get_task(db, OWNER, task_id)
-        mutation = await repository.action_task(
-            db,
-            OWNER,
-            task_id,
-            WorkBoardActionRequest(
-                action=WorkBoardAction.unblock,
-                expected_revision=current.task_revision,
-                resolution="The artifact link was restored and checked.",
-            ),
-        )
-
-        assert mutation.task.status is WorkBoardStatus.review
-        assert mutation.task.requires_review is True
-        assert mutation.task.reviewer_id == "operator:reviewer"
-        assert mutation.task.block_source_status is None
-        assert mutation.task.block_kind is None
-        assert mutation.event.kind == "task.unblock"
-        assert mutation.event.metadata_json is not None
-        detail = await repository.get_detail(db, OWNER, task_id)
-        assert len(detail["attempts"]) == 1
-        assert json.loads(detail["attempts"][0].receipt_refs_json) == [
-            {
-                "status": "succeeded",
-                "verified": True,
-                "workflow_run_id": "review-phase-run",
-                "content_sha256": "a" * 64,
-                "readback_status": "verified",
-            }
-        ]
+        with pytest.raises(BoardError) as raised:
+            await repository.action_task(
+                db,
+                OWNER,
+                task_id,
+                WorkBoardActionRequest(
+                    action=WorkBoardAction.unblock,
+                    expected_revision=current.task_revision,
+                    resolution="The artifact link was restored and checked.",
+                ),
+            )
+        assert raised.value.code == "review_renewal_required"
+        assert current.status is WorkBoardStatus.blocked
 
 
 @pytest.mark.asyncio
@@ -383,10 +371,14 @@ async def _seed_blocked_review_task(
                         if receipt_refs is not None
                         else [
                             {
+                                "receipt_kind": "readback",
+                                "effect_type": "readback",
                                 "status": "succeeded",
                                 "verified": True,
                                 "workflow_run_id": workflow_run_id,
+                                "readback_id": f"artifact-{key_suffix}",
                                 "content_sha256": "a" * 64,
+                                "verified_at": datetime.now(timezone.utc).isoformat(),
                             }
                         ]
                     ),
@@ -521,32 +513,29 @@ async def test_repository_review_unblock_requires_attempt_bound_verified_readbac
 
 
 @pytest.mark.asyncio
-async def test_repository_review_unblock_preserves_attempt_and_revision_cas(async_db):
+async def test_repository_review_unblock_requires_explicit_renewal(async_db):
     task_id = await _seed_blocked_review_task(async_db, key_suffix="contract-positive")
     repository = WorkBoardRepository()
     async with async_db() as db:
-        mutation = await repository.action_task(
-            db,
-            OWNER,
-            task_id,
-            WorkBoardActionRequest(
-                action=WorkBoardAction.unblock,
-                expected_revision=1,
-                resolution="restore review recovery",
-            ),
-        )
-        assert mutation.task.status is WorkBoardStatus.review
-        assert mutation.task.task_revision == 2
-        assert mutation.task.requires_review is True
-        assert mutation.task.reviewer_id == "operator:reviewer"
-        assert mutation.task.block_source_status is None
-        assert mutation.task.block_kind is None
-        detail = await repository.get_detail(db, OWNER, task_id)
-        assert len(detail["attempts"]) == 1
+        with pytest.raises(BoardError) as raised:
+            await repository.action_task(
+                db,
+                OWNER,
+                task_id,
+                WorkBoardActionRequest(
+                    action=WorkBoardAction.unblock,
+                    expected_revision=1,
+                    resolution="restore review recovery",
+                ),
+            )
+        assert raised.value.code == "review_renewal_required"
+        current = await repository.get_task(db, OWNER, task_id)
+        assert current.status is WorkBoardStatus.blocked
+        assert current.task_revision == 1
 
 
 @pytest.mark.asyncio
-async def test_projected_review_persists_attempt_bound_readback_for_recovery(async_db):
+async def test_projected_review_persists_typed_readback_and_rejects_generic_block(async_db):
     task_id = await _seed_task(async_db, OWNER, key_suffix="projected-review")
     repository = WorkBoardRepository()
     workflow_run_id = "projected-review-run"
@@ -582,61 +571,74 @@ async def test_projected_review_persists_attempt_bound_readback_for_recovery(asy
             status=WorkBoardStatus.review,
             outcome="verified",
             receipt_refs=[
-                {"workflow_run_id": workflow_run_id, "status": "succeeded", "verified": True}
+                {
+                    "receipt_kind": "readback",
+                    "effect_type": "readback",
+                    "workflow_run_id": workflow_run_id,
+                    "readback_id": "artifact-projected-review",
+                    "status": "succeeded",
+                    "verified": True,
+                    "content_sha256": digest,
+                    "verified_at": "2026-09-24T12:34:56+00:00",
+                }
             ],
             verified_readback={
                 "source": "workflow_run",
+                "receipt_kind": "readback",
+                "effect_type": "readback",
                 "status": "succeeded",
                 "verified": True,
                 "workflow_run_id": workflow_run_id,
+                "readback_id": "artifact-projected-review",
                 "content_sha256": digest,
+                "verified_at": "2026-09-24T12:34:56+00:00",
             },
         )
         assert projected.task.status is WorkBoardStatus.review
         assert projected.attempt.ended_at is not None
         assert json.loads(projected.attempt.receipt_refs_json) == [
             {
+                "receipt_kind": "readback",
+                "effect_type": "readback",
                 "workflow_run_id": workflow_run_id,
+                "readback_id": "artifact-projected-review",
                 "content_sha256": digest,
                 "status": "succeeded",
                 "verified": True,
+                "verified_at": "2026-09-24T12:34:56+00:00",
                 "readback_status": "verified",
                 "verification_status": "passed",
             },
-            {"workflow_run_id": workflow_run_id, "status": "succeeded", "verified": True},
+            {
+                "receipt_kind": "readback",
+                "effect_type": "readback",
+                "workflow_run_id": workflow_run_id,
+                "readback_id": "artifact-projected-review",
+                "status": "succeeded",
+                "verified": True,
+                "content_sha256": digest,
+                "verified_at": "2026-09-24T12:34:56+00:00",
+            },
         ]
         await db.commit()
 
     async with async_db() as db:
         current = await repository.get_task(db, OWNER, task_id)
-        blocked = await repository.action_task(
-            db,
-            OWNER,
-            task_id,
-            WorkBoardActionRequest(
-                action=WorkBoardAction.block,
-                expected_revision=current.task_revision,
-                block_kind="operator",
-                reason="Reviewer requested a bounded retry of the review step",
-            ),
-        )
-        await db.commit()
-        assert blocked.task.status is WorkBoardStatus.blocked
-
-    async with async_db() as db:
-        current = await repository.get_task(db, OWNER, task_id)
-        recovered = await repository.action_task(
-            db,
-            OWNER,
-            task_id,
-            WorkBoardActionRequest(
-                action=WorkBoardAction.unblock,
-                expected_revision=current.task_revision,
-                resolution="The reviewed artifact remains valid.",
-            ),
-        )
-        assert recovered.task.status is WorkBoardStatus.review
-        assert recovered.task.task_revision == 4
+        with pytest.raises(BoardError) as raised:
+            await repository.action_task(
+                db,
+                OWNER,
+                task_id,
+                WorkBoardActionRequest(
+                    action=WorkBoardAction.block,
+                    expected_revision=current.task_revision,
+                    block_kind="operator",
+                    source_status=WorkBoardStatus.review,
+                    reason="Reviewer requested a bounded retry of the review step",
+                ),
+            )
+        assert raised.value.code == "review_typed_recovery_required"
+        assert current.status is WorkBoardStatus.review
 
 
 @pytest.mark.asyncio
@@ -652,6 +654,7 @@ async def test_generic_unblock_refuses_operator_block_with_existing_attempt(asyn
                 action=WorkBoardAction.block,
                 expected_revision=1,
                 block_kind="operator",
+                source_status=WorkBoardStatus.triage,
                 reason="Operator needs to revise the specification",
             ),
         )

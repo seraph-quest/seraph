@@ -5504,9 +5504,34 @@ async def _preview_repo_change_for_operator(
     *,
     work_board_task_id: str | None = None,
     work_board_attempt_id: str | None = None,
+    work_board_parent_handoff_context: list[dict[str, Any]] | None = None,
+    work_board_parent_handoff_digest: str | None = None,
 ):
     if (work_board_task_id is None) != (work_board_attempt_id is None):
         raise HTTPException(status_code=409, detail={"code": "work_board_binding_invalid"})
+    parent_handoff_context = list(work_board_parent_handoff_context or [])
+    parent_handoff_digest = str(work_board_parent_handoff_digest or "")
+    if parent_handoff_context:
+        encoded_handoffs = json.dumps(
+            parent_handoff_context,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if (
+            not work_board_task_id
+            or len(encoded_handoffs.encode("utf-8")) > 32_768
+            or hashlib.sha256(encoded_handoffs.encode("utf-8")).hexdigest() != parent_handoff_digest
+            or any(
+                not isinstance(item, dict)
+                or item.get("status") != "verified"
+                or item.get("child_task_id") != work_board_task_id
+                for item in parent_handoff_context
+            )
+        ):
+            raise HTTPException(status_code=409, detail={"code": "work_board_handoff_binding_invalid"})
+    elif parent_handoff_digest:
+        raise HTTPException(status_code=409, detail={"code": "work_board_handoff_binding_invalid"})
     principal_id = str(operator.principal.principal_id)
     idempotency_scope = "work-board-attempt" if work_board_task_id else "repo-change"
     idempotency_key = (
@@ -5538,6 +5563,11 @@ async def _preview_repo_change_for_operator(
                 status_code=409,
                 detail={"code": "repo_change_idempotency_conflict", "fields": immutable_conflicts},
             )
+        if authority.get("parent_handoff_digest") != (parent_handoff_digest or None):
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "repo_change_idempotency_conflict", "fields": ["parent_handoff_digest"]},
+            )
         # The idempotency row is authoritative.  Compare every execution
         # input before the recovery/preflight branch so a repeated key cannot
         # silently adopt a different repository, sandbox policy, or priority.
@@ -5558,6 +5588,7 @@ async def _preview_repo_change_for_operator(
             ("test_args", list(requested_test_args), authority.get("test_args")),
             ("priority", req.priority, existing.get("priority")),
             ("deadline_seconds", req.deadline_seconds, authority.get("deadline_seconds")),
+            ("parent_handoff_digest", parent_handoff_digest or None, authority.get("parent_handoff_digest")),
         ):
             if stored is not None and requested != stored:
                 immutable_conflicts.append(field)
@@ -5629,12 +5660,14 @@ async def _preview_repo_change_for_operator(
         "dossier_artifact_id": candidate_proof["dossier_artifact_id"],
         "dossier_sha256": candidate_proof["dossier_sha256"],
     }
+    if parent_handoff_context:
+        authority["parent_handoff_digest"] = parent_handoff_digest
     spec = DurableJobSpec(
         identity=DurableJobIdentity(
             job_id=job_id, owner_kind="user", owner_principal_id=principal_id, job_kind=_REPO_CHANGE_JOB_KIND,
             capability_version=_REPO_CHANGE_CAPABILITY_VERSION, idempotency_scope=idempotency_scope, idempotency_key=idempotency_key,
         ),
-        inputs={"base_digest": snapshot.digest, "patch_sha256": req.patch_sha256, "candidate_id": req.candidate_id, "repository_ref": repository_ref, "allowed_paths": list(allowed_paths), "test_args": list(test_args), **candidate_proof},
+        inputs={"base_digest": snapshot.digest, "patch_sha256": req.patch_sha256, "candidate_id": req.candidate_id, "repository_ref": repository_ref, "allowed_paths": list(allowed_paths), "test_args": list(test_args), **candidate_proof, **({"parent_handoff_context": parent_handoff_context, "parent_handoff_digest": parent_handoff_digest} if parent_handoff_context else {})},
         session_id=str(operator.session_id), operator_session_id=str(operator.session_id), goal_id=req.goal_id,
         goal_revision=req.goal_revision, candidate_id=req.candidate_id, priority=req.priority, declared_authority=authority,
         deadline_at=datetime.now(timezone.utc) + timedelta(seconds=_REPO_CHANGE_JOB_TTL_SECONDS), max_attempts=1,

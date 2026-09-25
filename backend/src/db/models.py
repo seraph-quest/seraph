@@ -550,6 +550,18 @@ class WorkBoardTask(SQLModel, table=True):
     block_source_status: Optional[str] = Field(default=None, index=True)
     requires_review: bool = Field(default=False, index=True)
     reviewer_id: Optional[str] = Field(default=None, index=True)
+    review_expires_at: Optional[datetime] = Field(default=None, index=True)
+    # A worker/operator request is an intent.  The dispatcher may project it
+    # to Review only after it rechecks the authoritative durable run and
+    # independent readback.  These fields bind the intent to one fenced
+    # attempt and one board revision so a late worker cannot promote a newer
+    # attempt.
+    review_request_attempt_id: Optional[str] = Field(default=None, index=True)
+    review_request_fence: Optional[int] = Field(default=None, index=True)
+    review_request_revision: Optional[int] = Field(default=None, index=True)
+    review_request_digest: Optional[str] = Field(default=None, index=True)
+    review_request_evidence_json: str = Field(default="[]")
+    review_requested_at: Optional[datetime] = Field(default=None, index=True)
     task_revision: int = Field(default=1, index=True)
     result_refs_json: str = Field(default="[]")
     artifact_refs_json: str = Field(default="[]")
@@ -591,9 +603,45 @@ class WorkBoardAttempt(SQLModel, table=True):
     ended_at: Optional[datetime] = Field(default=None, index=True)
     cancel_requested_at: Optional[datetime] = Field(default=None, index=True)
     outcome: Optional[str] = Field(default=None, index=True)
+    # Immutable, source-verified parent context captured at the fenced claim.
+    # Persisting it on the attempt keeps admission digests and restart recovery
+    # bound to the same handoffs even if a parent is archived later.
+    parent_handoff_context_json: str = Field(default="[]")
+    parent_handoff_digest: Optional[str] = Field(default=None)
     receipt_refs_json: str = Field(default="[]")
     created_at: datetime = Field(default_factory=_now, index=True)
     updated_at: datetime = Field(default_factory=_now, index=True)
+
+
+class WorkBoardReviewIntent(SQLModel, table=True):
+    """Immutable worker/operator request waiting for dispatcher verification."""
+
+    __tablename__ = "work_board_review_intents"
+    __table_args__ = (
+        Index(
+            "ux_work_board_review_intents_binding",
+            "owner_principal_id",
+            "owner_session_id",
+            "task_id",
+            "attempt_id",
+            "fencing_token",
+            "task_revision",
+            unique=True,
+        ),
+    )
+
+    intent_id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_principal_id: str = Field(index=True)
+    owner_session_id: str = Field(index=True)
+    task_id: str = Field(foreign_key="work_board_tasks.task_id", index=True)
+    attempt_id: str = Field(index=True)
+    workflow_run_id: str = Field(default="", index=True)
+    fencing_token: int = Field(default=0, index=True)
+    task_revision: int = Field(default=1, index=True)
+    request_digest: str = Field(default="", index=True)
+    evidence_refs_json: str = Field(default="[]")
+    status: str = Field(default="pending", index=True)
+    created_at: datetime = Field(default_factory=_now, index=True)
 
 
 class WorkBoardLink(SQLModel, table=True):
@@ -613,6 +661,7 @@ class WorkBoardLink(SQLModel, table=True):
     owner_session_id: str = Field(index=True)
     parent_task_id: str = Field(foreign_key="work_board_tasks.task_id", index=True)
     child_task_id: str = Field(foreign_key="work_board_tasks.task_id", index=True)
+    current_handoff_id: Optional[str] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=_now, index=True)
 
 
@@ -647,6 +696,95 @@ class WorkBoardEvent(SQLModel, table=True):
     actor_session_id: Optional[str] = Field(default=None, index=True)
     kind: str = Field(index=True)
     metadata_json: str = Field(default="{}")
+    created_at: datetime = Field(default_factory=_now, index=True)
+
+
+class WorkBoardProposal(SQLModel, table=True):
+    """Operator reviewed triage proposal staged before task creation.
+
+    Proposal rows are deliberately non-executable.  They bind the source task,
+    owner/session, revision and idempotency key so a retried inference request
+    can return the same pending/proposed record without creating board tasks or
+    spending a second remote request.
+    """
+
+    __tablename__ = "work_board_proposals"
+    __table_args__ = (
+        Index(
+            "ux_work_board_proposals_idempotency",
+            "owner_principal_id",
+            "owner_session_id",
+            "parent_task_id",
+            "parent_revision",
+            "kind",
+            "idempotency_key",
+            unique=True,
+        ),
+    )
+
+    proposal_id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_principal_id: str = Field(index=True)
+    owner_session_id: str = Field(index=True)
+    parent_task_id: str = Field(index=True)
+    parent_revision: int = Field(default=1, index=True)
+    goal_revision: int = Field(default=1, index=True)
+    kind: str = Field(index=True)
+    idempotency_key: str = Field(index=True)
+    # Complete immutable admission binding.  A retry may reuse the durable
+    # operation only when every field below still matches.
+    request_digest: str = Field(default="", index=True)
+    capability_id: str = Field(default="strategist_agent", index=True)
+    capability_version: str = Field(default="", index=True)
+    authority_digest: str = Field(default="", index=True)
+    grant_revision: int = Field(default=1, index=True)
+    input_digest: str = Field(default="", index=True)
+    route_id: str = Field(default="strategist_agent", index=True)
+    admission_job_id: str = Field(default_factory=_uuid, index=True, unique=True)
+    effect_id_digest: str = Field(default="", index=True)
+    provider_contact_started: bool = Field(default=False, index=True)
+    provider_contact_state: str = Field(default="not_started", index=True)
+    status: str = Field(default="pending_inference", index=True)
+    proposal_json: str = Field(default="{}")
+    proposal_digest: str = Field(default="", index=True)
+    estimated_cost: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    expires_at: datetime = Field(index=True)
+    revision: int = Field(default=1, index=True)
+
+
+class WorkBoardHandoff(SQLModel, table=True):
+    """Bounded persisted evidence handed from one completed task to a child."""
+
+    __tablename__ = "work_board_handoffs"
+    __table_args__ = (
+        Index(
+            "ux_work_board_handoffs_version",
+            "owner_principal_id",
+            "owner_session_id",
+            "parent_task_id",
+            "child_task_id",
+            "link_id",
+            "source_attempt_id",
+            "source_task_revision",
+            unique=True,
+        ),
+    )
+
+    handoff_id: str = Field(default_factory=_uuid, primary_key=True)
+    schema_version: str = Field(default="work_board_handoff.v1", index=True)
+    owner_principal_id: str = Field(index=True)
+    owner_session_id: str = Field(index=True)
+    parent_task_id: str = Field(foreign_key="work_board_tasks.task_id", index=True)
+    child_task_id: str = Field(foreign_key="work_board_tasks.task_id", index=True)
+    link_id: str = Field(foreign_key="work_board_links.link_id", index=True)
+    source_attempt_id: str = Field(index=True)
+    workflow_run_id: str = Field(index=True)
+    source_task_revision: int = Field(default=1, index=True)
+    summary: str = Field(default="", max_length=500)
+    artifact_refs_json: str = Field(default="[]")
+    result_refs_json: str = Field(default="[]")
+    verification_json: str = Field(default="{}")
+    risks_json: str = Field(default="[]")
     created_at: datetime = Field(default_factory=_now, index=True)
 
 

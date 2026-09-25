@@ -23,12 +23,16 @@ from src.db.models import (
 from src.vault import redaction as vault_redaction
 from src.work_board.contracts import (
     WorkBoardActionRequest,
+    WORK_BOARD_AUTHENTICATED_BLOCK_KINDS,
     WorkBoardCommentCreate,
     WorkBoardLinkCreate,
     WorkBoardLinkDelete,
     WorkBoardOwner,
     WorkBoardTaskCreate,
     WorkBoardTaskPatch,
+    WorkBoardProposalAccept,
+    WorkBoardProposalReject,
+    WorkBoardProposalRequest,
 )
 from src.work_board.repository import (
     BoardError,
@@ -48,6 +52,9 @@ from src.work_board.events import (
 )
 from src.goals.repository import deserialize_admission_budget
 from src.work_board.dispatcher import _dispatcher
+from src.work_board import review as review_service
+from src.work_board import triage as triage_service
+from src.work_board.time import serialize_utc_datetime
 
 
 router = APIRouter(prefix="/work-board")
@@ -65,6 +72,8 @@ _RECOVERY_ACTIONS = frozenset(
         "reconcile_external_effect",
         "reconcile_admission_binding",
         "restore_prerequisite",
+        "configure_goal_success_criterion",
+        "renew_review",
     }
 )
 
@@ -94,7 +103,13 @@ def _recovery_action(
     if status != WorkBoardStatus.blocked.value:
         return None
     if (
-        block_kind == "operator"
+        (
+            block_kind == "operator"
+            or (
+                block_kind == "dependency"
+                and task.block_reason == review_service._HANDOFF_RECONCILIATION_REASON
+            )
+        )
         and (latest_attempt is None or latest_attempt.ended_at is not None)
         and str(task.block_source_status or "")
         in {item.value for item in (WorkBoardStatus.triage, WorkBoardStatus.todo, WorkBoardStatus.ready, WorkBoardStatus.review)}
@@ -107,7 +122,18 @@ def _recovery_action(
     if block_kind == "needs_input":
         return "approve_existing_run"
     if block_kind == "capability":
+        # A pre-admission capability gate has no effect to reconcile. Once
+        # its prerequisite is restored, Retry re-runs the live gate before
+        # returning the card to Todo; no attempt or effect is replayed here.
+        if latest_attempt is None and attempt_count == 0:
+            return "retry"
         return "restore_prerequisite"
+    if block_kind == "review_expired":
+        return "renew_review"
+    if block_kind == "attempt_limit":
+        # Attempt exhaustion is a terminal recovery boundary for this card.
+        # Further work starts as a new linked task, so never expose retry.
+        return None
     if block_kind in {"transient", "cancelled"} and latest_attempt is not None:
         if latest_attempt.ended_at is None or attempt_count >= 2:
             return None
@@ -156,7 +182,7 @@ def _raise_board_error(exc: BoardError) -> None:
 
 def _json_value(value: Any) -> Any:
     if isinstance(value, datetime):
-        return value.isoformat()
+        return serialize_utc_datetime(value)
     if hasattr(value, "value"):
         return value.value
     return value
@@ -210,6 +236,7 @@ def _task_payload(
         "cancel_requested_at": _json_value(latest_attempt.cancel_requested_at) if latest_attempt is not None else None,
         "requires_review": task.requires_review,
         "reviewer_id": safe_board_identifier(task.reviewer_id, max_length=128),
+        "review_expires_at": _json_value(task.review_expires_at),
         "dependency_count": dependency_count,
         "completed_dependency_count": completed_dependency_count,
         "dispatch_rank": dispatch_rank,
@@ -273,9 +300,9 @@ async def _safe_task_payload(
                 exc.extra.get("recovery_action") or "restore_prerequisite"
             )
     elif payload.get("recovery_action") == "unblock":
-        # Generic unblock is only a live operator convenience for an
-        # owner-bound manual block.  Recheck the session, goal revision, and
-        # phase-specific Ready/Review evidence before advertising it.
+        # Generic unblock is only exposed for an owner-bound manual block or
+        # an exact verified-handoff recovery. Recheck the live session, goal,
+        # and reviewer boundary before advertising the action.
         try:
             await dispatcher.validate_unblock(
                 WorkBoardOwner(
@@ -334,11 +361,12 @@ def _safe_attempt_outcome(value: Any) -> str | None:
 
 def _attempt_payload(attempt: WorkBoardAttempt) -> dict[str, Any]:
     receipt_refs = _decode_json_list(attempt.receipt_refs_json)
-    verified = any(
-        isinstance(item, dict)
-        and bool(item.get("verified"))
-        and str(item.get("status") or "") in {"succeeded", "read_back", "reconciled"}
-        for item in receipt_refs
+    proof = review_service._verified_readback(attempt)
+    verified = bool(
+        proof
+        and proof.get("workflow_run_id") == str(attempt.workflow_run_id or "")
+        and proof.get("readback_id")
+        and proof.get("verified_at")
     )
     unresolved = any(
         isinstance(item, dict)
@@ -549,6 +577,11 @@ async def get_work_board_task(request: Request, task_id: str):
                 "children": detail["children"],
                 "comments": [await _safe_comment_payload(item) for item in detail["comments"]],
                 "events": [_event_payload(item) for item in detail["events"]],
+                "parent_handoffs": await review_service.parent_handoffs(
+                    db,
+                    _owner(operator),
+                    detail["task"],
+                ),
                 "revision": detail["task"].task_revision,
             }
     except BoardError as exc:
@@ -609,17 +642,64 @@ async def action_work_board_task(request: Request, task_id: str, body: WorkBoard
                 task_id,
                 expected_revision=body.expected_revision,
             )
-        elif body.action.value == "unblock":
-            # Run the live owner/goal/phase preflight before opening the
-            # repository transaction.  The repository remains the final CAS
-            # authority, so a stale preflight can only fail closed.
-            await dispatcher.validate_unblock(
-                owner,
-                task_id,
-                expected_revision=body.expected_revision,
-            )
         async with get_session() as db:
-            if body.action.value == "retry":
+            if body.action.value == "request_review":
+                mutation = await review_service.request_review(
+                    db,
+                    owner,
+                    task_id,
+                    expected_revision=body.expected_revision,
+                    attempt_id=body.attempt_id or "",
+                    evidence_refs=body.evidence_refs,
+                    repository=repository,
+                )
+            elif body.action.value == "request_changes":
+                mutation = await review_service.request_changes(
+                    db,
+                    owner,
+                    task_id,
+                    expected_revision=body.expected_revision,
+                    reason=body.reason or "",
+                    repository=repository,
+                )
+            elif body.action.value == "complete_review":
+                mutation = await review_service.complete_review(
+                    db,
+                    owner,
+                    task_id,
+                    expected_revision=body.expected_revision,
+                    attempt_id=body.attempt_id or "",
+                    repository=repository,
+                )
+            elif body.action.value == "renew_review":
+                mutation = await review_service.renew_review(
+                    db,
+                    owner,
+                    task_id,
+                    expected_revision=body.expected_revision,
+                    repository=repository,
+                )
+            elif body.action.value == "block" and body.block_kind not in WORK_BOARD_AUTHENTICATED_BLOCK_KINDS:
+                # Workflow/effect categories are written only after the
+                # authoritative runtime has reconciled them.  The
+                # authenticated generic action may record only bounded board
+                # recovery categories; repository.action_task repeats this
+                # check for direct callers and performs the revision/source
+                # status CAS.
+                raise HTTPException(
+                    status_code=422,
+                    detail={"code": "invalid_block_kind"},
+                )
+            elif body.action.value == "unblock":
+                mutation = await review_service.unblock_task(
+                    db,
+                    owner,
+                    task_id,
+                    expected_revision=body.expected_revision,
+                    resolution=body.resolution or "",
+                    repository=repository,
+                )
+            elif body.action.value == "retry":
                 mutation = await repository.retry_task(
                     db,
                     owner,
@@ -639,19 +719,145 @@ async def action_work_board_task(request: Request, task_id: str, body: WorkBoard
                     .limit(1)
                 )
             ).scalar_one_or_none()
-            task_payload = await _safe_task_payload(
-                mutation.task,
-                latest_attempt=latest_attempt,
-            )
-            payload = {
-                **_action_receipt_payload(
-                    task_payload,
-                    mutation.event,
-                    attempt_id=(latest_attempt.attempt_id if latest_attempt is not None else None),
-                ),
-                "task": task_payload,
-            }
+        # Recovery guidance performs fresh provider-free authority checks.
+        # Build this projection only after the mutation session commits so a
+        # manual Block response cannot validate the pre-mutation Todo state
+        # and incorrectly hide its new Unblock action.
+        task_payload = await _safe_task_payload(
+            mutation.task,
+            latest_attempt=latest_attempt,
+        )
+        payload = {
+            **_action_receipt_payload(
+                task_payload,
+                mutation.event,
+                attempt_id=(latest_attempt.attempt_id if latest_attempt is not None else None),
+            ),
+            "task": task_payload,
+        }
         return payload
+    except BoardError as exc:
+        _raise_board_error(exc)
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "board_storage_unavailable", "recovery": "Check the local database readiness receipt and retry."},
+        ) from exc
+
+
+@router.post("/tasks/{task_id}/specify")
+async def specify_work_board_task(
+    request: Request,
+    task_id: str,
+    body: WorkBoardProposalRequest,
+):
+    operator = _operator(request)
+    try:
+        return await triage_service.create_proposal(
+            _owner(operator),
+            task_id,
+            kind="specify",
+            request=body,
+            operator=operator,
+        )
+    except BoardError as exc:
+        _raise_board_error(exc)
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "board_storage_unavailable", "recovery": "Check the local database readiness receipt and retry."},
+        ) from exc
+
+
+@router.get("/tasks/{task_id}/proposals")
+async def list_work_board_proposals(
+    request: Request,
+    task_id: str,
+    kind: str | None = Query(default=None),
+):
+    operator = _operator(request)
+    try:
+        return {
+            "proposals": await triage_service.list_proposals(
+                _owner(operator),
+                task_id,
+                kind=kind,
+            )
+        }
+    except BoardError as exc:
+        _raise_board_error(exc)
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "board_storage_unavailable", "recovery": "Retry after the workspace database is ready."},
+        ) from exc
+
+
+@router.get("/proposals/{proposal_id}")
+async def get_work_board_proposal(request: Request, proposal_id: str):
+    operator = _operator(request)
+    try:
+        return await triage_service.get_proposal(_owner(operator), proposal_id)
+    except BoardError as exc:
+        _raise_board_error(exc)
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "board_storage_unavailable", "recovery": "Retry after the workspace database is ready."},
+        ) from exc
+
+
+@router.post("/tasks/{task_id}/decompose")
+async def decompose_work_board_task(
+    request: Request,
+    task_id: str,
+    body: WorkBoardProposalRequest,
+):
+    operator = _operator(request)
+    try:
+        return await triage_service.create_proposal(
+            _owner(operator),
+            task_id,
+            kind="decompose",
+            request=body,
+            operator=operator,
+        )
+    except BoardError as exc:
+        _raise_board_error(exc)
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "board_storage_unavailable", "recovery": "Check the local database readiness receipt and retry."},
+        ) from exc
+
+
+@router.post("/proposals/{proposal_id}/accept")
+async def accept_work_board_proposal(
+    request: Request,
+    proposal_id: str,
+    body: WorkBoardProposalAccept,
+):
+    operator = _operator(request)
+    try:
+        return await triage_service.accept_proposal(_owner(operator), proposal_id, body)
+    except BoardError as exc:
+        _raise_board_error(exc)
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "board_storage_unavailable", "recovery": "Check the local database readiness receipt and retry."},
+        ) from exc
+
+
+@router.post("/proposals/{proposal_id}/reject")
+async def reject_work_board_proposal(
+    request: Request,
+    proposal_id: str,
+    body: WorkBoardProposalReject,
+):
+    operator = _operator(request)
+    try:
+        return await triage_service.reject_proposal(_owner(operator), proposal_id, body)
     except BoardError as exc:
         _raise_board_error(exc)
     except SQLAlchemyError as exc:

@@ -14,6 +14,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from functools import partial
 import hashlib
+import json
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import stat
 from typing import Any, Callable, Literal, Protocol
@@ -284,6 +285,7 @@ class _Readback:
     content_sha256: str | None
     content: bytes | None
     reason: str = ""
+    verified_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -443,6 +445,8 @@ class GoalSnapshotToFileAdapter:
         authority_approval: ApprovalBinding | None = None,
         work_board_task_id: str | None = None,
         work_board_attempt_id: str | None = None,
+        work_board_parent_handoff_context: list[dict[str, Any]] | None = None,
+        work_board_parent_handoff_digest: str | None = None,
         clock: Callable[[], datetime] = _now,
     ) -> None:
         self.request = request
@@ -457,6 +461,30 @@ class GoalSnapshotToFileAdapter:
         self.work_board_attempt_id = _text(work_board_attempt_id) or None
         if (self.work_board_task_id is None) != (self.work_board_attempt_id is None):
             raise ValueError("work-board task and attempt identity must be supplied together")
+        self.work_board_parent_handoff_context = list(work_board_parent_handoff_context or [])
+        encoded_handoffs = json.dumps(
+            self.work_board_parent_handoff_context,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if len(encoded_handoffs.encode("utf-8")) > 32_768:
+            raise ValueError("work-board parent handoff context exceeds its bounded limit")
+        self.work_board_parent_handoff_digest = _text(work_board_parent_handoff_digest) or None
+        if self.work_board_parent_handoff_context:
+            if (
+                self.work_board_task_id is None
+                or self.work_board_parent_handoff_digest != _safe_digest(self.work_board_parent_handoff_context)
+                or any(
+                    not isinstance(item, dict)
+                    or item.get("status") != "verified"
+                    or item.get("child_task_id") != self.work_board_task_id
+                    for item in self.work_board_parent_handoff_context
+                )
+            ):
+                raise ValueError("work-board parent handoff binding is invalid")
+        elif self.work_board_parent_handoff_digest is not None:
+            raise ValueError("empty work-board parent handoff context cannot carry a digest")
         self.clock = clock
         self.last_receipt: dict[str, Any] | None = None
         self._resolved_workflow_binding: dict[str, Any] | None = None
@@ -498,7 +526,11 @@ class GoalSnapshotToFileAdapter:
         return "goal_snapshot"
 
     def _workflow_inputs(self, path: str) -> dict[str, Any]:
-        return {"file_path": path}
+        inputs: dict[str, Any] = {"file_path": path}
+        if self.work_board_parent_handoff_context:
+            inputs["parent_handoff_context"] = self.work_board_parent_handoff_context
+            inputs["parent_handoff_digest"] = self.work_board_parent_handoff_digest
+        return inputs
 
     def _board_attempt_identity(self) -> tuple[str, str] | None:
         """Return the server-only board task/attempt identity, if present.
@@ -1784,6 +1816,8 @@ class GoalSnapshotToFileAdapter:
             effect_id=workflow_effect_id,
             effect_type="workflow_invocation",
             target_digest=workflow_target_digest,
+            readback_id=artifact_id,
+            verified_at=readback.verified_at,
         )
         if readback_receipt is None:
             return await self._block_job(
@@ -2030,7 +2064,7 @@ class GoalSnapshotToFileAdapter:
             goal_id_read_back = goal_id.encode("utf-8") in content
             if not goal_id_read_back:
                 return _Readback(True, True, False, digest, content, "goal_id_missing_from_output")
-            return _Readback(True, True, True, digest, content)
+            return _Readback(True, True, True, digest, content, verified_at=_now().isoformat())
         except (OSError, ValueError) as exc:
             return _Readback(False, False, False, None, None, f"output_readback_failed:{type(exc).__name__}")
 
@@ -2147,6 +2181,7 @@ class GoalSnapshotToFileAdapter:
                 and readback.content is not None
             ),
         }
+        readback_kwargs = dict(kwargs)
         try:
             if hasattr(self.jobs, "record_readback"):
                 result = await self.jobs.record_readback(
@@ -2155,7 +2190,7 @@ class GoalSnapshotToFileAdapter:
                     status="succeeded" if readback.goal_id_read_back else "failed",
                     content_sha256=readback.content_sha256,
                     details=details,
-                    **kwargs,
+                    **readback_kwargs,
                 )
             else:
                 result = await self.jobs.record_effect(
@@ -2166,7 +2201,7 @@ class GoalSnapshotToFileAdapter:
                     status="succeeded" if readback.goal_id_read_back else "failed",
                     content_sha256=readback.content_sha256,
                     details=details,
-                    **kwargs,
+                    **readback_kwargs,
                 )
             self._remember_projection(result, job_id=job_id)
             return result
@@ -2575,6 +2610,8 @@ class GoalSnapshotToFileService:
         *,
         work_board_task_id: str | None = None,
         work_board_attempt_id: str | None = None,
+        work_board_parent_handoff_context: list[dict[str, Any]] | None = None,
+        work_board_parent_handoff_digest: str | None = None,
     ) -> GoalSnapshotToFileResult:
         request = request if isinstance(request, self.request_model) else self.request_model.model_validate(request)
         if (work_board_task_id is None) != (work_board_attempt_id is None):
@@ -2596,6 +2633,8 @@ class GoalSnapshotToFileService:
             authority_approval=self.authority_approval,
             work_board_task_id=work_board_task_id,
             work_board_attempt_id=work_board_attempt_id,
+            work_board_parent_handoff_context=work_board_parent_handoff_context,
+            work_board_parent_handoff_digest=work_board_parent_handoff_digest,
         )
         outcome = await self.dispatcher(candidate, adapter=adapter)
         if not isinstance(outcome, GoalOutcomeReceipt):

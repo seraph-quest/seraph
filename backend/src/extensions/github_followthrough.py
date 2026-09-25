@@ -1055,10 +1055,32 @@ class GitHubFollowthroughService:
         owner_session_id: str,
         external_mutation_granted: bool = False,
         work_board_idempotency_key: str | None = None,
+        work_board_task_id: str | None = None,
+        work_board_parent_handoff_context: list[dict[str, Any]] | None = None,
+        work_board_parent_handoff_digest: str | None = None,
         request: PrepareRequest,
     ) -> dict[str, Any]:
         if work_board_idempotency_key is not None and not str(work_board_idempotency_key).strip():
             raise GitHubFollowthroughError("work_board_binding_invalid", status_code=409)
+        parent_handoff_context = list(work_board_parent_handoff_context or [])
+        parent_handoff_digest = _text(work_board_parent_handoff_digest)
+        if parent_handoff_context:
+            encoded_handoffs = _dump(parent_handoff_context)
+            if (
+                work_board_idempotency_key is None
+                or not work_board_task_id
+                or len(encoded_handoffs.encode("utf-8")) > 32_768
+                or _sha(encoded_handoffs) != parent_handoff_digest
+                or any(
+                    not isinstance(item, dict)
+                    or item.get("status") != "verified"
+                    or item.get("child_task_id") != work_board_task_id
+                    for item in parent_handoff_context
+                )
+            ):
+                raise GitHubFollowthroughError("work_board_handoff_binding_invalid", status_code=409)
+        elif parent_handoff_digest:
+            raise GitHubFollowthroughError("work_board_handoff_binding_invalid", status_code=409)
         await _require_live_owner_session(
             owner_principal_id=owner_principal_id,
             owner_session_id=owner_session_id,
@@ -1115,6 +1137,9 @@ class GitHubFollowthroughService:
             "goal_revision": int(goal.revision),
             "plan_revision": int(watch.plan_revision),
         }
+        if parent_handoff_context:
+            input_fields["parent_handoff_context"] = parent_handoff_context
+            input_fields["parent_handoff_digest"] = parent_handoff_digest
         input_digest = _sha(_dump(input_fields))
         job_id = f"ghfollow_{operation_id.hex}"
         existing = await durable_job_repository.get_job(job_id)
@@ -1161,6 +1186,8 @@ class GitHubFollowthroughService:
             "dossier_sha256": request.dossier_sha256,
             "budget_microusd": 0,
         }
+        if parent_handoff_context:
+            authority["parent_handoff_digest"] = parent_handoff_digest
         admitted = await durable_job_repository.admit_job(
             DurableJobSpec(
                 identity=DurableJobIdentity(

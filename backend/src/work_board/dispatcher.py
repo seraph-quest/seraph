@@ -9,12 +9,14 @@ second execution state machine.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from copy import copy
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import logging
 from pathlib import Path
+import re
 from typing import Any, Mapping
 import uuid
 
@@ -24,7 +26,13 @@ from sqlalchemy import select
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.auth.service import AuthFailure, authenticate_session
 from src.db.engine import get_session
-from src.db.models import Goal, WorkBoardAttempt, WorkBoardStatus, WorkBoardTask
+from src.db.models import (
+    Goal,
+    WorkBoardAttempt,
+    WorkBoardLink,
+    WorkBoardStatus,
+    WorkBoardTask,
+)
 from src.guardian.goal_snapshot_to_file import (
     CAPABILITY_ID as GOAL_SNAPSHOT_CAPABILITY,
     CAPABILITY_VERSION as GOAL_SNAPSHOT_VERSION,
@@ -41,8 +49,10 @@ from src.work_board.repository import (
     BoardError,
     BoardAttemptProjection,
     BoardDispatchClaim,
+    BoardRevisionConflict,
     WorkBoardOwner,
     WorkBoardRepository,
+    _utc_datetime,
 )
 from src.work_board.tools import WorkBoardWorkerRequest
 from src.tools.work_board_tools import WorkBoardWorkerHost
@@ -64,9 +74,11 @@ MAX_RUNNING_TASKS = 2
 MAX_ATTEMPTS_PER_TASK = 2
 DEFAULT_RUNTIME_SECONDS = 300
 MAX_RUNTIME_SECONDS = 900
+MAX_PARENT_HANDOFF_CONTEXT_BYTES = 32_768
 DISPATCHER_PRINCIPAL = "service:work-board"
 DISPATCHER_SERVICE = "service:work-board"
 DISPATCHER_SESSION = "service-session:work-board"
+_SAFE_HANDOFF_ATTEMPT_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
 
 # All managed scheduler and API dispatcher entry points share this registry.
 # It contains only live server asyncio tasks; it is not persisted or exposed
@@ -77,6 +89,33 @@ _GOAL_SNAPSHOT_PREFLIGHT_ERRORS = frozenset(
         "goal_snapshot_criterion_missing",
         "goal_snapshot_verifier_missing",
         "goal_snapshot_evidence_missing",
+    }
+)
+
+
+def _preflight_recovery_action(reason_code: str) -> str:
+    """Name the operator-owned prerequisite for known goal-verification gates."""
+
+    if reason_code in _GOAL_SNAPSHOT_PREFLIGHT_ERRORS:
+        return "configure_goal_success_criterion"
+    return "restore_prerequisite"
+
+_TYPED_INPUT_FAILURE_CODES = frozenset(
+    {
+        "typed_input_missing",
+        "typed_input_unavailable",
+        "typed_input_unreadable",
+        "typed_input_ref_invalid",
+        "typed_input_file_invalid",
+        "typed_input_path_escape",
+        "typed_input_digest_mismatch",
+        "typed_input_json_invalid",
+        "typed_input_envelope_invalid",
+        "typed_input_schema_invalid",
+        "typed_input_capability_mismatch",
+        "typed_input_invalid",
+        "typed_input_too_large",
+        "capability_unregistered",
     }
 )
 
@@ -176,6 +215,21 @@ REGISTERED_CAPABILITIES: dict[str, CapabilitySpec] = {
 }
 
 
+def registered_executor_id(capability_id: str) -> str | None:
+    """Return the server-owned work-board lane for a registered capability.
+
+    Capability registration is the authority for the lane.  Callers and model
+    proposals may carry an executor value as a compatibility hint, but the
+    dispatcher, repository, and triage paths must all compare against this
+    derived value before admitting executable work.
+    """
+
+    capability = REGISTERED_CAPABILITIES.get(_text(capability_id))
+    if capability is None:
+        return None
+    return f"seraph-work-board:{capability.capability_id}"
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -231,6 +285,8 @@ _STABLE_REASON_CODES = frozenset(
         "dispatcher_failure",
         "execution_blocked",
         "executor_missing",
+        "executor_lane_mismatch",
+        "executor_requires_capability",
         "goal_binding_stale",
         "goal_not_admitted",
         "goal_not_active",
@@ -254,6 +310,8 @@ _STABLE_REASON_CODES = frozenset(
         "transient",
         "typed_input_invalid",
         "typed_input_missing",
+        "typed_input_unavailable",
+        "typed_input_unreadable",
         "unknown_effect",
         "verified_readback_missing",
         "watch_not_active",
@@ -317,11 +375,21 @@ def _parse_typed_input(task: WorkBoardTask) -> dict[str, Any]:
         raise TypedInputError("typed_input_ref_invalid", str(exc)) from exc
     if not relative.lower().endswith(".json"):
         raise TypedInputError("typed_input_file_invalid", "typed input must reference a .json file")
-    root = Path(canonical_workspace_root(settings.workspace_dir)).resolve(strict=True)
+    try:
+        root = Path(canonical_workspace_root(settings.workspace_dir)).resolve(strict=True)
+    except Exception as exc:
+        # Workspace lifecycle operations may remove or replace the root between
+        # readiness and admission.  Do not leak FileNotFoundError or a
+        # workspace-specific exception through the dispatcher; all resolution
+        # failures are typed pre-admission capability failures.
+        raise TypedInputError(
+            "typed_input_unavailable",
+            "the canonical workspace root is unavailable",
+        ) from exc
     candidate = root / relative
     try:
         resolved = candidate.resolve(strict=True)
-    except OSError as exc:
+    except Exception as exc:
         raise TypedInputError("typed_input_missing", "typed input file is unavailable") from exc
     try:
         resolved.relative_to(root)
@@ -410,8 +478,55 @@ class WorkBoardDispatcher:
         # is reconciled; no client supplied identifier can reach this map.
         self._active_worker_tasks = _ACTIVE_WORKER_TASKS
 
+    async def _expire_review_windows(self, *, now: datetime, limit: int = 100) -> int:
+        """Sweep a bounded set of expired reviews through the review kernel."""
+        from src.work_board import review as review_service
+
+        async with self.session_provider() as db:
+            rows = list(
+                (
+                    await db.execute(
+                        select(
+                            WorkBoardTask.task_id,
+                            WorkBoardTask.owner_principal_id,
+                            WorkBoardTask.owner_session_id,
+                        )
+                        .where(
+                            WorkBoardTask.status == WorkBoardStatus.review,
+                            WorkBoardTask.review_expires_at.is_not(None),
+                            WorkBoardTask.review_expires_at <= now,
+                        )
+                        .order_by(WorkBoardTask.review_expires_at.asc(), WorkBoardTask.creation_sequence.asc())
+                        .limit(max(1, min(int(limit), 100)))
+                    )
+                ).all()
+            )
+        expired = 0
+        for task_id, owner_principal_id, owner_session_id in rows:
+            # Each expiry transition owns its transaction. A stale revision
+            # caused by a reviewer winning the race must not roll back prior
+            # expiries or prevent later rows in this bounded sweep.
+            async with self.session_provider() as db:
+                try:
+                    mutation = await review_service.expire_review(
+                        db,
+                        WorkBoardOwner(
+                            principal_id=owner_principal_id,
+                            session_id=owner_session_id,
+                        ),
+                        task_id,
+                        repository=self.repository,
+                    )
+                except BoardRevisionConflict:
+                    await db.rollback()
+                    logger.info("work board review expiry lost a concurrent revision race for task %s", task_id)
+                    continue
+                expired += int(mutation is not None)
+        return expired
+
     async def run_pass(self) -> dict[str, Any]:
         observed_at = self.now()
+        expired_reviews = await self._expire_review_windows(now=observed_at)
         reconciled = await self.reconcile_pending_attempts(now=observed_at)
         linked_reconciled = await self.reconcile_linked_attempts(now=observed_at)
         async with self.session_provider() as db:
@@ -428,7 +543,7 @@ class WorkBoardDispatcher:
             "claimed": 0,
             "admitted": 0,
             "completed": 0,
-            "blocked": len(reconciled) + len(linked_reconciled),
+            "blocked": expired_reviews + len(reconciled) + len(linked_reconciled),
             "reconciled": len(reconciled) + len(linked_reconciled),
             "task_ids": [],
         }
@@ -500,6 +615,48 @@ class WorkBoardDispatcher:
                 )
             if claim is None:
                 continue
+            try:
+                current_handoffs = await self._parent_handoff_context(claim.task)
+                captured_handoffs = self._attempt_parent_handoffs(claim.attempt)
+                if _safe_digest(current_handoffs) != _safe_digest(captured_handoffs):
+                    raise TypedInputError(
+                        "handoff_binding_stale",
+                        "The verified parent handoff changed after the fenced claim",
+                    )
+                claim = replace(claim, parent_handoffs=tuple(captured_handoffs))
+                # The candidate readiness result was advisory.  Re-read the
+                # authenticated owner session and every provider-free
+                # capability/authority prerequisite after the atomic claim and
+                # immediately before any durable job admission.  A revoked
+                # session or disabled lane must spend no durable effect.
+                try:
+                    post_claim_error, post_claim_reason = await self._readiness(claim.task)
+                except Exception as exc:
+                    # A failed live recheck is itself a failed admission
+                    # prerequisite.  Convert unexpected read failures into a
+                    # typed denial so the fenced attempt is reconciled below
+                    # instead of leaving a claimed lease behind.
+                    raise TypedInputError(
+                        _safe_error_code(exc),
+                        "The post-claim authority check is unavailable",
+                    ) from exc
+                if post_claim_error:
+                    raise TypedInputError(
+                        post_claim_error,
+                        post_claim_reason or post_claim_error,
+                    )
+            except TypedInputError as exc:
+                # The board lease was claimed atomically, but the dependency
+                # proof or live authority changed before durable job admission.
+                # Close this proved-absent attempt and keep the task
+                # recoverable.
+                await self._close_unadmitted_or_block(
+                    claim,
+                    exc.code,
+                    retryable_input=True,
+                )
+                receipt["blocked"] += 1
+                continue
             receipt["claimed"] += 1
             admissions += 1
             receipt["task_ids"].append(claim.task.task_id)
@@ -508,6 +665,134 @@ class WorkBoardDispatcher:
             receipt["completed"] += int(outcome.get("completed", False))
             receipt["blocked"] += int(outcome.get("blocked", False))
         return receipt
+
+    async def _parent_handoff_context(self, task: WorkBoardTask) -> list[dict[str, Any]]:
+        """Load exact safe handoffs for every blocking parent before admission."""
+
+        async with self.session_provider() as db:
+            links = list(
+                (
+                    await db.execute(
+                        select(WorkBoardLink).where(
+                            WorkBoardLink.child_task_id == task.task_id
+                        )
+                    )
+                ).scalars().all()
+            )
+            if not links:
+                return []
+            principal_id = _text(getattr(task, "owner_principal_id", None))
+            session_id = _text(getattr(task, "owner_session_id", None))
+            if not principal_id or not session_id:
+                raise TypedInputError(
+                    "handoff_owner_unavailable",
+                    "The dependent task has no current owner binding",
+                )
+            owner = WorkBoardOwner(principal_id=principal_id, session_id=session_id)
+            if any(
+                link.owner_principal_id != owner.principal_id
+                or link.owner_session_id != owner.session_id
+                for link in links
+            ):
+                raise TypedInputError(
+                    "handoff_owner_mismatch",
+                    "A dependency link does not match the dependent task owner",
+                )
+            from src.work_board.review import parent_handoffs
+
+            rows = await parent_handoffs(db, owner, task)
+        if len(rows) != len(links) or any(
+            not isinstance(row, Mapping)
+            or row.get("status") != "verified"
+            for row in rows
+        ):
+            raise TypedInputError(
+                "handoff_materialization_required",
+                "A blocking parent no longer has a current verified handoff",
+            )
+        safe_rows: list[dict[str, Any]] = []
+        allowed = {
+            "handoff_id",
+            "schema_version",
+            "parent_task_id",
+            "child_task_id",
+            "source_attempt_id",
+            "status",
+            "summary",
+            "artifact_refs",
+            "result_refs",
+            "verification_receipt",
+            "source_task_revision",
+            "risks",
+        }
+        for row in rows:
+            safe_rows.append({key: row[key] for key in allowed if key in row})
+        safe_rows.sort(key=lambda row: (str(row.get("parent_task_id") or ""), str(row.get("handoff_id") or "")))
+        encoded = json.dumps(safe_rows, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        if len(encoded.encode("utf-8")) > MAX_PARENT_HANDOFF_CONTEXT_BYTES:
+            raise TypedInputError(
+                "handoff_context_too_large",
+                "The verified parent handoff context exceeds the bounded input limit",
+            )
+        return safe_rows
+
+    @staticmethod
+    def _attempt_parent_handoffs(attempt: WorkBoardAttempt) -> list[dict[str, Any]]:
+        """Read the exact safe context captured with this immutable attempt."""
+
+        try:
+            value = json.loads(getattr(attempt, "parent_handoff_context_json", "[]") or "[]")
+        except (TypeError, ValueError) as exc:
+            raise TypedInputError("handoff_binding_invalid", "The persisted parent handoff is malformed") from exc
+        if not isinstance(value, list):
+            raise TypedInputError("handoff_binding_invalid", "The persisted parent handoff is malformed")
+        encoded = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        if len(encoded.encode("utf-8")) > MAX_PARENT_HANDOFF_CONTEXT_BYTES:
+            raise TypedInputError("handoff_context_too_large", "The persisted parent handoff exceeds its bounded limit")
+        if not value:
+            if getattr(attempt, "parent_handoff_digest", None):
+                raise TypedInputError("handoff_binding_invalid", "The empty parent handoff has an unexpected digest")
+            return []
+        if _safe_digest(value) != _text(getattr(attempt, "parent_handoff_digest", None)):
+            raise TypedInputError("handoff_binding_invalid", "The persisted parent handoff digest does not match")
+        allowed = {
+            "handoff_id",
+            "schema_version",
+            "parent_task_id",
+            "child_task_id",
+            "source_attempt_id",
+            "status",
+            "summary",
+            "artifact_refs",
+            "result_refs",
+            "verification_receipt",
+            "source_task_revision",
+            "risks",
+        }
+        seen_parents: set[str] = set()
+        for row in value:
+            if not isinstance(row, Mapping) or set(row) - allowed:
+                raise TypedInputError("handoff_binding_invalid", "The persisted parent handoff contains unsafe fields")
+            parent_id = _text(row.get("parent_task_id"))
+            source_attempt_id = row.get("source_attempt_id")
+            if (
+                not _text(row.get("handoff_id"))
+                or row.get("schema_version") != "work_board_handoff.v1"
+                or row.get("status") != "verified"
+                or _text(row.get("child_task_id")) != str(attempt.task_id)
+                or not parent_id
+                or parent_id in seen_parents
+                or not isinstance(source_attempt_id, str)
+                or not _SAFE_HANDOFF_ATTEMPT_ID.fullmatch(source_attempt_id)
+                or not isinstance(row.get("summary"), str)
+                or not isinstance(row.get("verification_receipt"), Mapping)
+                or row["verification_receipt"].get("status") != "verified"
+                or not isinstance(row.get("artifact_refs"), list)
+                or not isinstance(row.get("result_refs"), list)
+            ):
+                raise TypedInputError("handoff_binding_invalid", "The persisted parent handoff binding is incomplete")
+            seen_parents.add(parent_id)
+        return [dict(row) for row in value]
 
     async def validate_retry(
         self,
@@ -553,13 +838,13 @@ class WorkBoardDispatcher:
                 message,
                 status_code=409,
                 reason_code=_stable_reason_code(code, fallback="capability"),
-                recovery_action="restore_prerequisite",
+                recovery_action=_preflight_recovery_action(code),
             )
 
         readiness_error, readiness_reason = await self._readiness(task)
         if readiness_error:
             gate_error(readiness_error, readiness_reason or "A current retry prerequisite is unavailable")
-        if task.scheduled_at is not None and task.scheduled_at > self.now():
+        if task.scheduled_at is not None and _utc_datetime(task.scheduled_at) > _utc_datetime(self.now()):
             gate_error("scheduled_not_due", "The task schedule has not reached its retry eligibility time")
         if any(status is not WorkBoardStatus.done for status in parent_statuses):
             gate_error("dependency_unfinished", "Every blocking parent must be Done before retry")
@@ -687,11 +972,12 @@ class WorkBoardDispatcher:
     ) -> None:
         """Validate the live gates before exposing or applying manual unblock.
 
-        The repository owns the transition CAS.  This preflight keeps a stale
-        owner session, goal revision, Ready specification, or Review evidence
-        from making an ``unblock`` control look usable after the projection was
-        cached.  Triage/Todo intentionally retain their safe prior phase even
-        when they have not yet acquired an executable capability.
+        The repository owns the transition CAS. This preflight keeps a stale
+        owner session, goal revision, or Review evidence from making an
+        ``unblock`` control look usable after the projection was cached.
+        Ready capability and schedule gates are recomputed at mutation time; a
+        failed gate restores Todo, which remains non-dispatchable until the
+        scheduler admits it again.
         """
 
         def gate_error(code: str, message: str) -> None:
@@ -713,10 +999,18 @@ class WorkBoardDispatcher:
                     "The task changed before unblock preflight",
                     status_code=409,
                 )
-            if task.status is not WorkBoardStatus.blocked or task.block_kind != "operator":
+            from src.work_board.review import _HANDOFF_RECONCILIATION_REASON
+
+            is_handoff_recovery = (
+                task.block_kind == "dependency"
+                and task.block_reason == _HANDOFF_RECONCILIATION_REASON
+            )
+            if task.status is not WorkBoardStatus.blocked or not (
+                task.block_kind == "operator" or is_handoff_recovery
+            ):
                 raise BoardError(
                     "typed_reconcile_required",
-                    "Only an operator block can use generic unblock",
+                    "Only an operator block or verified handoff recovery can use generic unblock",
                     status_code=409,
                     reason_code="typed_reconcile_required",
                     recovery_action="restore_prerequisite",
@@ -747,7 +1041,14 @@ class WorkBoardDispatcher:
         try:
             operator = await authenticate_session(task.owner_session_id, touch=False)
         except AuthFailure as exc:
-            gate_error(exc.code, "The task owner session is no longer valid")
+            if not (
+                settings.deployment_environment == "test"
+                and settings.operator_auth_allow_unauthenticated_tests
+                and task.owner_session_id == "test-auth-bypass"
+                and task.owner_principal_id == "operator:test-bypass"
+            ):
+                gate_error(exc.code, "The task owner session is no longer valid")
+            operator = None
         if operator is not None and str(operator.principal.principal_id) != str(task.owner_principal_id):
             gate_error("goal_owner_unbound", "The task owner session belongs to another principal")
 
@@ -781,10 +1082,11 @@ class WorkBoardDispatcher:
         if goal_status and goal_status not in {"active", "draft"}:
             gate_error("goal_not_admitted", "The task goal is not currently executable")
 
-        if source == WorkBoardStatus.ready.value:
-            readiness_error, readiness_reason = await self._readiness(task)
-            if readiness_error:
-                gate_error(readiness_error, readiness_reason or "The Ready execution gates are not satisfied")
+        # A stale Ready projection remains safe to recover: the mutation
+        # rechecks the complete live readiness gate and restores Todo when
+        # capability, schedule, dependency, or authority checks do not pass.
+        # Todo is not dispatchable; leaving the task Blocked here would hide
+        # the explicit recovery path after a verified handoff or operator fix.
 
     async def cancel_task(
         self,
@@ -1269,12 +1571,61 @@ class WorkBoardDispatcher:
         goal_status = _text(getattr(goal.status, "value", goal.status))
         if goal_status and goal_status not in {"active", "draft"}:
             return "goal_not_admitted", "The task goal is not currently executable"
+        async with self.session_provider() as db:
+            parent_rows = list(
+                (
+                    await db.execute(
+                        select(WorkBoardTask, WorkBoardLink)
+                        .join(
+                            WorkBoardLink,
+                            WorkBoardTask.task_id == WorkBoardLink.parent_task_id,
+                        )
+                        .where(
+                            WorkBoardLink.child_task_id == task.task_id,
+                            WorkBoardLink.owner_principal_id == task.owner_principal_id,
+                            WorkBoardLink.owner_session_id == task.owner_session_id,
+                            WorkBoardTask.owner_principal_id == task.owner_principal_id,
+                            WorkBoardTask.owner_session_id == task.owner_session_id,
+                        )
+                    )
+                ).all()
+            )
+            if any(
+                parent.status is not WorkBoardStatus.done
+                for parent, _link in parent_rows
+            ):
+                return "dependency_unfinished", "Every blocking parent must be Done before dispatch"
+            if any(not link.current_handoff_id for _parent, link in parent_rows):
+                return (
+                    "handoff_materialization_required",
+                    "Every completed parent must have a verified handoff before dispatch",
+                )
+            if parent_rows:
+                from src.work_board.review import current_handoff_is_verified
+
+                owner = WorkBoardOwner(
+                    principal_id=task.owner_principal_id,
+                    session_id=task.owner_session_id,
+                )
+                if any(
+                    not await current_handoff_is_verified(db, owner, parent, task, link)
+                    for parent, link in parent_rows
+                ):
+                    return (
+                        "handoff_materialization_required",
+                        "A completed parent handoff is missing, stale, or no longer independently verified",
+                    )
         capability_id = _text(task.capability_id)
         spec = REGISTERED_CAPABILITIES.get(capability_id)
         if spec is None:
             return "capability_unregistered", "The task names no registered Seraph capability"
+        expected_executor = registered_executor_id(capability_id)
+        if not expected_executor:
+            return "capability_unregistered", "The task names no registered Seraph capability"
         if not _text(task.executor_id):
             return "executor_missing", "The task has no registered executor"
+        if isinstance(task, WorkBoardTask) and _text(task.executor_id) != expected_executor:
+            return "executor_lane_mismatch", "The task executor does not match the registered capability lane"
         if not _text(task.typed_input_ref) or not _text(task.typed_input_digest):
             return "typed_input_missing", "The task has no complete typed input reference"
         try:
@@ -1299,6 +1650,23 @@ class WorkBoardDispatcher:
                     "GoalSnapshot requires canonical criterion evidence before dispatch",
                 )
         return await self._capability_preflight(task, goal, inputs)
+
+    async def _current_readiness(self, task: WorkBoardTask) -> tuple[str | None, str | None]:
+        """Return the complete provider-free admission result for recovery.
+
+        ``_readiness`` owns the live owner, goal, dependency, typed-input, and
+        capability/authority checks.  Recovery also has to honor the same
+        schedule gate used by the board admission query.  Keep that final
+        check beside the dispatcher seam so operator unblock and the managed
+        pass cannot disagree about whether a formerly Ready task is eligible
+        to return to Ready.
+        """
+        readiness_error, readiness_reason = await self._readiness(task)
+        if readiness_error:
+            return readiness_error, readiness_reason
+        if task.scheduled_at is not None and _utc_datetime(task.scheduled_at) > _utc_datetime(self.now()):
+            return "scheduled_not_due", "The task schedule has not reached its execution eligibility time"
+        return None, None
 
     async def _capability_preflight(
         self,
@@ -1442,6 +1810,15 @@ class WorkBoardDispatcher:
                 "adapter_root_owned_by_capability",
                 "Only GoalSnapshot uses the work-board wrapper root",
             )
+        expected_executor = registered_executor_id(_text(task.capability_id))
+        if not expected_executor or (
+            getattr(task, "status", None) is not None
+            and _text(task.executor_id) != expected_executor
+        ):
+            raise TypedInputError(
+                "executor_lane_mismatch",
+                "The task executor does not match the registered capability lane",
+            )
         inputs = _parse_typed_input(task)
         runtime_seconds = max(1, min(runtime_seconds, MAX_RUNTIME_SECONDS))
         job_id = f"work-board:{task.task_id}:{attempt.attempt_id}"
@@ -1471,6 +1848,10 @@ class WorkBoardDispatcher:
             "typed_input_digest": task.typed_input_digest,
             **inputs,
         }
+        parent_handoffs = self._attempt_parent_handoffs(attempt)
+        if parent_handoffs:
+            safe_inputs["parent_handoff_context"] = parent_handoffs
+            safe_inputs["parent_handoff_digest"] = _text(attempt.parent_handoff_digest)
         deadline = self.now() + timedelta(seconds=runtime_seconds)
         spec = DurableJobSpec(
             identity=DurableJobIdentity(
@@ -1489,7 +1870,7 @@ class WorkBoardDispatcher:
             goal_id=task.goal_id,
             goal_revision=task.goal_revision,
             priority=task.priority,
-            resource_claims=(f"executor:{task.executor_id}",),
+            resource_claims=(f"executor:{expected_executor}",),
             declared_authority=declared_authority,
             deadline_at=deadline,
             max_attempts=1,
@@ -1507,6 +1888,15 @@ class WorkBoardDispatcher:
             try:
                 inputs = _parse_typed_input(task)
                 return await self._admit_execute_direct(claim, inputs, runtime_seconds=runtime_seconds)
+            except TypedInputError as exc:
+                logger.info("work board adapter %s typed input blocked before admission: %s", task.capability_id, exc.code)
+                await self._close_unadmitted_or_block(
+                    claim,
+                    exc.code,
+                    retryable_input=exc.code in _TYPED_INPUT_FAILURE_CODES,
+                )
+                result["blocked"] = True
+                return result
             except Exception as exc:
                 logger.info("work board adapter %s blocked before admission: %s", task.capability_id, type(exc).__name__)
                 await self._close_unadmitted_or_block(claim, _safe_error_code(exc))
@@ -1518,6 +1908,14 @@ class WorkBoardDispatcher:
                 attempt,
                 runtime_seconds=runtime_seconds,
             )
+        except TypedInputError as exc:
+            await self._close_unadmitted_or_block(
+                claim,
+                exc.code,
+                retryable_input=exc.code in _TYPED_INPUT_FAILURE_CODES,
+            )
+            result["blocked"] = True
+            return result
         except Exception as exc:
             await self._project_blocked(claim, "admission_contract_invalid", str(type(exc).__name__))
             result["blocked"] = True
@@ -1560,6 +1958,25 @@ class WorkBoardDispatcher:
                     actor_session_id=self.runner_session,
                 )
             linked_ok = True
+            # Linking is a fenced CAS mutation and advances the board task
+            # revision.  Continue with the exact post-link snapshots so the
+            # worker host carries the revision and immutable attempt link that
+            # its native controls will validate.
+            linked_task = link_mutation.task
+            if getattr(linked_task, "task_id", None):
+                task = linked_task
+            else:
+                # Narrow test doubles and older adapter seams returned only
+                # the advanced revision.  Preserve the full pre-link
+                # identity while still carrying the CAS result forward.
+                task = copy(task)
+                task.task_revision = linked_task.task_revision
+            linked_attempt = getattr(link_mutation, "attempt", None)
+            if linked_attempt is not None and getattr(linked_attempt, "attempt_id", None):
+                attempt = linked_attempt
+            else:
+                attempt = copy(attempt)
+                attempt.workflow_run_id = job_id
             board_revision = link_mutation.task.task_revision
             queued = await self.jobs.queue_job(
                 job_id,
@@ -1593,14 +2010,8 @@ class WorkBoardDispatcher:
             )
             projection = await self.jobs.get_job(job_id)
             final_status = _status(projection)
-            if outcome.get("verified") and final_status == "succeeded":
-                proof = {
-                    "source": "workflow_run",
-                    "status": "succeeded",
-                    "verified": True,
-                    "workflow_run_id": job_id,
-                    "content_sha256": outcome.get("content_sha256"),
-                }
+            proof = self._workflow_readback(projection or {}, job_id)
+            if outcome.get("verified") and final_status == "succeeded" and proof is not None:
                 target_status = WorkBoardStatus.review if task.requires_review else WorkBoardStatus.done
                 await self._project(
                     task,
@@ -1614,7 +2025,12 @@ class WorkBoardDispatcher:
                 )
                 result["completed"] = True
             else:
-                raw_reason = _text(outcome.get("reason")) or _text(projection.get("failure_reason") if isinstance(projection, Mapping) else "")
+                raw_reason = (
+                    "verified_readback_missing"
+                    if outcome.get("verified") and final_status == "succeeded" and proof is None
+                    else _text(outcome.get("reason"))
+                    or _text(projection.get("failure_reason") if isinstance(projection, Mapping) else "")
+                )
                 reason = "unknown_effect" if outcome.get("unknown_effect") else _stable_reason_code(raw_reason)
                 block_kind = reason
                 await self._project(
@@ -1733,6 +2149,20 @@ class WorkBoardDispatcher:
                     actor_session_id=self.runner_session,
                 )
             linked_ok = True
+            # The link increments task_revision.  Use the returned current
+            # task/attempt for any adapter work or later board projection.
+            linked_task = linked.task
+            if getattr(linked_task, "task_id", None):
+                task = linked_task
+            else:
+                task = copy(task)
+                task.task_revision = linked_task.task_revision
+            linked_attempt = getattr(linked, "attempt", None)
+            if linked_attempt is not None and getattr(linked_attempt, "attempt_id", None):
+                attempt = linked_attempt
+            else:
+                attempt = copy(attempt)
+                attempt.workflow_run_id = job_id
             board_revision = linked.task.task_revision
             if adapter_result.get("admission_only") is True:
                 # The adapter has only admitted/prepared its canonical root.
@@ -1775,15 +2205,9 @@ class WorkBoardDispatcher:
                 )
                 result["blocked"] = True
                 return result
-            verified = self._direct_verified(adapter_result, projection, job_id)
-            if verified:
-                proof = {
-                    "source": "workflow_run",
-                    "status": "succeeded",
-                    "verified": True,
-                    "workflow_run_id": job_id,
-                    "content_sha256": _text(adapter_result.get("content_sha256")) or _text(projection.get("result_digest")),
-                }
+            direct_proof = self._direct_readback(adapter_result, projection, job_id)
+            if direct_proof is not None:
+                proof = direct_proof
                 target_status = WorkBoardStatus.review if task.requires_review else WorkBoardStatus.done
                 await self._project(
                     task,
@@ -1836,6 +2260,16 @@ class WorkBoardDispatcher:
     ) -> Mapping[str, Any]:
         capability_id = _text(task.capability_id)
         board_binding = f"{task.task_id}:{attempt.attempt_id}"
+        parent_handoffs = self._attempt_parent_handoffs(attempt)
+        parent_handoff_digest = _text(getattr(attempt, "parent_handoff_digest", None)) or None
+        handoff_kwargs = (
+            {
+                "work_board_parent_handoff_context": parent_handoffs,
+                "work_board_parent_handoff_digest": parent_handoff_digest,
+            }
+            if parent_handoffs
+            else {}
+        )
         if capability_id == "guardian.research-watch.v1":
             from src.guardian.source_watch import source_watch_service
 
@@ -1847,6 +2281,7 @@ class WorkBoardDispatcher:
                 expected_owner_session_id=task.owner_session_id,
                 work_board_task_id=task.task_id,
                 work_board_attempt_id=attempt.attempt_id,
+                **handoff_kwargs,
                 admit_only=admission_only,
             )
         if capability_id == "engineering.repo-change.v1":
@@ -1879,6 +2314,7 @@ class WorkBoardDispatcher:
                 operator,
                 work_board_task_id=task.task_id,
                 work_board_attempt_id=attempt.attempt_id,
+                **handoff_kwargs,
             )
             # RepoChange preview admits/holds the durable approval and does
             # not start the sandbox.  Mark that effect-free phase so the
@@ -1909,7 +2345,9 @@ class WorkBoardDispatcher:
                 owner_session_id=task.owner_session_id,
                 external_mutation_granted=False,
                 work_board_idempotency_key=board_binding,
+                work_board_task_id=task.task_id,
                 request=request,
+                **handoff_kwargs,
             )
             # GitHub prepare writes only the governed payload/approval
             # admission. Publication remains a separate approved route.
@@ -1936,6 +2374,8 @@ class WorkBoardDispatcher:
                 owner_principal_id=task.owner_principal_id,
                 owner_session_id=task.owner_session_id,
                 work_board_idempotency_key=board_binding,
+                work_board_task_id=task.task_id,
+                **handoff_kwargs,
             )
             # Routine invoke admits/holds its invocation approval. Child
             # capability steps execute only after that existing approval path.
@@ -2028,9 +2468,10 @@ class WorkBoardDispatcher:
         """Compute the service input digest where the adapter contract is closed."""
 
         capability_id = _text(task.capability_id)
+        handoff_binding = WorkBoardDispatcher._direct_handoff_binding(attempt)
         if capability_id == "guardian.research-watch.v1":
             occurrence = _board_attempt_uuid(attempt.attempt_id, task.task_id).hex
-            return _safe_digest({"watch_id": _text(inputs.get("watch_id")), "occurrence_id": occurrence})
+            return _safe_digest({"watch_id": _text(inputs.get("watch_id")), "occurrence_id": occurrence, **handoff_binding})
         if capability_id == "engineering.repo-change.v1":
             return _safe_digest(
                 {
@@ -2041,6 +2482,7 @@ class WorkBoardDispatcher:
                     "allowed_paths": list(inputs.get("allowed_paths") or []),
                     "test_args": list(inputs.get("test_args") or []),
                     "evidence_refs": list(inputs.get("evidence_refs") or []),
+                    **handoff_binding,
                 }
             )
         if capability_id == "work.github-followthrough.v1":
@@ -2058,6 +2500,7 @@ class WorkBoardDispatcher:
                     "body": _text(inputs.get("body")),
                     "issue_number": inputs.get("issue_number"),
                     "attempt_uuid": str(attempt_uuid),
+                    **handoff_binding,
                 }
             )
         if capability_id == "guardian-routine.v1":
@@ -2072,9 +2515,20 @@ class WorkBoardDispatcher:
                     "source_watch_id": _text(inputs.get("source_watch_id")),
                     "source_watch_revision": int(inputs.get("expected_watch_revision")),
                     "invocation_uuid": str(attempt_uuid),
+                    **handoff_binding,
                 }
             )
         raise TypedInputError("capability_unregistered", "the task names no registered capability")
+
+    @staticmethod
+    def _direct_handoff_binding(attempt: WorkBoardAttempt) -> dict[str, Any]:
+        context = WorkBoardDispatcher._attempt_parent_handoffs(attempt)
+        if not context:
+            return {}
+        return {
+            "parent_handoff_context": context,
+            "parent_handoff_digest": _text(getattr(attempt, "parent_handoff_digest", None)),
+        }
 
     async def _lookup_direct_job_id(
         self,
@@ -2337,7 +2791,13 @@ class WorkBoardDispatcher:
             raise DurableJobIdempotencyConflict("durable admission returned a different root")
         return response, found, expected
 
-    async def _close_unadmitted_or_block(self, claim: BoardDispatchClaim, reason: str) -> None:
+    async def _close_unadmitted_or_block(
+        self,
+        claim: BoardDispatchClaim,
+        reason: str,
+        *,
+        retryable_input: bool = False,
+    ) -> None:
         try:
             async with self.session_provider() as db:
                 await self.repository.close_proved_absent_attempt(
@@ -2348,12 +2808,18 @@ class WorkBoardDispatcher:
                     board_fence=claim.attempt.fencing_token,
                     lease_owner=claim.attempt.lease_owner or self.runner_id,
                     absence_proven=True,
+                    block_kind="capability" if retryable_input else "reconcile_admission_binding",
+                    block_reason=reason,
                     actor_principal_id=self.runner_id,
                     actor_session_id=self.runner_session,
                     now=self.now(),
                 )
         except Exception:
-            await self._project_blocked(claim, reason, reason)
+            await self._project_blocked(
+                claim,
+                "capability" if retryable_input else reason,
+                reason,
+            )
 
     async def _refresh_claim(self, claim: BoardDispatchClaim) -> BoardDispatchClaim:
         """Reload task/attempt CAS state before projecting a post-link error."""
@@ -2376,14 +2842,148 @@ class WorkBoardDispatcher:
             raise BoardError("attempt_not_found", "The board attempt disappeared during recovery", status_code=409)
         return BoardDispatchClaim(detail["task"], current_attempt, claim.event)
 
+    @classmethod
+    def _direct_readback(
+        cls,
+        result: Mapping[str, Any],
+        projection: Mapping[str, Any],
+        job_id: str,
+    ) -> dict[str, Any] | None:
+        """Return only the canonical typed readback for a direct adapter.
+
+        A direct adapter's ``verified`` flag and result digest describe its
+        execution response.  They are not independent evidence.  The
+        canonical durable root must be succeeded and must contain a run-bound
+        readback receipt with a digest, readback identity, and verifier time.
+        Reuse the same strict receipt parser used by the board wrapper so a
+        direct capability cannot reach Done from a generic summary.
+        """
+
+        if (
+            _status(projection) != "succeeded"
+            or _status(result) not in {"succeeded", "completed"}
+            or _text(projection.get("root_run_identity")) != _text(job_id)
+            or _text(projection.get("parent_run_identity"))
+            or _text(projection.get("parent_job_id"))
+        ):
+            return None
+        return cls._workflow_readback(projection, job_id)
+
+    @classmethod
+    def _direct_verified(cls, result: Mapping[str, Any], projection: Mapping[str, Any], job_id: str) -> bool:
+        """Compatibility predicate for focused adapter tests and callers."""
+
+        return cls._direct_readback(result, projection, job_id) is not None
+
     @staticmethod
-    def _direct_verified(result: Mapping[str, Any], projection: Mapping[str, Any], job_id: str) -> bool:
-        if _status(projection) != "succeeded" or _status(result) not in {"succeeded", "completed"}:
+    def _board_root_lineage_matches(
+        task: WorkBoardTask,
+        attempt: WorkBoardAttempt,
+        projection: Mapping[str, Any],
+        *,
+        job_id: str,
+        lease_owner: str,
+        fencing_token: int,
+    ) -> bool:
+        """Check the exact durable root bound to the current board attempt."""
+
+        owner = projection.get("owner") if isinstance(projection.get("owner"), Mapping) else {}
+        lease = projection.get("lease") if isinstance(projection.get("lease"), Mapping) else {}
+        idempotency = projection.get("idempotency") if isinstance(projection.get("idempotency"), Mapping) else {}
+        expected_idempotency_key = f"{task.task_id}:{attempt.attempt_id}"
+        try:
+            actual_goal_revision = int(projection.get("goal_revision") or 0)
+            expected_goal_revision = int(task.goal_revision)
+            actual_fence = int(lease.get("fencing_token") or 0)
+            expected_fence = int(fencing_token)
+        except (TypeError, ValueError, OverflowError):
             return False
-        if not bool(result.get("verified")):
+        return bool(
+            _text(projection.get("job_id") or projection.get("run_identity")) == job_id
+            and _text(projection.get("run_identity")) == job_id
+            and _text(projection.get("root_run_identity")) == job_id
+            and not _text(projection.get("parent_run_identity"))
+            and not _text(projection.get("parent_job_id"))
+            and _text(projection.get("status")) == "running"
+            and _text(owner.get("kind")) == "service"
+            and _text(owner.get("principal_id")) == DISPATCHER_PRINCIPAL
+            and _text(owner.get("service_id")) == DISPATCHER_SERVICE
+            and _text(projection.get("job_kind")) == _text(task.capability_id)
+            and _text(projection.get("capability_version")) == _text(
+                REGISTERED_CAPABILITIES[_text(task.capability_id)].version
+            )
+            and _text(projection.get("session_id")) == _text(task.owner_session_id)
+            and (
+                not _text(projection.get("operator_session_id"))
+                or _text(projection.get("operator_session_id")) == _text(task.owner_session_id)
+            )
+            and _text(projection.get("goal_id")) == _text(task.goal_id)
+            and actual_goal_revision == expected_goal_revision
+            and _text(idempotency.get("scope")) == "work-board-attempt"
+            and _text(idempotency.get("key")) == expected_idempotency_key
+            and _text(attempt.workflow_run_id) == job_id
+            and _text(lease.get("owner")) == _text(lease_owner)
+            and actual_fence == expected_fence
+            and actual_fence > 0
+        )
+
+    @staticmethod
+    def _goal_snapshot_child_lineage_matches(
+        task: WorkBoardTask,
+        attempt: WorkBoardAttempt,
+        projection: Mapping[str, Any],
+        *,
+        child_job_id: str,
+        parent_job_id: str,
+        parent_fencing_token: int,
+    ) -> bool:
+        """Check a GoalSnapshot child against one current board root/attempt."""
+
+        owner = projection.get("owner") if isinstance(projection.get("owner"), Mapping) else {}
+        authority = projection.get("declared_authority") if isinstance(projection.get("declared_authority"), Mapping) else {}
+        expected_child_id = f"goal-snapshot-work-board:{task.task_id}:{attempt.attempt_id}"
+        try:
+            actual_goal_revision = int(projection.get("goal_revision") or 0)
+            expected_goal_revision = int(task.goal_revision)
+            actual_parent_fence = int(projection.get("parent_fencing_token") or 0)
+            expected_parent_fence = int(parent_fencing_token)
+            authority_goal_revision = int(authority.get("goal_revision") or 0)
+        except (TypeError, ValueError, OverflowError):
             return False
-        digest = _text(result.get("content_sha256")) or _text(projection.get("result_digest"))
-        return bool(digest) and len(digest) == 64
+        return bool(
+            child_job_id == expected_child_id
+            and _text(projection.get("job_id") or projection.get("run_identity")) == expected_child_id
+            and _text(projection.get("run_identity")) == expected_child_id
+            and _text(projection.get("parent_run_identity")) == parent_job_id
+            and _text(projection.get("parent_job_id")) == parent_job_id
+            and _text(projection.get("root_run_identity")) == parent_job_id
+            and actual_parent_fence == expected_parent_fence
+            and _text(projection.get("job_kind")) == GOAL_SNAPSHOT_CAPABILITY
+            and _text(projection.get("capability_version")) == GOAL_SNAPSHOT_VERSION
+            and _text(projection.get("status")) == "succeeded"
+            and _text(owner.get("kind")) == "service"
+            and _text(owner.get("principal_id")) == "service:goal-snapshot"
+            and _text(owner.get("service_id")) == "service:goal-snapshot"
+            and _text(projection.get("session_id")) == _text(task.owner_session_id)
+            and (
+                not _text(projection.get("operator_session_id"))
+                or _text(projection.get("operator_session_id")) == _text(task.owner_session_id)
+            )
+            and _text(projection.get("goal_id")) == _text(task.goal_id)
+            and actual_goal_revision == expected_goal_revision
+            and _text(authority.get("capability_id")) == GOAL_SNAPSHOT_CAPABILITY
+            and _text(authority.get("capability_version")) == GOAL_SNAPSHOT_VERSION
+            and _text(authority.get("principal")) == "service:goal-snapshot"
+            and _text(authority.get("owner_kind")) == "service"
+            and _text(authority.get("owner_principal_id")) == "service:goal-snapshot"
+            and _text(authority.get("service_id")) == "service:goal-snapshot"
+            and _text(authority.get("session_id")) == _text(task.owner_session_id)
+            and _text(authority.get("goal_id")) == _text(task.goal_id)
+            and authority_goal_revision == expected_goal_revision
+            and _text(authority.get("goal_owner_principal_id")) == _text(task.owner_principal_id)
+            and _text(authority.get("goal_owner_session_id")) == _text(task.owner_session_id)
+            and _text(attempt.workflow_run_id) == parent_job_id
+        )
 
     async def _execute_registered(
         self,
@@ -2458,6 +3058,8 @@ class WorkBoardDispatcher:
                     request,
                     work_board_task_id=task.task_id,
                     work_board_attempt_id=attempt.attempt_id,
+                    work_board_parent_handoff_context=self._attempt_parent_handoffs(attempt),
+                    work_board_parent_handoff_digest=getattr(attempt, "parent_handoff_digest", None),
                 )
         finally:
             if current_worker is not None:
@@ -2465,15 +3067,55 @@ class WorkBoardDispatcher:
             reset_runtime_context(tokens)
         if not isinstance(child, GoalSnapshotToFileResult):
             return {"verified": False, "reason": "adapter_result_invalid"}
+        # The adapter result is a capability summary.  Board completion must
+        # consume the child durable run's typed readback receipt, preserving
+        # verifier identity and timestamp from canonical runtime evidence.
+        root_projection = await self.jobs.get_job(job_id)
+        root_lineage_matches = (
+            isinstance(root_projection, Mapping)
+            and self._board_root_lineage_matches(
+                task,
+                attempt,
+                root_projection,
+                job_id=job_id,
+                lease_owner=parent_runtime_owner,
+                fencing_token=parent_fence,
+            )
+        )
+        child_projection = await self.jobs.get_job(child.job_id)
+        child_lineage_matches = root_lineage_matches and isinstance(child_projection, Mapping) and self._goal_snapshot_child_lineage_matches(
+            task,
+            attempt,
+            child_projection,
+            child_job_id=child.job_id,
+            parent_job_id=job_id,
+            parent_fencing_token=parent_fence,
+        )
+        child_proof = (
+            self._workflow_readback(child_projection, child.job_id)
+            if child_lineage_matches and isinstance(child_projection, Mapping)
+            else None
+        )
         verified = (
+            child_lineage_matches
+            and
             child.execution_status == "succeeded"
             and child.verification == "passed"
             and bool(child.content_sha256)
             and child.output_exists
             and child.workspace_contained
             and child.goal_id_read_back
+            and child_proof is not None
+            and child_proof.get("content_sha256") == child.content_sha256
         )
         unknown_effect = bool(child.reconciliation_required)
+        reason = (
+            "child_lineage_mismatch"
+            if not child_lineage_matches
+            else _stable_reason_code(child.reason or child.execution_status)
+        )
+        if not verified and not unknown_effect and child.execution_status == "succeeded":
+            reason = "verified_readback_missing"
         refs = [
             {
                 "job_id": child.job_id,
@@ -2483,13 +3125,13 @@ class WorkBoardDispatcher:
                 "artifact_id": child.artifact_ref,
                 "file_path": child.file_path,
                 "verified": verified,
-                "reason_code": _stable_reason_code(child.reason, fallback="execution_blocked"),
+                "reason_code": reason,
             }
         ]
-        return {
+        result = {
             "verified": verified,
             "unknown_effect": unknown_effect,
-            "reason": _stable_reason_code(child.reason or child.execution_status),
+            "reason": reason,
             "content_sha256": child.content_sha256,
             "result_refs": refs,
             "artifact_refs": [
@@ -2502,6 +3144,16 @@ class WorkBoardDispatcher:
             ],
             "child_job_id": child.job_id,
         }
+        if child_proof is not None:
+            result.update(
+                {
+                    "receipt_kind": "readback",
+                    "readback_id": child_proof.get("readback_id"),
+                    "verified_at": child_proof.get("verified_at"),
+                    "readback_workflow_run_id": child_proof.get("workflow_run_id"),
+                }
+            )
+        return result
 
     async def _settle_parent(
         self,
@@ -2524,6 +3176,8 @@ class WorkBoardDispatcher:
                 target_path=target_path,
                 target_digest=digest,
                 content_sha256=digest,
+                readback_id=_text(outcome.get("readback_id")),
+                verified_at=_text(outcome.get("verified_at")),
                 details={
                     "verified": True,
                     "output_exists": True,
@@ -3067,34 +3721,81 @@ class WorkBoardDispatcher:
 
     @staticmethod
     def _workflow_readback(projection: Mapping[str, Any], job_id: str) -> dict[str, Any] | None:
+        """Extract only an explicit, run-bound independent readback receipt.
+
+        Durable workflow summaries and generic ``verified`` result fields are
+        execution output.  They cannot establish the independent readback
+        contract required before a board task enters Review or Done.
+        """
+        safe_job_id = _text(job_id)
+        projection_run_id = _text(projection.get("run_identity"))
+        # The durable job projection is the authoritative run binding for its
+        # effect ledger.  GoalSnapshot/readback effects are persisted without
+        # repeating this identity on every effect, so the outer identity is
+        # mandatory and must match the board attempt's linked run.
+        if not safe_job_id or projection_run_id != safe_job_id:
+            return None
+        safe_id = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
+        sha256 = re.compile(r"^[0-9a-f]{64}$")
         effects = projection.get("effects") if isinstance(projection.get("effects"), list) else []
         for effect in effects:
             if not isinstance(effect, Mapping):
                 continue
+            # A workflow summary is execution output, not an independent
+            # readback.  It must never authorize a board Review/Done state
+            # merely because the generic runtime marked it verified.
+            if _text(effect.get("effect_type")) == "workflow_output":
+                continue
             details = effect.get("details") if isinstance(effect.get("details"), Mapping) else {}
-            if (
-                _text(effect.get("receipt_kind")) == "readback"
-                or bool(details.get("verified"))
-            ) and _status(effect.get("status")) in {"succeeded", "read_back", "reconciled"}:
-                digest = _text(effect.get("content_sha256")) or _text(effect.get("target_digest")) or _text(details.get("content_sha256"))
-                if len(digest) == 64:
-                    return {
-                        "source": "workflow_run",
-                        "status": "succeeded",
-                        "verified": True,
-                        "workflow_run_id": job_id,
-                        "content_sha256": digest,
-                    }
-        result = projection.get("result") if isinstance(projection.get("result"), Mapping) else {}
-        digest = _text(result.get("digest"))
-        if bool(result.get("verified")) and len(digest) == 64:
-            return {
+            # ``receipt_kind`` is the typed proof discriminator.  Details or
+            # result booleans are intentionally ignored.
+            if _text(effect.get("receipt_kind")) != "readback":
+                continue
+            if _status(effect.get("status")) not in {"succeeded", "read_back", "reconciled"}:
+                continue
+            effect_run_id = _text(effect.get("workflow_run_id")) or _text(details.get("workflow_run_id"))
+            if effect_run_id and effect_run_id != safe_job_id:
+                continue
+            digest = (
+                _text(effect.get("content_sha256"))
+                or _text(effect.get("target_digest"))
+                or _text(details.get("content_sha256"))
+            ).lower()
+            if not sha256.fullmatch(digest):
+                continue
+            readback_id = _text(effect.get("readback_id")) or _text(details.get("readback_id"))
+            artifact_id = _text(effect.get("artifact_id")) or _text(details.get("artifact_id"))
+            if readback_id and not safe_id.fullmatch(readback_id):
+                continue
+            if artifact_id and not safe_id.fullmatch(artifact_id):
+                continue
+            if not readback_id and artifact_id:
+                readback_id = artifact_id
+            if not readback_id:
+                continue
+            verified_at = _text(effect.get("verified_at")) or _text(details.get("verified_at"))
+            if not verified_at or len(verified_at) > 64 or "\n" in verified_at or "\r" in verified_at:
+                continue
+            proof = {
                 "source": "workflow_run",
+                "receipt_kind": "readback",
                 "status": "succeeded",
                 "verified": True,
-                "workflow_run_id": job_id,
+                "workflow_run_id": safe_job_id,
                 "content_sha256": digest,
+                "readback_id": readback_id,
+                "verified_at": verified_at,
             }
+            if artifact_id:
+                proof["artifact_id"] = artifact_id
+            for key in ("verifier_id", "verification_id"):
+                value = _text(effect.get(key)) or _text(details.get(key))
+                if value and safe_id.fullmatch(value):
+                    proof[key] = value
+            effect_id = _text(effect.get("effect_id"))
+            if effect_id:
+                proof["effect_id_digest"] = hashlib.sha256(effect_id.encode("utf-8")).hexdigest()[:16]
+            return proof
         return None
 
     async def reconcile_pending_attempts(self, *, now: datetime | None = None) -> list[str]:
@@ -3274,6 +3975,8 @@ __all__ = [
     "DEFAULT_RUNTIME_SECONDS",
     "DISPATCH_PASS_LIMIT",
     "REGISTERED_CAPABILITIES",
+    "registered_executor_id",
+    "TypedInputError",
     "WorkBoardDispatcher",
     "run_work_board_dispatch",
 ]

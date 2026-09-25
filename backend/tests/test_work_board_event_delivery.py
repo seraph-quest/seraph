@@ -286,7 +286,11 @@ async def test_dispatcher_and_worker_producers_publish_through_canonical_session
                     "job_id": worker_run_id,
                     "status": "running",
                     "revision": 4,
-                    "lease": {"owner": "workflow-worker", "fencing_token": 11},
+                    "lease": {
+                        "owner": "workflow-worker",
+                        "fencing_token": 11,
+                        "expires_at": (now + timedelta(minutes=5)).isoformat(),
+                    },
                 }
 
         worker = WorkBoardWorkerTools(

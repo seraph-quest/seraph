@@ -126,8 +126,10 @@ export type WorkBoardRecoveryAction =
   | "retry"
   | "approve_existing_run"
   | "restore_prerequisite"
+  | "configure_goal_success_criterion"
   | "reconcile_admission_binding"
-  | "reconcile_external_effect";
+  | "reconcile_external_effect"
+  | "renew_review";
 
 export type WorkBoardReadbackStatus =
   | "not_started"
@@ -155,6 +157,8 @@ export interface WorkBoardReceiptReference {
   effect_id?: string;
   effect_id_digest?: string;
   effect_type?: string;
+  readback_id?: string;
+  verification_id?: string;
   status?: string;
   verified?: boolean | null;
   target_digest?: string;
@@ -219,6 +223,7 @@ export interface WorkBoardTask {
   cancel_requested_at: string | null;
   requires_review: boolean;
   reviewer_id: string | null;
+  review_expires_at?: string | null;
   dependency_count: number;
   completed_dependency_count: number;
   dispatch_rank: number | null;
@@ -259,7 +264,22 @@ export interface WorkBoardTaskDetail {
   children: string[];
   comments: WorkBoardComment[];
   events: WorkBoardEvent[];
+  parent_handoffs?: WorkBoardSafeParentHandoff[];
   revision: number;
+}
+
+export interface WorkBoardSafeParentHandoff {
+  handoff_id: string;
+  parent_task_id: string;
+  child_task_id: string;
+  status: string;
+  summary: string;
+  artifact_refs: WorkBoardReceiptReference[];
+  result_refs: WorkBoardReceiptReference[];
+  verification_receipt: Record<string, unknown>;
+  source_attempt_id: string | null;
+  source_task_revision: number;
+  risks: string[];
 }
 
 export interface WorkBoardTaskPage {
@@ -317,14 +337,66 @@ export interface WorkBoardTaskPatchRequest {
   scheduled_at?: string | null;
 }
 
-export type WorkBoardAction = "promote" | "block" | "unblock" | "retry" | "cancel" | "archive";
+export type WorkBoardAction =
+  | "promote" | "block" | "unblock" | "retry" | "cancel" | "archive"
+  | "request_review" | "request_changes" | "complete_review" | "renew_review";
 
 export interface WorkBoardActionRequest {
   action: WorkBoardAction;
   expected_revision: number;
-  block_kind?: "operator";
+  block_kind?: "operator" | "dependency" | "needs_input" | "capability" | "transient" | "cancelled" | "review_expired" | "unknown_effect";
+  source_status?: WorkBoardStatus;
+  attempt_id?: string;
+  evidence_refs?: string[];
   reason?: string;
   resolution?: string;
+}
+
+export interface WorkBoardProposalTask {
+  task_id?: string;
+  title: string;
+  body?: string;
+  goal_id?: string;
+  goal_revision?: number;
+  capability_id: string;
+  typed_input_ref?: string | null;
+  typed_input_digest?: string | null;
+  executor_id: string;
+  authority: string;
+  dependencies?: string[];
+  cost_estimate?: string | null;
+  capability_version?: string;
+}
+
+export interface WorkBoardProposalLink {
+  parent_task_id: string;
+  child_task_id: string;
+}
+
+export interface WorkBoardProposal {
+  kind: "specify" | "decompose";
+  proposal_id: string;
+  proposal_revision: number;
+  parent_task_id: string;
+  parent_revision: number;
+  idempotency_key?: string;
+  proposal_digest: string;
+  expires_at: string;
+  proposed_tasks: WorkBoardProposalTask[];
+  proposed_links: WorkBoardProposalLink[];
+  estimated_cost: string | null;
+  blocked_reason?: string | null;
+  recovery_action?: string | null;
+  status?: string;
+  request_digest?: string;
+  route_id?: string;
+  capability_id?: string;
+  capability_version?: string;
+  grant_revision?: number;
+  input_digest?: string;
+  admission_job_id?: string;
+  effect_id_digest?: string;
+  provider_contact_state?: string;
 }
 
 export interface WorkBoardCommentCreateRequest {

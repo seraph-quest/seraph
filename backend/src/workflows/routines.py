@@ -2114,9 +2114,31 @@ class RoutineService:
         owner_principal_id: str,
         owner_session_id: str,
         work_board_idempotency_key: str | None = None,
+        work_board_task_id: str | None = None,
+        work_board_parent_handoff_context: list[dict[str, Any]] | None = None,
+        work_board_parent_handoff_digest: str | None = None,
     ) -> dict[str, Any]:
         if work_board_idempotency_key is not None and not str(work_board_idempotency_key).strip():
             raise RoutineError("work_board_binding_invalid")
+        parent_handoff_context = list(work_board_parent_handoff_context or [])
+        parent_handoff_digest = str(work_board_parent_handoff_digest or "")
+        if parent_handoff_context:
+            encoded_handoffs = _dump(parent_handoff_context)
+            if (
+                work_board_idempotency_key is None
+                or not work_board_task_id
+                or len(encoded_handoffs.encode("utf-8")) > 32_768
+                or _sha(encoded_handoffs) != parent_handoff_digest
+                or any(
+                    not isinstance(item, dict)
+                    or item.get("status") != "verified"
+                    or item.get("child_task_id") != work_board_task_id
+                    for item in parent_handoff_context
+                )
+            ):
+                raise RoutineError("work_board_handoff_binding_invalid")
+        elif parent_handoff_digest:
+            raise RoutineError("work_board_handoff_binding_invalid")
         routine = await self._routine(routine_id, owner_principal_id)
         self._require_routine_owner_session(routine, owner_session_id)
         if routine.revision != req.expected_routine_revision or routine.state != "active":
@@ -2180,7 +2202,31 @@ class RoutineService:
             "capability_id": ROUTINE_CAPABILITY_VERSION,
             "budget_microusd": 0,
         }
-        job = await self._admit_user_job(job_id=job_id, job_kind="routine_invocation", idempotency_key=f"{owner_principal_id}:{routine_id}:{invocation_uuid}", inputs={"routine_id": routine_id, "routine_version": req.version, "source_watch_id": req.source_watch_id, "source_watch_revision": req.expected_watch_revision, "invocation_uuid": invocation_uuid}, authority=authority, owner_principal_id=owner_principal_id, owner_session_id=owner_session_id, goal_id=req.goal_id, goal_revision=req.expected_goal_revision, plan_revision=int(watch.get("plan_revision") or 1), candidate_id=None, work_board_idempotency_key=work_board_idempotency_key)
+        invocation_inputs = {
+            "routine_id": routine_id,
+            "routine_version": req.version,
+            "source_watch_id": req.source_watch_id,
+            "source_watch_revision": req.expected_watch_revision,
+            "invocation_uuid": invocation_uuid,
+        }
+        if parent_handoff_context:
+            invocation_inputs["parent_handoff_context"] = parent_handoff_context
+            invocation_inputs["parent_handoff_digest"] = parent_handoff_digest
+            authority["parent_handoff_digest"] = parent_handoff_digest
+        job = await self._admit_user_job(
+            job_id=job_id,
+            job_kind="routine_invocation",
+            idempotency_key=f"{owner_principal_id}:{routine_id}:{invocation_uuid}",
+            inputs=invocation_inputs,
+            authority=authority,
+            owner_principal_id=owner_principal_id,
+            owner_session_id=owner_session_id,
+            goal_id=req.goal_id,
+            goal_revision=req.expected_goal_revision,
+            plan_revision=int(watch.get("plan_revision") or 1),
+            candidate_id=None,
+            work_board_idempotency_key=work_board_idempotency_key,
+        )
         receipt = job.get("receipt") if isinstance(job.get("receipt"), Mapping) else {}
         deduped = receipt.get("status") == "deduped"
         durable_authority = job.get("declared_authority") if isinstance(job.get("declared_authority"), Mapping) else {}

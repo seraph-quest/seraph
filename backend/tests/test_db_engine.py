@@ -547,17 +547,116 @@ async def test_ensure_search_indexes_backfills_session_message_and_event_rows(tm
 
 
 @pytest.mark.asyncio
-async def _run_file_backed_sqlite_auth_touches_are_bounded_and_survive_concurrency(
+async def _run_file_backed_sqlite_auth_pool_is_bounded(
     tmp_path,
     monkeypatch,
 ):
-    """Concurrent authenticated touches use a bounded, healthy SQLite pool.
+    """The merged #877 pool bound still covers a 40-request auth burst."""
+    pool = production_engine.sync_engine.pool
+    assert pool._pool.maxsize == 20
+    assert pool._max_overflow == 0
+    assert pool._timeout == 3
+    assert pool._pre_ping is True
 
-    Cockpit refreshes can authenticate several requests at once.  Keep the
-    production pool capped at twenty connections so this single-writer
-    database cannot add the previous twenty-connection overflow burst while
-    preserving the real session validity and sliding idle-expiry update path.
-    """
+    db_path = tmp_path / "operator-auth-pool.db"
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{db_path}",
+        connect_args={"check_same_thread": False},
+        pool_size=20,
+        max_overflow=0,
+        pool_timeout=3,
+        pool_pre_ping=True,
+    )
+    event.listen(engine.sync_engine, "connect", _configure_sqlite_connection)
+
+    checked_out = 0
+    max_checked_out = 0
+    counter_lock = threading.Lock()
+    checkout_barrier = asyncio.Barrier(20)
+
+    @event.listens_for(engine.sync_engine, "checkout")
+    def _track_checkout(_dbapi_connection, _connection_record, _connection_proxy):
+        nonlocal checked_out, max_checked_out
+        with counter_lock:
+            checked_out += 1
+            max_checked_out = max(max_checked_out, checked_out)
+
+    @event.listens_for(engine.sync_engine, "checkin")
+    def _track_checkin(_dbapi_connection, _connection_record):
+        nonlocal checked_out
+        with counter_lock:
+            checked_out -= 1
+
+    class BarrierSession(AsyncSession):
+        async def get(self, entity, ident, **kwargs):
+            await self.connection()
+            await asyncio.wait_for(checkout_barrier.wait(), timeout=5)
+            return await super().get(entity, ident, **kwargs)
+
+    setup_factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    factory = sessionmaker(engine, class_=BarrierSession, expire_on_commit=False)
+
+    @asynccontextmanager
+    async def _get_session():
+        async with factory() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+
+    monkeypatch.setattr("src.auth.service.get_session", _get_session)
+    from src.auth.service import authenticate_session
+
+    try:
+        now = datetime.now(timezone.utc)
+        async with engine.begin() as connection:
+            await connection.run_sync(OperatorSession.__table__.create)
+        async with setup_factory() as session:
+            session.add(
+                OperatorSession(
+                    id="auth-pool-session",
+                    token_hash="not-used-by-this-test",
+                    last_seen_at=now,
+                    idle_expires_at=now + timedelta(minutes=5),
+                    absolute_expires_at=now + timedelta(hours=1),
+                )
+            )
+            await session.commit()
+
+        results = await asyncio.wait_for(
+            asyncio.gather(
+                *[
+                    authenticate_session("auth-pool-session", touch=False)
+                    for _ in range(40)
+                ],
+                return_exceptions=True,
+            ),
+            timeout=30,
+        )
+        assert [result for result in results if isinstance(result, BaseException)] == []
+        assert len(results) == 40
+        assert max_checked_out == 20
+        assert max_checked_out <= 20
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_file_backed_sqlite_auth_pool_is_bounded(tmp_path, monkeypatch):
+    await asyncio.wait_for(
+        _run_file_backed_sqlite_auth_pool_is_bounded(tmp_path, monkeypatch),
+        timeout=60,
+    )
+
+
+@pytest.mark.asyncio
+async def _run_file_backed_sqlite_auth_touch_is_coalesced(
+    tmp_path,
+    monkeypatch,
+):
+    """Concurrent authentication coalesces a stale session touch to one write."""
     pool = production_engine.sync_engine.pool
     assert pool._pool.maxsize == 20
     assert pool._max_overflow == 0
@@ -575,15 +674,17 @@ async def _run_file_backed_sqlite_auth_touches_are_bounded_and_survive_concurren
     )
     event.listen(engine.sync_engine, "connect", _configure_sqlite_connection)
 
+    updates_entered = 0
+    auth_get_calls = 0
+    barrier_gets_completed = 0
     checked_out = 0
     max_checked_out = 0
     counter_lock = threading.Lock()
-    checkout_barrier = asyncio.Barrier(20)
-    first_batch_released = asyncio.Event()
-    updates_entered = 0
-    lock_released = False
+    initial_read_barrier = asyncio.Barrier(20)
+    initial_reads_completed = asyncio.Event()
     lock_connection = None
     lock_engine = None
+    lock_released = False
 
     @event.listens_for(engine.sync_engine, "checkout")
     def _track_checkout(_dbapi_connection, _connection_record, _connection_proxy):
@@ -607,24 +708,30 @@ async def _run_file_backed_sqlite_auth_touches_are_bounded_and_survive_concurren
             with counter_lock:
                 updates_entered += 1
 
+    setup_factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     class BarrierSession(AsyncSession):
         async def get(self, entity, ident, **kwargs):
-            # ``AsyncSession.get`` calls the synchronous session internally,
-            # so coordinate before it issues the first SELECT.  The first
-            # twenty authenticated sessions keep their pooled connections
-            # checked out at the barrier; the remaining twenty must wait for
-            # a real pool checkout.
-            await self.connection()
-            await asyncio.wait_for(checkout_barrier.wait(), timeout=5)
-            first_batch_released.set()
+            nonlocal auth_get_calls, barrier_gets_completed
+            auth_get_calls += 1
+            call_number = auth_get_calls
+            if call_number <= 40:
+                # Hold twenty initial authenticated reads at once so the
+                # bounded pool reaches its real 20-connection ceiling. The
+                # two barrier waves cover all forty requests; serialized
+                # stale-touch rereads run after these initial reads and skip
+                # the barrier.
+                await self.connection()
+                await asyncio.wait_for(initial_read_barrier.wait(), timeout=5)
+                barrier_gets_completed += 1
+                if barrier_gets_completed == 40:
+                    initial_reads_completed.set()
             return await super().get(entity, ident, **kwargs)
 
-    setup_factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    factory = sessionmaker(engine, class_=BarrierSession, expire_on_commit=False)
+    request_factory = sessionmaker(engine, class_=BarrierSession, expire_on_commit=False)
 
     @asynccontextmanager
     async def _get_session():
-        async with factory() as session:
+        async with request_factory() as session:
             try:
                 yield session
                 await session.commit()
@@ -635,8 +742,6 @@ async def _run_file_backed_sqlite_auth_touches_are_bounded_and_survive_concurren
     monkeypatch.setattr("src.auth.service.get_session", _get_session)
     from src.auth.service import authenticate_session
 
-    auth_tasks: list[asyncio.Task] = []
-
     async def _release_lock():
         nonlocal lock_released
         if lock_released or lock_connection is None:
@@ -644,30 +749,19 @@ async def _run_file_backed_sqlite_auth_touches_are_bounded_and_survive_concurren
         await lock_connection.exec_driver_sql("ROLLBACK")
         lock_released = True
 
-    async def _wait_for_updates():
+    async def _wait_for_update():
         deadline = asyncio.get_running_loop().time() + 6
         while True:
             with counter_lock:
                 observed = updates_entered
-            if observed >= 20:
+            if observed >= 1:
                 return
             if asyncio.get_running_loop().time() >= deadline:
-                raise AssertionError(
-                    f"expected 20 concurrent auth updates, observed {observed}"
-                )
+                raise AssertionError(f"expected one blocked auth touch update, observed {observed}")
             await asyncio.sleep(0.01)
 
-    async def _run_contention():
-        await asyncio.wait_for(first_batch_released.wait(), timeout=5)
-        await _wait_for_updates()
-        await _release_lock()
-        return await asyncio.wait_for(
-            asyncio.gather(*auth_tasks, return_exceptions=True),
-            timeout=15,
-        )
-
     try:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc) - timedelta(minutes=1)
         async with engine.begin() as connection:
             await connection.run_sync(OperatorSession.__table__.create)
         async with setup_factory() as session:
@@ -681,7 +775,14 @@ async def _run_file_backed_sqlite_auth_touches_are_bounded_and_survive_concurren
                 )
             )
             await session.commit()
-
+        # Create the bounded pool before acquiring the separate writer lock.
+        # New SQLite connections configure journal mode during connect, which
+        # itself may need a write lock and would confound this test.
+        warm_connections = []
+        for _ in range(20):
+            warm_connections.append(await engine.connect())
+        for connection in warm_connections:
+            await connection.close()
         lock_engine = create_async_engine(
             f"sqlite+aiosqlite:///{db_path}",
             connect_args={"check_same_thread": False},
@@ -690,7 +791,6 @@ async def _run_file_backed_sqlite_auth_touches_are_bounded_and_survive_concurren
         event.listen(lock_engine.sync_engine, "connect", _configure_sqlite_connection)
         lock_connection = await lock_engine.connect()
         await lock_connection.exec_driver_sql("BEGIN IMMEDIATE")
-
         auth_tasks = [
             asyncio.create_task(
                 authenticate_session("auth-contention-session"),
@@ -698,12 +798,28 @@ async def _run_file_backed_sqlite_auth_touches_are_bounded_and_survive_concurren
             )
             for index in range(40)
         ]
-        results = await asyncio.wait_for(_run_contention(), timeout=30)
+        await asyncio.wait_for(initial_reads_completed.wait(), timeout=10)
+        await _wait_for_update()
+        # Give the DBAPI writer a scheduling turn while the independent
+        # BEGIN IMMEDIATE connection still owns SQLite's writer reservation.
+        await asyncio.sleep(0.05)
+        assert all(not task.done() for task in auth_tasks), "a touch completed before the writer lock was released"
+        with counter_lock:
+            observed_updates = updates_entered
+        assert observed_updates == 1, "stale touch writes must remain coalesced under contention"
+        assert max_checked_out == 20
+        assert max_checked_out <= 20
+        await _release_lock()
+
+        results = await asyncio.wait_for(
+            asyncio.gather(*auth_tasks, return_exceptions=True),
+            timeout=15,
+        )
         failures = [result for result in results if isinstance(result, BaseException)]
         assert failures == []
         assert len(results) == 40
-        assert max_checked_out == 20
-        assert max_checked_out <= 20
+        with counter_lock:
+            assert updates_entered == 1
 
         async with setup_factory() as session:
             record = await session.get(OperatorSession, "auth-contention-session")
@@ -714,57 +830,34 @@ async def _run_file_backed_sqlite_auth_touches_are_bounded_and_survive_concurren
                 last_seen_at = last_seen_at.replace(tzinfo=timezone.utc)
             if idle_expires_at.tzinfo is None:
                 idle_expires_at = idle_expires_at.replace(tzinfo=timezone.utc)
-            assert last_seen_at >= now
+            assert last_seen_at > now
             assert idle_expires_at > now
             assert record.revoked_at is None
     finally:
-        # Release the writer lock before cancelling auth tasks.  A cancelled
-        # coroutine can still have a DBAPI worker waiting on SQLite's busy
-        # timeout; releasing first lets that worker unwind and return its
-        # pooled connection.
         try:
             await asyncio.wait_for(_release_lock(), timeout=5)
         except (Exception, asyncio.CancelledError):
             pass
-        for task in auth_tasks:
-            if not task.done():
-                task.cancel()
-        if auth_tasks:
-            try:
-                await asyncio.wait_for(
-                    asyncio.gather(*auth_tasks, return_exceptions=True),
-                    timeout=5,
-                )
-            except (Exception, asyncio.CancelledError):
-                for task in auth_tasks:
-                    if not task.done():
-                        task.cancel()
+        if "auth_tasks" in locals():
+            for task in auth_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*auth_tasks, return_exceptions=True)
         if lock_connection is not None:
-            try:
-                await asyncio.wait_for(lock_connection.close(), timeout=5)
-            except (Exception, asyncio.CancelledError):
-                pass
+            await lock_connection.close()
         if lock_engine is not None:
-            try:
-                await asyncio.wait_for(lock_engine.dispose(), timeout=5)
-            except (Exception, asyncio.CancelledError):
-                pass
-        try:
-            await asyncio.wait_for(engine.dispose(), timeout=5)
-        except (Exception, asyncio.CancelledError):
-            pass
+            await lock_engine.dispose()
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_file_backed_sqlite_auth_touches_are_bounded_and_survive_concurrency(
+async def test_file_backed_sqlite_auth_touch_is_coalesced(
     tmp_path,
     monkeypatch,
 ):
-    # Bound the entire test, including schema setup, lock acquisition, the
-    # contention barrier, durable readback, and cleanup.  The inner waits keep
-    # cleanup bounded after this watchdog cancels the scenario.
+    # Bound schema setup, the contention barrier, durable readback, and cleanup.
     await asyncio.wait_for(
-        _run_file_backed_sqlite_auth_touches_are_bounded_and_survive_concurrency(
+        _run_file_backed_sqlite_auth_touch_is_coalesced(
             tmp_path,
             monkeypatch,
         ),

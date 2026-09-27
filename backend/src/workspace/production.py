@@ -31,9 +31,11 @@ from src.workspace.lifecycle import (
     workspace_restore_staging_dir,
 )
 from src.workspace.state_registry import (
+    WORK_BOARD_ROUTINE_BINDING_TABLE,
     WorkspaceStateError,
     canonical_workspace_root,
     canonical_workspace_root_identity,
+    work_board_routine_binding_contract,
 )
 
 
@@ -227,6 +229,15 @@ class ProductionWorkspace:
             ),
             "sidecars_are_active_roots": False,
             "secret_values_included": False,
+            # This ownership receipt does not open SQLite.  Inventory is the
+            # authoritative place where presence is verified.
+            "database_operator_contracts": {
+                "work_board_routine_binding": work_board_routine_binding_contract(
+                    present=None
+                ),
+                "inventory_source": "workspace_state_registry",
+                "table_name": WORK_BOARD_ROUTINE_BINDING_TABLE,
+            },
         }
 
 

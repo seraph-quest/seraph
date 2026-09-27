@@ -32,9 +32,13 @@ from src.db import engine as db_engine
 from src.db.models import (
     Goal,
     GuardianDecisionPacket,
+    GuardianRoutine,
+    GuardianRoutineVersion,
     GuardianSourceWatch,
     GitHubFollowthroughConnection,
+    WorkflowRunState,
 )
+from src.extensions.capability_pack import CapabilityPackLifecycle
 from src.security.http_transport import (
     PinnedTransportError,
     PinnedResponse,
@@ -51,8 +55,10 @@ from src.vault.repository import vault_repository
 from src.workflows.job_runtime import (
     DurableJobError,
     DurableJobIdentity,
+    DurableJobRoutinePublicationAdmissionGuard,
     DurableJobSpec,
     DurableJobTransitionError,
+    UNRESOLVED_EFFECT_STATUSES,
     durable_job_repository,
 )
 
@@ -81,6 +87,31 @@ MAX_ARTIFACT_BYTES = 96 * 1024
 READBACK_ATTEMPTS = 3
 RUNNER_PREFIX = "github-followthrough:"
 MARKER_PREFIX = "<!-- seraph-operation:"
+_SAFE_APPROVAL_CLEANUP_OUTCOMES = frozenset(
+    {"denied", "not_bound", "missing", "approved", "consumed", "expired"}
+)
+ROUTINE_PUBLICATION_CHILD_JOB_KIND = "routine_github_followthrough_child"
+ROUTINE_BINDING_KEYS = frozenset(
+    {
+        "routine_id",
+        "routine_revision",
+        "routine_version",
+        "package_digest",
+        "parent_invocation_job_id",
+        "publication_child_job_id",
+        "invocation_uuid",
+        "owner_principal_id",
+        "owner_session_id",
+        "goal_id",
+        "goal_revision",
+        "source_watch_id",
+        "connection_id",
+        "connection_revision",
+        "repository",
+        "action",
+        "operation_uuid",
+    }
+)
 _REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _SAFE_VAULT_KEY_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,160}$")
 
@@ -101,6 +132,58 @@ def _now() -> datetime:
 def _sha(value: str | bytes) -> str:
     raw = value if isinstance(value, bytes) else value.encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
+
+
+def _followthrough_approval_scope(
+    *,
+    operation_id: str,
+    job_id: str,
+    connection_id: str,
+    connection_revision: int,
+    repository: str,
+    action: str,
+    issue_number: int | None,
+    title_sha256: str,
+    body_sha256: str,
+    source_watch_id: str,
+    plan_revision: int,
+    goal_id: str,
+    goal_revision: int,
+    dossier_artifact_id: str,
+    dossier_sha256: str,
+) -> dict[str, Any]:
+    """Return safe, exact destination and payload identity for operator review.
+
+    The approval surface must show which repository and operation will be
+    written while keeping private task prose out of approval details. Digests
+    bind the exact title/body, dossier, goal, connection, and durable job.
+    """
+
+    return {
+        "action": action,
+        "target": {
+            "provider": "github",
+            "repository": repository,
+            "issue_number": issue_number,
+        },
+        "authority": {
+            "operation_id": operation_id,
+            "job_id": job_id,
+            "connection_id": connection_id,
+            "connection_revision": connection_revision,
+            "source_watch_id": source_watch_id,
+            "plan_revision": plan_revision,
+            "goal_id": goal_id,
+            "goal_revision": goal_revision,
+            "dossier_artifact_id": dossier_artifact_id,
+            "dossier_sha256": dossier_sha256,
+        },
+        "payload": {
+            "title_sha256": title_sha256,
+            "body_sha256": body_sha256,
+        },
+        "effects": [action],
+    }
 
 
 def _dump(value: Any) -> str:
@@ -134,6 +217,85 @@ def _queued_approval_is_current(current: Mapping[str, Any]) -> bool:
         except (TypeError, ValueError):
             continue
         if expires_at > now:
+            return True
+    return False
+
+
+def _consumed_approval_resume_is_current(
+    current: Mapping[str, Any], approval: Any
+) -> bool:
+    """Allow a consumed approval only through its exact durable resume receipt.
+
+    Resolving an ApprovalRequest consumes that one-shot row while placing the
+    already admitted workflow run on the durable queue. The row alone must not
+    authorize dispatch: the run, owner/session, authority, goal, budget,
+    approval identity, and expiry must all match the immutable receipt written
+    by ``resume_approved_job``.
+    """
+    if _text(getattr(approval, "status", None)) != "consumed":
+        return False
+    if _text(current.get("status")) not in {"queued", "running"}:
+        return False
+    approval_id = _text(getattr(approval, "id", None))
+    job_id = _text(current.get("job_id") or current.get("run_identity"))
+    authority = current.get("declared_authority")
+    authority = authority if isinstance(authority, Mapping) else {}
+    owner = current.get("owner")
+    owner = owner if isinstance(owner, Mapping) else {}
+    details = _load(getattr(approval, "details_json", None), {})
+    if not isinstance(details, Mapping):
+        return False
+    session_id = _text(current.get("operator_session_id") or current.get("session_id"))
+    if (
+        not approval_id
+        or not job_id
+        or _text(authority.get("approval_id")) != approval_id
+        or _text(getattr(approval, "owner_principal_id", None)) != _text(owner.get("principal_id"))
+        or _text(getattr(approval, "operator_session_id", None) or getattr(approval, "session_id", None)) != session_id
+        or _text(details.get("durable_approval_id")) != approval_id
+        or _text(details.get("durable_job_id")) != job_id
+        or _text(details.get("durable_owner_kind")) != _text(owner.get("kind"))
+        or _text(details.get("durable_owner_principal_id")) != _text(owner.get("principal_id"))
+        or _text(details.get("operator_session_id")) != session_id
+        or _text(details.get("durable_authority_digest")) != _text(current.get("authority_digest"))
+        or _text(details.get("durable_goal_id")) != _text(current.get("goal_id"))
+        or details.get("durable_goal_revision") != current.get("goal_revision")
+        or details.get("durable_plan_revision") != current.get("plan_revision")
+        or _text(details.get("durable_capability_version")) != _text(current.get("capability_version"))
+        or _text(details.get("durable_budget_digest")) != _text(current.get("budget_digest"))
+    ):
+        return False
+    try:
+        approval_expiry = float(details.get("approval_expires_at", details.get("expires_at")))
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if not approval_expiry > _now().timestamp():
+        return False
+    for item in current.get("effects") or []:
+        if not isinstance(item, Mapping):
+            continue
+        if (
+            item.get("kind") != "approval_resume"
+            or item.get("status") != "approved"
+            or item.get("approval_request_status") != "consumed"
+            or _text(item.get("approval_id")) != approval_id
+            or _text(item.get("operator_principal_id")) != _text(owner.get("principal_id"))
+            or _text(item.get("operator_session_id")) != session_id
+            or _text(item.get("owner_kind")) != _text(owner.get("kind"))
+            or _text(item.get("owner_principal_id")) != _text(owner.get("principal_id"))
+            or _text(item.get("authority_digest")) != _text(current.get("authority_digest"))
+            or _text(item.get("goal_id")) != _text(current.get("goal_id"))
+            or item.get("goal_revision") != current.get("goal_revision")
+            or item.get("plan_revision") != current.get("plan_revision")
+            or _text(item.get("capability_version")) != _text(current.get("capability_version"))
+            or _text(item.get("budget_digest")) != _text(current.get("budget_digest"))
+        ):
+            continue
+        try:
+            receipt_expiry = float(item.get("expires_at"))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if receipt_expiry == approval_expiry and receipt_expiry > _now().timestamp():
             return True
     return False
 
@@ -186,6 +348,38 @@ def _operation_id(owner_principal_id: str, idempotency_key: uuid.UUID) -> uuid.U
         uuid.NAMESPACE_URL,
         f"seraph:github-followthrough:{owner_principal_id}:{idempotency_key}",
     )
+
+
+def _routine_pack_id(routine_id: str, version: int) -> str:
+    """Derive the server-owned package identity without importing routines.py.
+
+    ``routines.py`` imports this adapter, so the execute-time package check
+    cannot call ``RoutineService`` without creating an import cycle.  The
+    package identity is intentionally a small, deterministic contract shared
+    by the two services.
+    """
+
+    token = _text(routine_id).replace("-", "").lower()
+    try:
+        if len(token) != 32:
+            raise ValueError
+        uuid.UUID(hex=token)
+        if int(version) < 1:
+            raise ValueError
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise GitHubFollowthroughError("routine_binding_invalid") from exc
+    return f"seraph.routine.{token}.v{int(version)}"
+
+
+def _routine_child_job_id(invocation_uuid: str) -> str:
+    """Return the fixed publication child identity used by RoutineService."""
+
+    try:
+        namespace = uuid.UUID(str(invocation_uuid))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise GitHubFollowthroughError("routine_binding_invalid") from exc
+    child_uuid = uuid.uuid5(namespace, "seraph:guardian-routine:publication")
+    return f"routine-child:{child_uuid.hex}"
 
 
 def _marker(operation_id: uuid.UUID) -> str:
@@ -364,6 +558,17 @@ class PreparedPublication:
             "body_sha256": self.body_sha256,
             "operation_marker": self.operation_marker,
         }
+
+
+def _publication_effect_target_path(prepared: PreparedPublication) -> str:
+    """Return the immutable approved write target for one publication."""
+    if prepared.action == ACTION_CREATE_ISSUE:
+        return f"/repos/{prepared.repository}/issues"
+    return f"/repos/{prepared.repository}/issues/{prepared.issue_number}/comments"
+
+
+def _publication_readback_id(prepared: PreparedPublication) -> str:
+    return f"github-readback:{prepared.operation_id}"
 
 
 class ConnectionRequest(BaseModel):
@@ -644,6 +849,641 @@ class GitHubFollowthroughService:
             raise GitHubFollowthroughError("dossier_artifact_digest_mismatch", status_code=409)
         return packet, watch, goal, raw
 
+    async def _discover_routine_publication_binding(
+        self,
+        *,
+        owner_principal_id: str,
+        owner_session_id: str,
+        client_key: uuid.UUID,
+        job_id: str,
+        connection: GitHubFollowthroughConnection,
+        request: PrepareRequest,
+        watch: GuardianSourceWatch,
+        goal: Goal,
+    ) -> dict[str, Any] | None:
+        """Recover the server-only routine identity for one M3 publication.
+
+        ``RoutineService`` admits a fenced publication child before it calls
+        this adapter.  The child and its invocation parent are therefore the
+        only trusted source for routine identity; no routine fields are
+        accepted from the HTTP request.  A standalone M3 operation has no
+        matching child and retains its existing contract.
+        """
+
+        operation_uuid = str(client_key)
+        expected_job_id = f"ghfollow_{_operation_id(owner_principal_id, client_key).hex}"
+        if job_id != expected_job_id:
+            return None
+
+        try:
+            async with db_engine.get_session() as db:
+                child_rows = (
+                    await db.execute(
+                        select(WorkflowRunState).where(
+                            WorkflowRunState.job_kind == ROUTINE_PUBLICATION_CHILD_JOB_KIND,
+                            WorkflowRunState.owner_kind == "user",
+                            WorkflowRunState.owner_principal_id == owner_principal_id,
+                            WorkflowRunState.session_id == owner_session_id,
+                        )
+                    )
+                ).scalars().all()
+                matches: list[tuple[WorkflowRunState, Mapping[str, Any], Mapping[str, Any]]] = []
+                for child in child_rows:
+                    child_authority = _load(child.declared_authority_json, {})
+                    if not isinstance(child_authority, Mapping):
+                        continue
+                    if _text(child_authority.get("m3_job_id")) != job_id:
+                        continue
+                    child_inputs = _load(child.arguments_json, {})
+                    if not isinstance(child_inputs, Mapping):
+                        raise GitHubFollowthroughError("routine_publication_binding_invalid")
+                    matches.append((child, child_authority, child_inputs))
+                if not matches:
+                    return None
+                if len(matches) != 1:
+                    raise GitHubFollowthroughError("routine_publication_binding_conflict")
+
+                child, child_authority, child_inputs = matches[0]
+                parent_job_id = _text(
+                    child_authority.get("routine_invocation_job_id")
+                    or child_authority.get("parent_job_id")
+                    or child.parent_job_id
+                )
+                if (
+                    not parent_job_id
+                    or _text(child.parent_job_id) != parent_job_id
+                    or _text(child_authority.get("step_id")) != "github_followthrough"
+                    or _text(child_authority.get("m3_job_id")) != expected_job_id
+                    or _text(child_authority.get("publication_operation_uuid")) != operation_uuid
+                ):
+                    raise GitHubFollowthroughError("routine_publication_binding_invalid")
+
+                parent = (
+                    await db.execute(
+                        select(WorkflowRunState).where(
+                            WorkflowRunState.run_identity == parent_job_id,
+                            WorkflowRunState.job_kind == "routine_invocation",
+                            WorkflowRunState.owner_kind == "user",
+                            WorkflowRunState.owner_principal_id == owner_principal_id,
+                            WorkflowRunState.session_id == owner_session_id,
+                        )
+                    )
+                ).scalars().first()
+                if parent is None:
+                    raise GitHubFollowthroughError("routine_publication_binding_invalid")
+                parent_authority = _load(parent.declared_authority_json, {})
+                if not isinstance(parent_authority, Mapping):
+                    raise GitHubFollowthroughError("routine_publication_binding_invalid")
+
+                invocation_uuid = _text(
+                    child_inputs.get("invocation_uuid")
+                    or parent_authority.get("invocation_uuid")
+                )
+                try:
+                    invocation_uuid = str(uuid.UUID(invocation_uuid))
+                except (TypeError, ValueError, AttributeError) as exc:
+                    raise GitHubFollowthroughError("routine_publication_binding_invalid") from exc
+                if (
+                    _routine_child_job_id(invocation_uuid) != _text(child.run_identity)
+                    or _text(parent_authority.get("invocation_uuid")) not in {"", invocation_uuid}
+                    or _text(child_inputs.get("routine_invocation_job_id")) not in {"", parent_job_id}
+                ):
+                    raise GitHubFollowthroughError("routine_publication_binding_invalid")
+
+                routine_id = _text(child_authority.get("routine_id"))
+                parent_routine_id = _text(parent_authority.get("routine_id"))
+                if not routine_id or parent_routine_id != routine_id:
+                    raise GitHubFollowthroughError("routine_publication_binding_invalid")
+                try:
+                    routine_revision = int(child_authority.get("routine_revision"))
+                    parent_routine_revision = int(parent_authority.get("routine_revision"))
+                    routine_version = int(child_authority.get("routine_version"))
+                    parent_routine_version = int(parent_authority.get("routine_version"))
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise GitHubFollowthroughError("routine_publication_binding_invalid") from exc
+                package_digest = _text(parent_authority.get("package_digest"))
+                if (
+                    routine_revision < 1
+                    or routine_version < 1
+                    or routine_revision != parent_routine_revision
+                    or routine_version != parent_routine_version
+                    or len(package_digest) != 64
+                    or re.fullmatch(r"[0-9a-f]{64}", package_digest) is None
+                ):
+                    raise GitHubFollowthroughError("routine_publication_binding_invalid")
+
+                source_watch_id = _text(parent_authority.get("source_watch_id"))
+                connection_id = _text(parent_authority.get("github_connection_id"))
+                repository = _text(parent_authority.get("github_repository"))
+                action = _text(parent_authority.get("github_action"))
+                try:
+                    source_watch_revision = int(parent_authority.get("source_watch_revision"))
+                    connection_revision = int(parent_authority.get("github_connection_revision"))
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise GitHubFollowthroughError("routine_publication_binding_invalid") from exc
+                if (
+                    source_watch_id != _text(watch.id)
+                    or source_watch_revision < 1
+                    or connection_id != _text(connection.id)
+                    or connection_revision != int(connection.revision)
+                    or repository != _text(connection.repository)
+                    or action != _text(request.action)
+                    or parent.goal_id != goal.id
+                    or int(parent.goal_revision or 0) != int(goal.revision or 0)
+                    or int(parent.goal_revision or 0) != int(request.goal_revision)
+                    or _text(parent.operator_session_id or parent.session_id) != owner_session_id
+                ):
+                    raise GitHubFollowthroughError("routine_publication_binding_invalid")
+
+                return {
+                    "routine_id": routine_id,
+                    "routine_revision": routine_revision,
+                    "routine_version": routine_version,
+                    "package_digest": package_digest,
+                    "parent_invocation_job_id": parent_job_id,
+                    "publication_child_job_id": _text(child.run_identity),
+                    "invocation_uuid": invocation_uuid,
+                    "owner_principal_id": owner_principal_id,
+                    "owner_session_id": owner_session_id,
+                    "goal_id": _text(goal.id),
+                    "goal_revision": int(goal.revision),
+                    "source_watch_id": source_watch_id,
+                    "connection_id": connection_id,
+                    "connection_revision": connection_revision,
+                    "repository": repository,
+                    "action": action,
+                    "operation_uuid": operation_uuid,
+                }
+        except GitHubFollowthroughError:
+            raise
+        except Exception as exc:
+            raise GitHubFollowthroughError("routine_binding_unavailable", status_code=503) from exc
+
+    async def _current_routine_publication_binding(
+        self,
+        current: Mapping[str, Any],
+        *,
+        owner_principal_id: str,
+        owner_session_id: str,
+        return_admission_guard: bool = False,
+    ) -> dict[str, Any] | tuple[dict[str, Any], DurableJobRoutinePublicationAdmissionGuard] | None:
+        """Require the exact live routine/package binding before M3 writes."""
+
+        authority = current.get("declared_authority")
+        authority = authority if isinstance(authority, Mapping) else {}
+        binding = authority.get("routine_binding")
+        if binding is None:
+            return None
+        if not isinstance(binding, Mapping) or set(binding) != set(ROUTINE_BINDING_KEYS):
+            raise GitHubFollowthroughError("routine_binding_invalid")
+        binding = dict(binding)
+        if (
+            _text(binding.get("owner_principal_id")) != owner_principal_id
+            or _text(binding.get("owner_session_id")) != owner_session_id
+        ):
+            raise GitHubFollowthroughError("routine_binding_invalid")
+        try:
+            routine_revision = int(binding["routine_revision"])
+            routine_version = int(binding["routine_version"])
+            goal_revision = int(binding["goal_revision"])
+            connection_revision = int(binding["connection_revision"])
+            operation_uuid = uuid.UUID(str(binding["operation_uuid"]))
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            raise GitHubFollowthroughError("routine_binding_invalid") from exc
+        if routine_revision < 1 or routine_version < 1 or goal_revision < 1 or connection_revision < 1:
+            raise GitHubFollowthroughError("routine_binding_invalid")
+        if (
+            _text(binding.get("parent_invocation_job_id")) == ""
+            or _text(binding.get("publication_child_job_id")) == ""
+            or _text(binding.get("routine_id")) == ""
+            or _text(binding.get("package_digest")) == ""
+            or _text(binding.get("goal_id")) == ""
+            or _text(binding.get("source_watch_id")) == ""
+            or _text(binding.get("connection_id")) == ""
+            or _text(binding.get("repository")) == ""
+            or _text(binding.get("action")) not in ACTIONS
+            or len(_text(binding.get("package_digest"))) != 64
+            or re.fullmatch(r"[0-9a-f]{64}", _text(binding.get("package_digest"))) is None
+        ):
+            raise GitHubFollowthroughError("routine_binding_invalid")
+        expected_job_id = f"ghfollow_{_operation_id(owner_principal_id, operation_uuid).hex}"
+        if _text(current.get("job_id")) != expected_job_id:
+            raise GitHubFollowthroughError("routine_binding_invalid")
+        if _routine_child_job_id(_text(binding["invocation_uuid"])) != _text(
+            binding["publication_child_job_id"]
+        ):
+            raise GitHubFollowthroughError("routine_binding_invalid")
+
+        # M3 is deliberately a separate durable job from the routine parent
+        # and wrapper child.  The persisted binding alone must not let a board
+        # caller execute an approved M3 after the invocation tree was
+        # cancelled or its parent fence was replaced.  Re-read both rows on
+        # every execute boundary and require the same live parent fence that
+        # the wrapper child recorded when it was admitted.
+        try:
+            parent = await durable_job_repository.get_job(
+                _text(binding["parent_invocation_job_id"])
+            )
+            child = await durable_job_repository.get_job(
+                _text(binding["publication_child_job_id"])
+            )
+        except Exception as exc:
+            raise GitHubFollowthroughError(
+                "routine_parent_child_unavailable", status_code=503
+            ) from exc
+        parent_authority = (
+            parent.get("declared_authority")
+            if isinstance(parent, Mapping)
+            and isinstance(parent.get("declared_authority"), Mapping)
+            else {}
+        )
+        child_authority = (
+            child.get("declared_authority")
+            if isinstance(child, Mapping)
+            and isinstance(child.get("declared_authority"), Mapping)
+            else {}
+        )
+        parent_owner = parent.get("owner") if isinstance(parent, Mapping) and isinstance(parent.get("owner"), Mapping) else {}
+        child_owner = child.get("owner") if isinstance(child, Mapping) and isinstance(child.get("owner"), Mapping) else {}
+        parent_lease = parent.get("lease") if isinstance(parent, Mapping) and isinstance(parent.get("lease"), Mapping) else {}
+        child_lease = child.get("lease") if isinstance(child, Mapping) and isinstance(child.get("lease"), Mapping) else {}
+        try:
+            parent_fence = int(parent_lease.get("fencing_token") or 0)
+            child_parent_fence = int(child.get("parent_fencing_token") or 0) if isinstance(child, Mapping) else 0
+            parent_routine_revision = int(parent_authority.get("routine_revision") or 0)
+            parent_routine_version = int(parent_authority.get("routine_version") or 0)
+            parent_goal_revision = int(parent.get("goal_revision") or 0) if isinstance(parent, Mapping) else 0
+            child_goal_revision = int(child.get("goal_revision") or 0) if isinstance(child, Mapping) else 0
+            child_parent_authority_fence = int(child_authority.get("parent_fencing_token") or 0)
+            parent_connection_revision = int(parent_authority.get("github_connection_revision") or 0)
+            child_connection_revision = int(child_authority.get("github_connection_revision") or 0)
+            child_routine_revision = int(child_authority.get("routine_revision") or 0)
+            child_routine_version = int(child_authority.get("routine_version") or 0)
+            child_lease_fence = int(child_lease.get("fencing_token") or 0)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise GitHubFollowthroughError("routine_parent_child_binding_invalid") from exc
+
+        parent_status = _text(parent.get("status")) if isinstance(parent, Mapping) else ""
+        child_status = _text(child.get("status")) if isinstance(child, Mapping) else ""
+        parent_lease_owner = _text(parent_lease.get("owner"))
+        child_lease_owner = _text(child_lease.get("owner"))
+        child_lease_expiry = _text(child_lease.get("expires_at"))
+
+        def _live_lease_expiry(lease: Mapping[str, Any]) -> bool:
+            raw_expiry = lease.get("expires_at")
+            if isinstance(raw_expiry, datetime):
+                expiry = raw_expiry
+            else:
+                try:
+                    expiry = datetime.fromisoformat(str(raw_expiry).replace("Z", "+00:00"))
+                except (TypeError, ValueError, AttributeError):
+                    return False
+            if expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=timezone.utc)
+            return expiry > _now()
+
+        parent_lease_live = bool(parent_lease_owner) and _live_lease_expiry(parent_lease)
+        child_running = (
+            child_status == "running"
+            and bool(child_lease_owner)
+            and child_lease_fence > 0
+            and _live_lease_expiry(child_lease)
+        )
+        # Approval is held in the canonical routine representation by settling
+        # the wrapper child.  Its parent remains running, while the child is
+        # blocked with no live lease and its persisted parent fence is rebound
+        # to the current parent lease.  Keep this exact pair executable so a
+        # resumed M3 can consume the already reviewed approval; a blocked child
+        # with a lease or a stale parent fence remains fail-closed.
+        child_approval_hold = (
+            child_status == "blocked"
+            and not child_lease_owner
+            and not child_lease_expiry
+            and child_parent_fence > 0
+            and child_parent_fence == parent_fence
+        )
+        approval_id = _text(authority.get("approval_id"))
+        child_approval_checkpoint: Mapping[str, Any] | None = None
+        child_approval_checkpoint_id = ""
+        if isinstance(child, Mapping):
+            for item in reversed(child.get("checkpoints") or []):
+                if not isinstance(item, Mapping) or item.get("checkpoint_id") not in {
+                    "routine-child:adoption_pending",
+                    "routine-child:prepared",
+                }:
+                    continue
+                payload = item.get("payload")
+                child_approval_checkpoint = payload if isinstance(payload, Mapping) else item
+                child_approval_checkpoint_id = _text(item.get("checkpoint_id"))
+                break
+        if return_admission_guard:
+            # Initial M3 admission happens after RoutineService has recorded
+            # adoption_pending but before an approval exists.  The durable
+            # admission guard binds that checkpoint to this deterministic M3;
+            # execute/resume keeps the stricter prepared+approval requirement.
+            approval_identity_ok = (
+                child_approval_checkpoint_id
+                in {"routine-child:adoption_pending", "routine-child:prepared"}
+                and child_approval_checkpoint is not None
+                and _text(child_approval_checkpoint.get("m3_job_id"))
+                == _text(current.get("job_id"))
+            )
+        else:
+            approval_identity_ok = bool(approval_id) and (
+                child_approval_checkpoint_id == "routine-child:prepared"
+                and child_approval_checkpoint is not None
+                and _text(child_approval_checkpoint.get("m3_job_id"))
+                == _text(current.get("job_id"))
+                and _text(child_approval_checkpoint.get("approval_id")) == approval_id
+            )
+        if (
+            not isinstance(parent, Mapping)
+            or not isinstance(child, Mapping)
+            or _text(parent.get("job_id") or parent.get("run_identity"))
+            != _text(binding["parent_invocation_job_id"])
+            or _text(child.get("job_id") or child.get("run_identity"))
+            != _text(binding["publication_child_job_id"])
+            or _text(parent.get("job_kind")) != "routine_invocation"
+            or _text(child.get("job_kind")) != ROUTINE_PUBLICATION_CHILD_JOB_KIND
+            or parent_status != "running"
+            or not parent_lease_live
+            or not (child_running or child_approval_hold)
+            or _text(parent_owner.get("kind")) not in {"", "user"}
+            or _text(parent_owner.get("principal_id")) != owner_principal_id
+            or _text(child_owner.get("kind")) not in {"", "user"}
+            or _text(child_owner.get("principal_id")) != owner_principal_id
+            or _text(parent.get("operator_session_id") or parent.get("session_id")) != owner_session_id
+            or _text(child.get("operator_session_id") or child.get("session_id")) != owner_session_id
+            or parent_fence <= 0
+            or child_parent_fence <= 0
+            or child_parent_fence != parent_fence
+            or not approval_identity_ok
+            or _text(child.get("parent_job_id")) != _text(binding["parent_invocation_job_id"])
+            or _text(child_authority.get("parent_job_id")) != _text(binding["parent_invocation_job_id"])
+            or _text(child_authority.get("routine_invocation_job_id"))
+            != _text(binding["parent_invocation_job_id"])
+            or _text(child_authority.get("step_id")) != "github_followthrough"
+            or _text(child_authority.get("m3_job_id")) != _text(current.get("job_id"))
+            or _text(child_authority.get("publication_operation_uuid"))
+            != _text(binding["operation_uuid"])
+            or child_parent_authority_fence != parent_fence
+            or _text(parent_authority.get("routine_id")) != _text(binding["routine_id"])
+            or parent_routine_revision != routine_revision
+            or parent_routine_version != routine_version
+            or _text(parent_authority.get("package_digest")) != _text(binding["package_digest"])
+            or _text(parent_authority.get("invocation_uuid")) != _text(binding["invocation_uuid"])
+            or _text(parent_authority.get("source_watch_id")) != _text(binding["source_watch_id"])
+            or _text(parent_authority.get("github_connection_id")) != _text(binding["connection_id"])
+            or parent_connection_revision != connection_revision
+            or _text(parent_authority.get("github_repository")) != _text(binding["repository"])
+            or _text(parent_authority.get("github_action")) != _text(binding["action"])
+            or _text(child_authority.get("routine_id")) != _text(binding["routine_id"])
+            or child_routine_revision != routine_revision
+            or child_routine_version != routine_version
+            or _text(child_authority.get("package_digest")) != _text(binding["package_digest"])
+            or _text(child_authority.get("invocation_uuid")) != _text(binding["invocation_uuid"])
+            or _text(child_authority.get("source_watch_id")) != _text(binding["source_watch_id"])
+            or _text(child_authority.get("github_connection_id")) != _text(binding["connection_id"])
+            or child_connection_revision != connection_revision
+            or _text(child_authority.get("github_repository")) != _text(binding["repository"])
+            or _text(child_authority.get("github_action")) != _text(binding["action"])
+            or _text(parent.get("goal_id")) != _text(binding["goal_id"])
+            or parent_goal_revision != goal_revision
+            or _text(child.get("goal_id")) != _text(binding["goal_id"])
+            or child_goal_revision != goal_revision
+        ):
+            raise GitHubFollowthroughError("routine_parent_child_not_current")
+
+        try:
+            async with db_engine.get_session() as db:
+                routine = (
+                    await db.execute(
+                        select(GuardianRoutine).where(
+                            GuardianRoutine.id == _text(binding["routine_id"]),
+                            GuardianRoutine.owner_principal_id == owner_principal_id,
+                            GuardianRoutine.owner_session_id == owner_session_id,
+                        )
+                    )
+                ).scalars().first()
+                version = (
+                    await db.execute(
+                        select(GuardianRoutineVersion).where(
+                            GuardianRoutineVersion.routine_id == _text(binding["routine_id"]),
+                            GuardianRoutineVersion.version == routine_version,
+                        )
+                    )
+                ).scalars().first()
+        except GitHubFollowthroughError:
+            raise
+        except Exception as exc:
+            raise GitHubFollowthroughError("routine_binding_unavailable", status_code=503) from exc
+
+        if routine is None or version is None:
+            raise GitHubFollowthroughError("package_review_required")
+        routine_state = _text(routine.state)
+        if routine_state == "revoked":
+            raise GitHubFollowthroughError("routine_revoked_terminal")
+        if routine_state != "active" or int(routine.revision or 0) != routine_revision:
+            raise GitHubFollowthroughError("routine_not_active_or_stale")
+        if int(routine.current_version or 0) != routine_version:
+            raise GitHubFollowthroughError("routine_not_active_or_stale")
+        package_digest = _text(binding["package_digest"])
+        if _text(version.installed_package_digest) != package_digest:
+            raise GitHubFollowthroughError("package_review_required")
+
+        pack_id = _routine_pack_id(_text(binding["routine_id"]), routine_version)
+        try:
+            lifecycle = CapabilityPackLifecycle().status(
+                pack_id,
+                owner_principal_id=owner_principal_id,
+                session_id=owner_session_id,
+            )
+        except Exception as exc:
+            raise GitHubFollowthroughError("package_review_required") from exc
+        active = lifecycle.get("active") if isinstance(lifecycle, Mapping) else None
+        expected_pack_version = f"1.0.{routine_version}"
+        if (
+            not isinstance(active, Mapping)
+            or _text(active.get("pack_id")) != pack_id
+            or _text(active.get("status")) != "active"
+            or _text(active.get("version")) != expected_pack_version
+            or _text(active.get("digest")) != package_digest
+            or package_digest in {
+                _text(item)
+                for item in (lifecycle.get("revoked_digests", []) if isinstance(lifecycle, Mapping) else [])
+            }
+        ):
+            raise GitHubFollowthroughError("package_review_required")
+        if return_admission_guard:
+            return (
+                binding,
+                DurableJobRoutinePublicationAdmissionGuard(
+                    routine_parent_job_id=str(binding["parent_invocation_job_id"]),
+                    routine_parent_fencing_token=parent_fence,
+                    publication_child_job_id=str(binding["publication_child_job_id"]),
+                    publication_child_fencing_token=child_lease_fence,
+                    publication_child_parent_fencing_token=child_parent_fence,
+                    owner_principal_id=owner_principal_id,
+                    owner_session_id=owner_session_id,
+                ),
+            )
+        return binding
+
+    async def _routine_publication_admission_guard(
+        self,
+        binding: Mapping[str, Any],
+        *,
+        owner_principal_id: str,
+        owner_session_id: str,
+    ) -> DurableJobRoutinePublicationAdmissionGuard:
+        """Capture the current wrapper fences for the final M3 CAS.
+
+        ``_current_routine_publication_binding`` is an intentionally separate
+        package/readback preflight.  The durable repository repeats the
+        parent/child checks under one admission transaction, using these
+        fences to reject a cancellation that wins after preflight.
+        """
+
+        try:
+            parent = await durable_job_repository.get_job(
+                str(binding["parent_invocation_job_id"])
+            )
+            child = await durable_job_repository.get_job(
+                str(binding["publication_child_job_id"])
+            )
+            parent_lease = parent.get("lease") if isinstance(parent, Mapping) else {}
+            child_lease = child.get("lease") if isinstance(child, Mapping) else {}
+            parent_fence = int(parent_lease.get("fencing_token") or 0)
+            child_fence = int(child_lease.get("fencing_token") or 0)
+            child_parent_fence = int(child.get("parent_fencing_token") or 0) if isinstance(child, Mapping) else 0
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            raise GitHubFollowthroughError("routine_parent_child_binding_invalid") from exc
+        if (
+            not isinstance(parent, Mapping)
+            or not isinstance(child, Mapping)
+            or parent_fence <= 0
+            or child_fence <= 0
+            or child_parent_fence <= 0
+            or parent_fence != child_parent_fence
+            or _text(parent.get("job_id") or parent.get("run_identity"))
+            != _text(binding.get("parent_invocation_job_id"))
+            or _text(child.get("job_id") or child.get("run_identity"))
+            != _text(binding.get("publication_child_job_id"))
+        ):
+            raise GitHubFollowthroughError("routine_parent_child_not_current")
+        return DurableJobRoutinePublicationAdmissionGuard(
+            routine_parent_job_id=str(binding["parent_invocation_job_id"]),
+            routine_parent_fencing_token=parent_fence,
+            publication_child_job_id=str(binding["publication_child_job_id"]),
+            publication_child_fencing_token=child_fence,
+            publication_child_parent_fencing_token=child_parent_fence,
+            owner_principal_id=owner_principal_id,
+            owner_session_id=owner_session_id,
+        )
+
+    async def _close_invalid_routine_publication(
+        self,
+        current: Mapping[str, Any],
+        *,
+        prepared: PreparedPublication,
+        reason: str,
+        known_no_dispatch: bool = False,
+        target_path: str = "github:routine-binding",
+        owner: str | None = None,
+        fence: int | None = None,
+    ) -> dict[str, Any]:
+        """Close a revoked routine without erasing an external-effect liability."""
+
+        latest = await durable_job_repository.get_job(prepared.job_id) or dict(current)
+        effects = [item for item in latest.get("effects") or [] if isinstance(item, Mapping)]
+        unresolved = next(
+            (
+                item
+                for item in reversed(effects)
+                if _text(item.get("effect_type")) == "github_publication"
+                and _text(item.get("status")) in UNRESOLVED_EFFECT_STATUSES
+            ),
+            None,
+        )
+        lease = latest.get("lease") if isinstance(latest.get("lease"), Mapping) else {}
+        leased_owner = _text(owner or lease.get("owner")) or None
+        leased_fence = int(fence if fence is not None else (lease.get("fencing_token") or 0)) or None
+        if unresolved is not None:
+            if (
+                known_no_dispatch
+                and _text(unresolved.get("status")) == "intent"
+                and latest.get("status") == "running"
+                and leased_owner
+                and leased_fence
+            ):
+                return await self._mark_no_dispatch(
+                    prepared,
+                    reason=reason,
+                    current=latest,
+                    owner=leased_owner,
+                    fence=leased_fence,
+                    target_path=_text(unresolved.get("target_path")) or target_path,
+                )
+            if latest.get("status") == "running" and leased_owner and leased_fence:
+                return await self._mark_unknown(
+                    prepared,
+                    reason=reason,
+                    current=latest,
+                    owner=leased_owner,
+                    fence=leased_fence,
+                    readback_observation=_text(unresolved.get("status")) == "dispatched",
+                    target_path=_text(unresolved.get("target_path")) or target_path,
+                )
+            return latest
+
+        status = _text(latest.get("status"))
+        approval_cleanup = "not_bound"
+        try:
+            if status in {"accepted", "queued", "awaiting_approval"}:
+                # A pending approval is a one-shot operator decision.  If its
+                # routine package became invalid before resume, invalidate the
+                # exact still-pending row as a companion to the durable job
+                # cancellation. A consumed/approved row is left intact as
+                # historical evidence; it cannot authorize a cancelled job.
+                if status == "awaiting_approval":
+                    approval_cleanup = await self._deny_pending_approval_for_cancelled_job(
+                        latest,
+                        owner_principal_id=prepared.owner_principal_id,
+                        owner_session_id=prepared.owner_session_id,
+                        job_id=prepared.job_id,
+                    )
+                cancelled = await durable_job_repository.cancel_job(
+                    prepared.job_id,
+                    expected_revision=latest.get("revision"),
+                    reason=reason,
+                )
+                if approval_cleanup not in _SAFE_APPROVAL_CLEANUP_OUTCOMES:
+                    return await self._cancel_cleanup_response(
+                        cancelled,
+                        cleanup_status=approval_cleanup,
+                    )
+                return cancelled
+            if status == "running" and leased_owner and leased_fence:
+                return await durable_job_repository.transition_job(
+                    prepared.job_id,
+                    "blocked",
+                    owner=leased_owner,
+                    fencing_token=leased_fence,
+                    expected_revision=latest.get("revision"),
+                    reason=reason,
+                    result={"recovery_action": "restore_prerequisite", "learning": "no_learning"},
+                    result_summary="routine package binding is no longer active; restore it before retry",
+                )
+        except DurableJobError:
+            latest_after = await durable_job_repository.get_job(prepared.job_id) or latest
+            if approval_cleanup not in _SAFE_APPROVAL_CLEANUP_OUTCOMES:
+                return await self._cancel_cleanup_response(
+                    latest_after,
+                    cleanup_status=approval_cleanup,
+                )
+            return latest_after
+        return latest
+
     async def _prepare_payload_file(self, prepared: PreparedPublication) -> str:
         owner_digest = _sha(prepared.owner_principal_id)[:24]
         path = f"github/followthrough/{owner_digest}/{prepared.job_id}.json"
@@ -658,6 +1498,85 @@ class GitHubFollowthroughService:
         if truncated or stored != payload:
             raise GitHubFollowthroughError("input_artifact_readback_failed", status_code=500)
         return path
+
+    async def _assert_prepare_current(
+        self,
+        current: Mapping[str, Any],
+        *,
+        owner_principal_id: str,
+        owner_session_id: str,
+        routine_binding: Mapping[str, Any] | None,
+        phase: str,
+    ) -> dict[str, Any]:
+        """Re-read the leased M3 row before each prepare side effect.
+
+        Preparation runs after admission but before the approval hold.  A
+        routine pause/revoke can therefore win between any two durable CAS
+        operations.  The latest row and its exact lease remain authoritative;
+        a changed owner/fence is never adopted by this worker.
+        """
+
+        job_id = _text(current.get("job_id") or current.get("run_identity"))
+        latest = await durable_job_repository.get_job(job_id) if job_id else None
+        if not isinstance(latest, Mapping) or _text(latest.get("job_id") or latest.get("run_identity")) != job_id:
+            raise GitHubFollowthroughError(f"prepare_{phase}_job_missing")
+        if _text(latest.get("status")) != "running":
+            raise GitHubFollowthroughError(f"prepare_{phase}_job_not_current")
+        previous_lease = current.get("lease") if isinstance(current.get("lease"), Mapping) else {}
+        latest_lease = latest.get("lease") if isinstance(latest.get("lease"), Mapping) else {}
+        previous_owner = _text(previous_lease.get("owner"))
+        previous_fence = int(previous_lease.get("fencing_token") or 0)
+        latest_owner = _text(latest_lease.get("owner"))
+        latest_fence = int(latest_lease.get("fencing_token") or 0)
+        if (
+            not latest_owner
+            or latest_fence <= 0
+            or (previous_owner and latest_owner != previous_owner)
+            or (previous_fence and latest_fence != previous_fence)
+        ):
+            raise GitHubFollowthroughError(f"prepare_{phase}_lease_not_current")
+        if routine_binding is not None:
+            live_binding = await self._current_routine_publication_binding(
+                latest,
+                owner_principal_id=owner_principal_id,
+                owner_session_id=owner_session_id,
+                # The wrapper child is still adoption_pending until this
+                # prepare call creates and binds the approval.  The admission
+                # form validates the exact parent/child fence without
+                # requiring an approval id that does not exist yet.
+                return_admission_guard=True,
+            )
+            if isinstance(live_binding, tuple) and len(live_binding) == 2:
+                live_binding = live_binding[0]
+            if not isinstance(live_binding, Mapping) or dict(live_binding) != dict(routine_binding):
+                raise GitHubFollowthroughError("routine_binding_invalid")
+        return dict(latest)
+
+    async def _cleanup_uncommitted_payload_file(self, *, job_id: str, path: str) -> None:
+        """Remove a private payload only while no durable artifact owns it."""
+
+        try:
+            latest = await durable_job_repository.get_job(job_id)
+        except Exception:
+            # An unreadable durable projection cannot prove that artifact
+            # admission did not occur.  Preserve the private file for the
+            # operator's existing recovery/reconciliation path.
+            return
+        if not isinstance(latest, Mapping):
+            # A successful but non-canonical response is not proof that this
+            # path is unowned.  Cleanup is deliberately fail closed.
+            return
+        for artifact in latest.get("artifacts") or []:
+            if isinstance(artifact, Mapping) and _text(artifact.get("file_path")) == _text(path):
+                # The artifact receipt is canonical even if a later
+                # checkpoint CAS lost.  Never delete a referenced file.
+                return
+        try:
+            _safe_resolve(path).unlink(missing_ok=True)
+        except (OSError, ValueError):
+            # Cleanup is best effort; the durable row remains the recovery
+            # authority and no provider request is made from this path.
+            return
 
     async def _checkpoint_payload(self, job_id: str, *, phase: str, payload: Mapping[str, Any], current: Mapping[str, Any]) -> dict[str, Any]:
         lease = current.get("lease") or {}
@@ -1137,8 +2056,22 @@ class GitHubFollowthroughService:
             "goal_revision": int(goal.revision),
             "plan_revision": int(watch.plan_revision),
         }
+        routine_binding = await self._discover_routine_publication_binding(
+            owner_principal_id=owner_principal_id,
+            owner_session_id=owner_session_id,
+            client_key=client_key,
+            job_id=f"ghfollow_{operation_id.hex}",
+            connection=connection,
+            request=request,
+            watch=watch,
+            goal=goal,
+        )
+        if routine_binding is not None:
+            input_fields["routine_binding"] = dict(routine_binding)
         if parent_handoff_context:
-            input_fields["parent_handoff_context"] = parent_handoff_context
+            # The supplied context is already verified against this digest.
+            # Bind only the digest into the durable input receipt so raw
+            # handoff summaries stay out of the durable job projection.
             input_fields["parent_handoff_digest"] = parent_handoff_digest
         input_digest = _sha(_dump(input_fields))
         job_id = f"ghfollow_{operation_id.hex}"
@@ -1186,8 +2119,44 @@ class GitHubFollowthroughService:
             "dossier_sha256": request.dossier_sha256,
             "budget_microusd": 0,
         }
+        if routine_binding is not None:
+            authority["routine_binding"] = dict(routine_binding)
         if parent_handoff_context:
             authority["parent_handoff_digest"] = parent_handoff_digest
+        # The routine child is admitted before this M3 prepare call.  Re-read
+        # the canonical routine/package rows immediately before admitting the
+        # publication itself so a revoke/quarantine racing preparation cannot
+        # leave a stale provider job behind.  Standalone M3 has no binding and
+        # keeps its existing path.
+        routine_publication_admission_guard = None
+        if routine_binding is not None:
+            live_binding = await self._current_routine_publication_binding(
+                {
+                    "job_id": job_id,
+                    "declared_authority": {"routine_binding": routine_binding},
+                },
+                owner_principal_id=owner_principal_id,
+                owner_session_id=owner_session_id,
+                return_admission_guard=True,
+            )
+            if (
+                isinstance(live_binding, tuple)
+                and len(live_binding) == 2
+                and isinstance(live_binding[0], Mapping)
+                and isinstance(live_binding[1], DurableJobRoutinePublicationAdmissionGuard)
+            ):
+                if dict(live_binding[0]) != routine_binding:
+                    raise GitHubFollowthroughError("routine_binding_invalid")
+                routine_publication_admission_guard = live_binding[1]
+            else:
+                # Keep test doubles and older internal adapters fail-closed:
+                # a binding without the exact preflight fences must make one
+                # final owner/row read before admission.
+                routine_publication_admission_guard = await self._routine_publication_admission_guard(
+                    routine_binding,
+                    owner_principal_id=owner_principal_id,
+                    owner_session_id=owner_session_id,
+                )
         admitted = await durable_job_repository.admit_job(
             DurableJobSpec(
                 identity=DurableJobIdentity(
@@ -1208,10 +2177,14 @@ class GitHubFollowthroughService:
                 plan_revision=int(watch.plan_revision),
                 declared_authority=authority,
                 deadline_at=_now() + timedelta(seconds=PREPARE_DEADLINE_SECONDS),
-                max_attempts=1,
+                # The first claim prepares and pauses at the independent
+                # publication approval gate; the approved effect/readback is
+                # a second explicit claim, not an automatic retry.
+                max_attempts=2,
                 priority=50,
                 run_fingerprint=input_digest,
                 budget_microusd=0,
+                routine_publication_admission_guard=routine_publication_admission_guard,
             )
         )
         if admitted.get("receipt", {}).get("status") == "deduped" or admitted.get("status") != "accepted":
@@ -1255,54 +2228,104 @@ class GitHubFollowthroughService:
         fence = int((current.get("lease") or {}).get("fencing_token") or 0)
         path = f"github/followthrough/{_sha(owner_principal_id)[:24]}/{job_id}.json"
         payload_text = _dump(prepared.as_private_payload()) + "\n"
+        current = await self._assert_prepare_current(
+            current,
+            owner_principal_id=owner_principal_id,
+            owner_session_id=owner_session_id,
+            routine_binding=routine_binding,
+            phase="payload",
+        )
+        owner = str((current.get("lease") or {}).get("owner") or owner)
+        fence = int((current.get("lease") or {}).get("fencing_token") or fence)
         try:
             _write_workspace_text_bounded(_safe_resolve(path), payload_text, max_bytes=MAX_ARTIFACT_BYTES)
             stored, truncated = _read_workspace_text_bounded(_safe_resolve(path), max_bytes=MAX_ARTIFACT_BYTES)
         except (OSError, ValueError) as exc:
-            await durable_job_repository.transition_job(
-                job_id,
-                "failed",
-                owner=owner,
-                fencing_token=fence,
-                expected_revision=current.get("revision"),
-                reason="input_artifact_write_failed",
-            )
+            await self._cleanup_uncommitted_payload_file(job_id=job_id, path=path)
+            try:
+                await durable_job_repository.transition_job(
+                    job_id,
+                    "failed",
+                    owner=owner,
+                    fencing_token=fence,
+                    expected_revision=current.get("revision"),
+                    reason="input_artifact_write_failed",
+                )
+            except DurableJobError:
+                pass
             raise GitHubFollowthroughError("input_artifact_write_failed", status_code=500) from exc
         if truncated or stored != payload_text:
+            await self._cleanup_uncommitted_payload_file(job_id=job_id, path=path)
             raise GitHubFollowthroughError("input_artifact_readback_failed", status_code=500)
         prepared = replace_dataclass(
             prepared,
             payload_path=path,
             payload_sha256=_sha(payload_text),
         )
-        artifact = await durable_job_repository.record_artifact(
-            job_id,
-            file_path=path,
-            artifact_type="github_followthrough_input",
-            content=payload_text,
-            owner=owner,
-            fencing_token=fence,
-            expected_revision=current.get("revision"),
+        try:
+            current = await self._assert_prepare_current(
+                current,
+                owner_principal_id=owner_principal_id,
+                owner_session_id=owner_session_id,
+                routine_binding=routine_binding,
+                phase="artifact",
+            )
+            owner = str((current.get("lease") or {}).get("owner") or owner)
+            fence = int((current.get("lease") or {}).get("fencing_token") or fence)
+            artifact = await durable_job_repository.record_artifact(
+                job_id,
+                file_path=path,
+                artifact_type="github_followthrough_input",
+                content=payload_text,
+                owner=owner,
+                fencing_token=fence,
+                expected_revision=current.get("revision"),
+            )
+            current = await self._checkpoint_payload(
+                job_id,
+                phase="prepared",
+                payload={
+                    "operation_id": str(operation_id),
+                    "payload_path": path,
+                    "payload_sha256": prepared.payload_sha256,
+                    "input_artifact_id": (artifact.get("receipt") or {}).get("artifact_id"),
+                    "input_digest": input_digest,
+                    "connection_id": connection.id,
+                    "connection_revision": int(connection.revision),
+                    "source_watch_id": watch.id,
+                    "plan_revision": int(watch.plan_revision),
+                    "dossier_artifact_id": request.dossier_artifact_id,
+                    "dossier_sha256": request.dossier_sha256,
+                },
+                current=await durable_job_repository.get_job(job_id) or current,
+            )
+            current = await self._assert_prepare_current(
+                current,
+                owner_principal_id=owner_principal_id,
+                owner_session_id=owner_session_id,
+                routine_binding=routine_binding,
+                phase="approval",
+            )
+        except Exception:
+            await self._cleanup_uncommitted_payload_file(job_id=job_id, path=path)
+            raise
+        approval_scope = _followthrough_approval_scope(
+            operation_id=str(operation_id),
+            job_id=job_id,
+            connection_id=connection.id,
+            connection_revision=int(connection.revision),
+            repository=connection.repository,
+            action=request.action,
+            issue_number=issue_number,
+            title_sha256=_sha(title or ""),
+            body_sha256=_sha(body),
+            source_watch_id=watch.id,
+            plan_revision=int(watch.plan_revision),
+            goal_id=goal.id,
+            goal_revision=int(goal.revision),
+            dossier_artifact_id=request.dossier_artifact_id,
+            dossier_sha256=request.dossier_sha256,
         )
-        current = await self._checkpoint_payload(
-            job_id,
-            phase="prepared",
-            payload={
-                "operation_id": str(operation_id),
-                "payload_path": path,
-                "payload_sha256": prepared.payload_sha256,
-                "input_artifact_id": (artifact.get("receipt") or {}).get("artifact_id"),
-                "input_digest": input_digest,
-                "connection_id": connection.id,
-                "connection_revision": int(connection.revision),
-                "source_watch_id": watch.id,
-                "plan_revision": int(watch.plan_revision),
-                "dossier_artifact_id": request.dossier_artifact_id,
-                "dossier_sha256": request.dossier_sha256,
-            },
-            current=await durable_job_repository.get_job(job_id) or current,
-        )
-        current = await durable_job_repository.get_job(job_id) or current
         approval_fingerprint = fingerprint_tool_call(
             "github:followthrough",
             {
@@ -1317,6 +2340,7 @@ class GitHubFollowthroughService:
                 "dossier_artifact_id": request.dossier_artifact_id,
                 "dossier_sha256": request.dossier_sha256,
             },
+            approval_context=approval_scope,
         )
         approval = await approval_repository.get_or_create_pending(
             session_id=owner_session_id,
@@ -1325,6 +2349,8 @@ class GitHubFollowthroughService:
             summary=f"Publish an approved GitHub {request.action} for goal {goal.id}",
             fingerprint=approval_fingerprint,
             details={
+                "approval_scope": approval_scope,
+                "approval_context": approval_scope,
                 "approval_operator_principal_id": owner_principal_id,
                 "approval_owner_principal_id": owner_principal_id,
                 "approval_owner_operator_session_id": owner_session_id,
@@ -1334,6 +2360,7 @@ class GitHubFollowthroughService:
                 "durable_job_id": job_id,
                 "durable_owner_kind": "user",
                 "durable_owner_principal_id": owner_principal_id,
+                "durable_service_id": None,
                 "durable_authority_digest": current.get("authority_digest"),
                 "durable_goal_id": goal.id,
                 "durable_goal_revision": int(goal.revision),
@@ -1354,36 +2381,68 @@ class GitHubFollowthroughService:
                 "approval_expires_at": (_now() + timedelta(seconds=APPROVAL_TTL_SECONDS)).timestamp(),
             },
         )
-        current = await durable_job_repository.get_job(job_id) or current
-        lease = current.get("lease") or {}
-        bound = await durable_job_repository.bind_approval_id(
-            job_id,
-            approval.id,
-            owner=str(lease.get("owner") or owner),
-            fencing_token=int(lease.get("fencing_token") or fence),
-            expected_revision=int(current.get("revision") or 0),
-        )
-        await approval_repository.update_pending_details(
-            approval.id,
-            owner_principal_id=owner_principal_id,
-            operator_session_id=owner_session_id,
-            updates={
-                "durable_authority_digest": bound.get("authority_digest"),
-                "authority_digest": bound.get("authority_digest"),
-                "approval_expires_at": approval.expires_at.timestamp() if approval.expires_at else None,
-            },
-        )
-        bound_lease = bound.get("lease") or {}
-        held = await durable_job_repository.transition_job(
-            job_id,
-            "awaiting_approval",
-            owner=str(bound_lease.get("owner") or owner),
-            fencing_token=int(bound_lease.get("fencing_token") or fence),
-            expected_revision=int(bound.get("revision") or 0),
-            reason="github_followthrough_approval_required",
-        )
+        created_approval_id = _text(getattr(approval, "id", None))
+        if not created_approval_id:
+            raise GitHubFollowthroughError("approval_creation_invalid")
+        try:
+            # Cancellation may win after the approval row is created but
+            # before its id is durably bound.  Recheck first, then use the
+            # exact newly-created id for the cleanup CAS on every later error.
+            current = await self._assert_prepare_current(
+                current,
+                owner_principal_id=owner_principal_id,
+                owner_session_id=owner_session_id,
+                routine_binding=routine_binding,
+                phase="approval_bind",
+            )
+            lease = current.get("lease") or {}
+            bound = await durable_job_repository.bind_approval_id(
+                job_id,
+                created_approval_id,
+                owner=str(lease.get("owner") or owner),
+                fencing_token=int(lease.get("fencing_token") or fence),
+                expected_revision=int(current.get("revision") or 0),
+            )
+            await approval_repository.update_pending_details(
+                created_approval_id,
+                owner_principal_id=owner_principal_id,
+                operator_session_id=owner_session_id,
+                updates={
+                    "durable_authority_digest": bound.get("authority_digest"),
+                    "authority_digest": bound.get("authority_digest"),
+                    "approval_expires_at": approval.expires_at.timestamp() if approval.expires_at else None,
+                },
+            )
+            bound_lease = bound.get("lease") or {}
+            held = await durable_job_repository.transition_job(
+                job_id,
+                "awaiting_approval",
+                owner=str(bound_lease.get("owner") or owner),
+                fencing_token=int(bound_lease.get("fencing_token") or fence),
+                expected_revision=int(bound.get("revision") or 0),
+                reason="github_followthrough_approval_required",
+            )
+        except Exception:
+            try:
+                latest = await durable_job_repository.get_job(job_id) or current
+            except Exception:
+                latest = current
+            try:
+                await self._deny_pending_approval_for_cancelled_job(
+                    latest,
+                    owner_principal_id=owner_principal_id,
+                    owner_session_id=owner_session_id,
+                    job_id=job_id,
+                    approval_id_override=created_approval_id,
+                )
+            except Exception:
+                # Preserve the original durable CAS error.  The exact
+                # approval helper is retry-safe and the next cancellation or
+                # recovery pass will attempt the same idempotent cleanup.
+                pass
+            raise
         return await self._prepare_job_response(held, prepared=prepared, approval={
-            "id": approval.id,
+            "id": created_approval_id,
             "expires_at": approval.expires_at,
         })
 
@@ -1456,11 +2515,7 @@ class GitHubFollowthroughService:
         owner: str,
         fence: int,
     ) -> dict[str, Any]:
-        target_path = (
-            f"/repos/{prepared.repository}/issues"
-            if prepared.action == ACTION_CREATE_ISSUE
-            else f"/repos/{prepared.repository}/issues/{prepared.issue_number}/comments"
-        )
+        target_path = _publication_effect_target_path(prepared)
         return await durable_job_repository.record_effect(
             prepared.job_id,
             effect_type="github_publication",
@@ -1505,14 +2560,21 @@ class GitHubFollowthroughService:
         revision = int(current.get("revision") or 0)
         effect_id = f"github:{prepared.operation_id}"
         if readback_observation:
+            effect_target_path = _publication_effect_target_path(prepared)
+            readback_details: dict[str, Any] = {
+                "verified": False,
+                "reason_code": reason,
+            }
+            if target_path and target_path != effect_target_path:
+                readback_details["readback_path"] = target_path
             observed = await durable_job_repository.record_readback(
                 prepared.job_id,
-                target_path=target_path or "github:unknown",
+                target_path=effect_target_path,
                 effect_id=effect_id,
                 effect_type="github_publication",
                 target_digest=prepared.body_sha256,
                 status="unknown",
-                details={"verified": False, "reason_code": reason},
+                details=readback_details,
                 owner=owner,
                 fencing_token=fence,
                 expected_revision=revision,
@@ -2025,6 +3087,22 @@ class GitHubFollowthroughService:
             result["recovery_action"] = recovery_action
             result["reason_code"] = exc.code
             return result
+        try:
+            await self._current_routine_publication_binding(
+                current,
+                owner_principal_id=owner_principal_id,
+                owner_session_id=owner_session_id or prepared.owner_session_id,
+            )
+        except GitHubFollowthroughError as exc:
+            closed = await self._close_invalid_routine_publication(
+                current,
+                prepared=prepared,
+                reason=exc.code,
+            )
+            result = await self._prepare_job_response(closed, prepared=prepared)
+            result["reason_code"] = exc.code
+            result["recovery_action"] = "restore_prerequisite"
+            return result
         if current.get("status") == "awaiting_approval":
             approval_id = _text((current.get("declared_authority") or {}).get("approval_id"))
             approval = await approval_repository.get(approval_id)
@@ -2081,6 +3159,26 @@ class GitHubFollowthroughService:
                 expected_revision=current.get("revision"),
             )
             current = await durable_job_repository.get_job(job_id) or resumed
+            # Approval consumption only moves the durable job to the queue; it
+            # does not grant a stale routine package a provider dispatch.  The
+            # package/version binding is checked again after that CAS and
+            # before claim, reservation, or effect intent.
+            try:
+                await self._current_routine_publication_binding(
+                    current,
+                    owner_principal_id=owner_principal_id,
+                    owner_session_id=owner_session_id or prepared.owner_session_id,
+                )
+            except GitHubFollowthroughError as exc:
+                closed = await self._close_invalid_routine_publication(
+                    current,
+                    prepared=prepared,
+                    reason=exc.code,
+                )
+                result = await self._prepare_job_response(closed, prepared=prepared)
+                result["reason_code"] = exc.code
+                result["recovery_action"] = "restore_prerequisite"
+                return result
         if current.get("status") == "queued":
             runner = RUNNER_PREFIX + job_id
             current = await durable_job_repository.claim_job(
@@ -2152,7 +3250,10 @@ class GitHubFollowthroughService:
             # closes the intent as a known no-dispatch outcome.
             approval_id = _text((current.get("declared_authority") or {}).get("approval_id"))
             approval = await approval_repository.get(approval_id)
-            if approval is None or approval.status != "approved":
+            if approval is None or (
+                approval.status != "approved"
+                and not _consumed_approval_resume_is_current(current, approval)
+            ):
                 raise GitHubFollowthroughError("approval_not_current")
             approval_session = _text(approval.operator_session_id or approval.session_id)
             if approval_session != prepared.owner_session_id:
@@ -2188,18 +3289,58 @@ class GitHubFollowthroughService:
                 job_id=job_id,
                 fence=reservation_fence,
             )
+            post_path = _publication_effect_target_path(prepared)
+            try:
+                await self._current_routine_publication_binding(
+                    current,
+                    owner_principal_id=owner_principal_id,
+                    owner_session_id=owner_session_id or prepared.owner_session_id,
+                )
+            except GitHubFollowthroughError as exc:
+                closed = await self._close_invalid_routine_publication(
+                    current,
+                    prepared=prepared,
+                    reason=exc.code,
+                    known_no_dispatch=True,
+                    target_path=post_path,
+                    owner=owner,
+                    fence=fence,
+                )
+                if closed.get("status") in {"blocked", "cancelled"}:
+                    connection_after_binding_failure = await self._get_connection_row(owner_principal_id)
+                    if (
+                        connection_after_binding_failure is not None
+                        and connection_after_binding_failure.active_job_id == job_id
+                    ):
+                        await self._release_connection(
+                            connection_id=connection_after_binding_failure.id,
+                            owner_principal_id=owner_principal_id,
+                            job_id=job_id,
+                            fence=reservation_fence,
+                        )
+                result = await self._prepare_job_response(closed, prepared=prepared)
+                result["reason_code"] = exc.code
+                result["recovery_action"] = "restore_prerequisite"
+                return result
             token = await self._load_token(connection)
-            deadline = min(
-                _now().timestamp() + EXECUTION_DEADLINE_SECONDS,
-                datetime.fromisoformat(str(current["deadline_at"]).replace("Z", "+00:00")).timestamp()
-                if current.get("deadline_at")
-                else _now().timestamp() + EXECUTION_DEADLINE_SECONDS,
-            )
+            current_deadline = _now().timestamp() + EXECUTION_DEADLINE_SECONDS
+            if current.get("deadline_at"):
+                persisted_deadline = datetime.fromisoformat(
+                    str(current["deadline_at"]).replace("Z", "+00:00")
+                )
+                # SQLite may deserialize a UTC DATETIME without its timezone
+                # marker. Treat that naive value as UTC, matching the durable
+                # job repository, instead of interpreting it in the host's
+                # local timezone and expiring the run early.
+                if persisted_deadline.tzinfo is None:
+                    persisted_deadline = persisted_deadline.replace(tzinfo=timezone.utc)
+                else:
+                    persisted_deadline = persisted_deadline.astimezone(timezone.utc)
+                current_deadline = min(current_deadline, persisted_deadline.timestamp())
+            deadline = current_deadline
             if prepared.action == ACTION_CREATE_ISSUE:
-                post_path = f"/repos/{prepared.repository}/issues"
                 request_body = {"title": prepared.title, "body": prepared.body}
             else:
-                post_path = f"/repos/{prepared.repository}/issues/{prepared.issue_number}/comments"
                 request_body = {"body": prepared.body}
             try:
                 response = await self._request(
@@ -2309,11 +3450,13 @@ class GitHubFollowthroughService:
                 return await self._prepare_job_response(unknown, prepared=prepared)
             readback = await durable_job_repository.record_readback(
                 job_id,
-                target_path=readback_path,
+                target_path=post_path,
                 effect_id=f"github:{prepared.operation_id}",
                 effect_type="github_publication",
                 target_digest=prepared.body_sha256,
                 content_sha256=_sha(_dump(readback_payload)),
+                readback_id=_publication_readback_id(prepared),
+                verified_at=_now().isoformat(),
                 status="succeeded",
                 details={
                     "verified": True,
@@ -2321,6 +3464,7 @@ class GitHubFollowthroughService:
                     "repository": prepared.repository,
                     "action": prepared.action,
                     "body_sha256": prepared.body_sha256,
+                    "readback_path": readback_path,
                     "title_sha256": _sha(prepared.title or ""),
                     "issue_url_matches": prepared.action == ACTION_CREATE_ISSUE
                     or _text(readback_payload.get("issue_url"))
@@ -2393,6 +3537,100 @@ class GitHubFollowthroughService:
             raise GitHubFollowthroughError("job_not_found", status_code=404)
         return await self._prepare_job_response(current)
 
+    async def _deny_pending_approval_for_cancelled_job(
+        self,
+        current: Mapping[str, Any],
+        *,
+        owner_principal_id: str,
+        owner_session_id: str,
+        job_id: str,
+        approval_id_override: str | None = None,
+    ) -> str:
+        """Invalidate only the exact still-pending approval for one M3 job.
+
+        The durable job transition is authoritative.  Approval resolution is a
+        companion CAS: an already approved or consumed row remains historical,
+        while a pending row is denied only after its server-owned job, owner,
+        session, authority, goal, and capability bindings match this job.
+        """
+
+        authority = current.get("declared_authority")
+        authority = authority if isinstance(authority, Mapping) else {}
+        approval_id = _text(approval_id_override or authority.get("approval_id"))
+        if not approval_id:
+            return "not_bound"
+        try:
+            approval = await approval_repository.get(approval_id)
+        except Exception:
+            # Cancellation has already been durably recorded.  A later retry
+            # of this same cancellation can safely retry the companion CAS.
+            return "unavailable"
+        if approval is None:
+            return "missing"
+        approval_status = _text(getattr(approval, "status", None))
+        if approval_status != "pending":
+            # Approved/consumed/expired/denied rows are historical and must not
+            # be rewritten as a side effect of cancellation.
+            return approval_status or "unknown"
+
+        owner = current.get("owner")
+        owner = owner if isinstance(owner, Mapping) else {}
+        details = _load(getattr(approval, "details_json", None), {})
+        if not isinstance(details, Mapping):
+            return "binding_mismatch"
+        if (
+            _text(getattr(approval, "id", None)) != approval_id
+            or _text(getattr(approval, "tool_name", None)) != "github:followthrough"
+            or _text(getattr(approval, "session_id", None)) != _text(owner_session_id)
+            or _text(getattr(approval, "operator_session_id", None)) != _text(owner_session_id)
+            or _text(getattr(approval, "owner_principal_id", None)) != _text(owner_principal_id)
+            or _text(details.get("durable_approval_id")) != approval_id
+            or _text(details.get("approval_id")) != approval_id
+            or _text(details.get("durable_job_id")) != _text(job_id)
+            or _text(details.get("durable_owner_kind")) != _text(owner.get("kind"))
+            or _text(details.get("durable_owner_principal_id")) != _text(owner_principal_id)
+            or _text(details.get("operator_session_id")) != _text(owner_session_id)
+            or _text(details.get("durable_authority_digest")) != _text(current.get("authority_digest"))
+            or _text(details.get("durable_goal_id")) != _text(current.get("goal_id"))
+            or details.get("durable_goal_revision") != current.get("goal_revision")
+            or details.get("durable_plan_revision") != current.get("plan_revision")
+            or _text(details.get("durable_capability_version"))
+            != _text(current.get("capability_version"))
+            or _text(details.get("durable_budget_digest")) != _text(current.get("budget_digest"))
+        ):
+            return "binding_mismatch"
+        try:
+            resolved = await approval_repository.resolve(approval_id, "denied")
+        except Exception:
+            return "unavailable"
+        if resolved is None:
+            return "missing"
+        return _text(getattr(resolved, "status", None)) or "unknown"
+
+    async def _cancel_cleanup_response(
+        self,
+        current: Mapping[str, Any],
+        *,
+        cleanup_status: str,
+    ) -> dict[str, Any]:
+        """Expose an unresolved approval cleanup without hiding cancellation."""
+
+        response = await self._prepare_job_response(current)
+        if cleanup_status in _SAFE_APPROVAL_CLEANUP_OUTCOMES:
+            return response
+        response.update(
+            {
+                "status": "blocked",
+                "durable_status": _text(current.get("status")) or "cancelled",
+                "approval_cleanup": cleanup_status,
+                "reason_code": "approval_cleanup_required",
+                "recovery_action": "reconcile_or_cancel",
+                "operator_action": "reconcile_or_cancel",
+                "operator_visible": True,
+            }
+        )
+        return response
+
     async def cancel(
         self,
         *,
@@ -2412,6 +3650,17 @@ class GitHubFollowthroughService:
         if not _text(owner_session_id) or persisted_session != _text(owner_session_id):
             raise GitHubFollowthroughError("job_session_mismatch", status_code=403)
         if current.get("status") in {"succeeded", "cancelled"}:
+            if current.get("status") == "cancelled":
+                cleanup_status = await self._deny_pending_approval_for_cancelled_job(
+                    current,
+                    owner_principal_id=owner_principal_id,
+                    owner_session_id=owner_session_id,
+                    job_id=job_id,
+                )
+                return await self._cancel_cleanup_response(
+                    current,
+                    cleanup_status=cleanup_status,
+                )
             return await self._prepare_job_response(current)
         lease = current.get("lease") or {}
         try:
@@ -2424,6 +3673,14 @@ class GitHubFollowthroughService:
             )
         except DurableJobError as exc:
             raise GitHubFollowthroughError("cancel_conflict") from exc
+        cleanup_status = "not_bound"
+        if cancelled.get("status") == "cancelled":
+            cleanup_status = await self._deny_pending_approval_for_cancelled_job(
+                cancelled,
+                owner_principal_id=owner_principal_id,
+                owner_session_id=owner_session_id,
+                job_id=job_id,
+            )
         # An approval-held or queued job has no external effect. A running job
         # with an intent is conservatively kept reserved by the connection
         # until the destination is reconciled.
@@ -2447,6 +3704,11 @@ class GitHubFollowthroughService:
                         job_id=job_id,
                         fence=int(connection.active_fence),
                     )
+        if cancelled.get("status") == "cancelled":
+            return await self._cancel_cleanup_response(
+                cancelled,
+                cleanup_status=cleanup_status,
+            )
         return await self._prepare_job_response(cancelled)
 
     async def reconcile(
@@ -2493,13 +3755,14 @@ class GitHubFollowthroughService:
             deadline=deadline,
         )
         readback_path = _canonical_path(prepared.repository, prepared.action, prepared.issue_number, remote_id)
+        effect_target_path = _publication_effect_target_path(prepared)
         if not verified or payload is None:
             # A failed readback is an observation only. It cannot clear the
             # original intent or authorize a new POST.
             try:
                 observed = await durable_job_repository.record_readback(
                     job_id,
-                    target_path=readback_path,
+                    target_path=effect_target_path,
                     effect_id=f"github:{prepared.operation_id}",
                     effect_type="github_publication",
                     target_digest=prepared.body_sha256,
@@ -2507,6 +3770,7 @@ class GitHubFollowthroughService:
                     details={
                         "verified": False,
                         "reason_code": reason,
+                        "readback_path": readback_path,
                         "reconciliation_owner_id": owner_principal_id,
                     },
                     owner=None,
@@ -2521,17 +3785,20 @@ class GitHubFollowthroughService:
             return result
         readback = await durable_job_repository.record_readback(
             job_id,
-            target_path=readback_path,
+            target_path=effect_target_path,
             effect_id=f"github:{prepared.operation_id}",
             effect_type="github_publication",
             target_digest=prepared.body_sha256,
             content_sha256=_sha(_dump(payload)),
+            readback_id=_publication_readback_id(prepared),
+            verified_at=_now().isoformat(),
             status="succeeded",
             details={
                 "verified": True,
                 "remote_id": remote_id,
                 "repository": prepared.repository,
                 "action": prepared.action,
+                "readback_path": readback_path,
                 "reconciliation_owner_id": owner_principal_id,
             },
             owner=None,

@@ -23,6 +23,7 @@ import uuid
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select
 
+from src.approval.repository import approval_repository
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.auth.service import AuthFailure, authenticate_session
 from src.db.engine import get_session
@@ -113,6 +114,7 @@ _TYPED_INPUT_FAILURE_CODES = frozenset(
         "typed_input_envelope_invalid",
         "typed_input_schema_invalid",
         "typed_input_capability_mismatch",
+        "typed_input_goal_binding_mismatch",
         "typed_input_invalid",
         "typed_input_too_large",
         "capability_unregistered",
@@ -178,6 +180,8 @@ class _RoutineInput(BaseModel):
     routine_id: str = Field(min_length=1, max_length=256)
     version: int = Field(ge=1)
     expected_routine_revision: int = Field(ge=1)
+    goal_id: str = Field(min_length=1, max_length=256)
+    expected_goal_revision: int = Field(ge=1)
     source_watch_id: str = Field(min_length=1, max_length=256)
     expected_watch_revision: int = Field(ge=1)
 
@@ -244,6 +248,18 @@ def _text(value: Any) -> str:
     return str(getattr(value, "value", value) or "").strip()
 
 
+def _load_json_mapping(value: Any) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        return dict(value)
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        decoded = json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return dict(decoded) if isinstance(decoded, Mapping) else {}
+
+
 def _board_attempt_uuid(attempt_id: str, task_id: str) -> uuid.UUID:
     """Normalize the durable attempt identity for adapter-specific IDs."""
 
@@ -299,6 +315,9 @@ _STABLE_REASON_CODES = frozenset(
         "not_dispatched",
         "operator_cancelled",
         "operator_retry",
+        "owner_mismatch",
+        "owner_session_invalid",
+        "package_review_required",
         "pending_admission",
         "reconcile_admission_binding",
         "reconcile_external_effect",
@@ -306,8 +325,13 @@ _STABLE_REASON_CODES = frozenset(
         "restore_prerequisite",
         "routine_not_active",
         "routine_revision_stale",
+        "routine_version_binding_invalid",
+        "routine_version_not_installed",
         "scheduled_not_due",
+        "session_expired",
+        "session_revoked",
         "transient",
+        "typed_input_goal_binding_mismatch",
         "typed_input_invalid",
         "typed_input_missing",
         "typed_input_unavailable",
@@ -351,6 +375,55 @@ def _stable_reason_code(value: Any, *, fallback: str = "execution_blocked") -> s
     if any(token in candidate for token in ("timeout", "timed", "rate", "retry", "failed", "failure", "deadline")):
         return "transient"
     return fallback if fallback in _STABLE_REASON_CODES else "execution_blocked"
+
+
+def _github_approval_block_projection(
+    approval_outcome: Mapping[str, Any],
+    *,
+    job_id: str,
+) -> dict[str, Any]:
+    """Build a safe board block receipt without losing the raw recovery class."""
+
+    raw_reason = _text(approval_outcome.get("reason_code")) or "approval_not_current"
+    if approval_outcome.get("retry_safe_after_terminal_cancel") is True:
+        reason = _text(approval_outcome.get("reason_code"))
+        return {
+            "outcome": f"{reason}_no_effect"[:128],
+            "block_kind": "cancelled",
+            "block_reason": f"{reason}_no_effect"[:256],
+            "result_refs": [
+                {
+                    "job_id": job_id,
+                    "workflow_run_id": job_id,
+                    "status": "cancelled",
+                    "reason_code": "no_external_effect",
+                    "recovery_action": "retry",
+                }
+            ],
+        }
+
+    reason_code = _stable_reason_code(raw_reason)
+    recovery_action = _text(approval_outcome.get("recovery_action")) or "retry_after_prerequisite"
+    if recovery_action == "reconcile_admission_binding":
+        block_kind = "reconcile_admission_binding"
+    elif raw_reason in {"approval_not_current", "approval_expired", "approval_denied"} or reason_code == "needs_input":
+        block_kind = "needs_input"
+    else:
+        block_kind = "capability"
+    return {
+        "outcome": reason_code,
+        "block_kind": block_kind,
+        "block_reason": reason_code,
+        "result_refs": [
+            {
+                "job_id": job_id,
+                "workflow_run_id": job_id,
+                "status": "blocked",
+                "reason_code": reason_code,
+                "recovery_action": recovery_action,
+            }
+        ],
+    }
 
 
 def _parse_typed_input(task: WorkBoardTask) -> dict[str, Any]:
@@ -431,6 +504,16 @@ def _parse_typed_input(task: WorkBoardTask) -> dict[str, Any]:
     except ValidationError as exc:
         raise TypedInputError("typed_input_invalid", "typed input does not match the capability schema") from exc
     result = validated.model_dump(mode="json", exclude_none=True)
+    if capability_id == "guardian-routine.v1":
+        if (
+            result.get("goal_id") != _text(getattr(task, "goal_id", ""))
+            or int(result.get("expected_goal_revision", 0))
+            != int(getattr(task, "goal_revision", 0) or 0)
+        ):
+            raise TypedInputError(
+                "typed_input_goal_binding_mismatch",
+                "routine typed input goal binding does not match the canonical task",
+            )
     if capability_id == GOAL_SNAPSHOT_CAPABILITY:
         try:
             result["file_path"] = normalize_workspace_relative_path(result["file_path"])
@@ -946,6 +1029,9 @@ class WorkBoardDispatcher:
                     gate_error("routine_version_not_installed", "The selected routine version is not installed")
                 if _text(package.get("status")) != "active" or _text(package.get("digest")) != _text(selected.get("installed_package_digest")):
                     gate_error("package_review_required", "The routine package review is not current")
+                external_code, external_reason = await self._routine_external_preflight(task, selected)
+                if external_code:
+                    gate_error(external_code, external_reason or "The procedure's GitHub prerequisite is unavailable")
                 from src.guardian.source_watch import source_watch_service
 
                 watch = await source_watch_service.get_watch(
@@ -999,11 +1085,11 @@ class WorkBoardDispatcher:
                     "The task changed before unblock preflight",
                     status_code=409,
                 )
-            from src.work_board.review import _HANDOFF_RECONCILIATION_REASON
+            from src.work_board.review import _is_handoff_reconciliation_block
 
-            is_handoff_recovery = (
-                task.block_kind == "dependency"
-                and task.block_reason == _HANDOFF_RECONCILIATION_REASON
+            is_handoff_recovery = _is_handoff_reconciliation_block(
+                task.block_kind,
+                task.block_reason,
             )
             if task.status is not WorkBoardStatus.blocked or not (
                 task.block_kind == "operator" or is_handoff_recovery
@@ -1595,11 +1681,10 @@ class WorkBoardDispatcher:
                 for parent, _link in parent_rows
             ):
                 return "dependency_unfinished", "Every blocking parent must be Done before dispatch"
+            from src.work_board.review import _HANDOFF_RECONCILIATION_REASON
+
             if any(not link.current_handoff_id for _parent, link in parent_rows):
-                return (
-                    "handoff_materialization_required",
-                    "Every completed parent must have a verified handoff before dispatch",
-                )
+                return "handoff_materialization_required", _HANDOFF_RECONCILIATION_REASON
             if parent_rows:
                 from src.work_board.review import current_handoff_is_verified
 
@@ -1607,14 +1692,9 @@ class WorkBoardDispatcher:
                     principal_id=task.owner_principal_id,
                     session_id=task.owner_session_id,
                 )
-                if any(
-                    not await current_handoff_is_verified(db, owner, parent, task, link)
-                    for parent, link in parent_rows
-                ):
-                    return (
-                        "handoff_materialization_required",
-                        "A completed parent handoff is missing, stale, or no longer independently verified",
-                    )
+                for parent, link in parent_rows:
+                    if not await current_handoff_is_verified(db, owner, parent, task, link):
+                        return "handoff_materialization_required", _HANDOFF_RECONCILIATION_REASON
         capability_id = _text(task.capability_id)
         spec = REGISTERED_CAPABILITIES.get(capability_id)
         if spec is None:
@@ -1784,12 +1864,19 @@ class WorkBoardDispatcher:
                     return "routine_version_not_installed", "The selected procedure version is not installed"
                 if _text(package.get("status")) != "active" or _text(package.get("digest")) != _text(selected.get("installed_package_digest")):
                     return "package_review_required", "The procedure package review is not current"
+                external_code, external_reason = await self._routine_external_preflight(task, selected)
+                if external_code:
+                    return external_code, external_reason
                 watch = await source_watch_service.get_watch(
                     _text(inputs["source_watch_id"]),
                     owner_principal_id=task.owner_principal_id,
                     owner_session_id=task.owner_session_id,
                 )
-                if not isinstance(watch, Mapping) or int(watch.get("plan_revision") or 0) != int(inputs["expected_watch_revision"]):
+                if not isinstance(watch, Mapping):
+                    return "source_watch_not_owned", "The procedure source watch is unavailable to this owner session"
+                if _text(watch.get("state")) != "active":
+                    return "source_watch_not_active", "The procedure source watch is not currently active"
+                if int(watch.get("plan_revision") or 0) != int(inputs["expected_watch_revision"]):
                     return "watch_plan_revision_stale", "The procedure source watch revision changed"
                 return None, None
         except AuthFailure as exc:
@@ -1797,6 +1884,70 @@ class WorkBoardDispatcher:
         except Exception as exc:
             return _safe_error_code(exc), "A current capability prerequisite is unavailable"
         return "capability_unregistered", "The task names no supported executable capability"
+
+    async def _routine_external_preflight(
+        self,
+        task: WorkBoardTask,
+        selected_version: Mapping[str, Any],
+    ) -> tuple[str | None, str | None]:
+        """Require current owner authority and the reviewed GitHub destination."""
+
+        try:
+            from src.extensions.github_followthrough import GitHubFollowthroughService
+
+            connection = await GitHubFollowthroughService().get_connection(task.owner_principal_id)
+            if not isinstance(connection, Mapping) or _text(connection.get("mode")) != "active":
+                return "github_connection_not_active", "The procedure's GitHub connection is not currently active"
+            if not bool(connection.get("credential_configured")):
+                return "credential_not_configured", "The procedure's GitHub credential is not currently configured"
+            bound_repository = _text(selected_version.get("source_repository"))
+            if bound_repository and _text(connection.get("repository")) != bound_repository:
+                return "github_repository_changed", "The active GitHub connection no longer matches the reviewed procedure destination"
+            operator = await authenticate_session(task.owner_session_id, touch=False)
+            if _text(getattr(operator, "session_id", None)) != _text(task.owner_session_id):
+                return "owner_session_invalid", "The procedure owner session is no longer current"
+            principal = getattr(operator, "principal", None)
+            if _text(getattr(principal, "principal_id", None)) != _text(task.owner_principal_id):
+                return "owner_mismatch", "The procedure owner session belongs to a different operator"
+            grants = {
+                _text(getattr(grant, "value", grant))
+                for grant in (getattr(principal, "grants", ()) or ())
+            }
+            if AuthorityGrant.EXTERNAL_MUTATION.value not in grants:
+                return "external_mutation_grant_required", "The current session has no external mutation grant"
+            return None, None
+        except AuthFailure as exc:
+            return exc.code, "The procedure owner session is no longer valid"
+        except Exception as exc:
+            return _safe_error_code(exc), "The procedure's GitHub prerequisite could not be verified"
+
+    async def _routine_recovery_session_error(
+        self,
+        task: WorkBoardTask,
+    ) -> tuple[str | None, str | None]:
+        """Require the persisted routine owner session to still be current."""
+
+        try:
+            operator = await authenticate_session(task.owner_session_id, touch=False)
+        except AuthFailure as exc:
+            if not (
+                settings.deployment_environment == "test"
+                and settings.operator_auth_allow_unauthenticated_tests
+                and task.owner_session_id == "test-auth-bypass"
+                and task.owner_principal_id == "operator:test-bypass"
+            ):
+                return exc.code, "The routine owner session is no longer valid"
+            operator = None
+        except Exception as exc:
+            return _safe_error_code(exc), "The routine owner session could not be revalidated"
+        if operator is None:
+            return None, None
+        if _text(getattr(operator, "session_id", None)) != _text(task.owner_session_id):
+            return "owner_session_invalid", "The routine owner session is no longer current"
+        principal = getattr(operator, "principal", None)
+        if _text(getattr(principal, "principal_id", None)) != _text(task.owner_principal_id):
+            return "owner_mismatch", "The routine owner session belongs to another operator"
+        return None, None
 
     def _build_spec(
         self,
@@ -2095,6 +2246,35 @@ class WorkBoardDispatcher:
             )
             job_id = _text(expected.get("job_id"))
             projection = admitted_projection
+        except BoardError as exc:
+            if exc.code == "external_mutation_grant_required":
+                await self._close_unadmitted_or_block(
+                    claim,
+                    exc.code,
+                    retryable_input=True,
+                )
+                result["blocked"] = True
+                return result
+            # A service may fail after durable admission but before returning
+            # its receipt.  Resolve the exact common binding before deciding
+            # whether this claim can be discarded.
+            adapter_error = exc
+            adapter_result = {"status": "blocked", "reason_code": _stable_reason_code(exc.code)}
+            try:
+                job_id = await self._lookup_direct_job_id(task, attempt, inputs)
+                projection = await self.jobs.get_job(job_id)
+                if not isinstance(projection, Mapping):
+                    raise DurableJobError("durable_run_projection_missing")
+                expected = self._canonical_identity_from_projection(
+                    task,
+                    attempt,
+                    inputs,
+                    projection,
+                )
+            except Exception as lookup_exc:
+                lookup_error = lookup_exc
+                job_id = None
+                projection = None
         except Exception as exc:
             # A service may fail after durable admission but before returning
             # its receipt.  Resolve the exact common binding before deciding
@@ -2205,6 +2385,30 @@ class WorkBoardDispatcher:
                 )
                 result["blocked"] = True
                 return result
+            # A routine can wait for explicit operator approval or publication
+            # review. Reflect that wait on the same card and release its board
+            # lease; the immutable attempt/run link remains available for a
+            # same-card recovery after the exact approval is resolved.
+            if _text(task.capability_id) == "guardian-routine.v1" and safe_status in {
+                "awaiting_approval",
+                "awaiting_publication_preview",
+                "awaiting_publication_approval",
+            }:
+                await self._pause_routine_for_operator(
+                    task,
+                    attempt,
+                    projection,
+                    reason=safe_status,
+                )
+                result[safe_status] = True
+                return result
+            # GitHub prepare creates the exact durable approval job but must
+            # not publish while the operator is still deciding. Keep the
+            # linked board attempt fenced and visible; the reconciliation
+            # pass consumes only that same approved job later.
+            if _text(task.capability_id) == "work.github-followthrough.v1" and safe_status == "awaiting_approval":
+                result["awaiting_approval"] = True
+                return result
             direct_proof = self._direct_readback(adapter_result, projection, job_id)
             if direct_proof is not None:
                 proof = direct_proof
@@ -2248,6 +2452,207 @@ class WorkBoardDispatcher:
                 await self._project_blocked(claim, "unknown_effect", "reconcile_admission_binding")
             result["blocked"] = True
         return result
+
+    async def _current_external_mutation_grant(self, task: WorkBoardTask) -> bool:
+        """Re-authenticate the task owner at the GitHub adapter boundary."""
+
+        try:
+            operator = await authenticate_session(task.owner_session_id, touch=False)
+        except AuthFailure:
+            return False
+        principal = getattr(operator, "principal", None)
+        if _text(getattr(operator, "session_id", None)) != _text(task.owner_session_id):
+            return False
+        if _text(getattr(principal, "principal_id", None)) != _text(task.owner_principal_id):
+            return False
+        grants = {
+            _text(getattr(grant, "value", grant))
+            for grant in (getattr(principal, "grants", ()) or ())
+        }
+        return AuthorityGrant.EXTERNAL_MUTATION.value in grants
+
+    async def _resume_github_followthrough(
+        self,
+        task: WorkBoardTask,
+        attempt: WorkBoardAttempt,
+        job_id: str,
+        projection: Mapping[str, Any],
+    ) -> tuple[Mapping[str, Any], dict[str, Any]]:
+        """Consume one exact approved GitHub job without creating a new root.
+
+        Prepare owns admission and the approval row.  This recovery seam only
+        reads that binding, waits while approval is pending, and calls the
+        existing GitHub execution service after the current owner grant is
+        re-authenticated.  It never derives a second operation identity.
+        """
+
+        authority = (
+            projection.get("declared_authority")
+            if isinstance(projection.get("declared_authority"), Mapping)
+            else {}
+        )
+        owner = projection.get("owner") if isinstance(projection.get("owner"), Mapping) else {}
+        idempotency = projection.get("idempotency") if isinstance(projection.get("idempotency"), Mapping) else {}
+        if (
+            _text(projection.get("job_id") or projection.get("run_identity")) != _text(job_id)
+            or _text(attempt.workflow_run_id) != _text(job_id)
+            or _text(owner.get("kind")) != "user"
+            or _text(owner.get("principal_id")) != _text(task.owner_principal_id)
+            or _text(projection.get("session_id")) != _text(task.owner_session_id)
+            or _text(projection.get("operator_session_id")) != _text(task.owner_session_id)
+            or _text(projection.get("job_kind")) != "github_followthrough_v1"
+            or _text(projection.get("capability_version")) != "1"
+            or _text(projection.get("goal_id")) != _text(task.goal_id)
+            or int(projection.get("goal_revision") or 0) != int(task.goal_revision)
+            or _text(authority.get("capability_id")) != "work.github-followthrough.v1"
+            or _text(idempotency.get("scope")) != "work-board-attempt"
+            or _text(idempotency.get("key")) != f"{task.task_id}:{attempt.attempt_id}"
+        ):
+            return projection, {
+                "status": "blocked",
+                "reason_code": "approval_job_binding_mismatch",
+                "recovery_action": "reconcile_admission_binding",
+            }
+        approval_id = _text(authority.get("approval_id"))
+        if not approval_id:
+            return projection, {
+                "status": "blocked",
+                "reason_code": "approval_not_current",
+                "recovery_action": "reconcile_admission_binding",
+            }
+        approval = await approval_repository.get(approval_id)
+        if approval is None:
+            return projection, {
+                "status": "blocked",
+                "reason_code": "approval_not_current",
+                "recovery_action": "reconcile_admission_binding",
+            }
+        approval_details = _load_json_mapping(getattr(approval, "details_json", None))
+        if (
+            _text(getattr(approval, "owner_principal_id", None)) != _text(task.owner_principal_id)
+            or _text(getattr(approval, "operator_session_id", None)) != _text(task.owner_session_id)
+            or _text(approval_details.get("durable_job_id")) != _text(job_id)
+        ):
+            return projection, {
+                "status": "blocked",
+                "reason_code": "approval_job_binding_mismatch",
+                "recovery_action": "reconcile_admission_binding",
+            }
+        approval_status = _text(getattr(approval, "status", None))
+        if approval_status in {"pending", "requested"}:
+            return projection, {
+                "status": "awaiting_approval",
+                "approval_id": approval_id,
+            }
+        if approval_status == "consumed":
+            from src.extensions.github_followthrough import _consumed_approval_resume_is_current
+
+            if not _consumed_approval_resume_is_current(projection, approval):
+                return projection, {
+                    "status": "blocked",
+                    "reason_code": "approval_not_current",
+                    "recovery_action": "reconcile_admission_binding",
+                }
+        elif approval_status != "approved":
+            if approval_status in {"denied", "expired"}:
+                # A terminal approval can be safely retried only before the
+                # publication effect has been created.  Cancellation is done
+                # through the existing owner/session-bound service, then the
+                # durable job is reread so a racing dispatch or malformed
+                # ledger stays in reconciliation instead of becoming Retry.
+                effects = projection.get("effects")
+                if not isinstance(effects, list) or effects:
+                    return projection, {
+                        "status": "blocked",
+                        "reason_code": "unknown_effect",
+                        "unknown_effect": True,
+                        "recovery_action": "reconcile_external_effect",
+                    }
+                from src.extensions.github_followthrough import GitHubFollowthroughService
+
+                try:
+                    await GitHubFollowthroughService().cancel(
+                        owner_principal_id=task.owner_principal_id,
+                        owner_session_id=task.owner_session_id,
+                        job_id=job_id,
+                    )
+                except Exception:
+                    # A terminal transition race is resolved from canonical
+                    # durable state below.  No exception summary is exposed.
+                    pass
+                latest = await self.jobs.get_job(job_id)
+                latest_effects = (
+                    latest.get("effects")
+                    if isinstance(latest, Mapping) and isinstance(latest.get("effects"), list)
+                    else None
+                )
+                if _status(latest) != "cancelled" or latest_effects is None or latest_effects:
+                    return latest if isinstance(latest, Mapping) else projection, {
+                        "status": "blocked",
+                        "reason_code": "unknown_effect",
+                        "unknown_effect": True,
+                        "recovery_action": "reconcile_external_effect",
+                    }
+                return latest, {
+                    "status": "blocked",
+                    "reason_code": f"approval_{approval_status}",
+                    "recovery_action": "retry_after_prerequisite",
+                    "retry_safe_after_terminal_cancel": True,
+                }
+            return projection, {
+                "status": "blocked",
+                "reason_code": "approval_not_current",
+                "recovery_action": "retry_after_prerequisite",
+            }
+        if not await self._current_external_mutation_grant(task):
+            return projection, {
+                "status": "blocked",
+                "reason_code": "external_mutation_grant_required",
+                "recovery_action": "retry_after_prerequisite",
+            }
+
+        from src.extensions.github_followthrough import GitHubFollowthroughService
+
+        try:
+            await GitHubFollowthroughService().execute(
+                owner_principal_id=task.owner_principal_id,
+                owner_session_id=task.owner_session_id,
+                job_id=job_id,
+                external_mutation_granted=True,
+            )
+        except Exception as exc:
+            latest = await self.jobs.get_job(job_id) or projection
+            latest_effects = latest.get("effects") if isinstance(latest, Mapping) and isinstance(latest.get("effects"), list) else []
+            unknown = _status(latest) in UNCERTAIN_EXTERNAL_EFFECT_STATUSES or any(
+                isinstance(effect, Mapping)
+                and _status(effect.get("status")) in {"unknown", "intent", "dispatched"}
+                for effect in latest_effects
+            )
+            return latest, {
+                "status": "blocked",
+                "reason_code": "unknown_effect" if unknown else _safe_error_code(exc),
+                "unknown_effect": unknown,
+                "recovery_action": "reconcile_external_effect" if unknown else "retry_after_prerequisite",
+            }
+        latest = await self.jobs.get_job(job_id) or projection
+        latest_effects = latest.get("effects") if isinstance(latest, Mapping) and isinstance(latest.get("effects"), list) else []
+        latest_uncertain = _status(latest) in UNCERTAIN_EXTERNAL_EFFECT_STATUSES or any(
+            isinstance(effect, Mapping)
+            and _status(effect.get("status")) in {"unknown", "intent", "dispatched"}
+            for effect in latest_effects
+        )
+        if latest_uncertain:
+            return latest, {
+                "status": "blocked",
+                "approval_id": approval_id,
+                "reason_code": "unknown_effect",
+                "unknown_effect": True,
+                "recovery_action": "reconcile_external_effect",
+            }
+        return latest, {
+            "status": _status(latest) or "blocked",
+            "approval_id": approval_id,
+        }
 
     async def _execute_direct_adapter(
         self,
@@ -2340,10 +2745,26 @@ class WorkBoardDispatcher:
                 issue_number=inputs.get("issue_number"),
                 idempotency_key=str(attempt_uuid),
             )
+            external_mutation_granted = await self._current_external_mutation_grant(task)
+            if not external_mutation_granted:
+                if admission_only:
+                    raise BoardError(
+                        "external_mutation_grant_required",
+                        "The current GitHub owner session has no external mutation grant",
+                        status_code=409,
+                        reason_code="external_mutation_grant_required",
+                        recovery_action="retry_after_prerequisite",
+                    )
+                return {
+                    "status": "blocked",
+                    "reason_code": "external_mutation_grant_required",
+                    "recovery_action": "retry_after_prerequisite",
+                    "admission_only": False,
+                }
             prepared = await GitHubFollowthroughService().prepare(
                 owner_principal_id=task.owner_principal_id,
                 owner_session_id=task.owner_session_id,
-                external_mutation_granted=False,
+                external_mutation_granted=external_mutation_granted,
                 work_board_idempotency_key=board_binding,
                 work_board_task_id=task.task_id,
                 request=request,
@@ -2353,7 +2774,12 @@ class WorkBoardDispatcher:
             # admission. Publication remains a separate approved route.
             return {**prepared, "admission_only": admission_only}
         if capability_id == "guardian-routine.v1":
-            from src.workflows.routines import RoutineInvokeRequest, routine_service
+            from src.workflows.routines import (
+                RoutineError,
+                RoutineExecuteRequest,
+                RoutineInvokeRequest,
+                routine_service,
+            )
 
             attempt_uuid = uuid.uuid5(
                 uuid.NAMESPACE_URL,
@@ -2368,18 +2794,134 @@ class WorkBoardDispatcher:
                 expected_watch_revision=int(inputs["expected_watch_revision"]),
                 invocation_uuid=str(attempt_uuid),
             )
-            prepared = await routine_service.invoke(
-                _text(inputs["routine_id"]),
-                request,
-                owner_principal_id=task.owner_principal_id,
-                owner_session_id=task.owner_session_id,
-                work_board_idempotency_key=board_binding,
-                work_board_task_id=task.task_id,
-                **handoff_kwargs,
-            )
-            # Routine invoke admits/holds its invocation approval. Child
-            # capability steps execute only after that existing approval path.
-            return {**prepared, "admission_only": admission_only}
+            if admission_only:
+                prepared = await routine_service.invoke(
+                    _text(inputs["routine_id"]),
+                    request,
+                    owner_principal_id=task.owner_principal_id,
+                    owner_session_id=task.owner_session_id,
+                    work_board_idempotency_key=board_binding,
+                    work_board_task_id=task.task_id,
+                    runtime_seconds=runtime_seconds,
+                    **handoff_kwargs,
+                )
+                # Routine invoke admits/holds its invocation approval. Child
+                # capability steps execute only after that existing approval
+                # path; this phase must not execute a child itself.
+                return {**prepared, "admission_only": True}
+
+            # The board link is already bound to this exact routine parent.
+            # Read the durable root and approval instead of invoking again:
+            # calling ``invoke`` here would only deduplicate the parent and
+            # would leave an accepted approval unconsumed.  The routine
+            # service remains the authority for approval fencing and child
+            # admission through ``execute_invocation``.
+            from src.workflows.routines import durable_job_repository
+
+            expected_job_id = f"routine-invocation:{_text(inputs['routine_id'])}:{attempt_uuid}"
+            job = await durable_job_repository.get_job(expected_job_id)
+            if not isinstance(job, Mapping):
+                return {
+                    "status": "blocked",
+                    "job_id": expected_job_id,
+                    "reason_code": "routine_invocation_binding_missing",
+                    "recovery_action": "reconcile_admission_binding",
+                    "admission_only": False,
+                }
+            owner = job.get("owner") if isinstance(job.get("owner"), Mapping) else {}
+            authority = job.get("declared_authority") if isinstance(job.get("declared_authority"), Mapping) else {}
+            if (
+                _text(job.get("job_id") or job.get("run_identity")) != expected_job_id
+                or _text(job.get("job_kind")) != "routine_invocation"
+                or _text(owner.get("principal_id")) != _text(task.owner_principal_id)
+                or _text(owner.get("kind")) != "user"
+                or _text(job.get("session_id") or job.get("operator_session_id")) != _text(task.owner_session_id)
+                or _text(authority.get("routine_id")) != _text(inputs["routine_id"])
+                or int(authority.get("routine_version") or 0) != int(inputs["version"])
+                or int(authority.get("routine_revision") or 0) != int(inputs["expected_routine_revision"])
+                or _text(authority.get("source_watch_id")) != _text(inputs["source_watch_id"])
+                or int(authority.get("source_watch_revision") or 0) != int(inputs["expected_watch_revision"])
+                or _text(authority.get("invocation_uuid")) != str(attempt_uuid)
+                or _text(job.get("goal_id")) != _text(task.goal_id)
+                or int(job.get("goal_revision") or 0) != int(task.goal_revision)
+            ):
+                return {
+                    "status": "blocked",
+                    "job_id": expected_job_id,
+                    "reason_code": "routine_invocation_binding_mismatch",
+                    "recovery_action": "reconcile_admission_binding",
+                    "admission_only": False,
+                }
+            approval_id = _text(authority.get("approval_id"))
+            if not approval_id:
+                return {
+                    "status": "blocked",
+                    "job_id": expected_job_id,
+                    "reason_code": "approval_not_current",
+                    "recovery_action": "approve_existing_run",
+                    "admission_only": False,
+                }
+            approval = await approval_repository.get(approval_id)
+            if approval is None:
+                return {
+                    "status": "blocked",
+                    "job_id": expected_job_id,
+                    "approval_id": approval_id,
+                    "reason_code": "approval_not_current",
+                    "recovery_action": "approve_existing_run",
+                    "admission_only": False,
+                }
+            approval_details = _load_json_mapping(getattr(approval, "details_json", None))
+            if (
+                _text(getattr(approval, "owner_principal_id", None)) != _text(task.owner_principal_id)
+                or _text(getattr(approval, "operator_session_id", None)) != _text(task.owner_session_id)
+                or _text(approval_details.get("durable_job_id")) != expected_job_id
+            ):
+                return {
+                    "status": "blocked",
+                    "job_id": expected_job_id,
+                    "approval_id": approval_id,
+                    "reason_code": "approval_job_binding_mismatch",
+                    "recovery_action": "reconcile_admission_binding",
+                    "admission_only": False,
+                }
+            if _text(getattr(approval, "status", None)) != "approved":
+                return {
+                    "status": "awaiting_approval" if _text(getattr(approval, "status", None)) in {"pending", "requested"} else "blocked",
+                    "job_id": expected_job_id,
+                    "approval_id": approval_id,
+                    "reason_code": "approval_not_current",
+                    "recovery_action": "approve_existing_run",
+                    "admission_only": False,
+                }
+            try:
+                executed = await routine_service.execute_invocation(
+                    _text(inputs["routine_id"]),
+                    expected_job_id,
+                    RoutineExecuteRequest(
+                        approval_id=approval_id,
+                        expected_routine_revision=int(inputs["expected_routine_revision"]),
+                    ),
+                    owner_principal_id=task.owner_principal_id,
+                    owner_session_id=task.owner_session_id,
+                )
+            except RoutineError as exc:
+                return {
+                    "status": "blocked",
+                    "job_id": expected_job_id,
+                    "approval_id": approval_id,
+                    "reason_code": exc.code,
+                    "recovery_action": "restore_prerequisite",
+                    "operator_visible": True,
+                    "learning": "no_learning",
+                    "admission_only": False,
+                }
+            return {
+                **executed,
+                "job_id": _text(executed.get("job_id")) or expected_job_id,
+                "approval_id": approval_id,
+                "admission_only": False,
+            }
         raise TypedInputError("capability_unregistered", "the task names no registered capability")
 
     @staticmethod
@@ -3258,6 +3800,109 @@ class WorkBoardDispatcher:
                 actor_session_id=self.runner_session,
             )
 
+    async def _pause_routine_for_operator(
+        self,
+        task: WorkBoardTask,
+        attempt: WorkBoardAttempt,
+        projection: Mapping[str, Any],
+        *,
+        reason: str,
+    ) -> BoardAttemptProjection:
+        """Release the board lease while a routine waits for human review."""
+
+        if reason not in {
+            "awaiting_approval",
+            "awaiting_publication_preview",
+            "awaiting_publication_approval",
+            "external_mutation_grant_required",
+        }:
+            raise BoardError("routine_wait_reason_invalid", "The routine is not waiting for an operator decision")
+        lease = projection.get("lease") if isinstance(projection.get("lease"), Mapping) else {}
+        raw_fence = lease.get("fencing_token", projection.get("fencing_token", attempt.fencing_token))
+        try:
+            durable_fence = int(raw_fence or attempt.fencing_token)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise BoardError("routine_wait_fence_invalid", "The durable routine fence is malformed") from exc
+        async with self.session_provider() as db:
+            return await self.repository.pause_routine_attempt_for_operator(
+                db,
+                task.task_id,
+                attempt.attempt_id,
+                expected_revision=int(task.task_revision),
+                board_fence=int(attempt.fencing_token),
+                lease_owner=attempt.lease_owner,
+                workflow_run_id=str(attempt.workflow_run_id or ""),
+                durable_fence=durable_fence,
+                reason=reason,
+                actor_principal_id=self.runner_id,
+                actor_session_id=self.runner_session,
+            )
+
+    async def resume_routine_attempt_for_operator_recovery(
+        self,
+        owner: WorkBoardOwner,
+        task: WorkBoardTask,
+        attempt: WorkBoardAttempt,
+        parent_projection: Mapping[str, Any],
+        *,
+        expected_revision: int,
+    ) -> BoardAttemptProjection:
+        """Reacquire the same board attempt before an approved routine resumes."""
+
+        lease = parent_projection.get("lease") if isinstance(parent_projection.get("lease"), Mapping) else {}
+        failure_reason = _text(parent_projection.get("failure_reason"))
+        parent_status = _status(parent_projection)
+        approval_wait = parent_status == "awaiting_approval" and task.block_reason == "awaiting_approval"
+        publication_wait = (
+            parent_status == "blocked"
+            and failure_reason in {"awaiting_publication_preview", "awaiting_publication_approval"}
+            and task.block_reason in {
+                "awaiting_publication_preview",
+                "awaiting_publication_approval",
+                "external_mutation_grant_required",
+            }
+        )
+        if (
+            not (approval_wait or publication_wait)
+            or task.status is not WorkBoardStatus.blocked
+            or attempt.ended_at is not None
+            or attempt.lease_owner is not None
+            or attempt.lease_expires_at is not None
+            or str(attempt.workflow_run_id or "") != str(parent_projection.get("job_id") or "")
+        ):
+            raise BoardError("routine_recovery_not_ready", "The durable routine is not in an explicit publication wait")
+        if approval_wait:
+            authority = (
+                parent_projection.get("declared_authority")
+                if isinstance(parent_projection.get("declared_authority"), Mapping)
+                else {}
+            )
+            approval_id = _text(authority.get("approval_id"))
+            approval = await approval_repository.get(approval_id) if approval_id else None
+            if str(getattr(approval, "status", "") or "") != "approved":
+                raise BoardError("approval_not_current", "Resolve the exact routine approval before resuming")
+        try:
+            previous_fence = int(lease.get("fencing_token") or 0)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise BoardError("routine_wait_fence_invalid", "The durable routine fence is malformed") from exc
+        if previous_fence <= 0 or int(attempt.fencing_token) != previous_fence:
+            raise BoardError("stale_fence", "The suspended board attempt does not match the blocked workflow fence")
+        lease_seconds = await self._effective_runtime(task)
+        async with self.session_provider() as db:
+            return await self.repository.resume_routine_attempt_for_operator_recovery(
+                db,
+                task.task_id,
+                attempt.attempt_id,
+                expected_revision=int(expected_revision),
+                previous_fence=previous_fence,
+                next_fence=previous_fence + 1,
+                lease_owner=self.runner_id,
+                lease_seconds=lease_seconds,
+                workflow_run_id=str(attempt.workflow_run_id or ""),
+                actor_principal_id=owner.principal_id,
+                actor_session_id=owner.session_id,
+            )
+
     async def _project_blocked(
         self,
         claim: BoardDispatchClaim,
@@ -3348,6 +3993,58 @@ class WorkBoardDispatcher:
                 if status in {"accepted", "queued", "running"}:
                     return True
 
+            if (
+                _text(current.task.capability_id) == "work.github-followthrough.v1"
+                and status == "awaiting_approval"
+            ):
+                projection, approval_outcome = await self._resume_github_followthrough(
+                    current.task,
+                    current.attempt,
+                    workflow_run_id,
+                    projection,
+                )
+                status = _status(projection)
+                if approval_outcome.get("status") == "awaiting_approval":
+                    return True
+                if approval_outcome.get("unknown_effect") or status in UNCERTAIN_EXTERNAL_EFFECT_STATUSES:
+                    await self._project(
+                        current.task,
+                        current.attempt,
+                        board_revision=current.task.task_revision,
+                        status=WorkBoardStatus.blocked,
+                        outcome="unknown_effect",
+                        block_kind="unknown_effect",
+                        block_reason=str(approval_outcome.get("reason_code") or "reconcile_external_effect"),
+                        result_refs=[
+                            {
+                                "job_id": workflow_run_id,
+                                "workflow_run_id": workflow_run_id,
+                                "status": "unknown",
+                                "reason_code": approval_outcome.get("reason_code") or "reconcile_external_effect",
+                                "recovery_action": "reconcile_external_effect",
+                            }
+                        ],
+                        lease_owner=current.attempt.lease_owner or self.runner_id,
+                    )
+                    return True
+                if approval_outcome.get("status") == "blocked":
+                    block_projection = _github_approval_block_projection(
+                        approval_outcome,
+                        job_id=workflow_run_id,
+                    )
+                    await self._project(
+                        current.task,
+                        current.attempt,
+                        board_revision=current.task.task_revision,
+                        status=WorkBoardStatus.blocked,
+                        outcome=block_projection["outcome"],
+                        block_kind=block_projection["block_kind"],
+                        block_reason=block_projection["block_reason"],
+                        result_refs=block_projection["result_refs"],
+                        lease_owner=current.attempt.lease_owner or self.runner_id,
+                    )
+                    return True
+
             if status == "succeeded":
                 proof = self._workflow_readback(projection, workflow_run_id)
                 if proof is not None:
@@ -3405,6 +4102,47 @@ class WorkBoardDispatcher:
             expected_authority_digest = _safe_digest(spec.declared_authority)
             expected_run_fingerprint = spec.run_fingerprint
         else:
+            if capability_id == "guardian-routine.v1":
+                # Routine invocation roots are already admitted and may be
+                # waiting on the operator approval boundary.  Re-entering
+                # RoutineService.invoke here would rebuild a fresh deadline
+                # and authority envelope, causing a false immutable-field
+                # conflict during recovery.  Inspect the deterministic root
+                # and validate its persisted projection instead.
+                expected_job_id, expected_owner, expected_kind, expected_service, binding_key = (
+                    self._direct_job_identity(task, attempt, inputs)
+                )
+                projection = await self.jobs.get_job(expected_job_id)
+                if not isinstance(projection, Mapping):
+                    return None
+                expected = self._canonical_identity_from_projection(
+                    task,
+                    attempt,
+                    inputs,
+                    projection,
+                )
+                found = await lookup(
+                    owner_principal_id=expected["owner_principal_id"],
+                    goal_id=expected["goal_id"],
+                    goal_revision=expected["goal_revision"],
+                    idempotency_scope=expected["idempotency_scope"],
+                    idempotency_key=expected["idempotency_key"],
+                    expected_job_id=expected["job_id"],
+                    owner_kind=expected["owner_kind"],
+                    service_id=expected["service_id"],
+                    session_id=expected["session_id"],
+                    operator_session_id=expected["operator_session_id"],
+                    job_kind=expected["job_kind"],
+                    capability_version=expected["capability_version"],
+                    input_digest=expected["input_digest"],
+                    authority_digest=expected["authority_digest"],
+                    run_fingerprint=expected["run_fingerprint"],
+                )
+                if not isinstance(found, Mapping):
+                    return None
+                if _text(found.get("job_id") or found.get("run_identity")) != expected_job_id:
+                    raise DurableJobIdempotencyConflict("durable admission returned a different root")
+                return expected_job_id
             _response, projection, _expected = await self._canonical_direct_admission(
                 task,
                 attempt,
@@ -3653,6 +4391,171 @@ class WorkBoardDispatcher:
                             )
                         projection = await self.jobs.get_job(job_id) or projection
                     status = _status(projection)
+
+                if (
+                    _text(task.capability_id) == "work.github-followthrough.v1"
+                    and status == "awaiting_approval"
+                ):
+                    # GitHub prepare has already created the exact durable
+                    # root and approval. Keep pending approval visible, then
+                    # consume the same job only after its bound approval and
+                    # current owner grant both validate.
+                    projection, approval_outcome = await self._resume_github_followthrough(
+                        task,
+                        attempt,
+                        job_id,
+                        projection,
+                    )
+                    status = _status(projection)
+                    effects = projection.get("effects") if isinstance(projection.get("effects"), list) else []
+                    if approval_outcome.get("status") == "awaiting_approval":
+                        recovered.append(job_id)
+                        continue
+                    if approval_outcome.get("unknown_effect") or status in UNCERTAIN_EXTERNAL_EFFECT_STATUSES or any(
+                        isinstance(effect, Mapping)
+                        and _status(effect.get("status")) in {"unknown", "intent", "dispatched"}
+                        for effect in effects
+                    ):
+                        await self._project(
+                            task,
+                            attempt,
+                            board_revision=task.task_revision,
+                            status=WorkBoardStatus.blocked,
+                            outcome="unknown_effect",
+                            block_kind="unknown_effect",
+                            block_reason=str(approval_outcome.get("reason_code") or "reconcile_external_effect"),
+                            result_refs=[
+                                {
+                                    "job_id": job_id,
+                                    "workflow_run_id": job_id,
+                                    "status": "unknown",
+                                    "reason_code": approval_outcome.get("reason_code") or "reconcile_external_effect",
+                                    "recovery_action": "reconcile_external_effect",
+                                }
+                            ],
+                            lease_owner=attempt.lease_owner or self.runner_id,
+                        )
+                        recovered.append(job_id)
+                        continue
+                    if approval_outcome.get("status") == "blocked":
+                        block_projection = _github_approval_block_projection(
+                            approval_outcome,
+                            job_id=job_id,
+                        )
+                        await self._project(
+                            task,
+                            attempt,
+                            board_revision=task.task_revision,
+                            status=WorkBoardStatus.blocked,
+                            outcome=block_projection["outcome"],
+                            block_kind=block_projection["block_kind"],
+                            block_reason=block_projection["block_reason"],
+                            result_refs=block_projection["result_refs"],
+                            lease_owner=attempt.lease_owner or self.runner_id,
+                        )
+                        recovered.append(job_id)
+                        continue
+
+                if (
+                    _text(task.capability_id) == "guardian-routine.v1"
+                    and status == "awaiting_approval"
+                ):
+                    # Approval resolution changes only the canonical approval
+                    # row.  Reconcile the same linked routine parent and let
+                    # RoutineService consume that exact approval; do not call
+                    # invoke/admit a second parent.
+                    if task.status is WorkBoardStatus.running:
+                        paused = await self._pause_routine_for_operator(
+                            task,
+                            attempt,
+                            projection,
+                            reason="awaiting_approval",
+                        )
+                        task, attempt = paused.task, paused.attempt
+                    session_code, _session_reason = await self._routine_recovery_session_error(task)
+                    if session_code:
+                        # The task is already Blocked with no board lease. The
+                        # authenticated recovery action will require a current
+                        # owner session before it can resume this attempt.
+                        if task.status is WorkBoardStatus.blocked:
+                            recovered.append(job_id)
+                            continue
+                        await self._project(
+                            task,
+                            attempt,
+                            board_revision=task.task_revision,
+                            status=WorkBoardStatus.blocked,
+                            outcome="capability",
+                            block_kind="capability",
+                            block_reason=session_code,
+                            result_refs=[
+                                {
+                                    "job_id": job_id,
+                                    "workflow_run_id": job_id,
+                                    "status": "blocked",
+                                    "reason_code": session_code,
+                                    "recovery_action": "restore_prerequisite",
+                                }
+                            ],
+                            lease_owner=attempt.lease_owner or self.runner_id,
+                        )
+                        recovered.append(job_id)
+                        continue
+                    if task.status is WorkBoardStatus.blocked:
+                        try:
+                            resumed = await self.resume_routine_attempt_for_operator_recovery(
+                                WorkBoardOwner(
+                                    principal_id=task.owner_principal_id,
+                                    session_id=task.owner_session_id,
+                                ),
+                                task,
+                                attempt,
+                                projection,
+                                expected_revision=task.task_revision,
+                            )
+                        except BoardError as exc:
+                            if exc.code == "approval_not_current":
+                                recovered.append(job_id)
+                                continue
+                            raise
+                        task, attempt = resumed.task, resumed.attempt
+                    adapter_result = await self._execute_direct_adapter(
+                        task,
+                        attempt,
+                        inputs,
+                        runtime_seconds=await self._effective_runtime(task),
+                        admission_only=False,
+                    )
+                    returned_job_id = self._adapter_job_id(adapter_result)
+                    if returned_job_id and returned_job_id != job_id:
+                        raise DurableJobIdempotencyConflict(
+                            "routine execution returned a different durable root"
+                        )
+                    projection = await self.jobs.get_job(job_id) or projection
+                    status = _status(projection)
+                    effects = projection.get("effects") if isinstance(projection.get("effects"), list) else []
+                    if status == "awaiting_approval":
+                        recovered.append(job_id)
+                        continue
+
+                if (
+                    _text(task.capability_id) == "guardian-routine.v1"
+                    and status == "blocked"
+                    and _text(projection.get("failure_reason"))
+                    in {"awaiting_publication_preview", "awaiting_publication_approval"}
+                ):
+                    # The durable routine is paused for a human decision. The
+                    # card must say Blocked and release its finite board lease
+                    # while preserving the same open attempt/run binding for
+                    # the explicit same-card recovery action.
+                    await self._pause_routine_for_operator(
+                        task,
+                        attempt,
+                        projection,
+                        reason=_text(projection.get("failure_reason")),
+                    )
+                    recovered.append(job_id)
+                    continue
 
                 if status in {"awaiting_approval", "blocked", "failed", "cancelled", "degraded"}:
                     reason = _stable_reason_code(_text(projection.get("failure_reason")) or status)

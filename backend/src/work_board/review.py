@@ -58,6 +58,25 @@ _SAFE_RISKS = frozenset(
 _HANDOFF_RECONCILIATION_REASON = (
     "A completed parent handoff needs verified readback reconciliation before dispatch"
 )
+_LEGACY_HANDOFF_RECONCILIATION_REASON = (
+    "A completed parent handoff is missing, stale, or no longer independently verified"
+)
+_LEGACY_HANDOFF_MISSING_REASON = (
+    "Every completed parent must have a verified handoff before dispatch"
+)
+_HANDOFF_RECONCILIATION_REASONS = (
+    _HANDOFF_RECONCILIATION_REASON,
+    _LEGACY_HANDOFF_RECONCILIATION_REASON,
+    _LEGACY_HANDOFF_MISSING_REASON,
+)
+
+
+def _is_handoff_reconciliation_block(block_kind: Any, block_reason: Any) -> bool:
+    """Recognize canonical handoff recovery blocks and the pre-fix wording."""
+    return (
+        str(block_kind or "") == "dependency"
+        and str(block_reason or "") in _HANDOFF_RECONCILIATION_REASONS
+    )
 
 
 def _now() -> datetime:
@@ -356,6 +375,81 @@ def _workflow_run_binds_board_attempt(
 
     if str(run.owner_kind or "") != "service":
         return False
+    capability_id = str(task.capability_id or "").strip()
+    if capability_id == "guardian.research-watch.v1":
+        # The source-watch adapter owns its existing durable root directly.
+        # It is a distinct, fixed service identity from the board wrapper
+        # service below; accept it only when the root's task/attempt
+        # idempotency binding, goal/session authority, and redacted argument
+        # shape all match this exact board claim.
+        from src.guardian.source_watch import (
+            CAPABILITY_ID as SOURCE_WATCH_CAPABILITY_ID,
+            CAPABILITY_VERSION as SOURCE_WATCH_CAPABILITY_VERSION,
+            SERVICE_ID as SOURCE_WATCH_SERVICE_ID,
+            SERVICE_PRINCIPAL as SOURCE_WATCH_SERVICE_PRINCIPAL,
+        )
+
+        authority = _decode_object(run.declared_authority_json)
+        required_authority = {
+            "principal": SOURCE_WATCH_SERVICE_PRINCIPAL,
+            "owner_kind": "service",
+            "service_id": SOURCE_WATCH_SERVICE_ID,
+            "session_id": str(task.owner_session_id or ""),
+            "goal_id": str(task.goal_id or ""),
+            "goal_revision": int(task.goal_revision or 0),
+            "goal_owner_principal_id": str(task.owner_principal_id or ""),
+            "goal_owner_session_id": str(task.owner_session_id or ""),
+            "capability_id": SOURCE_WATCH_CAPABILITY_ID,
+        }
+        if any(authority.get(key) != value for key, value in required_authority.items()):
+            return False
+        if (
+            str(run.owner_principal_id or "") != SOURCE_WATCH_SERVICE_PRINCIPAL
+            or str(run.service_id or "") != SOURCE_WATCH_SERVICE_ID
+            or str(run.job_kind or "") != "guardian_source_watch"
+            or str(run.capability_version or "") != SOURCE_WATCH_CAPABILITY_VERSION
+            or str(run.idempotency_scope or "") != "work-board-attempt"
+            or str(run.idempotency_key or "")
+            != f"{task.task_id}:{attempt.attempt_id}"
+        ):
+            return False
+        permissions = authority.get("permissions")
+        if (
+            not isinstance(permissions, list)
+            or any(not isinstance(item, str) for item in permissions)
+            or set(permissions) != {"source_observation", "workspace_write"}
+        ):
+            return False
+        try:
+            plan_revision = int(run.plan_revision or 0)
+            authority_plan_revision = int(authority.get("plan_revision") or 0)
+        except (TypeError, ValueError):
+            return False
+        if plan_revision < 1 or authority_plan_revision != plan_revision:
+            return False
+        if not safe_digest(authority.get("source_set_digest")) or not safe_digest(
+            authority.get("criteria_digest")
+        ):
+            return False
+        if not arguments.get("redacted") or arguments.get("shape") != "dict":
+            return False
+        keys = arguments.get("keys")
+        if not isinstance(keys, list):
+            return False
+        argument_keys = {str(key) for key in keys}
+        required_keys = {"watch_id", "occurrence_id"}
+        allowed_keys = required_keys | {
+            "parent_handoff_context",
+            "parent_handoff_digest",
+        }
+        if (
+            not required_keys.issubset(argument_keys)
+            or not argument_keys.issubset(allowed_keys)
+            or ("parent_handoff_context" in argument_keys)
+            != ("parent_handoff_digest" in argument_keys)
+        ):
+            return False
+        return safe_digest(run.input_digest) and safe_digest(run.run_fingerprint)
     try:
         from src.work_board.dispatcher import (
             DISPATCHER_PRINCIPAL,
@@ -364,7 +458,6 @@ def _workflow_run_binds_board_attempt(
         )
     except Exception:
         return False
-    capability_id = str(task.capability_id or "").strip()
     capability = REGISTERED_CAPABILITIES.get(capability_id)
     authority = _decode_object(run.declared_authority_json)
     if capability is None:
@@ -1097,9 +1190,9 @@ async def unblock_task(
             "An expired review can be restored only through renew_review",
             status_code=409,
         )
-    is_handoff_recovery = (
-        task.block_kind == "dependency"
-        and task.block_reason == _HANDOFF_RECONCILIATION_REASON
+    is_handoff_recovery = _is_handoff_reconciliation_block(
+        task.block_kind,
+        task.block_reason,
     )
     if task.block_kind not in {"operator", "dependency"} or (
         task.block_kind == "dependency" and not is_handoff_recovery
@@ -1651,13 +1744,13 @@ async def backfill_verified_handoffs(db: AsyncSession, *, limit: int = 256) -> i
                             ),
                             or_(
                                 child_alias.block_reason.is_(None),
-                                child_alias.block_reason != _HANDOFF_RECONCILIATION_REASON,
+                                child_alias.block_reason.notin_(_HANDOFF_RECONCILIATION_REASONS),
                             ),
                         ),
                         and_(
                             child_alias.status == WorkBoardStatus.blocked,
                             child_alias.block_kind == "dependency",
-                            child_alias.block_reason == _HANDOFF_RECONCILIATION_REASON,
+                            child_alias.block_reason.in_(_HANDOFF_RECONCILIATION_REASONS),
                         ),
                     ),
                 )
@@ -1675,7 +1768,10 @@ async def backfill_verified_handoffs(db: AsyncSession, *, limit: int = 256) -> i
         was_reconciliation_block = (
             child.status is WorkBoardStatus.blocked
             and child.block_kind == "dependency"
-            and child.block_reason == _HANDOFF_RECONCILIATION_REASON
+            and _is_handoff_reconciliation_block(
+                child.block_kind,
+                child.block_reason,
+            )
         )
         try:
             await materialize_handoff_for_link(db, owner, parent, child, link)

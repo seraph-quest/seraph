@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 import json
-from typing import Any
+import uuid
+from typing import Any, Mapping
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.auth.service import AuthenticatedOperator
+from src.approval.repository import approval_repository
 from src.db.engine import get_session
 from src.db.models import (
     WorkBoardAttempt,
@@ -33,6 +35,8 @@ from src.work_board.contracts import (
     WorkBoardProposalAccept,
     WorkBoardProposalReject,
     WorkBoardProposalRequest,
+    WorkBoardRoutinePublicationPrepareRequest,
+    WorkBoardRoutinePublicationRecoverRequest,
 )
 from src.work_board.repository import (
     BoardError,
@@ -51,10 +55,18 @@ from src.work_board.events import (
     _event_payload,
 )
 from src.goals.repository import deserialize_admission_budget
-from src.work_board.dispatcher import _dispatcher
+from src.work_board.dispatcher import TypedInputError, _dispatcher, _parse_typed_input
 from src.work_board import review as review_service
 from src.work_board import triage as triage_service
 from src.work_board.time import serialize_utc_datetime
+from src.security.trust_contract import AuthorityGrant
+from src.workflows.job_runtime import durable_job_repository
+from src.workflows.routines import (
+    RoutinePublicationRequest,
+    RoutineError,
+    _job_checkpoint,
+    routine_service,
+)
 
 
 router = APIRouter(prefix="/work-board")
@@ -74,6 +86,8 @@ _RECOVERY_ACTIONS = frozenset(
         "restore_prerequisite",
         "configure_goal_success_criterion",
         "renew_review",
+        "prepare_routine_publication",
+        "resume_routine_publication",
     }
 )
 
@@ -105,9 +119,9 @@ def _recovery_action(
     if (
         (
             block_kind == "operator"
-            or (
-                block_kind == "dependency"
-                and task.block_reason == review_service._HANDOFF_RECONCILIATION_REASON
+            or review_service._is_handoff_reconciliation_block(
+                block_kind,
+                task.block_reason,
             )
         )
         and (latest_attempt is None or latest_attempt.ended_at is not None)
@@ -122,6 +136,13 @@ def _recovery_action(
     if block_kind == "needs_input":
         return "approve_existing_run"
     if block_kind == "capability":
+        if (
+            task.block_reason == "external_mutation_grant_required"
+            and latest_attempt is not None
+            and latest_attempt.ended_at is not None
+            and attempt_count < 2
+        ):
+            return "retry"
         # A pre-admission capability gate has no effect to reconcile. Once
         # its prerequisite is restored, Retry re-runs the live gate before
         # returning the card to Todo; no attempt or effect is replayed here.
@@ -172,6 +193,14 @@ def _owner(operator: AuthenticatedOperator) -> WorkBoardOwner:
         principal_id=operator.principal.principal_id,
         session_id=operator.session_id,
     )
+
+
+def _operator_has_external_mutation(operator: AuthenticatedOperator) -> bool:
+    grants = {
+        str(getattr(item, "value", item))
+        for item in (getattr(getattr(operator, "principal", None), "grants", ()) or ())
+    }
+    return AuthorityGrant.EXTERNAL_MUTATION.value in grants
 
 
 def _raise_board_error(exc: BoardError) -> None:
@@ -317,6 +346,506 @@ async def _safe_task_payload(
                 exc.extra.get("recovery_action") or "restore_prerequisite"
             )
     return payload
+
+
+def _routine_invocation_uuid(task_id: str, attempt_id: str) -> str:
+    return str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"seraph:work-board-attempt:{task_id}:{attempt_id}",
+        )
+    )
+
+
+def _routine_publication_error(
+    code: str,
+    message: str,
+    *,
+    status_code: int = 409,
+    **extra: Any,
+) -> BoardError:
+    return BoardError(code, message, status_code=status_code, **extra)
+
+
+def _safe_publication_preview(value: Any) -> dict[str, Any] | None:
+    """Keep only bounded, operator-safe fields from the M3 preview receipt."""
+
+    if not isinstance(value, Mapping):
+        return None
+    preview: dict[str, Any] = {}
+    for key in (
+        "repository",
+        "action",
+        "issue_number",
+        "body_sha256",
+        "marker",
+        "dossier_artifact_id",
+        "dossier_sha256",
+        "source_watch_id",
+        "connection_revision",
+    ):
+        item = value.get(key)
+        if item is not None:
+            preview[key] = item
+    for key, maximum in (("title", 160), ("body", 32_000)):
+        item = value.get(key)
+        if item is not None:
+            preview[key] = str(item)[:maximum]
+    return preview or None
+
+
+async def _routine_publication_context(
+    db,
+    operator: AuthenticatedOperator,
+    task_id: str,
+    *,
+    expected_revision: int | None = None,
+) -> dict[str, Any]:
+    """Resolve publication recovery only from the canonical board binding.
+
+    The browser supplies a task ID and, for mutations, the task revision. The
+    attempt, parent workflow run, routine binding, package/watch authority,
+    publication child, and approval are all read from durable task/runtime
+    records. This intentionally accepts no caller-selected attempt, run, or
+    approval identity.
+    """
+
+    owner = _owner(operator)
+    detail = await repository.get_detail(db, owner, task_id)
+    task = detail["task"]
+    if task.capability_id != "guardian-routine.v1":
+        raise _routine_publication_error(
+            "routine_publication_not_supported",
+            "The selected task is not a governed routine invocation",
+            status_code=422,
+        )
+    if expected_revision is not None and int(task.task_revision) != int(expected_revision):
+        raise BoardRevisionConflict(task.task_id, int(expected_revision), int(task.task_revision))
+    if task.status not in {WorkBoardStatus.running, WorkBoardStatus.blocked}:
+        raise _routine_publication_error(
+            "routine_publication_task_state_invalid",
+            "Routine publication recovery requires the same active or publication-blocked task",
+        )
+    attempts = [
+        item
+        for item in detail["attempts"]
+        if item.workflow_run_id and item.ended_at is None
+    ]
+    if not attempts:
+        raise _routine_publication_error(
+            "routine_publication_attempt_missing",
+            "The canonical routine task has no resumable linked durable workflow attempt",
+        )
+    attempt = attempts[0]
+    workflow_run_id = str(attempt.workflow_run_id or "")
+    if not workflow_run_id:
+        raise _routine_publication_error(
+            "routine_publication_attempt_missing",
+            "The canonical routine attempt has no durable parent workflow run",
+        )
+    try:
+        inputs = _parse_typed_input(task)
+    except TypedInputError as exc:
+        raise _routine_publication_error(
+            exc.code,
+            "The routine task's immutable typed input cannot be trusted for publication recovery",
+        ) from exc
+    routine_id = str(inputs.get("routine_id") or "")
+    try:
+        routine_version = int(inputs.get("version") or 0)
+        routine_revision = int(inputs.get("expected_routine_revision") or 0)
+        watch_revision = int(inputs.get("expected_watch_revision") or 0)
+        goal_revision = int(inputs.get("expected_goal_revision") or 0)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise _routine_publication_error(
+            "routine_publication_binding_invalid",
+            "The routine task's typed authority is malformed",
+        ) from exc
+    watch_id = str(inputs.get("source_watch_id") or "")
+    if (
+        not routine_id
+        or routine_version < 1
+        or routine_revision < 1
+        or not watch_id
+        or watch_revision < 1
+        or task.goal_id != str(inputs.get("goal_id") or "")
+        or int(task.goal_revision) != goal_revision
+    ):
+        raise _routine_publication_error(
+            "routine_publication_binding_mismatch",
+            "The task goal and typed routine authority do not match",
+        )
+
+    parent = await durable_job_repository.get_job(workflow_run_id)
+    if not isinstance(parent, Mapping):
+        raise _routine_publication_error(
+            "routine_publication_parent_missing",
+            "The linked routine workflow run is unavailable",
+        )
+    if str(parent.get("job_id") or parent.get("run_identity") or "") != workflow_run_id:
+        raise _routine_publication_error(
+            "routine_publication_parent_mismatch",
+            "The linked attempt does not identify the expected routine workflow",
+        )
+    parent_owner = parent.get("owner") if isinstance(parent.get("owner"), Mapping) else {}
+    authority = parent.get("declared_authority") if isinstance(parent.get("declared_authority"), Mapping) else {}
+    persisted_sessions = {
+        str(value)
+        for value in (
+            authority.get("session_id"),
+            parent.get("operator_session_id"),
+            parent.get("session_id"),
+        )
+        if str(value or "")
+    }
+    try:
+        parent_goal_revision = int(parent.get("goal_revision") or 0)
+        parent_connection_revision = int(authority.get("github_connection_revision") or 0)
+        authority_routine_version = int(authority.get("routine_version") or 0)
+        authority_routine_revision = int(authority.get("routine_revision") or 0)
+        authority_watch_revision = int(authority.get("source_watch_revision") or 0)
+        binding_matches = (
+            str(parent.get("job_kind") or "") == "routine_invocation"
+            and str(parent_owner.get("kind") or "") == "user"
+            and str(parent_owner.get("principal_id") or "") == owner.principal_id
+            and str(authority.get("goal_owner_principal_id") or "") == owner.principal_id
+            and str(authority.get("goal_owner_session_id") or "") == owner.session_id
+            and persisted_sessions == {owner.session_id}
+            and str(authority.get("capability_id") or "") == "guardian-routine.v1"
+            and bool(str(authority.get("package_digest") or ""))
+            and bool(str(authority.get("github_connection_id") or ""))
+            and parent_connection_revision >= 1
+            and str(parent.get("goal_id") or "") == task.goal_id
+            and parent_goal_revision == int(task.goal_revision)
+            and str(parent.get("session_id") or parent.get("operator_session_id") or "") == owner.session_id
+            and (
+                parent.get("operator_session_id") is None
+                or str(parent.get("operator_session_id") or "") == owner.session_id
+            )
+            and str(authority.get("routine_id") or "") == routine_id
+            and authority_routine_version == routine_version
+            and authority_routine_revision == routine_revision
+            and str(authority.get("source_watch_id") or "") == watch_id
+            and authority_watch_revision == watch_revision
+            and str(authority.get("invocation_uuid") or "")
+            == _routine_invocation_uuid(task.task_id, attempt.attempt_id)
+        )
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise _routine_publication_error(
+            "routine_publication_binding_invalid",
+            "The linked routine workflow authority is malformed",
+        ) from exc
+    if not binding_matches:
+        raise _routine_publication_error(
+            "routine_publication_binding_mismatch",
+            "The linked routine workflow authority does not match the board task",
+        )
+
+    try:
+        attempt_fence = int(attempt.fencing_token or 0)
+        parent_fence = int((parent.get("lease") or {}).get("fencing_token") or 0)
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise _routine_publication_error(
+            "routine_publication_fence_invalid",
+            "The routine attempt fence is malformed",
+        ) from exc
+    parent_status = str(parent.get("status") or "")
+    parent_wait_reason = str(parent.get("failure_reason") or "")
+    waiting_for_operator = (
+        parent_status == "blocked"
+        and parent_wait_reason
+        in {"awaiting_publication_preview", "awaiting_publication_approval"}
+    )
+    if attempt_fence <= 0 or parent_fence != attempt_fence:
+        raise _routine_publication_error(
+            "stale_fence",
+            "The routine attempt no longer owns the linked durable workflow",
+        )
+    if waiting_for_operator:
+        if (
+            task.status is not WorkBoardStatus.blocked
+            or str(task.block_reason or "") not in {
+                parent_wait_reason,
+                "external_mutation_grant_required",
+            }
+            or attempt.lease_owner is not None
+            or attempt.lease_expires_at is not None
+        ):
+            raise _routine_publication_error(
+                "routine_publication_task_state_invalid",
+                "The same card must be Blocked with its board lease released while an operator decision is pending",
+            )
+    elif parent_status == "running":
+        if task.status is not WorkBoardStatus.running or not attempt.lease_owner:
+            raise _routine_publication_error(
+                "routine_publication_task_state_invalid",
+                "A running routine parent requires its current fenced board attempt",
+            )
+        lease = parent.get("lease") if isinstance(parent.get("lease"), Mapping) else {}
+        if not lease.get("owner") or not lease.get("expires_at"):
+            raise _routine_publication_error(
+                "stale_fence",
+                "The running routine workflow has no current lease",
+            )
+        try:
+            expiry = datetime.fromisoformat(str(lease["expires_at"]).replace("Z", "+00:00"))
+            if expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=timezone.utc)
+            if expiry <= datetime.now(timezone.utc):
+                raise ValueError("expired")
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise _routine_publication_error(
+                "stale_fence",
+                "The routine workflow lease is expired or malformed",
+            ) from exc
+    else:
+        raise _routine_publication_error(
+            "routine_publication_not_ready",
+            "The linked durable routine is not waiting for publication review",
+        )
+
+    publication_checkpoint = _job_checkpoint(parent, "routine:publication_child_recorded")
+    m3_job_id = str((publication_checkpoint or {}).get("m3_job_id") or "")
+    approval_id = str((publication_checkpoint or {}).get("approval_id") or "")
+    m3_job = await durable_job_repository.get_job(m3_job_id) if m3_job_id else None
+    publication = None
+    if isinstance(m3_job, Mapping):
+        m3_authority = (
+            m3_job.get("declared_authority")
+            if isinstance(m3_job.get("declared_authority"), Mapping)
+            else {}
+        )
+        m3_owner = m3_job.get("owner") if isinstance(m3_job.get("owner"), Mapping) else {}
+        m3_sessions = {
+            str(value)
+            for value in (
+                m3_authority.get("session_id"),
+                m3_job.get("operator_session_id"),
+                m3_job.get("session_id"),
+            )
+            if str(value or "")
+        }
+        try:
+            m3_goal_revision = int(m3_job.get("goal_revision") or 0)
+            m3_connection_revision = int(m3_authority.get("connection_revision") or 0)
+            m3_matches = (
+                str(m3_job.get("job_kind") or "") == "github_followthrough_v1"
+                and str(m3_job.get("capability_version") or "") == "1"
+                and str(m3_owner.get("principal_id") or "") == owner.principal_id
+                and m3_sessions == {owner.session_id}
+                and str(m3_job.get("goal_id") or "") == task.goal_id
+                and m3_goal_revision == int(task.goal_revision)
+                and str(m3_authority.get("connection_id") or "")
+                == str(authority.get("github_connection_id") or "")
+                and m3_connection_revision == parent_connection_revision
+                and str(m3_authority.get("source_watch_id") or "") == watch_id
+            )
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise _routine_publication_error(
+                "routine_publication_child_binding_invalid",
+                "The prepared publication child authority is malformed",
+            ) from exc
+        if not m3_matches:
+            raise _routine_publication_error(
+                "routine_publication_child_binding_mismatch",
+                "The prepared publication child is not bound to the current routine authority",
+            )
+        from src.extensions.github_followthrough import GitHubFollowthroughService
+
+        try:
+            publication = await GitHubFollowthroughService()._prepare_job_response(m3_job)
+        except Exception:
+            publication = None
+        approval_id = approval_id or str(
+            (m3_job.get("declared_authority") or {}).get("approval_id")
+            if isinstance(m3_job.get("declared_authority"), Mapping)
+            else ""
+        )
+    approval_status = None
+    if approval_id:
+        approval = await approval_repository.get(approval_id)
+        if approval is not None:
+            if (
+                str(getattr(approval, "owner_principal_id", "") or "") != owner.principal_id
+                or str(getattr(approval, "operator_session_id", "") or "") != owner.session_id
+            ):
+                raise _routine_publication_error(
+                    "approval_owner_mismatch",
+                    "The publication approval belongs to another operator session",
+                    status_code=403,
+                )
+            approval_details = {}
+            try:
+                parsed_details = json.loads(getattr(approval, "details_json", "") or "{}")
+                if isinstance(parsed_details, Mapping):
+                    approval_details = dict(parsed_details)
+            except (TypeError, ValueError):
+                approval_details = {}
+            if str(approval_details.get("durable_job_id") or "") != m3_job_id:
+                raise _routine_publication_error(
+                    "approval_job_binding_mismatch",
+                    "The publication approval is not bound to the canonical M3 job",
+                )
+            approval_status = str(getattr(approval, "status", "") or "")
+
+    parent_failure = str(parent.get("failure_reason") or "")
+    if not m3_job_id and parent_failure != "awaiting_publication_preview":
+        raise _routine_publication_error(
+            "routine_publication_not_ready",
+            "The routine parent is not waiting for a publication preview",
+        )
+    if m3_job_id and not isinstance(m3_job, Mapping):
+        raise _routine_publication_error(
+            "routine_publication_child_missing",
+            "The prepared publication child is unavailable for reconciliation",
+        )
+    return {
+        "task": task,
+        "attempt": attempt,
+        "detail": detail,
+        "parent": dict(parent),
+        "parent_effects": list(parent.get("effects") or []),
+        "inputs": inputs,
+        "routine_id": routine_id,
+        "routine_version": routine_version,
+        "routine_revision": routine_revision,
+        "source_watch_id": watch_id,
+        "source_watch_revision": watch_revision,
+        "parent_workflow_run_id": workflow_run_id,
+        "m3_job_id": m3_job_id or None,
+        "m3_status": str(m3_job.get("status") or "") if isinstance(m3_job, Mapping) else None,
+        "publication_effects": list(m3_job.get("effects") or []) if isinstance(m3_job, Mapping) else [],
+        "approval_id": approval_id or None,
+        "approval_status": approval_status,
+        "preview": _safe_publication_preview((publication or {}).get("preview")),
+        "publication_response": publication,
+    }
+
+
+async def _routine_publication_payload(context: Mapping[str, Any]) -> dict[str, Any]:
+    task = context["task"]
+    attempt = context["attempt"]
+    publication_response = context.get("publication_response")
+    return {
+        "task_id": task.task_id,
+        "task_revision": task.task_revision,
+        "attempt_id": attempt.attempt_id,
+        "parent_workflow_run_id": safe_workflow_run_id(context["parent_workflow_run_id"]),
+        "routine_id": context["routine_id"],
+        "routine_version": context["routine_version"],
+        "routine_revision": context["routine_revision"],
+        "source_watch_id": context["source_watch_id"],
+        "source_watch_revision": context["source_watch_revision"],
+        "parent_status": context["parent"].get("status"),
+        "m3_job_id": safe_workflow_run_id(context.get("m3_job_id")),
+        "m3_status": context.get("m3_status"),
+        "approval_id": context.get("approval_id"),
+        "approval_status": context.get("approval_status"),
+        "preview": context.get("preview"),
+        "status": (
+            publication_response.get("status")
+            if isinstance(publication_response, Mapping)
+            else context["parent"].get("failure_reason") or context["parent"].get("status")
+        ),
+        "recovery_action": (
+            "resume_routine_publication"
+            if context.get("m3_job_id")
+            else "prepare_routine_publication"
+        ),
+    }
+
+
+async def _block_routine_for_missing_external_authority(context: Mapping[str, Any]) -> bool:
+    """Safely block an unpublished routine attempt when its grant disappears.
+
+    The routine parent is cancelled only while it is waiting for its explicit
+    publication preview/approval and both durable effect ledgers are empty.
+    Any uncertain or already dispatched outcome stays in normal reconciliation.
+    """
+
+    task = context["task"]
+    attempt = context["attempt"]
+    parent = context.get("parent") if isinstance(context.get("parent"), Mapping) else {}
+    m3_status = str(context.get("m3_status") or "")
+    parent_status = str(parent.get("status") or "")
+    parent_reason = str(parent.get("failure_reason") or "")
+    safe_parent_wait = (
+        parent_status == "blocked"
+        and parent_reason in {"awaiting_publication_preview", "awaiting_publication_approval"}
+    )
+    safe_child_wait = not context.get("m3_job_id") or m3_status in {
+        "accepted",
+        "queued",
+        "awaiting_approval",
+    }
+    parent_effects = context.get("parent_effects")
+    safe_parent_effects = isinstance(parent_effects, list) and all(
+        isinstance(item, Mapping)
+        and (
+            str(item.get("status") or "") == "approved"
+            or (
+                str(item.get("status") or "") == "succeeded"
+                and str(item.get("effect_type") or "")
+                in {"guardian_routine_child", "guardian_routine_outcome"}
+            )
+        )
+        for item in parent_effects
+    )
+    safe_effect_ledgers = safe_parent_effects and not context.get("publication_effects")
+    if not safe_parent_wait or not safe_child_wait or not safe_effect_ledgers or attempt.ended_at is not None:
+        await dispatcher.reconcile_linked_attempts()
+        return False
+
+    if task.status is WorkBoardStatus.blocked:
+        # The durable routine parent is already waiting for an explicit
+        # operator decision and its effect ledgers are empty. Preserve the
+        # same open task attempt and workflow binding, release any board
+        # lease, and expose the missing grant as the prerequisite to restore.
+        # Recovery can then recheck authority and advance the fence before
+        # resuming this exact durable run.
+        if attempt.lease_owner is not None or attempt.lease_expires_at is not None:
+            await dispatcher.reconcile_linked_attempts()
+            return False
+        await dispatcher._pause_routine_for_operator(
+            task,
+            attempt,
+            context["parent"],
+            reason="external_mutation_grant_required",
+        )
+        return True
+
+    if task.status is not WorkBoardStatus.running:
+        await dispatcher.reconcile_linked_attempts()
+        return False
+
+    cancellations = await routine_service.cancel_invocation_job_tree(
+        context["parent_workflow_run_id"],
+        routine_id=context["routine_id"],
+        owner_principal_id=task.owner_principal_id,
+        owner_session_id=task.owner_session_id,
+        reason="external_mutation_authority_missing",
+    )
+    if cancellations:
+        await dispatcher.reconcile_linked_attempts()
+        return False
+    receipt = {
+        "workflow_run_id": context["parent_workflow_run_id"],
+        "status": "cancelled",
+        "reason_code": "capability",
+        "recovery_action": "retry_after_prerequisite",
+    }
+    await dispatcher._project(
+        task,
+        attempt,
+        board_revision=int(task.task_revision),
+        status=WorkBoardStatus.blocked,
+        outcome="capability",
+        block_kind="capability",
+        block_reason="external_mutation_grant_required",
+        result_refs=[receipt],
+        lease_owner=attempt.lease_owner or dispatcher.runner_id,
+    )
+    return True
 
 
 def _decode_json_list(value: str | None) -> list[Any]:
@@ -586,6 +1115,217 @@ async def get_work_board_task(request: Request, task_id: str):
             }
     except BoardError as exc:
         _raise_board_error(exc)
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "board_storage_unavailable", "recovery": "Check the local database readiness receipt and retry."},
+        ) from exc
+
+
+@router.get("/tasks/{task_id}/routine-publication")
+async def get_work_board_routine_publication(request: Request, task_id: str):
+    """Read the exact publication recovery state for one board card."""
+
+    operator = _operator(request)
+    try:
+        async with get_session() as db:
+            context = await _routine_publication_context(db, operator, task_id)
+            task_payload = await _safe_task_payload(
+                context["task"],
+                latest_attempt=context["attempt"],
+                attempt_count=len(context["detail"]["attempts"]),
+            )
+        return {
+            "task": task_payload,
+            "publication": await _routine_publication_payload(context),
+        }
+    except (BoardError, RoutineError) as exc:
+        if isinstance(exc, BoardError):
+            _raise_board_error(exc)
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "board_storage_unavailable", "recovery": "Check the local database readiness receipt and retry."},
+        ) from exc
+
+
+@router.post("/tasks/{task_id}/routine-publication/prepare")
+async def prepare_work_board_routine_publication(
+    request: Request,
+    task_id: str,
+    body: WorkBoardRoutinePublicationPrepareRequest,
+):
+    """Prepare a bounded M3 preview from the task's canonical parent run.
+
+    This route never accepts task/attempt/run/approval IDs from the browser and
+    never approves or executes the publication.
+    """
+
+    operator = _operator(request)
+    try:
+        async with get_session() as db:
+            context = await _routine_publication_context(
+                db,
+                operator,
+                task_id,
+                expected_revision=body.expected_revision,
+            )
+        if not _operator_has_external_mutation(operator):
+            safely_blocked = await _block_routine_for_missing_external_authority(context)
+            raise BoardError(
+                "external_mutation_grant_required",
+                "The current operator session has no external mutation grant; restore the grant before recovering this same run"
+                if safely_blocked
+                else "The current operator session has no external mutation grant; reconcile the linked run before retrying",
+                status_code=403,
+                recovery_action="restore_prerequisite",
+            )
+        existing_preview = context.get("preview")
+        if context.get("m3_job_id"):
+            # The exact M3 binding is immutable. A retry may redisplay it, but
+            # cannot replace its approved body with a new caller-selected one.
+            if isinstance(existing_preview, Mapping) and (
+                str(existing_preview.get("body") or "") != body.body
+                or str(existing_preview.get("title") or "") != str(body.title or "")
+            ):
+                raise BoardError(
+                    "routine_publication_binding_conflict",
+                    "The prepared publication preview is immutable; create a new governed invocation for changed text",
+                )
+        else:
+            await dispatcher.resume_routine_attempt_for_operator_recovery(
+                _owner(operator),
+                context["task"],
+                context["attempt"],
+                context["parent"],
+                expected_revision=body.expected_revision,
+            )
+            await routine_service.prepare_publication(
+                context["routine_id"],
+                context["parent_workflow_run_id"],
+                RoutinePublicationRequest(title=body.title, body=body.body),
+                owner_principal_id=operator.principal.principal_id,
+                owner_session_id=operator.session_id,
+                external_mutation_granted=True,
+            )
+            # Preparation resumes the durable parent only long enough to
+            # create the exact M3 approval hold. Reconcile it back to
+            # Blocked before returning the refreshed card and cursor.
+            await dispatcher.reconcile_linked_attempts()
+        async with get_session() as db:
+            refreshed = await _routine_publication_context(db, operator, task_id)
+            task_payload = await _safe_task_payload(
+                refreshed["task"],
+                latest_attempt=refreshed["attempt"],
+                attempt_count=len(refreshed["detail"]["attempts"]),
+            )
+        return {
+            "task": task_payload,
+            "publication": await _routine_publication_payload(refreshed),
+            "approval_required": True,
+            "operator_action": "approve_exact_publication_in_pending_approvals",
+        }
+    except (BoardError, RoutineError) as exc:
+        if isinstance(exc, BoardError):
+            _raise_board_error(exc)
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "board_storage_unavailable", "recovery": "Check the local database readiness receipt and retry."},
+        ) from exc
+
+
+@router.post("/tasks/{task_id}/routine-publication/recover")
+async def recover_work_board_routine_publication(
+    request: Request,
+    task_id: str,
+    body: WorkBoardRoutinePublicationRecoverRequest,
+):
+    """Consume the exact approved M3 publication and reconcile the same card."""
+
+    operator = _operator(request)
+    try:
+        async with get_session() as db:
+            context = await _routine_publication_context(
+                db,
+                operator,
+                task_id,
+                expected_revision=body.expected_revision,
+            )
+        if not _operator_has_external_mutation(operator):
+            safely_blocked = await _block_routine_for_missing_external_authority(context)
+            raise BoardError(
+                "external_mutation_grant_required",
+                "The current operator session has no external mutation grant; restore the grant before recovering this same run"
+                if safely_blocked
+                else "The current operator session has no external mutation grant; reconcile the linked run before retrying",
+                status_code=403,
+                recovery_action="restore_prerequisite",
+            )
+        if not context.get("m3_job_id") or not context.get("approval_id"):
+            raise BoardError(
+                "routine_publication_preview_required",
+                "Prepare and inspect the exact publication preview before approval",
+            )
+        if context.get("approval_status") != "approved":
+            raise BoardError(
+                "approval_not_current",
+                "Approve the exact publication preview in Pending approvals before resuming",
+                recovery_action="approve_existing_run",
+            )
+        await dispatcher.resume_routine_attempt_for_operator_recovery(
+            _owner(operator),
+            context["task"],
+            context["attempt"],
+            context["parent"],
+            expected_revision=body.expected_revision,
+        )
+        try:
+            result = await routine_service.recover(
+                context["routine_id"],
+                context["parent_workflow_run_id"],
+                owner_principal_id=operator.principal.principal_id,
+                owner_session_id=operator.session_id,
+                external_mutation_granted=True,
+            )
+        finally:
+            # The routine service remains execution authority. The board
+            # dispatcher projects the same fenced attempt only after the
+            # current durable run exposes a verified independent readback;
+            # otherwise it returns the card to a truthful recovery Blocked
+            # state or leaves an actually running run under its live lease.
+            await dispatcher.reconcile_linked_attempts()
+        async with get_session() as db:
+            detail = await repository.get_detail(db, _owner(operator), task_id)
+            latest_attempt = detail["attempts"][0] if detail["attempts"] else None
+            task_payload = await _safe_task_payload(
+                detail["task"],
+                dependency_counts=detail["dependency_counts"],
+                latest_attempt=latest_attempt,
+                attempt_count=len(detail["attempts"]),
+            )
+        publication = await _routine_publication_payload(
+            {
+                **context,
+                "parent": {
+                    **context["parent"],
+                    "status": result.get("status") or context["parent"].get("status"),
+                },
+                "publication_response": result.get("child") if isinstance(result, Mapping) else None,
+            }
+        )
+        return {
+            "task": task_payload,
+            "publication": publication,
+            "recovery": result,
+            "readback_required": True,
+        }
+    except (BoardError, RoutineError) as exc:
+        if isinstance(exc, BoardError):
+            _raise_board_error(exc)
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
     except SQLAlchemyError as exc:
         raise HTTPException(
             status_code=503,

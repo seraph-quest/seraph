@@ -19,6 +19,7 @@ from src.db.models import (
     WorkBoardHandoff,
     WorkBoardLink,
     WorkBoardProposal,
+    WorkBoardRoutineBinding,
     WorkBoardTask,
 )
 from src.workspace import (
@@ -40,6 +41,7 @@ def test_work_board_tables_are_registered_in_canonical_metadata():
         "work_board_review_intents",
         "work_board_handoffs",
         "work_board_proposals",
+        "work_board_routine_bindings",
     }
     assert expected.issubset(SQLModel.metadata.tables)
     assert expected.issubset(set(OPERATOR_REQUIRED_TABLES))
@@ -174,6 +176,24 @@ def _board_workspace(tmp_path: Path):
                 status TEXT NOT NULL,
                 proposal_json TEXT NOT NULL
             );
+            CREATE TABLE work_board_routine_bindings (
+                binding_id TEXT PRIMARY KEY,
+                owner_principal_id TEXT NOT NULL,
+                owner_session_id TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                preview_digest TEXT NOT NULL,
+                source_task_id TEXT NOT NULL,
+                action_task_id TEXT NOT NULL,
+                routine_name TEXT NOT NULL,
+                deterministic_routine_id TEXT NOT NULL,
+                routine_id TEXT,
+                install_job_id TEXT,
+                state TEXT NOT NULL,
+                recovery_reason TEXT,
+                created_at DATETIME NOT NULL,
+                updated_at DATETIME NOT NULL,
+                revision INTEGER NOT NULL
+            );
             INSERT INTO work_board_tasks(task_id, title, status)
                 VALUES ('task-roundtrip', 'Persisted board task', 'triage');
             INSERT INTO work_board_attempts(attempt_id, task_id, executor_id)
@@ -232,6 +252,22 @@ def _board_workspace(tmp_path: Path):
                 'strategist_agent', 'job-roundtrip', 'effect-digest-roundtrip',
                 0, 'not_started', 'blocked', '{"proposed_tasks":[]}'
             );
+            INSERT INTO work_board_routine_bindings(
+                binding_id, owner_principal_id, owner_session_id, idempotency_key,
+                preview_digest, source_task_id, action_task_id, routine_name,
+                deterministic_routine_id, routine_id, install_job_id, state,
+                recovery_reason, created_at, updated_at, revision
+            ) VALUES (
+                'binding-roundtrip', 'operator:test', 'session:test',
+                'routine-key-roundtrip',
+                'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                'source-task', 'action-task', 'Reviewed routine',
+                '0123456789abcdef0123456789abcdef',
+                '0123456789abcdef0123456789abcdef',
+                'routine-install:0123456789abcdef0123456789abcdef:v1',
+                'prepared', NULL, '2026-09-25T00:00:00+00:00',
+                '2026-09-25T00:00:00+00:00', 2
+            );
             """
         )
     return root, registry
@@ -241,13 +277,19 @@ def test_backup_restore_retains_work_board_task_and_event_records(tmp_path):
     root, registry = _board_workspace(tmp_path)
     inventory_receipt = production_workspace_inventory(root)
     inventory = inventory_receipt["manifest"]["database"]["tables"]
+    binding_contract = inventory_receipt["manifest"]["database"]["operator_contracts"][
+        "work_board_routine_binding"
+    ]
     assert {
         "work_board_tasks",
         "work_board_attempts",
         "work_board_links",
         "work_board_comments",
         "work_board_events",
+        "work_board_routine_bindings",
     }.issubset({table["name"] for table in inventory})
+    assert binding_contract["present"] is True
+    assert binding_contract["backup_scope"] == "canonical_sqlite"
     assert registry.classify_path("seraph.db").value == "canonical"
     with lifecycle_fence_marker():
         archive = Path(backup_workspace(root, registry=registry)["archive_path"])
@@ -260,6 +302,7 @@ def test_backup_restore_retains_work_board_task_and_event_records(tmp_path):
         connection.execute("DELETE FROM work_board_review_intents")
         connection.execute("DELETE FROM work_board_handoffs")
         connection.execute("DELETE FROM work_board_proposals")
+        connection.execute("DELETE FROM work_board_routine_bindings")
     with lifecycle_fence_marker():
         restore_workspace(
             root,
@@ -312,6 +355,9 @@ def test_backup_restore_retains_work_board_task_and_event_records(tmp_path):
         proposal = connection.execute(
             "SELECT owner_principal_id, owner_session_id, admission_job_id, effect_id_digest, authority_digest, input_digest FROM work_board_proposals"
         ).fetchone()
+        routine_binding = connection.execute(
+            "SELECT owner_principal_id, owner_session_id, idempotency_key, deterministic_routine_id, state, revision FROM work_board_routine_bindings"
+        ).fetchone()
     assert task == ("task-roundtrip", "Persisted board task", "triage")
     assert event == ("task-roundtrip", "task.created")
     assert attempt == ("attempt-roundtrip", "task-roundtrip", "executor.test")
@@ -338,6 +384,14 @@ def test_backup_restore_retains_work_board_task_and_event_records(tmp_path):
         "effect-digest-roundtrip",
         "authority-digest-roundtrip",
         "input-digest-roundtrip",
+    )
+    assert routine_binding == (
+        "operator:test",
+        "session:test",
+        "routine-key-roundtrip",
+        "0123456789abcdef0123456789abcdef",
+        "prepared",
+        2,
     )
 
 
@@ -406,9 +460,166 @@ async def test_init_db_additively_creates_board_tables_and_preserves_existing_ro
         "work_board_links",
         "work_board_comments",
         "work_board_events",
+        WorkBoardRoutineBinding.__tablename__,
     }.issubset(tables)
     assert existing == ("legacy-goal", "Existing goal")
     assert "AUTOINCREMENT" in task_ddl.upper()
+
+
+@pytest.mark.asyncio
+async def test_init_db_upgrades_legacy_routine_binding_before_metadata_indexes(
+    tmp_path,
+    monkeypatch,
+):
+    """Startup must upgrade an old binding table before ``create_all`` indexes it."""
+
+    root = tmp_path / "legacy-binding-startup"
+    root.mkdir()
+    database_path = root / "seraph.db"
+    sync_engine = create_sync_engine(f"sqlite:///{database_path}")
+    SQLModel.metadata.create_all(sync_engine, tables=[Goal.__table__])
+    with sync_engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE work_board_routine_bindings (
+                binding_id TEXT PRIMARY KEY,
+                owner_principal_id TEXT NOT NULL,
+                owner_session_id TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                preview_digest TEXT NOT NULL,
+                source_task_id TEXT NOT NULL,
+                action_task_id TEXT NOT NULL,
+                routine_name TEXT NOT NULL,
+                deterministic_routine_id TEXT NOT NULL,
+                created_at DATETIME NOT NULL
+            )
+            """
+        )
+    sync_engine.dispose()
+
+    async_engine = create_async_engine(
+        f"sqlite+aiosqlite:///{database_path}",
+        connect_args={"check_same_thread": False},
+    )
+    monkeypatch.setattr(settings, "workspace_dir", str(root))
+    monkeypatch.setattr(db_engine, "engine", async_engine)
+    monkeypatch.setattr(db_engine, "_db_path", str(database_path))
+
+    async def _noop(_connection):
+        return None
+
+    monkeypatch.setattr(db_engine, "_ensure_legacy_columns", _noop)
+    monkeypatch.setattr(db_engine, "_ensure_telegram_transport_columns", _noop)
+    monkeypatch.setattr(db_engine, "_ensure_memory_indexes", _noop)
+    monkeypatch.setattr(db_engine, "_ensure_search_indexes", _noop)
+
+    try:
+        await db_engine.init_db()
+    finally:
+        await async_engine.dispose()
+
+    with sqlite3.connect(database_path) as connection:
+        columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(work_board_routine_bindings)"
+            )
+        }
+        indexes = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA index_list(work_board_routine_bindings)"
+            )
+        }
+    assert {
+        "routine_id",
+        "install_job_id",
+        "state",
+        "recovery_reason",
+        "revision",
+        "updated_at",
+    }.issubset(columns)
+    assert {
+        "ux_work_board_routine_bindings_idempotency",
+        "ux_work_board_routine_bindings_deterministic_routine",
+    }.issubset(indexes)
+
+
+@pytest.mark.asyncio
+async def test_routine_binding_migration_adds_restart_projection_and_unique_indexes(tmp_path):
+    database_path = tmp_path / "routine-binding-upgrade.db"
+    async_engine = create_async_engine(
+        f"sqlite+aiosqlite:///{database_path}",
+        connect_args={"check_same_thread": False},
+    )
+    try:
+        async with async_engine.begin() as connection:
+            await connection.exec_driver_sql(
+                """
+                CREATE TABLE work_board_routine_bindings (
+                    binding_id TEXT PRIMARY KEY,
+                    owner_principal_id TEXT NOT NULL,
+                    owner_session_id TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    preview_digest TEXT NOT NULL,
+                    source_task_id TEXT NOT NULL,
+                    action_task_id TEXT NOT NULL,
+                    routine_name TEXT NOT NULL,
+                    deterministic_routine_id TEXT NOT NULL,
+                    created_at DATETIME NOT NULL
+                )
+                """
+            )
+            await connection.exec_driver_sql(
+                "INSERT INTO work_board_routine_bindings "
+                "(binding_id, owner_principal_id, owner_session_id, idempotency_key, "
+                "preview_digest, source_task_id, action_task_id, routine_name, "
+                "deterministic_routine_id, created_at) VALUES "
+                "('legacy-binding', 'operator:test', 'session:test', 'legacy-key', "
+                "'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', "
+                "'source-task', 'action-task', 'Legacy routine', "
+                "'0123456789abcdef0123456789abcdef', '2026-09-25T00:00:00+00:00')"
+            )
+            await db_engine._ensure_work_board_routine_binding(connection)
+            columns = {
+                row[1]
+                for row in (
+                    await connection.exec_driver_sql(
+                        "PRAGMA table_info(work_board_routine_bindings)"
+                    )
+                ).fetchall()
+            }
+            indexes = {
+                row[1]
+                for row in (
+                    await connection.exec_driver_sql(
+                        "PRAGMA index_list(work_board_routine_bindings)"
+                    )
+                ).fetchall()
+            }
+            state, revision = (
+                await connection.exec_driver_sql(
+                    "SELECT state, revision FROM work_board_routine_bindings "
+                    "WHERE binding_id = 'legacy-binding'"
+                )
+            ).fetchone()
+    finally:
+        await async_engine.dispose()
+
+    assert {
+        "routine_id",
+        "install_job_id",
+        "state",
+        "recovery_reason",
+        "revision",
+        "updated_at",
+    }.issubset(columns)
+    assert {
+        "ux_work_board_routine_bindings_idempotency",
+        "ux_work_board_routine_bindings_deterministic_routine",
+    }.issubset(indexes)
+    assert state == "pending"
+    assert revision == 1
 
 
 @pytest.mark.asyncio

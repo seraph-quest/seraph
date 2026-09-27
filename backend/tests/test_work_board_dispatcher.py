@@ -8,6 +8,8 @@ import hashlib
 import json
 from pathlib import Path
 from typing import Any
+import uuid
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import event, select
@@ -40,6 +42,7 @@ from src.work_board.dispatcher import (
     _stable_reason_code,
     registered_executor_id,
 )
+import src.work_board.dispatcher as dispatcher_module
 from src.work_board.repository import BoardMutation, BoardError, WorkBoardRepository
 from src.work_board import review as review_service
 from src.workflows.job_runtime import DurableJobError, DurableJobRepository
@@ -62,6 +65,110 @@ def test_goal_snapshot_readiness_failure_names_goal_verification_recovery(reason
 
 def test_other_readiness_failure_keeps_generic_prerequisite_recovery():
     assert _preflight_recovery_action("github_credential_missing") == "restore_prerequisite"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("connection", "grants", "repository", "expected"),
+    [
+        ({"mode": "active", "credential_configured": True, "repository": "seraph/repo"}, (), "seraph/repo", "external_mutation_grant_required"),
+        ({"mode": "active", "credential_configured": False, "repository": "seraph/repo"}, ("external_mutation",), "seraph/repo", "credential_not_configured"),
+        ({"mode": "active", "credential_configured": True, "repository": "seraph/other"}, ("external_mutation",), "seraph/repo", "github_repository_changed"),
+    ],
+)
+async def test_routine_preflight_blocks_missing_current_github_authority(
+    monkeypatch,
+    connection,
+    grants,
+    repository,
+    expected,
+):
+    class FakeGitHubService:
+        async def get_connection(self, _owner):
+            return connection
+
+    async def authenticate(_session_id, *, touch):
+        assert touch is False
+        return SimpleNamespace(
+            session_id="session-one",
+            principal=SimpleNamespace(
+                principal_id="operator:one",
+                grants=grants,
+            ),
+        )
+
+    monkeypatch.setattr(
+        "src.extensions.github_followthrough.GitHubFollowthroughService",
+        FakeGitHubService,
+    )
+    monkeypatch.setattr(dispatcher_module, "authenticate_session", authenticate)
+    code, _reason = await WorkBoardDispatcher()._routine_external_preflight(
+        _task("guardian-routine.v1"),
+        {"source_repository": repository},
+    )
+    assert code == expected
+
+
+@pytest.mark.asyncio
+async def test_routine_preflight_blocks_inactive_source_watch_before_admission(monkeypatch):
+    class FakeRoutineService:
+        async def read(self, *_args, **_kwargs):
+            return {
+                "state": "active",
+                "revision": 4,
+                "versions": [
+                    {
+                        "version": 1,
+                        "installed_package_digest": "a" * 64,
+                        "source_repository": "seraph/repo",
+                    }
+                ],
+                "package": {"status": "active", "digest": "a" * 64},
+            }
+
+    class FakeGitHubService:
+        async def get_connection(self, _owner):
+            return {
+                "mode": "active",
+                "credential_configured": True,
+                "repository": "seraph/repo",
+            }
+
+    async def authenticate(_session_id, *, touch):
+        assert touch is False
+        return SimpleNamespace(
+            session_id="session-one",
+            principal=SimpleNamespace(
+                principal_id="operator:one",
+                grants=("external_mutation",),
+            ),
+        )
+
+    async def get_paused_watch(*_args, **_kwargs):
+        return {"state": "paused", "plan_revision": 9}
+
+    monkeypatch.setattr("src.workflows.routines.routine_service", FakeRoutineService())
+    monkeypatch.setattr(
+        "src.extensions.github_followthrough.GitHubFollowthroughService",
+        FakeGitHubService,
+    )
+    monkeypatch.setattr(dispatcher_module, "authenticate_session", authenticate)
+    monkeypatch.setattr("src.guardian.source_watch.source_watch_service.get_watch", get_paused_watch)
+    dispatcher = WorkBoardDispatcher()
+    code, reason = await dispatcher._capability_preflight(
+        _task("guardian-routine.v1"),
+        SimpleNamespace(),
+        {
+            "routine_id": "routine-1",
+            "expected_routine_revision": 4,
+            "version": 1,
+            "source_watch_id": "watch-paused",
+            "expected_watch_revision": 9,
+        },
+    )
+
+    assert code == "source_watch_not_active"
+    assert reason == "The procedure source watch is not currently active"
 
 
 def _task(capability_id: str, *, owner: str = "operator:one"):
@@ -155,6 +262,785 @@ def test_direct_adapters_use_the_reviewed_root_and_binding_identities():
     assert routine_owner == "operator:one"
     assert routine_kind == "routine_invocation"
     assert routine_service is None
+
+
+@pytest.mark.asyncio
+async def test_routine_board_adapter_executes_approved_parent_without_duplicate_admission(monkeypatch):
+    """A board retry consumes the exact approval through RoutineService."""
+
+    task = SimpleNamespace(
+        task_id="task-routine-approved",
+        owner_principal_id="operator:one",
+        owner_session_id="session-one",
+        goal_id="goal-one",
+        goal_revision=3,
+        capability_id="guardian-routine.v1",
+    )
+    attempt = SimpleNamespace(attempt_id="attempt-routine-approved")
+    inputs = {
+        "routine_id": "routine-1",
+        "version": 2,
+        "expected_routine_revision": 7,
+        "goal_id": "goal-one",
+        "expected_goal_revision": 3,
+        "source_watch_id": "watch-1",
+        "expected_watch_revision": 9,
+    }
+    attempt_uuid = uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"seraph:work-board-attempt:{task.task_id}:{attempt.attempt_id}",
+    )
+    job_id = f"routine-invocation:{inputs['routine_id']}:{attempt_uuid}"
+    job = {
+        "job_id": job_id,
+        "run_identity": job_id,
+        "job_kind": "routine_invocation",
+        "status": "awaiting_approval",
+        "owner": {"principal_id": task.owner_principal_id, "kind": "user"},
+        "session_id": task.owner_session_id,
+        "operator_session_id": task.owner_session_id,
+        "goal_id": task.goal_id,
+        "goal_revision": task.goal_revision,
+        "declared_authority": {
+            "routine_id": inputs["routine_id"],
+            "routine_version": inputs["version"],
+            "routine_revision": inputs["expected_routine_revision"],
+            "source_watch_id": inputs["source_watch_id"],
+            "source_watch_revision": inputs["expected_watch_revision"],
+            "invocation_uuid": str(attempt_uuid),
+            "approval_id": "approval-routine-1",
+        },
+    }
+    approval = SimpleNamespace(
+        status="approved",
+        owner_principal_id=task.owner_principal_id,
+        operator_session_id=task.owner_session_id,
+        details_json=json.dumps({"durable_job_id": job_id}),
+    )
+    calls: list[str] = []
+
+    class ApprovalRepository:
+        async def get(self, approval_id):
+            assert approval_id == "approval-routine-1"
+            return approval
+
+    class RoutineService:
+        async def invoke(self, *_args, **_kwargs):
+            calls.append("invoke")
+            return {"status": "awaiting_approval", "job_id": job_id, "approval_id": "approval-routine-1"}
+
+        async def execute_invocation(self, *_args, **kwargs):
+            calls.append("execute")
+            assert kwargs["owner_principal_id"] == task.owner_principal_id
+            assert kwargs["owner_session_id"] == task.owner_session_id
+            return {"status": "succeeded", "job_id": job_id, "readback": {"status": "verified"}}
+
+    monkeypatch.setattr("src.workflows.routines.routine_service", RoutineService())
+    monkeypatch.setattr("src.work_board.dispatcher.approval_repository", ApprovalRepository())
+
+    async def get_job(requested_job_id):
+        assert requested_job_id == job_id
+        return dict(job)
+
+    monkeypatch.setattr("src.workflows.routines.durable_job_repository.get_job", get_job)
+    dispatcher = WorkBoardDispatcher()
+
+    admitted = await dispatcher._execute_direct_adapter(
+        task,
+        attempt,
+        inputs,
+        runtime_seconds=300,
+        admission_only=True,
+    )
+    executed = await dispatcher._execute_direct_adapter(
+        task,
+        attempt,
+        inputs,
+        runtime_seconds=300,
+        admission_only=False,
+    )
+
+    assert admitted["status"] == "awaiting_approval"
+    assert executed["status"] == "succeeded"
+    assert calls == ["invoke", "execute"]
+
+
+@pytest.mark.asyncio
+async def test_board_routine_admission_and_approved_execution_projects_verified_readback(monkeypatch):
+    """The governed parent reaches Done only after RoutineService execution proof."""
+
+    task = SimpleNamespace(
+        task_id="task-routine-vertical",
+        task_revision=1,
+        owner_principal_id="operator:one",
+        owner_session_id="session-one",
+        goal_id="goal-one",
+        goal_revision=3,
+        capability_id="guardian-routine.v1",
+        requires_review=False,
+        executor_id="executor.routine",
+        priority=50,
+    )
+    attempt = SimpleNamespace(
+        attempt_id="attempt-routine-vertical",
+        fencing_token=4,
+        lease_owner="service:work-board",
+    )
+    inputs = {
+        "routine_id": "routine-vertical",
+        "version": 1,
+        "expected_routine_revision": 7,
+        "goal_id": "goal-one",
+        "expected_goal_revision": 3,
+        "source_watch_id": "watch-vertical",
+        "expected_watch_revision": 9,
+    }
+    attempt_uuid = uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"seraph:work-board-attempt:{task.task_id}:{attempt.attempt_id}",
+    )
+    job_id = f"routine-invocation:{inputs['routine_id']}:{attempt_uuid}"
+    projection = {
+        "job_id": job_id,
+        "run_identity": job_id,
+        "root_run_identity": job_id,
+        "owner": {"principal_id": task.owner_principal_id, "kind": "user"},
+        "job_kind": "routine_invocation",
+        "capability_version": "guardian-routine.v1",
+        "session_id": task.owner_session_id,
+        "operator_session_id": task.owner_session_id,
+        "goal_id": task.goal_id,
+        "goal_revision": task.goal_revision,
+        "idempotency": {
+            "scope": "work-board-attempt",
+            "key": f"{task.task_id}:{attempt.attempt_id}",
+        },
+        "declared_authority": {
+            "capability_id": task.capability_id,
+            "routine_id": inputs["routine_id"],
+            "routine_version": inputs["version"],
+            "routine_revision": inputs["expected_routine_revision"],
+            "source_watch_id": inputs["source_watch_id"],
+            "source_watch_revision": inputs["expected_watch_revision"],
+            "invocation_uuid": str(attempt_uuid),
+            "approval_id": "approval-vertical",
+        },
+        "input_digest": "a" * 64,
+        "authority_digest": "b" * 64,
+        "run_fingerprint": "c" * 64,
+        "status": "awaiting_approval",
+        "effects": [],
+    }
+    approval = SimpleNamespace(
+        status="approved",
+        owner_principal_id=task.owner_principal_id,
+        operator_session_id=task.owner_session_id,
+        details_json=json.dumps({"durable_job_id": job_id}),
+    )
+    calls: list[str] = []
+
+    class ApprovalRepository:
+        async def get(self, approval_id):
+            assert approval_id == "approval-vertical"
+            return approval
+
+    class RoutineService:
+        async def invoke(self, *_args, **_kwargs):
+            calls.append("invoke")
+            return {"status": "awaiting_approval", "job_id": job_id, "approval_id": "approval-vertical"}
+
+        async def execute_invocation(self, *_args, **kwargs):
+            calls.append("execute")
+            assert kwargs["owner_principal_id"] == task.owner_principal_id
+            projection.update(
+                {
+                    "status": "succeeded",
+                    "effects": [
+                        {
+                            "receipt_kind": "readback",
+                            "status": "succeeded",
+                            "reconciled": True,
+                            "workflow_run_id": job_id,
+                            "content_sha256": "d" * 64,
+                            "readback_id": "routine-readback",
+                            "verified_at": "2026-09-25T00:00:00+00:00",
+                        }
+                    ],
+                }
+            )
+            return {"status": "succeeded", "job_id": job_id}
+
+    class Jobs:
+        async def get_job(self, requested_job_id):
+            assert requested_job_id == job_id
+            return dict(projection)
+
+        async def get_by_idempotency_binding(self, **_kwargs):
+            return dict(projection)
+
+    class Repository:
+        async def link_attempt_workflow_run(self, _db, *_args, **_kwargs):
+            return SimpleNamespace(
+                task=SimpleNamespace(**{**vars(task), "task_revision": 2}),
+                attempt=attempt,
+            )
+
+    monkeypatch.setattr("src.workflows.routines.routine_service", RoutineService())
+    monkeypatch.setattr("src.work_board.dispatcher.approval_repository", ApprovalRepository())
+
+    async def get_job(_job_id):
+        return dict(projection)
+
+    monkeypatch.setattr("src.workflows.routines.durable_job_repository.get_job", get_job)
+    projected: list[dict[str, Any]] = []
+    dispatcher = WorkBoardDispatcher(
+        repository=Repository(),
+        jobs=Jobs(),
+        session_provider=lambda: _Session(),
+    )
+
+    async def project(*_args, **kwargs):
+        projected.append(kwargs)
+
+    dispatcher._project = project
+    result = await dispatcher._admit_execute_direct(
+        BoardDispatchClaim(task, attempt, SimpleNamespace(event_id=1)),
+        inputs,
+        runtime_seconds=300,
+    )
+
+    assert result["admitted"] is True
+    assert result["completed"] is True
+    assert result["blocked"] is False
+    assert calls == ["invoke", "execute"]
+    assert projected[-1]["status"] is WorkBoardStatus.done
+    assert projected[-1]["outcome"] == "verified"
+    assert projected[-1]["proof"]["readback_id"] == "routine-readback"
+
+
+def _github_board_task():
+    return SimpleNamespace(
+        task_id="task-github-approval",
+        task_revision=4,
+        owner_principal_id="operator:github",
+        owner_session_id="session:github",
+        goal_id="goal-github",
+        goal_revision=2,
+        capability_id="work.github-followthrough.v1",
+        requires_review=False,
+    )
+
+
+def _github_board_attempt(job_id: str):
+    return SimpleNamespace(
+        attempt_id="attempt-github-approval",
+        workflow_run_id=job_id,
+        fencing_token=8,
+        lease_owner="service:work-board",
+        cancel_requested_at=None,
+    )
+
+
+def _github_pending_projection(job_id: str):
+    return {
+        "job_id": job_id,
+        "run_identity": job_id,
+        "status": "awaiting_approval",
+        "owner": {"kind": "user", "principal_id": "operator:github"},
+        "session_id": "session:github",
+        "operator_session_id": "session:github",
+        "goal_id": "goal-github",
+        "goal_revision": 2,
+        "plan_revision": 1,
+        "authority_digest": "authority-github",
+        "budget_digest": "budget-github",
+        "job_kind": "github_followthrough_v1",
+        "capability_version": "1",
+        "idempotency": {
+            "scope": "work-board-attempt",
+            "key": "task-github-approval:attempt-github-approval",
+        },
+        "declared_authority": {
+            "capability_id": "work.github-followthrough.v1",
+            "approval_id": "approval-github",
+        },
+        "effects": [],
+    }
+
+
+def _github_consumed_projection(job_id: str):
+    projection = _github_pending_projection(job_id)
+    projection["status"] = "queued"
+    expiry = (datetime.now(timezone.utc) + timedelta(minutes=4)).timestamp()
+    projection["effects"] = [
+        {
+            "kind": "approval_resume",
+            "status": "approved",
+            "approval_request_status": "consumed",
+            "approval_id": "approval-github",
+            "operator_principal_id": "operator:github",
+            "operator_session_id": "session:github",
+            "owner_kind": "user",
+            "owner_principal_id": "operator:github",
+            "authority_digest": "authority-github",
+            "goal_id": "goal-github",
+            "goal_revision": 2,
+            "plan_revision": 1,
+            "capability_version": "1",
+            "budget_digest": "budget-github",
+            "expires_at": expiry,
+        }
+    ]
+    details = {
+        "approval_expires_at": expiry,
+        "durable_approval_id": "approval-github",
+        "durable_job_id": job_id,
+        "durable_owner_kind": "user",
+        "durable_owner_principal_id": "operator:github",
+        "durable_authority_digest": "authority-github",
+        "durable_goal_id": "goal-github",
+        "durable_goal_revision": 2,
+        "durable_plan_revision": 1,
+        "durable_capability_version": "1",
+        "durable_budget_digest": "budget-github",
+        "operator_session_id": "session:github",
+    }
+    approval = SimpleNamespace(
+        id="approval-github",
+        status="consumed",
+        owner_principal_id="operator:github",
+        operator_session_id="session:github",
+        details_json=json.dumps(details),
+    )
+    return projection, approval
+
+
+class _ApprovalRepository:
+    def __init__(self, approval):
+        self.approval = approval
+
+    async def get(self, approval_id):
+        assert approval_id == "approval-github"
+        return self.approval
+
+
+@pytest.mark.asyncio
+async def test_github_linked_attempt_keeps_pending_approval_without_execution(monkeypatch):
+    job_id = "ghfollow_pending"
+    task = _github_board_task()
+    attempt = _github_board_attempt(job_id)
+    projection = _github_pending_projection(job_id)
+    approval = SimpleNamespace(
+        status="pending",
+        owner_principal_id=task.owner_principal_id,
+        operator_session_id=task.owner_session_id,
+        details_json=json.dumps({"durable_job_id": job_id}),
+    )
+    jobs = SimpleNamespace(get_job=AsyncMock(return_value=projection))
+    execute = AsyncMock(side_effect=AssertionError("pending approval must not execute"))
+    monkeypatch.setattr("src.work_board.dispatcher.approval_repository", _ApprovalRepository(approval))
+    monkeypatch.setattr(
+        "src.extensions.github_followthrough.GitHubFollowthroughService.execute",
+        execute,
+    )
+    dispatcher = WorkBoardDispatcher(jobs=jobs)
+    dispatcher._current_external_mutation_grant = AsyncMock(return_value=True)
+
+    latest, outcome = await dispatcher._resume_github_followthrough(task, attempt, job_id, projection)
+
+    assert latest is projection
+    assert outcome["status"] == "awaiting_approval"
+    execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_github_board_admission_keeps_same_fenced_attempt_pending(monkeypatch):
+    """Approval admission links the one root before leaving it pending."""
+
+    task = _github_board_task()
+    task.task_revision = 4
+    attempt = _github_board_attempt("ghfollow_admission")
+    job_id = "ghfollow_admission"
+    projection = _github_pending_projection(job_id)
+    linked = False
+    calls: list[str] = []
+
+    class Jobs:
+        async def get_job(self, requested_job_id):
+            assert requested_job_id == job_id
+            return dict(projection)
+
+    class Repository:
+        async def link_attempt_workflow_run(self, _db, *_args, **kwargs):
+            nonlocal linked
+            linked = True
+            assert kwargs["workflow_run_id"] == job_id
+            return SimpleNamespace(
+                task=SimpleNamespace(**vars(task)),
+                attempt=attempt,
+            )
+
+    dispatcher = WorkBoardDispatcher(
+        repository=Repository(),
+        jobs=Jobs(),
+        session_provider=lambda: _Session(),
+    )
+
+    async def canonical_admission(*_args, **_kwargs):
+        return (
+            {"status": "awaiting_approval", "job_id": job_id, "admission_only": True},
+            projection,
+            {"job_id": job_id},
+        )
+
+    async def execute_after_link(_task, _attempt, _inputs, *, runtime_seconds, admission_only=False):
+        assert runtime_seconds == 300
+        assert linked is True
+        assert admission_only is False
+        calls.append(job_id)
+        return {"status": "awaiting_approval", "job_id": job_id, "admission_only": False}
+
+    monkeypatch.setattr(dispatcher, "_canonical_direct_admission", canonical_admission)
+    monkeypatch.setattr(dispatcher, "_execute_direct_adapter", execute_after_link)
+    dispatcher._project = AsyncMock(side_effect=AssertionError("pending approval must not terminally project"))
+
+    result = await dispatcher._admit_execute_direct(
+        BoardDispatchClaim(task, attempt, SimpleNamespace(event_id=1)),
+        {},
+        runtime_seconds=300,
+    )
+
+    assert result == {
+        "admitted": True,
+        "completed": False,
+        "blocked": False,
+        "awaiting_approval": True,
+    }
+    assert calls == [job_id]
+
+
+@pytest.mark.asyncio
+async def test_github_linked_attempt_executes_same_approved_job_and_projects_readback(monkeypatch):
+    job_id = "ghfollow_approved"
+    task = _github_board_task()
+    attempt = _github_board_attempt(job_id)
+    projection = _github_pending_projection(job_id)
+    approval = SimpleNamespace(
+        status="approved",
+        owner_principal_id=task.owner_principal_id,
+        operator_session_id=task.owner_session_id,
+        details_json=json.dumps({"durable_job_id": job_id}),
+    )
+
+    class Jobs:
+        async def get_job(self, requested_job_id):
+            assert requested_job_id == job_id
+            return dict(projection)
+
+    class Repository:
+        async def list_linked_active_attempts(self, _db, *, limit):
+            assert limit > 0
+            return [(task, attempt)]
+
+    @asynccontextmanager
+    async def session_provider():
+        yield _Session()
+
+    execute = AsyncMock()
+    prepare = AsyncMock(side_effect=AssertionError("approved recovery must not prepare a second job"))
+
+    async def execute_same_job(**kwargs):
+        assert kwargs["job_id"] == job_id
+        assert kwargs["owner_principal_id"] == task.owner_principal_id
+        assert kwargs["owner_session_id"] == task.owner_session_id
+        projection.update(
+            {
+                "status": "succeeded",
+                "effects": [
+                    {
+                        "receipt_kind": "readback",
+                        "status": "succeeded",
+                        "reconciled": True,
+                        "workflow_run_id": job_id,
+                        "content_sha256": "e" * 64,
+                        "readback_id": "github-readback",
+                        "verified_at": "2026-09-25T00:00:00+00:00",
+                    }
+                ],
+            }
+        )
+        return {"status": "succeeded", "job_id": job_id}
+
+    execute.side_effect = execute_same_job
+    monkeypatch.setattr("src.work_board.dispatcher.approval_repository", _ApprovalRepository(approval))
+    monkeypatch.setattr(
+        "src.extensions.github_followthrough.GitHubFollowthroughService.execute",
+        execute,
+    )
+    monkeypatch.setattr(
+        "src.extensions.github_followthrough.GitHubFollowthroughService.prepare",
+        prepare,
+    )
+    dispatcher = WorkBoardDispatcher(
+        repository=Repository(),
+        jobs=Jobs(),
+        session_provider=session_provider,
+    )
+    dispatcher._current_external_mutation_grant = AsyncMock(return_value=True)
+    dispatcher._lookup_linked_binding = AsyncMock(return_value=job_id)
+    monkeypatch.setattr("src.work_board.dispatcher._parse_typed_input", lambda _task: {})
+    projected: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    async def project(*args, **kwargs):
+        projected.append((args, kwargs))
+
+    dispatcher._project = project
+
+    recovered = await dispatcher.reconcile_linked_attempts()
+
+    assert recovered == [job_id]
+    execute.assert_awaited_once()
+    prepare.assert_not_awaited()
+    assert projected[-1][0][0] is task
+    assert projected[-1][0][1] is attempt
+    assert projected[-1][1]["status"] is WorkBoardStatus.done
+    assert projected[-1][1]["proof"]["readback_id"] == "github-readback"
+
+
+@pytest.mark.asyncio
+async def test_github_linked_attempt_fails_closed_on_approval_binding_mismatch(monkeypatch):
+    job_id = "ghfollow_mismatched_approval"
+    task = _github_board_task()
+    attempt = _github_board_attempt(job_id)
+    projection = _github_pending_projection(job_id)
+    approval = SimpleNamespace(
+        status="approved",
+        owner_principal_id="operator:other",
+        operator_session_id="session:other",
+        details_json=json.dumps({"durable_job_id": "other-job"}),
+    )
+    execute = AsyncMock(side_effect=AssertionError("mismatched approval must not execute"))
+    monkeypatch.setattr("src.work_board.dispatcher.approval_repository", _ApprovalRepository(approval))
+    monkeypatch.setattr("src.extensions.github_followthrough.GitHubFollowthroughService.execute", execute)
+    dispatcher = WorkBoardDispatcher()
+    dispatcher._current_external_mutation_grant = AsyncMock(return_value=True)
+
+    latest, outcome = await dispatcher._resume_github_followthrough(task, attempt, job_id, projection)
+
+    assert latest is projection
+    assert outcome["status"] == "blocked"
+    assert outcome["reason_code"] == "approval_job_binding_mismatch"
+    execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_github_linked_attempt_resumes_consumed_approval_from_exact_durable_receipt(monkeypatch):
+    job_id = "ghfollow_consumed_approval"
+    task = _github_board_task()
+    attempt = _github_board_attempt(job_id)
+    projection, approval = _github_consumed_projection(job_id)
+    latest = {**projection, "status": "succeeded", "effects": []}
+    jobs = SimpleNamespace(get_job=AsyncMock(return_value=latest))
+    execute = AsyncMock()
+    monkeypatch.setattr("src.work_board.dispatcher.approval_repository", _ApprovalRepository(approval))
+    monkeypatch.setattr("src.extensions.github_followthrough.GitHubFollowthroughService.execute", execute)
+    dispatcher = WorkBoardDispatcher(jobs=jobs)
+    dispatcher._current_external_mutation_grant = AsyncMock(return_value=True)
+
+    result, outcome = await dispatcher._resume_github_followthrough(task, attempt, job_id, projection)
+
+    assert result is latest
+    assert outcome == {"status": "succeeded", "approval_id": "approval-github"}
+    execute.assert_awaited_once_with(
+        owner_principal_id=task.owner_principal_id,
+        owner_session_id=task.owner_session_id,
+        job_id=job_id,
+        external_mutation_granted=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    ["missing_receipt", "wrong_job", "stale_session", "wrong_approval_id"],
+)
+@pytest.mark.asyncio
+async def test_github_linked_attempt_rejects_unbound_consumed_approval(monkeypatch, tamper):
+    job_id = "ghfollow_consumed_stale"
+    task = _github_board_task()
+    attempt = _github_board_attempt(job_id)
+    projection, approval = _github_consumed_projection(job_id)
+    if tamper == "missing_receipt":
+        projection["effects"] = []
+    elif tamper == "wrong_job":
+        json_details = json.loads(approval.details_json)
+        json_details["durable_job_id"] = "other-job"
+        approval.details_json = json.dumps(json_details)
+    elif tamper == "stale_session":
+        json_details = json.loads(approval.details_json)
+        json_details["operator_session_id"] = "session:other"
+        approval.details_json = json.dumps(json_details)
+    else:
+        projection["effects"][0]["approval_id"] = "approval-other"
+    execute = AsyncMock(side_effect=AssertionError("stale consumed approval must not execute"))
+    monkeypatch.setattr("src.work_board.dispatcher.approval_repository", _ApprovalRepository(approval))
+    monkeypatch.setattr("src.extensions.github_followthrough.GitHubFollowthroughService.execute", execute)
+    dispatcher = WorkBoardDispatcher()
+    dispatcher._current_external_mutation_grant = AsyncMock(return_value=True)
+
+    latest, outcome = await dispatcher._resume_github_followthrough(task, attempt, job_id, projection)
+
+    assert latest is projection
+    assert outcome["status"] == "blocked"
+    assert outcome["reason_code"] in {"approval_not_current", "approval_job_binding_mismatch"}
+    execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_github_linked_attempt_blocks_revoked_grant_without_execution(monkeypatch):
+    job_id = "ghfollow_revoked_grant"
+    task = _github_board_task()
+    attempt = _github_board_attempt(job_id)
+    projection = _github_pending_projection(job_id)
+    approval = SimpleNamespace(
+        status="approved",
+        owner_principal_id=task.owner_principal_id,
+        operator_session_id=task.owner_session_id,
+        details_json=json.dumps({"durable_job_id": job_id}),
+    )
+    execute = AsyncMock(side_effect=AssertionError("revoked grant must not execute"))
+    monkeypatch.setattr("src.work_board.dispatcher.approval_repository", _ApprovalRepository(approval))
+    monkeypatch.setattr("src.extensions.github_followthrough.GitHubFollowthroughService.execute", execute)
+    dispatcher = WorkBoardDispatcher()
+    dispatcher._current_external_mutation_grant = AsyncMock(return_value=False)
+
+    latest, outcome = await dispatcher._resume_github_followthrough(task, attempt, job_id, projection)
+
+    assert latest is projection
+    assert outcome == {
+        "status": "blocked",
+        "reason_code": "external_mutation_grant_required",
+        "recovery_action": "retry_after_prerequisite",
+    }
+    execute.assert_not_awaited()
+
+
+@pytest.mark.parametrize("approval_status", ["denied", "expired"])
+@pytest.mark.asyncio
+async def test_github_linked_attempt_blocks_denied_or_expired_approval(monkeypatch, approval_status):
+    job_id = f"ghfollow_{approval_status}"
+    task = _github_board_task()
+    attempt = _github_board_attempt(job_id)
+    projection = _github_pending_projection(job_id)
+    approval = SimpleNamespace(
+        status=approval_status,
+        owner_principal_id=task.owner_principal_id,
+        operator_session_id=task.owner_session_id,
+        details_json=json.dumps({"durable_job_id": job_id}),
+    )
+    execute = AsyncMock(side_effect=AssertionError("invalid approval must not execute"))
+    cancel = AsyncMock()
+    jobs = SimpleNamespace(get_job=AsyncMock(return_value={**projection, "status": "cancelled"}))
+    monkeypatch.setattr("src.work_board.dispatcher.approval_repository", _ApprovalRepository(approval))
+    monkeypatch.setattr("src.extensions.github_followthrough.GitHubFollowthroughService.execute", execute)
+    monkeypatch.setattr("src.extensions.github_followthrough.GitHubFollowthroughService.cancel", cancel)
+    dispatcher = WorkBoardDispatcher(jobs=jobs)
+    dispatcher._current_external_mutation_grant = AsyncMock(return_value=True)
+
+    latest, outcome = await dispatcher._resume_github_followthrough(task, attempt, job_id, projection)
+
+    assert latest["status"] == "cancelled"
+    assert outcome == {
+        "status": "blocked",
+        "reason_code": f"approval_{approval_status}",
+        "recovery_action": "retry_after_prerequisite",
+        "retry_safe_after_terminal_cancel": True,
+    }
+    cancel.assert_awaited_once_with(
+        owner_principal_id=task.owner_principal_id,
+        owner_session_id=task.owner_session_id,
+        job_id=job_id,
+    )
+    execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_github_terminal_approval_with_effect_ledger_stays_in_reconciliation(monkeypatch):
+    job_id = "ghfollow_expired_with_effect"
+    task = _github_board_task()
+    attempt = _github_board_attempt(job_id)
+    projection = {**_github_pending_projection(job_id), "effects": [{"status": "intent"}]}
+    approval = SimpleNamespace(
+        status="expired",
+        owner_principal_id=task.owner_principal_id,
+        operator_session_id=task.owner_session_id,
+        details_json=json.dumps({"durable_job_id": job_id}),
+    )
+    cancel = AsyncMock(side_effect=AssertionError("uncertain effect must never be cancelled for retry"))
+    monkeypatch.setattr("src.work_board.dispatcher.approval_repository", _ApprovalRepository(approval))
+    monkeypatch.setattr("src.extensions.github_followthrough.GitHubFollowthroughService.cancel", cancel)
+    dispatcher = WorkBoardDispatcher()
+
+    latest, outcome = await dispatcher._resume_github_followthrough(task, attempt, job_id, projection)
+
+    assert latest is projection
+    assert outcome["unknown_effect"] is True
+    assert outcome["recovery_action"] == "reconcile_external_effect"
+    cancel.assert_not_awaited()
+
+
+def test_github_approval_block_projection_preserves_raw_recovery_category():
+    from src.work_board.dispatcher import _github_approval_block_projection
+
+    expired = _github_approval_block_projection(
+        {"status": "blocked", "reason_code": "approval_expired", "recovery_action": "retry_after_prerequisite"},
+        job_id="ghfollow_expired",
+    )
+    mismatch = _github_approval_block_projection(
+        {"status": "blocked", "reason_code": "approval_job_binding_mismatch", "recovery_action": "reconcile_admission_binding"},
+        job_id="ghfollow_mismatch",
+    )
+
+    assert expired["block_kind"] == "needs_input"
+    assert expired["result_refs"][0]["status"] == "blocked"
+    assert mismatch["block_kind"] == "reconcile_admission_binding"
+    assert mismatch["result_refs"][0]["recovery_action"] == "reconcile_admission_binding"
+
+
+@pytest.mark.asyncio
+async def test_github_linked_attempt_preserves_unknown_effect_recovery(monkeypatch):
+    job_id = "ghfollow_unknown"
+    task = _github_board_task()
+    attempt = _github_board_attempt(job_id)
+    projection = _github_pending_projection(job_id)
+    approval = SimpleNamespace(
+        status="approved",
+        owner_principal_id=task.owner_principal_id,
+        operator_session_id=task.owner_session_id,
+        details_json=json.dumps({"durable_job_id": job_id}),
+    )
+
+    async def execute_unknown(**_kwargs):
+        projection.update(
+            {
+                "status": "unknown_external_effect",
+                "effects": [{"status": "unknown", "effect_type": "github_publication"}],
+            }
+        )
+        return {"status": "unknown_external_effect", "job_id": job_id}
+
+    execute = AsyncMock(side_effect=execute_unknown)
+    monkeypatch.setattr("src.work_board.dispatcher.approval_repository", _ApprovalRepository(approval))
+    monkeypatch.setattr("src.extensions.github_followthrough.GitHubFollowthroughService.execute", execute)
+    dispatcher = WorkBoardDispatcher(jobs=SimpleNamespace(get_job=AsyncMock(return_value=projection)))
+    dispatcher._current_external_mutation_grant = AsyncMock(return_value=True)
+
+    latest, outcome = await dispatcher._resume_github_followthrough(task, attempt, job_id, projection)
+
+    assert latest["status"] == "unknown_external_effect"
+    assert outcome["status"] == "blocked"
+    assert outcome["unknown_effect"] is True
+    assert outcome["reason_code"] == "unknown_effect"
+    execute.assert_awaited_once()
 
 
 @pytest.mark.asyncio

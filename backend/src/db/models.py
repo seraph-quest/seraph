@@ -539,6 +539,51 @@ class GuardianRoutineVersion(SQLModel, table=True):
     installed_at: Optional[datetime] = Field(default=None, index=True)
 
 
+class WorkBoardRoutineBinding(SQLModel, table=True):
+    """Durable preview/create idempotency binding for board-derived routines.
+
+    This row is the recovery boundary between the operator's non-persistent
+    preview and the existing ``GuardianRoutine`` lifecycle.  It contains
+    opaque source identities and digests only; source text, approvals, grants,
+    and credentials never belong here.
+    """
+
+    __tablename__ = "work_board_routine_bindings"
+    __table_args__ = (
+        Index(
+            "ux_work_board_routine_bindings_idempotency",
+            "owner_principal_id",
+            "owner_session_id",
+            "idempotency_key",
+            unique=True,
+        ),
+        Index(
+            "ux_work_board_routine_bindings_deterministic_routine",
+            "deterministic_routine_id",
+            unique=True,
+        ),
+    )
+
+    binding_id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_principal_id: str = Field(index=True)
+    owner_session_id: str = Field(index=True)
+    idempotency_key: str = Field(index=True)
+    preview_digest: str = Field(default="", index=True)
+    source_task_id: str = Field(index=True)
+    action_task_id: str = Field(index=True)
+    routine_name: str = Field(default="", max_length=80)
+    deterministic_routine_id: str = Field(index=True)
+    routine_id: Optional[str] = Field(default=None, index=True)
+    install_job_id: Optional[str] = Field(default=None, index=True)
+    # ``state`` is a recovery projection for the binding transaction.  The
+    # routine row and durable install job remain the authority for execution.
+    state: str = Field(default="pending", index=True)
+    recovery_reason: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+    revision: int = Field(default=1, index=True)
+
+
 # ─── Operator work board ────────────────────────────────
 
 

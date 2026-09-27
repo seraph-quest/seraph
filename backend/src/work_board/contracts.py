@@ -330,6 +330,25 @@ class WorkBoardLinkDelete(WorkBoardBaseModel):
     expected_child_revision: int = Field(ge=1)
 
 
+class WorkBoardRoutinePublicationPrepareRequest(WorkBoardBaseModel):
+    """Operator supplied publication text for one canonical routine task.
+
+    The route derives the routine, parent run, destination, approval, and
+    current authority from the task and attempt.  Callers may provide only the
+    bounded text that will appear in the exact M3 preview.
+    """
+
+    expected_revision: int = Field(ge=1)
+    title: str | None = Field(default=None, max_length=160)
+    body: str = Field(min_length=1, max_length=32_000)
+
+
+class WorkBoardRoutinePublicationRecoverRequest(WorkBoardBaseModel):
+    """Resume the exact prepared publication after separate approval."""
+
+    expected_revision: int = Field(ge=1)
+
+
 class WorkBoardOwner(BaseModel):
     """Server-derived identity; never accept this from a browser body."""
 
@@ -357,6 +376,8 @@ __all__ = [
     "WorkBoardProposalAccept",
     "WorkBoardProposalReject",
     "WorkBoardProposalRequest",
+    "WorkBoardRoutinePublicationPrepareRequest",
+    "WorkBoardRoutinePublicationRecoverRequest",
     "WorkBoardStatus",
     "WorkBoardTaskCreate",
     "WorkBoardTaskPatch",

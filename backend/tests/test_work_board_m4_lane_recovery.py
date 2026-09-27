@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy import select
 
 from config.settings import settings
-from src.db.models import Goal, WorkBoardAttempt, WorkBoardStatus, WorkBoardTask
+from src.db.models import Goal, WorkBoardAttempt, WorkBoardLink, WorkBoardStatus, WorkBoardTask
 from src.work_board.contracts import (
     WorkBoardOwner,
     WorkBoardTaskCreate,
@@ -23,6 +23,7 @@ from src.work_board.dispatcher import (
 )
 from src.work_board.repository import BoardError, WorkBoardRepository
 from src.work_board import triage as triage_service
+from src.work_board import review as review_service
 
 
 OWNER = WorkBoardOwner(principal_id="operator:test-bypass", session_id="test-auth-bypass")
@@ -187,6 +188,84 @@ async def test_missing_workspace_root_is_a_visible_typed_input_block(async_db, m
 
     assert code == "typed_input_unavailable"
     assert reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("handoff_verified", [True, False])
+async def test_readiness_awaits_each_verified_parent_handoff(async_db, monkeypatch, handoff_verified):
+    async with async_db() as db:
+        goal = await _goal(db)
+        parent = WorkBoardTask(
+            task_id="ready-parent",
+            owner_principal_id=OWNER.principal_id,
+            owner_session_id=OWNER.session_id,
+            origin_session_id=OWNER.session_id,
+            goal_id=goal.id,
+            goal_revision=goal.revision,
+            title="Verified parent",
+            idempotency_key="ready-parent",
+            status=WorkBoardStatus.done,
+        )
+        child = WorkBoardTask(
+            task_id="ready-child",
+            owner_principal_id=OWNER.principal_id,
+            owner_session_id=OWNER.session_id,
+            origin_session_id=OWNER.session_id,
+            goal_id=goal.id,
+            goal_revision=goal.revision,
+            title="Dependent child",
+            idempotency_key="ready-child",
+            status=WorkBoardStatus.todo,
+            capability_id="work.github-followthrough.v1",
+            executor_id=registered_executor_id("work.github-followthrough.v1"),
+            typed_input_ref="workspace-json:inputs/followthrough.json",
+            typed_input_digest="a" * 64,
+        )
+        link = WorkBoardLink(
+            owner_principal_id=OWNER.principal_id,
+            owner_session_id=OWNER.session_id,
+            parent_task_id=parent.task_id,
+            child_task_id=child.task_id,
+            current_handoff_id="verified-handoff",
+        )
+        db.add(parent)
+        await db.flush()
+        db.add(child)
+        await db.flush()
+        db.add(link)
+
+    async def authenticated(*_args, **_kwargs):
+        return type("Operator", (), {"principal": type("Principal", (), {"principal_id": OWNER.principal_id})()})()
+
+    verified = []
+
+    async def handoff_is_verified(_db, _owner, _parent, _child, _link):
+        verified.append(True)
+        return handoff_verified
+
+    monkeypatch.setattr("src.work_board.dispatcher.authenticate_session", authenticated)
+    monkeypatch.setattr(
+        "src.work_board.dispatcher._parse_typed_input",
+        lambda _task: {"dossier_artifact_id": "artifact", "dossier_sha256": "b" * 64, "connection_revision": 1, "action": "create_issue", "body": "fixture"},
+    )
+    monkeypatch.setattr("src.work_board.review.current_handoff_is_verified", handoff_is_verified)
+
+    dispatcher = WorkBoardDispatcher(session_provider=async_db)
+
+    async def capability_preflight(_task, _goal, _inputs):
+        return None, None
+
+    dispatcher._capability_preflight = capability_preflight
+    readiness = await dispatcher._readiness(child)
+    if handoff_verified:
+        assert readiness == (None, None)
+    else:
+        assert readiness == (
+            "handoff_materialization_required",
+            review_service._HANDOFF_RECONCILIATION_REASON,
+        )
+
+    assert verified == [True]
 
 
 @pytest.mark.asyncio

@@ -15,7 +15,7 @@ import json
 import re
 from typing import Any, Mapping
 
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -2410,14 +2410,21 @@ class WorkBoardRepository:
             for _parent_id, _parent_revision, _status, _link_id, handoff_id in parent_rows
         ):
             readiness_error = readiness_error or "handoff_materialization_required"
-            readiness_reason = readiness_reason or (
-                "Every completed parent must have a verified handoff before dispatch"
-            )
+            from src.work_board.review import _HANDOFF_RECONCILIATION_REASON
+
+            readiness_reason = readiness_reason or _HANDOFF_RECONCILIATION_REASON
         if not readiness_error:
-            from src.work_board.review import current_handoff_is_verified
+            from src.work_board.review import (
+                _HANDOFF_RECONCILIATION_REASON,
+                current_handoff_is_verified,
+            )
 
             for parent_id, _parent_revision, _status, link_id, _handoff_id in parent_rows:
-                parent = await db.get(WorkBoardTask, parent_id)
+                # ``creation_sequence`` is WorkBoardTask's SQLAlchemy primary
+                # key; task_id is the public relationship key. Resolve the
+                # parent by the latter rather than passing task_id to
+                # AsyncSession.get(), which would silently return None.
+                parent = await self._find_task(db, parent_id)
                 link = (
                     await db.execute(
                         select(WorkBoardLink).where(
@@ -2434,9 +2441,7 @@ class WorkBoardRepository:
                     or not await current_handoff_is_verified(db, owner, parent, task, link)
                 ):
                     readiness_error = "handoff_materialization_required"
-                    readiness_reason = (
-                        "A completed parent handoff is missing, stale, or no longer independently verified"
-                    )
+                    readiness_reason = _HANDOFF_RECONCILIATION_REASON
                     break
 
         lane_error = _executor_lane_error(task.capability_id, task.executor_id)
@@ -2965,6 +2970,212 @@ class WorkBoardRepository:
         ).scalar_one()
         return refreshed
 
+    async def pause_routine_attempt_for_operator(
+        self,
+        db: AsyncSession,
+        task_id: str,
+        attempt_id: str,
+        *,
+        expected_revision: int,
+        board_fence: int,
+        lease_owner: str | None,
+        workflow_run_id: str,
+        durable_fence: int,
+        reason: str,
+        actor_principal_id: str,
+        actor_session_id: str,
+        now: datetime | None = None,
+    ) -> BoardAttemptProjection:
+        """Project a routine's explicit human wait as Blocked and release its lease.
+
+        The attempt stays open and linked to the same durable routine run. This
+        records a suspended attempt, not a completed retry. A later explicit
+        publication recovery reacquires a fresh board lease and updates the
+        same attempt fence to match the durable run's new lease.
+        """
+
+        safe_reasons = {
+            "awaiting_approval",
+            "awaiting_publication_preview",
+            "awaiting_publication_approval",
+            "external_mutation_grant_required",
+        }
+        if reason not in safe_reasons:
+            raise BoardError("routine_wait_reason_invalid", "The routine wait reason is not an operator recovery state")
+        observed_at = now or _now()
+        await _begin_sqlite_immediate(db)
+        task = await self._find_task(db, task_id)
+        if task is None:
+            raise BoardNotFound(task_id)
+        if task.capability_id != "guardian-routine.v1":
+            raise BoardError("routine_wait_not_supported", "Only governed routine attempts can pause for publication review")
+        if task.task_revision != int(expected_revision):
+            raise BoardRevisionConflict(task.task_id, int(expected_revision), task.task_revision)
+        if task.status not in {WorkBoardStatus.running, WorkBoardStatus.blocked}:
+            raise BoardError("task_not_recoverable", "Only the current routine attempt can enter an operator wait")
+        attempt = (
+            await db.execute(
+                select(WorkBoardAttempt).where(
+                    WorkBoardAttempt.task_id == task_id,
+                    WorkBoardAttempt.attempt_id == attempt_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if attempt is None or attempt.workflow_run_id != workflow_run_id:
+            raise BoardError("attempt_workflow_conflict", "The routine attempt does not link to this durable run")
+        if attempt.ended_at is not None or attempt.fencing_token != int(board_fence):
+            raise BoardError("stale_fence", "The routine attempt fence is stale")
+        if int(durable_fence) < int(attempt.fencing_token):
+            raise BoardError("stale_fence", "The durable routine fence moved backwards")
+        if task.status is WorkBoardStatus.running and attempt.lease_owner != lease_owner:
+            raise BoardError("stale_fence", "The running routine attempt lease owner is stale")
+        if task.status is WorkBoardStatus.blocked and (
+            attempt.lease_owner is not None or attempt.lease_expires_at is not None
+        ):
+            raise BoardError("stale_fence", "A blocked routine attempt cannot retain an execution lease")
+
+        changed = (
+            task.status is not WorkBoardStatus.blocked
+            or task.block_reason != reason
+            or int(attempt.fencing_token) != int(durable_fence)
+            or attempt.lease_owner is not None
+            or attempt.lease_expires_at is not None
+        )
+        if not changed:
+            return BoardAttemptProjection(task, attempt, None)
+
+        attempt.fencing_token = int(durable_fence)
+        attempt.lease_owner = None
+        attempt.lease_expires_at = None
+        attempt.outcome = reason
+        attempt.updated_at = observed_at
+        await self._cas_task_update(
+            db,
+            WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id),
+            task,
+            expected_revision=int(expected_revision),
+            values={
+                "status": WorkBoardStatus.blocked,
+                "block_kind": "needs_input",
+                "block_reason": reason,
+                "block_source_status": WorkBoardStatus.running.value,
+                "task_revision": int(expected_revision) + 1,
+                "updated_at": observed_at,
+            },
+        )
+        await db.flush()
+        event = await self._event(
+            db,
+            task,
+            WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id),
+            kind="task.blocked_for_operator",
+            metadata={
+                "attempt_id": attempt.attempt_id,
+                "workflow_run_id": workflow_run_id,
+                "status": WorkBoardStatus.blocked.value,
+                "block_kind": "needs_input",
+                "block_reason": reason,
+                "fencing_token": int(durable_fence),
+                "task_revision": task.task_revision,
+            },
+            actor_principal_id=actor_principal_id,
+            actor_session_id=actor_session_id,
+        )
+        return BoardAttemptProjection(task, attempt, event)
+
+    async def resume_routine_attempt_for_operator_recovery(
+        self,
+        db: AsyncSession,
+        task_id: str,
+        attempt_id: str,
+        *,
+        expected_revision: int,
+        previous_fence: int,
+        next_fence: int,
+        lease_owner: str,
+        lease_seconds: int = 300,
+        workflow_run_id: str,
+        actor_principal_id: str,
+        actor_session_id: str,
+        now: datetime | None = None,
+    ) -> BoardAttemptProjection:
+        """Reacquire the same suspended routine attempt after approval."""
+
+        observed_at = now or _now()
+        if int(next_fence) != int(previous_fence) + 1:
+            raise BoardError("stale_fence", "Routine recovery must advance exactly one fence")
+        await _begin_sqlite_immediate(db)
+        task = await self._find_task(db, task_id)
+        if task is None:
+            raise BoardNotFound(task_id)
+        if task.capability_id != "guardian-routine.v1":
+            raise BoardError("routine_wait_not_supported", "Only a governed routine can resume through publication recovery")
+        if task.status is not WorkBoardStatus.blocked or task.task_revision != int(expected_revision):
+            raise BoardError("stale_revision", "The blocked routine card changed before recovery")
+        if task.block_reason not in {
+            "awaiting_approval",
+            "awaiting_publication_preview",
+            "awaiting_publication_approval",
+            "external_mutation_grant_required",
+        }:
+            raise BoardError("task_not_recoverable", "The routine card is not waiting for publication review")
+        attempt = (
+            await db.execute(
+                select(WorkBoardAttempt).where(
+                    WorkBoardAttempt.task_id == task_id,
+                    WorkBoardAttempt.attempt_id == attempt_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if (
+            attempt is None
+            or attempt.workflow_run_id != workflow_run_id
+            or attempt.ended_at is not None
+            or int(attempt.fencing_token) != int(previous_fence)
+            or attempt.lease_owner is not None
+            or attempt.lease_expires_at is not None
+        ):
+            raise BoardError("stale_fence", "The suspended routine attempt no longer owns this recovery")
+
+        attempt.fencing_token = int(next_fence)
+        attempt.lease_owner = str(lease_owner)[:256]
+        attempt.lease_expires_at = observed_at + timedelta(seconds=max(1, min(int(lease_seconds), 900)))
+        attempt.heartbeat_at = observed_at
+        attempt.outcome = "operator_recovery_running"
+        attempt.updated_at = observed_at
+        owner = WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id)
+        await self._cas_task_update(
+            db,
+            owner,
+            task,
+            expected_revision=int(expected_revision),
+            values={
+                "status": WorkBoardStatus.running,
+                "block_kind": None,
+                "block_reason": None,
+                "block_source_status": None,
+                "task_revision": int(expected_revision) + 1,
+                "updated_at": observed_at,
+            },
+        )
+        await db.flush()
+        event = await self._event(
+            db,
+            task,
+            owner,
+            kind="task.operator_recovery_started",
+            metadata={
+                "attempt_id": attempt.attempt_id,
+                "workflow_run_id": workflow_run_id,
+                "status": WorkBoardStatus.running.value,
+                "fencing_token": int(next_fence),
+                "task_revision": task.task_revision,
+            },
+            actor_principal_id=actor_principal_id,
+            actor_session_id=actor_session_id,
+        )
+        return BoardAttemptProjection(task, attempt, event)
+
     async def project_attempt(
         self,
         db: AsyncSession,
@@ -3302,7 +3513,20 @@ class WorkBoardRepository:
             select(WorkBoardTask, WorkBoardAttempt)
             .join(WorkBoardAttempt, WorkBoardAttempt.task_id == WorkBoardTask.task_id)
             .where(
-                WorkBoardTask.status == WorkBoardStatus.running,
+                or_(
+                    WorkBoardTask.status == WorkBoardStatus.running,
+                    (
+                        WorkBoardTask.status == WorkBoardStatus.blocked
+                    )
+                    & (WorkBoardTask.capability_id == "guardian-routine.v1")
+                    & WorkBoardTask.block_reason.in_(
+                        (
+                            "awaiting_approval",
+                            "awaiting_publication_preview",
+                            "awaiting_publication_approval",
+                        )
+                    ),
+                ),
                 WorkBoardAttempt.workflow_run_id.is_not(None),
                 WorkBoardAttempt.ended_at.is_(None),
             )

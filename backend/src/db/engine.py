@@ -61,6 +61,7 @@ OPERATOR_REQUIRED_TABLES = (
     "github_followthrough_connections",
     "guardian_routines",
     "guardian_routine_versions",
+    "work_board_routine_bindings",
     "memory_tombstones",
     "audio_ingress_jobs",
     "audio_consent_grants",
@@ -1201,6 +1202,48 @@ async def _ensure_work_board_columns(conn) -> None:
         )
 
 
+async def _ensure_work_board_routine_binding(conn) -> None:
+    """Keep the M6 preview/create binding additive on existing workspaces."""
+
+    result = await conn.exec_driver_sql(
+        "PRAGMA table_info(work_board_routine_bindings)"
+    )
+    existing = {row[1] for row in result.fetchall()}
+    additions = {
+        "routine_id": "VARCHAR",
+        "install_job_id": "VARCHAR",
+        "state": "VARCHAR DEFAULT 'pending'",
+        "recovery_reason": "VARCHAR",
+        "revision": "INTEGER DEFAULT 1",
+        "updated_at": "DATETIME",
+    }
+    for column, sql_type in additions.items():
+        if existing and column not in existing:
+            await conn.exec_driver_sql(
+                f"ALTER TABLE work_board_routine_bindings ADD COLUMN {column} {sql_type}"
+            )
+    if existing:
+        await conn.exec_driver_sql(
+            "UPDATE work_board_routine_bindings SET state = 'pending' "
+            "WHERE state IS NULL OR state = ''"
+        )
+        await conn.exec_driver_sql(
+            "UPDATE work_board_routine_bindings SET revision = 1 "
+            "WHERE revision IS NULL OR revision < 1"
+        )
+        await conn.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS "
+            "ux_work_board_routine_bindings_idempotency "
+            "ON work_board_routine_bindings "
+            "(owner_principal_id, owner_session_id, idempotency_key)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS "
+            "ux_work_board_routine_bindings_deterministic_routine "
+            "ON work_board_routine_bindings (deterministic_routine_id)"
+        )
+
+
 async def init_db() -> None:
     """Create all tables on startup."""
     # Keep SQLite bound to the same canonical workspace registry used by
@@ -1221,6 +1264,9 @@ async def init_db() -> None:
         await _ensure_legacy_columns(conn)
         await _ensure_telegram_transport_columns(conn)
         await _ensure_work_board_columns(conn)
+        # Existing routine-binding tables need their additive columns before
+        # metadata creates the conditional indexes declared by SQLModel.
+        await _ensure_work_board_routine_binding(conn)
         await conn.run_sync(SQLModel.metadata.create_all)
         await _ensure_m5_columns(conn)
         await _ensure_work_board_indexes(conn)

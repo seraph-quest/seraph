@@ -31,8 +31,10 @@ from src.guardian.goal_snapshot_to_file import GoalSnapshotToFileService
 from src.goals.contracts import GoalOutcomeReceipt
 from src.work_board import review as review_service
 from src.work_board.contracts import WorkBoardOwner
-from src.work_board.repository import WorkBoardRepository
+from src.work_board.repository import BoardError, WorkBoardRepository
 from src.work_board.tools import WorkBoardWorkerRequest, WorkBoardWorkerTools
+from src.security.trust_contract import AuthorityGrant
+import src.workflows.routines as routines_module
 
 
 class _VerticalJobs:
@@ -176,6 +178,41 @@ def test_typed_input_is_workspace_bound_and_exact(monkeypatch, tmp_path):
     with pytest.raises(TypedInputError) as exc_info:
         _parse_typed_input(_task(extra_reference, extra_digest))
     assert exc_info.value.code == "typed_input_invalid"
+
+
+def test_routine_typed_input_requires_canonical_task_goal_binding(monkeypatch, tmp_path):
+    reference, digest = _write_input(
+        tmp_path,
+        {
+            "schema_version": 1,
+            "capability_id": "guardian-routine.v1",
+            "input": {
+                "routine_id": "routine-identity",
+                "version": 1,
+                "expected_routine_revision": 2,
+                "goal_id": "goal-identity",
+                "expected_goal_revision": 4,
+                "source_watch_id": "watch-identity",
+                "expected_watch_revision": 7,
+            },
+        },
+    )
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    task = SimpleNamespace(
+        typed_input_ref=reference,
+        typed_input_digest=digest,
+        capability_id="guardian-routine.v1",
+        goal_id="goal-identity",
+        goal_revision=4,
+    )
+    parsed = _parse_typed_input(task)
+    assert parsed["goal_id"] == "goal-identity"
+    assert parsed["expected_goal_revision"] == 4
+
+    task.goal_id = "goal-other"
+    with pytest.raises(TypedInputError) as exc_info:
+        _parse_typed_input(task)
+    assert exc_info.value.code == "typed_input_goal_binding_mismatch"
 
 
 def test_typed_input_rejects_traversal_and_symlink(monkeypatch, tmp_path):
@@ -839,3 +876,161 @@ async def test_goal_snapshot_dynamic_review_survives_stale_done_projection(async
         ).scalar_one()
         assert intent.workflow_run_id == attempt.workflow_run_id
         assert intent.status == "projected"
+
+
+def _github_adapter_inputs() -> dict[str, object]:
+    return {
+        "dossier_artifact_id": "dossier-1",
+        "dossier_sha256": "a" * 64,
+        "connection_revision": 2,
+        "action": "create_issue",
+        "title": "Create governed issue",
+        "body": "bounded body",
+        "issue_number": None,
+    }
+
+
+def _github_adapter_task_and_attempt() -> tuple[WorkBoardTask, WorkBoardAttempt]:
+    task = WorkBoardTask(
+        task_id="github-adapter-task",
+        owner_principal_id="operator:github",
+        owner_session_id="session:github",
+        goal_id="goal:github",
+        goal_revision=3,
+        capability_id="work.github-followthrough.v1",
+        executor_id=registered_executor_id("work.github-followthrough.v1"),
+    )
+    attempt = WorkBoardAttempt(
+        task_id=task.task_id,
+        attempt_id="github-adapter-attempt",
+    )
+    return task, attempt
+
+
+@pytest.mark.asyncio
+async def test_github_board_adapter_reauthenticates_and_passes_live_grant(monkeypatch):
+    task, attempt = _github_adapter_task_and_attempt()
+    captured: dict[str, object] = {}
+
+    async def live_session(session_id: str, *, touch: bool = False):
+        assert session_id == task.owner_session_id
+        assert touch is False
+        return SimpleNamespace(
+            session_id=session_id,
+            principal=SimpleNamespace(
+                principal_id=task.owner_principal_id,
+                grants=(AuthorityGrant.EXTERNAL_MUTATION,),
+            ),
+        )
+
+    class FakeGitHubFollowthroughService:
+        async def prepare(self, **kwargs):
+            captured.update(kwargs)
+            return {"status": "awaiting_approval", "job_id": "github-board-job"}
+
+    monkeypatch.setattr("src.work_board.dispatcher.authenticate_session", live_session)
+    monkeypatch.setattr(
+        "src.extensions.github_followthrough.GitHubFollowthroughService",
+        FakeGitHubFollowthroughService,
+    )
+
+    result = await WorkBoardDispatcher()._execute_direct_adapter(
+        task,
+        attempt,
+        _github_adapter_inputs(),
+        runtime_seconds=300,
+        admission_only=False,
+    )
+
+    assert result["status"] == "awaiting_approval"
+    assert captured["external_mutation_granted"] is True
+
+
+@pytest.mark.asyncio
+async def test_github_board_adapter_blocks_without_live_grant_and_never_prepares(monkeypatch):
+    task, attempt = _github_adapter_task_and_attempt()
+    prepare_calls = 0
+
+    async def revoked_session(session_id: str, *, touch: bool = False):
+        return SimpleNamespace(
+            session_id=session_id,
+            principal=SimpleNamespace(
+                principal_id=task.owner_principal_id,
+                grants=(),
+            ),
+        )
+
+    class FakeGitHubFollowthroughService:
+        async def prepare(self, **_kwargs):
+            nonlocal prepare_calls
+            prepare_calls += 1
+            return {"status": "awaiting_approval", "job_id": "should-not-exist"}
+
+    monkeypatch.setattr("src.work_board.dispatcher.authenticate_session", revoked_session)
+    monkeypatch.setattr(
+        "src.extensions.github_followthrough.GitHubFollowthroughService",
+        FakeGitHubFollowthroughService,
+    )
+
+    result = await WorkBoardDispatcher()._execute_direct_adapter(
+        task,
+        attempt,
+        _github_adapter_inputs(),
+        runtime_seconds=300,
+        admission_only=False,
+    )
+
+    assert result == {
+        "status": "blocked",
+        "reason_code": "external_mutation_grant_required",
+        "recovery_action": "retry_after_prerequisite",
+        "admission_only": False,
+    }
+    assert prepare_calls == 0
+
+    with pytest.raises(BoardError, match="external mutation grant") as error:
+        await WorkBoardDispatcher()._execute_direct_adapter(
+            task,
+            attempt,
+            _github_adapter_inputs(),
+            runtime_seconds=300,
+            admission_only=True,
+        )
+    assert error.value.code == "external_mutation_grant_required"
+
+
+@pytest.mark.asyncio
+async def test_routine_board_adapter_passes_effective_goal_runtime_to_durable_admission(monkeypatch):
+    captured = {}
+
+    async def invoke(*_args, **kwargs):
+        captured.update(kwargs)
+        return {"status": "awaiting_approval", "job_id": "routine-invocation:bounded"}
+
+    monkeypatch.setattr(routines_module.routine_service, "invoke", invoke)
+    task = SimpleNamespace(
+        task_id="task-runtime",
+        owner_principal_id="operator:runtime",
+        owner_session_id="session:runtime",
+        goal_id="goal-runtime",
+        goal_revision=6,
+        capability_id="guardian-routine.v1",
+    )
+    attempt = SimpleNamespace(attempt_id="attempt-runtime")
+    result = await WorkBoardDispatcher()._execute_direct_adapter(
+        task,
+        attempt,
+        {
+            "routine_id": "0123456789abcdef0123456789abcdef",
+            "version": 1,
+            "expected_routine_revision": 2,
+            "source_watch_id": "watch-runtime",
+            "expected_watch_revision": 3,
+        },
+        runtime_seconds=300,
+        admission_only=True,
+    )
+
+    assert result["admission_only"] is True
+    assert captured["runtime_seconds"] == 300
+    assert captured["work_board_idempotency_key"].startswith("task-runtime:")

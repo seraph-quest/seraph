@@ -129,7 +129,9 @@ export type WorkBoardRecoveryAction =
   | "configure_goal_success_criterion"
   | "reconcile_admission_binding"
   | "reconcile_external_effect"
-  | "renew_review";
+  | "renew_review"
+  | "prepare_routine_publication"
+  | "resume_routine_publication";
 
 export type WorkBoardReadbackStatus =
   | "not_started"
@@ -411,6 +413,238 @@ export interface WorkBoardLinkCreateRequest {
 }
 
 export interface WorkBoardLinkDeleteRequest extends WorkBoardLinkCreateRequest {}
+
+/** Safe preview returned before a verified board journey can become a routine. */
+export interface WorkBoardRoutinePreviewRequest {
+  source_task_id: string;
+  action_task_id: string;
+  expected_source_revision: number;
+  expected_action_revision: number;
+  name: string;
+  idempotency_key: string;
+}
+
+export interface WorkBoardRoutinePreview {
+  preview_digest: string;
+  source_refs: Record<string, string | number | boolean | null>;
+  version_plan: {
+    version: number;
+    steps: string[];
+    workflow: string;
+  };
+  typed_parameters: Record<string, string | number | boolean | null>;
+  permissions: {
+    capability_id: string;
+    external_mutation: string;
+    package_review: string;
+    shell_or_arbitrary_connector: boolean;
+  };
+  limits: {
+    runtime_seconds: number;
+    attempts: number;
+    remote_inference: boolean;
+  };
+  verifier: {
+    source: string;
+    required: boolean;
+    unknown_effect: string;
+  };
+  expires_at: string;
+  safe_summary: string;
+}
+
+export interface WorkBoardRoutineBinding {
+  routine_id: string;
+  state: string;
+  status: string;
+  revision: number;
+  version: number;
+  install_job_id: string;
+  preview_digest: string;
+  binding_id: string;
+  /** Present when the server can expose the exact approval receipt safely. */
+  approval_id?: string | null;
+}
+
+export interface WorkBoardRoutineVersion {
+  id: string;
+  routine_id: string;
+  version: number;
+  workflow_sha256: string;
+  runbook_sha256: string;
+  installed_package_digest: string | null;
+  source_provenance: Record<string, string | number | boolean | null | string[]>;
+  source_repository: string | null;
+  source_action: string | null;
+  source_issue_number: number | null;
+  created_at: string;
+  installed_at: string | null;
+}
+
+export interface WorkBoardRoutineRead {
+  id: string;
+  owner_principal_id: string;
+  state: string;
+  revision: number;
+  current_version: number | null;
+  name: string;
+  versions: WorkBoardRoutineVersion[];
+  package: {
+    status: string;
+    digest?: string | null;
+    review_id?: string | null;
+    reason?: string | null;
+  };
+}
+
+/** Redacted server-generated capability-pack proposal for one routine version. */
+export interface WorkBoardRoutinePackagePreview {
+  routine_id: string;
+  version: number;
+  pack_id: string;
+  digest: string;
+  installed_package_digest: string | null;
+  review_id: string | null;
+  status: string;
+  manifest: {
+    display_name: string;
+    summary: string;
+    version: string;
+    authority: {
+      tools: string[];
+      filesystem: string[];
+      network: boolean;
+      secrets: string[];
+      approval: string;
+    };
+    resources: {
+      max_runtime_seconds: number;
+      max_artifact_bytes: number;
+      max_inference_cost_microusd: number;
+      inference_priority: string;
+    };
+    data_policy: { classes: string[]; egress: string[] };
+  };
+  runbook: {
+    title: string;
+    summary: string;
+    procedure: {
+      capability_id: string;
+      steps: Array<{ id: string; capability: string; tool: string }>;
+    };
+    bindings: {
+      workflow_sha256: string;
+      legacy_runbook_sha256: string;
+      source_provenance_sha256: string;
+    };
+  };
+}
+
+/** Redacted JSON snapshot for one installed, digest-verified procedure version. */
+export interface WorkBoardRoutineProcedureExport {
+  schema_version: 1;
+  kind: "seraph.reviewed_procedure.v1";
+  pack_id: string;
+  version: number;
+  package_digest: string;
+  manifest: Record<string, unknown>;
+  runbook: Record<string, unknown>;
+}
+
+export interface WorkBoardRoutinePackageApproval {
+  approval_id: string;
+  status: "pending" | "approved" | "denied" | "expired" | "consumed";
+  action: string;
+  pack_id: string;
+  version: string;
+  digest: string;
+  goal_id: string;
+  expires_at?: string | null;
+}
+
+/** Owner/session-scoped source-watch fields safe for routine invocation selection. */
+export interface WorkBoardSourceWatch {
+  id: string;
+  goal_id: string;
+  goal_revision: number;
+  plan_revision: number;
+  state: string;
+  last_status: string | null;
+}
+
+export interface WorkBoardRoutineInvokeRequest {
+  version: number;
+  expected_routine_revision: number;
+  goal_id: string;
+  expected_goal_revision: number;
+  source_watch_id: string;
+  expected_watch_revision: number;
+  invocation_uuid: string;
+}
+
+export interface WorkBoardRoutineInvokeReceipt {
+  status: string;
+  task_id: string;
+  task_revision?: number;
+  deduped?: boolean;
+  preview?: {
+    routine_id?: string;
+    routine_revision?: number;
+    version?: number;
+    goal_id?: string;
+    goal_revision?: number;
+    source_watch_id?: string;
+    source_watch_revision?: number;
+    steps?: string[];
+  };
+}
+
+export interface WorkBoardRoutinePublicationPrepareRequest {
+  expected_revision: number;
+  title?: string | null;
+  body: string;
+}
+
+export interface WorkBoardRoutinePublicationState {
+  task_id: string;
+  task_revision: number;
+  attempt_id: string;
+  parent_workflow_run_id: string | null;
+  routine_id: string;
+  routine_version: number;
+  routine_revision: number;
+  source_watch_id: string;
+  source_watch_revision: number;
+  parent_status: string | null;
+  m3_job_id: string | null;
+  m3_status: string | null;
+  approval_id: string | null;
+  approval_status: string | null;
+  preview: {
+    repository?: string;
+    action?: string;
+    issue_number?: number | null;
+    title?: string | null;
+    body?: string | null;
+    body_sha256?: string;
+    marker?: string;
+    dossier_artifact_id?: string;
+    dossier_sha256?: string;
+    source_watch_id?: string;
+    connection_revision?: number;
+  } | null;
+  status: string | null;
+  recovery_action: "prepare_routine_publication" | "resume_routine_publication";
+}
+
+export interface WorkBoardRoutinePublicationResponse {
+  task: WorkBoardTask;
+  publication: WorkBoardRoutinePublicationState;
+  approval_required?: boolean;
+  operator_action?: string;
+  recovery?: Record<string, unknown>;
+  readback_required?: boolean;
+}
 
 /** The smaller goal shape returned by the loop inspection endpoint. */
 export interface GoalLoopGoal {

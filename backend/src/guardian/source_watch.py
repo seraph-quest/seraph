@@ -381,6 +381,45 @@ def _sha(value: str | bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def _source_watch_approval_scope(
+    watch: GuardianSourceWatch,
+    packet: GuardianDecisionPacket,
+    job_id: str,
+) -> dict[str, Any]:
+    """Describe the exact local writes covered by a source-watch approval.
+
+    Keep approval authority inspectable in the cockpit without copying source
+    text or proposed task content into the approval summary. Digests bind the
+    reviewed packet, while the source watch, packet, goal, and job identifiers
+    keep a decision scoped to one bounded local outcome.
+    """
+
+    return {
+        "action": "write_source_watch_dossier_and_task",
+        "target": {
+            "source_watch_id": _text(watch.id),
+            "packet_id": _text(packet.id),
+            "goal_id": _text(watch.goal_id),
+            "goal_revision": int(watch.goal_revision or 0),
+            "job_id": _text(job_id),
+            "packet_digest": _sha(_text(packet.proposal_text) + _text(packet.task_text)),
+        },
+        "effects": ["write_dossier_artifact", "create_goal_task"],
+    }
+
+
+def _readback_receipt_identity(job_id: str, target_path: str, digest: str) -> tuple[str, str]:
+    """Bind a safe readback ID and verifier timestamp to exact output bytes.
+
+    Board completion requires an explicit durable readback receipt. The
+    receipt ID contains no source path or content; its digest binds the run,
+    target, and observed content without exposing them in task summaries.
+    """
+
+    binding = "\0".join((_text(job_id), _text(target_path), _text(digest).lower()))
+    return f"guardian_readback:{_sha(binding)}", _now().isoformat()
+
+
 def _text(value: Any) -> str:
     return str(value or "").strip()
 
@@ -1841,6 +1880,38 @@ class SourceWatchService:
             if work_board_task_id
             else f"{watch.id}:{watch.plan_revision}:{occurrence_id}"
         )
+        deadline_at = _now() + timedelta(seconds=max_runtime)
+        if work_board_task_id:
+            # The board deliberately enters the existing adapter twice: the
+            # first call durably admits the workflow root before linking it to
+            # the attempt, and the second starts capability execution. Keep
+            # the first deadline on that exact attempt so the repository sees
+            # an identical immutable admission contract. Recomputing
+            # ``now + max_runtime`` here would turn a safe same-attempt resume
+            # into an idempotency conflict (or, if deadlines were ignored,
+            # risk extending the original runtime bound).
+            existing = await durable_job_repository.get_job(job_id)
+            idempotency = (
+                existing.get("idempotency")
+                if isinstance(existing, Mapping)
+                else None
+            )
+            if (
+                isinstance(idempotency, Mapping)
+                and _text(idempotency.get("scope")) == idempotency_scope
+                and _text(idempotency.get("key")) == idempotency_key
+            ):
+                raw_deadline = _text(existing.get("deadline_at"))
+                try:
+                    deadline_at = datetime.fromisoformat(
+                        raw_deadline.replace("Z", "+00:00")
+                    )
+                except ValueError as exc:
+                    raise SourceWatchError("durable_job_deadline_malformed") from exc
+                if deadline_at.tzinfo is None:
+                    deadline_at = deadline_at.replace(tzinfo=timezone.utc)
+                else:
+                    deadline_at = deadline_at.astimezone(timezone.utc)
         identity = DurableJobIdentity(
             job_id=job_id,
             owner_kind="service",
@@ -1860,7 +1931,7 @@ class SourceWatchService:
                 goal_revision=watch.goal_revision,
                 plan_revision=watch.plan_revision,
                 declared_authority=authority,
-            deadline_at=_now() + timedelta(seconds=max_runtime),
+                deadline_at=deadline_at,
             max_attempts=max_attempts,
             max_outstanding_jobs=int(getattr(budget, "max_outstanding_jobs", 1)),
             priority=priority,
@@ -2714,6 +2785,11 @@ class SourceWatchService:
     ) -> str:
         authority_digest = str(current.get("authority_digest") or "")
         budget_digest = str(current.get("budget_digest") or "")
+        approval_scope = _source_watch_approval_scope(
+            watch,
+            packet,
+            _text(current.get("job_id")),
+        )
         fingerprint = fingerprint_tool_call(
             "guardian:source-watch-write",
             {
@@ -2722,8 +2798,11 @@ class SourceWatchService:
                 "dossier_sha256": _sha(packet.proposal_text),
                 "task_sha256": _sha(packet.task_text),
             },
+            approval_context=approval_scope,
         )
         details = {
+            "approval_scope": approval_scope,
+            "approval_context": approval_scope,
             "approval_operator_principal_id": watch.owner_principal_id,
             "approval_owner_principal_id": watch.owner_principal_id,
             "approval_owner_operator_session_id": watch.owner_session_id,
@@ -3187,8 +3266,15 @@ class SourceWatchService:
                 and _text(item.get("target_path")) == path
                 and _text(item.get("content_sha256")) == str(record["content_sha256"])
                 and _text(item.get("status")) == "succeeded"
+                and _text(item.get("readback_id"))
+                and _text(item.get("verified_at"))
                 for item in effects
             ):
+                readback_id, verified_at = _readback_receipt_identity(
+                    job_id,
+                    path,
+                    str(record["content_sha256"]),
+                )
                 readback = await durable_job_repository.record_readback(
                     job_id,
                     target_path=path,
@@ -3196,6 +3282,8 @@ class SourceWatchService:
                     effect_type="workspace_write",
                     target_digest=str(record["content_sha256"]),
                     content_sha256=str(record["content_sha256"]),
+                    readback_id=readback_id,
+                    verified_at=verified_at,
                     status="succeeded",
                     details={"verified": True, "output_exists": True, "workspace_contained": True},
                     owner=owner,
@@ -3802,9 +3890,17 @@ class SourceWatchService:
         expires_at = lease.get("expires_at")
         if expires_at:
             try:
-                if datetime.fromisoformat(str(expires_at).replace("Z", "+00:00")) <= _now():
+                expiry = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+                # SQLite may deserialize a UTC lease without an offset.  The
+                # runtime clock is aware, so normalize both forms before the
+                # comparison and fail closed for malformed values below.
+                if expiry.tzinfo is None:
+                    expiry = expiry.replace(tzinfo=timezone.utc)
+                else:
+                    expiry = expiry.astimezone(timezone.utc)
+                if expiry <= _now():
                     raise SourceWatchError("durable_job_fence_expired")
-            except ValueError as exc:
+            except (TypeError, ValueError, OverflowError) as exc:
                 raise SourceWatchError("durable_job_fence_invalid") from exc
         return dict(current)
 
@@ -4030,6 +4126,11 @@ class SourceWatchService:
             )
             revision = int(effect.get("revision") or revision)
             effect_id = (effect.get("receipt") or {}).get("effect_id")
+            readback_id, verified_at = _readback_receipt_identity(
+                job_id,
+                path,
+                str(record["content_sha256"]),
+            )
             readback = await durable_job_repository.record_readback(
                 job_id,
                 target_path=path,
@@ -4037,6 +4138,8 @@ class SourceWatchService:
                 effect_type="workspace_write",
                 target_digest=str(record["content_sha256"]),
                 content_sha256=str(record["content_sha256"]),
+                readback_id=readback_id,
+                verified_at=verified_at,
                 status="succeeded",
                 details={"verified": True, "output_exists": True, "workspace_contained": True},
                 owner=owner,
@@ -4066,19 +4169,13 @@ class SourceWatchService:
             task_record=task_record,
             scan=scan,
         )
-        notification = await self._enqueue_completion_notification(
-            watch,
-            packet,
-            dossier_sha256=str(dossier_record["content_sha256"]),
-            task_sha256=str(task_record["content_sha256"]),
-            status="degraded" if scan is not None and scan.degraded else "succeeded",
-        )
-        notification_id = _text(getattr(notification, "id", None)) or None
-        await self._record_packet_notification(
-            packet.id,
-            notification_id,
-            status="queued" if notification_id else "budget_denied",
-        )
+        # Notification delivery is an optional receipt after the capability's
+        # output has been finalized and independently read back. Use its
+        # idempotent repair path so a transient local outbox failure cannot
+        # turn verified workspace effects into a failed workflow run. If the
+        # queue commit succeeded but recording the packet link did not, the
+        # same key is safe to resolve again after restart.
+        notification_id = await self._repair_packet_notification(watch, packet)
         current = await self._assert_execution_fence(
             job_id,
             owner=owner,
@@ -4104,7 +4201,22 @@ class SourceWatchService:
             },
             result_summary="verified source-watch dossier and local task readback",
         )
-        return {"notification_id": notification_id}
+        # Return only the canonical artifact identities and verified digests
+        # to the calling capability adapter. The work-board dispatcher uses
+        # these references to project the actual output records onto the task
+        # after it independently validates this workflow run's readback. Do
+        # not return dossier or task text here.
+        artifact_refs = [
+            {
+                "artifact_id": str(record["artifact_id"]),
+                "file_path": str(record["file_path"]),
+                "content_sha256": str(record["content_sha256"]),
+                "artifact_type": str(record["artifact_type"]),
+                "verified": True,
+            }
+            for record in (dossier_record, task_record)
+        ]
+        return {"notification_id": notification_id, "artifact_refs": artifact_refs}
 
     async def _settle_observation_job(
         self,
@@ -4134,12 +4246,19 @@ class SourceWatchService:
         )
         revision = int(effect.get("revision") or revision)
         effect_id = (effect.get("receipt") or {}).get("effect_id")
+        readback_id, verified_at = _readback_receipt_identity(
+            job_id,
+            f"source-watch:{job_id}",
+            _sha(reason),
+        )
         readback = await durable_job_repository.record_readback(
             job_id,
             target_path=f"source-watch:{job_id}",
             effect_id=effect_id,
             effect_type="source_observation",
             target_digest=_sha(reason),
+            readback_id=readback_id,
+            verified_at=verified_at,
             status="succeeded",
             details={"verified": True, "output_exists": True, "workspace_contained": True},
             owner=owner,
@@ -4424,14 +4543,7 @@ class SourceWatchService:
                 task_sha256=_text(packet.task_sha256) or _sha(packet.task_text),
                 status="degraded" if packet.status == "degraded" else "succeeded",
             )
-            notification_id = _text(getattr(notification, "id", None)) or None
-            await self._record_packet_notification(
-                packet.id,
-                notification_id,
-                status="queued" if notification_id else "budget_denied",
-            )
-            return notification_id
-        except SourceWatchError:
+        except Exception:
             # Recovery of the verified artifact must remain possible even if
             # the optional native delivery transport is unavailable.  Persist
             # the absence explicitly so the operator can distinguish it from
@@ -4441,6 +4553,18 @@ class SourceWatchService:
             except Exception:
                 pass
             return None
+        notification_id = _text(getattr(notification, "id", None)) or None
+        try:
+            await self._record_packet_notification(
+                packet.id,
+                notification_id,
+                status="queued" if notification_id else "budget_denied",
+            )
+        except Exception:
+            # The outbox is independently idempotent. A later reconciliation
+            # can read the same row and finish this packet-local reference.
+            pass
+        return notification_id
 
     async def correct(
         self,

@@ -19,6 +19,19 @@ import type {
   WorkBoardReceiptReference,
   WorkBoardRecoveryAction,
   WorkBoardProposal,
+  WorkBoardRoutineBinding,
+  WorkBoardRoutineInvokeRequest,
+  WorkBoardRoutineInvokeReceipt,
+  WorkBoardRoutinePackageApproval,
+  WorkBoardRoutinePackagePreview,
+  WorkBoardRoutineProcedureExport,
+  WorkBoardRoutinePublicationPrepareRequest,
+  WorkBoardRoutinePublicationResponse,
+  WorkBoardRoutinePublicationState,
+  WorkBoardRoutinePreview,
+  WorkBoardRoutinePreviewRequest,
+  WorkBoardRoutineRead,
+  WorkBoardSourceWatch,
   WorkBoardStatus,
   WorkBoardTask,
   WorkBoardTaskCreateRequest,
@@ -77,6 +90,8 @@ const RECOVERY_LABELS: Record<WorkBoardRecoveryAction, string> = {
   reconcile_admission_binding: "Reconcile the pending job admission",
   reconcile_external_effect: "Reconcile the external effect before retrying",
   renew_review: "Renew the review window",
+  prepare_routine_publication: "Prepare publication preview",
+  resume_routine_publication: "Resume approved publication",
 };
 
 const TASK_LIMIT = 100;
@@ -85,6 +100,8 @@ const MAX_SYNC_PAGES = 20;
 const DETAIL_REFRESH_BATCH_SIZE = 8;
 const RECONNECT_DELAY_MS = 3_000;
 const BOARD_REQUEST_TIMEOUT_MS = 15_000;
+const ROUTINE_SOURCE_CAPABILITY = "guardian.research-watch.v1";
+const ROUTINE_ACTION_CAPABILITY = "work.github-followthrough.v1";
 
 export interface WorkBoardPanelProps {
   onOpenApprovals?: () => void;
@@ -160,6 +177,138 @@ interface PendingTaskCreate {
 }
 
 const pendingTaskCreates = new Map<string, PendingTaskCreate>();
+
+interface PendingRoutineInvocation {
+  routineId: string;
+  request: WorkBoardRoutineInvokeRequest;
+}
+
+interface PendingRoutineInvocationStorageRead {
+  pending: PendingRoutineInvocation | null;
+  error: string | null;
+}
+
+interface StoredPendingRoutineInvocation {
+  routine_id: string;
+  request: WorkBoardRoutineInvokeRequest;
+}
+
+const ROUTINE_INVOCATION_STORAGE_PREFIX = "seraph.work-board.routine-invocation.v1";
+
+function routineInvocationStorageKey(
+  ownerPrincipalId: string | null | undefined,
+  ownerSessionId: string | null | undefined,
+): string | null {
+  if (!ownerPrincipalId || !ownerSessionId) return null;
+  return `${ROUTINE_INVOCATION_STORAGE_PREFIX}:${encodeURIComponent(ownerPrincipalId)}:${encodeURIComponent(ownerSessionId)}`;
+}
+
+function routineInvocationStorage(): Storage | null {
+  try {
+    if (typeof window === "undefined" || typeof window.sessionStorage === "undefined") return null;
+    const storage = window.sessionStorage;
+    if (typeof storage.getItem !== "function"
+      || typeof storage.setItem !== "function"
+      || typeof storage.removeItem !== "function") return null;
+    return storage;
+  } catch {
+    return null;
+  }
+}
+
+function isSafeRoutineStorageString(value: unknown, maxLength = 256): value is string {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= maxLength
+    && value === value.trim()
+    && !/[\u0000-\u001f\u007f]/.test(value);
+}
+
+function isSafeRoutineInvocationRequest(value: unknown): value is WorkBoardRoutineInvokeRequest {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const request = value as Partial<WorkBoardRoutineInvokeRequest>;
+  return isSafeRoutineStorageString(request.invocation_uuid)
+    && isSafeRoutineStorageString(request.goal_id)
+    && isSafeRoutineStorageString(request.source_watch_id)
+    && typeof request.version === "number"
+    && Number.isSafeInteger(request.version)
+    && request.version >= 1
+    && typeof request.expected_routine_revision === "number"
+    && Number.isSafeInteger(request.expected_routine_revision)
+    && request.expected_routine_revision >= 1
+    && typeof request.expected_goal_revision === "number"
+    && Number.isSafeInteger(request.expected_goal_revision)
+    && request.expected_goal_revision >= 1
+    && typeof request.expected_watch_revision === "number"
+    && Number.isSafeInteger(request.expected_watch_revision)
+    && request.expected_watch_revision >= 1;
+}
+
+function isPendingRoutineInvocation(value: unknown): value is StoredPendingRoutineInvocation {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const pending = value as { routine_id?: unknown; request?: unknown };
+  return isSafeRoutineStorageString(pending.routine_id)
+    && isSafeRoutineInvocationRequest(pending.request);
+}
+
+function readPendingRoutineInvocation(storageKey: string | null): PendingRoutineInvocationStorageRead {
+  if (!storageKey) return { pending: null, error: null };
+  const storage = routineInvocationStorage();
+  if (!storage) {
+    return {
+      pending: null,
+      error: "Browser session storage is unavailable. Invocation is blocked until the exact retry request can be persisted safely.",
+    };
+  }
+  try {
+    const raw = storage.getItem(storageKey);
+    if (raw === null) return { pending: null, error: null };
+    const parsed: unknown = JSON.parse(raw);
+    if (!isPendingRoutineInvocation(parsed)) {
+      return {
+        pending: null,
+        error: "The saved routine invocation record is invalid. Do not retry until the operator session storage is restored.",
+      };
+    }
+    return {
+      pending: { routineId: parsed.routine_id, request: parsed.request },
+      error: null,
+    };
+  } catch {
+    return {
+      pending: null,
+      error: "The saved routine invocation record could not be read. Invocation is blocked until the exact retry request is available.",
+    };
+  }
+}
+
+function persistPendingRoutineInvocation(storageKey: string | null, pending: PendingRoutineInvocation): string | null {
+  if (!storageKey) return "The authenticated owner session is unavailable, so the exact invocation request cannot be persisted.";
+  const storage = routineInvocationStorage();
+  if (!storage) return "Browser session storage is unavailable. Invocation is blocked until the exact retry request can be persisted safely.";
+  const encoded = JSON.stringify({ routine_id: pending.routineId, request: pending.request });
+  try {
+    storage.setItem(storageKey, encoded);
+    if (storage.getItem(storageKey) !== encoded) {
+      return "The exact invocation request could not be read back from browser session storage. No invocation was sent.";
+    }
+    return null;
+  } catch {
+    return "The exact invocation request could not be persisted in browser session storage. No invocation was sent.";
+  }
+}
+
+function clearPendingRoutineInvocation(storageKey: string | null): boolean {
+  if (!storageKey) return false;
+  const storage = routineInvocationStorage();
+  if (!storage) return false;
+  try {
+    storage.removeItem(storageKey);
+    return storage.getItem(storageKey) === null;
+  } catch {
+    return false;
+  }
+}
 
 function emptyCreateDraft(): CreateDraft {
   return {
@@ -369,6 +518,50 @@ function makeIdempotencyKey(): string {
   return `work-board-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+function normalizeSourceWatches(payload: unknown): WorkBoardSourceWatch[] {
+  const values = Array.isArray(payload)
+    ? payload
+    : payload && typeof payload === "object" && Array.isArray((payload as { watches?: unknown }).watches)
+      ? (payload as { watches: unknown[] }).watches
+      : [];
+  return values.flatMap((value) => {
+    if (!value || typeof value !== "object") return [];
+    const item = value as Record<string, unknown>;
+    const id = typeof item.id === "string" ? item.id : "";
+    const goalId = typeof item.goal_id === "string" ? item.goal_id : "";
+    const goalRevision = item.goal_revision;
+    const planRevision = item.plan_revision;
+    if (!id || !goalId
+      || typeof goalRevision !== "number" || !Number.isSafeInteger(goalRevision) || goalRevision < 1
+      || typeof planRevision !== "number" || !Number.isSafeInteger(planRevision) || planRevision < 1) return [];
+    return [{
+      id,
+      goal_id: goalId,
+      goal_revision: goalRevision,
+      plan_revision: planRevision,
+      state: typeof item.state === "string" ? item.state : "unknown",
+      last_status: typeof item.last_status === "string" ? item.last_status : null,
+    }];
+  });
+}
+
+function normalizeRoutineList(payload: unknown): WorkBoardRoutineRead[] {
+  const values = payload && typeof payload === "object" && Array.isArray((payload as { routines?: unknown }).routines)
+    ? (payload as { routines: unknown[] }).routines
+    : Array.isArray(payload) ? payload : [];
+  return values.filter((value): value is WorkBoardRoutineRead => {
+    if (!value || typeof value !== "object") return false;
+    const item = value as Partial<WorkBoardRoutineRead>;
+    return typeof item.id === "string"
+      && typeof item.name === "string"
+      && typeof item.state === "string"
+      && typeof item.revision === "number"
+      && Number.isSafeInteger(item.revision)
+      && Array.isArray(item.versions)
+      && Boolean(item.package && typeof item.package === "object");
+  });
+}
+
 function receiptTitle(reference: WorkBoardReceiptReference): string {
   return reference.artifact_type || reference.effect_type || reference.status || "Execution receipt";
 }
@@ -466,6 +659,48 @@ function WorkBoardPanel({
   const [proposal, setProposal] = useState<WorkBoardProposal | null>(null);
   const [proposalBusy, setProposalBusy] = useState(false);
   const [proposalError, setProposalError] = useState<string | null>(null);
+  const [routineSourceTaskId, setRoutineSourceTaskId] = useState("");
+  const [routineActionTaskId, setRoutineActionTaskId] = useState("");
+  const [routineName, setRoutineName] = useState("");
+  const [routinePreview, setRoutinePreview] = useState<WorkBoardRoutinePreview | null>(null);
+  const [routineBinding, setRoutineBinding] = useState<WorkBoardRoutineBinding | null>(null);
+  const [routine, setRoutine] = useState<WorkBoardRoutineRead | null>(null);
+  const [routinePackagePreview, setRoutinePackagePreview] = useState<WorkBoardRoutinePackagePreview | null>(null);
+  const [routinePackageApproval, setRoutinePackageApproval] = useState<WorkBoardRoutinePackageApproval | null>(null);
+  const [routineRecords, setRoutineRecords] = useState<WorkBoardRoutineRead[]>([]);
+  const [routineListError, setRoutineListError] = useState<string | null>(null);
+  const [selectedRoutineId, setSelectedRoutineId] = useState("");
+  const [routineApprovalId, setRoutineApprovalId] = useState("");
+  const [routineBusy, setRoutineBusy] = useState(false);
+  const [routineError, setRoutineError] = useState<string | null>(null);
+  const [sourceWatches, setSourceWatches] = useState<WorkBoardSourceWatch[]>([]);
+  const [sourceWatchError, setSourceWatchError] = useState<string | null>(null);
+  const [routineInvocationGoalId, setRoutineInvocationGoalId] = useState("");
+  const [routineInvocationWatchId, setRoutineInvocationWatchId] = useState("");
+  const [routineInvokeReceipt, setRoutineInvokeReceipt] = useState<WorkBoardRoutineInvokeReceipt | null>(null);
+  const [routineInvokeBusy, setRoutineInvokeBusy] = useState(false);
+  const [routinePublication, setRoutinePublication] = useState<WorkBoardRoutinePublicationState | null>(null);
+  const [routinePublicationTitle, setRoutinePublicationTitle] = useState("");
+  const [routinePublicationBody, setRoutinePublicationBody] = useState("");
+  const [routinePublicationBusy, setRoutinePublicationBusy] = useState(false);
+  const [routinePublicationError, setRoutinePublicationError] = useState<string | null>(null);
+  const routineInvocationStorageKeyValue = useMemo(
+    () => routineInvocationStorageKey(ownerPrincipalId, ownerSessionId),
+    [ownerPrincipalId, ownerSessionId],
+  );
+  const pendingRoutineInvocationAtMount = useMemo(
+    () => readPendingRoutineInvocation(routineInvocationStorageKeyValue),
+    [routineInvocationStorageKeyValue],
+  );
+  const [pendingRoutineInvocation, setPendingRoutineInvocation] = useState<PendingRoutineInvocation | null>(
+    pendingRoutineInvocationAtMount.pending,
+  );
+  const [pendingRoutineStorageKey, setPendingRoutineStorageKey] = useState<string | null>(
+    pendingRoutineInvocationAtMount.pending ? routineInvocationStorageKeyValue : null,
+  );
+  const [routinePersistenceError, setRoutinePersistenceError] = useState<string | null>(
+    pendingRoutineInvocationAtMount.error,
+  );
   const [commentDraft, setCommentDraft] = useState("");
   const [parentTaskIdDraft, setParentTaskIdDraft] = useState("");
   const [childTaskIdDraft, setChildTaskIdDraft] = useState("");
@@ -488,6 +723,7 @@ function WorkBoardPanel({
   const createDialogRef = useRef<HTMLFormElement | null>(null);
   const createOpenerRef = useRef<HTMLElement | null>(null);
   const proposalKeysRef = useRef(new Map<string, string>());
+  const routineRequestKeyRef = useRef(makeIdempotencyKey());
   const proposalSelectionVersionRef = useRef(0);
   const createBusyRef = useRef(createBusy);
   const taskDetailPanelRef = useRef<HTMLElement | null>(null);
@@ -541,10 +777,25 @@ function WorkBoardPanel({
     selectedTaskIdRef.current = selectedTaskId;
   }, [selectedTaskId]);
 
+  useEffect(() => {
+    const restored = readPendingRoutineInvocation(routineInvocationStorageKeyValue);
+    setPendingRoutineInvocation(restored.pending);
+    setPendingRoutineStorageKey(restored.pending ? routineInvocationStorageKeyValue : null);
+    setRoutinePersistenceError(restored.error);
+  }, [routineInvocationStorageKeyValue]);
+
   const allGoals = useMemo(() => flattenGoals(goals), [goals]);
   const selectedDetail = selectedTaskId && detail?.task.task_id === selectedTaskId ? detail : null;
   const selectedTask = selectedDetail?.task ?? tasks.find((task) => task.task_id === selectedTaskId) ?? null;
   const taskById = useMemo(() => new Map(tasks.map((task) => [task.task_id, task])), [tasks]);
+  const verifiedRoutineSourceTasks = useMemo(
+    () => tasks.filter((task) => task.status === "done" && task.capability_id === ROUTINE_SOURCE_CAPABILITY),
+    [tasks],
+  );
+  const verifiedRoutineActionTasks = useMemo(
+    () => tasks.filter((task) => task.status === "done" && task.capability_id === ROUTINE_ACTION_CAPABILITY),
+    [tasks],
+  );
 
   const loadAllTaskPages = useCallback(async (): Promise<BoardSnapshot> => {
     const loaded: WorkBoardTask[] = [];
@@ -958,6 +1209,36 @@ function WorkBoardPanel({
   }, [readTaskDetail, selectedTaskId]);
 
   useEffect(() => {
+    setRoutineRecords([]);
+    setSourceWatches([]);
+    setRoutineListError(null);
+    setSourceWatchError(null);
+    if (!ownerPrincipalId || !ownerSessionId) return;
+    let active = true;
+    void requestApi<unknown>("/api/capabilities/routines")
+      .then((payload) => {
+        if (!active || stoppedRef.current) return;
+        setRoutineRecords(normalizeRoutineList(payload));
+      })
+      .catch((error) => {
+        if (active && !stoppedRef.current && !(error instanceof Error && error.name === "AbortError")) {
+          setRoutineListError(inputErrorMessage(error));
+        }
+      });
+    void requestApi<unknown>("/api/capabilities/source-watches")
+      .then((payload) => {
+        if (!active || stoppedRef.current) return;
+        setSourceWatches(normalizeSourceWatches(payload));
+      })
+      .catch((error) => {
+        if (active && !stoppedRef.current && !(error instanceof Error && error.name === "AbortError")) {
+          setSourceWatchError(inputErrorMessage(error));
+        }
+      });
+    return () => { active = false; };
+  }, [ownerPrincipalId, ownerSessionId, requestApi]);
+
+  useEffect(() => {
     const selectionVersion = proposalSelectionVersionRef.current + 1;
     proposalSelectionVersionRef.current = selectionVersion;
     setProposal(null);
@@ -1172,6 +1453,24 @@ function WorkBoardPanel({
     setReviewChangesReason("");
     setProposal(null);
     setProposalError(null);
+    setRoutineSourceTaskId("");
+    setRoutineActionTaskId("");
+    setRoutineName("");
+    setRoutinePreview(null);
+    setRoutineBinding(null);
+    setRoutine(null);
+    setRoutinePackagePreview(null);
+    setRoutinePackageApproval(null);
+    setSelectedRoutineId("");
+    setRoutineApprovalId("");
+    setRoutineError(null);
+    setRoutineInvocationGoalId("");
+    setRoutineInvocationWatchId("");
+    setRoutineInvokeReceipt(null);
+    setSourceWatchError(null);
+    const openedTask = tasksRef.current.find((task) => task.task_id === taskId);
+    setRoutineName(openedTask?.status === "done" ? `${openedTask.title} procedure` : "");
+    routineRequestKeyRef.current = makeIdempotencyKey();
     setCommentDraft("");
     setSelectedTaskId(taskId);
     setEditMode(false);
@@ -1448,6 +1747,30 @@ function WorkBoardPanel({
     && ownerPrincipalId
     && selectedTask.reviewer_id === ownerPrincipalId,
   );
+  const defaultRoutineActionTaskId = selectedTask?.capability_id === ROUTINE_ACTION_CAPABILITY
+    ? selectedTask.task_id
+    : selectedDetail?.children.find((taskId) => verifiedRoutineActionTasks.some((task) => task.task_id === taskId))
+      ?? verifiedRoutineActionTasks[0]?.task_id
+      ?? "";
+  const defaultRoutineSourceTaskId = selectedTask?.capability_id === ROUTINE_SOURCE_CAPABILITY
+    ? selectedTask.task_id
+    : selectedDetail?.parents.find((taskId) => verifiedRoutineSourceTasks.some((task) => task.task_id === taskId))
+      ?? verifiedRoutineSourceTasks[0]?.task_id
+      ?? "";
+  const selectedRoutineActionTaskId = routineActionTaskId || defaultRoutineActionTaskId;
+  const selectedRoutineSourceTaskId = routineSourceTaskId || defaultRoutineSourceTaskId;
+  const routineSourceTask = taskById.get(selectedRoutineSourceTaskId) ?? null;
+  const routineActionTask = taskById.get(selectedRoutineActionTaskId) ?? null;
+  const routineJourneyReady = Boolean(
+    currentOwnerSession
+    && routineSourceTask
+    && routineActionTask
+    && routineSourceTask.task_id !== routineActionTask.task_id
+    && routineSourceTask.status === "done"
+    && routineActionTask.status === "done"
+    && routineSourceTask.capability_id === ROUTINE_SOURCE_CAPABILITY
+    && routineActionTask.capability_id === ROUTINE_ACTION_CAPABILITY,
+  );
   const requestReview = () => {
     if (!selectedTask || !currentAttempt) return;
     if (!currentAttempt.attempt_id || !currentAttempt.workflow_run_id) {
@@ -1466,6 +1789,532 @@ function WorkBoardPanel({
       return;
     }
     void performAction("request_changes", { reason });
+  };
+
+  const resetRoutineRequest = () => {
+    routineRequestKeyRef.current = makeIdempotencyKey();
+    setRoutinePreview(null);
+    setRoutineBinding(null);
+    setRoutine(null);
+    setRoutinePackagePreview(null);
+    setRoutinePackageApproval(null);
+    setSelectedRoutineId("");
+    setRoutineApprovalId("");
+    setRoutineError(null);
+    setRoutineInvokeReceipt(null);
+  };
+
+  const readRoutine = async (routineId: string): Promise<WorkBoardRoutineRead | null> => {
+    try {
+      const nextRoutine = await requestApi<WorkBoardRoutineRead>(
+        `/api/capabilities/routines/${encodeURIComponent(routineId)}`,
+      );
+      if (stoppedRef.current) return null;
+      setRoutine(nextRoutine);
+      setRoutineRecords((current) => {
+        const existing = current.some((item) => item.id === nextRoutine.id);
+        return existing
+          ? current.map((item) => item.id === nextRoutine.id ? nextRoutine : item)
+          : [nextRoutine, ...current];
+      });
+      return nextRoutine;
+    } catch (error) {
+      if (!stoppedRef.current) setRoutineError(inputErrorMessage(error));
+      return null;
+    }
+  };
+
+  const readRoutinePublication = async (taskId: string, expectedRevision?: number): Promise<WorkBoardRoutinePublicationState | null> => {
+    try {
+      const response = await requestBoard<WorkBoardRoutinePublicationResponse>(
+        `/tasks/${encodeURIComponent(taskId)}/routine-publication`,
+      );
+      if (stoppedRef.current) return null;
+      if (typeof expectedRevision === "number" && response.publication.task_revision !== expectedRevision) {
+        setRoutinePublicationError("The routine publication state changed while this card was open. Refresh the card before continuing.");
+        return null;
+      }
+      setRoutinePublication(response.publication);
+      if (response.publication.preview?.title !== undefined) setRoutinePublicationTitle(response.publication.preview.title ?? "");
+      if (response.publication.preview?.body !== undefined) setRoutinePublicationBody(response.publication.preview.body ?? "");
+      return response.publication;
+    } catch (error) {
+      if (!stoppedRef.current) {
+        if (error instanceof WorkBoardApiError && error.status === 404) {
+          setRoutinePublication(null);
+          setRoutinePublicationError(null);
+        } else {
+          setRoutinePublicationError(inputErrorMessage(error));
+        }
+      }
+      return null;
+    }
+  };
+
+  const prepareRoutinePublication = async () => {
+    if (!selectedTask || selectedTask.capability_id !== "guardian-routine.v1") {
+      setRoutinePublicationError("Select the governed routine invocation card before preparing publication.");
+      return;
+    }
+    const body = routinePublicationBody.trim();
+    const title = routinePublicationTitle.trim();
+    if (!body || body.length > 32_000 || title.length > 160) {
+      setRoutinePublicationError("Publication body must contain 1–32,000 characters and the title at most 160 characters.");
+      return;
+    }
+    setRoutinePublicationBusy(true);
+    setRoutinePublicationError(null);
+    const request: WorkBoardRoutinePublicationPrepareRequest = {
+      expected_revision: selectedTask.task_revision,
+      title: title || null,
+      body,
+    };
+    try {
+      const response = await requestBoard<WorkBoardRoutinePublicationResponse>(
+        `/tasks/${encodeURIComponent(selectedTask.task_id)}/routine-publication/prepare`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(request),
+        },
+      );
+      if (stoppedRef.current) return;
+      setRoutinePublication(response.publication);
+      setRoutinePublicationTitle(response.publication.preview?.title ?? title);
+      setRoutinePublicationBody(response.publication.preview?.body ?? body);
+      setAnnouncement("The exact publication preview is prepared. Inspect it, then approve it in Pending approvals.");
+      await refreshSelectedTask();
+      await refreshSnapshot();
+    } catch (error) {
+      if (!stoppedRef.current) setRoutinePublicationError(inputErrorMessage(error));
+    } finally {
+      if (!stoppedRef.current) setRoutinePublicationBusy(false);
+    }
+  };
+
+  const resumeRoutinePublication = async () => {
+    if (!selectedTask || !routinePublication) return;
+    if (routinePublication.approval_status !== "approved") {
+      setRoutinePublicationError("Approve the exact publication preview in Pending approvals before resuming this card.");
+      onOpenApprovals?.();
+      return;
+    }
+    setRoutinePublicationBusy(true);
+    setRoutinePublicationError(null);
+    try {
+      const response = await requestBoard<WorkBoardRoutinePublicationResponse>(
+        `/tasks/${encodeURIComponent(selectedTask.task_id)}/routine-publication/recover`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ expected_revision: selectedTask.task_revision }),
+        },
+      );
+      if (stoppedRef.current) return;
+      setRoutinePublication(response.publication);
+      setAnnouncement("The approved publication was resumed. The board will show Done only after independent readback.");
+      await refreshSelectedTask();
+      await refreshSnapshot();
+    } catch (error) {
+      if (!stoppedRef.current) setRoutinePublicationError(inputErrorMessage(error));
+    } finally {
+      if (!stoppedRef.current) setRoutinePublicationBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    if (
+      selectedTask
+      && selectedTask.capability_id === "guardian-routine.v1"
+      && currentOwnerSession
+    ) {
+      void readRoutinePublication(selectedTask.task_id, selectedTask.task_revision);
+    } else {
+      setRoutinePublication(null);
+      setRoutinePublicationError(null);
+    }
+    // The selected card and its revision are the only board-owned inputs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedTask?.task_id, selectedTask?.task_revision, currentOwnerSession]);
+
+  const selectExistingRoutine = async (routineId: string) => {
+    setSelectedRoutineId(routineId);
+    setRoutineError(null);
+    setRoutineInvokeReceipt(null);
+    setRoutinePreview(null);
+    setRoutineBinding(null);
+    setRoutinePackagePreview(null);
+    setRoutinePackageApproval(null);
+    routineRequestKeyRef.current = makeIdempotencyKey();
+    if (!routineId) {
+      setRoutine(null);
+      return;
+    }
+    const cached = routineRecords.find((item) => item.id === routineId) ?? null;
+    setRoutine(cached);
+    if (cached?.name) setRoutineName(cached.name);
+    await readRoutine(routineId);
+  };
+
+  const routineRequest = (): WorkBoardRoutinePreviewRequest | null => {
+    const source = taskById.get(selectedRoutineSourceTaskId);
+    const action = taskById.get(selectedRoutineActionTaskId);
+    const name = routineName.trim();
+    if (!currentOwnerSession) {
+      setRoutineError("The verified journey can only be reused by its authenticated owner session.");
+      return null;
+    }
+    if (!source || !action || !routineJourneyReady) {
+      setRoutineError("Choose one Done research task and its linked Done follow-through task. The server will recheck the link and receipts.");
+      return null;
+    }
+    if (!name || name.length > 80) {
+      setRoutineError("Enter a procedure name between 1 and 80 characters.");
+      return null;
+    }
+    return {
+      source_task_id: source.task_id,
+      action_task_id: action.task_id,
+      expected_source_revision: source.task_revision,
+      expected_action_revision: action.task_revision,
+      name,
+      idempotency_key: routineRequestKeyRef.current,
+    };
+  };
+
+  const previewRoutine = async () => {
+    const request = routineRequest();
+    if (!request) return;
+    setRoutineBusy(true);
+    setRoutineError(null);
+    try {
+      const nextPreview = await requestApi<WorkBoardRoutinePreview>(
+        "/api/capabilities/routines/from-board/preview",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(request),
+        },
+      );
+      if (stoppedRef.current) return;
+      setRoutinePreview(nextPreview);
+      setRoutineBinding(null);
+      setRoutine(null);
+      setAnnouncement("The verified journey returned a reviewable procedure preview.");
+    } catch (error) {
+      if (!stoppedRef.current) setRoutineError(inputErrorMessage(error));
+    } finally {
+      if (!stoppedRef.current) setRoutineBusy(false);
+    }
+  };
+
+  const acceptRoutine = async () => {
+    if (!routinePreview) return;
+    const request = routineRequest();
+    if (!request) return;
+    setRoutineBusy(true);
+    setRoutineError(null);
+    try {
+      const nextBinding = await requestApi<WorkBoardRoutineBinding>(
+        "/api/capabilities/routines/from-board",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...request, preview_digest: routinePreview.preview_digest }),
+        },
+      );
+      if (stoppedRef.current) return;
+      setRoutineBinding(nextBinding);
+      if (nextBinding.approval_id) setRoutineApprovalId(nextBinding.approval_id);
+      if (nextBinding.routine_id) await readRoutine(nextBinding.routine_id);
+      if (stoppedRef.current) return;
+      setAnnouncement("The procedure was accepted and prepared. Installation still requires its current approval receipt.");
+    } catch (error) {
+      if (!stoppedRef.current) setRoutineError(inputErrorMessage(error));
+    } finally {
+      if (!stoppedRef.current) setRoutineBusy(false);
+    }
+  };
+
+  const routinePackageContext = () => {
+    if (!currentOwnerSession) {
+      setRoutineError("Package review and activation require the current authenticated owner session.");
+      return null;
+    }
+    const routineId = routine?.id;
+    const version = routine?.current_version ?? routine?.versions[0]?.version;
+    if (!routineId || !routine || !version) {
+      setRoutineError("Install a procedure version before reviewing its capability package.");
+      return null;
+    }
+    return {
+      routineId,
+      version,
+      expectedRevision: routine.revision,
+      basePath: `/api/capabilities/routines/${encodeURIComponent(routineId)}/versions/${version}/package`,
+    };
+  };
+
+  const previewRoutinePackage = async () => {
+    const context = routinePackageContext();
+    if (!context) return;
+    setRoutineBusy(true);
+    setRoutineError(null);
+    setRoutinePackageApproval(null);
+    try {
+      const preview = await requestApi<WorkBoardRoutinePackagePreview>(`${context.basePath}/preview`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ expected_routine_revision: context.expectedRevision }),
+      });
+      if (stoppedRef.current) return;
+      setRoutinePackagePreview(preview);
+      setAnnouncement("The server returned the exact local procedure package for review. Its approval grants no invocation authority.");
+    } catch (error) {
+      if (!stoppedRef.current) {
+        setRoutineError(inputErrorMessage(error));
+        if (error instanceof WorkBoardApiError && error.status === 409) {
+          setRoutinePackagePreview(null);
+          setRoutinePackageApproval(null);
+          void readRoutine(context.routineId);
+        }
+      }
+    } finally {
+      if (!stoppedRef.current) setRoutineBusy(false);
+    }
+  };
+
+  const exportRoutineProcedure = async () => {
+    const context = routinePackageContext();
+    if (!context) return;
+    setRoutineBusy(true);
+    setRoutineError(null);
+    try {
+      const exported = await requestApi<WorkBoardRoutineProcedureExport>(
+        `/api/capabilities/routines/${encodeURIComponent(context.routineId)}/versions/${context.version}/export`,
+      );
+      if (stoppedRef.current) return;
+      const blob = new Blob([JSON.stringify(exported, null, 2)], { type: "application/json" });
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = `${exported.pack_id}-v${exported.version}.json`;
+      link.click();
+      URL.revokeObjectURL(objectUrl);
+      setAnnouncement(`Exported reviewed procedure ${exported.pack_id}, version ${exported.version}.`);
+    } catch (error) {
+      if (!stoppedRef.current) setRoutineError(inputErrorMessage(error));
+    } finally {
+      if (!stoppedRef.current) setRoutineBusy(false);
+    }
+  };
+
+  const reviewRoutinePackage = async () => {
+    const context = routinePackageContext();
+    if (!context || !routinePackagePreview) return;
+    if (routinePackagePreview.digest !== routinePackagePreview.installed_package_digest) {
+      setRoutineError("The package preview does not match the installed digest. Refresh the routine before reviewing it.");
+      return;
+    }
+    setRoutineBusy(true);
+    setRoutineError(null);
+    setRoutinePackageApproval(null);
+    try {
+      const result = await requestApi<{
+        digest: string;
+        review: { review_id: string; status: string };
+      }>(`${context.basePath}/review`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ expected_routine_revision: context.expectedRevision }),
+      });
+      if (stoppedRef.current) return;
+      if (result.digest !== routinePackagePreview.digest || !result.review?.review_id || result.review.status !== "approved") {
+        setRoutineError("The returned package review did not match the preview digest. Activation remains blocked.");
+        return;
+      }
+      setRoutinePackagePreview((current) => current ? { ...current, review_id: result.review.review_id, status: "reviewed" } : current);
+      setAnnouncement("The exact installed procedure package has a local review receipt. Prepare its separate activation approval next.");
+    } catch (error) {
+      if (!stoppedRef.current) {
+        setRoutineError(inputErrorMessage(error));
+        if (error instanceof WorkBoardApiError && error.status === 409) {
+          setRoutinePackagePreview(null);
+          void readRoutine(context.routineId);
+        }
+      }
+    } finally {
+      if (!stoppedRef.current) setRoutineBusy(false);
+    }
+  };
+
+  const prepareRoutinePackageApproval = async () => {
+    const context = routinePackageContext();
+    if (!context || !routinePackagePreview?.review_id) return;
+    setRoutineBusy(true);
+    setRoutineError(null);
+    try {
+      const result = await requestApi<{ digest: string; approval: WorkBoardRoutinePackageApproval }>(
+        `${context.basePath}/approvals`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ expected_routine_revision: context.expectedRevision }),
+        },
+      );
+      if (stoppedRef.current) return;
+      if (result.digest !== routinePackagePreview.digest
+        || result.approval?.digest !== routinePackagePreview.digest
+        || result.approval?.action !== "activate"
+        || result.approval?.status !== "pending") {
+        setRoutineError("The activation approval is not bound to this reviewed package digest. Activation remains blocked.");
+        return;
+      }
+      setRoutinePackageApproval(result.approval);
+      setAnnouncement("A short-lived activation approval is bound to this exact package digest and source goal.");
+    } catch (error) {
+      if (!stoppedRef.current) {
+        setRoutineError(inputErrorMessage(error));
+        if (error instanceof WorkBoardApiError && error.status === 409) void readRoutine(context.routineId);
+      }
+    } finally {
+      if (!stoppedRef.current) setRoutineBusy(false);
+    }
+  };
+
+  const decideRoutinePackageApproval = async (decision: "approved" | "denied") => {
+    const context = routinePackageContext();
+    const approval = routinePackageApproval;
+    if (!context || !approval || approval.status !== "pending") return;
+    setRoutineBusy(true);
+    setRoutineError(null);
+    try {
+      const result = await requestApi<{ digest: string; approval: WorkBoardRoutinePackageApproval }>(
+        `${context.basePath}/approvals/${encodeURIComponent(approval.approval_id)}/decision`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ expected_routine_revision: context.expectedRevision, decision }),
+        },
+      );
+      if (stoppedRef.current) return;
+      if (result.digest !== routinePackagePreview?.digest || result.approval?.approval_id !== approval.approval_id
+        || result.approval.status !== decision) {
+        setRoutineError("The activation decision receipt did not match the pending approval. Refresh before continuing.");
+        return;
+      }
+      setRoutinePackageApproval(result.approval);
+      setAnnouncement(decision === "approved"
+        ? "Activation is approved for the exact reviewed package digest. Activate it when ready."
+        : "Package activation was denied. The procedure remains unavailable for invocation.");
+    } catch (error) {
+      if (!stoppedRef.current) {
+        setRoutineError(inputErrorMessage(error));
+        if (error instanceof WorkBoardApiError && error.status === 409) {
+          setRoutinePackageApproval(null);
+          void readRoutine(context.routineId);
+        }
+      }
+    } finally {
+      if (!stoppedRef.current) setRoutineBusy(false);
+    }
+  };
+
+  const activateRoutinePackage = async () => {
+    const context = routinePackageContext();
+    const approval = routinePackageApproval;
+    if (!context || !approval || approval.status !== "approved" || !routinePackagePreview?.review_id) return;
+    setRoutineBusy(true);
+    setRoutineError(null);
+    try {
+      const result = await requestApi<{ digest: string; status: string }>(`${context.basePath}/activate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_routine_revision: context.expectedRevision,
+          approval_id: approval.approval_id,
+        }),
+      });
+      if (stoppedRef.current) return;
+      if (result.digest !== routinePackagePreview.digest || result.status !== "active") {
+        setRoutineError("Package activation could not be verified against the reviewed digest. Procedure invocation remains blocked.");
+        return;
+      }
+      setRoutinePackagePreview((current) => current ? { ...current, status: "active" } : current);
+      setRoutinePackageApproval({ ...approval, status: "consumed" });
+      setAnnouncement("The reviewed package is active. Enable the procedure separately before requesting invocations.");
+      await readRoutine(context.routineId);
+    } catch (error) {
+      if (!stoppedRef.current) {
+        setRoutineError(inputErrorMessage(error));
+        if (error instanceof WorkBoardApiError && error.status === 409) {
+          setRoutinePackageApproval(null);
+          void readRoutine(context.routineId);
+        }
+      }
+    } finally {
+      if (!stoppedRef.current) setRoutineBusy(false);
+    }
+  };
+
+  const runRoutineLifecycleAction = async (
+    action: "install" | "activate" | "pause" | "revoke" | "rollback",
+    targetVersion?: number,
+  ) => {
+    const routineId = routine?.id ?? routineBinding?.routine_id;
+    if (!routineId) {
+      setRoutineError("Accept a verified procedure preview before using its lifecycle controls.");
+      return;
+    }
+    if (routine?.state === "revoked") {
+      setRoutineError("This procedure is revoked permanently. Create a new reviewed procedure from a fresh verified journey.");
+      return;
+    }
+    if (action === "install" && !routineApprovalId.trim()) {
+      setRoutineError("Installation is blocked until the exact approval receipt is supplied from Pending approvals.");
+      onOpenApprovals?.();
+      return;
+    }
+    if (action === "rollback" && !targetVersion) {
+      setRoutineError("Choose an installed earlier version before requesting rollback.");
+      return;
+    }
+    if (action === "revoke" && !window.confirm("Revoke this procedure permanently?")) return;
+    setRoutineBusy(true);
+    setRoutineError(null);
+    const version = routinePreview?.version_plan.version
+      ?? routine?.current_version
+      ?? routine?.versions[0]?.version
+      ?? 1;
+    const expectedRoutineRevision = routine?.revision ?? routineBinding?.revision ?? 1;
+    const body = action === "install"
+      ? { version, expected_routine_revision: expectedRoutineRevision, approval_id: routineApprovalId.trim() }
+      : action === "activate"
+        ? { version, expected_routine_revision: expectedRoutineRevision }
+        : action === "rollback"
+          ? { target_version: targetVersion, expected_routine_revision: expectedRoutineRevision, reason: "Operator requested rollback after reviewing the procedure receipt." }
+          : { expected_routine_revision: expectedRoutineRevision, reason: action === "revoke" ? "Operator revoked the reviewed procedure." : "Operator paused the reviewed procedure." };
+    try {
+      const result = await requestApi<WorkBoardRoutineRead>(
+        `/api/capabilities/routines/${encodeURIComponent(routineId)}/${action}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      );
+      if (stoppedRef.current) return;
+      setRoutine(result);
+      setRoutineBinding((current) => current ? { ...current, revision: result.revision, state: result.state, status: result.state } : current);
+      setAnnouncement(`Procedure ${action} completed with the server's current revision.`);
+    } catch (error) {
+      if (!stoppedRef.current) {
+        setRoutineError(inputErrorMessage(error));
+        if (error instanceof WorkBoardApiError && error.status === 409) void readRoutine(routineId);
+      }
+    } finally {
+      if (!stoppedRef.current) setRoutineBusy(false);
+    }
   };
 
   const proposalKey = (
@@ -1735,7 +2584,7 @@ function WorkBoardPanel({
   const canRetry = Boolean(
     selectedTask
     && selectedTask.status === "blocked"
-    && selectedTask.recovery_action === "retry"
+    && ["retry", "restore_prerequisite"].includes(selectedTask.recovery_action ?? "")
     && !isActiveAttempt(selectedTask)
     && detailLimit
     && detailLimit.goal_revision === selectedTask.goal_revision
@@ -1755,6 +2604,199 @@ function WorkBoardPanel({
     && proposal.proposed_tasks.length > 0
     && proposal.proposed_tasks.every((task) => hasServerAuthorityPreview(task.authority)),
   );
+  const routineVersion = routinePreview?.version_plan.version
+    ?? routine?.current_version
+    ?? routine?.versions[0]?.version
+    ?? 1;
+  const routineVersionRecord = routine?.versions.find((version) => version.version === routineVersion) ?? null;
+  const routinePackageDigest = routineVersionRecord?.installed_package_digest ?? null;
+  const routinePackageReviewed = Boolean(
+    routine?.package?.status === "active"
+    && routinePackageDigest
+    && routine?.package?.digest === routinePackageDigest,
+  );
+  const routineRollbackVersions = routine?.versions.filter((version) => (
+    version.version !== routine.current_version
+    && Boolean(version.installed_package_digest)
+    && routine.package?.status === "active"
+    && Boolean(routine.package.digest)
+    && version.installed_package_digest === routine.package.digest
+  )) ?? [];
+  const routineRollbackCandidates = routine?.versions.filter((version) => (
+    version.version !== routine.current_version && Boolean(version.installed_package_digest)
+  )) ?? [];
+  const routineRollbackBlocked = Boolean(
+    routine
+    && routine.state !== "revoked"
+    && routineRollbackCandidates.length > 0
+    && routineRollbackVersions.length === 0,
+  );
+  const activeRoutineGoals = useMemo(
+    () => allGoals.filter((goal) => goal.status === "active"),
+    [allGoals],
+  );
+  const defaultRoutineInvocationGoalId = activeRoutineGoals.some((goal) => goal.id === selectedTask?.goal_id)
+    ? selectedTask?.goal_id ?? ""
+    : activeRoutineGoals[0]?.id ?? "";
+  const selectedRoutineInvocationGoalId = pendingRoutineInvocation
+    && pendingRoutineInvocation.routineId === routine?.id
+    ? pendingRoutineInvocation.request.goal_id
+    : activeRoutineGoals.some((goal) => goal.id === routineInvocationGoalId)
+      ? routineInvocationGoalId
+      : defaultRoutineInvocationGoalId;
+  const selectedRoutineInvocationGoal = activeRoutineGoals.find((goal) => goal.id === selectedRoutineInvocationGoalId) ?? null;
+  const routineWatchCandidates = useMemo(
+    () => sourceWatches.filter((watch) => watch.goal_id === selectedRoutineInvocationGoalId),
+    [selectedRoutineInvocationGoalId, sourceWatches],
+  );
+  const selectedRoutineWatchId = pendingRoutineInvocation
+    && pendingRoutineInvocation.routineId === routine?.id
+    ? pendingRoutineInvocation.request.source_watch_id
+    : routineWatchCandidates.some((watch) => watch.id === routineInvocationWatchId)
+      ? routineInvocationWatchId
+      : routineWatchCandidates.find((watch) => watch.state === "active")?.id
+          ?? routineWatchCandidates[0]?.id
+          ?? "";
+  const selectedRoutineWatch = routineWatchCandidates.find((watch) => watch.id === selectedRoutineWatchId) ?? null;
+  const pendingRoutineMatches = !pendingRoutineInvocation || pendingRoutineInvocation.routineId === routine?.id;
+  const pendingRoutineReplayReady = Boolean(
+    currentOwnerSession
+    && pendingRoutineInvocation
+    && pendingRoutineStorageKey === routineInvocationStorageKeyValue
+    && routine
+    && pendingRoutineInvocation.routineId === routine.id
+  );
+  const routineInvocationReady = pendingRoutineReplayReady || Boolean(
+    currentOwnerSession
+    && routine?.state === "active"
+    && routinePackageReviewed
+    && pendingRoutineMatches
+    && (!routinePersistenceError || Boolean(pendingRoutineInvocation))
+    && selectedRoutineInvocationGoal
+    && typeof selectedRoutineInvocationGoal.revision === "number"
+    && selectedRoutineWatch?.state === "active",
+  );
+
+  const invokeRoutine = async () => {
+    const pending = pendingRoutineInvocation;
+    const routineId = pending?.routineId ?? routine?.id ?? routineBinding?.routine_id;
+    if (!routineId || !routine) {
+      setRoutineError("Select or accept a governed procedure before invoking it.");
+      return;
+    }
+    if (pending && pending.routineId !== routine.id) {
+      setRoutineError("A different routine has an unconfirmed invocation. Select that routine before retrying; no new request was created.");
+      return;
+    }
+    if (!currentOwnerSession) {
+      setRoutineError("Invocation is available only to the authenticated owner session of the selected card.");
+      return;
+    }
+    if (pending && pendingRoutineStorageKey !== routineInvocationStorageKeyValue) {
+      setRoutineError("The saved invocation belongs to a different owner session. Refresh the authenticated session before retrying; no new request was created.");
+      return;
+    }
+    let request: WorkBoardRoutineInvokeRequest;
+    if (pending) {
+      request = pending.request;
+    } else {
+      if (routine.state === "revoked") {
+        setRoutineError("This procedure is revoked permanently. Create a new reviewed procedure from a fresh verified journey.");
+        return;
+      }
+      if (routine.state !== "active" || !routinePackageReviewed) {
+        setRoutineError("Invocation is blocked until this procedure is active and its installed package review is current.");
+        return;
+      }
+      const selectedGoal = selectedRoutineInvocationGoal;
+      const expectedGoalRevision = selectedGoal?.revision;
+      if (!selectedGoal || selectedGoal.status !== "active"
+        || typeof expectedGoalRevision !== "number" || !Number.isSafeInteger(expectedGoalRevision) || expectedGoalRevision < 1) {
+        setRoutineError("Choose an active goal with a current revision before invoking this procedure.");
+        return;
+      }
+      const selectedWatch = selectedRoutineWatch;
+      if (!selectedWatch || selectedWatch.state !== "active") {
+        setRoutineError("Invocation is blocked until an owner-visible active source watch is selected for the current goal.");
+        return;
+      }
+      request = {
+        version: routineVersion,
+        expected_routine_revision: routine.revision,
+        goal_id: selectedGoal.id,
+        expected_goal_revision: expectedGoalRevision,
+        source_watch_id: selectedWatch.id,
+        expected_watch_revision: selectedWatch.plan_revision,
+        invocation_uuid: makeIdempotencyKey(),
+      };
+    }
+    const pendingRequest = pending ?? { routineId: routine.id, request };
+    if (!pending) {
+      const persistenceError = persistPendingRoutineInvocation(
+        routineInvocationStorageKeyValue,
+        pendingRequest,
+      );
+      if (persistenceError) {
+        setRoutinePersistenceError(persistenceError);
+        setRoutineError(persistenceError);
+        return;
+      }
+      setRoutinePersistenceError(null);
+      setPendingRoutineInvocation(pendingRequest);
+      setPendingRoutineStorageKey(routineInvocationStorageKeyValue);
+    }
+    setRoutineInvokeBusy(true);
+    setRoutineError(null);
+    try {
+      const receipt = await requestApi<WorkBoardRoutineInvokeReceipt>(
+        `/api/capabilities/routines/${encodeURIComponent(routineId)}/invoke`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(request),
+        },
+      );
+      if (stoppedRef.current) return;
+      if (!receipt || typeof receipt.task_id !== "string" || !receipt.task_id) {
+        throw new Error("The routine invocation did not return a canonical Todo task receipt.");
+      }
+      const cleared = clearPendingRoutineInvocation(routineInvocationStorageKeyValue);
+      if (cleared) {
+        setPendingRoutineInvocation(null);
+        setPendingRoutineStorageKey(null);
+        setRoutinePersistenceError(null);
+      } else {
+        setRoutinePersistenceError("The Todo task receipt was confirmed, but the exact retry record could not be cleared. Keep this panel open and retry only if the receipt is not visible after refresh.");
+      }
+      setRoutineInvokeReceipt(receipt);
+      setAnnouncement(`The governed procedure created Todo task ${receipt.task_id}. The board is refreshing for dispatcher execution.`);
+      await refreshSnapshot();
+    } catch (error) {
+      if (!stoppedRef.current) {
+        const definitiveRejection = error instanceof WorkBoardApiError
+          && error.status >= 400
+          && error.status < 500;
+        if (definitiveRejection) {
+          const cleared = clearPendingRoutineInvocation(routineInvocationStorageKeyValue);
+          if (cleared) {
+            setPendingRoutineInvocation(null);
+            setPendingRoutineStorageKey(null);
+            setRoutinePersistenceError(null);
+          } else {
+            setRoutinePersistenceError("The server rejected this invocation, but the exact retry record could not be cleared. Keep the record until browser session storage is available again.");
+          }
+          setRoutineError(cleared
+            ? inputErrorMessage(error)
+            : `${inputErrorMessage(error)} The exact retry record is being preserved because it could not be cleared safely.`);
+        } else {
+          setRoutineError("The invocation receipt was not confirmed. Retry the unchanged request to reconcile it; no new invocation key will be generated.");
+        }
+        if (error instanceof WorkBoardApiError && error.status === 409) void readRoutine(routineId);
+      }
+    } finally {
+      if (!stoppedRef.current) setRoutineInvokeBusy(false);
+    }
+  };
 
   return (
     <section className="cockpit-panel cockpit-panel--embedded min-w-0" aria-label="Work board">
@@ -1977,6 +3019,41 @@ function WorkBoardPanel({
                 <div className="font-semibold">Actions and recovery</div>
                 <div className="mt-1">{selectedTask.status === "blocked" ? `Blocked: ${selectedTask.block_reason || "No safe reason was supplied."}` : `Current state: ${STATUS_LABELS[selectedTask.status]}`}</div>
                 {selectedTask.recovery_action && <div className="mt-1">Server recovery action: {RECOVERY_LABELS[selectedTask.recovery_action]}</div>}
+                {selectedTask.capability_id === "guardian-routine.v1" && routinePublication && (
+                  <section className="mt-3 rounded border border-amber-500/40 bg-amber-950/10 p-3" aria-label="Routine publication recovery">
+                    <div className="font-semibold">Governed publication recovery</div>
+                    <div className="mt-1 text-[11px] opacity-80">
+                      Parent {routinePublication.parent_workflow_run_id ?? "unavailable"} · attempt {routinePublication.attempt_id} · M3 {routinePublication.m3_status ?? "not prepared"}
+                    </div>
+                    {!routinePublication.m3_job_id ? (
+                      <>
+                        <div className="mt-2">Inspect and edit the bounded publication text before preparing the exact M3 approval.</div>
+                        <label className="mt-2 block">Publication title (optional)
+                          <input className="cockpit-input mt-1 w-full" maxLength={160} value={routinePublicationTitle} onChange={(event) => setRoutinePublicationTitle(event.currentTarget.value)} disabled={routinePublicationBusy} />
+                        </label>
+                        <label className="mt-2 block">Publication body
+                          <textarea className="cockpit-input mt-1 w-full" maxLength={32000} rows={5} value={routinePublicationBody} onChange={(event) => setRoutinePublicationBody(event.currentTarget.value)} disabled={routinePublicationBusy} />
+                        </label>
+                        <button type="button" className="cockpit-feedback-button mt-2" disabled={routinePublicationBusy || !routinePublicationBody.trim()} onClick={() => void prepareRoutinePublication()}>
+                          {routinePublicationBusy ? "Preparing preview…" : "Prepare exact publication preview"}
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <div className="mt-2">The M3 preview is immutable and must be approved separately.</div>
+                        {routinePublication.preview?.title !== undefined && <div className="mt-2"><span className="font-semibold">Title:</span> {routinePublication.preview.title || "(none)"}</div>}
+                        {routinePublication.preview?.body !== undefined && <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-black/20 p-2 text-[11px]">{routinePublication.preview.body}</pre>}
+                        <div className="mt-2 font-mono text-[11px]">Approval {routinePublication.approval_id ?? "unavailable"} · {routinePublication.approval_status ?? "status unavailable"}</div>
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {onOpenApprovals && <button type="button" className="cockpit-feedback-button" onClick={onOpenApprovals}>Open Pending approvals</button>}
+                          <button type="button" className="cockpit-feedback-button" disabled={routinePublicationBusy} onClick={() => void readRoutinePublication(selectedTask.task_id, selectedTask.task_revision)}>Refresh approval state</button>
+                          <button type="button" className="cockpit-feedback-button" disabled={routinePublicationBusy || routinePublication.approval_status !== "approved"} onClick={() => void resumeRoutinePublication()} title={routinePublication.approval_status !== "approved" ? "Approve the exact M3 preview first." : undefined}>Resume approved publication</button>
+                        </div>
+                      </>
+                    )}
+                    {routinePublicationError && <div className="mt-2 rounded border border-red-500/40 p-2" role="alert">{routinePublicationError}</div>}
+                  </section>
+                )}
                 {selectedTask.status === "review" && selectedTask.review_expires_at && (
                   <div className="mt-1" role="status">
                     Review deadline: {safeDateTime(selectedTask.review_expires_at)}
@@ -2008,21 +3085,21 @@ function WorkBoardPanel({
                       <button type="submit" className="cockpit-feedback-button self-start" disabled={busyAction || !unblockResolution.trim() || unblockResolution.trim().length > 1000}>Unblock after rechecking authority</button>
                     </form>
                   )}
-                  {selectedTask.status === "blocked" && selectedTask.recovery_action === "retry" && !isActiveAttempt(selectedTask) && (
+                  {selectedTask.status === "blocked" && ["retry", "restore_prerequisite"].includes(selectedTask.recovery_action ?? "") && !isActiveAttempt(selectedTask) && (
                     <button
                       type="button"
                       className="cockpit-feedback-button"
                       disabled={busyAction || !canRetry}
                       title={!canRetry ? "Acknowledge the current server-derived runtime limit before retrying." : undefined}
                       onClick={() => void performAction("retry", {}, true)}
-                    >Retry (new attempt)</button>
+                    >{selectedTask.recovery_action === "restore_prerequisite" ? "Retry after rechecking prerequisites (new attempt)" : "Retry (new attempt)"}</button>
                   )}
-                  {selectedTask.status === "blocked" && selectedTask.recovery_action === "retry" && !canRetry && (
+                  {selectedTask.status === "blocked" && ["retry", "restore_prerequisite"].includes(selectedTask.recovery_action ?? "") && !canRetry && (
                     <div className="w-full text-amber-200" role="status">
                       Retry stays disabled until the current goal revision limit is loaded and acknowledged. {detailLimitError ?? "Check the current runtime limit above."}
                     </div>
                   )}
-                  {selectedTask.status === "blocked" && selectedTask.recovery_action !== "retry" && selectedTask.recovery_action !== "unblock" && selectedTask.recovery_action && (
+                  {selectedTask.status === "blocked" && selectedTask.recovery_action !== "retry" && selectedTask.recovery_action !== "restore_prerequisite" && selectedTask.recovery_action !== "unblock" && selectedTask.recovery_action && (
                     <div className="w-full rounded bg-amber-950/20 p-2" role="status">
                       {selectedTask.recovery_action === "approve_existing_run" ? (
                         <><span>Continue in the existing authenticated approval surface.</span>{onOpenApprovals && <button type="button" className="ml-2 underline" onClick={onOpenApprovals}>Open approvals</button>}</>
@@ -2129,6 +3206,295 @@ function WorkBoardPanel({
                   <div className="mt-2 rounded border border-amber-500/40 p-2" role="status">External effect or cost is unresolved. Reconcile independent readback before any new attempt; retry is unavailable.</div>
                 )}
                 {isActiveAttempt(selectedTask) && <div className="mt-2 text-[10px] opacity-75">Attempt is active; manual block and retry are disabled until the durable run is reconciled.</div>}
+              </section>
+
+              <section className="rounded border border-white/10 p-3" aria-label="Governed procedure from verified journey">
+                <div className="font-semibold">Reuse this verified journey as a governed procedure</div>
+                <p className="mt-1 text-[10px] opacity-75">Only the fixed research-watch → GitHub follow-through journey can be reused here. The server rechecks ownership, Done state, dependency linkage, workflow readback, memory outcome, and current authority. Source bodies, approvals, credentials, and private content are never included in this preview.</p>
+                {!currentOwnerSession && <div className="mt-2 rounded border border-amber-500/40 p-2" role="status">This control is available only to the authenticated owner session of the selected card.</div>}
+                {currentOwnerSession && routineRecords.length > 0 && (
+                  <div className="mt-2 rounded border border-white/10 bg-black/20 p-2">
+                    <label>Existing governed procedure
+                      <select
+                        aria-label="Existing governed procedure"
+                        className="cockpit-input mt-1 w-full"
+                        value={selectedRoutineId}
+                        disabled={routineBusy || routineInvokeBusy}
+                        onChange={(event) => { void selectExistingRoutine(event.currentTarget.value); }}
+                      >
+                        <option value="">Create from a verified journey</option>
+                        {routineRecords.map((record) => (
+                          <option key={record.id} value={record.id}>
+                            {record.name} · {record.state} · revision {record.revision}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <div className="mt-1 text-[10px] opacity-75">Saved procedures are loaded from the authenticated owner/session workspace. Selection shows only the routine name, state, revision, and version metadata.</div>
+                  </div>
+                )}
+                {routineListError && <div className="mt-2 rounded border border-amber-500/40 p-2" role="status">Saved procedures could not be loaded: {routineListError}</div>}
+                {currentOwnerSession && (verifiedRoutineSourceTasks.length === 0 || verifiedRoutineActionTasks.length === 0) && (
+                  <div className="mt-2 rounded border border-amber-500/40 p-2" role="status">Blocked: a verified Done research task and a verified Done GitHub follow-through task are required before a procedure can be previewed.</div>
+                )}
+                <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                  <label>Verified research task
+                    <select
+                      aria-label="Verified research task"
+                      className="cockpit-input mt-1 w-full"
+                      value={selectedRoutineSourceTaskId}
+                      onChange={(event) => { setRoutineSourceTaskId(event.currentTarget.value); resetRoutineRequest(); }}
+                      disabled={routineBusy || verifiedRoutineSourceTasks.length === 0}
+                    >
+                      <option value="">Choose a Done research task</option>
+                      {verifiedRoutineSourceTasks.map((task) => <option key={task.task_id} value={task.task_id}>{task.title} · {task.task_id}</option>)}
+                    </select>
+                  </label>
+                  <label>Verified follow-through task
+                    <select
+                      aria-label="Verified follow-through task"
+                      className="cockpit-input mt-1 w-full"
+                      value={selectedRoutineActionTaskId}
+                      onChange={(event) => { setRoutineActionTaskId(event.currentTarget.value); resetRoutineRequest(); }}
+                      disabled={routineBusy || verifiedRoutineActionTasks.length === 0}
+                    >
+                      <option value="">Choose a Done follow-through task</option>
+                      {verifiedRoutineActionTasks.map((task) => <option key={task.task_id} value={task.task_id}>{task.title} · {task.task_id}</option>)}
+                    </select>
+                  </label>
+                  <label className="sm:col-span-2">Procedure name
+                    <input
+                      aria-label="Procedure name"
+                      className="cockpit-input mt-1 w-full"
+                      maxLength={80}
+                      value={routineName}
+                      onChange={(event) => { setRoutineName(event.currentTarget.value); resetRoutineRequest(); }}
+                      disabled={routineBusy}
+                    />
+                  </label>
+                </div>
+                {!routineJourneyReady && currentOwnerSession && verifiedRoutineSourceTasks.length > 0 && verifiedRoutineActionTasks.length > 0 && (
+                  <div className="mt-2 text-amber-200" role="status">The selected pair is not a verified linked journey in the current snapshot. Choose the linked Done tasks; the backend remains authoritative.</div>
+                )}
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    className="cockpit-feedback-button"
+                    disabled={routineBusy || !routineJourneyReady || !routineName.trim()}
+                    onClick={() => void previewRoutine()}
+                  >{routineBusy && !routinePreview ? "Preparing preview…" : "Preview procedure"}</button>
+                  {routinePreview && (
+                    <button type="button" className="cockpit-feedback-button" disabled={routineBusy} onClick={() => void acceptRoutine()}>
+                      {routineBusy ? "Accepting…" : "Accept and prepare procedure"}
+                    </button>
+                  )}
+                </div>
+                {routineError && <div className="mt-2 rounded border border-amber-500/40 p-2" role="alert">{routineError}</div>}
+                {routinePreview && (
+                  <div className="mt-3 rounded border border-white/10 bg-black/20 p-3" role="region" aria-label="Governed procedure preview">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="font-semibold">Reviewable procedure proposal</div>
+                      <span className="font-mono text-[10px]">preview {routinePreview.preview_digest}</span>
+                    </div>
+                    <div className="mt-2">{routinePreview.safe_summary}</div>
+                    <div className="mt-2 grid gap-1 text-[10px]">
+                      <div>Version {routinePreview.version_plan.version} · workflow {routinePreview.version_plan.workflow}</div>
+                      <div>Steps: {routinePreview.version_plan.steps.join(" → ")}</div>
+                      <div>Runtime limit: {routinePreview.limits.runtime_seconds}s · attempts: {routinePreview.limits.attempts} · remote inference: {routinePreview.limits.remote_inference ? "enabled" : "disabled"}</div>
+                      <div>External mutation: {routinePreview.permissions.external_mutation} · package review: {routinePreview.permissions.package_review}</div>
+                      <div>Verifier: {routinePreview.verifier.source} · unknown effect: {routinePreview.verifier.unknown_effect}</div>
+                      <div>Expires: {safeDateTime(routinePreview.expires_at)}</div>
+                    </div>
+                    <div className="mt-2 rounded bg-black/20 p-2">
+                      <div className="font-semibold text-[10px]">Typed invocation parameters</div>
+                      <div className="mt-1 grid gap-1 break-all font-mono text-[10px]">
+                        {Object.entries(routinePreview.typed_parameters).map(([key, value]) => <div key={key}>{key}: {value === null ? "null" : String(value)}</div>)}
+                        {Object.keys(routinePreview.typed_parameters).length === 0 && <div>None returned</div>}
+                      </div>
+                    </div>
+                    <div className="mt-2 rounded bg-black/20 p-2">
+                      <div className="font-semibold text-[10px]">Safe source receipts</div>
+                      <div className="mt-1 grid gap-1 break-all font-mono text-[10px]">
+                        {(["source_task_id", "source_attempt_id", "source_watch_job_id", "source_packet_id", "action_task_id", "action_attempt_id", "source_m3_job_id"] as const).map((key) => (
+                          <div key={key}>{key}: {routinePreview.source_refs[key] ?? "unavailable"}</div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+                {(routineBinding || routine) && (
+                  <div className="mt-3 rounded border border-white/10 bg-black/20 p-3" role="region" aria-label="Governed procedure lifecycle">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="font-semibold">Procedure lifecycle</div>
+                      <span>{routine?.state ?? routineBinding?.state} · revision {routine?.revision ?? routineBinding?.revision}</span>
+                    </div>
+                    <div className="mt-1 break-all text-[10px]">Routine {routine?.id ?? routineBinding?.routine_id} · version {routineVersion}{routineBinding?.install_job_id ? ` · install job ${routineBinding.install_job_id}` : ""}</div>
+                    {routine && <div className="mt-1">Package review: {routine.package?.status ?? "unavailable"}{routine.package?.reason ? ` · ${routine.package.reason}` : ""}</div>}
+                    {(routine?.state === "revoked" || routineBinding?.state === "revoked") && <div className="mt-2 rounded border border-red-500/40 p-2" role="status">Revoked: future invocations are blocked permanently. A revoked procedure cannot be reactivated or revived by rollback.</div>}
+                    {routine && routine.state !== "revoked" && routine.package?.status !== "active" && (
+                      <div className="mt-2 rounded border border-amber-500/40 p-2" role="status">Blocked: this capability package is not active for the current owner session. The procedure cannot be enabled or invoked until its exact package review and activation approval are current.</div>
+                    )}
+                    {routine && routine.state !== "prepared" && routine.state !== "revoked" && (
+                      <section className="mt-3 rounded border border-white/10 bg-black/20 p-3" aria-label="Procedure package governance">
+                        <div className="font-semibold">Review the installed procedure package</div>
+                        <p className="mt-1 text-[10px] opacity-75">This immutable v2 package records the reviewed procedure definition for its source goal. It grants no tools, filesystem access, network access, or secrets. Package activation does not authorize later work; each invocation receives fresh goal revision, grants, approvals, budget, task, and readback.</p>
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {routine?.current_version && (
+                            <button type="button" className="cockpit-feedback-button" disabled={routineBusy} onClick={() => void exportRoutineProcedure()}>
+                              {routineBusy ? "Exporting procedure…" : "Export reviewed procedure"}
+                            </button>
+                          )}
+                          <button type="button" className="cockpit-feedback-button" disabled={routineBusy} onClick={() => void previewRoutinePackage()}>
+                            {routineBusy && !routinePackagePreview ? "Loading package preview…" : "Preview installed package"}
+                          </button>
+                          {routinePackagePreview
+                            && routinePackagePreview.digest === routinePackagePreview.installed_package_digest
+                            && !routinePackagePreview.review_id
+                            && routinePackagePreview.status !== "active"
+                            && (
+                              <button type="button" className="cockpit-feedback-button" disabled={routineBusy} onClick={() => void reviewRoutinePackage()}>
+                                {routineBusy ? "Recording review…" : "Record local package review"}
+                              </button>
+                            )}
+                          {routinePackagePreview?.review_id
+                            && routinePackagePreview.status !== "active"
+                            && (!routinePackageApproval || ["denied", "expired"].includes(routinePackageApproval.status))
+                            && (
+                              <button type="button" className="cockpit-feedback-button" disabled={routineBusy} onClick={() => void prepareRoutinePackageApproval()}>
+                                {routineBusy ? "Preparing approval…" : "Prepare activation approval"}
+                              </button>
+                            )}
+                          {routinePackageApproval?.status === "pending" && (
+                            <>
+                              <button type="button" className="cockpit-feedback-button" disabled={routineBusy} onClick={() => void decideRoutinePackageApproval("approved")}>Approve exact package activation</button>
+                              <button type="button" className="cockpit-feedback-button" disabled={routineBusy} onClick={() => void decideRoutinePackageApproval("denied")}>Deny package activation</button>
+                            </>
+                          )}
+                          {routinePackageApproval?.status === "approved" && (
+                            <button type="button" className="cockpit-feedback-button" disabled={routineBusy} onClick={() => void activateRoutinePackage()}>
+                              {routineBusy ? "Activating package…" : "Activate reviewed capability package"}
+                            </button>
+                          )}
+                        </div>
+                        {routinePackagePreview && (
+                          <div className="mt-3 rounded border border-white/10 p-3" role="region" aria-label="Procedure package preview">
+                            <div className="font-semibold">{routinePackagePreview.manifest.display_name}</div>
+                            <div className="mt-1">{routinePackagePreview.manifest.summary}</div>
+                            <div className="mt-2 grid gap-1 break-all font-mono text-[10px]">
+                              <div>Package ID: {routinePackagePreview.pack_id} · version {routinePackagePreview.manifest.version}</div>
+                              <div>Digest: {routinePackagePreview.digest}</div>
+                              <div>Capability: {routinePackagePreview.runbook.procedure.capability_id}</div>
+                              <div>Fixed steps: {routinePackagePreview.runbook.procedure.steps.map((step) => step.id).join(" → ")}</div>
+                              <div>Workflow SHA-256: {routinePackagePreview.runbook.bindings.workflow_sha256}</div>
+                              <div>Authority: {routinePackagePreview.manifest.authority.tools.length} tools · {routinePackagePreview.manifest.authority.filesystem.length} filesystem paths · network {routinePackagePreview.manifest.authority.network ? "enabled" : "disabled"} · {routinePackagePreview.manifest.authority.secrets.length} secrets</div>
+                              <div>Limits: {routinePackagePreview.manifest.resources.max_runtime_seconds}s · {routinePackagePreview.manifest.resources.max_artifact_bytes} artifact bytes · ${routinePackagePreview.manifest.resources.max_inference_cost_microusd / 1_000_000} inference budget</div>
+                              <div>Package state: {routinePackagePreview.status}{routinePackagePreview.review_id ? ` · review ${routinePackagePreview.review_id}` : ""}</div>
+                            </div>
+                            {routinePackageApproval && (
+                              <div className="mt-2 rounded bg-black/20 p-2" role="status">
+                                Activation approval {routinePackageApproval.status}: <span className="font-mono">{routinePackageApproval.approval_id}</span> · digest {routinePackageApproval.digest}
+                              </div>
+                            )}
+                            {routinePackagePreview.digest !== routinePackagePreview.installed_package_digest && (
+                              <div className="mt-2 rounded border border-amber-500/40 p-2" role="alert">The package preview differs from the installed digest. Review and activation controls remain blocked.</div>
+                            )}
+                            {routinePackageApproval?.status === "denied" && (
+                              <div className="mt-2 rounded border border-amber-500/40 p-2" role="status">Activation was denied. The procedure remains unavailable; a new exact approval is required after review.</div>
+                            )}
+                          </div>
+                        )}
+                      </section>
+                    )}
+                    {!routineApprovalId.trim() && routine?.state === "prepared" && (
+                      <div className="mt-2 grid gap-2 rounded border border-amber-500/40 p-2">
+                        <div role="status">Installation is waiting for the exact approval receipt created for this procedure.</div>
+                        <label>Install approval ID from Pending approvals
+                          <input aria-label="Install approval ID from Pending approvals" className="cockpit-input mt-1 w-full" maxLength={256} value={routineApprovalId} onChange={(event) => setRoutineApprovalId(event.currentTarget.value)} />
+                        </label>
+                        {onOpenApprovals && <button type="button" className="cockpit-feedback-button justify-self-start" onClick={onOpenApprovals}>Open Pending approvals</button>}
+                      </div>
+                    )}
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {routine?.state === "prepared" && (
+                        <button type="button" className="cockpit-feedback-button" disabled={routineBusy || !routineApprovalId.trim()} onClick={() => void runRoutineLifecycleAction("install")}>Install reviewed procedure</button>
+                      )}
+                      {routine?.state === "installed" && (
+                        <button type="button" className="cockpit-feedback-button" disabled={routineBusy || !routinePackageReviewed} onClick={() => void runRoutineLifecycleAction("activate")} title={!routinePackageReviewed ? "The current package must first be reviewed, separately approved, and activated." : undefined}>Enable procedure invocations</button>
+                      )}
+                      {routine && ["installed", "active", "paused"].includes(routine.state) && (
+                        <button type="button" className="cockpit-feedback-button" disabled={routineBusy || routine.state === "revoked"} onClick={() => void runRoutineLifecycleAction("pause")}>Pause future invocations</button>
+                      )}
+                      {routine && routine.state !== "revoked" && (
+                        <button type="button" className="cockpit-feedback-button" disabled={routineBusy} onClick={() => void runRoutineLifecycleAction("revoke")}>Revoke permanently</button>
+                      )}
+                    </div>
+                    {routineRollbackVersions.length > 0 && routine && routine.state !== "revoked" && (
+                      <div className="mt-2 flex flex-wrap items-end gap-2">
+                        <label>Rollback target
+                          <select aria-label="Rollback target" className="cockpit-input mt-1 block" defaultValue="" disabled={routineBusy} onChange={(event) => { const target = Number(event.currentTarget.value); if (target) void runRoutineLifecycleAction("rollback", target); }}>
+                            <option value="">Choose installed version</option>
+                            {routineRollbackVersions.map((version) => <option key={version.version} value={version.version}>Version {version.version}</option>)}
+                          </select>
+                        </label>
+                        <span className="text-[10px] opacity-75">Rollback changes future invocations after the server verifies the current package receipt.</span>
+                      </div>
+                    )}
+                    {routineRollbackBlocked && routine && routine.state !== "revoked" && (
+                      <div className="mt-2 rounded border border-amber-500/40 p-2" role="status">
+                        Rollback is blocked: no installed earlier version matches the current active package readback. Refresh the package review before choosing a rollback target.
+                      </div>
+                    )}
+                    {routine && (
+                      <div className="mt-3 rounded border border-white/10 bg-black/20 p-3" role="region" aria-label="Governed procedure invocation">
+                        <div className="font-semibold">Invoke for a fresh approved goal and input</div>
+                        <p className="mt-1 text-[10px] opacity-75">Invocation submits the current routine, goal, and source-watch revisions. The server creates one canonical Todo task; the normal dispatcher owns execution and approvals.</p>
+                        {pendingRoutineInvocation && <div className="mt-2 rounded border border-amber-500/40 p-2" role="status">
+                          An invocation has an unconfirmed receipt. The exact routine, goal, watch, and revision request is preserved under invocation ID <span className="font-mono">{pendingRoutineInvocation.request.invocation_uuid}</span>. Retry reconciliation submits the same request and cannot create a new invocation key.
+                        </div>}
+                        {routinePersistenceError && routinePersistenceError !== routineError && <div className="mt-2 rounded border border-amber-500/40 p-2" role="alert">{routinePersistenceError}</div>}
+                        {activeRoutineGoals.length === 0 && <div className="mt-2 rounded border border-amber-500/40 p-2" role="status">Blocked: no active owner goal with a current revision is available.</div>}
+                        {activeRoutineGoals.length > 0 && (
+                          <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                            <label>Invocation goal
+                              <select
+                                aria-label="Invocation goal"
+                                className="cockpit-input mt-1 w-full"
+                                value={selectedRoutineInvocationGoalId}
+                                disabled={routineInvokeBusy || routine.state === "revoked" || Boolean(pendingRoutineInvocation)}
+                                onChange={(event) => { setRoutineInvocationGoalId(event.currentTarget.value); setRoutineInvocationWatchId(""); setRoutineInvokeReceipt(null); setRoutineError(null); }}
+                              >
+                                <option value="">Choose an active goal</option>
+                                {activeRoutineGoals.map((goal) => <option key={goal.id} value={goal.id}>{goal.title} · revision {goal.revision ?? "unavailable"}</option>)}
+                              </select>
+                            </label>
+                            <label>Approved source watch
+                              <select
+                                aria-label="Approved source watch"
+                                className="cockpit-input mt-1 w-full"
+                                value={selectedRoutineWatchId}
+                                disabled={routineInvokeBusy || routine.state === "revoked" || routineWatchCandidates.length === 0 || Boolean(pendingRoutineInvocation)}
+                                onChange={(event) => { setRoutineInvocationWatchId(event.currentTarget.value); setRoutineInvokeReceipt(null); setRoutineError(null); }}
+                              >
+                                <option value="">Choose an owner-visible watch</option>
+                                {routineWatchCandidates.map((watch) => <option key={watch.id} value={watch.id}>{watch.id} · {watch.state} · goal rev {watch.goal_revision} · plan rev {watch.plan_revision}</option>)}
+                              </select>
+                            </label>
+                          </div>
+                        )}
+                        {sourceWatchError && <div className="mt-2 rounded border border-amber-500/40 p-2" role="status">Source-watch selection is unavailable: {sourceWatchError}</div>}
+                        {selectedRoutineWatch && <div className="mt-2 text-[10px]">Watch {selectedRoutineWatch.id} · goal revision {selectedRoutineWatch.goal_revision} · plan revision {selectedRoutineWatch.plan_revision} · status {selectedRoutineWatch.state}{selectedRoutineWatch.last_status ? ` · ${selectedRoutineWatch.last_status}` : ""}</div>}
+                        {routine.state !== "active" && routine.state !== "revoked" && <div className="mt-2 rounded border border-amber-500/40 p-2" role="status">Blocked: this procedure is {routine.state}. Activate it before requesting a fresh invocation.</div>}
+                        {routine.state === "active" && !routinePackageReviewed && <div className="mt-2 rounded border border-amber-500/40 p-2" role="status">Blocked: the installed package review is stale or unavailable. Refresh the review before invoking.</div>}
+                        {routine.state === "active" && routineWatchCandidates.length === 0 && <div className="mt-2 rounded border border-amber-500/40 p-2" role="status">Blocked: no owner-visible source watch matches the selected active goal.</div>}
+                        {selectedRoutineWatch && selectedRoutineWatch.state !== "active" && <div className="mt-2 rounded border border-amber-500/40 p-2" role="status">Blocked: the selected source watch is {selectedRoutineWatch.state}. Select an active approved watch or refresh its state.</div>}
+                        <button type="button" className="cockpit-feedback-button mt-2" disabled={routineInvokeBusy || !routineInvocationReady} onClick={() => void invokeRoutine()}>
+                          {routineInvokeBusy ? "Reconciling Todo task…" : pendingRoutineInvocation ? "Retry invocation and reconcile" : "Invoke governed procedure"}
+                        </button>
+                        {routineInvokeReceipt && <div className="mt-2 rounded border border-emerald-500/40 p-2" role="status">Invocation queued: Todo task <span className="font-mono">{routineInvokeReceipt.task_id}</span>{typeof routineInvokeReceipt.task_revision === "number" ? ` · revision ${routineInvokeReceipt.task_revision}` : ""}. The board was refreshed; dispatcher controls execution.</div>}
+                      </div>
+                    )}
+                  </div>
+                )}
               </section>
 
               <section className="rounded border border-white/10 p-3">

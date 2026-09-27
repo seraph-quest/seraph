@@ -379,6 +379,25 @@ async def lifespan(app: FastAPI):
         logging.getLogger(__name__).exception(
             "Durable job restart recovery failed; stale work remains operator-visible"
         )
+    # Routine installs stage workflow/package bytes outside discoverable roots
+    # until their canonical selector transaction commits. Reconcile committed
+    # staging, and remove only proven uncommitted staging, before scheduler
+    # work can discover a partial procedure after a process crash.
+    try:
+        from src.workflows.routines import routine_service
+
+        recovered_installs = await routine_service.recover_pending_installs()
+        blocked_installs = sum(1 for item in recovered_installs if item.get("status") == "blocked")
+        if recovered_installs:
+            logging.getLogger(__name__).warning(
+                "Routine install restart recovery inspected %d staging tree(s); %d remain blocked",
+                len(recovered_installs),
+                blocked_installs,
+            )
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "Routine install restart recovery failed; partial staging remains non-discoverable"
+        )
     # Audio quarantine files and unconfirmed transcript state are process-local
     # and must never resume after a crash.  Run the durable cleanup before any
     # scheduler work can admit a stale audio job.

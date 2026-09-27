@@ -1211,6 +1211,41 @@ describe("WorkBoardPanel", () => {
     await waitFor(() => expect(actionBody).toEqual({ action: "retry", expected_revision: 3 }));
   });
 
+  it("offers a revision-bound retry after a restored prerequisite is rechecked", async () => {
+    const blocked = task({
+      status: "blocked",
+      block_kind: "capability_missing",
+      block_reason: "The registered capability was unavailable.",
+      recovery_action: "restore_prerequisite",
+      latest_attempt: null,
+    });
+    let actionBody: Record<string, unknown> | null = null;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/work-board/tasks/task-1/actions")) {
+        actionBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return Promise.resolve(response({ task: task({ status: "todo", task_revision: 4 }) }));
+      }
+      if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) return Promise.resolve(response(page([blocked], 8)));
+      if (url.includes("/api/work-board/events")) return Promise.resolve(response(events(8)));
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
+      if (url.includes("/api/work-board/goals/goal-1/execution-limits")) return Promise.resolve(response(limits()));
+      if (url.includes("/api/work-board/tasks/task-1")) return Promise.resolve(response(detail(blocked)));
+      return Promise.resolve(response({}));
+    });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<WorkBoardPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Bounded task" }));
+    const retry = await screen.findByRole("button", { name: "Retry after rechecking prerequisites (new attempt)" });
+    expect(retry).toBeDisabled();
+    fireEvent.click(await screen.findByLabelText(/I acknowledge the server-derived runtime limit/i));
+    await waitFor(() => expect(retry).toBeEnabled());
+    fireEvent.click(retry);
+
+    await waitFor(() => expect(actionBody).toEqual({ action: "retry", expected_revision: 3 }));
+  });
+
   it("submits an operator unblock with only the task revision and bounded resolution", async () => {
     const blocked = task({ status: "blocked", title: "Operator recovery", block_kind: "operator", recovery_action: "unblock", block_reason: "Waiting for operator input." });
     taskResponse(fetchMock, blocked);

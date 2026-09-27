@@ -1094,6 +1094,13 @@ class ApprovalRepository:
         def detail(*names: str) -> Any:
             return _approval_detail_value(details, *names)
 
+        def explicit_null_detail(*names: str) -> bool:
+            values = [details[name] for name in names if name in details]
+            nested_context = details.get("approval_context")
+            if isinstance(nested_context, Mapping):
+                values.extend(nested_context[name] for name in names if name in nested_context)
+            return bool(values) and all(value is None for value in values)
+
         # These identities are part of the durable run contract even when
         # their values are absent.  Comparing the normalized pair makes a
         # candidate-present approval unable to authorize a candidate-absent
@@ -1180,6 +1187,15 @@ class ApprovalRepository:
                     return None
                 continue
             if observed is None:
+                # A user-owned run has no service id. Keep that explicit null
+                # binding distinct from a missing field so an approval cannot
+                # silently omit part of the durable execution identity.
+                if (
+                    _field_name == "service_id"
+                    and expected is None
+                    and explicit_null_detail(*names)
+                ):
+                    continue
                 return None
             if _field_name in {"goal_revision", "plan_revision"}:
                 if type(expected) is not int or expected <= 0:

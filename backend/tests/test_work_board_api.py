@@ -25,6 +25,7 @@ from src.db.models import (
 )
 from src.work_board.contracts import WorkBoardOwner, WorkBoardTaskCreate, WorkBoardTaskPatch
 from src.work_board.repository import WorkBoardRepository
+from src.work_board import review as review_service
 
 
 def test_running_task_keeps_cancel_control_visible_while_cancellation_is_pending():
@@ -160,7 +161,15 @@ def test_attempt_limit_is_visible_and_has_no_retry_recovery_action():
     assert _event_payload(event)["metadata"]["block_kind"] == "attempt_limit"
 
 
-def test_verified_handoff_reconciliation_exposes_manual_recovery():
+@pytest.mark.parametrize(
+    "block_reason",
+    [
+        review_service._HANDOFF_RECONCILIATION_REASON,
+        review_service._LEGACY_HANDOFF_RECONCILIATION_REASON,
+        review_service._LEGACY_HANDOFF_MISSING_REASON,
+    ],
+)
+def test_verified_handoff_reconciliation_exposes_manual_recovery(block_reason):
     task = WorkBoardTask(
         task_id="handoff-recovery-task",
         owner_principal_id="operator:test",
@@ -171,9 +180,7 @@ def test_verified_handoff_reconciliation_exposes_manual_recovery():
         idempotency_key="handoff-recovery-task",
         status=WorkBoardStatus.blocked,
         block_kind="dependency",
-        block_reason=(
-            "A completed parent handoff needs verified readback reconciliation before dispatch"
-        ),
+        block_reason=block_reason,
         block_source_status=WorkBoardStatus.ready.value,
     )
 

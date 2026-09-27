@@ -1092,7 +1092,7 @@ async def test_owner_review_api_can_complete_even_when_executor_identifier_match
         assert not hasattr(worker, "complete_review")
 
 
-async def _handoff_fixture(db, *, proof_available: bool):
+async def _handoff_fixture(db, *, proof_available: bool, block_reason: str | None = None):
     goal = await _goal(db, "goal-handoff-recovery")
     parent = WorkBoardTask(
         task_id="handoff-recovery-parent",
@@ -1117,7 +1117,7 @@ async def _handoff_fixture(db, *, proof_available: bool):
         idempotency_key="handoff-recovery-child-key",
         status=WorkBoardStatus.blocked,
         block_kind="dependency",
-        block_reason=review_service._HANDOFF_RECONCILIATION_REASON,
+        block_reason=block_reason or review_service._HANDOFF_RECONCILIATION_REASON,
         block_source_status=WorkBoardStatus.todo.value,
         task_revision=2,
     )
@@ -1201,6 +1201,62 @@ async def test_handoff_recovery_stays_blocked_without_proof_then_restores_safely
             )
         )
         assert handoff_events == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "legacy_reason",
+    [
+        review_service._LEGACY_HANDOFF_RECONCILIATION_REASON,
+        review_service._LEGACY_HANDOFF_MISSING_REASON,
+    ],
+)
+async def test_legacy_handoff_block_reason_uses_verified_recovery(async_db, legacy_reason):
+    async with async_db() as db:
+        parent, child, _attempt, link = await _handoff_fixture(
+            db,
+            proof_available=True,
+            block_reason=legacy_reason,
+        )
+        mutation = await review_service.unblock_task(
+            db,
+            OWNER,
+            child.task_id,
+            expected_revision=child.task_revision,
+            resolution="verified handoff rechecked after managed restart",
+        )
+        assert mutation.task.status is WorkBoardStatus.todo
+        assert mutation.task.block_reason is None
+        assert link.current_handoff_id
+
+
+@pytest.mark.asyncio
+async def test_repository_readiness_resolves_parent_by_task_id(async_db):
+    async with async_db() as db:
+        _parent, child, _attempt, link = await _handoff_fixture(
+            db,
+            proof_available=True,
+        )
+        recovered = await review_service.unblock_task(
+            db,
+            OWNER,
+            child.task_id,
+            expected_revision=child.task_revision,
+            resolution="verified handoff was rechecked",
+        )
+        await db.commit()
+        assert recovered.task.status is WorkBoardStatus.todo
+        assert link.current_handoff_id
+
+        promoted = await WorkBoardRepository().promote_task_ready(
+            db,
+            child.task_id,
+            expected_revision=recovered.task.task_revision,
+            actor_principal_id="service:work-board",
+        )
+        assert promoted is not None
+        assert promoted.task.status is WorkBoardStatus.ready
+        assert promoted.task.block_reason is None
 
 
 @pytest.mark.asyncio

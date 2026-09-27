@@ -1114,7 +1114,7 @@ describe("CockpitView", () => {
     render(<CockpitView onSend={() => {}} />);
 
     const consoleRegion = await screen.findByRole("region", { name: "M9 governed extension console" });
-    expect(within(consoleRegion).getByText("Atlas Marketplace Pack")).toBeInTheDocument();
+    expect(await within(consoleRegion).findByText("Atlas Marketplace Pack")).toBeInTheDocument();
     expect(consoleRegion).toHaveTextContent(/0 installed · 1 installable · 0 rollback receipts/i);
     expect(consoleRegion).toHaveTextContent(/marketplace · installable · flow ready · marketplace · verified · Seraph Labs · 1.2.0/i);
     expect(consoleRegion).toHaveTextContent(/compatible · Seraph >=0.9.0 · current 0.9.1/i);

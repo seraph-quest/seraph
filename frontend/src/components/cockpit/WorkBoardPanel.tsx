@@ -1468,14 +1468,14 @@ function WorkBoardPanel({
     setRoutineInvocationWatchId("");
     setRoutineInvokeReceipt(null);
     setSourceWatchError(null);
-    const openedTask = tasksRef.current.find((task) => task.task_id === taskId);
+    const openedTask = tasks.find((task) => task.task_id === taskId);
     setRoutineName(openedTask?.status === "done" ? `${openedTask.title} procedure` : "");
     routineRequestKeyRef.current = makeIdempotencyKey();
     setCommentDraft("");
     setSelectedTaskId(taskId);
     setEditMode(false);
     setDetail(null);
-  }, []);
+  }, [tasks]);
 
   const closeTask = useCallback(() => {
     selectedTaskIdRef.current = null;

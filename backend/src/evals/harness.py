@@ -7696,7 +7696,11 @@ async def _eval_memory_provider_quality_gate_improvement_behavior() -> dict[str,
                 return_value=HybridMemoryRetrievalResult(context="", buckets={}, degraded=False, hits=()),
             ),
         ):
-            retrieval = await plan_memory_retrieval(query="Atlas investor brief owner", active_projects=("Atlas launch",))
+            async with _patched_async_db():
+                retrieval = await plan_memory_retrieval(
+                    query="Atlas investor brief owner",
+                    active_projects=("Atlas launch",),
+                )
     finally:
         clear_memory_provider_adapters()
 
@@ -7809,7 +7813,11 @@ async def _eval_memory_provider_quality_gate_suppression_behavior() -> dict[str,
                 return_value=HybridMemoryRetrievalResult(context="", buckets={}, degraded=False, hits=()),
             ),
         ):
-            retrieval = await plan_memory_retrieval(query="Atlas launch", active_projects=("Atlas launch",))
+            async with _patched_async_db():
+                retrieval = await plan_memory_retrieval(
+                    query="Atlas launch",
+                    active_projects=("Atlas launch",),
+                )
     finally:
         clear_memory_provider_adapters()
 
@@ -10762,13 +10770,15 @@ async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
     from src.guardian.feedback import guardian_feedback_repository
     from src.api.activity import get_activity_ledger
     from src.api.operator import get_operator_timeline
+    from src.observer.native_notification_queue import NativeNotificationQueue
 
+    eval_notification_queue = NativeNotificationQueue()
     async with _patched_async_db(
         "src.agent.session.get_session",
         "src.guardian.feedback.get_session",
         "src.observer.insight_queue.get_session",
     ):
-        await native_notification_queue.clear()
+        await eval_notification_queue.clear()
         await session_manager.get_or_create(
             "continuity-session",
             owner_principal_id="operator:test-bypass",
@@ -10796,7 +10806,7 @@ async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
             latest_outcome="delivered",
             transport="native_notification",
         )
-        notification = await native_notification_queue.enqueue(
+        notification = await eval_notification_queue.enqueue(
             intervention_id=native_intervention.id,
             title="Seraph alert",
             body="Desktop fallback is active.",
@@ -10847,6 +10857,7 @@ async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
 
         with (
             patch("src.api.observer.context_manager", mgr),
+            patch("src.api.observer.native_notification_queue", eval_notification_queue),
             patch("src.scheduler.connection_manager.ws_manager", mock_ws_manager),
             patch("src.observer.delivery._active_channel_adapters", return_value={"websocket"}),
             patch(
@@ -11015,7 +11026,7 @@ async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
         queued_ids = [item.id for item in await insight_queue.peek_all()]
         if queued_ids:
             await insight_queue.delete_many(queued_ids)
-        await native_notification_queue.clear()
+        await eval_notification_queue.clear()
 
     surfaces = {item["continuity_surface"] for item in continuity["recent_interventions"]}
     live_route = next(item for item in continuity["reach"]["route_statuses"] if item["route"] == "live_delivery")
@@ -12329,6 +12340,8 @@ async def _eval_workflow_anticipatory_repair_behavior() -> dict[str, Any]:
                 {
                     "id": "run-anticipatory",
                     "run_identity": "session-1:workflow_release_brief:1",
+                    "owner_kind": "user",
+                    "owner_principal_id": "operator:test-bypass",
                     "root_run_identity": "session-1:workflow_release_brief:1",
                     "workflow_name": "release-brief",
                     "summary": "Preparing release publication.",
@@ -12360,6 +12373,8 @@ async def _eval_workflow_anticipatory_repair_behavior() -> dict[str, Any]:
                 {
                     "id": "run-history",
                     "run_identity": "session-1:workflow_release_brief:branch-1",
+                    "owner_kind": "user",
+                    "owner_principal_id": "operator:test-bypass",
                     "root_run_identity": "session-1:workflow_release_brief:1",
                     "parent_run_identity": "session-1:workflow_release_brief:1",
                     "branch_kind": "branch_from_checkpoint",
@@ -12379,7 +12394,11 @@ async def _eval_workflow_anticipatory_repair_behavior() -> dict[str, Any]:
             ],
         ),
     ):
-        payload = await get_operator_workflow_orchestration(limit_sessions=6, limit_workflows=8)
+        payload = await get_operator_workflow_orchestration(
+            _authenticated_operator_request("/api/operator/workflow-orchestration"),
+            limit_sessions=6,
+            limit_workflows=8,
+        )
 
     session = payload["sessions"][0]
     workflow = next(item for item in payload["workflows"] if item["run_identity"] == "session-1:workflow_release_brief:1")
@@ -12389,7 +12408,9 @@ async def _eval_workflow_anticipatory_repair_behavior() -> dict[str, Any]:
         "session_anticipatory_summary_visible": "anticipatory ready" in str(session["attention_summary"] or ""),
         "workflow_risk_level_elevated": workflow["anticipatory_plan"]["risk_level"] in {"elevated", "high"},
         "workflow_backup_branch_ready": workflow["anticipatory_plan"]["backup_branch_ready"] is True,
-        "workflow_backup_branch_draft_visible": '_seraph_resume_from_step="draft"' in workflow["anticipatory_plan"]["backup_branch_draft"],
+        "session_backup_branch_draft_redacted": session["lead_backup_branch_draft"] is None,
+        "workflow_backup_branch_label_redacted": workflow["anticipatory_plan"]["backup_branch_label"] == "checkpoint",
+        "workflow_backup_branch_draft_redacted": workflow["anticipatory_plan"]["backup_branch_draft"] is None,
         "workflow_pre_repair_draft_visible": str(workflow["anticipatory_plan"]["anticipatory_repair_draft"]).startswith("Before continuing workflow"),
     }
 
@@ -12408,6 +12429,8 @@ async def _eval_workflow_condensation_fidelity_behavior() -> dict[str, Any]:
                 {
                     "id": "run-root",
                     "run_identity": "session-1:workflow_repo_review:1",
+                    "owner_kind": "user",
+                    "owner_principal_id": "operator:test-bypass",
                     "root_run_identity": "session-1:workflow_repo_review:1",
                     "workflow_name": "repo-review",
                     "summary": "Review handoff is still active.",
@@ -12440,6 +12463,8 @@ async def _eval_workflow_condensation_fidelity_behavior() -> dict[str, Any]:
                 {
                     "id": "run-branch",
                     "run_identity": "session-1:workflow_repo_review:branch-1",
+                    "owner_kind": "user",
+                    "owner_principal_id": "operator:test-bypass",
                     "root_run_identity": "session-1:workflow_repo_review:1",
                     "parent_run_identity": "session-1:workflow_repo_review:1",
                     "branch_kind": "branch_from_checkpoint",
@@ -12459,7 +12484,11 @@ async def _eval_workflow_condensation_fidelity_behavior() -> dict[str, Any]:
             ],
         ),
     ):
-        payload = await get_operator_workflow_orchestration(limit_sessions=6, limit_workflows=8)
+        payload = await get_operator_workflow_orchestration(
+            _authenticated_operator_request("/api/operator/workflow-orchestration"),
+            limit_sessions=6,
+            limit_workflows=8,
+        )
 
     workflow = next(item for item in payload["workflows"] if item["run_identity"] == "session-1:workflow_repo_review:1")
     return {
@@ -12484,6 +12513,8 @@ async def _eval_workflow_backup_branch_surface_behavior() -> dict[str, Any]:
                 {
                     "id": "run-1",
                     "run_identity": "session-1:workflow_repo_review:1",
+                    "owner_kind": "user",
+                    "owner_principal_id": "operator:test-bypass",
                     "root_run_identity": "session-1:workflow_repo_review:1",
                     "workflow_name": "repo-review",
                     "summary": "Comparison is running before publish.",
@@ -12515,14 +12546,19 @@ async def _eval_workflow_backup_branch_surface_behavior() -> dict[str, Any]:
             ],
         ),
     ):
-        payload = await get_operator_workflow_orchestration(limit_sessions=6, limit_workflows=8)
+        payload = await get_operator_workflow_orchestration(
+            _authenticated_operator_request("/api/operator/workflow-orchestration"),
+            limit_sessions=6,
+            limit_workflows=8,
+        )
 
     session = payload["sessions"][0]
     workflow = payload["workflows"][0]
     return {
-        "session_backup_branch_label_visible": session["lead_backup_branch_label"] == "compare (diff_compare)",
-        "session_backup_branch_draft_visible": '_seraph_resume_from_step="compare"' in session["lead_backup_branch_draft"],
-        "workflow_backup_branch_label_visible": workflow["anticipatory_plan"]["backup_branch_label"] == "compare (diff_compare)",
+        "session_backup_branch_label_redacted": session["lead_backup_branch_label"] == "checkpoint",
+        "session_backup_branch_draft_redacted": session["lead_backup_branch_draft"] is None,
+        "workflow_backup_branch_label_redacted": workflow["anticipatory_plan"]["backup_branch_label"] == "checkpoint",
+        "workflow_backup_branch_draft_redacted": workflow["anticipatory_plan"]["backup_branch_draft"] is None,
         "workflow_backup_branch_ready": workflow["anticipatory_plan"]["backup_branch_ready"] is True,
     }
 
@@ -12544,6 +12580,8 @@ async def _eval_workflow_multi_session_endurance_behavior() -> dict[str, Any]:
                 {
                     "id": "run-1",
                     "run_identity": "session-1:workflow_repo_review:1",
+                    "owner_kind": "user",
+                    "owner_principal_id": "operator:test-bypass",
                     "root_run_identity": "session-1:workflow_repo_review:1",
                     "workflow_name": "repo-review",
                     "summary": "Ready for anticipatory backup branch.",
@@ -12573,6 +12611,8 @@ async def _eval_workflow_multi_session_endurance_behavior() -> dict[str, Any]:
                 {
                     "id": "run-2",
                     "run_identity": "session-2:workflow_research_followup:1",
+                    "owner_kind": "user",
+                    "owner_principal_id": "operator:test-bypass",
                     "root_run_identity": "session-2:workflow_research_followup:1",
                     "workflow_name": "research-followup",
                     "summary": "Blocked after trust boundary drift.",
@@ -12599,7 +12639,11 @@ async def _eval_workflow_multi_session_endurance_behavior() -> dict[str, Any]:
             ],
         ),
     ):
-        payload = await get_operator_workflow_orchestration(limit_sessions=6, limit_workflows=8)
+        payload = await get_operator_workflow_orchestration(
+            _authenticated_operator_request("/api/operator/workflow-orchestration"),
+            limit_sessions=6,
+            limit_workflows=8,
+        )
 
     sessions = {item["thread_id"]: item for item in payload["sessions"]}
     return {

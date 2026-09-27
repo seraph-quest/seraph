@@ -3435,7 +3435,15 @@ def test_run_benchmark_suites_executes_computer_use_browser_desktop_suite():
 
     result_names = {result.name for result in summary.results}
 
-    assert summary.failed == 0
+    assert summary.failed == 0, [
+        {
+            "name": result.name,
+            "error": result.error,
+            "details": result.details,
+        }
+        for result in summary.results
+        if not result.passed
+    ]
     assert result_names == {
         "browser_execution_task_replay_behavior",
         "browser_runtime_audit",

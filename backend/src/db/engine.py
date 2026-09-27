@@ -1,7 +1,8 @@
 import json
 import os
-from contextlib import asynccontextmanager
-from typing import AsyncGenerator, Iterable
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar, Token
+from typing import AsyncGenerator, Callable, Iterable, Iterator
 
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -38,6 +39,30 @@ event.listen(engine.sync_engine, "connect", _configure_sqlite_connection)
 async_session_factory = sessionmaker(
     engine, class_=AsyncSession, expire_on_commit=False
 )
+
+_session_factory_override: ContextVar[Callable[[], AsyncSession] | None] = ContextVar(
+    "seraph_session_factory_override", default=None
+)
+
+
+@contextmanager
+def override_session_factory(
+    factory: Callable[[], AsyncSession],
+) -> Iterator[None]:
+    """Override the database session factory only in the current task context.
+
+    This is used by isolated runtime evaluations. Context variables keep live
+    application requests running concurrently on the canonical workspace DB.
+    Child tasks created by the isolated operation inherit the scoped factory.
+    """
+    token: Token[Callable[[], AsyncSession] | None] = _session_factory_override.set(
+        factory
+    )
+    try:
+        yield
+    finally:
+        _session_factory_override.reset(token)
+
 
 OPERATOR_REQUIRED_TABLES = (
     "sessions",
@@ -1309,7 +1334,8 @@ async def close_db() -> None:
 @asynccontextmanager
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
     """Yield an async DB session."""
-    async with async_session_factory() as session:
+    factory = _session_factory_override.get() or async_session_factory
+    async with factory() as session:
         try:
             yield session
             await session.commit()

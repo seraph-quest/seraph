@@ -508,6 +508,7 @@ async def test_concurrent_intents_have_one_durable_cas_winner(async_db, monkeypa
                 raise
 
     monkeypatch.setattr("src.workflows.durable_state.get_session", file_session)
+    monkeypatch.setattr("src.workflows.job_runtime.get_session", file_session)
     try:
         _admitted, claimed = await _admit_and_claim(
             "job-744-intent-race",

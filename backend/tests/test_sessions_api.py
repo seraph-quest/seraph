@@ -10,6 +10,8 @@ from src.agent.session import SessionManager
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.tools.process_tools import process_runtime_manager, start_process
 
+_TEST_OPERATOR_ID = "operator:test-bypass"
+
 
 @pytest.fixture
 def sm():
@@ -24,17 +26,27 @@ class TestListSessions:
 
     async def test_with_data(self, client, async_db):
         sm = SessionManager()
-        await sm.get_or_create("s1")
-        await sm.get_or_create("s2")
+        await sm.get_or_create("s1", owner_principal_id=_TEST_OPERATOR_ID)
+        await sm.get_or_create("s2", owner_principal_id=_TEST_OPERATOR_ID)
         res = await client.get("/api/sessions")
         assert res.status_code == 200
         assert len(res.json()) == 2
+
+    async def test_excludes_sessions_owned_by_another_principal(self, client, async_db):
+        sm = SessionManager()
+        await sm.get_or_create("owned", owner_principal_id=_TEST_OPERATOR_ID)
+        await sm.get_or_create("foreign", owner_principal_id="operator:other")
+
+        res = await client.get("/api/sessions")
+
+        assert res.status_code == 200
+        assert [item["id"] for item in res.json()] == ["owned"]
 
 
 class TestSearchSessions:
     async def test_search_success(self, client, async_db):
         sm = SessionManager()
-        await sm.get_or_create("s1")
+        await sm.get_or_create("s1", owner_principal_id=_TEST_OPERATOR_ID)
         await sm.add_message("s1", "user", "Need a weather briefing")
         res = await client.get("/api/sessions/search", params={"q": "weather"})
         assert res.status_code == 200
@@ -44,9 +56,9 @@ class TestSearchSessions:
 
     async def test_search_excludes_current_session(self, client, async_db):
         sm = SessionManager()
-        await sm.get_or_create("s1")
+        await sm.get_or_create("s1", owner_principal_id=_TEST_OPERATOR_ID)
         await sm.add_message("s1", "user", "Need a weather briefing")
-        await sm.get_or_create("s2")
+        await sm.get_or_create("s2", owner_principal_id=_TEST_OPERATOR_ID)
         await sm.add_message("s2", "user", "Need another weather briefing")
 
         res = await client.get(
@@ -56,6 +68,18 @@ class TestSearchSessions:
         assert res.status_code == 200
         payload = res.json()
         assert [item["session_id"] for item in payload] == ["s1"]
+
+    async def test_search_excludes_sessions_owned_by_another_principal(self, client, async_db):
+        sm = SessionManager()
+        await sm.get_or_create("owned", owner_principal_id=_TEST_OPERATOR_ID)
+        await sm.add_message("owned", "user", "Need a weather briefing")
+        await sm.get_or_create("foreign", owner_principal_id="operator:other")
+        await sm.add_message("foreign", "user", "Need a weather briefing")
+
+        res = await client.get("/api/sessions/search", params={"q": "weather"})
+
+        assert res.status_code == 200
+        assert [item["session_id"] for item in res.json()] == ["owned"]
 
     async def test_search_rejects_whitespace_only_query(self, client, async_db):
         res = await client.get("/api/sessions/search", params={"q": "   "})

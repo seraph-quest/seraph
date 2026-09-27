@@ -74,6 +74,92 @@ class DummyTool:
         return self.__call__(*args, **kwargs)
 
 
+def _owned_workflow_audit_events(events):
+    """Bind synthetic audit rows to the authenticated test-bypass operator."""
+    owned_events = []
+    for event in events:
+        owned = dict(event)
+        details = dict(owned.get("details") or {})
+        details.setdefault("owner_kind", "user")
+        details.setdefault("owner_principal_id", "operator:test-bypass")
+        details.setdefault("operator_session_id", "test-auth-bypass")
+        details.setdefault("goal_id", "goal-1")
+        details.setdefault("criterion_id", "criterion-1")
+        details.setdefault("goal_revision", 1)
+        details.setdefault("plan_revision", 1)
+        owned["details"] = details
+        owned_events.append(owned)
+    return owned_events
+
+
+def _workflow_resume_operator_context(run_identity: str) -> dict[str, object]:
+    return {
+        "workflow_run_identity": run_identity,
+        "goal_id": "goal-1",
+        "criterion_id": "criterion-1",
+        "goal_revision": 1,
+        "plan_revision": 1,
+    }
+
+
+async def _seed_durable_workflow_parent_job(
+    run_identity: str,
+    operator,
+    *,
+    session_id: str = "session-1",
+    lease_owner: str | None = None,
+):
+    """Create a running canonical parent row for a resumed child workflow."""
+    from src.workflows.job_runtime import (
+        DurableJobIdentity,
+        DurableJobSpec,
+        durable_job_repository,
+    )
+    from src.workflows.manager import _workflow_canonical_lease_owner
+
+    authority = {
+        "principal": operator.principal.principal_id,
+        "owner_kind": "user",
+        "session_id": session_id,
+        "operator_session_id": operator.session_id,
+        "capability": "workflow_web_brief_to_file",
+    }
+    admitted = await durable_job_repository.admit_job(
+        DurableJobSpec(
+            identity=DurableJobIdentity(
+                job_id=run_identity,
+                owner_kind="user",
+                owner_principal_id=operator.principal.principal_id,
+                job_kind="web-brief-to-file",
+                capability_version="workflow-v2",
+                idempotency_scope="workflow:test-recovery-parent",
+                idempotency_key=run_identity,
+            ),
+            inputs={"query": "seraph"},
+            session_id=session_id,
+            operator_session_id=operator.session_id,
+            declared_authority=authority,
+            max_attempts=2,
+        )
+    )
+    queued = await durable_job_repository.queue_job(
+        run_identity,
+        expected_revision=admitted["revision"],
+    )
+    return await durable_job_repository.claim_job(
+        run_identity,
+        owner=lease_owner or _workflow_canonical_lease_owner(run_identity),
+        expected_revision=queued["revision"],
+        lease_seconds=300,
+    )
+
+
+def _seed_durable_workflow_parent_job_sync(run_identity: str, operator, **kwargs):
+    from src.workflows.manager import _run_async
+
+    return _run_async(_seed_durable_workflow_parent_job(run_identity, operator, **kwargs))
+
+
 def _write_manifest_workflow_package(
     root,
     *,
@@ -711,20 +797,21 @@ class TestWorkflowManager:
         workflow_tool = WorkflowTool(workflow, {"web_search": search, "write_file": write})
         operator = _test_bypass_operator()
         parent_run_identity = "session-1:workflow_web_brief_to_file:parent"
+        parent_job = _seed_durable_workflow_parent_job_sync(parent_run_identity, operator)
+        parent_lease = parent_job["lease"]
         checkpoint_payload = {
+            "record_schema_version": 2,
             "workflow_name": "web-brief-to-file",
             "session_id": "session-1",
+            "operator_session_id": operator.session_id,
             "owner_kind": "user",
             "owner_principal_id": operator.principal.principal_id,
             "durable_run_identity": parent_run_identity,
             "state_source": "durable_workflow_state",
             "orchestration_v2": {
-                "revision": 7,
+                "revision": parent_job["revision"],
                 "lease": {
-                    "owner": _workflow_recovery_owner(operator.principal.principal_id, "session-1"),
-                    "lease_id": "parent-lease",
-                    "expires_at": "2099-01-01T00:00:00+00:00",
-                    "revision": 7,
+                    **parent_lease,
                 },
             },
             "checkpoint_context": {
@@ -765,8 +852,9 @@ class TestWorkflowManager:
                     _seraph_root_run_identity=parent_run_identity,
                     _seraph_branch_kind="retry_failed_step",
                     _seraph_branch_depth=1,
-                    _seraph_parent_revision=7,
-                    _seraph_parent_lease_id="parent-lease",
+                    _seraph_parent_revision=parent_job["revision"],
+                    _seraph_parent_lease_id=parent_lease["lease_id"],
+                    _seraph_parent_fencing_token=parent_lease["fencing_token"],
                 )
         finally:
             reset_runtime_context(tokens)
@@ -822,20 +910,21 @@ class TestWorkflowManager:
         )
         operator = _test_bypass_operator()
         parent_run_identity = "session-1:workflow_web_brief_to_file:parent"
+        parent_job = _seed_durable_workflow_parent_job_sync(parent_run_identity, operator)
+        parent_lease = parent_job["lease"]
         checkpoint_payload = {
+            "record_schema_version": 2,
             "workflow_name": "web-brief-to-file",
             "session_id": "session-1",
+            "operator_session_id": operator.session_id,
             "owner_kind": "user",
             "owner_principal_id": operator.principal.principal_id,
             "durable_run_identity": parent_run_identity,
             "state_source": "durable_workflow_state",
             "orchestration_v2": {
-                "revision": 7,
+                "revision": parent_job["revision"],
                 "lease": {
-                    "owner": _workflow_recovery_owner(operator.principal.principal_id, "session-1"),
-                    "lease_id": "parent-lease",
-                    "expires_at": "2099-01-01T00:00:00+00:00",
-                    "revision": 7,
+                    **parent_lease,
                 },
             },
             "checkpoint_context": {
@@ -876,8 +965,9 @@ class TestWorkflowManager:
                     _seraph_root_run_identity=parent_run_identity,
                     _seraph_branch_kind="retry_failed_step",
                     _seraph_branch_depth=2,
-                    _seraph_parent_revision=7,
-                    _seraph_parent_lease_id="parent-lease",
+                    _seraph_parent_revision=parent_job["revision"],
+                    _seraph_parent_lease_id=parent_lease["lease_id"],
+                    _seraph_parent_fencing_token=parent_lease["fencing_token"],
                 )
         finally:
             reset_runtime_context(tokens)
@@ -1931,7 +2021,7 @@ async def test_workflow_runs_endpoint_projects_history_and_boundaries(client):
     with (
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-result",
                     "session_id": "session-1",
@@ -1971,7 +2061,7 @@ async def test_workflow_runs_endpoint_projects_history_and_boundaries(client):
                         "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
                     },
                 },
-            ],
+            ]),
         ),
         patch(
             "src.api.workflows.approval_repository.list_pending",
@@ -1981,6 +2071,17 @@ async def test_workflow_runs_endpoint_projects_history_and_boundaries(client):
                     "tool_name": "workflow_web_brief_to_file",
                     "session_id": "session-1",
                     "fingerprint": "web-brief",
+                    "workflow_run_identity": "session-1:workflow_web_brief_to_file:web-brief",
+                    "conversation_id": "session-1",
+                    "operator_session_id": "test-auth-bypass",
+                    "owner_kind": "user",
+                    "owner_principal_id": "operator:test-bypass",
+                    "goal_id": "goal-1",
+                    "criterion_id": "criterion-1",
+                    "goal_revision": 1,
+                    "plan_revision": 1,
+                    "status": "pending",
+                    "expires_at": "2099-01-01T00:00:00Z",
                     "summary": "Approval pending for workflow_web_brief_to_file",
                     "risk_level": "medium",
                     "created_at": "2026-03-18T12:01:10Z",
@@ -2025,42 +2126,34 @@ async def test_workflow_runs_endpoint_projects_history_and_boundaries(client):
     assert len(payload["runs"]) == 1
     run = payload["runs"][0]
     assert run["workflow_name"] == "web-brief-to-file"
-    assert run["risk_level"] == "medium"
-    assert run["execution_boundaries"] == ["external_read", "workspace_write"]
+    assert run["status"] == "succeeded"
+    assert "risk_level" not in run
+    assert "execution_boundaries" not in run
     assert run["artifact_paths"] == ["notes/brief.md"]
     assert run["artifact_registry"][0]["artifact_id"].startswith("art_")
     assert run["artifact_registry"][0]["file_path"] == "notes/brief.md"
-    assert run["artifact_registry"][0]["producer"] == "workflow:web-brief-to-file"
-    assert run["artifact_registry"][0]["run_id"] == "session-1:workflow_web_brief_to_file:web-brief"
-    assert run["artifact_registry"][0]["trust_boundary"]["status"] == "stable"
-    assert run["run_fingerprint"] == "web-brief"
+    assert set(run["artifact_registry"][0]) == {"artifact_id", "file_path", "content_sha256"}
+    assert "run_fingerprint" not in run
     assert run["run_identity"] == "session-1:workflow_web_brief_to_file:web-brief"
     assert run["step_records"][0]["tool"] == "web_search"
+    assert run["step_records"][0]["id"].startswith("redacted_workflow_step_")
+    assert "arguments" not in run["step_records"][0]
+    assert "result" not in run["step_records"][0]
     assert run["pending_approval_count"] == 1
-    assert run["pending_approval_ids"] == ["approval-1"]
-    assert run["pending_approvals"][0]["resume_message"] == "Continue the web brief once approved"
     assert run["thread_id"] == "session-1"
-    assert run["thread_label"] == "Research thread"
+    assert run["thread_label"] == "workflow thread"
     assert run["replay_allowed"] is False
     assert run["replay_block_reason"] == "pending_approval"
     assert run["availability"] == "ready"
-    assert run["parameter_schema"]["file_path"]["type"] == "string"
-    assert run["resume_from_step"] == "approval_gate"
-    assert run["resume_checkpoint_label"] == "Approval gate"
+    assert run["resume_from_step"] is None
+    assert run["resume_checkpoint_label"] is None
     assert run["branch_kind"] == "approval_resume"
     assert run["parent_run_identity"] is None
     assert run["root_run_identity"] == "session-1:workflow_web_brief_to_file:web-brief"
-    assert run["checkpoint_candidates"][0]["step_id"] == "approval_gate"
-    assert run["checkpoint_candidates"][1]["step_id"] == "search"
-    assert run["resume_plan"]["source_run_identity"] == run["run_identity"]
-    assert run["resume_plan"]["parent_run_identity"] == run["run_identity"]
-    assert run["resume_plan"]["branch_kind"] == "approval_resume"
-    assert run["resume_plan"]["checkpoint_candidates"][0]["kind"] == "approval_gate"
-    assert run["thread_continue_message"] == "Continue the web brief once approved"
-    assert run["approval_recovery_message"]
-    assert run["timeline"][0]["kind"] == "workflow_started"
-    assert run["timeline"][1]["kind"] == "workflow_step_succeeded"
-    assert run["timeline"][2]["kind"] == "approval_pending"
+    assert run["checkpoint_candidates"] == []
+    assert "resume_plan" not in run
+    assert run["thread_continue_message"] == "Use the live workflow recovery controls to continue this run."
+    assert run["approval_recovery_message"] is None
 
 
 @pytest.mark.asyncio
@@ -2068,7 +2161,7 @@ async def test_workflow_runs_endpoint_uses_stored_fingerprint_for_redacted_argum
     with (
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-result",
                     "session_id": "session-1",
@@ -2101,7 +2194,7 @@ async def test_workflow_runs_endpoint_uses_stored_fingerprint_for_redacted_argum
                         },
                     },
                 },
-            ],
+            ]),
         ),
         patch(
             "src.api.workflows.approval_repository.list_pending",
@@ -2111,6 +2204,10 @@ async def test_workflow_runs_endpoint_uses_stored_fingerprint_for_redacted_argum
                     "tool_name": "workflow_web_brief_to_file",
                     "session_id": "session-1",
                     "fingerprint": "web-brief-secret",
+                    "conversation_id": "session-1",
+                    "operator_session_id": "test-auth-bypass",
+                    "owner_kind": "user",
+                    "owner_principal_id": "operator:test-bypass",
                     "summary": "Approval pending for workflow_web_brief_to_file",
                     "risk_level": "medium",
                     "created_at": "2026-03-18T12:01:10Z",
@@ -2155,12 +2252,17 @@ async def test_workflow_runs_endpoint_uses_stored_fingerprint_for_redacted_argum
 
     assert response.status_code == 200
     run = response.json()["runs"][0]
-    assert run["run_fingerprint"] == "web-brief-secret"
+    assert "run_fingerprint" not in run
+    assert run["run_identity"] == "session-1:workflow_web_brief_to_file:web-brief-secret"
     assert run["pending_approval_count"] == 1
-    assert run["pending_approvals"][0]["id"] == "approval-1"
     assert run["replay_block_reason"] == "approval_context_missing"
-    assert run["thread_continue_message"] is None
-    assert "predates trust-boundary tracking" in run["approval_recovery_message"]
+    assert run["thread_continue_message"] == "Use the live workflow recovery controls to continue this run."
+    assert run["approval_recovery_message"] is None
+    assert run["replay_inputs"] == {
+        "redacted": True,
+        "argument_keys": ["file_path", "query", "secret_ref"],
+        "requires_live_control": True,
+    }
 
 
 @pytest.mark.asyncio
@@ -2189,7 +2291,7 @@ async def test_workflow_runs_endpoint_hides_resume_metadata_when_pending_run_lac
     with (
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-call",
                     "session_id": "session-1",
@@ -2202,7 +2304,7 @@ async def test_workflow_runs_endpoint_hides_resume_metadata_when_pending_run_lac
                         "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
                     },
                 },
-            ],
+            ]),
         ),
         patch(
             "src.api.workflows.approval_repository.list_pending",
@@ -2267,13 +2369,13 @@ async def test_workflow_runs_endpoint_hides_resume_metadata_when_pending_run_lac
     assert run["resume_from_step"] is None
     assert run["resume_checkpoint_label"] is None
     assert run["checkpoint_candidates"] == []
-    assert run["resume_plan"] is None
-    assert run["thread_continue_message"] is None
-    assert "predates trust-boundary tracking" in run["approval_recovery_message"]
+    assert "resume_plan" not in run
+    assert run["thread_continue_message"] == "Use the live workflow recovery controls to continue this run."
+    assert run["approval_recovery_message"] is None
     assert run["trust_boundary"]["status"] == "missing"
     assert run["trust_boundary"]["blocked"] is True
     assert run["trust_boundary"]["reason"] == "approval_context_missing"
-    assert run["trust_boundary"]["current"]["authenticated_source"] is True
+    assert "current" not in run["trust_boundary"]
 
 
 @pytest.mark.asyncio
@@ -2281,7 +2383,7 @@ async def test_workflow_runs_endpoint_marks_waiting_runs_as_awaiting_approval(cl
     with (
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-call",
                     "session_id": "session-1",
@@ -2289,9 +2391,12 @@ async def test_workflow_runs_endpoint_marks_waiting_runs_as_awaiting_approval(cl
                     "tool_name": "workflow_web_brief_to_file",
                     "summary": "Calling workflow",
                     "created_at": "2026-03-18T12:01:00Z",
-                    "details": {"arguments": {"query": "seraph", "file_path": "notes/brief.md"}},
+                    "details": {
+                        "run_fingerprint": "waiting-approval",
+                        "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
+                    },
                 },
-            ],
+            ]),
         ),
         patch(
             "src.api.workflows.approval_repository.list_pending",
@@ -2300,7 +2405,18 @@ async def test_workflow_runs_endpoint_marks_waiting_runs_as_awaiting_approval(cl
                     "id": "approval-1",
                     "tool_name": "workflow_web_brief_to_file",
                     "session_id": "session-1",
-                    "fingerprint": "none",
+                    "fingerprint": "waiting-approval",
+                    "workflow_run_identity": "session-1:workflow_web_brief_to_file:waiting-approval",
+                    "conversation_id": "session-1",
+                    "operator_session_id": "test-auth-bypass",
+                    "owner_kind": "user",
+                    "owner_principal_id": "operator:test-bypass",
+                    "goal_id": "goal-1",
+                    "criterion_id": "criterion-1",
+                    "goal_revision": 1,
+                    "plan_revision": 1,
+                    "status": "pending",
+                    "expires_at": "2099-01-01T00:00:00Z",
                     "summary": "Approval pending for workflow_web_brief_to_file",
                     "risk_level": "medium",
                     "created_at": "2026-03-18T12:01:10Z",
@@ -2341,8 +2457,8 @@ async def test_workflow_runs_endpoint_marks_waiting_runs_as_awaiting_approval(cl
     assert run["status"] == "awaiting_approval"
     assert run["pending_approval_count"] == 1
     assert run["availability"] == "blocked"
-    assert any(action["type"] == "set_tool_policy" for action in run["replay_recommended_actions"])
-    assert run["timeline"][1]["kind"] == "approval_pending"
+    assert run["replay_recommended_actions"] == []
+    assert "timeline" not in run
 
 
 @pytest.mark.asyncio
@@ -2350,7 +2466,7 @@ async def test_workflow_runs_endpoint_does_not_suggest_tool_policy_for_unrelated
     with (
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-result",
                     "session_id": "session-1",
@@ -2388,7 +2504,7 @@ async def test_workflow_runs_endpoint_does_not_suggest_tool_policy_for_unrelated
                     "created_at": "2026-03-18T12:01:00Z",
                     "details": {"run_fingerprint": "web-brief-error", "arguments": {"query": "seraph"}},
                 },
-            ],
+            ]),
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
         patch(
@@ -2433,7 +2549,7 @@ async def test_workflow_resume_plan_endpoint_returns_structured_branch_metadata(
     with (
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-result",
                     "session_id": "session-1",
@@ -2487,9 +2603,10 @@ async def test_workflow_resume_plan_endpoint_returns_structured_branch_metadata(
                         "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
                     },
                 },
-            ],
+            ]),
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
+        patch("src.api.workflows._workflow_current_goal_binding_detail", return_value=None),
         patch(
             "src.api.workflows.workflow_manager.get_tool_metadata",
             return_value={
@@ -2522,7 +2639,12 @@ async def test_workflow_resume_plan_endpoint_returns_structured_branch_metadata(
     ):
         response = await client.post(
             "/api/workflows/runs/session-1:workflow_web_brief_to_file:web-brief-error/resume-plan",
-            json={"step_id": "save"},
+            json={
+                "step_id": "save",
+                "operator_context": _workflow_resume_operator_context(
+                    "session-1:workflow_web_brief_to_file:web-brief-error"
+                ),
+            },
         )
 
     assert response.status_code == 200
@@ -2530,19 +2652,23 @@ async def test_workflow_resume_plan_endpoint_returns_structured_branch_metadata(
     assert payload["run_identity"] == "session-1:workflow_web_brief_to_file:web-brief-error"
     assert payload["workflow_name"] == "web-brief-to-file"
     assert payload["resume_plan"]["branch_kind"] == "retry_failed_step"
-    assert payload["resume_plan"]["resume_from_step"] == "save"
-    assert payload["resume_plan"]["resume_checkpoint_label"] == "save (write_file)"
+    assert payload["resume_plan"]["resume_from_step"].startswith("redacted_workflow_step_")
+    assert payload["resume_plan"]["resume_checkpoint_label"] == "checkpoint"
     assert payload["resume_plan"]["parent_run_identity"] == payload["run_identity"]
     assert payload["resume_plan"]["root_run_identity"] == payload["run_identity"]
     assert payload["resume_plan"]["requires_manual_execution"] is True
-    assert payload["resume_plan"]["checkpoint_candidates"][1]["step_id"] == "save"
-    assert '_seraph_resume_from_step="save"' in payload["resume_plan"]["draft"]
-    assert "_seraph_parent_run_identity=" in payload["resume_plan"]["draft"]
+    assert payload["resume_plan"]["draft_available"] is True
+    assert payload["resume_plan"]["draft"] is None
+    assert payload["resume_plan"]["checkpoint_candidates"][1]["step_id"].startswith(
+        "redacted_workflow_step_"
+    )
+    assert "save" not in json.dumps(payload["resume_plan"])
 
 
 @pytest.mark.asyncio
 async def test_workflow_run_control_records_live_operator_recovery_control(client, async_db):
     run_identity = "session-live:workflow_web_brief_to_file:control"
+    operator = _test_bypass_operator()
     await workflow_state_repository.create_run(
         run_identity=run_identity,
         workflow_name="web-brief-to-file",
@@ -2550,7 +2676,15 @@ async def test_workflow_run_control_records_live_operator_recovery_control(clien
         session_id="session-live",
         run_fingerprint="control",
         arguments={"query": "seraph", "file_path": "notes/brief.md"},
-        approval_context={"risk_level": "medium", "execution_boundaries": ["workspace_write"]},
+        approval_context={
+            "risk_level": "medium",
+            "execution_boundaries": ["workspace_write"],
+            "goal_id": "goal-1",
+            "criterion_id": "criterion-1",
+            "goal_revision": 1,
+            "plan_revision": 1,
+        },
+        operator_session_id="test-auth-bypass",
         owner_kind="user",
         owner_principal_id="operator:test-bypass",
     )
@@ -2578,9 +2712,43 @@ async def test_workflow_run_control_records_live_operator_recovery_control(clien
         last_completed_step_id="write_file",
         error="write_file blocked by policy",
     )
+    projected_run = {
+        "run_identity": run_identity,
+        "root_run_identity": run_identity,
+        "workflow_name": "web-brief-to-file",
+        "tool_name": "workflow_web_brief_to_file",
+        "session_id": "session-live",
+        "operator_session_id": operator.session_id,
+        "owner_kind": "user",
+        "owner_principal_id": operator.principal.principal_id,
+        "goal_id": "goal-1",
+        "criterion_id": "criterion-1",
+        "goal_revision": 1,
+        "plan_revision": 1,
+        "status": "failed",
+        "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
+        "approval_context": {
+            "risk_level": "medium",
+            "execution_boundaries": ["workspace_write"],
+            "goal_id": "goal-1",
+            "criterion_id": "criterion-1",
+            "goal_revision": 1,
+            "plan_revision": 1,
+        },
+        "continued_error_steps": ["write_file"],
+        "step_records": [{"id": "write_file", "tool": "write_file", "status": "failed"}],
+        "checkpoint_context_available": True,
+        "replay_allowed": True,
+        "replay_block_reason": None,
+    }
 
     with (
         patch("src.api.workflows.audit_repository.list_events", return_value=[]),
+        patch(
+            "src.api.workflows._find_workflow_run_for_control",
+            new_callable=AsyncMock,
+            return_value=projected_run,
+        ),
         patch(
             "src.api.workflows.workflow_manager.get_tool_metadata",
             return_value={
@@ -2591,6 +2759,7 @@ async def test_workflow_run_control_records_live_operator_recovery_control(clien
         ),
         patch("src.api.workflows.session_manager.list_sessions", return_value=[{"id": "session-live", "title": "Live work"}]),
         patch("src.api.workflows.get_current_tool_policy_mode", return_value="balanced"),
+        patch("src.api.workflows._workflow_current_goal_binding_detail", return_value=None),
     ):
         response = await client.post(
             f"/api/workflows/runs/{run_identity}/control",
@@ -2599,11 +2768,11 @@ async def test_workflow_run_control_records_live_operator_recovery_control(clien
                 "step_id": "write_file",
                 "target": "write_file",
                 "owner": "cockpit",
-                "operator_context": {"source": "cockpit"},
+                "operator_context": _workflow_resume_operator_context(run_identity),
             },
         )
 
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     payload = response.json()
     assert payload["status"] == "recorded"
     assert payload["action"] == "retry"
@@ -2613,13 +2782,14 @@ async def test_workflow_run_control_records_live_operator_recovery_control(clien
     assert payload["recovery_receipt"]["status"] == "ready"
     assert payload["transition_receipt"]["status"] == "recorded"
     assert payload["resume_plan"]["branch_kind"] == "retry_failed_step"
-    assert payload["resume_plan"]["resume_from_step"] == "write_file"
+    assert payload["resume_plan"]["resume_from_step"].startswith("redacted_workflow_step_")
     assert payload["run"]["run_identity"] == run_identity
 
 
 @pytest.mark.asyncio
 async def test_workflow_run_control_refuses_blocked_live_lease_without_resume_plan(client, async_db):
     run_identity = "session-live:workflow_web_brief_to_file:lease-blocked"
+    operator = _test_bypass_operator()
     await workflow_state_repository.create_run(
         run_identity=run_identity,
         workflow_name="web-brief-to-file",
@@ -2627,7 +2797,15 @@ async def test_workflow_run_control_refuses_blocked_live_lease_without_resume_pl
         session_id="session-live",
         run_fingerprint="lease-blocked",
         arguments={"query": "seraph", "file_path": "notes/brief.md"},
-        approval_context={"risk_level": "medium", "execution_boundaries": ["workspace_write"]},
+        approval_context={
+            "risk_level": "medium",
+            "execution_boundaries": ["workspace_write"],
+            "goal_id": "goal-1",
+            "criterion_id": "criterion-1",
+            "goal_revision": 1,
+            "plan_revision": 1,
+        },
+        operator_session_id=operator.session_id,
         owner_kind="user",
         owner_principal_id="operator:test-bypass",
     )
@@ -2659,9 +2837,36 @@ async def test_workflow_run_control_refuses_blocked_live_lease_without_resume_pl
         run_identity=run_identity,
         owner="another-worker",
     )
+    projected_run = {
+        "run_identity": run_identity,
+        "root_run_identity": run_identity,
+        "workflow_name": "web-brief-to-file",
+        "tool_name": "workflow_web_brief_to_file",
+        "session_id": "session-live",
+        "operator_session_id": operator.session_id,
+        "owner_kind": "user",
+        "owner_principal_id": operator.principal.principal_id,
+        "goal_id": "goal-1",
+        "criterion_id": "criterion-1",
+        "goal_revision": 1,
+        "plan_revision": 1,
+        "status": "failed",
+        "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
+        "approval_context": {"risk_level": "medium", "execution_boundaries": ["workspace_write"]},
+        "continued_error_steps": ["write_file"],
+        "step_records": [{"id": "write_file", "tool": "write_file", "status": "failed"}],
+        "checkpoint_context_available": True,
+        "replay_allowed": True,
+        "replay_block_reason": None,
+    }
 
     with (
         patch("src.api.workflows.audit_repository.list_events", return_value=[]),
+        patch(
+            "src.api.workflows._find_workflow_run_for_control",
+            new_callable=AsyncMock,
+            return_value=projected_run,
+        ),
         patch(
             "src.api.workflows.workflow_manager.get_tool_metadata",
             return_value={
@@ -2672,6 +2877,7 @@ async def test_workflow_run_control_refuses_blocked_live_lease_without_resume_pl
         ),
         patch("src.api.workflows.session_manager.list_sessions", return_value=[{"id": "session-live", "title": "Live work"}]),
         patch("src.api.workflows.get_current_tool_policy_mode", return_value="balanced"),
+        patch("src.api.workflows._workflow_current_goal_binding_detail", return_value=None),
     ):
         response = await client.post(
             f"/api/workflows/runs/{run_identity}/control",
@@ -2680,7 +2886,7 @@ async def test_workflow_run_control_refuses_blocked_live_lease_without_resume_pl
                 "step_id": "write_file",
                 "target": "write_file",
                 "owner": "spoofed-worker",
-                "operator_context": {"source": "cockpit"},
+                "operator_context": _workflow_resume_operator_context(run_identity),
             },
         )
 
@@ -2697,7 +2903,7 @@ async def test_workflow_runs_endpoint_hides_later_retry_draft_without_checkpoint
     with (
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-result",
                     "session_id": "session-1",
@@ -2749,7 +2955,7 @@ async def test_workflow_runs_endpoint_hides_later_retry_draft_without_checkpoint
                         "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
                     },
                 },
-            ],
+            ]),
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
         patch(
@@ -2788,9 +2994,11 @@ async def test_workflow_runs_endpoint_hides_later_retry_draft_without_checkpoint
     run = response.json()["runs"][0]
     assert run["checkpoint_context_available"] is False
     assert run["retry_from_step_draft"] is None
-    assert run["checkpoint_candidates"][0]["step_id"] == "search"
+    assert run["checkpoint_candidates"][0]["step_id"].startswith("redacted_workflow_step_")
+    assert run["checkpoint_candidates"][0]["step_id"] != "search"
     assert run["checkpoint_candidates"][0]["resume_supported"] is True
-    assert run["checkpoint_candidates"][1]["step_id"] == "save"
+    assert run["checkpoint_candidates"][1]["step_id"].startswith("redacted_workflow_step_")
+    assert run["checkpoint_candidates"][1]["step_id"] != "save"
     assert run["checkpoint_candidates"][1]["resume_supported"] is False
     assert run["checkpoint_candidates"][1]["resume_draft"] is None
 
@@ -2800,7 +3008,7 @@ async def test_workflow_resume_plan_rejects_approval_gate_for_non_approval_run(c
     with (
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-result",
                     "session_id": "session-1",
@@ -2818,9 +3026,10 @@ async def test_workflow_resume_plan_rejects_approval_gate_for_non_approval_run(c
                         "continued_error_steps": [],
                     },
                 },
-            ],
+            ]),
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
+        patch("src.api.workflows._workflow_current_goal_binding_detail", return_value=None),
         patch(
             "src.api.workflows.workflow_manager.get_tool_metadata",
             return_value={"risk_level": "medium", "execution_boundaries": ["external_read"], "accepts_secret_refs": False},
@@ -2834,11 +3043,16 @@ async def test_workflow_resume_plan_rejects_approval_gate_for_non_approval_run(c
     ):
         response = await client.post(
             "/api/workflows/runs/session-1:workflow_web_brief_to_file:web-brief-ok/resume-plan",
-            json={"step_id": "approval_gate"},
+            json={
+                "step_id": "approval_gate",
+                "operator_context": _workflow_resume_operator_context(
+                    "session-1:workflow_web_brief_to_file:web-brief-ok"
+                ),
+            },
         )
 
     assert response.status_code == 404
-    assert "approval_gate" in response.json()["detail"]
+    assert response.json()["detail"] == "workflow_checkpoint_not_found"
 
 
 @pytest.mark.asyncio
@@ -2846,7 +3060,7 @@ async def test_workflow_resume_plan_rejects_noninitial_checkpoint_without_reusab
     with (
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-result",
                     "session_id": "session-1",
@@ -2879,9 +3093,10 @@ async def test_workflow_resume_plan_rejects_noninitial_checkpoint_without_reusab
                         "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
                     },
                 },
-            ],
+            ]),
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
+        patch("src.api.workflows._workflow_current_goal_binding_detail", return_value=None),
         patch(
             "src.api.workflows.workflow_manager.get_tool_metadata",
             return_value={
@@ -2914,7 +3129,12 @@ async def test_workflow_resume_plan_rejects_noninitial_checkpoint_without_reusab
     ):
         response = await client.post(
             "/api/workflows/runs/session-1:workflow_web_brief_to_file:web-brief-no-checkpoint/resume-plan",
-            json={"step_id": "save"},
+            json={
+                "step_id": "save",
+                "operator_context": _workflow_resume_operator_context(
+                    "session-1:workflow_web_brief_to_file:web-brief-no-checkpoint"
+                ),
+            },
         )
 
     assert response.status_code == 409
@@ -2926,7 +3146,7 @@ async def test_workflow_resume_plan_blocks_branching_past_pending_approval_gate(
     with (
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-call",
                     "session_id": "session-1",
@@ -2956,8 +3176,9 @@ async def test_workflow_resume_plan_blocks_branching_past_pending_approval_gate(
                         "continued_error_steps": [],
                     },
                 },
-            ],
+            ]),
         ),
+        patch("src.api.workflows._workflow_current_goal_binding_detail", return_value=None),
         patch(
             "src.api.workflows.approval_repository.list_pending",
             return_value=[{
@@ -2984,11 +3205,16 @@ async def test_workflow_resume_plan_blocks_branching_past_pending_approval_gate(
     ):
         response = await client.post(
             "/api/workflows/runs/session-1:workflow_web_brief_to_file:web-brief-pending/resume-plan",
-            json={"step_id": "search"},
+            json={
+                "step_id": "search",
+                "operator_context": _workflow_resume_operator_context(
+                    "session-1:workflow_web_brief_to_file:web-brief-pending"
+                ),
+            },
         )
 
     assert response.status_code == 409
-    assert "approval gate" in response.json()["detail"]
+    assert response.json()["detail"] == "workflow_replay_blocked:pending_approval"
 
 
 @pytest.mark.asyncio
@@ -2997,6 +3223,13 @@ async def test_workflow_resume_plan_falls_back_to_scoped_run_lookup(client):
     fallback_run = {
         "run_identity": run_identity,
         "workflow_name": "web-brief-to-file",
+        "owner_kind": "user",
+        "owner_principal_id": "operator:test-bypass",
+        "operator_session_id": "test-auth-bypass",
+        "goal_id": "goal-1",
+        "criterion_id": "criterion-1",
+        "goal_revision": 1,
+        "plan_revision": 1,
         "pending_approvals": [],
         "continued_error_steps": ["save"],
         "step_records": [
@@ -3013,6 +3246,7 @@ async def test_workflow_resume_plan_falls_back_to_scoped_run_lookup(client):
 
     with (
         patch("src.api.workflows._list_workflow_runs", AsyncMock(side_effect=[[], [fallback_run]])) as list_runs,
+        patch("src.api.workflows._workflow_current_goal_binding_detail", return_value=None),
         patch(
             "src.api.workflows._load_workflow_events_for_identity",
             AsyncMock(return_value=([{"id": "evt"}], "session-1")),
@@ -3020,13 +3254,17 @@ async def test_workflow_resume_plan_falls_back_to_scoped_run_lookup(client):
     ):
         response = await client.post(
             f"/api/workflows/runs/{run_identity}/resume-plan",
-            json={"step_id": "save"},
+            json={
+                "step_id": "save",
+                "operator_context": _workflow_resume_operator_context(run_identity),
+            },
         )
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["run_identity"] == run_identity
-    assert payload["resume_plan"]["resume_from_step"] == "save"
+    assert payload["resume_plan"]["resume_from_step"].startswith("redacted_workflow_step_")
+    assert "save" not in json.dumps(payload["resume_plan"])
     assert list_runs.await_count == 2
     load_events.assert_awaited_once_with(run_identity)
 
@@ -3036,7 +3274,7 @@ async def test_workflow_runs_endpoint_disambiguates_duplicate_fingerprinted_runs
     with (
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-call-older",
                     "session_id": "session-1",
@@ -3095,7 +3333,7 @@ async def test_workflow_runs_endpoint_disambiguates_duplicate_fingerprinted_runs
                         "continued_error_steps": [],
                     },
                 },
-            ],
+            ]),
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
         patch(
@@ -3134,9 +3372,17 @@ async def test_workflow_runs_endpoint_disambiguates_duplicate_fingerprinted_runs
     runs = response.json()["runs"]
     assert len(runs) == 2
     assert runs[0]["run_identity"] == "session-1:workflow_web_brief_to_file:shared-fingerprint:evt-call-newer"
-    assert runs[0]["replay_inputs"] == {"query": "newer", "file_path": "notes/newer.md"}
+    assert runs[0]["replay_inputs"] == {
+        "redacted": True,
+        "argument_keys": ["file_path", "query"],
+        "requires_live_control": True,
+    }
     assert runs[1]["run_identity"] == "session-1:workflow_web_brief_to_file:shared-fingerprint:evt-call-older"
-    assert runs[1]["replay_inputs"] == {"query": "older", "file_path": "notes/older.md"}
+    assert runs[1]["replay_inputs"] == {
+        "redacted": True,
+        "argument_keys": ["file_path", "query"],
+        "requires_live_control": True,
+    }
 
 
 @pytest.mark.asyncio
@@ -3148,6 +3394,10 @@ async def test_workflow_runs_endpoint_blocks_replay_for_durable_only_rows(client
         "workflow_name": "web-brief-to-file",
         "tool_name": "workflow_web_brief_to_file",
         "session_id": "session-1",
+        "conversation_id": "session-1",
+        "operator_session_id": "test-auth-bypass",
+        "owner_kind": "user",
+        "owner_principal_id": "operator:test-bypass",
         "status": "succeeded",
         "run_fingerprint": "web-brief-secret",
         "arguments": {"query": "[redacted]"},
@@ -3186,11 +3436,11 @@ async def test_workflow_runs_endpoint_blocks_replay_for_durable_only_rows(client
 
     assert response.status_code == 200
     run = response.json()["runs"][0]
-    assert run["audit_projection_available"] is False
+    assert "audit_projection_available" not in run
     assert run["availability"] == "audit_projection_missing"
     assert run["replay_allowed"] is False
     assert run["replay_block_reason"] == "durable_projection_missing"
-    assert run["resume_plan"] is None
+    assert "resume_plan" not in run
 
 
 @pytest.mark.asyncio
@@ -3210,9 +3460,13 @@ async def test_workflow_runs_endpoint_uses_approval_context_in_pending_fingerpri
     )
 
     with (
+        patch("src.api.workflows.settings.deployment_environment", "test"),
+        patch("src.api.workflows.settings.operator_auth_allow_unauthenticated_tests", True),
+        patch("src.api.workflows.settings.operator_auth_secret", ""),
+        patch("src.api.workflows.settings.operator_auth_secret_hash", ""),
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-call",
                     "session_id": "session-1",
@@ -3225,7 +3479,7 @@ async def test_workflow_runs_endpoint_uses_approval_context_in_pending_fingerpri
                         "approval_context": approval_context,
                     },
                 },
-            ],
+            ]),
         ),
         patch(
             "src.api.workflows.approval_repository.list_pending",
@@ -3273,9 +3527,12 @@ async def test_workflow_runs_endpoint_uses_approval_context_in_pending_fingerpri
 
     assert response.status_code == 200
     run = response.json()["runs"][0]
-    assert run["run_fingerprint"] == expected_fingerprint
     assert run["pending_approval_count"] == 1
-    assert run["pending_approval_ids"] == ["approval-1"]
+    # The authenticated projection correlates the approval through its opaque
+    # run identity without exposing a separate fingerprint or approval context.
+    assert "run_fingerprint" not in run
+    assert run["run_identity"].endswith(f":{expected_fingerprint}:evt-call")
+    assert "approval_context" not in run
 
 
 @pytest.mark.asyncio
@@ -3296,9 +3553,13 @@ async def test_workflow_runs_endpoint_blocks_replay_when_approval_context_change
     }
 
     with (
+        patch("src.api.workflows.settings.deployment_environment", "test"),
+        patch("src.api.workflows.settings.operator_auth_allow_unauthenticated_tests", True),
+        patch("src.api.workflows.settings.operator_auth_secret", ""),
+        patch("src.api.workflows.settings.operator_auth_secret_hash", ""),
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-result",
                     "session_id": "session-1",
@@ -3329,7 +3590,7 @@ async def test_workflow_runs_endpoint_blocks_replay_when_approval_context_change
                         "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
                     },
                 },
-            ],
+            ]),
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
         patch("src.api.workflows.get_base_tools_and_active_skills", return_value=([], [], "balanced")),
@@ -3369,23 +3630,19 @@ async def test_workflow_runs_endpoint_blocks_replay_when_approval_context_change
 
     assert response.status_code == 200
     run = response.json()["runs"][0]
-    assert run["approval_context_mismatch"] is True
     assert run["replay_allowed"] is False
     assert run["replay_block_reason"] == "approval_context_changed"
-    assert run["risk_level"] == "medium"
-    assert run["execution_boundaries"] == ["external_read", "workspace_write"]
     assert run["resume_from_step"] is None
     assert run["resume_checkpoint_label"] is None
     assert run["checkpoint_candidates"] == []
-    assert run["resume_plan"] is None
-    assert "trust boundary" in run["approval_recovery_message"]
     assert run["trust_boundary"]["status"] == "changed"
     assert run["trust_boundary"]["blocked"] is True
     assert run["trust_boundary"]["reason"] == "approval_context_changed"
-    assert "risk_level" in run["trust_boundary"]["changed_fields"]
-    assert "execution_boundaries" in run["trust_boundary"]["changed_fields"]
-    assert run["trust_boundary"]["recorded"]["risk_level"] == "medium"
-    assert run["trust_boundary"]["current"]["risk_level"] == "high"
+    assert run["approval_recovery_message"] is None
+    assert run.get("resume_plan") is None
+    assert "approval_context_mismatch" not in run
+    assert "current_approval_context" not in run
+    assert "approval_context" not in run
 
 
 @pytest.mark.asyncio
@@ -3408,7 +3665,7 @@ async def test_workflow_runs_endpoint_hides_repair_actions_when_boundary_drift_b
     with (
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-failed",
                     "session_id": "session-1",
@@ -3446,7 +3703,7 @@ async def test_workflow_runs_endpoint_hides_repair_actions_when_boundary_drift_b
                         "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
                     },
                 },
-            ],
+            ]),
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
         patch("src.api.workflows.get_base_tools_and_active_skills", return_value=([], [], "balanced")),
@@ -3489,7 +3746,7 @@ async def test_workflow_runs_endpoint_hides_repair_actions_when_boundary_drift_b
     assert run["replay_block_reason"] == "approval_context_changed"
     assert run["replay_recommended_actions"] == []
     assert run["step_records"][1]["recovery_actions"] == []
-    assert run["step_records"][1]["recovery_hint"] is None
+    assert "recovery_hint" not in run["step_records"][1]
     assert run["step_records"][1]["is_recoverable"] is False
 
 
@@ -3511,9 +3768,13 @@ async def test_workflow_runs_endpoint_ignores_approval_context_list_reordering(c
     }
 
     with (
+        patch("src.api.workflows.settings.deployment_environment", "test"),
+        patch("src.api.workflows.settings.operator_auth_allow_unauthenticated_tests", True),
+        patch("src.api.workflows.settings.operator_auth_secret", ""),
+        patch("src.api.workflows.settings.operator_auth_secret_hash", ""),
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-result",
                     "session_id": "session-1",
@@ -3544,7 +3805,7 @@ async def test_workflow_runs_endpoint_ignores_approval_context_list_reordering(c
                         "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
                     },
                 },
-            ],
+            ]),
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
         patch(
@@ -3582,9 +3843,9 @@ async def test_workflow_runs_endpoint_ignores_approval_context_list_reordering(c
 
     assert response.status_code == 200
     run = response.json()["runs"][0]
-    assert run["approval_context_mismatch"] is False
     assert run["replay_allowed"] is True
     assert run["replay_block_reason"] is None
+    assert "approval_context_mismatch" not in run
 
 
 @pytest.mark.asyncio
@@ -3623,7 +3884,7 @@ async def test_workflow_runs_endpoint_detects_authenticated_source_context_drift
     with (
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-result",
                     "session_id": "session-1",
@@ -3654,7 +3915,7 @@ async def test_workflow_runs_endpoint_detects_authenticated_source_context_drift
                         "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
                     },
                 },
-            ],
+            ]),
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
         patch(
@@ -3701,21 +3962,15 @@ async def test_workflow_runs_endpoint_detects_authenticated_source_context_drift
 
     assert response.status_code == 200
     run = response.json()["runs"][0]
-    assert run["approval_context_mismatch"] is True
+    assert run["trust_boundary"]["status"] == "changed"
+    assert run["trust_boundary"]["blocked"] is True
+    assert run["trust_boundary"]["reason"] == "approval_context_changed"
     assert run["replay_allowed"] is False
     assert run["replay_block_reason"] == "approval_context_changed"
     assert run["checkpoint_candidates"] == []
-    assert run["resume_plan"] is None
-    assert run["current_approval_context"]["authenticated_source"] is True
-    assert run["current_approval_context"]["source_systems"] == [
-        {
-            "server_name": "github",
-            "hostname": "api.github.com",
-            "source": "extension",
-            "authenticated_source": True,
-            "credential_sources": ["vault:github_token"],
-        }
-    ]
+    assert "resume_plan" not in run
+    assert "current_approval_context" not in run
+    assert "approval_context_mismatch" not in run
 
 
 @pytest.mark.asyncio
@@ -3776,7 +4031,7 @@ async def test_workflow_runs_endpoint_ignores_authenticated_source_system_reorde
     with (
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-result",
                     "session_id": "session-1",
@@ -3807,7 +4062,7 @@ async def test_workflow_runs_endpoint_ignores_authenticated_source_system_reorde
                         "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
                     },
                 },
-            ],
+            ]),
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
         patch(
@@ -3847,25 +4102,13 @@ async def test_workflow_runs_endpoint_ignores_authenticated_source_system_reorde
 
     assert response.status_code == 200
     run = response.json()["runs"][0]
-    assert run["approval_context_mismatch"] is False
+    assert run["trust_boundary"]["status"] == "stable"
+    assert run["trust_boundary"]["blocked"] is False
+    assert run["trust_boundary"]["reason"] is None
     assert run["replay_allowed"] is True
     assert run["replay_block_reason"] is None
-    assert run["current_approval_context"]["source_systems"] == [
-        {
-            "server_name": "github",
-            "hostname": "api.github.com",
-            "source": "extension",
-            "authenticated_source": True,
-            "credential_sources": ["env:GITHUB_TOKEN", "vault:github_token"],
-        },
-        {
-            "server_name": "jira",
-            "hostname": "acme.atlassian.net",
-            "source": "manual",
-            "authenticated_source": True,
-            "credential_sources": ["vault:jira_token"],
-        },
-    ]
+    assert "current_approval_context" not in run
+    assert "approval_context_mismatch" not in run
 
 
 @pytest.mark.asyncio
@@ -3894,7 +4137,7 @@ async def test_workflow_runs_endpoint_detects_delegated_specialist_context_drift
     with (
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-result",
                     "session_id": "session-1",
@@ -3925,7 +4168,7 @@ async def test_workflow_runs_endpoint_detects_delegated_specialist_context_drift
                         "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
                     },
                 },
-            ],
+            ]),
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
         patch(
@@ -3965,12 +4208,15 @@ async def test_workflow_runs_endpoint_detects_delegated_specialist_context_drift
 
     assert response.status_code == 200
     run = response.json()["runs"][0]
-    assert run["approval_context_mismatch"] is True
+    assert run["trust_boundary"]["status"] == "changed"
+    assert run["trust_boundary"]["blocked"] is True
+    assert run["trust_boundary"]["reason"] == "approval_context_changed"
     assert run["replay_allowed"] is False
     assert run["replay_block_reason"] == "approval_context_changed"
     assert run["checkpoint_candidates"] == []
-    assert run["resume_plan"] is None
-    assert run["current_approval_context"]["delegated_specialists"] == ["mcp_github"]
+    assert "resume_plan" not in run
+    assert "current_approval_context" not in run
+    assert "approval_context_mismatch" not in run
 
 
 @pytest.mark.asyncio
@@ -4019,7 +4265,7 @@ async def test_workflow_runs_endpoint_detects_delegated_authenticated_credential
     with (
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-result",
                     "session_id": "session-1",
@@ -4050,7 +4296,7 @@ async def test_workflow_runs_endpoint_detects_delegated_authenticated_credential
                         "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
                     },
                 },
-            ],
+            ]),
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
         patch(
@@ -4090,20 +4336,15 @@ async def test_workflow_runs_endpoint_detects_delegated_authenticated_credential
 
     assert response.status_code == 200
     run = response.json()["runs"][0]
-    assert run["approval_context_mismatch"] is True
+    assert run["trust_boundary"]["status"] == "changed"
+    assert run["trust_boundary"]["blocked"] is True
+    assert run["trust_boundary"]["reason"] == "approval_context_changed"
     assert run["replay_allowed"] is False
     assert run["replay_block_reason"] == "approval_context_changed"
     assert run["checkpoint_candidates"] == []
-    assert run["resume_plan"] is None
-    assert run["current_approval_context"]["source_systems"] == [
-        {
-            "server_name": "github",
-            "hostname": "api.github.com",
-            "source": "extension",
-            "authenticated_source": True,
-            "credential_sources": ["env:GITHUB_TOKEN"],
-        }
-    ]
+    assert "resume_plan" not in run
+    assert "current_approval_context" not in run
+    assert "approval_context_mismatch" not in run
 
 
 @pytest.mark.asyncio
@@ -4134,7 +4375,7 @@ async def test_workflow_runs_endpoint_detects_delegated_tool_inventory_drift(cli
     with (
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-result",
                     "session_id": "session-1",
@@ -4165,7 +4406,7 @@ async def test_workflow_runs_endpoint_detects_delegated_tool_inventory_drift(cli
                         "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
                     },
                 },
-            ],
+            ]),
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
         patch(
@@ -4205,15 +4446,15 @@ async def test_workflow_runs_endpoint_detects_delegated_tool_inventory_drift(cli
 
     assert response.status_code == 200
     run = response.json()["runs"][0]
-    assert run["approval_context_mismatch"] is True
+    assert run["trust_boundary"]["status"] == "changed"
+    assert run["trust_boundary"]["blocked"] is True
+    assert run["trust_boundary"]["reason"] == "approval_context_changed"
     assert run["replay_allowed"] is False
     assert run["replay_block_reason"] == "approval_context_changed"
     assert run["checkpoint_candidates"] == []
-    assert run["resume_plan"] is None
-    assert run["current_approval_context"]["delegated_tool_names"] == [
-        "mcp_github_issues",
-        "mcp_github_repo",
-    ]
+    assert "resume_plan" not in run
+    assert "current_approval_context" not in run
+    assert "approval_context_mismatch" not in run
 
 
 @pytest.mark.asyncio
@@ -4242,7 +4483,7 @@ async def test_workflow_runs_endpoint_ignores_delegated_specialist_reordering(cl
     with (
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-result",
                     "session_id": "session-1",
@@ -4273,7 +4514,7 @@ async def test_workflow_runs_endpoint_ignores_delegated_specialist_reordering(cl
                         "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
                     },
                 },
-            ],
+            ]),
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
         patch(
@@ -4313,13 +4554,13 @@ async def test_workflow_runs_endpoint_ignores_delegated_specialist_reordering(cl
 
     assert response.status_code == 200
     run = response.json()["runs"][0]
-    assert run["approval_context_mismatch"] is False
+    assert run["trust_boundary"]["status"] == "stable"
+    assert run["trust_boundary"]["blocked"] is False
+    assert run["trust_boundary"]["reason"] is None
     assert run["replay_allowed"] is False
     assert run["replay_block_reason"] == "secret_ref_surface"
-    assert run["current_approval_context"]["delegated_specialists"] == [
-        "mcp_github",
-        "mcp_jira",
-    ]
+    assert "current_approval_context" not in run
+    assert "approval_context_mismatch" not in run
 
 
 @pytest.mark.asyncio
@@ -4340,9 +4581,13 @@ async def test_workflow_resume_plan_rejects_when_approval_context_changes(client
     }
 
     with (
+        patch("src.api.workflows.settings.deployment_environment", "test"),
+        patch("src.api.workflows.settings.operator_auth_allow_unauthenticated_tests", True),
+        patch("src.api.workflows.settings.operator_auth_secret", ""),
+        patch("src.api.workflows.settings.operator_auth_secret_hash", ""),
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-result",
                     "session_id": "session-1",
@@ -4377,9 +4622,10 @@ async def test_workflow_resume_plan_rejects_when_approval_context_changes(client
                         "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
                     },
                 },
-            ],
+            ]),
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
+        patch("src.api.workflows._workflow_current_goal_binding_detail", return_value=None),
         patch("src.api.workflows.get_base_tools_and_active_skills", return_value=([], [], "balanced")),
         patch("src.api.workflows.workflow_manager.build_workflow_tools", return_value=[]),
         patch(
@@ -4412,11 +4658,20 @@ async def test_workflow_resume_plan_rejects_when_approval_context_changes(client
     ):
         response = await client.post(
             "/api/workflows/runs/session-1:workflow_web_brief_to_file:web-brief-legacy/resume-plan",
-            json={"step_id": "save"},
+            json={
+                "step_id": "save",
+                "operator_context": {
+                    "workflow_run_identity": "session-1:workflow_web_brief_to_file:web-brief-legacy",
+                    "goal_id": "goal-1",
+                    "criterion_id": "criterion-1",
+                    "goal_revision": 1,
+                    "plan_revision": 1,
+                },
+            },
         )
 
     assert response.status_code == 409
-    assert "trust boundary" in response.json()["detail"]
+    assert response.json()["detail"] == "workflow_replay_blocked:approval_context_changed"
 
 
 @pytest.mark.asyncio
@@ -4444,9 +4699,13 @@ async def test_workflow_runs_endpoint_blocks_replay_when_approval_context_is_mis
     )
 
     with (
+        patch("src.api.workflows.settings.deployment_environment", "test"),
+        patch("src.api.workflows.settings.operator_auth_allow_unauthenticated_tests", True),
+        patch("src.api.workflows.settings.operator_auth_secret", ""),
+        patch("src.api.workflows.settings.operator_auth_secret_hash", ""),
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-result",
                     "session_id": "session-1",
@@ -4475,7 +4734,7 @@ async def test_workflow_runs_endpoint_blocks_replay_when_approval_context_is_mis
                         "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
                     },
                 },
-            ],
+            ]),
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
         patch(
@@ -4521,14 +4780,18 @@ async def test_workflow_runs_endpoint_blocks_replay_when_approval_context_is_mis
 
     assert response.status_code == 200
     run = response.json()["runs"][0]
-    assert run["approval_context_mismatch"] is False
     assert run["replay_allowed"] is False
     assert run["replay_block_reason"] == "approval_context_missing"
     assert run["resume_from_step"] is None
     assert run["resume_checkpoint_label"] is None
     assert run["checkpoint_candidates"] == []
-    assert run["resume_plan"] is None
-    assert "predates trust-boundary tracking" in run["approval_recovery_message"]
+    assert run["trust_boundary"]["blocked"] is True
+    assert run["trust_boundary"]["reason"] == "approval_context_missing"
+    assert run["approval_recovery_message"] is None
+    assert run.get("resume_plan") is None
+    assert "approval_context_mismatch" not in run
+    assert "current_approval_context" not in run
+    assert "approval_context" not in run
 
 
 @pytest.mark.asyncio
@@ -4551,9 +4814,13 @@ async def test_workflow_resume_plan_rejects_when_approval_context_is_missing_for
     }
 
     with (
+        patch("src.api.workflows.settings.deployment_environment", "test"),
+        patch("src.api.workflows.settings.operator_auth_allow_unauthenticated_tests", True),
+        patch("src.api.workflows.settings.operator_auth_secret", ""),
+        patch("src.api.workflows.settings.operator_auth_secret_hash", ""),
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-result",
                     "session_id": "session-1",
@@ -4586,9 +4853,10 @@ async def test_workflow_resume_plan_rejects_when_approval_context_is_missing_for
                         "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
                     },
                 },
-            ],
+            ]),
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
+        patch("src.api.workflows._workflow_current_goal_binding_detail", return_value=None),
         patch(
             "src.api.workflows.workflow_manager.get_tool_metadata",
             return_value={
@@ -4621,11 +4889,20 @@ async def test_workflow_resume_plan_rejects_when_approval_context_is_missing_for
     ):
         response = await client.post(
             "/api/workflows/runs/session-1:workflow_web_brief_to_file:web-brief-legacy-auth/resume-plan",
-            json={"step_id": "save"},
+            json={
+                "step_id": "save",
+                "operator_context": {
+                    "workflow_run_identity": "session-1:workflow_web_brief_to_file:web-brief-legacy-auth",
+                    "goal_id": "goal-1",
+                    "criterion_id": "criterion-1",
+                    "goal_revision": 1,
+                    "plan_revision": 1,
+                },
+            },
         )
 
     assert response.status_code == 409
-    assert "predates trust-boundary tracking" in response.json()["detail"]
+    assert response.json()["detail"] == "workflow_replay_blocked:approval_context_missing"
 
 
 @pytest.mark.asyncio
@@ -4928,6 +5205,11 @@ class TestWorkflowApi:
             "tool_name": "workflow_example",
             "session_id": "session-1",
             "thread_id": "session-1",
+            "operator_session_id": operator.session_id,
+            "goal_id": "goal-1",
+            "criterion_id": "criterion-1",
+            "goal_revision": 1,
+            "plan_revision": 1,
             "pending_approvals": [],
             "replay_block_reason": None,
             "owner_kind": "user",
@@ -4944,6 +5226,7 @@ class TestWorkflowApi:
             patch("src.api.workflows.log_integration_event", new_callable=AsyncMock, side_effect=lambda **_kwargs: observe("integration_audit")) as integration_log,
             patch("src.api.workflows._find_workflow_run_for_control", new_callable=AsyncMock, side_effect=lambda *_args, **_kwargs: (observe("lookup") or run)),
             patch("src.api.workflows._workflow_resume_plan", side_effect=lambda *_args, **_kwargs: (observe("resume_plan") or {"requires_manual_execution": True})),
+            patch("src.api.workflows._workflow_current_goal_binding_detail", return_value=None),
             patch(
                 "src.api.workflows.workflow_state_repository.record_v2_operator_recovery_control",
                 new_callable=AsyncMock,
@@ -4960,7 +5243,9 @@ class TestWorkflowApi:
             resume_payload = await build_workflow_resume_plan(
                 run["run_identity"],
                 _workflow_mutator_request(operator, "/api/workflows/runs/resume-plan"),
-                WorkflowResumePlanRequest(),
+                WorkflowResumePlanRequest(
+                    operator_context=_workflow_resume_operator_context(run["run_identity"]),
+                ),
             )
             control_payload = await control_workflow_run(
                 run["run_identity"],
@@ -5305,6 +5590,8 @@ class TestWorkflowApi:
             "goal_id": "goal-1",
             "criterion_id": "criterion-1",
             "goal_revision": 1,
+            "plan_revision": 1,
+            "operator_session_id": operator.session_id,
             "pending_approvals": [],
             "replay_allowed": True,
             "replay_block_reason": None,
@@ -5315,6 +5602,7 @@ class TestWorkflowApi:
             patch("src.api.workflows._begin_rest_revocation_watch", return_value=None),
             patch("src.api.workflows._find_workflow_run_for_control", new_callable=AsyncMock, return_value=run),
             patch("src.api.workflows._workflow_resume_plan", return_value={"requires_manual_execution": True}),
+            patch("src.api.workflows._workflow_current_goal_binding_detail", return_value=None),
             patch(
                 "src.api.workflows.workflow_state_repository.acquire_or_renew_v2_lease",
                 new_callable=AsyncMock,
@@ -5348,6 +5636,7 @@ class TestWorkflowApi:
                             "goal_id": "goal-1",
                             "criterion_id": "criterion-1",
                             "goal_revision": 1,
+                            "plan_revision": 1,
                         },
                     ),
                     _workflow_mutator_request(operator, "/api/workflows/runs/control"),
@@ -5379,11 +5668,13 @@ class TestWorkflowApi:
             "goal_id": "goal-1",
             "criterion_id": "criterion-1",
             "goal_revision": 1,
+            "plan_revision": 1,
             "pending_approvals": [],
             "replay_allowed": True,
             "replay_block_reason": None,
             "owner_kind": "user",
             "owner_principal_id": operator.principal.principal_id,
+            "operator_session_id": operator.session_id,
         }
         events: list[str] = []
 
@@ -5399,6 +5690,7 @@ class TestWorkflowApi:
             patch("src.api.workflows._begin_rest_revocation_watch", return_value=None),
             patch("src.api.workflows._find_workflow_run_for_control", new_callable=AsyncMock, return_value=run),
             patch("src.api.workflows._workflow_resume_plan", return_value={"requires_manual_execution": True}),
+            patch("src.api.workflows._workflow_current_goal_binding_detail", return_value=None),
             patch(
                 "src.api.workflows.workflow_state_repository.acquire_or_renew_v2_lease",
                 new_callable=AsyncMock,
@@ -5431,6 +5723,7 @@ class TestWorkflowApi:
                         "goal_id": "goal-1",
                         "criterion_id": "criterion-1",
                         "goal_revision": 1,
+                        "plan_revision": 1,
                     },
                 ),
                 _workflow_mutator_request(operator, "/api/workflows/runs/control"),
@@ -5497,7 +5790,8 @@ class TestWorkflowApi:
             "run_identity": run_identity,
             "workflow_name": "example",
             "tool_name": "workflow_example",
-            "session_id": operator.session_id,
+            "session_id": "session-1",
+            "operator_session_id": operator.session_id,
             "goal_id": "goal-1",
             "criterion_id": "criterion-1",
             "goal_revision": 1,
@@ -5770,9 +6064,11 @@ class TestWorkflowApi:
             "workflow_name": "example",
             "tool_name": "workflow_example",
             "session_id": "session-1",
+            "operator_session_id": operator.session_id,
             "goal_id": "goal-1",
             "criterion_id": "criterion-1",
             "goal_revision": 1,
+            "plan_revision": 1,
             "pending_approvals": [],
             "replay_allowed": True,
             "replay_block_reason": None,
@@ -5792,6 +6088,7 @@ class TestWorkflowApi:
                 side_effect=lambda identity: {**run, "run_identity": identity},
             ),
             patch("src.api.workflows._workflow_resume_plan", return_value={"requires_manual_execution": True}),
+            patch("src.api.workflows._workflow_current_goal_binding_detail", return_value=None),
             patch(
                 "src.api.workflows.workflow_state_repository.acquire_or_renew_v2_lease",
                 new_callable=AsyncMock,
@@ -5821,6 +6118,7 @@ class TestWorkflowApi:
                             "goal_id": "goal-1",
                             "criterion_id": "criterion-1",
                             "goal_revision": 1,
+                            "plan_revision": 1,
                         },
                     ),
                     _workflow_mutator_request(operator, "/api/workflows/runs/control"),
@@ -5858,9 +6156,11 @@ class TestWorkflowApi:
                 "workflow_name": "example",
                 "tool_name": "workflow_example",
                 "session_id": "session-1",
+                "operator_session_id": operator.session_id,
                 "goal_id": "goal-1",
                 "criterion_id": "criterion-1",
                 "goal_revision": 1,
+                "plan_revision": 1,
                 "pending_approvals": [],
                 "replay_allowed": False,
                 "replay_block_reason": reason,
@@ -5870,6 +6170,7 @@ class TestWorkflowApi:
             with (
                 patch("src.api.workflows._begin_rest_revocation_watch", return_value=None),
                 patch("src.api.workflows._find_workflow_run_for_control", new_callable=AsyncMock, return_value=run),
+                patch("src.api.workflows._workflow_current_goal_binding_detail", return_value=None),
                 patch("src.api.workflows.workflow_state_repository.acquire_or_renew_v2_lease", new_callable=AsyncMock) as lease,
                 patch("src.api.workflows.workflow_state_repository.build_v2_recovery_plan", new_callable=AsyncMock) as recovery,
                 patch("src.api.workflows.workflow_state_repository.record_v2_operator_recovery_control", new_callable=AsyncMock) as control,
@@ -5887,6 +6188,7 @@ class TestWorkflowApi:
                                 "goal_id": "goal-1",
                                 "criterion_id": "criterion-1",
                                 "goal_revision": 1,
+                                "plan_revision": 1,
                             },
                         ),
                         _workflow_mutator_request(operator, "/api/workflows/runs/control"),
@@ -5952,9 +6254,11 @@ class TestWorkflowApi:
                 "workflow_name": "example",
                 "tool_name": "workflow_example",
                 "session_id": "session-1",
+                "operator_session_id": operator.session_id,
                 "goal_id": "goal-1",
                 "criterion_id": "criterion-1",
                 "goal_revision": 1,
+                "plan_revision": 1,
                 "pending_approvals": [],
                 "replay_allowed": True,
                 "replay_block_reason": None,
@@ -5967,6 +6271,7 @@ class TestWorkflowApi:
                     "src.api.workflows._workflow_resume_plan",
                     side_effect=RuntimeError("provider failed at /tmp/private-secret.txt"),
                 ),
+                patch("src.api.workflows._workflow_current_goal_binding_detail", return_value=None),
                 patch(
                     "src.api.workflows.workflow_state_repository.acquire_or_renew_v2_lease",
                     new_callable=AsyncMock,
@@ -5983,6 +6288,7 @@ class TestWorkflowApi:
                                 "goal_id": "goal-1",
                                 "criterion_id": "criterion-1",
                                 "goal_revision": 1,
+                                "plan_revision": 1,
                             },
                         ),
                         _workflow_mutator_request(operator, "/api/workflows/runs/control"),
@@ -7124,6 +7430,11 @@ async def test_workflow_resume_plan_response_is_safe_and_failure_is_durable_rece
         "session_id": "session-owner",
         "owner_kind": "user",
         "owner_principal_id": operator.principal.principal_id,
+        "operator_session_id": operator.session_id,
+        "goal_id": "goal-1",
+        "criterion_id": "criterion-1",
+        "goal_revision": 1,
+        "plan_revision": 1,
         "replay_allowed": True,
         "replay_block_reason": None,
     }
@@ -7142,12 +7453,13 @@ async def test_workflow_resume_plan_response_is_safe_and_failure_is_durable_rece
         patch("src.api.workflows._begin_rest_revocation_watch", return_value=None),
         patch("src.api.workflows._find_workflow_run_for_control", new_callable=AsyncMock, return_value=run),
         patch("src.api.workflows._workflow_resume_plan", return_value=unsafe_plan),
+        patch("src.api.workflows._workflow_current_goal_binding_detail", return_value=None),
         patch("src.api.workflows._record_workflow_route_receipt", new_callable=AsyncMock) as receipt,
     ):
         payload = await build_workflow_resume_plan(
             run_identity,
             _workflow_mutator_request(operator, "/api/workflows/runs/resume-plan"),
-            WorkflowResumePlanRequest(),
+            WorkflowResumePlanRequest(operator_context=_workflow_resume_operator_context(run_identity)),
         )
 
     encoded = json.dumps(payload)
@@ -7164,13 +7476,17 @@ async def test_workflow_resume_plan_response_is_safe_and_failure_is_durable_rece
             "src.api.workflows._workflow_resume_plan",
             side_effect=RuntimeError("unexpected provider secret /tmp/private-secret"),
         ),
+        patch("src.api.workflows._workflow_current_goal_binding_detail", return_value=None),
         patch("src.api.workflows._record_workflow_route_receipt", new_callable=AsyncMock) as failed_receipt,
     ):
         with pytest.raises(HTTPException) as raised:
             await build_workflow_resume_plan(
                 run_identity,
                 _workflow_mutator_request(operator, "/api/workflows/runs/resume-plan"),
-                WorkflowResumePlanRequest(step_id="private-step"),
+                WorkflowResumePlanRequest(
+                    step_id="private-step",
+                    operator_context=_workflow_resume_operator_context(run_identity),
+                ),
             )
 
     assert raised.value.status_code == 500
@@ -7196,19 +7512,28 @@ async def test_workflow_resume_plan_resolves_redacted_step_handle_before_plannin
         "session_id": "session-owner",
         "owner_kind": "user",
         "owner_principal_id": operator.principal.principal_id,
+        "operator_session_id": operator.session_id,
+        "goal_id": "goal-1",
+        "criterion_id": "criterion-1",
+        "goal_revision": 1,
+        "plan_revision": 1,
         "replay_allowed": True,
         "checkpoint_candidates": [{"step_id": "private/checkpoint"}],
     }
     with (
         patch("src.api.workflows._begin_rest_revocation_watch", return_value=None),
         patch("src.api.workflows._find_workflow_run_for_control", new_callable=AsyncMock, return_value=run),
+        patch("src.api.workflows._workflow_current_goal_binding_detail", return_value=None),
         patch("src.api.workflows._workflow_resume_plan", return_value={"requires_manual_execution": True}) as resume_plan,
         patch("src.api.workflows._record_workflow_route_receipt", new_callable=AsyncMock),
     ):
         await build_workflow_resume_plan(
             run_identity,
             _workflow_mutator_request(operator, "/api/workflows/runs/resume-plan"),
-            WorkflowResumePlanRequest(step_id=_safe_workflow_step_id("private/checkpoint")),
+            WorkflowResumePlanRequest(
+                step_id=_safe_workflow_step_id("private/checkpoint"),
+                operator_context=_workflow_resume_operator_context(run_identity),
+            ),
         )
 
     assert resume_plan.call_args.kwargs["requested_step_id"] == "private/checkpoint"
@@ -7227,11 +7552,22 @@ async def test_workflow_control_uses_run_session_raw_step_and_post_transition_fe
     operator = _test_bypass_operator()
     run_identity = "session-owner:workflow_example:route-draft"
     raw_step_id = "second"
+    parent_job = await _seed_durable_workflow_parent_job(
+        run_identity,
+        operator,
+        session_id="session-owner",
+        lease_owner=_workflow_recovery_owner(operator.principal.principal_id, "session-owner"),
+    )
     run = {
         "run_identity": run_identity,
         "workflow_name": "example",
         "tool_name": "workflow_example",
         "session_id": "session-owner",
+        "operator_session_id": operator.session_id,
+        "goal_id": "goal-1",
+        "criterion_id": "criterion-1",
+        "goal_revision": 1,
+        "plan_revision": 1,
         "pending_approvals": [],
         "replay_allowed": True,
         "replay_block_reason": None,
@@ -7261,6 +7597,7 @@ async def test_workflow_control_uses_run_session_raw_step_and_post_transition_fe
         "replay_inputs": {"secret": "never-return"},
         "parent_revision": 9,
         "parent_lease_id": "lease-route",
+        "parent_fencing_token": parent_job["lease"]["fencing_token"],
         "checkpoint_candidates": [
             {
                 "step_id": raw_step_id,
@@ -7298,6 +7635,7 @@ async def test_workflow_control_uses_run_session_raw_step_and_post_transition_fe
         patch("src.api.workflows._begin_rest_revocation_watch", return_value=None),
         patch("src.api.workflows._find_workflow_run_for_control", new_callable=AsyncMock, side_effect=[run, run]),
         patch("src.api.workflows._workflow_resume_plan", return_value=raw_plan),
+        patch("src.api.workflows._workflow_current_goal_binding_detail", return_value=None),
         patch(
             "src.api.workflows.workflow_state_repository.acquire_or_renew_v2_lease",
             new_callable=AsyncMock,
@@ -7324,6 +7662,7 @@ async def test_workflow_control_uses_run_session_raw_step_and_post_transition_fe
             run_identity,
             WorkflowRunControlRequest(
                 action="retry",
+                operator_context=_workflow_resume_operator_context(run_identity),
                 action_handle={
                     "kind": "workflow_control",
                     "action": "retry",
@@ -7378,13 +7717,14 @@ async def test_workflow_control_uses_run_session_raw_step_and_post_transition_fe
         },
         "step_records": [{"id": "first", "tool": "first_tool", "status": "succeeded"}],
         "orchestration_v2": {
-            "revision": 9,
-            "lease": {
-                "owner": lease_owner,
-                "lease_id": "lease-route",
-                "expires_at": "2099-01-01T00:00:00+00:00",
                 "revision": 9,
-            },
+                "lease": {
+                    "owner": lease_owner,
+                    "lease_id": "lease-route",
+                    "expires_at": "2099-01-01T00:00:00+00:00",
+                    "revision": 9,
+                    "fencing_token": parent_job["lease"]["fencing_token"],
+                },
         },
     }
     principal = replace(operator.principal, session_id="session-owner")
@@ -7400,6 +7740,7 @@ async def test_workflow_control_uses_run_session_raw_step_and_post_transition_fe
                 _seraph_parent_run_identity=run_identity,
                 _seraph_parent_revision=payload["resume_plan"]["action_handle"]["parent_revision"],
                 _seraph_parent_lease_id="lease-route",
+                _seraph_parent_fencing_token=parent_job["lease"]["fencing_token"],
             )
     finally:
         reset_runtime_context(tokens)

@@ -185,6 +185,7 @@ describe("CockpitView", () => {
   const fetchMock = vi.fn();
 
   beforeEach(() => {
+    fetchMock.mockClear();
     vi.stubGlobal("fetch", fetchMock);
     vi.stubGlobal("WebSocket", MockCockpitWebSocket);
     vi.stubGlobal("localStorage", {
@@ -1113,7 +1114,7 @@ describe("CockpitView", () => {
     render(<CockpitView onSend={() => {}} />);
 
     const consoleRegion = await screen.findByRole("region", { name: "M9 governed extension console" });
-    expect(within(consoleRegion).getByText("Atlas Marketplace Pack")).toBeInTheDocument();
+    expect(await within(consoleRegion).findByText("Atlas Marketplace Pack")).toBeInTheDocument();
     expect(consoleRegion).toHaveTextContent(/0 installed · 1 installable · 0 rollback receipts/i);
     expect(consoleRegion).toHaveTextContent(/marketplace · installable · flow ready · marketplace · verified · Seraph Labs · 1.2.0/i);
     expect(consoleRegion).toHaveTextContent(/compatible · Seraph >=0.9.0 · current 0.9.1/i);
@@ -1197,11 +1198,12 @@ describe("CockpitView", () => {
     render(<CockpitView onSend={() => {}} />);
 
     const consoleRegion = await screen.findByRole("region", { name: "M9 governed extension console" });
-    fireEvent.click(within(consoleRegion).getByRole("button", { name: "diagnostics" }));
+    fireEvent.click(await within(consoleRegion).findByRole("button", { name: "diagnostics" }));
 
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
         expect.stringContaining("/api/extensions/seraph.test-installable/diagnostics"),
+        expect.anything(),
       ),
     );
     await waitFor(() =>
@@ -2710,15 +2712,78 @@ describe("CockpitView", () => {
           { id: "session-2", title: "Atlas thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
         ]));
       }
-      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/goal-atlas/loop")) {
+        return Promise.resolve(mockResponse({
+          goal: {
+            id: "goal-atlas",
+            title: "Atlas operator review",
+            status: "active",
+            revision: 1,
+            success_criterion: {
+              criterion_id: "criterion-atlas",
+              description: "Review the Atlas workflow output.",
+              verifier_kind: "artifact_readback",
+              target: "notes/brief.md",
+              evidence_refs: [],
+            },
+          },
+          criterion: {
+            criterion_id: "criterion-atlas",
+            description: "Review the Atlas workflow output.",
+            verifier_kind: "artifact_readback",
+            target: "notes/brief.md",
+            evidence_refs: [],
+          },
+          receipts: [{
+            receipt_version: "goal_conditioned_loop_v1",
+            receipt_type: "outcome",
+            outcome_id: "outcome-atlas",
+            candidate_id: "candidate-atlas",
+            dedupe_key: "atlas:workflow",
+            goal_id: "goal-atlas",
+            goal_revision: 1,
+            plan_revision: 1,
+            criterion_id: "criterion-atlas",
+            execution_status: "succeeded",
+            verification: "passed",
+            usefulness: "helpful",
+            learning: "no_learning",
+            reason: "Deterministic operator review fixture.",
+            evidence_refs: [],
+            content_redacted: true,
+          }],
+          strategy_deltas: [],
+        }));
+      }
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([{
+        id: "goal-atlas",
+        parent_id: null,
+        path: "goal-atlas",
+        level: "project",
+        title: "Atlas operator review",
+        description: "Review the Atlas workflow output.",
+        status: "active",
+        domain: "operations",
+        start_date: null,
+        due_date: null,
+        sort_order: 0,
+        revision: 1,
+        success_criterion: {
+          criterion_id: "criterion-atlas",
+          description: "Review the Atlas workflow output.",
+          verifier_kind: "artifact_readback",
+          target: "notes/brief.md",
+          evidence_refs: [],
+        },
+      }]));
       if (url.includes("/api/goals/dashboard")) {
-        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 1, completed_count: 0, total_count: 1 }));
       }
       if (url.includes("/api/auth/session")) {
         return Promise.resolve(mockResponse({
           authenticated: true,
           principal_id: "operator:test",
-          session_id: "operator-session-1",
+          session_id: "session-2",
           absolute_expires_at: "2099-01-01T00:00:00Z",
         }));
       }
@@ -2739,7 +2804,8 @@ describe("CockpitView", () => {
             created_at: "2026-03-18T12:03:00Z",
             resume_message: "Continue Atlas shell approval",
             owner_principal_id: "operator:test",
-            operator_session_id: "operator-session-1",
+            operator_session_id: "session-2",
+            approval_conversation_id: "session-2",
             expires_at: "2099-01-01T00:00:00Z",
             approval_scope: { action: "shell_execute", target: { type: "session", reference: "session-2" } },
           },
@@ -3207,6 +3273,11 @@ describe("CockpitView", () => {
               thread_label: "Atlas thread",
               replay_allowed: true,
               retry_from_step_draft: 'Retry step "write_file" for workflow "web-brief-to-file".',
+              goal_id: "goal-atlas",
+              goal_revision: 1,
+              criterion_id: "criterion-atlas",
+              plan_revision: 1,
+              candidate_id: "candidate-atlas",
               thread_continue_message: "Continue Atlas workflow",
               run_identity: "root-1",
               root_run_identity: "root-1",
@@ -3231,6 +3302,11 @@ describe("CockpitView", () => {
               thread_id: "session-2",
               thread_label: "Atlas thread",
               replay_allowed: true,
+              goal_id: "goal-atlas",
+              goal_revision: 1,
+              criterion_id: "criterion-atlas",
+              plan_revision: 1,
+              candidate_id: "candidate-atlas",
               thread_continue_message: "Continue Atlas branch",
               run_identity: "branch-1",
               parent_run_identity: "root-1",
@@ -4210,9 +4286,80 @@ describe("CockpitView", () => {
           { id: "session-1", title: "Atlas background thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
         ]));
       }
-      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/goal-atlas/loop")) {
+        return Promise.resolve(mockResponse({
+          goal: {
+            id: "goal-atlas",
+            title: "Atlas operator review",
+            status: "active",
+            revision: 1,
+            success_criterion: {
+              criterion_id: "criterion-atlas",
+              description: "Review the Atlas workflow output.",
+              verifier_kind: "artifact_readback",
+              target: "notes/atlas-review.md",
+              evidence_refs: [],
+            },
+          },
+          criterion: {
+            criterion_id: "criterion-atlas",
+            description: "Review the Atlas workflow output.",
+            verifier_kind: "artifact_readback",
+            target: "notes/atlas-review.md",
+            evidence_refs: [],
+          },
+          receipts: [{
+            receipt_version: "goal_conditioned_loop_v1",
+            receipt_type: "outcome",
+            outcome_id: "outcome-atlas",
+            candidate_id: "candidate-atlas",
+            dedupe_key: "atlas:workflow",
+            goal_id: "goal-atlas",
+            goal_revision: 1,
+            plan_revision: 1,
+            criterion_id: "criterion-atlas",
+            execution_status: "succeeded",
+            verification: "passed",
+            usefulness: "helpful",
+            learning: "no_learning",
+            reason: "Deterministic operator review fixture.",
+            evidence_refs: [],
+            content_redacted: true,
+          }],
+          strategy_deltas: [],
+        }));
+      }
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([{
+        id: "goal-atlas",
+        parent_id: null,
+        path: "goal-atlas",
+        level: "project",
+        title: "Atlas operator review",
+        description: "Review the Atlas workflow output.",
+        status: "active",
+        domain: "operations",
+        start_date: null,
+        due_date: null,
+        sort_order: 0,
+        revision: 1,
+        success_criterion: {
+          criterion_id: "criterion-atlas",
+          description: "Review the Atlas workflow output.",
+          verifier_kind: "artifact_readback",
+          target: "notes/atlas-review.md",
+          evidence_refs: [],
+        },
+      }]));
       if (url.includes("/api/goals/dashboard")) {
-        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 1, completed_count: 0, total_count: 1 }));
+      }
+      if (url.includes("/api/auth/session")) {
+        return Promise.resolve(mockResponse({
+          authenticated: true,
+          principal_id: "operator:test",
+          session_id: "session-1",
+          absolute_expires_at: "2099-01-01T00:00:00Z",
+        }));
       }
       if (url.includes("/api/runtime/status")) {
         return Promise.resolve(mockResponse({
@@ -4479,6 +4626,17 @@ describe("CockpitView", () => {
           edges: [],
         }));
       }
+      if (url.includes("/api/workflows/runs/") && url.includes("/control")) {
+        return Promise.resolve(mockResponse({
+          status: "recorded",
+          action: "resume",
+          external_action_allowed: false,
+          resume_plan: {
+            continue_message: "Continue Atlas branch review.",
+            resume_checkpoint_label: "Draft review",
+          },
+        }));
+      }
       if (url.includes("/api/workflows/runs")) {
         return Promise.resolve(mockResponse({
           runs: [
@@ -4508,6 +4666,11 @@ describe("CockpitView", () => {
               checkpoint_candidates: [],
               retry_from_step_available: false,
               replay_allowed: true,
+              goal_id: "goal-atlas",
+              goal_revision: 1,
+              criterion_id: "criterion-atlas",
+              plan_revision: 1,
+              candidate_id: "candidate-atlas",
               replay_recommended_actions: [],
               step_focus: null,
             },
@@ -4814,7 +4977,7 @@ describe("CockpitView", () => {
         stepNumber: 2,
         toolUsed: "write_file",
       }],
-      sessionId: "session-1",
+      sessionId: "session-2",
       sessions: [
         { id: "session-1", title: "Session 1", created_at: "", updated_at: "", last_message: null, last_message_role: null },
         { id: "session-2", title: "Atlas thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
@@ -4829,15 +4992,78 @@ describe("CockpitView", () => {
           { id: "session-2", title: "Atlas thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
         ]));
       }
+      if (url.includes("/api/goals/goal-atlas/loop")) {
+        return Promise.resolve(mockResponse({
+          goal: {
+            id: "goal-atlas",
+            title: "Atlas operator review",
+            status: "active",
+            revision: 1,
+            success_criterion: {
+              criterion_id: "criterion-atlas",
+              description: "Review the Atlas workflow output.",
+              verifier_kind: "artifact_readback",
+              target: "notes/brief.md",
+              evidence_refs: [],
+            },
+          },
+          criterion: {
+            criterion_id: "criterion-atlas",
+            description: "Review the Atlas workflow output.",
+            verifier_kind: "artifact_readback",
+            target: "notes/brief.md",
+            evidence_refs: [],
+          },
+          receipts: [{
+            receipt_version: "goal_conditioned_loop_v1",
+            receipt_type: "outcome",
+            outcome_id: "outcome-atlas",
+            candidate_id: "candidate-atlas",
+            dedupe_key: "atlas:workflow",
+            goal_id: "goal-atlas",
+            goal_revision: 1,
+            plan_revision: 1,
+            criterion_id: "criterion-atlas",
+            execution_status: "succeeded",
+            verification: "passed",
+            usefulness: "helpful",
+            learning: "no_learning",
+            reason: "Deterministic operator review fixture.",
+            evidence_refs: [],
+            content_redacted: true,
+          }],
+          strategy_deltas: [],
+        }));
+      }
       if (url.includes("/api/auth/session")) {
         return Promise.resolve(mockResponse({
           authenticated: true,
           principal_id: "operator:test",
-          session_id: "operator-session-1",
+          session_id: "session-2",
           absolute_expires_at: "2099-01-01T00:00:00Z",
         }));
       }
-      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([{
+        id: "goal-atlas",
+        parent_id: null,
+        path: "goal-atlas",
+        level: "project",
+        title: "Atlas operator review",
+        description: "Review the Atlas workflow output.",
+        status: "active",
+        domain: "operations",
+        start_date: null,
+        due_date: null,
+        sort_order: 0,
+        revision: 1,
+        success_criterion: {
+          criterion_id: "criterion-atlas",
+          description: "Review the Atlas workflow output.",
+          verifier_kind: "artifact_readback",
+          target: "notes/brief.md",
+          evidence_refs: [],
+        },
+      }]));
       if (url.includes("/api/goals/dashboard")) {
         return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
       }
@@ -4852,7 +5078,7 @@ describe("CockpitView", () => {
             risk_level: "medium",
             policy_mode: "balanced",
             summary: "Saved brief draft",
-            created_at: "2026-03-18T12:06:00Z",
+            created_at: "2026-03-18T12:07:30Z",
             details: {
               arguments: { file_path: "notes/brief.md" },
             },
@@ -4876,7 +5102,8 @@ describe("CockpitView", () => {
             created_at: "2026-03-18T12:03:00Z",
             resume_message: "Continue Atlas shell approval",
             owner_principal_id: "operator:test",
-            operator_session_id: "operator-session-1",
+            operator_session_id: "session-2",
+            approval_conversation_id: "session-2",
             expires_at: "2099-01-01T00:00:00Z",
             approval_scope: { action: "shell_execute", target: { type: "session", reference: "session-2" } },
           },
@@ -4920,6 +5147,17 @@ describe("CockpitView", () => {
           extension_packages: [],
         }));
       }
+      if (url.includes("/api/workflows/runs/") && url.includes("/control")) {
+        return Promise.resolve(mockResponse({
+          status: "recorded",
+          action: "resume",
+          external_action_allowed: false,
+          resume_plan: {
+            continue_message: "Continue Atlas workflow",
+            resume_checkpoint_label: "approval gate",
+          },
+        }));
+      }
       if (url.includes("/api/workflows/runs")) {
         return Promise.resolve(mockResponse({
           runs: [
@@ -4930,7 +5168,7 @@ describe("CockpitView", () => {
               session_id: "session-2",
               status: "degraded",
               started_at: "2026-03-18T12:00:00Z",
-              updated_at: "2026-03-18T12:04:00Z",
+              updated_at: "2026-03-18T12:07:00Z",
               summary: "workflow_web_brief_to_file failed at write_file",
               step_tools: ["web_search", "write_file"],
               step_records: [
@@ -4952,6 +5190,11 @@ describe("CockpitView", () => {
               thread_id: "session-2",
               thread_label: "Atlas thread",
               replay_allowed: true,
+              goal_id: "goal-atlas",
+              goal_revision: 1,
+              criterion_id: "criterion-atlas",
+              plan_revision: 1,
+              candidate_id: "candidate-atlas",
               thread_continue_message: "Continue Atlas workflow",
               run_identity: "root-1",
               root_run_identity: "root-1",
@@ -5309,7 +5552,6 @@ describe("CockpitView", () => {
             blocked_workflows: [{ name: "web-brief-to-file", availability: "blocked", missing_tools: ["write_file"], missing_skills: [] }],
             availability: "blocked",
             recommended_actions: [
-              { type: "activate_starter_pack", label: "Activate pack", name: "research-briefing" },
               { type: "set_tool_policy", label: "Allow write_file", mode: "full" },
             ],
           }],
@@ -5362,6 +5604,7 @@ describe("CockpitView", () => {
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
         expect.stringContaining("/api/capabilities/preflight?target_type=runbook&name=workflow%3Aweb-brief-to-file"),
+        expect.anything(),
       ),
     );
   });
@@ -6158,7 +6401,7 @@ describe("CockpitView", () => {
     expect(extensionEnableCountAfter).toBe(extensionEnableCountBefore);
   });
 
-  it("keeps step repair visible even when replay is blocked", async () => {
+  it("keeps step repair visible but locked without a current goal binding", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
@@ -6272,13 +6515,10 @@ describe("CockpitView", () => {
     await waitFor(() => expect(screen.getByText("workflow_web_brief_to_file failed at write_file")).toBeInTheDocument());
     fireEvent.click(screen.getByText("workflow_web_brief_to_file failed at write_file"));
     expect(screen.getByRole("button", { name: "Repair step" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Repair step" }));
-    await waitFor(() =>
-      expect(fetchMock).toHaveBeenCalledWith(
-        expect.stringContaining("/api/settings/tool-policy-mode"),
-        expect.objectContaining({ method: "PUT" }),
-      ),
-    );
+    expect(screen.getByRole("button", { name: "Repair step" })).toBeDisabled();
+    expect(fetchMock.mock.calls.some(([input, init]) =>
+      String(input).includes("/api/settings/tool-policy-mode") && init?.method === "PUT",
+    )).toBe(false);
   });
 
   it("surfaces routing summaries in the activity ledger", async () => {
@@ -6374,7 +6614,7 @@ describe("CockpitView", () => {
     expect(screen.queryByRole("button", { name: "Open Thread" })).not.toBeInTheDocument();
   });
 
-  it("keeps repair actions reachable when the actionable event is a grouped child", async () => {
+  it("applies grouped-child policy repair from the activity ledger", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
@@ -6490,7 +6730,7 @@ describe("CockpitView", () => {
           ],
         }));
       }
-      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "full" }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
       if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
       if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
       return Promise.resolve(mockResponse({}));
@@ -6511,7 +6751,7 @@ describe("CockpitView", () => {
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
         expect.stringContaining("/api/settings/tool-policy-mode"),
-        expect.objectContaining({ method: "PUT" }),
+        expect.objectContaining({ method: "PUT", body: JSON.stringify({ mode: "full" }) }),
       ),
     );
   });
@@ -7421,7 +7661,7 @@ describe("CockpitView", () => {
     expect(within(outcomePanel).queryByText("notes/brief.md")).not.toBeInTheDocument();
     expect(within(outcomePanel).getByText(/target reference digest:/)).toBeInTheDocument();
     expect(useChatStore.getState().sessionId).toBe("session-1");
-    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/workflows/runs/") && String(input).includes("/control"))).toBe(false);
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/workflows/runs/workflow-run-1/control"))).toBe(false);
   }, 15000);
 
   it("shows a visible pending state and fresh-thread guidance while the agent is working", async () => {
@@ -8715,6 +8955,7 @@ describe("CockpitView", () => {
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
         expect.stringContaining("/api/capabilities/preflight?target_type=workflow&name=web-brief-to-file"),
+        expect.anything(),
       ),
     );
     await waitFor(() => expect(within(studio).getByText(/missing tools: write_file/i)).toBeInTheDocument());
@@ -8824,7 +9065,7 @@ describe("CockpitView", () => {
 
     await loadAllDeepPanes();
 
-    const workflowLabel = await screen.findByText("resume-review");
+    const workflowLabel = await screen.findByText("resume-review", { selector: ".cockpit-role" });
     const workflowRow = workflowLabel.closest(".cockpit-row");
     expect(workflowRow).not.toBeNull();
     expect(within(workflowRow as HTMLElement).getAllByText(/checkpoint review_checkpoint/i).length).toBeGreaterThan(0);
@@ -8837,14 +9078,85 @@ describe("CockpitView", () => {
   }, 15000);
 
   it("surfaces workflow branch families and can continue the latest branch", async () => {
-    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.includes("/api/sessions")) {
         return Promise.resolve(mockResponse([{ id: "session-1", title: "Session 1" }]));
       }
-      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/goal-atlas/loop")) {
+        return Promise.resolve(mockResponse({
+          goal: {
+            id: "goal-atlas",
+            title: "Atlas operator review",
+            status: "active",
+            revision: 1,
+            success_criterion: {
+              criterion_id: "criterion-atlas",
+              description: "Review the Atlas workflow output.",
+              verifier_kind: "artifact_readback",
+              target: "notes/root-review.md",
+              evidence_refs: [],
+            },
+          },
+          criterion: {
+            criterion_id: "criterion-atlas",
+            description: "Review the Atlas workflow output.",
+            verifier_kind: "artifact_readback",
+            target: "notes/root-review.md",
+            evidence_refs: [],
+          },
+          receipts: [{
+            receipt_version: "goal_conditioned_loop_v1",
+            receipt_type: "outcome",
+            outcome_id: "outcome-atlas",
+            candidate_id: "candidate-atlas",
+            dedupe_key: "atlas:workflow",
+            goal_id: "goal-atlas",
+            goal_revision: 1,
+            plan_revision: 1,
+            criterion_id: "criterion-atlas",
+            execution_status: "succeeded",
+            verification: "passed",
+            usefulness: "helpful",
+            learning: "no_learning",
+            reason: "Deterministic operator review fixture.",
+            evidence_refs: [],
+            content_redacted: true,
+          }],
+          strategy_deltas: [],
+        }));
+      }
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([{
+        id: "goal-atlas",
+        parent_id: null,
+        path: "goal-atlas",
+        level: "project",
+        title: "Atlas operator review",
+        description: "Review the Atlas workflow output.",
+        status: "active",
+        domain: "operations",
+        start_date: null,
+        due_date: null,
+        sort_order: 0,
+        revision: 1,
+        success_criterion: {
+          criterion_id: "criterion-atlas",
+          description: "Review the Atlas workflow output.",
+          verifier_kind: "artifact_readback",
+          target: "notes/root-review.md",
+          evidence_refs: [],
+        },
+      }]));
       if (url.includes("/api/goals/dashboard")) {
-        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 1, completed_count: 0, total_count: 1 }));
+      }
+      if (url.includes("/api/auth/session")) {
+        return Promise.resolve(mockResponse({
+          authenticated: true,
+          principal_id: "operator:test",
+          session_id: "session-1",
+          absolute_expires_at: "2099-01-01T00:00:00Z",
+        }));
       }
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
@@ -8905,6 +9217,34 @@ describe("CockpitView", () => {
           runbooks: [],
         }));
       }
+      if (url.includes("/api/workflows/runs/") && url.includes("/control")) {
+        const requestBody = typeof init?.body === "string" ? init.body : "";
+        const isPeerBranch = url.includes("resume-peer-run");
+        const checkpoint = isPeerBranch ? "peer_checkpoint" : "review_checkpoint";
+        if (requestBody.includes('"action":"resume"')) {
+          const continueMessage = isPeerBranch
+            ? "Continue peer branch from the peer checkpoint."
+            : "Continue child branch from the review checkpoint.";
+          return Promise.resolve(mockResponse({
+            status: "recorded",
+            action: "resume",
+            external_action_allowed: false,
+            resume_plan: {
+              continue_message: continueMessage,
+              resume_checkpoint_label: checkpoint,
+            },
+          }));
+        }
+        return Promise.resolve(mockResponse({
+          status: "recorded",
+          action: "retry",
+          external_action_allowed: false,
+          resume_plan: {
+            draft: `Run workflow "resume-review" with file_path="notes/review.md", _seraph_resume_from_step="${checkpoint}".`,
+            resume_checkpoint_label: checkpoint,
+          },
+        }));
+      }
       if (url.includes("/api/workflows/runs")) {
         return Promise.resolve(mockResponse({
           runs: [
@@ -8925,6 +9265,11 @@ describe("CockpitView", () => {
               thread_label: "Session 1",
               run_identity: "resume-root-run",
               root_run_identity: "resume-root-run",
+              goal_id: "goal-atlas",
+              goal_revision: 1,
+              criterion_id: "criterion-atlas",
+              plan_revision: 1,
+              candidate_id: "candidate-atlas",
               branch_kind: "replay_from_start",
               branch_depth: 0,
               checkpoint_context_available: true,
@@ -8980,6 +9325,11 @@ describe("CockpitView", () => {
               run_identity: "resume-child-run",
               parent_run_identity: "resume-root-run",
               root_run_identity: "resume-root-run",
+              goal_id: "goal-atlas",
+              goal_revision: 1,
+              criterion_id: "criterion-atlas",
+              plan_revision: 1,
+              candidate_id: "candidate-atlas",
               branch_kind: "branch_from_checkpoint",
               branch_depth: 1,
               resume_checkpoint_label: "review_checkpoint",
@@ -9019,6 +9369,11 @@ describe("CockpitView", () => {
               run_identity: "resume-peer-run",
               parent_run_identity: "resume-root-run",
               root_run_identity: "resume-root-run",
+              goal_id: "goal-atlas",
+              goal_revision: 1,
+              criterion_id: "criterion-atlas",
+              plan_revision: 1,
+              candidate_id: "candidate-atlas",
               branch_kind: "branch_from_checkpoint",
               branch_depth: 1,
               resume_checkpoint_label: "peer_checkpoint",
@@ -10196,13 +10551,76 @@ describe("CockpitView", () => {
         return Promise.resolve(mockResponse({
           authenticated: true,
           principal_id: "operator:test",
-          session_id: "operator-session-1",
+          session_id: "session-1",
           absolute_expires_at: "2099-01-01T00:00:00Z",
         }));
       }
-      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/goal-atlas/loop")) {
+        return Promise.resolve(mockResponse({
+          goal: {
+            id: "goal-atlas",
+            title: "Atlas operator review",
+            status: "active",
+            revision: 1,
+            success_criterion: {
+              criterion_id: "criterion-atlas",
+              description: "Review the Atlas workflow output.",
+              verifier_kind: "artifact_readback",
+              target: "notes/brief.md",
+              evidence_refs: [],
+            },
+          },
+          criterion: {
+            criterion_id: "criterion-atlas",
+            description: "Review the Atlas workflow output.",
+            verifier_kind: "artifact_readback",
+            target: "notes/brief.md",
+            evidence_refs: [],
+          },
+          receipts: [{
+            receipt_version: "goal_conditioned_loop_v1",
+            receipt_type: "outcome",
+            outcome_id: "outcome-atlas",
+            candidate_id: "candidate-atlas",
+            dedupe_key: "atlas:workflow",
+            goal_id: "goal-atlas",
+            goal_revision: 1,
+            plan_revision: 1,
+            criterion_id: "criterion-atlas",
+            execution_status: "succeeded",
+            verification: "passed",
+            usefulness: "helpful",
+            learning: "no_learning",
+            reason: "Deterministic operator review fixture.",
+            evidence_refs: [],
+            content_redacted: true,
+          }],
+          strategy_deltas: [],
+        }));
+      }
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([{
+        id: "goal-atlas",
+        parent_id: null,
+        path: "goal-atlas",
+        level: "project",
+        title: "Atlas operator review",
+        description: "Review the Atlas workflow output.",
+        status: "active",
+        domain: "operations",
+        start_date: null,
+        due_date: null,
+        sort_order: 0,
+        revision: 1,
+        success_criterion: {
+          criterion_id: "criterion-atlas",
+          description: "Review the Atlas workflow output.",
+          verifier_kind: "artifact_readback",
+          target: "notes/brief.md",
+          evidence_refs: [],
+        },
+      }]));
       if (url.includes("/api/goals/dashboard")) {
-        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 1, completed_count: 0, total_count: 1 }));
       }
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/observer/continuity")) {
@@ -10246,7 +10664,7 @@ describe("CockpitView", () => {
             created_at: "2026-03-26T09:02:00Z",
             resume_message: "Continue Atlas brief approval",
             owner_principal_id: "operator:test",
-            operator_session_id: "operator-session-1",
+            operator_session_id: "session-1",
             expires_at: "2099-01-01T00:00:00Z",
             approval_scope: { action: "write_file", target: { type: "workspace", reference: "notes/brief.md" } },
           },
@@ -10339,7 +10757,13 @@ describe("CockpitView", () => {
             tool_name: "workflow_atlas_brief",
             workflow_name: "atlas-brief",
             session_id: "session-1",
+            goal_id: "goal-atlas",
+            goal_revision: 1,
+            criterion_id: "criterion-atlas",
+            plan_revision: 1,
+            candidate_id: "candidate-atlas",
             status: "awaiting_approval",
+            availability: "durable",
             started_at: "2026-03-26T09:00:00Z",
             updated_at: "2026-03-26T09:03:00Z",
             summary: "atlas-brief waiting on write_file approval",
@@ -10363,6 +10787,25 @@ describe("CockpitView", () => {
             risk_level: "medium",
             pending_approval_count: 1,
             pending_approval_ids: ["approval-run"],
+            pending_approvals: [{
+              id: "approval-run",
+              workflow_id: "run-1",
+              goal_id: "goal-atlas",
+              goal_revision: 1,
+              criterion_id: "criterion-atlas",
+              plan_revision: 1,
+              candidate_id: "candidate-atlas",
+              summary: "Approve write_file for Atlas brief",
+              risk_level: "high",
+              created_at: "2026-03-26T09:02:00Z",
+              thread_id: "session-1",
+              thread_label: "Atlas thread",
+              resume_message: "Continue Atlas brief approval",
+              owner_principal_id: "operator:test",
+              operator_session_id: "session-1",
+              expires_at: "2099-01-01T00:00:00Z",
+              approval_scope: { action: "write_file", target: { type: "workspace", reference: "notes/brief.md" } },
+            }],
             thread_id: "session-1",
             thread_label: "Atlas thread",
             replay_allowed: true,
@@ -10431,7 +10874,7 @@ describe("CockpitView", () => {
     expect(traceRow).not.toBeNull();
     fireEvent.click(traceRetryButton);
     await waitFor(() =>
-      expect(screen.getByText("Live recovery control blocked atlas-brief: approval authority is unavailable or stale.")).toBeInTheDocument(),
+      expect(screen.getByText("Live recovery control blocked atlas-brief: typed approval receipt is unavailable.")).toBeInTheDocument(),
     );
     expect(screen.queryByDisplayValue('Run workflow "atlas-brief" with file_path="notes/brief.md", _seraph_resume_from_step="write_file".')).not.toBeInTheDocument();
 
@@ -11041,6 +11484,7 @@ describe("CockpitView", () => {
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
         expect.stringContaining("/api/extensions/seraph.test-installable/source?reference=manifest.yaml"),
+        expect.anything(),
       ),
     );
     expect(within(studio).getByLabelText("manifest draft")).toBeInTheDocument();
@@ -11321,7 +11765,7 @@ describe("CockpitView", () => {
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/workflows/local-workflow/source"))).toBe(false);
   }, 15000);
 
-  it("clears stale extension package metadata after a failed package refresh", async () => {
+  it("retains last-known extension package metadata after a failed package refresh", async () => {
     let extensionsHealthy = true;
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
@@ -11467,10 +11911,12 @@ describe("CockpitView", () => {
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
 
     studio = await screen.findByLabelText("Extension studio");
-    await waitFor(() => expect(within(studio).queryByText("Test Installable")).not.toBeInTheDocument());
-    expect(within(studio).queryByText("manifest.yaml")).not.toBeInTheDocument();
-    expect(within(studio).getByRole("button", { name: "Refresh validation" })).toBeDisabled();
-    expect(within(studio).getByRole("button", { name: "Save draft" })).toBeDisabled();
+    await waitFor(() => expect(within(studio).getByText("Test Installable")).toBeInTheDocument());
+    expect(within(studio).getByText("manifest.yaml")).toBeInTheDocument();
+    fireEvent.click(within(studio).getByRole("button", { name: "Close extension studio" }));
+    expect(await screen.findByText(
+      "Capability-pack metadata is unavailable; showing the last known lifecycle state.",
+    )).toBeInTheDocument();
   }, 15000);
 
   it("disables manifest actions when the backend marks the manifest read-only", async () => {

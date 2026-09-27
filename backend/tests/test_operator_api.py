@@ -770,13 +770,19 @@ async def test_operator_timeline_aggregates_threaded_workflows_notifications_and
 
     workflow_item = next(item for item in payload["items"] if item["kind"] == "workflow_run")
     assert workflow_item["thread_label"] == "Session 1"
-    assert workflow_item["continue_message"] == "Continue from pending workflow approval."
-    assert workflow_item["recommended_actions"][0]["type"] == "set_tool_policy"
+    # A blocked replay boundary must not expose stale continuation or action
+    # controls. The pending approval remains separately actionable below.
+    assert workflow_item["continue_message"] is None
+    assert workflow_item["replay_draft"] is None
+    assert workflow_item["replay_allowed"] is False
+    assert workflow_item["replay_block_reason"] == "pending_approval"
+    assert workflow_item["recommended_actions"] == []
     assert workflow_item["metadata"]["run_identity"] == "session-1:workflow_web_brief_to_file:web-brief"
     assert workflow_item["metadata"]["run_fingerprint"] == "web-brief"
     assert workflow_item["metadata"]["branch_kind"] == "approval_resume"
-    assert workflow_item["metadata"]["checkpoint_candidates"][0]["step_id"] == "approval_gate"
-    assert workflow_item["metadata"]["resume_plan"]["resume_from_step"] == "approval_gate"
+    assert workflow_item["metadata"]["resume_from_step"] is None
+    assert workflow_item["metadata"]["checkpoint_candidates"] == []
+    assert workflow_item["metadata"]["resume_plan"] is None
 
     approval_item = next(item for item in payload["items"] if item["kind"] == "approval")
     assert approval_item["continue_message"] == "Resume after approval."
@@ -1483,6 +1489,10 @@ async def test_operator_benchmark_proof_does_not_block_event_loop(client):
 @pytest.mark.asyncio
 async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_gates(client):
     with ExitStack() as stack:
+        stack.enter_context(patch("src.api.operator.settings.deployment_environment", "test"))
+        stack.enter_context(patch("src.api.operator.settings.operator_auth_allow_unauthenticated_tests", True))
+        stack.enter_context(patch("src.api.operator.settings.operator_auth_secret", ""))
+        stack.enter_context(patch("src.api.operator.settings.operator_auth_secret_hash", ""))
         stack.enter_context(patch(
         "src.api.operator.list_evolution_targets",
         return_value=[
@@ -3523,7 +3533,14 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert resp.status_code == 200
     payload = resp.json()
     assert payload["summary"]["suite_count"] == len(payload["suites"])
-    assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
+    red_child_postures = {
+        key: value
+        for key, value in payload["summary"].items()
+        if key.endswith("_posture") and "regressions_detected" in str(value)
+    }
+    assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed", (
+        f"Unexpected child benchmark regression posture(s): {red_child_postures}"
+    )
     assert (
         payload["summary"]["production_parity_readiness_posture"]
         == "production_parity_readiness_ci_gated_operator_visible"
@@ -9436,8 +9453,11 @@ async def test_operator_workflow_orchestration_groups_sessions_and_step_focus(cl
     assert sessions[0]["queue_state"] == "boundary_blocked"
     assert sessions[0]["queue_reason"] == "1 workflow crossed a changed trust boundary and now needs repair or a fresh run."
     assert sessions[0]["attention_summary"] == "1 boundary blocked · 1 repair ready · 1 branch ready · 2 debugger ready"
-    assert sessions[0]["queue_draft"].startswith("Review the workflow queue for Session 2.")
-    assert sessions[0]["handoff_draft"].startswith("Prepare a workflow handoff for Session 2.")
+    # Safe workflow projection rejects free-form thread labels and supplies a
+    # bounded fallback.  The orchestration lane must keep that redaction
+    # visible in operator drafts instead of reintroducing raw session text.
+    assert sessions[0]["queue_draft"].startswith("Review the workflow queue for workflow thread.")
+    assert sessions[0]["handoff_draft"].startswith("Prepare a workflow handoff for workflow thread.")
     assert sessions[0]["boundary_blocked_workflows"] == 1
     assert sessions[0]["repair_ready_workflows"] == 1
     assert sessions[0]["branch_ready_workflows"] == 1
@@ -9446,9 +9466,9 @@ async def test_operator_workflow_orchestration_groups_sessions_and_step_focus(cl
     assert sessions[0]["lead_related_output_paths"] == ["notes/daily-brief-v2.md"]
     assert sessions[0]["lead_output_history"][0]["path"] == "notes/daily-brief-v2.md"
     assert sessions[0]["lead_latest_branch_run_identity"] == "session-2:workflow_daily_brief:branch-1"
-    assert sessions[0]["lead_latest_branch_summary"] == "Branched repair draft completed"
+    assert sessions[0]["lead_latest_branch_summary"] == "Workflow daily-brief succeeded"
     assert sessions[1]["thread_id"] == "session-1"
-    assert sessions[1]["continue_message"] == "Resume repo review."
+    assert sessions[1]["continue_message"] == "Use the live workflow recovery controls to continue this run."
     assert sessions[1]["lead_step_focus"]["kind"] == "active"
     assert sessions[1]["queue_position"] == 2
     assert sessions[1]["queue_state"] == "approval_gate"
@@ -9469,7 +9489,7 @@ async def test_operator_workflow_orchestration_groups_sessions_and_step_focus(cl
     assert workflows[0]["step_count"] == 5
     assert workflows[0]["compacted_step_count"] == 2
     assert len(workflows[0]["step_records"]) == 3
-    assert workflows[0]["step_records"][0]["id"] == "compare"
+    assert workflows[0]["step_records"][0]["id"].startswith("redacted_workflow_step_")
     assert "checkpoint_branch" in workflows[0]["preserved_recovery_paths"]
     assert "approval_gate" in workflows[0]["preserved_recovery_paths"]
     assert workflows[0]["recovery_density"]["recommended_path"] == "approval_gate"
@@ -9483,7 +9503,7 @@ async def test_operator_workflow_orchestration_groups_sessions_and_step_focus(cl
     assert workflows[1]["step_focus"]["recovery_action_count"] == 1
     assert workflows[1]["is_compacted"] is True
     assert len(workflows[1]["step_records"]) == 3
-    assert workflows[1]["step_records"][0]["id"] == "outline"
+    assert workflows[1]["step_records"][0]["id"].startswith("redacted_workflow_step_")
     assert workflows[1]["state_capsule"].startswith("4 steps")
     assert "step_repair" in workflows[1]["preserved_recovery_paths"]
     assert "boundary_receipt" in workflows[1]["preserved_recovery_paths"]
@@ -9579,11 +9599,16 @@ async def test_operator_workflow_orchestration_surfaces_anticipatory_repair_and_
     session = payload["sessions"][0]
     assert session["lead_anticipatory_risk_level"] in {"elevated", "high"}
     assert "backup branch" in session["lead_anticipatory_summary"]
-    assert session["lead_backup_branch_label"] == "draft (write_file)"
-    assert '_seraph_resume_from_step="draft"' in session["lead_backup_branch_draft"]
+    # Checkpoint labels and executable drafts are intentionally redacted by
+    # the safe workflow projection; the live control endpoint owns recovery.
+    assert session["lead_backup_branch_label"] == "checkpoint"
+    assert session["lead_backup_branch_draft"] is None
     assert session["lead_anticipatory_repair_draft"].startswith("Before continuing workflow")
     workflow = next(item for item in payload["workflows"] if item["run_identity"] == "session-1:workflow_release_brief:1")
     assert workflow["anticipatory_plan"]["backup_branch_ready"] is True
+    assert workflow["anticipatory_plan"]["backup_branch_step_id"].startswith("redacted_workflow_step_")
+    assert workflow["anticipatory_plan"]["backup_branch_label"] == "checkpoint"
+    assert workflow["anticipatory_plan"]["backup_branch_draft"] is None
     assert workflow["anticipatory_plan"]["risk_level"] in {"elevated", "high"}
     assert workflow["condensation_fidelity"]["state"] == "partial"
 
@@ -9971,7 +9996,7 @@ async def test_operator_workflow_orchestration_uses_most_recent_branch_for_debug
     payload = resp.json()
     root_workflow = payload["workflows"][0]
     assert root_workflow["output_debugger"]["latest_branch_run_identity"] == "session-1:workflow_repo_review:branch-new"
-    assert root_workflow["output_debugger"]["latest_branch_summary"] == "Newest successful branch"
+    assert root_workflow["output_debugger"]["latest_branch_summary"] == "Workflow repo-review succeeded"
     assert root_workflow["output_debugger"]["latest_branch_output_path"] == "notes/repo-review-new-branch.md"
 
 
@@ -11031,7 +11056,7 @@ async def test_operator_timeline_projects_routing_metadata(client):
 
 
 @pytest.mark.asyncio
-async def test_operator_timeline_uses_retry_draft_when_no_thread_continue_message_exists(client):
+async def test_operator_timeline_hides_retry_draft_when_replay_is_blocked(client):
     with (
         patch(
             "src.api.operator._list_workflow_runs",
@@ -11102,7 +11127,14 @@ async def test_operator_timeline_uses_retry_draft_when_no_thread_continue_messag
     assert resp.status_code == 200
     payload = resp.json()
     workflow_item = next(item for item in payload["items"] if item["kind"] == "workflow_run")
-    assert workflow_item["continue_message"] == "Retry workflow \"retryable-save\" from step \"save\"."
+    assert workflow_item["continue_message"] is None
+    assert workflow_item["replay_draft"] is None
+    assert workflow_item["replay_allowed"] is False
+    assert workflow_item["replay_block_reason"] == "workflow_unavailable"
+    assert workflow_item["recommended_actions"] == []
+    assert workflow_item["metadata"]["resume_from_step"] is None
+    assert workflow_item["metadata"]["checkpoint_candidates"] == []
+    assert workflow_item["metadata"]["resume_plan"] is None
 
 
 @pytest.mark.asyncio

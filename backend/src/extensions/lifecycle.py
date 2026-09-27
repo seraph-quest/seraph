@@ -1490,11 +1490,7 @@ def _planned_connector_definition_errors(contribution: ExtensionContributionReco
             break
     conflict = contribution.metadata.get("registry_conflict")
     if isinstance(conflict, dict):
-        name = str(conflict.get("name") or contribution.metadata.get("name") or contribution.reference)
-        winner = str(conflict.get("winner_display_name") or conflict.get("winner_extension_id") or "another extension")
-        errors.append(
-            f"{contribution.contribution_type.removesuffix('s').replace('_', ' ')} '{name}' conflicts with {winner}"
-        )
+        errors.append("Contribution conflicts with another definition.")
     return errors
 
 

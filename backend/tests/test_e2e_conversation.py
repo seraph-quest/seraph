@@ -443,18 +443,30 @@ class TestE2EConversation:
                     ws.send_text(json.dumps({
                         "type": "message",
                         "message": "run this snippet",
-                        "session_id": "s-resume",
+                        "session_id": None,
                     }))
 
+                    initial_messages = []
                     for _ in range(10):
                         msg = json.loads(_receive_text(ws))
+                        initial_messages.append(msg)
                         if msg["type"] == "final":
                             break
+
+                    initial_final = next(
+                        (msg for msg in initial_messages if msg["type"] == "final"),
+                        None,
+                    )
+                    assert initial_final is not None, "Initial ingress must return a final response"
+                    session_id = initial_final.get("session_id")
+                    assert isinstance(session_id, str) and session_id.strip(), (
+                        "Initial ingress must return a real session_id"
+                    )
 
                     ws.send_text(json.dumps({
                         "type": "resume_message",
                         "message": "run this snippet",
-                        "session_id": "s-resume",
+                        "session_id": session_id,
                     }))
 
                     for _ in range(10):
@@ -462,9 +474,9 @@ class TestE2EConversation:
                         if msg["type"] == "final":
                             break
 
-                messages = client.get("/api/sessions/s-resume/messages").json()
+                messages = client.get(f"/api/sessions/{session_id}/messages").json()
                 user_messages = [m for m in messages if m["role"] == "user"]
-                assert len(user_messages) == 1
+                assert len(user_messages) == 1, "resume_message must not duplicate the user turn"
                 assert user_messages[0]["content"] == "run this snippet"
         finally:
             _close_sync_client_with_db(patches, stack)

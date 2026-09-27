@@ -296,7 +296,9 @@ describe("WorkBoardPanel M6 governed procedure controls", () => {
 
     render(<WorkBoardPanel {...owner} />);
     fireEvent.click(await screen.findByRole("button", { name: "Open task Verified follow-through" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Preview procedure" }));
+    const previewButton = await screen.findByRole("button", { name: "Preview procedure" });
+    await waitFor(() => expect(previewButton).toBeEnabled());
+    fireEvent.click(previewButton);
 
     const preview = await screen.findByRole("region", { name: "Governed procedure preview" });
     expect(preview).toHaveTextContent("Fixed guardian watch and reviewed GitHub follow-through");

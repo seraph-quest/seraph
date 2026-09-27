@@ -10,6 +10,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
 
 from config.settings import settings
+import src.db.engine as db_engine
 from src.db.engine import (
     _configure_sqlite_connection,
     _ensure_legacy_columns,
@@ -23,6 +24,49 @@ from src.db.models import (
     ModelRouteReceiptRecord,
     OperatorSession,
 )
+
+
+async def test_session_factory_override_is_task_local(monkeypatch):
+    class MarkerSession:
+        def __init__(self, marker: str):
+            self.info = {"marker": marker}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def commit(self):
+            return None
+
+        async def rollback(self):
+            return None
+
+    monkeypatch.setattr(
+        db_engine,
+        "async_session_factory",
+        lambda: MarkerSession("canonical"),
+    )
+    release_canonical_reader = asyncio.Event()
+
+    async def read_marker() -> str:
+        async with db_engine.get_session() as session:
+            return str(session.info["marker"])
+
+    async def unrelated_application_request() -> str:
+        await release_canonical_reader.wait()
+        return await read_marker()
+
+    # This task captures the canonical context before the eval override is set.
+    unrelated_request = asyncio.create_task(unrelated_application_request())
+    with db_engine.override_session_factory(lambda: MarkerSession("eval")):
+        release_canonical_reader.set()
+        eval_value = await read_marker()
+        canonical_value = await unrelated_request
+
+    assert eval_value == "eval"
+    assert canonical_value == "canonical"
 
 
 async def test_ensure_m5_columns_adds_m5_candidate_digests(tmp_path):
@@ -675,13 +719,14 @@ async def _run_file_backed_sqlite_auth_touch_is_coalesced(
     event.listen(engine.sync_engine, "connect", _configure_sqlite_connection)
 
     updates_entered = 0
-    auth_get_calls = 0
+    initial_auth_reads_started = 0
     barrier_gets_completed = 0
     checked_out = 0
     max_checked_out = 0
     counter_lock = threading.Lock()
-    initial_read_barrier = asyncio.Barrier(20)
+    pool_saturation_barrier = asyncio.Barrier(20)
     initial_reads_completed = asyncio.Event()
+    task_get_calls: dict[asyncio.Task, int] = {}
     lock_connection = None
     lock_engine = None
     lock_released = False
@@ -711,20 +756,27 @@ async def _run_file_backed_sqlite_auth_touch_is_coalesced(
     setup_factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     class BarrierSession(AsyncSession):
         async def get(self, entity, ident, **kwargs):
-            nonlocal auth_get_calls, barrier_gets_completed
-            auth_get_calls += 1
-            call_number = auth_get_calls
-            if call_number <= 40:
-                # Hold twenty initial authenticated reads at once so the
-                # bounded pool reaches its real 20-connection ceiling. The
-                # two barrier waves cover all forty requests; serialized
-                # stale-touch rereads run after these initial reads and skip
-                # the barrier.
-                await self.connection()
-                await asyncio.wait_for(initial_read_barrier.wait(), timeout=5)
-                barrier_gets_completed += 1
-                if barrier_gets_completed == 40:
-                    initial_reads_completed.set()
+            nonlocal initial_auth_reads_started, barrier_gets_completed
+            task = asyncio.current_task()
+            assert task is not None
+            task_get_calls[task] = task_get_calls.get(task, 0) + 1
+            if task_get_calls[task] == 1:
+                # The first twenty request tasks hold their initial reads
+                # together to prove the pool reaches its 20-connection cap.
+                # Later initial reads do not join another full barrier: one
+                # serialized stale-touch write may already hold a connection.
+                with counter_lock:
+                    initial_auth_reads_started += 1
+                    saturate_pool = initial_auth_reads_started <= 20
+                if saturate_pool:
+                    await self.connection()
+                    await asyncio.wait_for(pool_saturation_barrier.wait(), timeout=5)
+                record = await super().get(entity, ident, **kwargs)
+                with counter_lock:
+                    barrier_gets_completed += 1
+                    if barrier_gets_completed == 40:
+                        initial_reads_completed.set()
+                return record
             return await super().get(entity, ident, **kwargs)
 
     request_factory = sessionmaker(engine, class_=BarrierSession, expire_on_commit=False)

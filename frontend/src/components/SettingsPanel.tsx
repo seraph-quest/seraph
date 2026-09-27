@@ -9,6 +9,7 @@ import { McpPolicyModeToggle } from "./settings/McpPolicyModeToggle";
 import { ApprovalModeToggle } from "./settings/ApprovalModeToggle";
 import { AuditLogPanel } from "./settings/AuditLogPanel";
 import { WorkflowPanel } from "./settings/WorkflowPanel";
+import { SourceWatchPanel } from "./settings/SourceWatchPanel";
 import { ArtifactStoragePanel } from "./settings/ArtifactStoragePanel";
 import { useOptionalOperatorAuth } from "./auth/OperatorAuthGate";
 
@@ -133,7 +134,7 @@ interface McpServer {
   auth_hint: string;
 }
 
-type SettingsSection = "artifacts" | "general" | "native" | "policies" | "audit" | "workflows" | "skills" | "discover" | "mcp";
+type SettingsSection = "artifacts" | "general" | "native" | "policies" | "audit" | "workflows" | "guardian" | "skills" | "discover" | "mcp";
 
 const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string }> = [
   { id: "artifacts", label: "Screenshot/VLM" },
@@ -142,6 +143,7 @@ const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string }> = [
   { id: "policies", label: "Policies" },
   { id: "audit", label: "Audit" },
   { id: "workflows", label: "Workflows" },
+  { id: "guardian", label: "Guardian" },
   { id: "skills", label: "Skills" },
   { id: "discover", label: "Discover" },
   { id: "mcp", label: "MCP" },
@@ -723,6 +725,8 @@ export function SettingsPanel() {
           {activeSection === "audit" && <AuditLogPanel />}
 
           {activeSection === "workflows" && <WorkflowPanel />}
+
+          {activeSection === "guardian" && <SourceWatchPanel />}
 
           {activeSection === "skills" && (
           <div className="px-1">

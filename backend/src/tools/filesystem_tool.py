@@ -3,6 +3,7 @@ import difflib
 import hashlib
 import json
 import os
+import stat
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -127,6 +128,9 @@ def _open_workspace_file(
                 os.close(parent_fd)
             parent_fd = next_fd
         final_fd = os.open(parts[-1], flags | nofollow, mode, dir_fd=parent_fd)
+        final_stat = os.fstat(final_fd)
+        if not stat.S_ISREG(final_stat.st_mode) or final_stat.st_nlink != 1:
+            raise ValueError("workspace file must be a regular single-link file")
         yield final_fd
         final_fd = None
     finally:

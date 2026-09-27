@@ -24,7 +24,7 @@ from sqlalchemy.orm import aliased
 from sqlmodel import select
 
 from src.artifacts.registry import build_artifact_record
-from src.db.models import Goal, WorkflowRunState
+from src.db.models import ApprovalRequest, Goal, GuardianRoutine, GuardianRoutineVersion, WorkflowRunState
 from src.db.session_refs import ensure_sessions_exist
 
 
@@ -110,7 +110,10 @@ DURABLE_JOB_TRANSITIONS: dict[str, frozenset[str]] = {
     }),
     "unknown_external_effect": frozenset({"blocked", "failed", "cancelled"}),
     "cost_liability": frozenset({"blocked", "failed", "cancelled"}),
-    "failed": frozenset({"queued"}),
+    # A failed local execution can be explicitly settled when recovery has
+    # proved that no external effect remains. Unknown effect history is
+    # redirected to reconciliation below rather than silently cancelled.
+    "failed": frozenset({"queued", "cancelled", "unknown_external_effect", "cost_liability"}),
     "degraded": frozenset(),
     "succeeded": frozenset(),
     "cancelled": frozenset(),
@@ -541,7 +544,16 @@ def _safe_structure(value: Any, *, max_depth: int = 3) -> Any:
         for key, item in value.items():
             key_text = str(key)
             normalized_key = re.sub(r"[^a-z0-9]", "", key_text.lower())
-            if any(
+            # A parent fencing counter is a monotonic CAS identity, not a
+            # bearer credential. Preserve only its typed non-negative integer
+            # form so durable child authority can be rebound and verified
+            # after recovery; all other token-like values remain redacted.
+            is_parent_fencing_counter = (
+                normalized_key == "parentfencingtoken"
+                and type(item) is int
+                and item >= 0
+            )
+            if not is_parent_fencing_counter and (any(
                 marker in normalized_key
                 for marker in (
                     "secret",
@@ -553,7 +565,7 @@ def _safe_structure(value: Any, *, max_depth: int = 3) -> Any:
                     "authorization",
                     "authheader",
                 )
-            ) or normalized_key in {"originalerror", "errordetail", "traceback"}:
+            ) or normalized_key in {"originalerror", "errordetail", "traceback"}):
                 result[key_text] = "[redacted]"
             else:
                 result[key_text] = _safe_structure(item, max_depth=max_depth - 1)
@@ -568,6 +580,71 @@ def _safe_structure(value: Any, *, max_depth: int = 3) -> Any:
 def _safe_inputs_digest(inputs: Any) -> tuple[str, dict[str, Any]]:
     keys = sorted(str(key) for key in inputs.keys()) if isinstance(inputs, dict) else []
     return _digest(inputs), {"redacted": True, "keys": keys, "shape": type(inputs).__name__}
+
+
+_ROUTINE_PUBLICATION_BINDING_FIELDS = frozenset(
+    {
+        "routine_id",
+        "routine_revision",
+        "routine_version",
+        "package_digest",
+        "parent_invocation_job_id",
+        "publication_child_job_id",
+        "invocation_uuid",
+        "owner_principal_id",
+        "owner_session_id",
+        "goal_id",
+        "goal_revision",
+        "source_watch_id",
+        "connection_id",
+        "connection_revision",
+        "repository",
+        "action",
+        "operation_uuid",
+    }
+)
+_ROUTINE_PUBLICATION_BINDING_REVISIONS = frozenset(
+    {"routine_revision", "routine_version", "goal_revision", "connection_revision"}
+)
+
+
+def _safe_routine_publication_binding(value: Any) -> dict[str, Any] | None:
+    """Persist only the scalar server binding needed to fence routine M3."""
+    if not isinstance(value, Mapping) or set(value) != _ROUTINE_PUBLICATION_BINDING_FIELDS:
+        return None
+    safe: dict[str, Any] = {}
+    for key, item in value.items():
+        if key in _ROUTINE_PUBLICATION_BINDING_REVISIONS:
+            if type(item) is not int or item <= 0:
+                return None
+            safe[key] = item
+        elif not isinstance(item, str) or not item or len(item) > 512:
+            return None
+        else:
+            safe[key] = item
+    return safe
+
+
+def _safe_durable_authority(value: Any) -> dict[str, Any]:
+    safe = _safe_structure(value)
+    if not isinstance(safe, dict) or not isinstance(value, Mapping):
+        return safe if isinstance(safe, dict) else {}
+    binding = _safe_routine_publication_binding(value.get("routine_binding"))
+    if binding is not None:
+        safe["routine_binding"] = binding
+    return safe
+
+
+def _safe_durable_inputs(inputs: Any) -> tuple[str, dict[str, Any]]:
+    digest, projection = _safe_inputs_digest(inputs)
+    binding = (
+        _safe_routine_publication_binding(inputs.get("routine_binding"))
+        if isinstance(inputs, Mapping)
+        else None
+    )
+    if binding is not None:
+        projection["routine_binding"] = binding
+    return digest, projection
 
 
 def _positive_revision(value: Any) -> int | None:
@@ -1480,8 +1557,12 @@ def _serialize(run: WorkflowRunState, *, receipt: dict[str, Any] | None = None) 
         "job_id": run.run_identity,
         "run_identity": run.run_identity,
         "record_schema_version": int(getattr(run, "record_schema_version", DURABLE_JOB_RECORD_SCHEMA_VERSION) or 0),
+        "root_run_identity": getattr(run, "root_run_identity", None),
+        "parent_run_identity": getattr(run, "parent_run_identity", None),
         "parent_job_id": getattr(run, "parent_job_id", None),
         "parent_fencing_token": getattr(run, "parent_fencing_token", None),
+        "branch_kind": getattr(run, "branch_kind", None),
+        "branch_depth": int(getattr(run, "branch_depth", 0) or 0),
         "owner": {
             "kind": getattr(run, "owner_kind", "legacy"),
             "principal_id": getattr(run, "owner_principal_id", None),
@@ -1593,6 +1674,44 @@ class DurableJobIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class DurableJobRoutinePublicationAdmissionGuard:
+    """Internal CAS binding for a routine-owned GitHub publication job.
+
+    The publication (M3) intentionally remains outside the routine
+    invocation job tree so an approval can survive a parent fence rollover.
+    Its admission nevertheless has to be serialized with cancellation of the
+    routine parent and wrapper child.  These fields are the exact durable
+    identities and fences that the admission transaction rechecks.
+    """
+
+    routine_parent_job_id: str
+    routine_parent_fencing_token: int
+    publication_child_job_id: str
+    publication_child_fencing_token: int
+    publication_child_parent_fencing_token: int
+    owner_principal_id: str
+    owner_session_id: str
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "routine_parent_job_id",
+            "publication_child_job_id",
+            "owner_principal_id",
+            "owner_session_id",
+        ):
+            if not _text(getattr(self, field_name)):
+                raise ValueError(f"{field_name} is required")
+        for field_name in (
+            "routine_parent_fencing_token",
+            "publication_child_fencing_token",
+            "publication_child_parent_fencing_token",
+        ):
+            value = getattr(self, field_name)
+            if type(value) is not int or value <= 0:
+                raise ValueError(f"{field_name} must be a positive integer")
+
+
+@dataclass(frozen=True, slots=True)
 class DurableJobSpec:
     identity: DurableJobIdentity
     inputs: Any = field(default_factory=dict)
@@ -1619,10 +1738,260 @@ class DurableJobSpec:
     run_fingerprint: str | None = None
     budget_microusd: int | None = None
     budget_digest: str | None = None
+    # M3 routine publications are admitted outside the durable parent tree so
+    # reviewed approvals can be adopted after a parent fence rollover.  When
+    # supplied, the repository validates this binding in the same transaction
+    # that inserts the M3 row.  Standalone M3 jobs leave it unset.
+    routine_publication_admission_guard: DurableJobRoutinePublicationAdmissionGuard | None = None
 
 
 class DurableJobRepository:
     """Persistence operations for the one canonical workflow job record."""
+
+    async def _assert_routine_publication_admission_guard(
+        self,
+        db: Any,
+        *,
+        spec: DurableJobSpec,
+        guard: DurableJobRoutinePublicationAdmissionGuard,
+        now: datetime,
+        dialect_name: str,
+    ) -> None:
+        """Fence an out-of-tree routine publication before its M3 insert.
+
+        Cancellation settles the routine child and parent in durable state,
+        while the GitHub publication remains a separate job for approval
+        recovery.  The final M3 admission must therefore lock and validate
+        both rows in this transaction; a preflight projection alone leaves a
+        cancellation/admission window.
+        """
+
+        if spec.identity.job_kind != "github_followthrough_v1":
+            raise DurableJobTransitionError(
+                "routine publication admission guard has an invalid job kind"
+            )
+        if spec.identity.owner_kind != "user":
+            raise DurableJobTransitionError(
+                "routine publication admission guard requires a user job"
+            )
+        if (
+            spec.identity.owner_principal_id != guard.owner_principal_id
+            or _text(spec.session_id) != guard.owner_session_id
+            or _text(spec.operator_session_id or spec.session_id) != guard.owner_session_id
+        ):
+            raise DurableJobLeaseError("routine publication admission owner binding is stale")
+
+        parent_id = guard.routine_parent_job_id
+        child_id = guard.publication_child_job_id
+        if parent_id == child_id or parent_id == spec.identity.job_id or child_id == spec.identity.job_id:
+            raise DurableJobTransitionError(
+                "routine publication admission identities are invalid"
+            )
+
+        statement = select(WorkflowRunState).where(
+            WorkflowRunState.run_identity.in_((parent_id, child_id))
+        )
+        if dialect_name != "sqlite":
+            # The SQLite path is protected by BEGIN IMMEDIATE in admit_job;
+            # row locks provide the equivalent serialization on a server DB.
+            statement = statement.with_for_update()
+        rows = (await db.execute(statement)).scalars().all()
+        by_identity = {_text(row.run_identity): row for row in rows}
+        parent = by_identity.get(parent_id)
+        child = by_identity.get(child_id)
+        if parent is None or child is None:
+            raise DurableJobLeaseError(
+                "routine publication admission parent or child is missing"
+            )
+
+        def _live_lease(run: WorkflowRunState) -> bool:
+            try:
+                expiry = _as_utc(run.lease_expires_at)
+            except ValueError as exc:
+                raise DurableJobLeaseError(
+                    "routine publication admission lease metadata is malformed"
+                ) from exc
+            return bool(_text(run.lease_owner)) and expiry is not None and expiry > now
+
+        if (
+            parent.job_kind != "routine_invocation"
+            or parent.owner_kind != "user"
+            or _text(parent.owner_principal_id) != guard.owner_principal_id
+            or _text(parent.session_id) != guard.owner_session_id
+            or _text(parent.operator_session_id or parent.session_id) != guard.owner_session_id
+            or parent.status != "running"
+            or not _live_lease(parent)
+            or int(parent.fencing_token or 0) != guard.routine_parent_fencing_token
+        ):
+            raise DurableJobLeaseError(
+                "routine publication admission parent fence is stale or expired"
+            )
+
+        if (
+            child.job_kind != "routine_github_followthrough_child"
+            or child.owner_kind != "user"
+            or _text(child.owner_principal_id) != guard.owner_principal_id
+            or _text(child.session_id) != guard.owner_session_id
+            or _text(child.operator_session_id or child.session_id) != guard.owner_session_id
+            or _text(child.parent_job_id) != parent_id
+            or int(child.parent_fencing_token or 0)
+            != guard.publication_child_parent_fencing_token
+            or int(child.fencing_token or 0) != guard.publication_child_fencing_token
+            or guard.publication_child_parent_fencing_token
+            != guard.routine_parent_fencing_token
+            or _text(child.goal_id) != _text(parent.goal_id)
+            or child.goal_revision != parent.goal_revision
+        ):
+            raise DurableJobLeaseError(
+                "routine publication admission child binding is stale"
+            )
+
+        child_status = _text(child.status)
+        if child_status == "running":
+            if not _live_lease(child) or int(child.fencing_token or 0) <= 0:
+                raise DurableJobLeaseError(
+                    "routine publication admission child lease is stale or expired"
+                )
+        elif child_status == "blocked":
+            # This is the canonical approval-held representation after M4
+            # settles its wrapper child.  A blocked child with any lease is
+            # ambiguous and cannot admit a new out-of-tree publication.
+            if child.lease_owner is not None or child.lease_expires_at is not None:
+                raise DurableJobLeaseError(
+                    "routine publication admission child blocked lease is invalid"
+                )
+        else:
+            raise DurableJobTransitionError(
+                "routine publication admission child is not current"
+            )
+
+        parent_authority = _json_load(parent.declared_authority_json, {})
+        child_authority = _json_load(child.declared_authority_json, {})
+        m3_authority = spec.declared_authority
+        m3_inputs = spec.inputs
+        if not all(
+            isinstance(value, Mapping)
+            for value in (parent_authority, child_authority, m3_authority, m3_inputs)
+        ):
+            raise DurableJobTransitionError(
+                "routine publication admission authority is malformed"
+            )
+
+        authority_binding = _safe_routine_publication_binding(
+            m3_authority.get("routine_binding")
+        )
+        input_binding = _safe_routine_publication_binding(
+            m3_inputs.get("routine_binding")
+        )
+        if authority_binding is None or input_binding is None or authority_binding != input_binding:
+            raise DurableJobTransitionError(
+                "routine publication admission binding is malformed"
+            )
+        binding = authority_binding
+        routine_statement = select(GuardianRoutine).where(
+            GuardianRoutine.id == binding["routine_id"],
+            GuardianRoutine.owner_principal_id == guard.owner_principal_id,
+            GuardianRoutine.owner_session_id == guard.owner_session_id,
+        )
+        version_statement = select(GuardianRoutineVersion).where(
+            GuardianRoutineVersion.routine_id == binding["routine_id"],
+            GuardianRoutineVersion.version == binding["routine_version"],
+        )
+        if dialect_name != "sqlite":
+            # The SQLite path is already inside BEGIN IMMEDIATE.  A row lock
+            # on both canonical lifecycle records provides the same admission
+            # serialization on a server database.
+            routine_statement = routine_statement.with_for_update()
+            version_statement = version_statement.with_for_update()
+        routine = (await db.execute(routine_statement)).scalars().first()
+        version = (await db.execute(version_statement)).scalars().first()
+        if routine is None or version is None:
+            raise DurableJobLeaseError(
+                "routine publication admission canonical routine is missing"
+            )
+        if (
+            _text(routine.state) != "active"
+            or int(routine.revision or 0) != binding["routine_revision"]
+            or int(routine.current_version or 0) != binding["routine_version"]
+            or _text(version.installed_package_digest) != binding["package_digest"]
+        ):
+            raise DurableJobLeaseError(
+                "routine publication admission canonical routine is stale or inactive"
+            )
+        if (
+            binding["parent_invocation_job_id"] != parent_id
+            or binding["publication_child_job_id"] != child_id
+            or binding["owner_principal_id"] != guard.owner_principal_id
+            or binding["owner_session_id"] != guard.owner_session_id
+            or binding["goal_id"] != _text(parent.goal_id)
+            or binding["goal_revision"] != parent.goal_revision
+            or _text(spec.goal_id) != _text(parent.goal_id)
+            or spec.goal_revision != parent.goal_revision
+        ):
+            raise DurableJobLeaseError(
+                "routine publication admission binding is stale"
+            )
+
+        parent_fields = (
+            ("routine_id", "routine_id"),
+            ("routine_revision", "routine_revision"),
+            ("routine_version", "routine_version"),
+            ("package_digest", "package_digest"),
+            ("invocation_uuid", "invocation_uuid"),
+            ("source_watch_id", "source_watch_id"),
+            ("connection_id", "github_connection_id"),
+            ("connection_revision", "github_connection_revision"),
+            ("repository", "github_repository"),
+            ("action", "github_action"),
+        )
+        child_fields = parent_fields
+        if any(parent_authority.get(auth_key) != binding[binding_key] for binding_key, auth_key in parent_fields):
+            raise DurableJobLeaseError(
+                "routine publication admission parent authority is stale"
+            )
+        if any(child_authority.get(auth_key) != binding[binding_key] for binding_key, auth_key in child_fields):
+            raise DurableJobLeaseError(
+                "routine publication admission child authority is stale"
+            )
+        if (
+            _text(child_authority.get("parent_job_id")) != parent_id
+            or int(child_authority.get("parent_fencing_token") or 0)
+            != guard.routine_parent_fencing_token
+            or _text(child_authority.get("routine_invocation_job_id")) != parent_id
+            or _text(child_authority.get("step_id")) != "github_followthrough"
+            or _text(child_authority.get("m3_job_id")) != spec.identity.job_id
+            or _text(child_authority.get("publication_operation_uuid"))
+            != binding["operation_uuid"]
+        ):
+            raise DurableJobLeaseError(
+                "routine publication admission child authority is stale"
+            )
+
+        # The child checkpoint is the durable identity written before the
+        # external prepare call.  It prevents a caller from borrowing a
+        # different routine child merely by presenting a matching JSON
+        # binding.  Both the pre-admission and approval-held forms are valid;
+        # cancellation uses a terminal child status and is rejected above.
+        checkpoints = _json_load(child.checkpoint_receipts_json, [])
+        if not isinstance(checkpoints, list):
+            raise DurableJobTransitionError(
+                "routine publication admission child checkpoints are malformed"
+            )
+        checkpoint = next(
+            (
+                item
+                for item in reversed(checkpoints)
+                if isinstance(item, Mapping)
+                and item.get("checkpoint_id")
+                in {"routine-child:adoption_pending", "routine-child:prepared"}
+            ),
+            None,
+        )
+        payload = checkpoint.get("payload") if isinstance(checkpoint, Mapping) else None
+        if not isinstance(payload, Mapping) or _text(payload.get("m3_job_id")) != spec.identity.job_id:
+            raise DurableJobTransitionError(
+                "routine publication admission child checkpoint is stale"
+            )
 
     async def admit_job(self, spec: DurableJobSpec) -> dict[str, Any]:
         identity = spec.identity
@@ -1640,7 +2009,7 @@ class DurableJobRepository:
             raise DurableJobTransitionError("a durable job cannot depend on itself")
         deadline = _as_utc(spec.deadline_at)
         now = _utc_now()
-        input_digest, safe_inputs = _safe_inputs_digest(spec.inputs)
+        input_digest, safe_inputs = _safe_durable_inputs(spec.inputs)
         run_fingerprint = _bounded_identifier(
             spec.run_fingerprint or input_digest,
             field_name="run_fingerprint",
@@ -1674,7 +2043,13 @@ class DurableJobRepository:
             dedupe_key=identity.idempotency_key,
         )
         authority_digest = _digest(spec.declared_authority)
+        safe_authority = _safe_durable_authority(spec.declared_authority)
+        root_run_identity = identity.job_id
+        branch_depth = 0
         async with self._session() as db:
+            bind = db.get_bind()
+            dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
+            transaction_started = False
             if not _text(spec.goal_id) and spec.goal_revision is not None:
                 raise DurableJobTransitionError("goal_revision requires a canonical goal")
             if _text(spec.goal_id):
@@ -1682,10 +2057,9 @@ class DurableJobRepository:
                 # write transaction before reading the canonical goal so a
                 # goal update/delete cannot race admission. A row-locking
                 # backend serializes on the canonical goal row instead.
-                bind = db.get_bind()
-                dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
                 if dialect_name == "sqlite":
                     await db.execute(text("BEGIN IMMEDIATE"))
+                    transaction_started = True
                 else:
                     await db.execute(
                         select(Goal.id)
@@ -1736,6 +2110,39 @@ class DurableJobRepository:
                     or int(parent.fencing_token or 0) != parent_fence
                 ):
                     raise DurableJobLeaseError("parent job fence is stale or expired")
+                # A durable child belongs to the same cancellation/readback
+                # tree as the validated parent.  The parent fence above is
+                # the authority that makes this lineage trustworthy; derive
+                # the root only after that validation succeeds.  Legacy rows
+                # may have an empty root, so retain their run identity as the
+                # safe fallback instead of creating a second tree.
+                root_run_identity = _text(getattr(parent, "root_run_identity", None))
+                if not root_run_identity:
+                    root_run_identity = _text(parent.run_identity)
+                try:
+                    parent_branch_depth = int(getattr(parent, "branch_depth", 0) or 0)
+                except (TypeError, ValueError) as exc:
+                    raise DurableJobTransitionError(
+                        "parent branch depth is malformed"
+                    ) from exc
+                if parent_branch_depth < 0:
+                    raise DurableJobTransitionError("parent branch depth is malformed")
+                branch_depth = parent_branch_depth + 1
+            if spec.routine_publication_admission_guard is not None:
+                if dialect_name == "sqlite" and not transaction_started:
+                    # A guard is meaningful even for a goalless internal row.
+                    # Start the same immediate transaction before reading the
+                    # parent/child so the final insert cannot follow a stale
+                    # cancellation preflight.
+                    await db.execute(text("BEGIN IMMEDIATE"))
+                    transaction_started = True
+                await self._assert_routine_publication_admission_guard(
+                    db,
+                    spec=spec,
+                    guard=spec.routine_publication_admission_guard,
+                    now=now,
+                    dialect_name=dialect_name,
+                )
             await ensure_sessions_exist(db, [spec.session_id])
             existing = (
                 await db.execute(
@@ -1766,6 +2173,12 @@ class DurableJobRepository:
                 outstanding = await db.execute(
                     select(func.count(WorkflowRunState.run_identity)).where(
                         WorkflowRunState.goal_id == spec.goal_id,
+                        # A workflow step is bounded by its admitted root and
+                        # must not consume a second goal-level outstanding
+                        # slot. The parent tree still owns child cancellation
+                        # and fencing independently.
+                        WorkflowRunState.parent_job_id.is_(None),
+                        WorkflowRunState.parent_run_identity.is_(None),
                         # Failed/blocked rows can be explicitly resumed back
                         # to queued, so they remain outstanding until the
                         # run reaches a terminal succeeded/degraded/cancelled
@@ -1790,7 +2203,7 @@ class DurableJobRepository:
             failure_reason = "deadline_expired" if status == "failed" else None
             run = WorkflowRunState(
                 run_identity=identity.job_id,
-                root_run_identity=identity.job_id,
+                root_run_identity=root_run_identity,
                 parent_run_identity=spec.parent_job_id,
                 parent_job_id=spec.parent_job_id,
                 parent_fencing_token=spec.parent_fencing_token,
@@ -1800,9 +2213,10 @@ class DurableJobRepository:
                 conversation_id=spec.conversation_id or spec.session_id,
                 operator_session_id=spec.operator_session_id,
                 status=status,
+                branch_depth=branch_depth,
                 run_fingerprint=run_fingerprint,
                 arguments_json=_canonical(safe_inputs),
-                approval_context_json=_canonical(_safe_structure(spec.declared_authority)),
+                approval_context_json=_canonical(safe_authority),
                 record_schema_version=DURABLE_JOB_RECORD_SCHEMA_VERSION,
                 job_kind=identity.job_kind,
                 owner_kind=identity.owner_kind,
@@ -1822,7 +2236,7 @@ class DurableJobRepository:
                 priority=int(spec.priority),
                 dependencies_json=_canonical(_string_list(spec.dependencies)),
                 resource_claims_json=_canonical(_string_list(spec.resource_claims)),
-                declared_authority_json=_canonical(_safe_structure(spec.declared_authority)),
+                declared_authority_json=_canonical(safe_authority),
                 deadline_at=deadline,
                 max_attempts=int(spec.max_attempts),
                 failure_reason=failure_reason,
@@ -1897,6 +2311,128 @@ class DurableJobRepository:
             ).scalars().first()
             if run is None:
                 return None
+            db.expunge(run)
+            return _serialize(run)
+
+    async def assert_active_lease(
+        self,
+        job_id: str,
+        *,
+        owner: str,
+        fencing_token: int,
+    ) -> dict[str, Any]:
+        """Re-read a running job and reject a stale or expired lease."""
+        async with self._session() as db:
+            run = await self._fetch(db, job_id)
+            if run.status != "running":
+                raise DurableJobLeaseError("durable job is not running")
+            self._assert_lease(run, owner=owner, fencing_token=fencing_token)
+            db.expunge(run)
+            return _serialize(run)
+
+    async def get_by_idempotency_binding(
+        self,
+        *,
+        owner_principal_id: str,
+        goal_id: str | None,
+        goal_revision: int | None,
+        idempotency_scope: str,
+        idempotency_key: str,
+        expected_job_id: str | None = None,
+        owner_kind: str | None = None,
+        service_id: str | None = None,
+        session_id: str | None = None,
+        operator_session_id: str | None = None,
+        job_kind: str | None = None,
+        capability_version: str | None = None,
+        input_digest: str | None = None,
+        authority_digest: str | None = None,
+        run_fingerprint: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Read the exact durable admission for one immutable binding.
+
+        Restart recovery must look up the binding persisted by admission. A
+        reconstructed job id is only an advisory hint and cannot prove that a
+        durable run belongs to the board attempt. The binding calculation is
+        the same canonical function used by ``admit_job``.
+        """
+
+        owner_principal_id = _bounded_identifier(
+            owner_principal_id,
+            field_name="owner_principal_id",
+        )
+        idempotency_scope = _bounded_identifier(
+            idempotency_scope,
+            field_name="idempotency_scope",
+        )
+        idempotency_key = _bounded_identifier(
+            idempotency_key,
+            field_name="idempotency_key",
+        )
+        expected_job_id = _bounded_identifier(expected_job_id, field_name="expected_job_id") or None
+        owner_kind = _bounded_identifier(owner_kind, field_name="owner_kind") or None
+        service_id = _bounded_identifier(service_id, field_name="service_id") or None
+        session_id = _bounded_identifier(session_id, field_name="session_id") or None
+        operator_session_id = (
+            _bounded_identifier(operator_session_id, field_name="operator_session_id") or None
+        )
+        job_kind = _bounded_identifier(job_kind, field_name="job_kind") or None
+        capability_version = (
+            _bounded_identifier(capability_version, field_name="capability_version") or None
+        )
+        input_digest = _bounded_identifier(input_digest, field_name="input_digest") or None
+        authority_digest = _bounded_identifier(authority_digest, field_name="authority_digest") or None
+        run_fingerprint = _bounded_identifier(run_fingerprint, field_name="run_fingerprint") or None
+        binding = _binding(
+            owner_principal_id=owner_principal_id,
+            goal_id=goal_id,
+            goal_revision=goal_revision,
+            idempotency_scope=idempotency_scope,
+            dedupe_key=idempotency_key,
+        )
+        async with self._session() as db:
+            run = (
+                await db.execute(
+                    select(WorkflowRunState).where(
+                        WorkflowRunState.idempotency_binding == binding,
+                    )
+                )
+            ).scalars().first()
+            if run is None:
+                return None
+            # The binding includes the immutable fields above, and these
+            # explicit checks keep a malformed legacy row from being treated
+            # as a recovery match merely because its digest collides.
+            if (
+                run.idempotency_binding != binding
+                or run.owner_principal_id != owner_principal_id
+                or run.goal_id != goal_id
+                or run.goal_revision != goal_revision
+                or run.idempotency_scope != idempotency_scope
+                or run.idempotency_key != idempotency_key
+                or (expected_job_id is not None and run.run_identity != expected_job_id)
+                or (owner_kind is not None and run.owner_kind != owner_kind)
+                or (service_id is not None and run.service_id != service_id)
+                or (session_id is not None and run.session_id != session_id)
+                or (
+                    operator_session_id is not None
+                    and run.operator_session_id != operator_session_id
+                )
+                or (job_kind is not None and run.job_kind != job_kind)
+                or (
+                    capability_version is not None
+                    and run.capability_version != capability_version
+                )
+                or (input_digest is not None and run.input_digest != input_digest)
+                or (authority_digest is not None and run.authority_digest != authority_digest)
+                or (
+                    run_fingerprint is not None
+                    and run.run_fingerprint != run_fingerprint
+                )
+            ):
+                raise DurableJobIdempotencyConflict(
+                    "durable admission binding conflicts on immutable identity"
+                )
             db.expunge(run)
             return _serialize(run)
 
@@ -2197,6 +2733,15 @@ class DurableJobRepository:
                 raise DurableJobTransitionError(
                     "failed jobs require explicit retry with reconciliation"
                 )
+            if current == "failed" and to_status == "cancelled":
+                try:
+                    effect_ledger = _effect_ledger_or_raise(run.effect_receipts_json)
+                except DurableJobTransitionError:
+                    to_status = "unknown_external_effect"
+                    reason = reason or "malformed_effect_history_requires_reconciliation"
+                if effect_ledger is not None and _job_has_unsafe_effects(effect_ledger):
+                    to_status, recovery_reason = _effect_recovery_state(effect_ledger)
+                    reason = reason or f"{recovery_reason}_pending_before_transition"
             if current == "running" and (owner is None or fencing_token is None):
                 raise DurableJobLeaseError(
                     "active jobs require owner and fencing token for every transition"
@@ -2361,6 +2906,122 @@ class DurableJobRepository:
             expected_revision=expected_revision,
             reason=reason,
         )
+
+    async def cancel_job_tree(
+        self,
+        root_job_id: str,
+        *,
+        reason: str = "operator_cancelled",
+    ) -> list[dict[str, Any]]:
+        """Cancel a durable root and its persisted descendants safely.
+
+        Descendants are cancelled before their parent so a child cannot keep
+        running after the board has requested cancellation. Each transition
+        goes through the existing lease/revision/fencing CAS; unresolved
+        external effects remain in their authoritative unknown state and are
+        returned for operator reconciliation.
+        """
+
+        root_job_id = _text(root_job_id)
+        if not root_job_id:
+            raise DurableJobNotFound("<empty>")
+        async with self._session() as db:
+            # Current admissions share ``root_run_identity``.  Older durable
+            # rows can still be active with a self-root, however, so walk the
+            # persisted parent links as a bounded frontier as well.  The
+            # parent link is the exact tree edge; a different root's rows do
+            # not enter this set merely because their root identity is close
+            # in text or ordering.
+            runs_by_id: dict[str, WorkflowRunState] = {}
+            frontier = {root_job_id}
+            while frontier:
+                result = await db.execute(
+                    select(WorkflowRunState).where(
+                        or_(
+                            WorkflowRunState.run_identity.in_(frontier),
+                            WorkflowRunState.root_run_identity.in_(frontier),
+                            WorkflowRunState.parent_run_identity.in_(frontier),
+                        )
+                    )
+                )
+                next_frontier: set[str] = set()
+                for run in result.scalars().all():
+                    run_identity = _text(run.run_identity)
+                    if not run_identity or run_identity in runs_by_id:
+                        continue
+                    runs_by_id[run_identity] = run
+                    next_frontier.add(run_identity)
+                frontier = next_frontier
+            runs = list(runs_by_id.values())
+        if not runs:
+            raise DurableJobNotFound(root_job_id)
+
+        # Use the live parent links to order legacy rows whose persisted
+        # branch_depth was never populated.  Falling back to the durable depth
+        # keeps a row with incomplete legacy ancestry cancellable while still
+        # making descendants precede their parent whenever the edge is known.
+        def _tree_depth(run: WorkflowRunState) -> int:
+            current_id = _text(run.run_identity)
+            depth = 0
+            visited: set[str] = set()
+            while current_id and current_id != root_job_id:
+                if current_id in visited:
+                    break
+                visited.add(current_id)
+                current = runs_by_id.get(current_id)
+                parent_id = _text(getattr(current, "parent_run_identity", None)) if current else ""
+                if not parent_id or parent_id not in runs_by_id:
+                    break
+                depth += 1
+                current_id = parent_id
+            if depth:
+                return depth
+            return max(0, int(getattr(run, "branch_depth", 0) or 0))
+
+        runs.sort(
+            key=lambda run: (
+                _tree_depth(run),
+                0 if run.run_identity == root_job_id else 1,
+            ),
+            reverse=True,
+        )
+        receipts: list[dict[str, Any]] = []
+        for run in runs:
+            current = await self.get_job(run.run_identity)
+            if not isinstance(current, Mapping):
+                continue
+            status = _text(current.get("status"))
+            if status in DURABLE_JOB_TERMINAL_STATUSES:
+                receipts.append(dict(current))
+                continue
+            # An unresolved effect cannot be converted into a successful
+            # cancellation claim. The normal transition classifier preserves
+            # the unknown/cost state for running jobs; skip already-unknown
+            # rows so no caller can erase their liability.
+            if status in UNCERTAIN_EXTERNAL_EFFECT_STATUSES:
+                receipts.append(dict(current))
+                continue
+            lease = current.get("lease") if isinstance(current.get("lease"), Mapping) else {}
+            kwargs: dict[str, Any] = {
+                "expected_revision": current.get("revision"),
+                "reason": reason,
+            }
+            if status == "running":
+                owner = _text(lease.get("owner"))
+                fence = lease.get("fencing_token")
+                if not owner or fence is None:
+                    receipts.append(dict(current))
+                    continue
+                kwargs.update(owner=owner, fencing_token=int(fence))
+            try:
+                cancelled = await self.cancel_job(run.run_identity, **kwargs)
+            except DurableJobError:
+                # A concurrent worker/recovery pass won the CAS. Re-read the
+                # durable projection and report that authoritative outcome.
+                cancelled = await self.get_job(run.run_identity)
+            if isinstance(cancelled, Mapping):
+                receipts.append(dict(cancelled))
+        return receipts
 
     async def pause_job(
         self,
@@ -3248,6 +3909,520 @@ class DurableJobRepository:
             db.expunge(refreshed)
             return _serialize(refreshed, receipt={"kind": "checkpoint", "status": "recorded", **receipt})
 
+    async def adopt_routine_publication_child(
+        self,
+        parent_job_id: str,
+        child_job_id: str,
+        *,
+        parent_owner: str,
+        parent_fencing_token: int,
+        expected_parent_revision: int,
+        expected_child_parent_fencing_token: int,
+        expected_child_revision: int,
+        m3_job_id: str,
+        approval_id: str,
+        expected_m3_binding: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Rebind one approval-held routine publication child after recovery.
+
+        This is deliberately narrower than a generic child reparent operation:
+        the deterministic routine child and its exact M3 job must still be in
+        the no-dispatch approval phase. The child relation and both matching
+        checkpoints are updated with CAS while the recovered parent lease is
+        current. A crashed caller can safely repeat the operation because the
+        newly written ``prepared`` checkpoint carries the same M3 identity.
+        """
+
+        parent_job_id = _text(parent_job_id)
+        child_job_id = _text(child_job_id)
+        m3_job_id = _text(m3_job_id)
+        approval_id = _text(approval_id)
+        parent_owner = _text(parent_owner)
+        try:
+            parent_fencing_token = int(parent_fencing_token)
+            expected_child_parent_fencing_token = int(expected_child_parent_fencing_token)
+            expected_parent_revision = int(expected_parent_revision)
+            expected_child_revision = int(expected_child_revision)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise DurableJobLeaseError("routine publication adoption binding is malformed") from exc
+        if (
+            not parent_job_id
+            or not child_job_id
+            or not m3_job_id
+            or not approval_id
+            or not parent_owner
+            or parent_fencing_token <= 0
+            or expected_child_parent_fencing_token <= 0
+            or not isinstance(expected_m3_binding, Mapping)
+        ):
+            raise DurableJobLeaseError("routine publication adoption binding is incomplete")
+
+        expected_binding = dict(expected_m3_binding)
+        required_binding_fields = {
+            "routine_id",
+            "routine_revision",
+            "routine_version",
+            "package_digest",
+            "parent_invocation_job_id",
+            "publication_child_job_id",
+            "invocation_uuid",
+            "owner_principal_id",
+            "owner_session_id",
+            "goal_id",
+            "goal_revision",
+            "source_watch_id",
+            "connection_id",
+            "connection_revision",
+            "repository",
+            "action",
+            "operation_uuid",
+        }
+        if set(expected_binding) != required_binding_fields:
+            raise DurableJobLeaseError("routine publication adoption binding fields are invalid")
+        if (
+            expected_binding.get("parent_invocation_job_id") != parent_job_id
+            or expected_binding.get("publication_child_job_id") != child_job_id
+        ):
+            raise DurableJobLeaseError("routine publication adoption identity is stale")
+
+        async with self._session() as db:
+            bind = db.get_bind()
+            dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
+            if dialect_name == "sqlite":
+                await db.execute(text("BEGIN IMMEDIATE"))
+            now = _utc_now()
+            parent = await self._fetch(db, parent_job_id)
+            child = await self._fetch(db, child_job_id)
+            m3 = await self._fetch(db, m3_job_id)
+            await _assert_canonical_goal_fence(
+                db,
+                goal_id=getattr(parent, "goal_id", None),
+                goal_revision=getattr(parent, "goal_revision", None),
+                owner_kind=_text(getattr(parent, "owner_kind", None)),
+                owner_principal_id=getattr(parent, "owner_principal_id", None),
+                session_id=getattr(parent, "session_id", None),
+                authority=getattr(parent, "declared_authority_json", None),
+            )
+            if (
+                parent.status != "running"
+                or _revision(parent) != expected_parent_revision
+                or int(parent.fencing_token or 0) != parent_fencing_token
+                or _text(parent.lease_owner) != parent_owner
+                or not parent.lease_expires_at
+                or _as_utc(parent.lease_expires_at) <= now
+                or _deadline_expired(parent, now=now)
+            ):
+                raise DurableJobLeaseError("recovered routine parent lease changed")
+            self._assert_lease(parent, owner=parent_owner, fencing_token=parent_fencing_token)
+
+            parent_authority = _json_load(parent.declared_authority_json, {})
+            child_authority = _json_load(child.declared_authority_json, {})
+            m3_authority = _json_load(m3.declared_authority_json, {})
+            m3_inputs = _json_load(m3.arguments_json, {})
+            if not all(
+                isinstance(value, Mapping)
+                for value in (parent_authority, child_authority, m3_authority, m3_inputs)
+            ):
+                raise DurableJobTransitionError("routine publication authority is malformed")
+            if (
+                parent.job_kind != "routine_invocation"
+                or parent.owner_kind != "user"
+                or child.job_kind != "routine_github_followthrough_child"
+                or child.owner_kind != "user"
+                or child.run_identity != child_job_id
+                or child.parent_job_id != parent_job_id
+                or int(child.parent_fencing_token or 0)
+                != expected_child_parent_fencing_token
+                or _revision(child) != expected_child_revision
+                or child.owner_principal_id != parent.owner_principal_id
+                or child.session_id != parent.session_id
+                or child.goal_id != parent.goal_id
+                or child.goal_revision != parent.goal_revision
+                or child_authority.get("parent_job_id") != parent_job_id
+                or int(child_authority.get("parent_fencing_token") or 0)
+                != expected_child_parent_fencing_token
+                or child_authority.get("routine_invocation_job_id") != parent_job_id
+                or child_authority.get("step_id") != "github_followthrough"
+                or child_authority.get("m3_job_id") != m3_job_id
+                or child_authority.get("publication_operation_uuid")
+                != expected_binding.get("operation_uuid")
+            ):
+                raise DurableJobLeaseError("routine publication child binding changed")
+
+            if child.status == "blocked":
+                if child.lease_owner is not None or child.lease_expires_at is not None:
+                    raise DurableJobLeaseError("blocked publication child still has a lease")
+            elif child.status == "running":
+                child_expiry = _as_utc(child.lease_expires_at)
+                if (
+                    not child.lease_owner
+                    or child_expiry is None
+                    or child_expiry > now
+                ):
+                    raise DurableJobLeaseError("publication child still has a live lease")
+            else:
+                raise DurableJobTransitionError("publication child is not recoverably approval-held")
+
+            child_effects = _effect_ledger_or_raise(child.effect_receipts_json)
+            safe_approval_hold = False
+            if len(child_effects) == 1:
+                child_effect = child_effects[0]
+                effect_details = (
+                    child_effect.get("details")
+                    if isinstance(child_effect, Mapping)
+                    else None
+                )
+                safe_approval_hold = (
+                    child_effect.get("effect_type") == "guardian_routine_child"
+                    and child_effect.get("status") == "blocked"
+                    and child_effect.get("target_path") == f"routine-child:{child_job_id}"
+                    and isinstance(effect_details, Mapping)
+                    and dict(effect_details)
+                    == {
+                        "step_id": "github_followthrough",
+                        "reason": "awaiting_publication_approval",
+                        "status": "awaiting_approval",
+                        "approval_id": approval_id,
+                    }
+                )
+            if _job_has_unsafe_effects(child_effects) or (child_effects and not safe_approval_hold):
+                raise DurableJobTransitionError(
+                    "publication child has effect history requiring reconciliation"
+                )
+
+            checkpoints = _json_load(child.checkpoint_receipts_json, [])
+            if not isinstance(checkpoints, list):
+                raise DurableJobTransitionError("publication child checkpoint history is malformed")
+            adoption = next(
+                (
+                    item
+                    for item in reversed(checkpoints)
+                    if isinstance(item, Mapping)
+                    and item.get("checkpoint_id")
+                    in {"routine-child:adoption_pending", "routine-child:prepared"}
+                ),
+                None,
+            )
+            adoption_payload = adoption.get("payload") if isinstance(adoption, Mapping) else None
+            if (
+                not isinstance(adoption_payload, Mapping)
+                or adoption_payload.get("m3_job_id") != m3_job_id
+                or adoption_payload.get("publication_operation_uuid")
+                != expected_binding.get("operation_uuid")
+            ):
+                raise DurableJobTransitionError("routine publication adoption checkpoint is missing")
+            if adoption.get("checkpoint_id") == "routine-child:adoption_pending" and (
+                adoption_payload.get("status") != "prepare_pending"
+            ):
+                raise DurableJobTransitionError("routine publication adoption checkpoint is invalid")
+
+            parent_owner_id = _text(parent.owner_principal_id)
+            owner_session_id = _text(parent.session_id)
+            if (
+                parent_authority.get("routine_id") != expected_binding.get("routine_id")
+                or int(parent_authority.get("routine_revision") or 0)
+                != expected_binding.get("routine_revision")
+                or int(parent_authority.get("routine_version") or 0)
+                != expected_binding.get("routine_version")
+                or parent_authority.get("package_digest") != expected_binding.get("package_digest")
+                or parent_authority.get("invocation_uuid") != expected_binding.get("invocation_uuid")
+                or parent_authority.get("source_watch_id") != expected_binding.get("source_watch_id")
+                or parent_authority.get("github_connection_id") != expected_binding.get("connection_id")
+                or int(parent_authority.get("github_connection_revision") or 0)
+                != expected_binding.get("connection_revision")
+                or parent_authority.get("github_repository") != expected_binding.get("repository")
+                or parent_authority.get("github_action") != expected_binding.get("action")
+                or expected_binding.get("owner_principal_id") != parent_owner_id
+                or expected_binding.get("owner_session_id") != owner_session_id
+                or expected_binding.get("goal_id") != parent.goal_id
+                or expected_binding.get("goal_revision") != parent.goal_revision
+            ):
+                raise DurableJobLeaseError("routine publication parent binding changed")
+            if (
+                child_authority.get("routine_id") != expected_binding.get("routine_id")
+                or int(child_authority.get("routine_revision") or 0)
+                != expected_binding.get("routine_revision")
+                or int(child_authority.get("routine_version") or 0)
+                != expected_binding.get("routine_version")
+                or child_authority.get("package_digest") != expected_binding.get("package_digest")
+                or child_authority.get("invocation_uuid") != expected_binding.get("invocation_uuid")
+            ):
+                raise DurableJobLeaseError("routine publication child authority changed")
+
+            m3_effects = _effect_ledger_or_raise(m3.effect_receipts_json)
+            m3_checkpoints = _json_load(m3.checkpoint_receipts_json, [])
+            m3_binding = m3_authority.get("routine_binding")
+            if (
+                m3.job_kind != "github_followthrough_v1"
+                or m3.owner_kind != "user"
+                or m3.owner_principal_id != parent_owner_id
+                or m3.session_id != owner_session_id
+                or m3.goal_id != parent.goal_id
+                or m3.goal_revision != parent.goal_revision
+                or m3.status not in {"awaiting_approval", "queued"}
+                or not isinstance(m3_binding, Mapping)
+                or dict(m3_binding) != expected_binding
+                or m3_inputs.get("routine_binding") != expected_binding
+                or m3_authority.get("approval_id") != approval_id
+                or not m3.input_digest
+                or _digest(m3_authority) != m3.authority_digest
+                or _job_has_unsafe_effects(m3_effects)
+                or any(item.get("effect_type") == "github_publication" for item in m3_effects)
+                or not isinstance(m3_checkpoints, list)
+                or any(
+                    isinstance(item, Mapping)
+                    and item.get("checkpoint_id") == "github-followthrough:dispatch_guard"
+                    for item in m3_checkpoints
+                )
+            ):
+                raise DurableJobTransitionError("routine publication M3 is not safely approval-held")
+
+            approval = (
+                await db.execute(
+                    select(ApprovalRequest).where(ApprovalRequest.id == approval_id)
+                )
+            ).scalars().first()
+            allowed_approval_statuses = (
+                {"pending", "approved"}
+                if m3.status == "awaiting_approval"
+                else {"approved", "consumed"}
+            )
+            approval_expiry = _as_utc(approval.expires_at) if approval is not None else None
+            if (
+                approval is None
+                or approval.status not in allowed_approval_statuses
+                or approval.owner_principal_id != parent_owner_id
+                or _text(approval.operator_session_id or approval.session_id) != owner_session_id
+                or approval_expiry is None
+                or approval_expiry <= now
+            ):
+                raise DurableJobTransitionError("routine publication approval is no longer current")
+
+            current_parent_fence = int(parent.fencing_token or 0)
+            original_child_authority = dict(child_authority)
+            rebound_child_authority = {
+                **original_child_authority,
+                "parent_fencing_token": current_parent_fence,
+            }
+            child_authority_json = _canonical(_safe_structure(rebound_child_authority))
+            approval_context_json = child_authority_json
+            child_payload = {
+                "m3_job_id": m3_job_id,
+                "approval_id": approval_id,
+                "status": str(m3.status),
+                "recovery": "adopted_child_checkpoint",
+                "previous_parent_fencing_token": expected_child_parent_fencing_token,
+                "parent_fencing_token": current_parent_fence,
+            }
+            parent_payload = {
+                "step_id": "github_followthrough",
+                "child_job_id": child_job_id,
+                "m3_job_id": m3_job_id,
+                "approval_id": approval_id,
+                "status": str(m3.status),
+                "recovery": "adopted_child_checkpoint",
+                "parent_fencing_token": current_parent_fence,
+            }
+
+            def append_checkpoint(raw: str | None, checkpoint_id: str, state: Any, payload: Any, fence: int) -> str:
+                history = _json_load(raw, [])
+                if not isinstance(history, list) or any(not isinstance(item, dict) for item in history):
+                    raise DurableJobTransitionError("durable checkpoint history is malformed")
+                receipt = {
+                    "checkpoint_id": checkpoint_id,
+                    "state_digest": _digest(state),
+                    "state_keys": sorted(str(key) for key in state.keys()) if isinstance(state, Mapping) else [],
+                    "safe": True,
+                    "recorded_at": now.isoformat(),
+                    "fencing_token": fence,
+                    "payload": _safe_structure(payload),
+                }
+                updated = [item for item in history if item.get("checkpoint_id") != checkpoint_id]
+                updated.append(receipt)
+                return _canonical(updated[-50:])
+
+            child_checkpoints_json = append_checkpoint(
+                child.checkpoint_receipts_json,
+                "routine-child:prepared",
+                {"step_id": "github_followthrough", **child_payload},
+                child_payload,
+                int(child.fencing_token or 0),
+            )
+            parent_checkpoints_json = append_checkpoint(
+                parent.checkpoint_receipts_json,
+                "routine:publication_child_recorded",
+                {"step_id": "github_followthrough", "child_job_id": child_job_id, "m3_job_id": m3_job_id},
+                parent_payload,
+                current_parent_fence,
+            )
+
+            parent_conditions = [
+                WorkflowRunState.run_identity == parent_job_id,
+                WorkflowRunState.status == "running",
+                WorkflowRunState.revision == expected_parent_revision,
+                WorkflowRunState.lease_owner == parent_owner,
+                WorkflowRunState.lease_expires_at > now,
+                WorkflowRunState.fencing_token == current_parent_fence,
+            ]
+            _append_goal_fence_condition(parent_conditions, parent)
+            parent_update = await db.execute(
+                update(WorkflowRunState)
+                .execution_options(synchronize_session=False)
+                .where(*parent_conditions)
+                .values(
+                    checkpoint_receipts_json=parent_checkpoints_json,
+                    updated_at=now,
+                    heartbeat_at=now,
+                    revision=WorkflowRunState.revision + 1,
+                )
+            )
+            if not _rowcount_is_one(parent_update):
+                raise DurableJobLeaseError("routine parent changed during publication adoption")
+
+            child_conditions = [
+                WorkflowRunState.run_identity == child_job_id,
+                WorkflowRunState.status == child.status,
+                WorkflowRunState.revision == expected_child_revision,
+                WorkflowRunState.parent_job_id == parent_job_id,
+                WorkflowRunState.parent_fencing_token == expected_child_parent_fencing_token,
+                WorkflowRunState.owner_kind == "user",
+                WorkflowRunState.owner_principal_id == parent_owner_id,
+                WorkflowRunState.session_id == owner_session_id,
+            ]
+            _append_goal_fence_condition(child_conditions, child)
+            if child.status == "blocked":
+                child_conditions.extend(
+                    (
+                        WorkflowRunState.lease_owner.is_(None),
+                        WorkflowRunState.lease_expires_at.is_(None),
+                    )
+                )
+            else:
+                child_conditions.extend(
+                    (
+                        WorkflowRunState.lease_owner == child.lease_owner,
+                        WorkflowRunState.lease_expires_at == child.lease_expires_at,
+                        WorkflowRunState.lease_expires_at <= now,
+                    )
+                )
+            child_update = await db.execute(
+                update(WorkflowRunState)
+                .execution_options(synchronize_session=False)
+                .where(*child_conditions)
+                .values(
+                    status="blocked",
+                    failure_reason="awaiting_publication_approval",
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    parent_fencing_token=current_parent_fence,
+                    declared_authority_json=child_authority_json,
+                    approval_context_json=approval_context_json,
+                    authority_digest=_digest(rebound_child_authority),
+                    checkpoint_receipts_json=child_checkpoints_json,
+                    updated_at=now,
+                    heartbeat_at=now,
+                    revision=WorkflowRunState.revision + 1,
+                )
+            )
+            if not _rowcount_is_one(child_update):
+                raise DurableJobLeaseError("routine publication child changed during adoption")
+
+            refreshed_parent = await self._fetch(db, parent_job_id)
+            refreshed_child = await self._fetch(db, child_job_id)
+            db.expunge(refreshed_parent)
+            db.expunge(refreshed_child)
+            return _serialize(refreshed_parent), _serialize(refreshed_child)
+
+    async def record_recovery_checkpoint(
+        self,
+        job_id: str,
+        *,
+        owner_kind: str,
+        owner_principal_id: str,
+        checkpoint_id: str,
+        state: Any,
+        checkpoint_payload: Any | None = None,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        """Append a checkpoint while an external effect is under recovery.
+
+        Recovery runs deliberately have no worker lease.  This narrow seam is
+        only for an authenticated owner recording evidence after an
+        independent external readback; it cannot claim, dispatch, or resume a
+        job.
+        """
+        if not _text(checkpoint_id):
+            raise ValueError("checkpoint_id is required")
+        if not _text(owner_kind) or not _text(owner_principal_id):
+            raise DurableJobLeaseError("recovery owner identity is required")
+        async with self._session() as db:
+            run = await self._fetch(db, job_id)
+            await _assert_canonical_goal_fence(
+                db,
+                goal_id=getattr(run, "goal_id", None),
+                goal_revision=getattr(run, "goal_revision", None),
+                owner_kind=_text(getattr(run, "owner_kind", None)),
+                owner_principal_id=getattr(run, "owner_principal_id", None),
+                session_id=getattr(run, "session_id", None),
+                authority=getattr(run, "declared_authority_json", None),
+            )
+            if (
+                _text(getattr(run, "owner_kind", None)) != _text(owner_kind)
+                or _text(getattr(run, "owner_principal_id", None)) != _text(owner_principal_id)
+            ):
+                raise DurableJobLeaseError("recovery owner does not match durable job owner")
+            if run.status not in {"unknown_external_effect", "cost_liability", "blocked", "failed"}:
+                raise DurableJobTransitionError(
+                    f"recovery checkpoint not allowed from {run.status}"
+                )
+            if run.lease_owner or run.lease_expires_at:
+                raise DurableJobLeaseError("recovery checkpoint requires an unleased job")
+            current_revision = _revision(run)
+            if expected_revision is not None and int(expected_revision) != current_revision:
+                raise DurableJobLeaseError("durable job revision is stale")
+            receipt = {
+                "checkpoint_id": checkpoint_id,
+                "state_digest": _digest(state),
+                "state_keys": sorted(str(key) for key in state.keys()) if isinstance(state, dict) else [],
+                "safe": True,
+                "payload": _safe_structure(checkpoint_payload) if checkpoint_payload is not None else None,
+                "recorded_at": _utc_now().isoformat(),
+                "recovery_owner_kind": owner_kind,
+                "recovery_owner_principal_id": owner_principal_id,
+            }
+            existing = _json_load(run.checkpoint_receipts_json, [])
+            existing = [
+                item
+                for item in existing
+                if isinstance(item, dict) and item.get("checkpoint_id") != checkpoint_id
+            ]
+            existing.append(receipt)
+            now = _utc_now()
+            conditions = [
+                WorkflowRunState.run_identity == job_id,
+                WorkflowRunState.status == run.status,
+                WorkflowRunState.revision == current_revision,
+                WorkflowRunState.lease_owner.is_(None),
+                WorkflowRunState.lease_expires_at.is_(None),
+            ]
+            _append_parent_fence_condition(conditions, run, now=now)
+            updated = await db.execute(
+                update(WorkflowRunState)
+                .execution_options(synchronize_session=False)
+                .where(*conditions)
+                .values(
+                    checkpoint_receipts_json=_canonical(existing[-50:]),
+                    updated_at=now,
+                    heartbeat_at=now,
+                    revision=WorkflowRunState.revision + 1,
+                )
+            )
+            if not _rowcount_is_one(updated):
+                raise DurableJobLeaseError("job changed during recovery checkpoint")
+            refreshed = await self._fetch(db, job_id)
+            db.expunge(refreshed)
+            return _serialize(refreshed, receipt={"kind": "recovery_checkpoint", "status": "recorded", **receipt})
+
     async def record_artifact(
         self,
         job_id: str,
@@ -3345,6 +4520,96 @@ class DurableJobRepository:
             db.expunge(refreshed)
             return _serialize(refreshed, receipt={"kind": "artifact", "status": "recorded", **receipt})
 
+    async def record_recovery_artifact(
+        self,
+        job_id: str,
+        *,
+        owner_kind: str,
+        owner_principal_id: str,
+        file_path: str,
+        artifact_type: str = "workspace_file",
+        content: str | bytes | None = None,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        """Persist an artifact after recovery readback, without a worker lease."""
+        if not _text(owner_kind) or not _text(owner_principal_id):
+            raise DurableJobLeaseError("recovery owner identity is required")
+        async with self._session() as db:
+            run = await self._fetch(db, job_id)
+            await _assert_canonical_goal_fence(
+                db,
+                goal_id=getattr(run, "goal_id", None),
+                goal_revision=getattr(run, "goal_revision", None),
+                owner_kind=_text(getattr(run, "owner_kind", None)),
+                owner_principal_id=getattr(run, "owner_principal_id", None),
+                session_id=getattr(run, "session_id", None),
+                authority=getattr(run, "declared_authority_json", None),
+            )
+            if (
+                _text(getattr(run, "owner_kind", None)) != _text(owner_kind)
+                or _text(getattr(run, "owner_principal_id", None)) != _text(owner_principal_id)
+            ):
+                raise DurableJobLeaseError("recovery owner does not match durable job owner")
+            if run.status not in {"unknown_external_effect", "cost_liability", "blocked", "failed"}:
+                raise DurableJobTransitionError(f"recovery artifact not allowed from {run.status}")
+            if run.lease_owner or run.lease_expires_at:
+                raise DurableJobLeaseError("recovery artifact requires an unleased job")
+            current_revision = _revision(run)
+            if expected_revision is not None and int(expected_revision) != current_revision:
+                raise DurableJobLeaseError("durable job revision is stale")
+            record = build_artifact_record(
+                file_path=file_path,
+                artifact_type=artifact_type,
+                producer=run.job_kind,
+                run_id=job_id,
+                session_id=run.session_id,
+                content=content,
+            )
+            receipt = {
+                "artifact_id": record["artifact_id"],
+                "artifact_type": record["artifact_type"],
+                "file_path": record["file_path"],
+                "producer": record["producer"],
+                "content_sha256": record["content_sha256"],
+                "size_bytes": record["size_bytes"],
+                "exists": record["exists"],
+                "recorded_at": _utc_now().isoformat(),
+                "recovery_owner_kind": owner_kind,
+                "recovery_owner_principal_id": owner_principal_id,
+            }
+            existing = _json_load(run.artifact_receipts_json, [])
+            existing = [
+                item
+                for item in existing
+                if isinstance(item, dict) and item.get("artifact_id") != receipt["artifact_id"]
+            ]
+            existing.append(receipt)
+            now = _utc_now()
+            conditions = [
+                WorkflowRunState.run_identity == job_id,
+                WorkflowRunState.status == run.status,
+                WorkflowRunState.revision == current_revision,
+                WorkflowRunState.lease_owner.is_(None),
+                WorkflowRunState.lease_expires_at.is_(None),
+            ]
+            _append_parent_fence_condition(conditions, run, now=now)
+            updated = await db.execute(
+                update(WorkflowRunState)
+                .execution_options(synchronize_session=False)
+                .where(*conditions)
+                .values(
+                    artifact_receipts_json=_canonical(existing[-100:]),
+                    updated_at=now,
+                    heartbeat_at=now,
+                    revision=WorkflowRunState.revision + 1,
+                )
+            )
+            if not _rowcount_is_one(updated):
+                raise DurableJobLeaseError("job changed during recovery artifact write")
+            refreshed = await self._fetch(db, job_id)
+            db.expunge(refreshed)
+            return _serialize(refreshed, receipt={"kind": "recovery_artifact", "status": "recorded", **receipt})
+
     async def record_effect(
         self,
         job_id: str,
@@ -3357,6 +4622,8 @@ class DurableJobRepository:
         adapter_idempotency_key: str | None = None,
         status: str = "succeeded",
         content_sha256: str | None = None,
+        readback_id: str | None = None,
+        verified_at: str | None = None,
         details: dict[str, Any] | None = None,
         receipt_kind: str = "effect",
         owner: str | None = None,
@@ -3385,6 +4652,8 @@ class DurableJobRepository:
         target_digest = _text(target_digest) or None
         approval_id = _text(approval_id) or None
         adapter_idempotency_key = _text(adapter_idempotency_key) or None
+        readback_id = _text(readback_id) or None
+        verified_at = _text(verified_at) or None
         if content_sha256 is not None and not _text(content_sha256):
             content_sha256 = None
         safe_details = _safe_structure(details or {})
@@ -3411,9 +4680,22 @@ class DurableJobRepository:
                 session_id=getattr(run, "session_id", None),
                 authority=getattr(run, "declared_authority_json", None),
             )
-            if _deadline_expired(run):
+            recovery_readback = (
+                receipt_kind == "readback"
+                and owner is None
+                and fencing_token is None
+                and isinstance(safe_details, Mapping)
+                and _text(safe_details.get("reconciliation_owner_id"))
+                == _text(getattr(run, "owner_principal_id", None))
+                and run.status in {"unknown_external_effect", "cost_liability", "blocked", "failed"}
+                and not run.lease_owner
+                and not run.lease_expires_at
+            )
+            if _deadline_expired(run) and not recovery_readback:
                 raise DurableJobTransitionError("job deadline has expired")
-            if run.status in DURABLE_JOB_TERMINAL_STATUSES or run.status in {"failed", "cancelled"}:
+            if run.status in DURABLE_JOB_TERMINAL_STATUSES or (
+                run.status == "failed" and not recovery_readback
+            ):
                 raise DurableJobTransitionError(f"terminal job cannot record effects ({run.status})")
             lease_present = bool(run.lease_owner or run.lease_expires_at)
             if run.status == "running" and (owner is None or fencing_token is None):
@@ -3423,7 +4705,9 @@ class DurableJobRepository:
                     raise DurableJobLeaseError("owner and fencing token are required for leased effect writes")
                 self._assert_lease(run, owner=owner, fencing_token=fencing_token)
             elif owner is None and fencing_token is None:
-                if not _is_typed_admission_receipt(
+                if recovery_readback:
+                    pass
+                elif not _is_typed_admission_receipt(
                     run,
                     effect_type=effect_type,
                     receipt_kind=receipt_kind,
@@ -3437,6 +4721,7 @@ class DurableJobRepository:
                     )
             else:
                 self._assert_lease(run, owner=owner, fencing_token=fencing_token)
+            recorded_at = _utc_now().isoformat()
             receipt = {
                 "effect_id": effect_id,
                 "receipt_kind": receipt_kind,
@@ -3448,9 +4733,18 @@ class DurableJobRepository:
                 "status": status,
                 "content_sha256": content_sha256,
                 "details": safe_details,
-                "recorded_at": _utc_now().isoformat(),
+                "recorded_at": recorded_at,
                 "fencing_token": fencing_token,
             }
+            if receipt_kind == "readback":
+                # Readback identity and verification time must come from the
+                # capability's actual verifier.  The durable runtime stores
+                # them when supplied; it never promotes an operation ID or its
+                # insertion time into proof fields.
+                if readback_id:
+                    receipt["readback_id"] = readback_id
+                if verified_at:
+                    receipt["verified_at"] = verified_at
             existing = _effect_ledger_or_raise(run.effect_receipts_json)
             previous = next(
                 (
@@ -3484,6 +4778,10 @@ class DurableJobRepository:
                 for field_name in ("approval_id", "adapter_idempotency_key"):
                     if not receipt.get(field_name):
                         receipt[field_name] = previous.get(field_name)
+                if receipt_kind == "readback":
+                    for field_name in ("readback_id", "verified_at"):
+                        if not receipt.get(field_name):
+                            receipt[field_name] = previous.get(field_name)
             previous_status = _text(previous.get("status")) if previous is not None else ""
             remote_terminal_settlement = (
                 effect_type == "remote_inference_admission"
@@ -3661,6 +4959,8 @@ class DurableJobRepository:
         effect_type: str | None = None,
         target_digest: str | None = None,
         content_sha256: str | None = None,
+        readback_id: str | None = None,
+        verified_at: str | None = None,
         details: dict[str, Any] | None = None,
         owner: str | None = None,
         fencing_token: int | None = None,
@@ -3689,6 +4989,8 @@ class DurableJobRepository:
             target_digest=target_digest,
             status=status,
             content_sha256=content_sha256,
+            readback_id=readback_id,
+            verified_at=verified_at,
             details=details,
             owner=owner,
             fencing_token=fencing_token,
@@ -4036,6 +5338,106 @@ class DurableJobRepository:
             db.expunge(refreshed)
             return _serialize(refreshed, receipt=receipt)
 
+    async def finalize_reconciled_job(
+        self,
+        job_id: str,
+        *,
+        owner_kind: str,
+        owner_principal_id: str,
+        expected_revision: int | None = None,
+        result: Any = None,
+        result_summary: str | None = None,
+    ) -> dict[str, Any]:
+        """Close an uncertain job only after its exact effect was read back.
+
+        This is intentionally separate from ``transition_job``: recovery has
+        no worker lease and must never make an arbitrary blocked job
+        successful.  The effect ledger must already contain a verified
+        readback and no unresolved liability.
+        """
+        if not _text(owner_kind) or not _text(owner_principal_id):
+            raise DurableJobLeaseError("recovery owner identity is required")
+        async with self._session() as db:
+            run = await self._fetch(db, job_id)
+            await _assert_canonical_goal_fence(
+                db,
+                goal_id=getattr(run, "goal_id", None),
+                goal_revision=getattr(run, "goal_revision", None),
+                owner_kind=_text(getattr(run, "owner_kind", None)),
+                owner_principal_id=getattr(run, "owner_principal_id", None),
+                session_id=getattr(run, "session_id", None),
+                authority=getattr(run, "declared_authority_json", None),
+            )
+            if (
+                _text(getattr(run, "owner_kind", None)) != _text(owner_kind)
+                or _text(getattr(run, "owner_principal_id", None)) != _text(owner_principal_id)
+            ):
+                raise DurableJobLeaseError("recovery owner does not match durable job owner")
+            if run.status not in {"unknown_external_effect", "cost_liability", "blocked", "failed"}:
+                raise DurableJobTransitionError(
+                    f"only an uncertain job may be finalized by reconciliation (current={run.status})"
+                )
+            if run.lease_owner or run.lease_expires_at:
+                raise DurableJobLeaseError("reconciled finalization requires an unleased job")
+            current_revision = _revision(run)
+            if expected_revision is not None and int(expected_revision) != current_revision:
+                raise DurableJobLeaseError("durable job revision is stale")
+            effects = _effect_ledger_or_raise(run.effect_receipts_json)
+            if _job_has_unsafe_effects(effects):
+                raise DurableJobTransitionError(
+                    "cannot finalize reconciliation while an external effect remains unresolved"
+                )
+            if not _verified_readback_exists(effects):
+                raise DurableJobTransitionError(
+                    "reconciled finalization requires a verified capability readback"
+                )
+            now = _utc_now()
+            conditions = [
+                WorkflowRunState.run_identity == job_id,
+                WorkflowRunState.status == run.status,
+                WorkflowRunState.revision == current_revision,
+                WorkflowRunState.owner_kind == owner_kind,
+                WorkflowRunState.owner_principal_id == owner_principal_id,
+                WorkflowRunState.lease_owner.is_(None),
+                WorkflowRunState.lease_expires_at.is_(None),
+            ]
+            _append_parent_fence_condition(conditions, run, now=now)
+            values: dict[str, Any] = {
+                "status": "succeeded",
+                "failure_reason": None,
+                "lease_owner": None,
+                "lease_expires_at": None,
+                "finished_at": now,
+                "updated_at": now,
+                "heartbeat_at": now,
+                "revision": WorkflowRunState.revision + 1,
+            }
+            if result is not None:
+                values["result_digest"] = _digest(result)
+                values["result_summary"] = _text(result_summary, "reconciled result recorded")
+            elif result_summary is not None:
+                values["result_summary"] = _text(result_summary)
+            updated = await db.execute(
+                update(WorkflowRunState)
+                .execution_options(synchronize_session=False)
+                .where(*conditions)
+                .values(**values)
+            )
+            if not _rowcount_is_one(updated):
+                raise DurableJobLeaseError("job changed during reconciled finalization")
+            refreshed = await self._fetch(db, job_id)
+            receipt = {
+                "kind": "reconciled_finalization",
+                "status": "recorded",
+                "owner_kind": owner_kind,
+                "owner_principal_id": owner_principal_id,
+                "reason": "verified_external_readback",
+                "revision": _revision(refreshed),
+                "operator_visible": True,
+            }
+            db.expunge(refreshed)
+            return _serialize(refreshed, receipt=receipt)
+
     async def reconcile_external_effect(
         self,
         job_id: str,
@@ -4368,6 +5770,82 @@ class DurableJobRepository:
                 db.expunge(refreshed)
                 recovered.append(_serialize(refreshed, receipt=receipt))
         return recovered
+
+    async def recover_stale_job(
+        self,
+        job_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Recover one expired lease without touching unrelated jobs.
+
+        Capability-specific recovery routes must not run the global stale-job
+        sweep as a side effect of inspecting one receipt.  This narrow CAS
+        uses the same conservative classification as ``recover_stale_jobs``:
+        an expired worker is cleared to a visible blocked/failed state, while
+        any unresolved effect remains authoritative.  A caller can then make
+        a capability-specific decision under the new fencing token.
+        """
+
+        observed_at = now or _utc_now()
+        async with self._session() as db:
+            run = await self._fetch(db, job_id)
+            if run.status != "running":
+                db.expunge(run)
+                return _serialize(run, receipt={"kind": "targeted_recovery", "status": "noop", "operator_visible": True})
+            try:
+                lease_expires = _as_utc(run.lease_expires_at)
+            except ValueError as exc:
+                raise DurableJobTransitionError("job lease metadata is malformed") from exc
+            if lease_expires is not None and lease_expires > observed_at:
+                raise DurableJobLeaseError("job lease is still active")
+            try:
+                deadline = _as_utc(run.deadline_at)
+            except ValueError:
+                deadline = None
+            if deadline is not None and deadline <= observed_at:
+                recovery_status, recovery_reason = "failed", "deadline_expired"
+            else:
+                recovery_status, recovery_reason = _restart_recovery_state(run)
+            expected_revision = _revision(run)
+            expected_fence = int(run.fencing_token or 0)
+            conditions = [
+                WorkflowRunState.run_identity == job_id,
+                WorkflowRunState.status == "running",
+                WorkflowRunState.revision == expected_revision,
+                WorkflowRunState.fencing_token == expected_fence,
+            ]
+            _append_goal_fence_condition(conditions, run)
+            updated = await db.execute(
+                update(WorkflowRunState)
+                .execution_options(synchronize_session=False)
+                .where(*conditions)
+                .values(
+                    status=recovery_status,
+                    failure_reason=recovery_reason,
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    fencing_token=WorkflowRunState.fencing_token + 1,
+                    revision=WorkflowRunState.revision + 1,
+                    updated_at=observed_at,
+                    heartbeat_at=observed_at,
+                    finished_at=(observed_at if recovery_status == "failed" else None),
+                )
+            )
+            if not _rowcount_is_one(updated):
+                raise DurableJobLeaseError("job changed during targeted recovery")
+            refreshed = await self._fetch(db, job_id)
+            receipt = {
+                "kind": "targeted_recovery",
+                "status": recovery_status,
+                "reason": recovery_reason,
+                "previous_owner": run.lease_owner,
+                "fencing_token": refreshed.fencing_token,
+                "revision": _revision(refreshed),
+                "operator_visible": True,
+            }
+            db.expunge(refreshed)
+            return _serialize(refreshed, receipt=receipt)
 
     def _assert_lease(self, run: WorkflowRunState, *, owner: str | None, fencing_token: int | None) -> None:
         if owner is None and fencing_token is None:

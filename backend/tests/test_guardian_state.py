@@ -180,8 +180,16 @@ async def test_build_guardian_state_collects_memory_and_recent_sessions(async_db
             AsyncMock(return_value={"Identity": "Builder"}),
         ),
         patch(
-            "src.memory.hybrid_retrieval.search_with_status",
-            return_value=([{"category": "goal", "text": "Ship guardian state"}], False),
+            "src.memory.retrieval_planner.plan_memory_retrieval",
+            AsyncMock(
+                return_value=MemoryRetrievalPlanResult(
+                    semantic_context="- [goal] Ship guardian state",
+                    episodic_context="",
+                    memory_buckets={"goal": ("Ship guardian state",)},
+                    degraded=False,
+                    lane="hybrid",
+                )
+            ),
         ),
         patch(
             "src.audit.repository.audit_repository.list_events",
@@ -1266,9 +1274,12 @@ async def test_build_guardian_state_uses_structured_memory_kinds(async_db):
     assert "avoid direct interruption during deep-work windows" in state.memory_context
     assert "prefer async native continuation when the user is blocked" in state.memory_context
     assert "bundle lower-urgency check-ins instead of interrupting immediately" in state.memory_context
-    assert "For advisory interventions, avoid direct interruption during deep-work windows." in state.world_model.active_constraints
-    assert "For advisory interventions, prefer async native continuation when the user is blocked." in state.world_model.active_constraints
-    assert "For advisory interventions, bundle lower-urgency check-ins instead of interrupting immediately." in state.world_model.active_constraints
+    # Procedural memory is rendered as one bounded constraint line; the full
+    # source text is checked in memory_context above. Keep stable anchors here.
+    active_constraints = "\n".join(state.world_model.active_constraints)
+    assert "For advisory interventions, avoid direct interruption" in active_constraints
+    assert "For advisory interventions, prefer async native continuation" in active_constraints
+    assert "For advisory interventions, bundle lower-urgency check-ins" in active_constraints
     assert "[commitment] Review the Atlas brief tomorrow morning" in state.memory_context
 
 

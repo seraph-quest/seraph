@@ -10,7 +10,13 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from src.audit.repository import audit_repository
 from src.auth.service import AuthenticatedOperator
-from src.goals.contracts import GoalAdmissionBudget, GoalCandidateRequest, GoalSuccessCriterion
+from src.extensions.capability_execution import CapabilityJournalError
+from src.goals.contracts import (
+    GoalAdmissionBudget,
+    GoalCandidateRequest,
+    GoalCandidateSetRequest,
+    GoalSuccessCriterion,
+)
 from src.guardian.goal_snapshot_to_file import (
     GoalSnapshotToFileRequest,
     GoalSnapshotToFileResult,
@@ -34,6 +40,7 @@ from src.goals.repository import (
 from src.guardian.goal_conditioned_loop import (
     list_goal_loop_receipts,
     propose_goal_candidate,
+    propose_goal_candidate_set,
 )
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 
@@ -1149,6 +1156,20 @@ async def propose_goal_loop_candidate(
         decision = await propose_goal_candidate(goal_id, body)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail="Goal not found") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail={"code": str(exc)}) from exc
+    except CapabilityJournalError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "decision_receipt_signing_unavailable",
+                "recovery": "Restore the workspace signing key, then recompute this decision from the current task candidates.",
+            },
+        ) from exc
+    except ValueError as exc:
+        code = str(exc)
+        status = 409 if code == "stale_goal_revision" else 422
+        raise HTTPException(status_code=status, detail={"code": code}) from exc
     return {
         **decision.model_dump(mode="json"),
         "execution": {
@@ -1156,6 +1177,47 @@ async def propose_goal_loop_candidate(
             "reason": "proposal_only_until_governed_admission_prerequisites_are_available",
         },
     }
+
+
+@router.post("/goals/{goal_id}/candidate-set")
+async def propose_goal_loop_candidate_set(
+    goal_id: str,
+    body: GoalCandidateSetRequest,
+    request: Request,
+):
+    """Compare an ordered, authenticated candidate set with M5 memory."""
+
+    operator = _require_authenticated_operator(request)
+    goal = await goal_repository.get(goal_id)
+    if not goal:
+        raise HTTPException(status_code=404, detail="Goal not found")
+    _require_goal_owner(goal, operator)
+    try:
+        return await propose_goal_candidate_set(
+            goal_id=goal_id,
+            task_id=body.task_id,
+            candidates=body.candidates,
+            owner_principal_id=operator.principal.principal_id,
+            owner_session_id=operator.session_id,
+            expected_task_revision=body.expected_task_revision,
+            expected_goal_revision=body.expected_goal_revision,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="Goal not found") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail={"code": str(exc)}) from exc
+    except CapabilityJournalError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "decision_receipt_signing_unavailable",
+                "recovery": "Restore the workspace signing key, then recompute this decision from the current task candidates.",
+            },
+        ) from exc
+    except ValueError as exc:
+        code = str(exc)
+        status = 409 if code.startswith("stale_") else 422
+        raise HTTPException(status_code=status, detail={"code": code}) from exc
 
 
 @router.post("/goals/{goal_id}/snapshot")

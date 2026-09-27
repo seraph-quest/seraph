@@ -14,11 +14,15 @@ import json
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Any, Protocol
+from typing import Any, Mapping, Protocol
+
+from sqlmodel import select
 
 from src.audit.formatting import redact_for_audit
 from src.audit.repository import audit_repository
 from src.db.models import Goal
+from src.db.engine import get_session
+from src.db.models import WorkBoardTask
 from src.goals.contracts import (
     GoalCandidateAction,
     GoalCandidateDecision,
@@ -706,6 +710,8 @@ async def _persist_receipt_compat(**kwargs: Any) -> dict[str, Any]:
 def build_goal_candidate_decision(
     goal: Goal,
     request: GoalCandidateRequest,
+    *,
+    memory_selection: Mapping[str, Any] | None = None,
 ) -> GoalCandidateDecision:
     """Build a deterministic decision while preserving the goal revision.
 
@@ -758,6 +764,19 @@ def build_goal_candidate_decision(
             action = GoalCandidateAction.defer
             reason = "candidate_expired"
 
+    # M5 supplies only a server-derived selection result.  It may annotate
+    # the chosen candidate, but it cannot add inputs, grants, or a capability
+    # that was absent from this request.  The full candidate-set receipt is
+    # persisted by ``propose_goal_candidate_set`` before this projection is
+    # returned to the caller.
+    if (
+        isinstance(memory_selection, Mapping)
+        and memory_selection.get("decision_status") == "changed"
+        and memory_selection.get("after_selected_capability_id") == request.capability_id
+        and action is GoalCandidateAction.act
+    ):
+        reason = "accepted_memory_selected"
+
     return GoalCandidateDecision(
         candidate_id=candidate_id,
         dedupe_key=dedupe_key,
@@ -773,6 +792,127 @@ def build_goal_candidate_decision(
         expected_outcome=expected_outcome,
         expires_at=request.expires_at,
     )
+
+
+async def propose_goal_candidate_set(
+    *,
+    goal_id: str,
+    candidates: list[GoalCandidateRequest],
+    owner_principal_id: str,
+    owner_session_id: str,
+    task_id: str,
+    expected_task_revision: int,
+    expected_goal_revision: int,
+) -> dict[str, Any]:
+    """Build one bounded goal decision from an authenticated candidate set."""
+
+    if len(candidates) < 1 or len(candidates) > 20:
+        raise ValueError("candidate_set_size_invalid")
+    goal = await goal_repository.get(goal_id)
+    if goal is None:
+        raise LookupError(f"Goal '{goal_id}' not found")
+    if str(getattr(goal, "owner_principal_id", "") or "") != owner_principal_id or str(
+        getattr(goal, "owner_session_id", "") or ""
+    ) != owner_session_id:
+        raise PermissionError("goal_owner_mismatch")
+    current_revision = max(int(goal.revision or 1), 1)
+    if current_revision != int(expected_goal_revision):
+        raise ValueError("stale_goal_revision")
+    async with get_session() as db:
+        task = (
+            await db.execute(
+                select(WorkBoardTask).where(
+                    WorkBoardTask.task_id == task_id,
+                    WorkBoardTask.owner_principal_id == owner_principal_id,
+                    WorkBoardTask.owner_session_id == owner_session_id,
+                )
+            )
+        ).scalar_one_or_none()
+    if task is None:
+        raise PermissionError("task_owner_session_forbidden")
+    if task.goal_id != goal_id:
+        raise ValueError("task_goal_mismatch")
+    if int(task.task_revision or 0) != int(expected_task_revision):
+        raise ValueError("stale_task_revision")
+    if int(task.goal_revision or 0) != int(expected_goal_revision):
+        raise ValueError("stale_task_goal_revision")
+
+    from src.memory.control import (
+        evaluate_goal_candidate_memory,
+        validate_goal_candidate_requests,
+    )
+
+    valid_requests: list[GoalCandidateRequest] = []
+    for candidate in candidates:
+        if not validate_goal_candidate_requests([candidate]):
+            raise ValueError("candidate_typed_input_invalid")
+        valid_requests.append(candidate)
+    preliminary = [build_goal_candidate_decision(goal, item) for item in valid_requests]
+    dispatchable_requests = [
+        candidate
+        for candidate, decision in zip(valid_requests, preliminary, strict=True)
+        if decision.dispatchable
+    ]
+    baseline = next((item for item in preliminary if item.dispatchable), None)
+
+    selection = await evaluate_goal_candidate_memory(
+        owner_principal_id=owner_principal_id,
+        owner_session_id=owner_session_id,
+        goal_id=goal.id,
+        goal_revision=current_revision,
+        later_task_id=task.task_id,
+        later_task_revision=task.task_revision,
+        candidates=dispatchable_requests,
+        baseline_capability_id=baseline.capability_id if baseline is not None else "",
+    )
+    selection_payload = {
+        "decision_status": selection.decision_status.value,
+        "reason": selection.reason,
+        "candidate_set_digest": selection.candidate_set_digest,
+        "before_input_digest": selection.before_input_digest,
+        "after_input_digest": selection.after_input_digest,
+        "before_selected_capability_id": selection.before_selected_capability_id,
+        "after_selected_capability_id": selection.after_selected_capability_id,
+        "after_typed_input_digest": selection.after_typed_input_digest,
+        "accepted_memory_id": selection.accepted_memory_id,
+        "accepted_memory_content_digest": selection.accepted_memory_content_digest,
+        "evidence_ids": list(selection.evidence_ids),
+        "receipt_id": selection.receipt.receipt_id,
+    }
+    decisions: list[GoalCandidateDecision] = []
+    chosen: GoalCandidateDecision | None = None
+    chosen_id = selection.after_selected_capability_id
+    chosen_input_digest = selection.after_typed_input_digest
+    for candidate in valid_requests:
+        candidate_contracts = validate_goal_candidate_requests([candidate])
+        candidate_contract = candidate_contracts[0] if candidate_contracts else None
+        is_selected = bool(
+            selection.decision_status.value == "changed"
+            and candidate_contract is not None
+            and candidate.capability_id == chosen_id
+            and candidate_contract["typed_input_digest"] == chosen_input_digest
+        )
+        decision = build_goal_candidate_decision(
+            goal,
+            candidate,
+            memory_selection=selection_payload if is_selected else None,
+        )
+        decisions.append(decision)
+        if (
+            candidate_contract is not None
+            and candidate.capability_id == chosen_id
+            and candidate_contract["typed_input_digest"] == chosen_input_digest
+        ):
+            chosen = decision
+    return {
+        "goal_id": goal.id,
+        "goal_revision": current_revision,
+        "candidate_set_digest": selection.candidate_set_digest,
+        "source_context_digest": selection.source_context_digest,
+        "decision": selection_payload,
+        "candidates": [item.model_dump(mode="json") for item in decisions],
+        "selected": chosen.model_dump(mode="json") if chosen is not None else None,
+    }
 
 
 async def propose_goal_candidate(

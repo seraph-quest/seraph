@@ -46,7 +46,6 @@ interface PttAudioControlProps {
 }
 
 export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/audio/ptt" }: PttAudioControlProps) {
-  const controlDisabled = disabled || !sessionId;
   const [state, setState] = useState<PttAudioState>("idle");
   const [captureConsent, setCaptureConsent] = useState(false);
   const [modelConsent, setModelConsent] = useState(false);
@@ -66,13 +65,17 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
   const actionRef = useRef<{ sequence: number; controller: AbortController } | null>(null);
   const mountedSessionRef = useRef(sessionId);
   const currentSessionRef = useRef(sessionId);
-  const controlDisabledRef = useRef(controlDisabled);
+  // Consent is an operator-level decision and does not require a conversation
+  // yet. Capture itself still needs a concrete session for durable ownership.
+  const captureDisabled = disabled || !sessionId;
+  const consentDisabled = disabled || state !== "idle" || consentPending !== null;
+  const controlDisabledRef = useRef(captureDisabled);
   // Keep event callbacks created by an earlier render from uploading bytes
   // after the conversation or browser capture gate has changed.  React runs
   // effects after commit, while MediaRecorder may invoke ``onstop`` in that
   // interval, so these two refs are updated during render as well.
   currentSessionRef.current = sessionId;
-  controlDisabledRef.current = controlDisabled;
+  controlDisabledRef.current = captureDisabled;
 
   const beginAction = () => {
     actionRef.current?.controller.abort();
@@ -188,7 +191,7 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
       setError(null);
       return;
     }
-    if (controlDisabled) {
+    if (captureDisabled) {
       // Busy/disabled is a browser capture gate, not a server-job revocation.
       // Keep the active request and durable snapshot available for recovery.
       stopCaptureResources(false);
@@ -197,7 +200,7 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
         setError(null);
       }
     }
-  }, [controlDisabled, sessionId]);
+  }, [captureDisabled, sessionId]);
 
   const applySnapshot = (payload: AudioSnapshot) => {
     setSnapshot(payload);
@@ -243,11 +246,16 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
   };
 
   const beginCapture = async () => {
-    if (controlDisabled || !captureConsent || state !== "idle") return;
+    if (captureDisabled || !captureConsent || state !== "idle") return;
     const mimeType = choosePttMimeType();
+    if (typeof window !== "undefined" && window.isSecureContext === false) {
+      setState("blocked");
+      setError("Microphone capture requires HTTPS or localhost. This LAN HTTP page cannot request microphone access.");
+      return;
+    }
     if (!mimeType || !navigator.mediaDevices?.getUserMedia) {
       setState("blocked");
-      setError("This browser cannot provide a supported audio recorder.");
+      setError("This browser cannot provide a supported audio recorder. Use a current browser over HTTPS or localhost.");
       return;
     }
     const captureGeneration = ++captureGenerationRef.current;
@@ -481,52 +489,52 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
   };
 
   return (
-    <section className="flex flex-col gap-2 mt-2" aria-label="Push to talk">
-      <div className="flex items-center gap-3 text-[10px] font-pixel uppercase">
+    <section className="cockpit-audio-control flex flex-col gap-2 mt-2" aria-label="Push to talk">
+      <div className="cockpit-audio-consent-row flex items-center gap-3 text-[10px] uppercase">
         <label className="flex items-center gap-1">
-          <input type="checkbox" checked={captureConsent} onChange={(event) => void setServerConsent("capture", event.target.checked)} disabled={controlDisabled || state !== "idle" || consentPending !== null} />
+          <input type="checkbox" checked={captureConsent} onChange={(event) => void setServerConsent("capture", event.target.checked)} disabled={consentDisabled} />
           Allow microphone capture
         </label>
         <label className="flex items-center gap-1">
-          <input type="checkbox" checked={modelConsent} onChange={(event) => void setServerConsent("model", event.target.checked)} disabled={controlDisabled || state !== "idle" || consentPending !== null} />
+          <input type="checkbox" checked={modelConsent} onChange={(event) => void setServerConsent("model", event.target.checked)} disabled={consentDisabled} />
           Allow model processing
         </label>
       </div>
       <button
         type="button"
-        disabled={controlDisabled || consentPending !== null || (!captureConsent && state === "idle") || ["uploading", "processing", "confirming", "reloading", "cancelling", "requesting_capture", "review", "review_unavailable", "blocked", "degraded", "error", "confirmed", "cancelled"].includes(state)}
+        disabled={captureDisabled || consentPending !== null || (!captureConsent && state === "idle") || ["uploading", "processing", "confirming", "reloading", "cancelling", "requesting_capture", "review", "review_unavailable", "blocked", "degraded", "error", "confirmed", "cancelled"].includes(state)}
         onPointerDown={() => void beginCapture()}
         onPointerUp={endCapture}
         onPointerCancel={endCapture}
         onKeyDown={(event) => { if (!event.repeat && (event.key === " " || event.key === "Enter")) void beginCapture(); }}
         onKeyUp={(event) => { if (event.key === " " || event.key === "Enter") endCapture(); }}
-        className="pixel-border-thin px-3 py-2 font-pixel text-[10px] uppercase disabled:opacity-40"
+        className="cockpit-audio-button px-3 py-2 text-[10px] uppercase disabled:opacity-40"
       >
         {state === "capturing" ? "Release to stop" : "Hold to talk"}
       </button>
       {snapshot && ["review", "review_unavailable", "confirming", "reloading", "cancelling", "processing", "degraded", "blocked", "error"].includes(state) && (
         <div className="flex gap-2 items-start">
           {state === "review" ? (
-            <textarea aria-label="Editable transcript" value={transcript} onChange={(event) => setTranscript(event.target.value)} className="flex-1 bg-retro-bg pixel-border-thin p-2 text-xs" />
+            <textarea aria-label="Editable transcript" value={transcript} onChange={(event) => setTranscript(event.target.value)} className="cockpit-audio-transcript flex-1 p-2 text-xs" />
           ) : (
             <span className="flex-1 text-xs">
               {state === "processing" ? "Audio is processing. You can cancel or reload its durable status." : state === "review_unavailable" ? "Transcript text is unavailable in this worker." : error || "Audio processing needs recovery."}
             </span>
           )}
           <div className="flex flex-col gap-2">
-            <button type="button" onClick={() => void confirmTranscript()} disabled={state !== "review"} className="pixel-border-thin px-2 py-1 font-pixel text-[10px]">Confirm</button>
-            <button type="button" onClick={() => void reloadSnapshot()} disabled={state === "reloading"} className="pixel-border-thin px-2 py-1 font-pixel text-[10px]">Reload review</button>
-            {["processing", "degraded", "blocked", "error", "review_unavailable"].includes(state) && <button type="button" onClick={() => void retryProcessing()} disabled={state === "processing"} className="pixel-border-thin px-2 py-1 font-pixel text-[10px]">Retry processing</button>}
-            <button type="button" onClick={() => void cancelAudio()} disabled={state === "cancelling"} className="pixel-border-thin px-2 py-1 font-pixel text-[10px]">Cancel</button>
+            <button type="button" onClick={() => void confirmTranscript()} disabled={state !== "review"} className="cockpit-audio-secondary px-2 py-1 text-[10px]">Confirm</button>
+            <button type="button" onClick={() => void reloadSnapshot()} disabled={state === "reloading"} className="cockpit-audio-secondary px-2 py-1 text-[10px]">Reload review</button>
+            {["processing", "degraded", "blocked", "error", "review_unavailable"].includes(state) && <button type="button" onClick={() => void retryProcessing()} disabled={state === "processing"} className="cockpit-audio-secondary px-2 py-1 text-[10px]">Retry processing</button>}
+            <button type="button" onClick={() => void cancelAudio()} disabled={state === "cancelling"} className="cockpit-audio-secondary px-2 py-1 text-[10px]">Cancel</button>
           </div>
         </div>
       )}
       {snapshot && ["confirming", "reloading", "cancelling"].includes(state) && (
-        <div className="pixel-border-thin p-2 text-xs" role="status">
+        <div className="cockpit-audio-status p-2 text-xs" role="status">
           {state === "confirming" ? "Confirming transcript…" : state === "reloading" ? "Reloading transcript review…" : "Cancelling audio…"}
         </div>
       )}
-      <span role="status" className="font-pixel text-[10px]" data-state={state}>{!sessionId ? "Select a conversation before recording." : error || state}</span>
+      <span role="status" className="cockpit-audio-status text-[10px]" data-state={state}>{!sessionId ? "Choose or start a conversation before recording." : error || state}</span>
     </section>
   );
 }

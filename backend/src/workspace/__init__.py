@@ -26,6 +26,8 @@ from src.workspace.state_registry import (
     canonical_workspace_root,
     canonical_workspace_root_identity,
     production_workspace_inventory,
+    WORK_BOARD_ROUTINE_BINDING_TABLE,
+    work_board_routine_binding_contract,
 )
 from src.workspace.lifecycle import (
     ARCHIVE_FORMAT,
@@ -94,6 +96,8 @@ __all__ = [
     "canonical_workspace_root",
     "canonical_workspace_root_identity",
     "production_workspace_inventory",
+    "WORK_BOARD_ROUTINE_BINDING_TABLE",
+    "work_board_routine_binding_contract",
     "ARCHIVE_FORMAT",
     "ARCHIVE_VERSION",
     "DEFAULT_RETENTION",

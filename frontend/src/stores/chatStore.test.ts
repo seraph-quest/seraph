@@ -140,6 +140,13 @@ describe("chatStore async actions", () => {
     expect(useChatStore.getState().onboardingCompleted).toBe(true);
   });
 
+  it("keeps onboarding active when the REST fallback cannot persist the skip", async () => {
+    useChatStore.setState({ onboardingCompleted: false });
+    mockFetch.mockResolvedValueOnce({ ok: false });
+    await expect(useChatStore.getState().skipOnboarding()).resolves.toBe(false);
+    expect(useChatStore.getState().onboardingCompleted).toBe(false);
+  });
+
   it("restartOnboarding resets state", async () => {
     useChatStore.setState({ onboardingCompleted: true, sessionId: "s1" });
     mockFetch.mockResolvedValueOnce({ ok: true });
@@ -170,6 +177,16 @@ describe("chatStore async actions", () => {
     expect(useChatStore.getState().sessionId).toBe("s1");
     expect(useChatStore.getState().messages).toHaveLength(2);
     expect(useChatStore.getState().messages[1].role).toBe("agent"); // mapped from assistant
+  });
+
+  it("drops a stale restored session after the backend returns 404", async () => {
+    localStorageMock.setItem("seraph_last_session_id", "stale-session");
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 404 });
+
+    await useChatStore.getState().switchSession("stale-session");
+
+    expect(localStorageMock.getItem("seraph_last_session_id")).toBeNull();
+    expect(useChatStore.getState().sessionId).toBeNull();
   });
 
   it("switchSession restores clarification metadata as a clarification message", async () => {

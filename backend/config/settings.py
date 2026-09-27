@@ -1,10 +1,40 @@
 from pathlib import Path
+from typing import Literal
 
+from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ENV_FILE = REPO_ROOT / ".env.dev"
+
+
+class RepoSandboxSettings(BaseModel):
+    """Operator-owned configuration for the one supported repository profile.
+
+    The worker receives none of these values.  They are only consumed by the
+    trusted backend Docker runner, and an empty socket/image deliberately keeps
+    the capability blocked until the operator provisions the prerequisite.
+    """
+
+    enabled: bool = False
+    docker_socket: str = ""
+    worker_image_digest: str = ""
+    profile: Literal["repo-python-pytest-v1"] = "repo-python-pytest-v1"
+    max_files: int = 2000
+    max_directories: int = 500
+    max_depth: int = 16
+    max_snapshot_bytes: int = 64 * 1024 * 1024
+    max_file_bytes: int = 2 * 1024 * 1024
+    max_patch_bytes: int = 1 * 1024 * 1024
+    max_output_bytes: int = 16 * 1024 * 1024
+    max_stream_bytes: int = 1 * 1024 * 1024
+    max_wall_seconds: int = 180
+    max_cpu_seconds: int = 120
+    max_memory_bytes: int = 512 * 1024 * 1024
+    max_pids: int = 64
+
+    model_config = {"extra": "forbid"}
 
 
 class Settings(BaseSettings):
@@ -92,6 +122,7 @@ class Settings(BaseSettings):
     # Phase 2 — Capable Executor
     sandbox_url: str = "http://sandbox:8060"
     sandbox_timeout: int = 35
+    repo_sandbox: RepoSandboxSettings = Field(default_factory=RepoSandboxSettings)
     browser_timeout: int = 30
     browser_site_allowlist: str = ""  # comma-separated hostname patterns allowed for browse/search
     browser_site_blocklist: str = ""  # comma-separated hostname patterns blocked for browse/search
@@ -189,7 +220,12 @@ class Settings(BaseSettings):
     llm_log_max_bytes: int = 52_428_800    # 50 MB per file
     llm_log_backup_count: int = 5          # keep 5 rotated files
 
-    model_config = SettingsConfigDict(env_file=DEFAULT_ENV_FILE, env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=DEFAULT_ENV_FILE,
+        env_file_encoding="utf-8",
+        env_nested_delimiter="__",
+        extra="ignore",
+    )
 
 
 settings = Settings()

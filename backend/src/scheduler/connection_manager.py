@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from dataclasses import dataclass, replace
 
@@ -31,6 +32,9 @@ class ConnectionManager:
     def __init__(self) -> None:
         self._connections: set[WebSocket] = set()
         self._bindings: dict[WebSocket, _ConnectionBinding] = {}
+        self._work_board_connections: set[WebSocket] = set()
+        self._work_board_bindings: dict[WebSocket, _ConnectionBinding] = {}
+        self._work_board_queues: dict[WebSocket, asyncio.Queue[dict]] = {}
 
     @property
     def active_count(self) -> int:
@@ -83,6 +87,68 @@ class ConnectionManager:
             owner_principal_id=str(owner_principal_id or "").strip() or None,
             operator_session_id=str(operator_session_id or "").strip() or None,
         )
+
+    def connect_work_board(
+        self,
+        ws: WebSocket,
+        *,
+        owner_principal_id: str,
+        operator_session_id: str,
+    ) -> asyncio.Queue[dict]:
+        """Register an authenticated board subscriber with a bounded queue."""
+        queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=256)
+        self._work_board_connections.add(ws)
+        self._work_board_bindings[ws] = _ConnectionBinding(
+            owner_principal_id=str(owner_principal_id).strip() or None,
+            operator_session_id=str(operator_session_id).strip() or None,
+        )
+        self._work_board_queues[ws] = queue
+        return queue
+
+    def disconnect_work_board(self, ws: WebSocket) -> None:
+        self._work_board_connections.discard(ws)
+        self._work_board_bindings.pop(ws, None)
+        self._work_board_queues.pop(ws, None)
+
+    async def broadcast_work_board_event(
+        self,
+        payload: dict,
+        *,
+        owner_principal_id: str,
+        operator_session_id: str,
+    ) -> None:
+        """Queue one redacted event only for the matching operator session."""
+        owner = str(owner_principal_id).strip()
+        operator_session = str(operator_session_id).strip()
+        for ws in tuple(self._work_board_connections):
+            binding = self._work_board_bindings.get(ws)
+            if binding is None:
+                continue
+            if (
+                binding.owner_principal_id != owner
+                or binding.operator_session_id != operator_session
+            ):
+                continue
+            queue = self._work_board_queues.get(ws)
+            if queue is None:
+                continue
+            try:
+                queue.put_nowait(dict(payload))
+            except asyncio.QueueFull:
+                # The client must resnapshot before resuming.  Keep one bounded
+                # cursor-gap marker instead of allowing an unbounded event
+                # buffer to consume the backend process.
+                while not queue.empty():
+                    try:
+                        queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                queue.put_nowait(
+                    {
+                        "type": "cursor_gap",
+                        "last_event_id": payload.get("event_id"),
+                    }
+                )
 
     async def broadcast(self, message: WSResponse) -> BroadcastResult:
         """Send ambient messages broadly and bound messages only in scope.

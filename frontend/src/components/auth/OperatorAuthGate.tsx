@@ -59,13 +59,13 @@ function LoginForm({
   };
 
   return (
-    <form onSubmit={submit} className="w-full max-w-sm border border-retro-text/20 bg-retro-bg/80 p-5 shadow-xl">
-      <div className="text-retro-highlight text-xs uppercase tracking-[0.3em]">Seraph operator access</div>
-      <h1 className="mt-3 text-xl font-semibold text-retro-text">Sign in to the cockpit</h1>
-      <p className="mt-2 text-xs leading-5 text-retro-text/60">
+    <form onSubmit={submit} className="cockpit-auth-card cockpit-auth-login w-full max-w-sm p-5">
+      <div className="cockpit-auth-eyebrow">Seraph operator access</div>
+      <h1 className="cockpit-auth-title mt-3">Sign in to the cockpit</h1>
+      <p className="cockpit-auth-copy mt-2">
         The backend keeps the operator credential and session cookie server-side. Your password is sent only to the configured local backend.
       </p>
-      <label className="mt-5 block text-[10px] uppercase tracking-wider text-retro-text/50" htmlFor="operator-password">
+      <label className="cockpit-auth-label mt-5 block" htmlFor="operator-password">
         Operator password
       </label>
       <input
@@ -75,13 +75,13 @@ function LoginForm({
         type="password"
         value={password}
         onChange={(event) => setPassword(event.target.value)}
-        className="mt-1 w-full border border-retro-text/20 bg-transparent px-2 py-2 text-sm text-retro-text outline-none focus:border-retro-highlight"
+        className="cockpit-auth-input mt-1 w-full px-2 py-2 text-sm"
       />
-      {error && <div role="alert" className="mt-2 text-xs text-red-400">{error}</div>}
+      {error && <div role="alert" className="cockpit-auth-error mt-2 text-xs">{error}</div>}
       <button
         type="submit"
         disabled={submitting || !password.trim()}
-        className="mt-4 border border-retro-highlight px-3 py-2 text-[10px] uppercase tracking-wider text-retro-highlight hover:bg-retro-highlight/10 disabled:cursor-not-allowed disabled:opacity-40"
+        className="cockpit-auth-button mt-4 px-3 py-2 text-[10px] uppercase disabled:cursor-not-allowed disabled:opacity-40"
       >
         {submitting ? "Signing in..." : "Sign in"}
       </button>
@@ -91,24 +91,24 @@ function LoginForm({
 
 function SetupRequiredView({ onRetry }: { onRetry: () => void }) {
   return (
-    <div className="w-full max-w-xl border border-yellow-400/40 bg-retro-bg/80 p-5 shadow-xl">
-      <div className="text-yellow-400 text-xs uppercase tracking-[0.3em]">Operator setup required</div>
-      <h1 className="mt-3 text-xl font-semibold text-retro-text">Seraph is locked until a server credential is configured</h1>
-      <p className="mt-2 text-xs leading-5 text-retro-text/60">
+    <div className="cockpit-auth-card cockpit-auth-card--warning w-full max-w-xl p-5">
+      <div className="cockpit-auth-eyebrow">Operator setup required</div>
+      <h1 className="cockpit-auth-title mt-3">Seraph is locked until a server credential is configured</h1>
+      <p className="cockpit-auth-copy mt-2">
         Authentication is intentionally fail-closed. Generate a PBKDF2 hash on the backend host, store it as
-        <code className="mx-1 text-yellow-300">OPERATOR_AUTH_SECRET_HASH</code>
+        <code className="cockpit-auth-code mx-1">OPERATOR_AUTH_SECRET_HASH</code>
         in the backend secret environment, then restart the managed backend.
       </p>
-      <pre className="mt-4 overflow-x-auto border border-retro-text/10 bg-black/20 p-3 text-[10px] leading-5 text-retro-text/70">
+      <pre className="cockpit-auth-pre mt-4 overflow-x-auto p-3 text-[10px] leading-5">
         cd backend{"\n"}uv run python -c 'from src.auth.service import encode_secret; print(encode_secret("REPLACE_ME"))'
       </pre>
-      <p className="mt-3 text-[10px] leading-4 text-retro-text/45">
+      <p className="cockpit-auth-note mt-3 text-[10px] leading-4">
         Keep the raw password in the deployment secret store only. Provider key setup is optional and does not unlock authentication or issue an inference request.
       </p>
       <button
         type="button"
         onClick={onRetry}
-        className="mt-4 border border-retro-text/20 px-3 py-2 text-[10px] uppercase tracking-wider text-retro-text/70 hover:text-retro-text"
+        className="cockpit-auth-button cockpit-auth-button--muted mt-4 px-3 py-2 text-[10px] uppercase"
       >
         Check setup again
       </button>
@@ -118,16 +118,16 @@ function SetupRequiredView({ onRetry }: { onRetry: () => void }) {
 
 function BackendUnavailableView({ onRetry }: { onRetry: () => void }) {
   return (
-    <div className="w-full max-w-xl border border-red-400/40 bg-retro-bg/80 p-5 shadow-xl">
-      <div className="text-red-400 text-xs uppercase tracking-[0.3em]">Backend unavailable</div>
-      <h1 className="mt-3 text-xl font-semibold text-retro-text">The operator session could not be checked</h1>
-      <p className="mt-2 text-xs leading-5 text-retro-text/60">
+    <div className="cockpit-auth-card cockpit-auth-card--danger w-full max-w-xl p-5">
+      <div className="cockpit-auth-eyebrow">Backend unavailable</div>
+      <h1 className="cockpit-auth-title mt-3">The operator session could not be checked</h1>
+      <p className="cockpit-auth-copy mt-2">
         Start the managed local backend, then retry. No provider or GPU request is made by this check.
       </p>
       <button
         type="button"
         onClick={onRetry}
-        className="mt-4 border border-retro-text/20 px-3 py-2 text-[10px] uppercase tracking-wider text-retro-text/70 hover:text-retro-text"
+        className="cockpit-auth-button cockpit-auth-button--muted mt-4 px-3 py-2 text-[10px] uppercase"
       >
         Retry connection
       </button>
@@ -270,16 +270,16 @@ export function OperatorAuthGate({ children }: { children: ReactNode }) {
   );
 
   if (view === "checking") {
-    return <div className="min-h-screen bg-retro-bg p-8 text-xs uppercase tracking-wider text-retro-text/50">Checking operator session...</div>;
+    return <div className="cockpit-auth-shell cockpit-auth-loading p-8 text-xs uppercase">Checking operator session...</div>;
   }
   if (view === "setup") {
-    return <div className="min-h-screen bg-retro-bg p-8 flex items-center justify-center"><SetupRequiredView onRetry={() => void inspectSession()} /></div>;
+    return <div className="cockpit-auth-shell p-8 flex items-center justify-center"><SetupRequiredView onRetry={() => void inspectSession()} /></div>;
   }
   if (view === "unavailable") {
-    return <div className="min-h-screen bg-retro-bg p-8 flex items-center justify-center"><BackendUnavailableView onRetry={() => void inspectSession()} /></div>;
+    return <div className="cockpit-auth-shell p-8 flex items-center justify-center"><BackendUnavailableView onRetry={() => void inspectSession()} /></div>;
   }
   if (!session || !contextValue) {
-    return <div className="min-h-screen bg-retro-bg p-8 flex items-center justify-center"><LoginForm error={loginError} onLogin={login} /></div>;
+    return <div className="cockpit-auth-shell p-8 flex items-center justify-center"><LoginForm error={loginError} onLogin={login} /></div>;
   }
   return <OperatorAuthContext.Provider value={contextValue}>{children}</OperatorAuthContext.Provider>;
 }

@@ -23,7 +23,11 @@ from src.approval.runtime import (
 )
 from src.agent.exceptions import ClarificationRequired
 from config.settings import settings
-from src.agent.direct_chat import run_direct_local_chat, should_use_direct_local_chat
+from src.agent.direct_chat import (
+    OPENROUTER_CHAT_ROUTE_BLOCKED_MESSAGE,
+    run_direct_local_chat,
+    should_use_direct_local_chat,
+)
 from src.agent.factory import build_agent
 from src.agent.onboarding import create_onboarding_agent
 from src.agent.session import (
@@ -63,6 +67,7 @@ from src.llm_runtime import (
     reset_current_llm_request_id,
     set_current_llm_request_id,
 )
+from src.model_fabric import NoCompliantModelRouteError
 
 logger = logging.getLogger(__name__)
 
@@ -676,6 +681,38 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
                 },
             )
             raise HTTPException(status_code=504, detail="OpenRouter chat timed out — try again")
+        except NoCompliantModelRouteError as exc:
+            safe_reason = await redact_secrets_in_text(str(exc) or NoCompliantModelRouteError.code)
+            logger.info(
+                "Direct OpenRouter REST chat blocked before provider contact",
+                extra={"reason": safe_reason},
+            )
+            await log_agent_run_event(
+                session_id=session.id,
+                transport="rest",
+                is_onboarding=is_onboarding,
+                outcome="blocked",
+                policy_mode=get_current_tool_policy_mode(),
+                details={
+                    "duration_ms": int((perf_counter() - started_at) * 1000),
+                    "message_length": len(request.message),
+                    "error": safe_reason,
+                    "request_id": llm_request_id,
+                    "runtime": "direct-openrouter-chat",
+                    "failure_stage": "route_preflight",
+                    "remote_outcome": "not_contacted",
+                    "retry_required": False,
+                },
+            )
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": NoCompliantModelRouteError.code,
+                    "message": OPENROUTER_CHAT_ROUTE_BLOCKED_MESSAGE,
+                    "remote_outcome": "not_contacted",
+                    "retry_required": False,
+                },
+            ) from exc
         except Exception as e:
             logger.exception("Direct OpenRouter chat failed")
             safe_detail = await redact_secrets_in_text(f"Agent error: {e}")
@@ -865,6 +902,38 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
                 "message": rendered,
             },
         )
+    except NoCompliantModelRouteError as exc:
+        safe_reason = await redact_secrets_in_text(str(exc) or NoCompliantModelRouteError.code)
+        logger.info(
+            "REST OpenRouter agent chat blocked before provider contact",
+            extra={"reason": safe_reason},
+        )
+        await log_agent_run_event(
+            session_id=session.id,
+            transport="rest",
+            is_onboarding=not profile.onboarding_completed,
+            outcome="blocked",
+            policy_mode=get_current_tool_policy_mode(),
+            details={
+                "duration_ms": int((perf_counter() - started_at) * 1000),
+                "message_length": len(request.message),
+                "error": safe_reason,
+                "request_id": llm_request_id,
+                "runtime": "openrouter-agent",
+                "failure_stage": "route_preflight",
+                "remote_outcome": "not_contacted",
+                "retry_required": False,
+            },
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": NoCompliantModelRouteError.code,
+                "message": OPENROUTER_CHAT_ROUTE_BLOCKED_MESSAGE,
+                "remote_outcome": "not_contacted",
+                "retry_required": False,
+            },
+        ) from exc
     except asyncio.TimeoutError:
         _mark_request_timed_out(llm_request_id)
         logger.warning("REST chat agent timed out after %ds", settings.agent_chat_timeout)

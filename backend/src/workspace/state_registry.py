@@ -108,6 +108,24 @@ class WorkspaceStateClass(str, Enum):
     DISPOSABLE = "disposable"
 
 
+# M6's binding is canonical operator intent.  Keep this contract at the
+# workspace inventory boundary so backup/restore and production receipts can
+# name the exact SQLite object without exposing rows or procedure content.
+WORK_BOARD_ROUTINE_BINDING_TABLE = "work_board_routine_bindings"
+
+
+def work_board_routine_binding_contract(*, present: bool | None) -> dict[str, Any]:
+    """Return the redacted inventory contract for the M6 binding table."""
+
+    return {
+        "schema_version": "seraph.work-board-routine-binding.v1",
+        "table_name": WORK_BOARD_ROUTINE_BINDING_TABLE,
+        "state_class": WorkspaceStateClass.CANONICAL.value,
+        "backup_scope": "canonical_sqlite",
+        "present": None if present is None else bool(present),
+    }
+
+
 # This is intentionally a small, stable vocabulary for operator and migration
 # consumers.  The state class remains the authoritative classification; these
 # roles make the payload/rebuild/cache/secret boundary explicit in a manifest
@@ -1204,6 +1222,10 @@ class WorkspaceStateRegistry:
 
         schema_objects.sort(key=lambda item: (item["type"], item["name"]))
         tables.sort(key=lambda item: item["name"])
+        binding_present = any(
+            item.get("name") == WORK_BOARD_ROUTINE_BINDING_TABLE
+            for item in tables
+        )
         return {
             "logical_path": self.config.database_path,
             "schema_fingerprint": _sha256_json(schema_objects),
@@ -1211,6 +1233,11 @@ class WorkspaceStateRegistry:
             "table_count": len(tables),
             "row_count": sum(table["row_count"] for table in tables),
             "tables": tables,
+            "operator_contracts": {
+                "work_board_routine_binding": work_board_routine_binding_contract(
+                    present=binding_present
+                )
+            },
         }
 
     @staticmethod
@@ -1233,6 +1260,7 @@ __all__ = [
     "WorkspaceStateClass",
     "WorkspaceStateError",
     "WorkspaceStateRegistry",
+    "WORK_BOARD_ROUTINE_BINDING_TABLE",
     "DEFAULT_MAX_INVENTORY_ENTRIES",
     "DEFAULT_MAX_INVENTORY_DEPTH",
     "DEFAULT_MAX_INVENTORY_TOTAL_BYTES",
@@ -1244,6 +1272,7 @@ __all__ = [
     "canonical_workspace_root",
     "canonical_workspace_root_identity",
     "production_workspace_inventory",
+    "work_board_routine_binding_contract",
 ]
 
 

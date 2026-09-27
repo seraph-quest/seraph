@@ -38,6 +38,11 @@ _PATCH_TARGETS = [
     "src.model_fabric.repository.get_session",
     "src.profile.service.get_db",
     "src.api.settings.get_db",  # aliased: `import get_session as get_db`
+    "src.api.work_board.get_session",
+    "src.api.workflows.get_session",
+    "src.work_board.triage.get_session",
+    "src.work_board.dispatcher.get_session",
+    "src.api.ws.get_session",
     "src.api.nodes.get_session",
     "src.api.observer.get_session",
     "src.scheduler.jobs.memory_consolidation.get_session",
@@ -253,10 +258,10 @@ def mocked_canonical_inference_context(monkeypatch):
         if inspect.isawaitable(result):
             timeout = kwargs.get("timeout")
             result = await asyncio.wait_for(result, timeout=timeout) if timeout is not None else await result
-        from src.llm_runtime import _log_llm_runtime_event_sync
+        from src.llm_runtime import _log_llm_runtime_event
 
         runtime_path = str(kwargs.get("runtime_path") or "test_inference")
-        _log_llm_runtime_event_sync(
+        await _log_llm_runtime_event(
             event_type="llm_primary_success",
             summary="Legacy caller fixture completed through the governed boundary",
             details={

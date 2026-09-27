@@ -86,6 +86,8 @@ def test_production_resolution_binds_only_the_configured_host_root(tmp_path):
     assert receipt["host_bind_identity"] == "configured_path_and_stat_digest"
     assert receipt["host_bind_identity_digest"] == workspace.bind_identity_digest
     assert receipt["sidecars_are_active_roots"] is False
+    assert receipt["database_operator_contracts"]["work_board_routine_binding"]["table_name"] == "work_board_routine_bindings"
+    assert receipt["database_operator_contracts"]["work_board_routine_binding"]["present"] is None
     assert str(root) not in json.dumps(receipt, sort_keys=True)
 
 

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException, Response
 from starlette.requests import Request
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from config.settings import settings
 from src.auth.middleware import validate_request_boundary
@@ -182,6 +182,110 @@ async def test_concurrent_refresh_has_exactly_one_winner(client):
     loser = next(result for result in results if isinstance(result, Exception))
     assert isinstance(loser, AuthFailure)
     assert loser.code == "session_revoked"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_authentication_coalesces_stale_session_touch(client, async_db):
+    _, token = await _login(client)
+    operator = await authenticate_token(token, touch=False)
+    stale_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+    async with async_db() as db:
+        sync_engine = db.sync_session.get_bind()
+        record = await db.get(OperatorSession, operator.session_id)
+        assert record is not None
+        record.last_seen_at = stale_at
+        record.idle_expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+        db.add(record)
+
+    update_count = 0
+
+    def _observe_auth_touch(
+        _conn, _cursor, statement, _parameters, _context, _executemany
+    ):
+        nonlocal update_count
+        if statement.lstrip().upper().startswith("UPDATE OPERATOR_SESSIONS"):
+            update_count += 1
+
+    event.listen(sync_engine, "before_cursor_execute", _observe_auth_touch)
+    try:
+        token_results = await asyncio.gather(
+            *(authenticate_token(token) for _ in range(40))
+        )
+        session_results = await asyncio.gather(
+            *(authenticate_session(operator.session_id) for _ in range(40))
+        )
+    finally:
+        event.remove(sync_engine, "before_cursor_execute", _observe_auth_touch)
+
+    assert all(result.session_id == operator.session_id for result in token_results)
+    assert all(result.session_id == operator.session_id for result in session_results)
+    assert update_count == 1
+
+    async with async_db() as db:
+        record = await db.get(OperatorSession, operator.session_id)
+        assert record is not None
+        last_seen_at = record.last_seen_at
+        if last_seen_at.tzinfo is None:
+            last_seen_at = last_seen_at.replace(tzinfo=timezone.utc)
+        assert last_seen_at > stale_at
+        assert record.revoked_at is None
+
+
+@pytest.mark.asyncio
+async def test_fresh_authentication_does_not_extend_idle_session_on_every_request(
+    client,
+    async_db,
+):
+    _, token = await _login(client)
+    operator = await authenticate_token(token, touch=False)
+    async with async_db() as db:
+        record = await db.get(OperatorSession, operator.session_id)
+        assert record is not None
+        baseline_last_seen = record.last_seen_at
+        baseline_idle_expiry = record.idle_expires_at
+
+    results = await asyncio.gather(
+        *(authenticate_token(token) for _ in range(40))
+    )
+    assert all(result.session_id == operator.session_id for result in results)
+
+    async with async_db() as db:
+        record = await db.get(OperatorSession, operator.session_id)
+        assert record is not None
+        assert record.last_seen_at == baseline_last_seen
+        assert record.idle_expires_at == baseline_idle_expiry
+
+
+@pytest.mark.asyncio
+async def test_short_idle_configuration_touches_before_half_idle_window(
+    client,
+    async_db,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "operator_auth_idle_seconds", 10)
+    _, token = await _login(client)
+    operator = await authenticate_token(token, touch=False)
+    stale_at = datetime.now(timezone.utc) - timedelta(seconds=6)
+    async with async_db() as db:
+        record = await db.get(OperatorSession, operator.session_id)
+        assert record is not None
+        record.last_seen_at = stale_at
+        record.idle_expires_at = datetime.now(timezone.utc) + timedelta(seconds=3)
+        db.add(record)
+
+    await authenticate_token(token)
+
+    async with async_db() as db:
+        record = await db.get(OperatorSession, operator.session_id)
+        assert record is not None
+        last_seen_at = record.last_seen_at
+        if last_seen_at.tzinfo is None:
+            last_seen_at = last_seen_at.replace(tzinfo=timezone.utc)
+        idle_expires_at = record.idle_expires_at
+        if idle_expires_at.tzinfo is None:
+            idle_expires_at = idle_expires_at.replace(tzinfo=timezone.utc)
+        assert last_seen_at > stale_at
+        assert idle_expires_at > datetime.now(timezone.utc)
 
 
 def test_websocket_boundary_requires_exact_host_and_origin(monkeypatch):

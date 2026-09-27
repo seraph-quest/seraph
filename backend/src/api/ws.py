@@ -15,7 +15,12 @@ from src.approval.repository import approval_repository
 from src.approval.runtime import get_current_approval_mode, reset_runtime_context, set_runtime_context
 from src.auth.cancellation import reset_revocation_guard, set_revocation_guard
 from src.agent.exceptions import ClarificationRequired
-from src.agent.direct_chat import run_direct_local_chat, should_use_direct_local_chat, stream_direct_local_chat
+from src.agent.direct_chat import (
+    OPENROUTER_CHAT_ROUTE_BLOCKED_MESSAGE,
+    run_direct_local_chat,
+    should_use_direct_local_chat,
+    stream_direct_local_chat,
+)
 from src.agent.factory import build_agent
 from src.agent.onboarding import create_onboarding_agent
 from src.agent.session import (
@@ -48,6 +53,7 @@ from src.auth.service import (
     authenticate_session,
     bind_operator_principal,
 )
+from src.db.engine import get_session
 from src.guardian.state import build_guardian_state
 from src.models.schemas import ChatIngressEnvelope, WSMessage, WSResponse
 from src.operators.local_codex import ExternalAgentRuntimeRemovedError
@@ -55,6 +61,7 @@ from src.scheduler.connection_manager import ws_manager
 from src.tools.policy import get_current_tool_policy_mode
 from src.vault.redaction import redact_secrets_for_streaming_snapshot, redact_secrets_in_text
 from src.vlm_runtime import direct_local_chat_route_error
+from src.work_board.repository import BoardError
 from src.llm_runtime import (
     _finish_request,
     _mark_request_timed_out,
@@ -62,6 +69,7 @@ from src.llm_runtime import (
     reset_current_llm_request_id,
     set_current_llm_request_id,
 )
+from src.model_fabric import NoCompliantModelRouteError
 
 logger = logging.getLogger(__name__)
 
@@ -264,6 +272,241 @@ async def _build_agent(
     return agent, False, specialist_names
 
 
+@router.websocket("/work-board/events")
+async def websocket_work_board_events(websocket: WebSocket):
+    """Authenticated, owner-scoped work-board event stream.
+
+    The browser must use the HTTP board snapshot as its state authority.  This
+    socket only carries safe event metadata and a bounded cursor-gap marker.
+    """
+    try:
+        operator = await authenticate_websocket(websocket)
+    except AuthFailure as exc:
+        await websocket.close(code=4401, reason=exc.code)
+        return
+    try:
+        after = int(websocket.query_params.get("after", "0") or "0")
+    except (TypeError, ValueError):
+        await websocket.close(code=4400, reason="invalid_cursor")
+        return
+    if after < 0:
+        await websocket.close(code=4400, reason="invalid_cursor")
+        return
+
+    await websocket.accept()
+    queue = ws_manager.connect_work_board(
+        websocket,
+        owner_principal_id=operator.principal.principal_id,
+        operator_session_id=operator.session_id,
+    )
+    auth_revoked = asyncio.Event()
+    revocation_guard = Event()
+    auth_session_id = operator.session_id if auth_enabled() else None
+    revocation_task = asyncio.create_task(
+        watch_operator_session(websocket, auth_session_id, auth_revoked, revocation_guard),
+        name=f"work-board-auth-watch:{operator.session_id[:8]}",
+    )
+    last_event_id = after
+    delivered_event_ids: set[int] = set()
+    disconnect_task: asyncio.Task | None = None
+    event_task: asyncio.Task | None = None
+    try:
+        from src.api.work_board import _event_payload, repository as work_board_repository
+        from src.work_board.contracts import WorkBoardOwner
+
+        owner = WorkBoardOwner(
+            principal_id=operator.principal.principal_id,
+            session_id=operator.session_id,
+        )
+
+        async def _send_persisted_event(event, *, allow_backfill: bool = False) -> None:
+            """Send one replay event while suppressing cursor duplicates.
+
+            ``event_id`` is global across owners. A committed event for this
+            owner can therefore arrive after a later owner-visible event was
+            already queued. In that case a bounded replay may send the late
+            event without moving the reconnect cursor backwards.
+            """
+            nonlocal last_event_id
+            payload = _event_payload(event)
+            event_id = payload.get("event_id")
+            if type(event_id) is int:
+                if event_id in delivered_event_ids:
+                    return
+                if event_id <= last_event_id:
+                    if not allow_backfill:
+                        return
+                    await websocket.send_json(payload)
+                    if len(delivered_event_ids) >= 512:
+                        delivered_event_ids.clear()
+                    delivered_event_ids.add(event_id)
+                    return
+                # The monotonic cursor makes the set naturally redundant for
+                # ordered pages, but bounding it protects long-lived sockets
+                # if a transport delivers out-of-order duplicates.
+                if len(delivered_event_ids) >= 512:
+                    delivered_event_ids.clear()
+                delivered_event_ids.add(event_id)
+                last_event_id = event_id
+            await websocket.send_json(payload)
+
+        async def _replay_persisted_events(
+            replay_after: int,
+            *,
+            allow_backfill: bool = False,
+        ) -> bool:
+            """Replay committed owner/session events in ascending cursor order.
+
+            Post-commit publishers can enqueue event 12 before event 11 even
+            though both rows are committed. Replaying from the last delivered
+            cursor before accepting a jumped live event gives the socket the
+            persisted order. A late lower event can use a one-event lookback
+            and be delivered as a backfill without rewinding the cursor.
+            """
+            nonlocal last_event_id
+            replay_cursor = replay_after
+            while True:
+                async with get_session() as db:
+                    page = await work_board_repository.list_events(
+                        db,
+                        owner,
+                        after=replay_cursor,
+                        limit=100,
+                    )
+                if page.gap:
+                    gap_cursor = int(page.last_event_id or last_event_id)
+                    if gap_cursor > last_event_id:
+                        await websocket.send_json(
+                            {"type": "cursor_gap", "last_event_id": gap_cursor}
+                        )
+                        last_event_id = gap_cursor
+                    return False
+                for event in page.events:
+                    await _send_persisted_event(event, allow_backfill=allow_backfill)
+                if not page.events or len(page.events) < 100:
+                    return True
+                next_cursor = next(
+                    (
+                        int(event.event_id)
+                        for event in reversed(page.events)
+                        if type(event.event_id) is int
+                    ),
+                    replay_cursor,
+                )
+                if next_cursor <= replay_cursor:
+                    # Defensive stop against a malformed repository page; do
+                    # not spin forever while holding an authenticated socket.
+                    return True
+                replay_cursor = next_cursor
+
+        await _replay_persisted_events(after)
+
+        async def _send_live_event(payload: dict) -> None:
+            """Reconcile a queued event before advancing the live cursor."""
+            nonlocal last_event_id
+            event_id = payload.get("event_id")
+            if type(event_id) is not int:
+                await websocket.send_json(payload)
+                return
+            if event_id in delivered_event_ids:
+                return
+            if event_id > last_event_id:
+                if event_id != last_event_id + 1:
+                    if not await _replay_persisted_events(last_event_id):
+                        return
+                if event_id in delivered_event_ids:
+                    return
+                await websocket.send_json(payload)
+                if len(delivered_event_ids) >= 512:
+                    delivered_event_ids.clear()
+                delivered_event_ids.add(event_id)
+                last_event_id = event_id
+                return
+
+            # The publisher delivered a lower ID after a later one. Replay
+            # from just before it so the committed owner/session row can be
+            # sent safely; the reconnect cursor remains monotonic.
+            if not await _replay_persisted_events(max(event_id - 1, 0), allow_backfill=True):
+                return
+            if event_id in delivered_event_ids:
+                return
+            await websocket.send_json(payload)
+            if len(delivered_event_ids) >= 512:
+                delivered_event_ids.clear()
+            delivered_event_ids.add(event_id)
+
+        # A WebSocket server does not learn that an idle browser went away
+        # until it reads the ASGI receive channel.  Keep that read pending
+        # alongside the board queue so a client close promptly reaches the
+        # common unregister path below.  Without this task an idle socket can
+        # remain in the manager's binding and queue maps indefinitely.
+        disconnect_task = asyncio.create_task(
+            websocket.receive(),
+            name="work-board-disconnect-wait",
+        )
+        while True:
+            event_task = asyncio.create_task(queue.get(), name="work-board-event-wait")
+            wait_set = {event_task, disconnect_task}
+            if auth_session_id:
+                wait_set.add(revocation_task)
+            done, _ = await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
+            if revocation_task in done and auth_revoked.is_set():
+                event_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await event_task
+                event_task = None
+                return
+            if disconnect_task in done:
+                event_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await event_task
+                event_task = None
+                try:
+                    message = disconnect_task.result()
+                except WebSocketDisconnect:
+                    return
+                if isinstance(message, dict) and message.get("type") == "websocket.disconnect":
+                    return
+                # Client messages are not part of this read-only event
+                # stream.  Ignore one and keep observing the channel.
+                disconnect_task = asyncio.create_task(
+                    websocket.receive(),
+                    name="work-board-disconnect-wait",
+                )
+                continue
+            payload = await event_task
+            event_task = None
+            if payload.get("type") == "cursor_gap":
+                gap_cursor = int(payload.get("last_event_id") or last_event_id)
+                if gap_cursor > last_event_id:
+                    await websocket.send_json(payload)
+                    last_event_id = gap_cursor
+                continue
+            await _send_live_event(payload)
+    except WebSocketDisconnect:
+        logger.info("Work-board websocket client disconnected")
+    except BoardError as exc:
+        with suppress(Exception):
+            await websocket.close(code=4400, reason=exc.code)
+    except Exception:
+        logger.exception("Work-board websocket failed")
+        with suppress(Exception):
+            await websocket.close(code=1011, reason="work_board_event_stream_unavailable")
+    finally:
+        for pending_task in (event_task, disconnect_task):
+            if pending_task is not None and not pending_task.done():
+                pending_task.cancel()
+        for pending_task in (event_task, disconnect_task):
+            if pending_task is not None:
+                with suppress(asyncio.CancelledError, Exception):
+                    await pending_task
+        ws_manager.disconnect_work_board(websocket)
+        if not revocation_task.done():
+            revocation_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await revocation_task
+
+
 @router.websocket("/chat")
 async def websocket_chat(websocket: WebSocket):
     """WebSocket endpoint for streaming chat responses."""
@@ -396,6 +639,7 @@ async def websocket_chat(websocket: WebSocket):
                             "Onboarding skipped. "
                             "The full workspace is now available. What do you want me to help you do?"
                         ),
+                        reason="onboarding_skipped",
                         seq=_next_seq(),
                     ).model_dump_json()
                 )
@@ -694,6 +938,12 @@ async def websocket_chat(websocket: WebSocket):
                         raise
                     except _OperatorSessionRevoked:
                         raise
+                    except NoCompliantModelRouteError as exc:
+                        # Route admission failed before an upstream request
+                        # could be sent. Do not describe this as an uncertain
+                        # remote outcome or ask the operator to retry a call
+                        # that never reached OpenRouter.
+                        raise exc
                     except Exception as exc:
                         raise _DirectStreamOutcomeUncertain(str(exc)) from exc
 
@@ -722,6 +972,38 @@ async def websocket_chat(websocket: WebSocket):
                         WSResponse(
                             type="error",
                             content="OpenRouter chat timed out — try again",
+                            session_id=session.id,
+                            seq=_next_seq(),
+                        ).model_dump_json()
+                    )
+                    continue
+                except NoCompliantModelRouteError as exc:
+                    safe_error = await redact_secrets_in_text(str(exc) or NoCompliantModelRouteError.code)
+                    blocked_message = OPENROUTER_CHAT_ROUTE_BLOCKED_MESSAGE
+                    logger.info("Direct OpenRouter websocket chat blocked before provider contact", extra={"reason": safe_error})
+                    await log_agent_run_event(
+                        session_id=session.id,
+                        transport="websocket",
+                        is_onboarding=direct_is_onboarding,
+                        outcome="blocked",
+                        policy_mode=get_current_tool_policy_mode(),
+                        details={
+                            "duration_ms": int((perf_counter() - started_at) * 1000),
+                            "message_length": len(ws_msg.message),
+                            "error": safe_error,
+                            "request_id": llm_request_id,
+                            "runtime": "direct-openrouter-chat",
+                            "failure_stage": "route_preflight",
+                            "remote_outcome": "not_contacted",
+                            "retry_required": False,
+                        },
+                    )
+                    active_turn_completed = True
+                    await websocket.send_text(
+                        WSResponse(
+                            type="error",
+                            content=blocked_message,
+                            reason=NoCompliantModelRouteError.code,
                             session_id=session.id,
                             seq=_next_seq(),
                         ).model_dump_json()
@@ -966,6 +1248,40 @@ async def websocket_chat(websocket: WebSocket):
             except _OperatorSessionRevoked:
                 active_turn_completed = True
                 raise
+            except NoCompliantModelRouteError as exc:
+                safe_reason = await redact_secrets_in_text(str(exc) or NoCompliantModelRouteError.code)
+                logger.info(
+                    "WebSocket OpenRouter agent chat blocked before provider contact",
+                    extra={"reason": safe_reason},
+                )
+                await log_agent_run_event(
+                    session_id=session.id,
+                    transport="websocket",
+                    is_onboarding=is_onboarding,
+                    outcome="blocked",
+                    policy_mode=get_current_tool_policy_mode(),
+                    details={
+                        "duration_ms": int((perf_counter() - started_at) * 1000),
+                        "message_length": len(ws_msg.message),
+                        "error": safe_reason,
+                        "request_id": llm_request_id,
+                        "runtime": "openrouter-agent",
+                        "failure_stage": "route_preflight",
+                        "remote_outcome": "not_contacted",
+                        "retry_required": False,
+                    },
+                )
+                active_turn_completed = True
+                await websocket.send_text(
+                    WSResponse(
+                        type="error",
+                        content=OPENROUTER_CHAT_ROUTE_BLOCKED_MESSAGE,
+                        reason=NoCompliantModelRouteError.code,
+                        session_id=session.id,
+                        seq=_next_seq(),
+                    ).model_dump_json()
+                )
+                continue
             except asyncio.TimeoutError:
                 logger.warning("Agent timed out after %ds for session %s", settings.agent_chat_timeout, session.id)
                 run_outcome = "timed_out"

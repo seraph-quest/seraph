@@ -118,7 +118,16 @@ def _normalize_action_spec(
             },
         )
 
-    raise ValueError("target_type must be one of: message, deliver_message, workflow, run_workflow.")
+    if normalized_target in {"source_watch", "run_source_watch"}:
+        args = _parse_workflow_args_json(workflow_args_json)
+        watch_id = str(args.get("watch_id") or "").strip()
+        if not watch_id:
+            raise ValueError("run_source_watch jobs require a watch_id.")
+        return "run_source_watch", {"watch_id": watch_id}
+
+    raise ValueError(
+        "target_type must be one of: message, deliver_message, workflow, run_workflow, run_source_watch."
+    )
 
 
 def _dumps(payload: dict[str, Any]) -> str:
@@ -613,6 +622,43 @@ async def execute_scheduled_job(job_id: str) -> None:
                     "scheduled_job_id": job_id,
                     "scheduled_job_run_id": run["id"],
                     "action_type": action_type,
+                },
+            )
+            return
+
+        if action_type == "run_source_watch":
+            from src.guardian.source_watch import source_watch_service
+
+            action_spec = job.get("action_spec") or {}
+            result = await source_watch_service.run_watch(
+                str(action_spec.get("watch_id") or ""),
+                occurrence_id=str(run["id"]),
+                expected_scheduled_job_id=job_id,
+                expected_owner_session_id=str(job.get("session_id") or "") or None,
+            )
+            outcome = str(result.get("status") or "blocked")
+            approval_id = result.get("approval_id") if isinstance(result, dict) else None
+            await scheduled_job_repository.record_run(
+                job_id,
+                outcome=outcome,
+                approval_id=approval_id,
+            )
+            await scheduled_job_repository.finish_run(
+                run["id"],
+                outcome=outcome,
+                status="approval_required" if outcome == "awaiting_approval" else "finished",
+                approval_id=approval_id,
+                metadata={"watch_id": action_spec.get("watch_id"), "job_id": result.get("job_id")},
+            )
+            await log_scheduler_job_event(
+                job_name=f"user_cron:{job_id}",
+                outcome="succeeded" if outcome in {"succeeded", "no_change", "degraded"} else outcome,
+                details={
+                    "scheduled_job_id": job_id,
+                    "scheduled_job_run_id": run["id"],
+                    "action_type": action_type,
+                    "watch_id": action_spec.get("watch_id"),
+                    "watch_outcome": outcome,
                 },
             )
             return

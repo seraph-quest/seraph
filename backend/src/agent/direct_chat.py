@@ -17,6 +17,13 @@ from src.llm_runtime import (
 from src.model_fabric.caller_context import build_canonical_inference_context
 
 
+OPENROUTER_CHAT_ROUTE_BLOCKED_MESSAGE = (
+    "OpenRouter chat is blocked before any provider request. "
+    "Open Settings → OpenRouter setup and save an allowed model, upstream, "
+    "cloud-egress consent, and a finite spend ceiling. No model call was made."
+)
+
+
 _LIGHTWEIGHT_PREFIXES = (
     "hello",
     "hi",

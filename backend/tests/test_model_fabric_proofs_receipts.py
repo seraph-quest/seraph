@@ -49,6 +49,13 @@ from src.security.trust_contract import (
 )
 
 
+class _InlineProbeAdmission:
+    """Keep synthetic receipt tests independent of process-wide admission state."""
+
+    async def execute(self, _request, operation, **_kwargs):
+        return await operation()
+
+
 @pytest.fixture(autouse=True)
 def allow_legacy_probe_contract_fixture(monkeypatch):
     """Exercise transport-free probe receipts without selecting a live route.
@@ -58,6 +65,10 @@ def allow_legacy_probe_contract_fixture(monkeypatch):
     OpenRouter-only and is covered by the focused policy suites.
     """
     monkeypatch.setattr(settings, "openrouter_provider_only", False)
+    monkeypatch.setattr(
+        "src.model_fabric.probe.remote_inference_admission_broker",
+        _InlineProbeAdmission(),
+    )
 
 
 def _profile(*, endpoint: str = "http://192.168.1.26:8001/v1") -> ProviderProfile:

@@ -13,7 +13,13 @@ import { useChatStore } from "../../stores/chatStore";
 import { useQuestStore } from "../../stores/questStore";
 import { useCockpitLayoutStore } from "../../stores/cockpitLayoutStore";
 import { PANEL_MIN_SIZES, usePanelLayoutStore } from "../../stores/panelLayoutStore";
-import type { ChatMessage, ConnectionStatus, GoalInfo, GoalLoopReceipt } from "../../types";
+import type {
+  ChatMessage,
+  ConnectionStatus,
+  GoalInfo,
+  GoalLoopReceipt,
+  WorkBoardReceiptReference,
+} from "../../types";
 import {
   buildWorkflowDraft,
   workflowAcceptsArtifact,
@@ -25,8 +31,10 @@ import { ResizeHandles } from "../ResizeHandles";
 import {
   collectArtifacts,
   formatInspectorValue,
+  resolveWorkBoardArtifact,
   type ArtifactRecord,
   type CockpitAuditEvent,
+  type WorkflowEffectReceiptRecord,
   type WorkflowRunRecord,
   type WorkflowStepRecord,
   type WorkflowTimelineEntry,
@@ -48,6 +56,7 @@ import {
   type OutcomeRouteSummary,
   type OutcomeWorkSummary,
   type OutcomeApprovalSummary,
+  type GitHubFollowthroughSummary,
 } from "./OutcomeCockpitPanel";
 import {
   displayApprovalScopeTarget,
@@ -61,10 +70,11 @@ import {
 } from "./cockpitAuthority";
 import { SeraphPresencePane } from "./SeraphPresencePane";
 import { PttAudioControl } from "../chat/PttAudioControl";
+import { WorkBoardPanel, type WorkBoardArtifactInspectRequest } from "./WorkBoardPanel";
 
 interface CockpitViewProps {
   onSend: (message: string) => boolean | void | Promise<boolean | void>;
-  onSkipOnboarding?: () => void;
+  onSkipOnboarding?: () => void | boolean | Promise<boolean | void>;
 }
 
 interface ObserverState {
@@ -6016,6 +6026,96 @@ function normalizeWorkflowRun(value: Record<string, unknown>): WorkflowRunRecord
   const workflowPlanRevision = readIdentityRevision("plan_revision", "planRevision");
   const workflowCriterionId = readIdentityText("criterion_id", "criterionId");
   const workflowCandidateId = readIdentityText("candidate_id", "candidateId");
+  const workflowRunId = typeof value.run_identity === "string" && value.run_identity.trim()
+    ? value.run_identity.trim()
+    : typeof value.id === "string" && value.id.trim()
+      ? value.id.trim()
+      : null;
+  const workflowSessionId = typeof value.session_id === "string" && value.session_id.trim()
+    ? value.session_id.trim()
+    : null;
+  const workflowArtifacts: ArtifactRecord[] = Array.isArray(value.artifact_registry)
+    ? value.artifact_registry.reduce<ArtifactRecord[]>((records, entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return records;
+        const record = entry as Record<string, unknown>;
+        const id = typeof record.artifact_id === "string" ? record.artifact_id : null;
+        const filePath = typeof record.file_path === "string" ? record.file_path : null;
+        const entrySessionId = typeof record.session_id === "string" ? record.session_id : workflowSessionId;
+        const entryRunId = typeof record.run_id === "string" ? record.run_id : workflowRunId;
+        if (
+          !id
+          || !filePath
+          || !workflowSessionId
+          || !workflowRunId
+          || entrySessionId !== workflowSessionId
+          || entryRunId !== workflowRunId
+        ) return records;
+        const digest = typeof record.content_sha256 === "string" && /^[a-f0-9]{64}$/i.test(record.content_sha256)
+          ? record.content_sha256.toLowerCase()
+          : null;
+        records.push({
+          id,
+          source: "workflow artifact registry",
+          filePath,
+          sessionId: workflowSessionId,
+          createdAt: typeof value.updated_at === "string" ? value.updated_at : String(value.started_at ?? ""),
+          summary: `Artifact receipt for ${String(value.workflow_name ?? value.tool_name ?? "workflow")}`,
+          artifactType: typeof record.artifact_type === "string" ? record.artifact_type : "workspace_file",
+          producer: typeof record.producer === "string" ? record.producer : null,
+          runId: workflowRunId,
+          contentSha256: digest,
+          sizeBytes: typeof record.size_bytes === "number" && Number.isSafeInteger(record.size_bytes) && record.size_bytes >= 0
+            ? record.size_bytes
+            : null,
+        });
+        return records;
+      }, [])
+    : [];
+  const typedReceipts = value.typed_receipts && typeof value.typed_receipts === "object" && !Array.isArray(value.typed_receipts)
+    ? value.typed_receipts as Record<string, unknown>
+    : null;
+  const durableReceipts = value.durable_receipts && typeof value.durable_receipts === "object" && !Array.isArray(value.durable_receipts)
+    ? value.durable_receipts as Record<string, unknown>
+    : null;
+  const rawEffects = Array.isArray(value.effect_receipts)
+    ? value.effect_receipts
+    : Array.isArray(durableReceipts?.effects)
+      ? durableReceipts.effects
+      : Array.isArray(typedReceipts?.effects)
+        ? typedReceipts.effects
+        : [];
+  const workflowEffectReceipts: WorkflowEffectReceiptRecord[] = rawEffects.reduce<WorkflowEffectReceiptRecord[]>((receipts, entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return receipts;
+    const record = entry as Record<string, unknown>;
+    const text = (key: string) => typeof record[key] === "string" ? record[key] as string : null;
+    const integer = (key: string) => typeof record[key] === "number" && Number.isSafeInteger(record[key]) && Number(record[key]) >= 0
+      ? Number(record[key])
+      : undefined;
+    receipts.push({
+      receiptKind: text("receipt_kind"),
+      effectType: text("effect_type"),
+      artifactId: text("artifact_id"),
+      childJobId: text("child_job_id"),
+      targetPath: text("target_path"),
+      status: text("status"),
+      safe: typeof record.safe === "boolean" ? record.safe : undefined,
+      reconciled: typeof record.reconciled === "boolean" ? record.reconciled : undefined,
+      reconciliationStatus: text("reconciliation_status"),
+      exists: typeof record.exists === "boolean" ? record.exists : undefined,
+      operatorVisible: typeof record.operator_visible === "boolean" ? record.operator_visible : undefined,
+      recordedAt: text("recorded_at"),
+      observedAt: text("observed_at"),
+      fencingToken: integer("fencing_token"),
+      sizeBytes: integer("size_bytes"),
+      artifactIdDigest: text("artifact_id_digest"),
+      effectIdDigest: text("effect_id_digest"),
+      stateDigest: text("state_digest"),
+      contentSha256: text("content_sha256"),
+      targetDigest: text("target_digest"),
+      readbackDigest: text("readback_digest"),
+    });
+    return receipts;
+  }, []);
 
   return {
     id: String(value.id ?? ""),
@@ -6040,7 +6140,8 @@ function normalizeWorkflowRun(value: Record<string, unknown>): WorkflowRunRecord
     arguments: value.arguments && typeof value.arguments === "object" && !Array.isArray(value.arguments)
       ? (value.arguments as Record<string, unknown>)
       : undefined,
-    artifacts: [],
+    artifacts: workflowArtifacts,
+    effectReceipts: workflowEffectReceipts,
     riskLevel: typeof value.risk_level === "string" ? value.risk_level : undefined,
     executionBoundaries: Array.isArray(value.execution_boundaries)
       ? value.execution_boundaries.filter((item): item is string => typeof item === "string")
@@ -6174,6 +6275,147 @@ function normalizeWorkflowRun(value: Record<string, unknown>): WorkflowRunRecord
     actionHandle,
     timeline: normalizedTimeline,
   };
+}
+
+/**
+ * A board evidence run is deliberately kept separate from the generic workflow
+ * index.  The bound API returns the small durable-job projection; this adapter
+ * gives the existing inspector the fields it can render without importing
+ * inputs, private results, or an unscoped workflow record.
+ */
+const BOARD_BOUND_WORKFLOW = Symbol("seraph.board-bound-workflow");
+type BoardBoundWorkflowRun = WorkflowRunRecord & {
+  [BOARD_BOUND_WORKFLOW]: true;
+};
+
+function isBoardBoundWorkflowRun(workflow: WorkflowRunRecord): workflow is BoardBoundWorkflowRun {
+  return (workflow as Partial<BoardBoundWorkflowRun>)[BOARD_BOUND_WORKFLOW] === true;
+}
+
+function boardBoundRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function boardBoundRecords(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value)
+    ? value.flatMap((entry) => {
+        const record = boardBoundRecord(entry);
+        return record ? [record] : [];
+      })
+    : [];
+}
+
+function boardBoundStatus(value: unknown): WorkflowRunRecord["status"] {
+  switch (value) {
+    case "succeeded":
+      return "succeeded";
+    case "failed":
+      return "failed";
+    case "degraded":
+      return "degraded";
+    case "awaiting_approval":
+      return "awaiting_approval";
+    case "approved":
+      return "approved";
+    case "denied":
+      return "denied";
+    case "blocked":
+    case "unknown_external_effect":
+    case "cost_liability":
+    case "cancelled":
+      return "degraded";
+    default:
+      return "running";
+  }
+}
+
+function normalizeBoardBoundWorkflowJob(
+  value: Record<string, unknown>,
+  ownerSessionId: string,
+): BoardBoundWorkflowRun | null {
+  const jobId = typeof value.job_id === "string" && value.job_id.trim() ? value.job_id.trim() : null;
+  if (!jobId || !ownerSessionId) return null;
+  const parentJobId = typeof value.parent_job_id === "string" && value.parent_job_id.trim()
+    ? value.parent_job_id.trim()
+    : null;
+  const jobKind = typeof value.job_kind === "string" && value.job_kind.trim()
+    ? value.job_kind.trim()
+    : "board durable job";
+  const startedAt = typeof value.started_at === "string" ? value.started_at : "";
+  const updatedAt = typeof value.updated_at === "string" ? value.updated_at : startedAt;
+  const artifactReceipts = boardBoundRecords(value.artifacts).filter(
+    (receipt) => typeof receipt.artifact_id === "string" && typeof receipt.file_path === "string",
+  );
+  const effectReceipts = boardBoundRecords(value.effects).map((receipt) => {
+    // Never propagate the opaque raw effect handle into inspector state.
+    // The API returns only its stable 16-hex digest prefix.
+    const safeReceipt = { ...receipt };
+    delete safeReceipt.effect_id;
+    delete safeReceipt.effect_id_digest;
+    const digest = typeof receipt.effect_id_digest === "string"
+      && /^[0-9a-f]{16}$/i.test(receipt.effect_id_digest)
+      ? receipt.effect_id_digest.toLowerCase()
+      : null;
+    return digest ? { ...safeReceipt, effect_id_digest: digest } : safeReceipt;
+  });
+  const normalized = normalizeWorkflowRun({
+    id: jobId,
+    run_identity: jobId,
+    parent_run_identity: parentJobId,
+    tool_name: jobKind,
+    workflow_name: jobKind,
+    session_id: ownerSessionId,
+    status: boardBoundStatus(value.status),
+    started_at: startedAt,
+    updated_at: updatedAt,
+    summary: `Durable board job ${jobId}`,
+    artifact_paths: artifactReceipts.flatMap((receipt) => (
+      typeof receipt.file_path === "string" ? [receipt.file_path] : []
+    )),
+    artifact_registry: artifactReceipts.map((receipt) => ({
+      ...receipt,
+      session_id: ownerSessionId,
+      run_id: jobId,
+    })),
+    effect_receipts: effectReceipts,
+  });
+  return { ...normalized, [BOARD_BOUND_WORKFLOW]: true };
+}
+
+function boardBoundJobMatchesReference(
+  value: Record<string, unknown>,
+  reference: WorkBoardReceiptReference,
+): boolean {
+  const receipts = [...boardBoundRecords(value.artifacts), ...boardBoundRecords(value.effects)];
+  return receipts.some((receipt) => {
+    if (reference.artifact_id && receipt.artifact_id !== reference.artifact_id) return false;
+    if (
+      reference.effect_id_digest
+      && String(receipt.effect_id_digest ?? "").toLowerCase() !== reference.effect_id_digest.toLowerCase()
+    ) return false;
+    if (reference.file_path && receipt.file_path !== reference.file_path) return false;
+    if (reference.target_path && receipt.target_path !== reference.target_path) return false;
+    if (reference.readback_id && receipt.readback_id !== reference.readback_id) return false;
+    if (reference.verification_id && receipt.verification_id !== reference.verification_id) return false;
+    if (
+      reference.content_sha256
+      && String(receipt.content_sha256 ?? "").toLowerCase() !== reference.content_sha256.toLowerCase()
+    ) return false;
+    if (
+      reference.target_digest
+      && String(receipt.target_digest ?? "").toLowerCase() !== reference.target_digest.toLowerCase()
+    ) return false;
+    return Boolean(
+      reference.artifact_id
+      || reference.effect_id_digest
+      || reference.file_path
+      || reference.target_path
+      || reference.readback_id
+      || reference.verification_id,
+    );
+  });
 }
 
 function collectGoalTitles(goals: GoalInfo[], limit: number): string[] {
@@ -6794,6 +7036,7 @@ const COCKPIT_WINDOW_HINTS = {
   operatorTimeline: "Browse what Seraph did, why it did it, and what spent budget across user, guardian, workflow, and system activity.",
   interventions: "Recent proactive nudges, delivery outcomes, and feedback signal.",
   workflowTimeline: "Inspect runs, branch from failures, and resume repaired steps.",
+  workBoard: "Coordinate bounded tasks, inspect verified attempts, and recover blocked work.",
   audit: "Durable tool, memory, workflow, and integration events for the current window.",
   trace: "In-flight routing, tool, and error activity while work is happening.",
   inspector: "Select a run, approval, intervention, or event to inspect details and recovery actions.",
@@ -7127,6 +7370,13 @@ type OperatorAuthState = {
   sessionId: string | null;
   expiresAt: string | null;
 };
+type GitHubConnectionState = {
+  id?: string | null;
+  repository?: string | null;
+  revision?: number | null;
+  mode?: "disabled" | "active" | "reconcile_only" | string | null;
+  credential_configured?: boolean;
+};
 type DeepPaneLoadState = "idle" | "loading" | "loaded" | "stale" | "failed";
 type DeepPaneKey =
   | "presence"
@@ -7142,6 +7392,65 @@ type DeepPaneKey =
   | "benchmark"
   | "m8";
 
+type CockpitGitHubFollowthrough = GitHubFollowthroughSummary & {
+  jobId?: string | null;
+  approvalId?: string | null;
+};
+
+function githubFollowthroughUiState(status: unknown): OutcomeCockpitState {
+  switch (String(status ?? "")) {
+    case "awaiting_approval":
+      return "awaiting_approval";
+    case "succeeded":
+      return "recovered";
+    case "failed":
+    case "cancelled":
+      return "failed";
+    case "blocked":
+    case "degraded":
+      return "blocked";
+    case "running":
+    case "queued":
+    case "accepted":
+      return "active";
+    default:
+      return "partial_metadata";
+  }
+}
+
+function normalizeGitHubFollowthrough(
+  payload: unknown,
+  connectionReady: boolean,
+): CockpitGitHubFollowthrough | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const value = payload as Record<string, unknown>;
+  const preview = value.preview && typeof value.preview === "object" && !Array.isArray(value.preview)
+    ? value.preview as Record<string, unknown>
+    : null;
+  const action = preview?.action === "create_comment" ? "create_comment" : preview?.action === "create_issue" ? "create_issue" : null;
+  if (!action) return null;
+  const issueNumber = typeof preview?.issue_number === "number" ? preview.issue_number : null;
+  const remoteId = typeof value.remote_id === "number" ? value.remote_id : null;
+  return {
+    state: githubFollowthroughUiState(value.status),
+    repository: typeof preview?.repository === "string" ? preview.repository : "",
+    action,
+    issueNumber,
+    previewTitle: typeof preview?.title === "string" ? preview.title : null,
+    previewBody: typeof preview?.body === "string" ? preview.body : null,
+    marker: typeof preview?.marker === "string" ? preview.marker : null,
+    sourceArtifactId: typeof preview?.dossier_artifact_id === "string" ? preview.dossier_artifact_id : null,
+    approvalExpiry: typeof value.approval_expires_at === "string" ? value.approval_expires_at : null,
+    approvalStatus: null,
+    connectionReady,
+    remoteId,
+    remoteUrl: typeof value.remote_url === "string" ? value.remote_url : null,
+    recoveryReason: typeof value.recovery_reason === "string" ? value.recovery_reason : null,
+    jobId: typeof value.job_id === "string" ? value.job_id : null,
+    approvalId: typeof value.approval_id === "string" ? value.approval_id : null,
+  };
+}
+
 export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [composer, setComposer] = useState("");
@@ -7156,6 +7465,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     sessionId: null,
     expiresAt: null,
   });
+  const [githubConnection, setGithubConnection] = useState<GitHubConnectionState | null>(null);
+  const [githubConnectionLoaded, setGithubConnectionLoaded] = useState(false);
+  const [githubFollowthrough, setGithubFollowthrough] = useState<CockpitGitHubFollowthrough | null>(null);
   const [feedbackState, setFeedbackState] = useState<Record<string, string>>({});
   const [approvalState, setApprovalState] = useState<Record<string, string>>({});
   const [selectedInspector, setSelectedInspector] = useState<InspectorSelection | null>(null);
@@ -7210,10 +7522,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const activityLedgerScopeRef = useRef<string>("");
   const cockpitRefreshInFlightRef = useRef(false);
   const goalLoopRequestKeyRef = useRef<string | null>(null);
+  const workBoardInspectionGenerationRef = useRef(0);
+  useEffect(() => () => {
+    workBoardInspectionGenerationRef.current += 1;
+  }, []);
   const [toolPolicyMode, setToolPolicyMode] = useState<ToolPolicyMode | "unknown">("unknown");
   const [mcpPolicyMode, setMcpPolicyMode] = useState<McpPolicyMode | "unknown">("unknown");
   const [approvalMode, setApprovalMode] = useState<ApprovalMode | "unknown">("unknown");
   const [operatorStatus, setOperatorStatus] = useState<string | null>(null);
+  const [onboardingActionStatus, setOnboardingActionStatus] = useState<string | null>(null);
   const [deepPaneLoadState, setDeepPaneLoadState] = useState<Record<DeepPaneKey, DeepPaneLoadState>>({
     presence: "idle",
     activity: "idle",
@@ -7289,6 +7606,17 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const clearSessionContinuity = useChatStore((s) => s.clearSessionContinuity);
   const setQuestPanelOpen = useChatStore((s) => s.setQuestPanelOpen);
   const setSettingsPanelOpen = useChatStore((s) => s.setSettingsPanelOpen);
+
+  const handleSkipOnboarding = useCallback(async () => {
+    if (!onSkipOnboarding) return;
+    setOnboardingActionStatus("Skipping onboarding…");
+    try {
+      const result = await onSkipOnboarding();
+      setOnboardingActionStatus(result === false ? "Could not skip onboarding. Retry when the backend is connected." : "Onboarding skipped.");
+    } catch {
+      setOnboardingActionStatus("Could not skip onboarding. Retry when the backend is connected.");
+    }
+  }, [onSkipOnboarding]);
 
   const dashboard = useQuestStore((s) => s.dashboard);
   const goalTree = useQuestStore((s) => s.goalTree);
@@ -7413,6 +7741,21 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       window.clearTimeout(timeout);
     }
   }, []);
+
+  // GitHub connection metadata is intentionally loaded only when the operator
+  // opens the follow-through action. It must not perturb the cockpit's stable
+  // baseline refresh request set or make an external capability look ready.
+  const loadGithubConnection = useCallback(async (): Promise<GitHubConnectionState | null> => {
+    const result = await fetchCockpitJson(`${API_URL}/api/capabilities/github/connection`, 5000);
+    setGithubConnectionLoaded(true);
+    if (result.ok && result.payload && typeof result.payload === "object" && !Array.isArray(result.payload)) {
+      const next = result.payload as GitHubConnectionState;
+      setGithubConnection(next);
+      return next;
+    }
+    setGithubConnection(null);
+    return null;
+  }, [fetchCockpitJson]);
 
   const fetchCockpitBatch = useCallback(async (
     requests: Array<() => Promise<CockpitFetchResult>>,
@@ -7642,34 +7985,39 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     markDeepPaneLoaded("activity", false);
   }, [fetchCockpitJson, markDeepPaneLoaded, sessionId, updateDeepPaneState]);
 
-  const loadWorkflowRuns = useCallback(async () => {
+  const loadWorkflowRuns = useCallback(async (isCurrent?: () => boolean) => {
+    if (isCurrent && !isCurrent()) return [];
     updateDeepPaneState("workflows", "loading");
     const [workflowRunsResult, artifactLineageRunsResult] = await fetchCockpitBatch([
       () => fetchCockpitJson(`${API_URL}/api/workflows/runs?limit=8${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`, 5000),
       () => fetchCockpitJson(`${API_URL}/api/workflows/runs?limit=40`, 5000),
     ]);
+    if (isCurrent && !isCurrent()) return [];
     let ok = false;
+    let primaryRuns: WorkflowRunRecord[] = [];
+    let lineageRuns: WorkflowRunRecord[] = [];
     if (workflowRunsResult.ok && workflowRunsResult.payload && typeof workflowRunsResult.payload === "object") {
       const runs = (workflowRunsResult.payload as { runs?: unknown }).runs;
-      setWorkflowRuns(
-        Array.isArray(runs)
-          ? runs.map((run: Record<string, unknown>) => normalizeWorkflowRun(run))
-          : [],
-      );
+      primaryRuns = Array.isArray(runs)
+        ? runs.map((run: Record<string, unknown>) => normalizeWorkflowRun(run))
+        : [];
+      setWorkflowRuns(primaryRuns);
       ok = true;
     }
+    if (isCurrent && !isCurrent()) return [];
     if (artifactLineageRunsResult.ok && artifactLineageRunsResult.payload && typeof artifactLineageRunsResult.payload === "object") {
       const runs = (artifactLineageRunsResult.payload as { runs?: unknown }).runs;
-      setArtifactLineageRuns(
-        Array.isArray(runs)
-          ? runs.map((run: Record<string, unknown>) => normalizeWorkflowRun(run))
-          : [],
-      );
+      lineageRuns = Array.isArray(runs)
+        ? runs.map((run: Record<string, unknown>) => normalizeWorkflowRun(run))
+        : [];
+      setArtifactLineageRuns(lineageRuns);
       ok = true;
     } else if (!ok) {
       setArtifactLineageRuns([]);
     }
+    if (isCurrent && !isCurrent()) return [];
     markDeepPaneLoaded("workflows", ok);
+    return [...lineageRuns, ...primaryRuns];
   }, [fetchCockpitBatch, fetchCockpitJson, markDeepPaneLoaded, sessionId, updateDeepPaneState]);
 
   const loadControlPlane = useCallback(async () => {
@@ -8071,6 +8419,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       guardianState: paneVisibility.guardian_state_pane,
       timeline: paneVisibility.operator_timeline_pane,
       workflows: paneVisibility.workflows_pane,
+      workBoard: paneVisibility.work_board_pane,
       interventions: paneVisibility.interventions_pane,
       audit: paneVisibility.audit_pane,
       trace: paneVisibility.trace_pane,
@@ -8193,6 +8542,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     );
   }
   function resolveWorkflowRun(workflow: WorkflowRunRecord): WorkflowRunRecord {
+    if (isBoardBoundWorkflowRun(workflow)) return workflow;
     if (workflow.runIdentity) {
       return workflowRunByIdentity.get(workflow.runIdentity) ?? workflowRunById.get(workflow.id) ?? workflow;
     }
@@ -8650,6 +9000,115 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   function inspectWorkflowRun(workflow: WorkflowRunRecord | null | undefined) {
     if (!workflow) return;
     setSelectedInspector({ kind: "workflow", workflow: resolveWorkflowRun(workflow) });
+  }
+
+  async function loadBoardBoundWorkflowRun(
+    workflowRunId: string,
+    ownerSessionId: string,
+    isCurrentInspection: () => boolean,
+  ): Promise<{
+    job: Record<string, unknown> | null;
+    workflow: BoardBoundWorkflowRun | null;
+    status?: number;
+  }> {
+    const result = await fetchCockpitJson(
+      `${API_URL}/api/workflows/jobs/${encodeURIComponent(workflowRunId)}`,
+      5000,
+      () => !isCurrentInspection(),
+    );
+    if (!isCurrentInspection() || !result.ok) {
+      return { job: null, workflow: null, status: result.status };
+    }
+    const payload = boardBoundRecord(result.payload);
+    const job = boardBoundRecord(payload?.job);
+    if (!job || job.job_id !== workflowRunId) {
+      return { job: null, workflow: null, status: result.status };
+    }
+    return {
+      job,
+      workflow: normalizeBoardBoundWorkflowJob(job, ownerSessionId),
+      status: result.status,
+    };
+  }
+
+  function boardWorkflowEvidenceUnavailable(status?: number): string {
+    if (status === 401 || status === 403 || status === 404) {
+      return "The task's linked workflow evidence is unavailable for the current authenticated session. Refresh the task and retry.";
+    }
+    return "Workflow evidence could not be loaded. Refresh workflow evidence and retry.";
+  }
+
+  function inspectWorkBoardWorkflowRun(workflowRunId: string, ownerSessionId: string | null) {
+    const inspectionGeneration = ++workBoardInspectionGenerationRef.current;
+    const isCurrentInspection = () => inspectionGeneration === workBoardInspectionGenerationRef.current;
+    if (!ownerSessionId) {
+      setOperatorStatus("Task workflow evidence is unavailable because the task's canonical owner session is missing.");
+      return;
+    }
+    focusPane("workflows_pane");
+    setOperatorStatus("Loading workflow evidence for the task's immutable run link.");
+    void loadBoardBoundWorkflowRun(workflowRunId, ownerSessionId, isCurrentInspection).then(({ workflow, status }) => {
+      if (!isCurrentInspection()) return;
+      if (!workflow) {
+        setOperatorStatus(boardWorkflowEvidenceUnavailable(status));
+        return;
+      }
+      setSelectedInspector({ kind: "workflow", workflow });
+    }).catch(() => {
+      if (!isCurrentInspection()) return;
+      setOperatorStatus("Workflow evidence could not be loaded. Refresh workflow evidence and retry.");
+    });
+  }
+  function inspectWorkBoardArtifact(request: WorkBoardArtifactInspectRequest) {
+    const inspectionGeneration = ++workBoardInspectionGenerationRef.current;
+    const isCurrentInspection = () => inspectionGeneration === workBoardInspectionGenerationRef.current;
+    const { reference, ownerSessionId, workflowRunId, parentWorkflowRunId } = request;
+    const expectedParentWorkflowRunId = parentWorkflowRunId && parentWorkflowRunId !== workflowRunId
+      ? parentWorkflowRunId
+      : null;
+    if (workflowRunId) {
+      if (!ownerSessionId) {
+        setOperatorStatus("Task workflow evidence is unavailable because the task's canonical owner session is missing.");
+        return;
+      }
+      focusPane("workflows_pane");
+      setOperatorStatus("Loading workflow evidence for the task's immutable run link.");
+      void loadBoardBoundWorkflowRun(workflowRunId, ownerSessionId, isCurrentInspection).then(({ job, workflow, status }) => {
+        if (!isCurrentInspection()) return;
+        if (!job || !workflow) {
+          setOperatorStatus(boardWorkflowEvidenceUnavailable(status));
+          return;
+        }
+        if (expectedParentWorkflowRunId && workflow.parentRunIdentity !== expectedParentWorkflowRunId) {
+          setOperatorStatus("Task child workflow evidence is hidden because its parent does not match the task's immutable run link.");
+          return;
+        }
+        if (!boardBoundJobMatchesReference(job, reference)) {
+          setOperatorStatus("The task's linked artifact is unavailable in the authenticated durable job evidence. Refresh the task and retry.");
+          return;
+        }
+        const artifact = resolveWorkBoardArtifact(workflow.artifacts, reference, { ownerSessionId, workflowRunId });
+        if (artifact) {
+          setSelectedInspector({ kind: "artifact", artifact });
+          focusPane("inspector_pane");
+        } else {
+          setSelectedInspector({ kind: "workflow", workflow });
+        }
+      }).catch(() => {
+        if (!isCurrentInspection()) return;
+        setOperatorStatus("Workflow evidence could not be loaded. Refresh workflow evidence and retry.");
+      });
+      return;
+    }
+
+    const artifact = resolveWorkBoardArtifact(artifacts, reference, { ownerSessionId, workflowRunId: null });
+    if (artifact) {
+      setSelectedInspector({ kind: "artifact", artifact });
+      focusPane("inspector_pane");
+      return;
+    }
+    focusPane("inspector_pane");
+    setOperatorStatus(`Exact task evidence ${reference.file_path ?? reference.target_path ?? reference.artifact_id ?? reference.effect_id ?? "reference"} is not in the current session index. Refresh activity and workflow evidence, then inspect again.`);
   }
   async function queueLiveWorkflowResumePlan(
     workflow: WorkflowRunRecord | null | undefined,
@@ -10002,6 +10461,176 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     : null;
   const latestArtifact = [...artifacts]
     .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())[0] ?? null;
+  const latestGuardianDossier = [...artifacts]
+    .filter((artifact) => (
+      artifact.artifactType === "guardian_decision_dossier"
+      && Boolean(artifact.contentSha256)
+      && (!sessionId || !artifact.sessionId || artifact.sessionId === sessionId)
+    ))
+    .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())[0] ?? null;
+  const githubConnectionReady = Boolean(
+    githubConnection
+    && githubConnection.mode === "active"
+    && githubConnection.credential_configured === true
+    && githubConnection.repository
+    && githubConnection.revision,
+  );
+
+  async function prepareGitHubFollowthrough(action: "create_issue" | "create_comment") {
+    if (!operatorAuth.principalId || !operatorAuth.sessionId || operatorAuth.status !== "authenticated") {
+      setOperatorStatus("GitHub publication is blocked until the authenticated operator session is current.");
+      return;
+    }
+    const connection = githubConnection ?? await loadGithubConnection();
+    const connectionReady = Boolean(
+      connection
+      && connection.mode === "active"
+      && connection.credential_configured === true
+      && connection.repository
+      && connection.revision,
+    );
+    if (!connectionReady || !connection?.revision) {
+      setOperatorStatus("GitHub publication is blocked: configure an active repository connection and vault credential first.");
+      return;
+    }
+    if (!currentGoal || !latestGuardianDossier?.contentSha256) {
+      setOperatorStatus("GitHub publication is blocked: a verified guardian dossier for the current goal is required.");
+      return;
+    }
+    const goalRevision = currentGoal.revision ?? currentGoalLoop?.goal.revision ?? null;
+    if (!goalRevision || !sessionId) {
+      setOperatorStatus("GitHub publication is blocked: the current goal/session binding is incomplete.");
+      return;
+    }
+    const suggestedBody = [
+      `Goal: ${currentGoal.title}`,
+      latestGuardianDossier.summary,
+    ].filter(Boolean).join("\n\n").slice(0, 19_500);
+    const body = typeof window !== "undefined"
+      ? window.prompt("Review the exact public GitHub text before preparing approval.", suggestedBody)
+      : null;
+    if (!body?.trim()) {
+      setOperatorStatus("GitHub publication preparation cancelled before any network write.");
+      return;
+    }
+    const title = action === "create_issue"
+      ? (typeof window !== "undefined" ? window.prompt("Review the GitHub issue title.", currentGoal.title.slice(0, 200)) : null)
+      : null;
+    if (action === "create_issue" && !title?.trim()) {
+      setOperatorStatus("GitHub issue preparation cancelled before any network write.");
+      return;
+    }
+    let issueNumber: number | undefined;
+    if (action === "create_comment") {
+      const rawIssueNumber = typeof window !== "undefined" ? window.prompt("Enter the existing GitHub issue or PR number.") : null;
+      issueNumber = rawIssueNumber ? Number.parseInt(rawIssueNumber, 10) : NaN;
+      if (!Number.isSafeInteger(issueNumber) || issueNumber <= 0) {
+        setOperatorStatus("GitHub comment preparation cancelled: a positive issue/PR number is required.");
+        return;
+      }
+    }
+    setOperatorStatus("Preparing the exact GitHub preview; no publication request is sent yet…");
+    try {
+      const response = await apiFetch(`${API_URL}/api/capabilities/github/prepare`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          conversation_id: sessionId,
+          goal_id: currentGoal.id,
+          goal_revision: goalRevision,
+          dossier_artifact_id: latestGuardianDossier.id,
+          dossier_sha256: latestGuardianDossier.contentSha256,
+          connection_revision: connection.revision,
+          action,
+          title: action === "create_issue" ? title?.trim() : undefined,
+          body: body.trim(),
+          issue_number: action === "create_comment" ? issueNumber : undefined,
+          idempotency_key: typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+            ? crypto.randomUUID()
+            : `00000000-0000-4000-8000-${Date.now().toString(16).padStart(12, "0").slice(-12)}`,
+        }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const detail = payload && typeof payload === "object" && "detail" in payload
+          ? (payload as { detail?: unknown }).detail
+          : null;
+        setOperatorStatus(`GitHub preview refused: ${typeof detail === "string" ? detail : "the bound dossier or connection is stale"}.`);
+        return;
+      }
+      const next = normalizeGitHubFollowthrough(payload, true);
+      if (!next) {
+        setOperatorStatus("GitHub preview returned incomplete metadata; no publication action is enabled.");
+        return;
+      }
+      if (next.approvalId && pendingApprovals.some((approval) => approval.id === next.approvalId)) {
+        next.approvalStatus = "pending";
+      }
+      setGithubFollowthrough(next);
+      setOperatorStatus("GitHub preview is ready in the approval queue. Review the exact text and approve it there.");
+      await refreshCockpit();
+    } catch {
+      setOperatorStatus("GitHub preview could not be prepared; no publication request was sent.");
+    }
+  }
+
+  async function refreshGitHubJob(jobId: string, path: "" | "/execute" | "/cancel" | "/reconcile", body?: Record<string, unknown>) {
+    if (!operatorAuth.sessionId) return;
+    try {
+      const response = await apiFetch(`${API_URL}/api/capabilities/github/jobs/${encodeURIComponent(jobId)}${path}`, {
+        method: path ? "POST" : "GET",
+        headers: path ? { "Content-Type": "application/json" } : undefined,
+        body: path ? JSON.stringify(body ?? {}) : undefined,
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const detail = payload && typeof payload === "object" && "detail" in payload
+          ? (payload as { detail?: unknown }).detail
+          : null;
+        setOperatorStatus(`GitHub follow-through refused: ${typeof detail === "string" ? detail : "the current job state is stale"}.`);
+        return;
+      }
+      const next = normalizeGitHubFollowthrough(payload, githubConnectionReady);
+      if (next) {
+        setGithubFollowthrough((current) => ({
+          ...next,
+          approvalStatus: current?.approvalStatus ?? next.approvalStatus,
+        }));
+      }
+      await refreshCockpit();
+    } catch {
+      setOperatorStatus("GitHub follow-through status is temporarily unavailable; inspect the durable job before acting again.");
+    }
+  }
+
+  async function executeGitHubFollowthrough() {
+    const jobId = githubFollowthrough?.jobId;
+    if (!jobId) return;
+    setOperatorStatus("Resuming the approved GitHub publication…");
+    await refreshGitHubJob(jobId, "/execute");
+  }
+
+  async function cancelGitHubFollowthrough() {
+    const jobId = githubFollowthrough?.jobId;
+    if (!jobId) return;
+    setOperatorStatus("Cancelling GitHub publication before any further dispatch…");
+    await refreshGitHubJob(jobId, "/cancel");
+  }
+
+  async function reconcileGitHubFollowthrough() {
+    const jobId = githubFollowthrough?.jobId;
+    if (!jobId) return;
+    const suggested = githubFollowthrough.remoteId ? String(githubFollowthrough.remoteId) : "";
+    const rawRemoteId = typeof window !== "undefined"
+      ? window.prompt("Enter the verified GitHub object ID if it is known; leave blank to receive a durable block.", suggested)
+      : null;
+    const remoteId = rawRemoteId?.trim() ? Number.parseInt(rawRemoteId, 10) : undefined;
+    if (remoteId !== undefined && (!Number.isSafeInteger(remoteId) || remoteId <= 0)) {
+      setOperatorStatus("GitHub reconciliation cancelled: the remote ID must be a positive integer.");
+      return;
+    }
+    await refreshGitHubJob(jobId, "/reconcile", remoteId === undefined ? {} : { remote_id: remoteId });
+  }
   const latestArtifactLineage = latestArtifact ? resolveArtifactLineage(latestArtifact) : null;
   const artifactSourceMatchesOutcome = Boolean(
     outcomeWorkflow
@@ -11986,6 +12615,18 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       const payload = await response.json();
       const nextStatus = payload?.status ?? (decision === "approve" ? "approved" : "denied");
       setApprovalState((current) => ({ ...current, [approval.id]: nextStatus }));
+      if (githubFollowthrough?.approvalId === approval.id) {
+        setGithubFollowthrough((current) => current ? {
+          ...current,
+          approvalStatus: nextStatus === "approved"
+            ? "approved"
+            : nextStatus === "denied"
+              ? "denied"
+              : nextStatus === "expired"
+                ? "expired"
+                : "pending",
+        } : current);
+      }
       setPendingApprovals((current) => current.filter((item) => item.id !== approval.id));
 
       if (decision === "approve" && payload?.resume_message) {
@@ -13167,6 +13808,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       meta = artifact.source;
       body = artifact.summary;
       details = {
+        artifact_id: artifact.id,
+        artifact_type: artifact.artifactType ?? "n/a",
+        content_sha256: artifact.contentSha256 ?? "n/a",
         file_path: artifact.filePath,
         session_id: artifact.sessionId ?? "n/a",
         created_at: artifact.createdAt,
@@ -13501,6 +14145,29 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 </div>
               </div>
             )}
+          </div>
+        )}
+        {selectedInspector.kind === "workflow" && selectedWorkflow && Boolean(selectedWorkflow.effectReceipts?.length) && (
+          <div className="cockpit-inspector-stack" aria-label="Workflow effect and readback receipts">
+            {selectedWorkflow.effectReceipts?.map((receipt, index) => (
+              <div key={`${selectedWorkflow.id}:effect:${receipt.effectIdDigest ?? index}`} className="cockpit-inspector-stack-row">
+                <div className="cockpit-key">{receipt.receiptKind === "readback" ? "readback receipt" : "effect receipt"}</div>
+                <div className="cockpit-value">
+                  {receipt.effectType ?? "workflow effect"} · {receipt.status ?? "status unavailable"}
+                  {receipt.reconciliationStatus ? ` · reconciliation ${receipt.reconciliationStatus}` : ""}
+                  {receipt.reconciled === true ? " · reconciled" : ""}
+                  {receipt.exists === true ? " · target exists" : receipt.exists === false ? " · target missing" : ""}
+                </div>
+                {receipt.effectIdDigest && <div className="cockpit-value">effect reference digest {receipt.effectIdDigest}</div>}
+                {receipt.artifactId && <div className="cockpit-value">artifact {receipt.artifactId}</div>}
+                {receipt.childJobId && <div className="cockpit-value">child workflow run {receipt.childJobId}</div>}
+                {receipt.targetPath && <div className="cockpit-value">readback path {receipt.targetPath}</div>}
+                {receipt.targetDigest && <div className="cockpit-value">target SHA-256 {receipt.targetDigest}</div>}
+                {receipt.contentSha256 && <div className="cockpit-value">artifact SHA-256 {receipt.contentSha256}</div>}
+                {receipt.readbackDigest && <div className="cockpit-value">readback SHA-256 {receipt.readbackDigest}</div>}
+                {receipt.recordedAt && <div className="cockpit-value">recorded {formatAge(receipt.recordedAt)}</div>}
+              </div>
+            ))}
           </div>
         )}
         {selectedInspector.kind === "workflow" && selectedWorkflow && workflowStepFocusRecords(selectedWorkflow).length > 0 && (
@@ -14592,8 +15259,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
           <div className="cockpit-action-row">
             {onboardingCompleted === false && onSkipOnboarding && (
-              <button className="cockpit-action cockpit-action--ghost" onClick={onSkipOnboarding}>
-                Skip intro
+              <button className="cockpit-action cockpit-action--ghost" onClick={() => void handleSkipOnboarding()}>
+                Skip onboarding
               </button>
             )}
             <button
@@ -15114,6 +15781,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       : workflowLoadState}
                 approvalLoadState={approvalLoadState}
                 recoveryAuthorized={recoveryAuthorityReady}
+                sourceWatchGoal={outcomeGoal}
+                githubConnectionReady={githubConnectionReady}
+                githubConnectionLoaded={githubConnectionLoaded}
+                githubFollowthrough={githubFollowthrough}
+                onPrepareGitHubIssue={() => void prepareGitHubFollowthrough("create_issue")}
+                onPrepareGitHubComment={() => void prepareGitHubFollowthrough("create_comment")}
+                onExecuteGitHubFollowthrough={() => void executeGitHubFollowthrough()}
+                onCancelGitHubFollowthrough={() => void cancelGitHubFollowthrough()}
+                onReconcileGitHubFollowthrough={() => void reconcileGitHubFollowthrough()}
                 onOpenPriorities={() => setQuestPanelOpen(true)}
                 onLoadWork={() => void loadWorkflowRuns()}
                 onInspectWork={() => inspectWorkflowRun(outcomeWorkflow)}
@@ -15585,6 +16261,27 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           </CockpitWorkspaceWindow>
         )}
 
+        {visibleSections.workBoard && (
+          <CockpitWorkspaceWindow
+            panelId="work_board_pane"
+            title="Work board"
+            meta="bounded operator tasks"
+            hint={COCKPIT_WINDOW_HINTS.workBoard}
+            showHint={cockpitHintsEnabled}
+            minWidth={640}
+            minHeight={360}
+            onClose={() => closeWindowPane("work_board_pane")}
+          >
+            <WorkBoardPanel
+              ownerPrincipalId={operatorAuth.principalId}
+              ownerSessionId={operatorAuth.sessionId}
+              onOpenApprovals={() => focusPane("approvals_pane")}
+              onInspectArtifact={inspectWorkBoardArtifact}
+              onInspectWorkflowRun={inspectWorkBoardWorkflowRun}
+            />
+          </CockpitWorkspaceWindow>
+        )}
+
         {visibleSections.workflows && (
           <CockpitWorkspaceWindow
             panelId="workflows_pane"
@@ -16013,6 +16710,18 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 onClose={() => closeWindowPane("conversation_pane")}
               >
               <section className="cockpit-panel cockpit-panel--embedded cockpit-chat-panel">
+                {onboardingCompleted === false && onSkipOnboarding && (
+                  <div className="cockpit-onboarding-actions" role="group" aria-label="Onboarding actions">
+                    <div className="cockpit-onboarding-copy">
+                      <span className="cockpit-key">onboarding active</span>
+                      <span>Answer the setup questions below, or skip them to open the full workspace.</span>
+                    </div>
+                    <button type="button" className="cockpit-action cockpit-action--ghost" onClick={() => void handleSkipOnboarding()}>
+                      Skip onboarding
+                    </button>
+                    {onboardingActionStatus && <span className="cockpit-onboarding-status" role="status">{onboardingActionStatus}</span>}
+                  </div>
+                )}
                 <div className="cockpit-feed">
                   {recentConversation.map((message) => (
                     <div key={message.id} className={`cockpit-message cockpit-message--${message.role}`}>
@@ -16046,7 +16755,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   )}
                 </div>
                 <PttAudioControl
-                  key={sessionId ?? "no-session"}
                   sessionId={sessionId}
                   disabled={isAgentBusy}
                 />

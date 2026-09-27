@@ -28,7 +28,13 @@ from src.extensions.capability_contributions import (
 )
 from src.extensions.channels import load_channel_adapter_definition
 from src.extensions.connectors import load_managed_connector_definition, load_mcp_server_definition
-from src.extensions.layout import iter_extension_manifest_paths, resolve_package_reference
+from src.extensions.layout import (
+    MANIFEST_FILENAMES,
+    is_package_manifest_path,
+    iter_extension_manifest_paths,
+    reject_symlink_entries,
+    resolve_package_reference,
+)
 from src.extensions.manifest import ExtensionManifest, ExtensionManifestError, load_extension_manifest
 from src.extensions.observers import load_observer_definition
 from src.skills.loader import parse_skill_content
@@ -38,6 +44,14 @@ from src.tools.mcp_manager import mcp_manager
 from src.workflows.loader import scan_workflows
 
 _MCP_RUNTIME_UNSET = object()
+_SYMLINK_LAYOUT_ERROR = "extension package cannot contain symlink entries"
+_RECOVERABLE_LAYOUT_ERRORS = frozenset(
+    {
+        _SYMLINK_LAYOUT_ERROR,
+        "extension package could not be inspected safely",
+        "extension package contains an unsupported file entry",
+    }
+)
 
 
 def _slugify(value: str) -> str:
@@ -199,8 +213,117 @@ class ExtensionRegistry:
     def get_extension(self, extension_id: str) -> ExtensionRecord | None:
         return self.snapshot().get_extension(extension_id)
 
-    def _iter_manifest_paths(self) -> list[Path]:
-        return iter_extension_manifest_paths(self._manifest_roots)
+    def _iter_manifest_paths(self) -> tuple[list[Path], list[ExtensionLoadErrorRecord]]:
+        discovery_errors: dict[str, ExtensionLoadErrorRecord] = {}
+        configured_roots: list[str] = []
+        for root in self._manifest_roots:
+            if not root:
+                continue
+            root_path = Path(root)
+            if root_path.is_symlink():
+                discovery_errors[str(root_path)] = ExtensionLoadErrorRecord(
+                    source=str(root_path),
+                    message="extension package cannot contain symlink entries",
+                    phase="layout",
+                )
+                continue
+            configured_roots.append(str(root_path))
+
+        try:
+            return iter_extension_manifest_paths(configured_roots), list(discovery_errors.values())
+        except ValueError:
+            # A shared workspace root is rejected as a whole when any package
+            # contains an unsafe entry.  Recover the package manifests without
+            # following symlink directories, then let the normal per-package
+            # path checks reject only the affected package.
+            discovered: dict[str, Path] = {}
+            symlink_entries: dict[str, Path] = {}
+            for root in configured_roots:
+                root_path = Path(root)
+                root_error: str | None = None
+                try:
+                    root_manifest_paths = iter_extension_manifest_paths([root])
+                except ValueError as root_exc:
+                    root_error = str(root_exc)
+                    if root_error not in _RECOVERABLE_LAYOUT_ERRORS:
+                        discovery_errors[str(root_path)] = ExtensionLoadErrorRecord(
+                            source=str(root_path),
+                            message=root_error,
+                            phase="layout",
+                        )
+                        continue
+                else:
+                    for manifest_path in root_manifest_paths:
+                        discovered[str(manifest_path.absolute())] = manifest_path
+                    continue
+
+                if not root_path.exists():
+                    continue
+                if root_path.is_file():
+                    continue
+
+                walk_errors: list[str] = []
+
+                def record_walk_error(error: OSError, *, source_root: Path = root_path) -> None:
+                    source = error.filename or str(source_root)
+                    walk_errors.append(str(source))
+                    discovery_errors[str(source)] = ExtensionLoadErrorRecord(
+                        source=str(source),
+                        message="extension package could not be inspected safely",
+                        phase="layout",
+                    )
+
+                for current, directories, filenames in os.walk(
+                    root_path,
+                    topdown=True,
+                    followlinks=False,
+                    onerror=record_walk_error,
+                ):
+                    current_path = Path(current)
+                    for name in directories:
+                        candidate = current_path / name
+                        if candidate.is_symlink():
+                            symlink_entries[str(candidate)] = candidate
+                    directories[:] = [
+                        name
+                        for name in directories
+                        if not (current_path / name).is_symlink()
+                    ]
+                    for filename in filenames:
+                        entry_path = current_path / filename
+                        if entry_path.is_symlink():
+                            symlink_entries[str(entry_path)] = entry_path
+                            continue
+                        if filename not in MANIFEST_FILENAMES:
+                            continue
+                        if not is_package_manifest_path(entry_path, root_path):
+                            continue
+                        discovered[str(entry_path.absolute())] = entry_path
+
+                if not walk_errors and root_error != _SYMLINK_LAYOUT_ERROR:
+                    discovery_errors[str(root_path)] = ExtensionLoadErrorRecord(
+                        source=str(root_path),
+                        message=root_error or "extension package could not be inspected safely",
+                        phase="layout",
+                    )
+
+            for symlink_entry in symlink_entries.values():
+                package_is_reported = any(
+                    manifest_path.parent == symlink_entry
+                    or manifest_path.parent in symlink_entry.parents
+                    for manifest_path in discovered.values()
+                )
+                if not package_is_reported:
+                    discovery_errors[str(symlink_entry)] = ExtensionLoadErrorRecord(
+                        source=str(symlink_entry),
+                        message=_SYMLINK_LAYOUT_ERROR,
+                        phase="layout",
+                    )
+
+            return (
+                [discovered[key] for key in sorted(discovered)],
+                list(discovery_errors.values()),
+            )
 
     def _manifest_root_index(self, manifest_path: Path) -> int:
         resolved_manifest = manifest_path.resolve()
@@ -219,8 +342,19 @@ class ExtensionRegistry:
 
     def _scan_manifest_extensions(self) -> tuple[list[ExtensionRecord], list[ExtensionLoadErrorRecord]]:
         extensions: list[ExtensionRecord] = []
-        errors: list[ExtensionLoadErrorRecord] = []
-        for manifest_path in self._iter_manifest_paths():
+        manifest_paths, errors = self._iter_manifest_paths()
+        for manifest_path in manifest_paths:
+            try:
+                reject_symlink_entries(manifest_path.parent)
+            except ValueError as exc:
+                errors.append(
+                    ExtensionLoadErrorRecord(
+                        source=str(manifest_path),
+                        message=str(exc),
+                        phase="layout",
+                    )
+                )
+                continue
             try:
                 manifest = load_extension_manifest(manifest_path)
             except ExtensionManifestError as exc:
@@ -230,6 +364,15 @@ class ExtensionRegistry:
                         message=exc.message,
                         phase="manifest",
                         details=exc.errors,
+                    )
+                )
+                continue
+            except ValueError as exc:
+                errors.append(
+                    ExtensionLoadErrorRecord(
+                        source=str(manifest_path),
+                        message=str(exc),
+                        phase="layout",
                     )
                 )
                 continue

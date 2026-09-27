@@ -400,6 +400,125 @@ def test_typed_projection_exposes_bounded_receipts_and_status():
     assert "must not be projected" not in str(projection)
 
 
+def test_board_child_readback_projection_correlates_real_child_artifact():
+    """The dispatcher child receipt remains resolvable through safe projections."""
+
+    parent_id = "session-durable:workflow:board-parent:run-1"
+    child_id = "session-durable:workflow:board-child:run-1"
+    artifact_id = "art_" + "c" * 24
+    digest = "d" * 64
+    artifact_path = "notes/board-child.md"
+
+    # This is the result-reference shape returned by the registered board
+    # adapter.  It is used only to build the durable parent readback below;
+    # the parent row itself never receives synthetic result_refs.
+    dispatcher_result = {
+        "verified": True,
+        "content_sha256": digest,
+        "result_refs": [
+            {
+                "job_id": child_id,
+                "workflow_run_id": parent_id,
+                "status": "succeeded",
+                "content_sha256": digest,
+                "artifact_id": artifact_id,
+                "file_path": artifact_path,
+                "verified": True,
+                "reason_code": "verified",
+            }
+        ],
+        "artifact_refs": [
+            {
+                "artifact_id": artifact_id,
+                "file_path": artifact_path,
+                "content_sha256": digest,
+                "exists": True,
+            }
+        ],
+        "child_job_id": child_id,
+    }
+    result_ref = dispatcher_result["result_refs"][0]
+    parent = _typed_api_job(status="succeeded")
+    parent.update(
+        {
+            "job_id": parent_id,
+            "run_identity": parent_id,
+                "root_run_identity": parent_id,
+                "checkpoints": [],
+                "artifacts": [],
+            "effects": [
+                {
+                    "effect_id": "board-child-readback",
+                    "receipt_kind": "readback",
+                    "effect_type": "board_child_readback",
+                    "target_path": result_ref["file_path"],
+                    "target_digest": digest,
+                    "content_sha256": digest,
+                    "status": "succeeded",
+                    "details": {
+                        "verified": True,
+                        "output_exists": True,
+                        "workspace_contained": True,
+                        "goal_id_read_back": True,
+                        "child_job_id": dispatcher_result["child_job_id"],
+                        "artifact_id": result_ref["artifact_id"],
+                        "private_source": "must not be projected",
+                    },
+                }
+            ],
+        }
+    )
+    child = _typed_api_job(status="succeeded")
+    child.update(
+        {
+            "job_id": child_id,
+            "run_identity": child_id,
+                "root_run_identity": parent_id,
+                "parent_run_identity": parent_id,
+                "parent_job_id": parent_id,
+                "checkpoints": [],
+                "artifacts": [
+                {
+                    "artifact_id": artifact_id,
+                    "artifact_type": "workspace_file",
+                    "file_path": artifact_path,
+                    "content_sha256": digest,
+                    "exists": True,
+                    "size_bytes": 17,
+                }
+            ],
+            "effects": [],
+        }
+    )
+
+    parent_projection = _safe_workflow_run_projection(_canonical_workflow_projection_input(parent))
+    child_projection = _safe_workflow_run_projection(_canonical_workflow_projection_input(child))
+
+    assert parent_projection is not None
+    assert child_projection is not None
+    parent_receipt = parent_projection["effect_receipts"][0]
+    assert parent_receipt["child_job_id"] == child_id
+    assert parent_receipt["artifact_id"] == artifact_id
+    assert parent_receipt["target_path"] == artifact_path
+    assert parent_receipt["content_sha256"] == digest
+    assert parent_projection["artifact_registry"] == [
+        {
+            "artifact_id": artifact_id,
+            "file_path": artifact_path,
+            "content_sha256": digest,
+        }
+    ]
+    assert child_projection["artifact_registry"] == [
+        {
+            "artifact_id": artifact_id,
+            "file_path": artifact_path,
+            "content_sha256": digest,
+        }
+    ]
+    assert "must not be projected" not in str(parent_projection)
+    assert "private_source" not in str(parent_projection)
+
+
 def test_typed_resume_plan_carries_derived_lease_identity_and_revision():
     run = _canonical_workflow_projection_input(_typed_api_job())
     assert run is not None

@@ -152,6 +152,8 @@ _MIGRATED_DEFAULT_LIFECYCLE = {
     "artifact_migration": "preserve",
     "revoke_running_jobs": "cancel_at_safe_checkpoint",
 }
+_ROUTINE_PACK_ID_PREFIX = "seraph.routine."
+_ROUTINE_LOCAL_EXECUTION_BLOCKED = "guardian_routine_execution_requires_routine_service"
 
 
 class CapabilityPackError(ValueError):
@@ -170,6 +172,19 @@ class CapabilityPackManifestError(CapabilityPackError):
 
 class CapabilityPackLifecycleError(CapabilityPackError):
     """Raised when a lifecycle transition would violate a reviewed binding."""
+
+
+def _assert_local_execution_target(pack_id: str) -> None:
+    """Keep GuardianRoutine packages behind their governed routine service.
+
+    Routine packages share the generic capability-pack lifecycle for review and
+    installation, but their runbook is not a generic local workflow.  The
+    server-derived ``seraph.routine.`` namespace is reserved for that shape;
+    rejecting it here also covers the compatibility delegate methods below.
+    """
+
+    if str(pack_id).startswith(_ROUTINE_PACK_ID_PREFIX):
+        raise CapabilityPackLifecycleError(_ROUTINE_LOCAL_EXECUTION_BLOCKED)
 
 
 def _normalize_strings(values: Iterable[Any] | None, *, field_name: str) -> list[str]:
@@ -4073,6 +4088,12 @@ class CapabilityPackLifecycle:
         domain = domain_aliases.get(str(domain).strip().lower(), str(domain).strip().lower())
         if domain not in {"primary", "secondary"}:
             raise CapabilityPackLifecycleError("local execution domain must be primary or secondary")
+        # GuardianRoutine packages are reviewed procedure definitions.  Their
+        # execution authority is minted and checked by RoutineService, never
+        # by this generic local-workflow compatibility seam.  Keep this gate
+        # before reconciliation and job admission so no lifecycle receipt or
+        # artifact can be created for the wrong execution surface.
+        _assert_local_execution_target(pack_id)
         if domain == "primary" and source_payload is None:
             raise CapabilityPackLifecycleError("primary local execution requires an intercepted source value")
         if domain == "secondary" and goal_snapshot is None:

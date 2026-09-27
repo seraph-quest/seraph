@@ -1,3 +1,5 @@
+import type { WorkBoardReceiptReference } from "../../types";
+
 export interface CockpitAuditEvent {
   id: string;
   session_id?: string | null;
@@ -27,6 +29,32 @@ export interface ArtifactRecord {
   recoveryHint?: string | null;
 }
 
+export function resolveWorkBoardArtifact(
+  artifacts: ArtifactRecord[],
+  reference: WorkBoardReceiptReference,
+  scope: { ownerSessionId: string | null; workflowRunId: string | null },
+): ArtifactRecord | null {
+  if (scope.workflowRunId) {
+    return artifacts.find((artifact) => {
+      if (artifact.runId !== scope.workflowRunId) return false;
+      if (scope.ownerSessionId && artifact.sessionId !== scope.ownerSessionId) return false;
+      if (reference.content_sha256 && artifact.contentSha256?.toLowerCase() !== reference.content_sha256.toLowerCase()) return false;
+      if (reference.artifact_id) return artifact.id === reference.artifact_id;
+      return Boolean(reference.file_path && reference.content_sha256
+        && artifact.filePath === reference.file_path);
+    }) ?? null;
+  }
+
+  if (!scope.ownerSessionId) return null;
+  return artifacts.find((artifact) => {
+    if (artifact.sessionId !== scope.ownerSessionId) return false;
+    if (reference.content_sha256 && artifact.contentSha256?.toLowerCase() !== reference.content_sha256.toLowerCase()) return false;
+    if (reference.artifact_id) return artifact.id === reference.artifact_id;
+    return Boolean(reference.file_path && reference.content_sha256
+      && artifact.filePath === reference.file_path);
+  }) ?? null;
+}
+
 export interface WorkflowStepRecord {
   id: string;
   index: number;
@@ -43,6 +71,30 @@ export interface WorkflowStepRecord {
   recoveryActions?: Array<Record<string, unknown>>;
   recoveryHint?: string | null;
   isRecoverable?: boolean;
+}
+
+export interface WorkflowEffectReceiptRecord {
+  receiptKind?: string | null;
+  effectType?: string | null;
+  artifactId?: string | null;
+  childJobId?: string | null;
+  targetPath?: string | null;
+  status?: string | null;
+  safe?: boolean;
+  reconciled?: boolean;
+  reconciliationStatus?: string | null;
+  exists?: boolean;
+  operatorVisible?: boolean;
+  recordedAt?: string | null;
+  observedAt?: string | null;
+  fencingToken?: number;
+  sizeBytes?: number;
+  artifactIdDigest?: string | null;
+  effectIdDigest?: string | null;
+  stateDigest?: string | null;
+  contentSha256?: string | null;
+  targetDigest?: string | null;
+  readbackDigest?: string | null;
 }
 
 export interface WorkflowTimelineEntry {
@@ -77,6 +129,7 @@ export interface WorkflowRunRecord {
   continuedErrorSteps: string[];
   arguments?: Record<string, unknown>;
   artifacts: ArtifactRecord[];
+  effectReceipts?: WorkflowEffectReceiptRecord[];
   riskLevel?: string;
   executionBoundaries?: string[];
   acceptsSecretRefs?: boolean;

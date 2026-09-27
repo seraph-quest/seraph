@@ -384,7 +384,7 @@ def _assert_runtime_eval_group_passes(scenario_names: list[str]) -> None:
     ]
 
     assert summary.total == len(scenario_names)
-    assert summary.failed == 0, failed_results
+    assert summary.failed == 0, "\n".join(failed_results)
     assert result_names == set(scenario_names)
 
 
@@ -4734,17 +4734,23 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["strategist_tick_behavior"]["urgency"] == 3
     assert details_by_name["strategist_tick_behavior"]["content_mentions_refocus"] is True
     assert details_by_name["strategist_tick_behavior"]["delivery"] == "deliver"
+    assert details_by_name["strategist_tick_behavior"]["recovery_action"] == (
+        "reconcile_delivery_receipt_before_retry"
+    )
     assert details_by_name["strategist_tick_behavior"]["reasoning"] == "Focus drift"
     assert details_by_name["strategist_tick_learning_continuity_behavior"]["message_type"] == "proactive"
     assert details_by_name["strategist_tick_learning_continuity_behavior"]["urgency"] == 2
-    assert details_by_name["strategist_tick_learning_continuity_behavior"]["scheduler_delivery"] == "queue"
+    assert details_by_name["strategist_tick_learning_continuity_behavior"]["scheduler_delivery"] == "deliver"
+    assert details_by_name["strategist_tick_learning_continuity_behavior"]["scheduler_recovery_action"] == (
+        "reconcile_delivery_receipt_before_retry"
+    )
     assert (
         details_by_name["strategist_tick_learning_continuity_behavior"]["scheduler_policy_action"]
-        == "bundle"
+        == "act"
     )
     assert (
         details_by_name["strategist_tick_learning_continuity_behavior"]["policy_reason"]
-        == "high_interruption_cost"
+        == "scheduled"
     )
     assert (
         details_by_name["strategist_tick_learning_continuity_behavior"]["learning_bias"]
@@ -4756,7 +4762,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
     )
     assert (
         details_by_name["strategist_tick_learning_continuity_behavior"]["transport"]
-        is None
+        == "native_notification"
     )
     assert (
         details_by_name["strategist_tick_learning_continuity_behavior"]["delivered_connections"]
@@ -4764,15 +4770,15 @@ def test_runtime_eval_scenarios_expose_expected_details():
     )
     assert (
         details_by_name["strategist_tick_learning_continuity_behavior"]["continuity_notification_count"]
-        == 0
-    )
-    assert (
-        details_by_name["strategist_tick_learning_continuity_behavior"]["continuity_queued_insight_count"]
         == 1
     )
     assert (
+        details_by_name["strategist_tick_learning_continuity_behavior"]["continuity_queued_insight_count"]
+        == 0
+    )
+    assert (
         details_by_name["strategist_tick_learning_continuity_behavior"]["continuity_surface"]
-        == "bundle_queue"
+        == "native_notification"
     )
     assert (
         details_by_name["strategist_tick_learning_continuity_behavior"]["continuity_excerpt_mentions_workflow"]
@@ -4780,11 +4786,11 @@ def test_runtime_eval_scenarios_expose_expected_details():
     )
     assert (
         details_by_name["strategist_tick_learning_continuity_behavior"]["notification_intervention_matches"]
-        is False
+        is True
     )
     assert (
         details_by_name["strategist_tick_learning_continuity_behavior"]["remaining_notifications_before_cleanup"]
-        == 0
+        == 1
     )
     assert details_by_name["guardian_state_synthesis"]["overall_confidence"] == "partial"
     assert details_by_name["guardian_state_synthesis"]["observer_confidence"] == "grounded"
@@ -6031,10 +6037,10 @@ def test_workflow_operating_layer_runtime_eval_exposes_expected_details():
     assert details["stalled_summary_visible"] is True
     assert details["atlas_queue_state_visible"] is True
     assert details["atlas_queue_reason_visible"] is True
-    assert details["atlas_queue_draft_visible"] is True
+    assert details["atlas_queue_draft_uses_safe_label"] is True
     assert details["atlas_attention_summary_visible"] is True
     assert details["brief_queue_state_visible"] is True
-    assert details["brief_handoff_draft_visible"] is True
+    assert details["brief_handoff_draft_uses_safe_label"] is True
     assert details["brief_related_output_visible"] is True
     assert details["brief_output_history_visible"] is True
     assert details["brief_branch_reference_visible"] is True

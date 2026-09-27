@@ -6683,9 +6683,9 @@ async def _eval_strategist_tick_behavior() -> dict[str, Any]:
             await _run_model_eval_job("strategist_tick_behavior", run_strategist_tick)
 
     delivered_message = mock_deliver.await_args.args[0]
-    succeeded = _find_audit_call(
+    outcome = _find_audit_call(
         mock_log_event,
-        event_type="scheduler_job_succeeded",
+        event_type="scheduler_job_unknown_external_effect",
         tool_name="strategist_tick",
     )
     return {
@@ -6693,7 +6693,8 @@ async def _eval_strategist_tick_behavior() -> dict[str, Any]:
         "intervention_type": delivered_message.intervention_type,
         "urgency": delivered_message.urgency,
         "content_mentions_refocus": "refocus" in delivered_message.content.lower(),
-        "delivery": succeeded["details"]["delivery"],
+        "delivery": outcome["details"]["delivery"],
+        "recovery_action": outcome["details"]["recovery_action"],
         "reasoning": delivered_message.reasoning,
     }
 
@@ -6707,6 +6708,10 @@ async def _eval_strategist_tick_learning_continuity_behavior() -> dict[str, Any]
         "src.observer.insight_queue.get_session",
     ):
         await native_notification_queue.clear()
+        await session_manager.get_or_create(
+            "strategist-learning",
+            owner_principal_id="operator:test-bypass",
+        )
         for feedback_type, content in (
             ("helpful", "That workflow reminder landed at the right moment."),
             ("helpful", "Another workflow nudge was useful."),
@@ -6801,6 +6806,7 @@ async def _eval_strategist_tick_learning_continuity_behavior() -> dict[str, Any]
             await _run_model_eval_job(
                 "strategist_tick_learning_continuity_behavior",
                 run_strategist_tick,
+                session_id="strategist-learning",
             )
             continuity = await get_observer_continuity(
                 _authenticated_operator_request("/api/observer/continuity")
@@ -6808,7 +6814,7 @@ async def _eval_strategist_tick_learning_continuity_behavior() -> dict[str, Any]
 
         scheduler_event = _find_audit_call(
             mock_log_event,
-            event_type="scheduler_job_succeeded",
+            event_type="scheduler_job_unknown_external_effect",
             tool_name="strategist_tick",
         )
         delivery_event = _find_audit_call(
@@ -6828,6 +6834,7 @@ async def _eval_strategist_tick_learning_continuity_behavior() -> dict[str, Any]
             "message_type": "proactive",
             "urgency": 2,
             "scheduler_delivery": scheduler_event["details"]["delivery"],
+            "scheduler_recovery_action": scheduler_event["details"]["recovery_action"],
             "scheduler_policy_action": scheduler_event["details"]["policy_action"],
             "policy_reason": delivery_event["details"]["policy_reason"],
             "learning_bias": delivery_event["details"]["learning_bias"],
@@ -12029,6 +12036,8 @@ async def _eval_workflow_context_condenser_behavior() -> dict[str, Any]:
                 {
                     "id": "run-1",
                     "run_identity": "session-1:workflow_repo_review:1",
+                    "owner_kind": "user",
+                    "owner_principal_id": "operator:test-bypass",
                     "workflow_name": "repo-review",
                     "summary": "Waiting on guarded approval",
                     "status": "awaiting_approval",
@@ -12052,6 +12061,8 @@ async def _eval_workflow_context_condenser_behavior() -> dict[str, Any]:
                 {
                     "id": "run-2",
                     "run_identity": "session-2:workflow_daily_brief:1",
+                    "owner_kind": "user",
+                    "owner_principal_id": "operator:test-bypass",
                     "workflow_name": "daily-brief",
                     "summary": "Failed while drafting follow-up",
                     "status": "failed",
@@ -12081,7 +12092,11 @@ async def _eval_workflow_context_condenser_behavior() -> dict[str, Any]:
             ],
         ),
     ):
-        payload = await get_operator_workflow_orchestration(limit_sessions=6, limit_workflows=8)
+        payload = await get_operator_workflow_orchestration(
+            _authenticated_operator_request("/api/operator/workflow-orchestration"),
+            limit_sessions=6,
+            limit_workflows=8,
+        )
 
     sessions_by_thread = {
         session.get("thread_id") or "__ambient__": session
@@ -12125,6 +12140,8 @@ async def _eval_workflow_operating_layer_behavior() -> dict[str, Any]:
                 {
                     "id": "run-1",
                     "run_identity": "session-1:workflow_repo_review:1",
+                    "owner_kind": "user",
+                    "owner_principal_id": "operator:test-bypass",
                     "workflow_name": "repo-review",
                     "summary": "Waiting on guarded approval",
                     "status": "awaiting_approval",
@@ -12149,6 +12166,8 @@ async def _eval_workflow_operating_layer_behavior() -> dict[str, Any]:
                     "id": "run-2",
                     "run_identity": "session-2:workflow_daily_brief:1",
                     "root_run_identity": "session-2:workflow_daily_brief:1",
+                    "owner_kind": "user",
+                    "owner_principal_id": "operator:test-bypass",
                     "workflow_name": "daily-brief",
                     "summary": "Failed while drafting follow-up",
                     "status": "failed",
@@ -12181,6 +12200,8 @@ async def _eval_workflow_operating_layer_behavior() -> dict[str, Any]:
                     "run_identity": "session-2:workflow_daily_brief:branch-1",
                     "root_run_identity": "session-2:workflow_daily_brief:1",
                     "parent_run_identity": "session-2:workflow_daily_brief:1",
+                    "owner_kind": "user",
+                    "owner_principal_id": "operator:test-bypass",
                     "branch_kind": "branch_from_checkpoint",
                     "workflow_name": "daily-brief",
                     "summary": "Branched repair draft completed",
@@ -12199,6 +12220,8 @@ async def _eval_workflow_operating_layer_behavior() -> dict[str, Any]:
                 {
                     "id": "run-4",
                     "run_identity": "ambient:workflow_cleanup:1",
+                    "owner_kind": "user",
+                    "owner_principal_id": "operator:test-bypass",
                     "workflow_name": "cleanup",
                     "summary": "Cleanup still needs follow-through.",
                     "status": "running",
@@ -12216,7 +12239,11 @@ async def _eval_workflow_operating_layer_behavior() -> dict[str, Any]:
             ],
         ),
     ):
-        payload = await get_operator_workflow_orchestration(limit_sessions=6, limit_workflows=8)
+        payload = await get_operator_workflow_orchestration(
+            _authenticated_operator_request("/api/operator/workflow-orchestration"),
+            limit_sessions=6,
+            limit_workflows=8,
+        )
 
     sessions_by_thread = {
         session.get("thread_id") or "__ambient__": session
@@ -12237,13 +12264,17 @@ async def _eval_workflow_operating_layer_behavior() -> dict[str, Any]:
         "atlas_queue_reason_visible": (
             atlas_session["queue_reason"] == "1 workflow awaits approval before the session can advance."
         ),
-        "atlas_queue_draft_visible": atlas_session["queue_draft"].startswith("Review the workflow queue for Atlas thread."),
+        "atlas_queue_draft_uses_safe_label": atlas_session["queue_draft"].startswith(
+            "Review the workflow queue for workflow thread."
+        ),
         "atlas_attention_summary_visible": all(
             fragment in atlas_session["attention_summary"]
             for fragment in ("approval gate", "branch ready", "debugger ready", "stalled")
         ),
         "brief_queue_state_visible": brief_session["queue_state"] == "boundary_blocked",
-        "brief_handoff_draft_visible": brief_session["handoff_draft"].startswith("Prepare a workflow handoff for Daily brief thread."),
+        "brief_handoff_draft_uses_safe_label": brief_session["handoff_draft"].startswith(
+            "Prepare a workflow handoff for workflow thread."
+        ),
         "brief_related_output_visible": brief_session["lead_related_output_paths"] == ["notes/daily-brief-v2.md"],
         "brief_output_history_visible": any(
             entry["path"] == "notes/daily-brief-v2.md"
@@ -13124,7 +13155,10 @@ async def _eval_operator_guardian_state_surface_behavior() -> dict[str, Any]:
         ),
         patch("src.api.operator._operator_database_missing_tables", AsyncMock(return_value=[])),
     ):
-        payload = await get_operator_guardian_state(session_id="session-1")
+        payload = await get_operator_guardian_state(
+            _authenticated_operator_request("/api/operator/guardian-state"),
+            session_id="session-1",
+        )
 
     return {
         "session_id_matches": payload["summary"]["session_id"] == "session-1",
@@ -13159,6 +13193,7 @@ async def _eval_operator_guardian_state_surface_behavior() -> dict[str, Any]:
     }
 
 
+@_isolated_eval_database
 async def _eval_workflow_boundary_blocked_surface_behavior() -> dict[str, Any]:
     from src.api.activity import get_activity_ledger
     from src.api.operator import get_operator_timeline
@@ -13311,38 +13346,43 @@ async def _eval_approval_explainability_surface_behavior() -> dict[str, Any]:
         },
     }
 
-    with (
-        patch(
-            "src.api.approvals.session_manager.list_sessions",
-            return_value=[{"id": "thread-1", "title": "Research thread"}],
-        ),
-        patch("src.api.approvals.approval_repository.list_pending", return_value=[approval]),
-        patch(
-            "src.api.operator.session_manager.list_sessions",
-            return_value=[{"id": "thread-1", "title": "Research thread"}],
-        ),
-        patch("src.api.operator._list_workflow_runs", return_value=[]),
-        patch("src.api.operator.approval_repository.list_pending", return_value=[approval]),
-        patch("src.api.operator.native_notification_queue.list", return_value=[]),
-        patch("src.api.operator.insight_queue.peek_all", return_value=[]),
-        patch("src.api.operator.guardian_feedback_repository.list_recent", return_value=[]),
-        patch("src.api.operator.audit_repository.list_events", return_value=[]),
-        patch(
-            "src.api.activity.session_manager.list_sessions",
-            return_value=[{"id": "thread-1", "title": "Research thread"}],
-        ),
-        patch("src.api.activity._list_workflow_runs", return_value=[]),
-        patch("src.api.activity.approval_repository.list_pending", return_value=[approval]),
-        patch("src.api.activity.native_notification_queue.list", return_value=[]),
-        patch("src.api.activity.insight_queue.peek_all", return_value=[]),
-        patch("src.api.activity.guardian_feedback_repository.list_recent", return_value=[]),
-        patch("src.api.activity.audit_repository.list_events", return_value=[]),
-        patch("src.api.activity.list_recent_llm_calls", return_value=[]),
-        patch("src.api.operator._operator_database_missing_tables", AsyncMock(return_value=[])),
-    ):
-        pending_payload = await list_pending_approvals(session_id="thread-1", limit=10)
-        operator_payload = await get_operator_timeline(limit=10, session_id="thread-1")
-        activity_payload = await get_activity_ledger(limit=10, session_id="thread-1", window_hours=24)
+    async with _patched_async_db():
+        with (
+            patch(
+                "src.api.approvals.session_manager.list_sessions",
+                return_value=[{"id": "thread-1", "title": "Research thread"}],
+            ),
+            patch("src.api.approvals.approval_repository.list_pending", return_value=[approval]),
+            patch(
+                "src.api.operator.session_manager.list_sessions",
+                return_value=[{"id": "thread-1", "title": "Research thread"}],
+            ),
+            patch("src.api.operator._list_workflow_runs", return_value=[]),
+            patch("src.api.operator.approval_repository.list_pending", return_value=[approval]),
+            patch("src.api.operator.native_notification_queue.list", return_value=[]),
+            patch("src.api.operator.insight_queue.peek_all", return_value=[]),
+            patch("src.api.operator.guardian_feedback_repository.list_recent", return_value=[]),
+            patch("src.api.operator.audit_repository.list_events", return_value=[]),
+            patch(
+                "src.api.activity.session_manager.list_sessions",
+                return_value=[{"id": "thread-1", "title": "Research thread"}],
+            ),
+            patch("src.api.activity._list_workflow_runs", return_value=[]),
+            patch("src.api.activity.approval_repository.list_pending", return_value=[approval]),
+            patch("src.api.activity.native_notification_queue.list", return_value=[]),
+            patch("src.api.activity.insight_queue.peek_all", return_value=[]),
+            patch("src.api.activity.guardian_feedback_repository.list_recent", return_value=[]),
+            patch("src.api.activity.audit_repository.list_events", return_value=[]),
+            patch("src.api.activity.list_recent_llm_calls", return_value=[]),
+            patch("src.api.operator._operator_database_missing_tables", AsyncMock(return_value=[])),
+        ):
+            pending_payload = await list_pending_approvals(
+                _authenticated_operator_request("/api/approvals/pending"),
+                session_id="thread-1",
+                limit=10,
+            )
+            operator_payload = await get_operator_timeline(limit=10, session_id="thread-1")
+            activity_payload = await get_activity_ledger(limit=10, session_id="thread-1", window_hours=24)
 
     pending_item = pending_payload[0]
     operator_item = next(item for item in operator_payload["items"] if item["kind"] == "approval")
@@ -16821,7 +16861,12 @@ async def _m7_cockpit_endpoint_payload() -> dict[str, Any]:
         ),
         patch("src.api.operator.process_runtime_manager.list_all_processes", return_value=[]),
     ):
-        return await get_operator_m7_cockpit(session_id="session-1", window_hours=24, limit_workflows=20)
+        return await get_operator_m7_cockpit(
+            _authenticated_operator_request("/api/operator/m7-cockpit"),
+            session_id="session-1",
+            window_hours=24,
+            limit_workflows=20,
+        )
 
 
 def _eval_operator_cockpit_receipt_legibility_behavior() -> dict[str, Any]:
@@ -25039,6 +25084,7 @@ def _eval_capability_preflight_behavior() -> dict[str, Any]:
     }
 
 
+@_isolated_eval_database
 async def _eval_activity_ledger_attribution_behavior() -> dict[str, Any]:
     from src.api.activity import get_activity_ledger
 

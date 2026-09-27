@@ -3730,21 +3730,15 @@ async def test_workflow_runs_endpoint_detects_authenticated_source_context_drift
 
     assert response.status_code == 200
     run = response.json()["runs"][0]
-    assert run["approval_context_mismatch"] is True
+    assert run["trust_boundary"]["status"] == "changed"
+    assert run["trust_boundary"]["blocked"] is True
+    assert run["trust_boundary"]["reason"] == "approval_context_changed"
     assert run["replay_allowed"] is False
     assert run["replay_block_reason"] == "approval_context_changed"
     assert run["checkpoint_candidates"] == []
-    assert run["resume_plan"] is None
-    assert run["current_approval_context"]["authenticated_source"] is True
-    assert run["current_approval_context"]["source_systems"] == [
-        {
-            "server_name": "github",
-            "hostname": "api.github.com",
-            "source": "extension",
-            "authenticated_source": True,
-            "credential_sources": ["vault:github_token"],
-        }
-    ]
+    assert "resume_plan" not in run
+    assert "current_approval_context" not in run
+    assert "approval_context_mismatch" not in run
 
 
 @pytest.mark.asyncio
@@ -3876,25 +3870,13 @@ async def test_workflow_runs_endpoint_ignores_authenticated_source_system_reorde
 
     assert response.status_code == 200
     run = response.json()["runs"][0]
-    assert run["approval_context_mismatch"] is False
+    assert run["trust_boundary"]["status"] == "stable"
+    assert run["trust_boundary"]["blocked"] is False
+    assert run["trust_boundary"]["reason"] is None
     assert run["replay_allowed"] is True
     assert run["replay_block_reason"] is None
-    assert run["current_approval_context"]["source_systems"] == [
-        {
-            "server_name": "github",
-            "hostname": "api.github.com",
-            "source": "extension",
-            "authenticated_source": True,
-            "credential_sources": ["env:GITHUB_TOKEN", "vault:github_token"],
-        },
-        {
-            "server_name": "jira",
-            "hostname": "acme.atlassian.net",
-            "source": "manual",
-            "authenticated_source": True,
-            "credential_sources": ["vault:jira_token"],
-        },
-    ]
+    assert "current_approval_context" not in run
+    assert "approval_context_mismatch" not in run
 
 
 @pytest.mark.asyncio
@@ -3923,7 +3905,7 @@ async def test_workflow_runs_endpoint_detects_delegated_specialist_context_drift
     with (
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-result",
                     "session_id": "session-1",
@@ -3954,7 +3936,7 @@ async def test_workflow_runs_endpoint_detects_delegated_specialist_context_drift
                         "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
                     },
                 },
-            ],
+            ]),
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
         patch(
@@ -3994,12 +3976,15 @@ async def test_workflow_runs_endpoint_detects_delegated_specialist_context_drift
 
     assert response.status_code == 200
     run = response.json()["runs"][0]
-    assert run["approval_context_mismatch"] is True
+    assert run["trust_boundary"]["status"] == "changed"
+    assert run["trust_boundary"]["blocked"] is True
+    assert run["trust_boundary"]["reason"] == "approval_context_changed"
     assert run["replay_allowed"] is False
     assert run["replay_block_reason"] == "approval_context_changed"
     assert run["checkpoint_candidates"] == []
-    assert run["resume_plan"] is None
-    assert run["current_approval_context"]["delegated_specialists"] == ["mcp_github"]
+    assert "resume_plan" not in run
+    assert "current_approval_context" not in run
+    assert "approval_context_mismatch" not in run
 
 
 @pytest.mark.asyncio
@@ -4048,7 +4033,7 @@ async def test_workflow_runs_endpoint_detects_delegated_authenticated_credential
     with (
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-result",
                     "session_id": "session-1",
@@ -4079,7 +4064,7 @@ async def test_workflow_runs_endpoint_detects_delegated_authenticated_credential
                         "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
                     },
                 },
-            ],
+            ]),
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
         patch(
@@ -4119,20 +4104,15 @@ async def test_workflow_runs_endpoint_detects_delegated_authenticated_credential
 
     assert response.status_code == 200
     run = response.json()["runs"][0]
-    assert run["approval_context_mismatch"] is True
+    assert run["trust_boundary"]["status"] == "changed"
+    assert run["trust_boundary"]["blocked"] is True
+    assert run["trust_boundary"]["reason"] == "approval_context_changed"
     assert run["replay_allowed"] is False
     assert run["replay_block_reason"] == "approval_context_changed"
     assert run["checkpoint_candidates"] == []
-    assert run["resume_plan"] is None
-    assert run["current_approval_context"]["source_systems"] == [
-        {
-            "server_name": "github",
-            "hostname": "api.github.com",
-            "source": "extension",
-            "authenticated_source": True,
-            "credential_sources": ["env:GITHUB_TOKEN"],
-        }
-    ]
+    assert "resume_plan" not in run
+    assert "current_approval_context" not in run
+    assert "approval_context_mismatch" not in run
 
 
 @pytest.mark.asyncio
@@ -4163,7 +4143,7 @@ async def test_workflow_runs_endpoint_detects_delegated_tool_inventory_drift(cli
     with (
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-result",
                     "session_id": "session-1",
@@ -4194,7 +4174,7 @@ async def test_workflow_runs_endpoint_detects_delegated_tool_inventory_drift(cli
                         "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
                     },
                 },
-            ],
+            ]),
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
         patch(
@@ -4234,15 +4214,15 @@ async def test_workflow_runs_endpoint_detects_delegated_tool_inventory_drift(cli
 
     assert response.status_code == 200
     run = response.json()["runs"][0]
-    assert run["approval_context_mismatch"] is True
+    assert run["trust_boundary"]["status"] == "changed"
+    assert run["trust_boundary"]["blocked"] is True
+    assert run["trust_boundary"]["reason"] == "approval_context_changed"
     assert run["replay_allowed"] is False
     assert run["replay_block_reason"] == "approval_context_changed"
     assert run["checkpoint_candidates"] == []
-    assert run["resume_plan"] is None
-    assert run["current_approval_context"]["delegated_tool_names"] == [
-        "mcp_github_issues",
-        "mcp_github_repo",
-    ]
+    assert "resume_plan" not in run
+    assert "current_approval_context" not in run
+    assert "approval_context_mismatch" not in run
 
 
 @pytest.mark.asyncio
@@ -4271,7 +4251,7 @@ async def test_workflow_runs_endpoint_ignores_delegated_specialist_reordering(cl
     with (
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-result",
                     "session_id": "session-1",
@@ -4302,7 +4282,7 @@ async def test_workflow_runs_endpoint_ignores_delegated_specialist_reordering(cl
                         "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
                     },
                 },
-            ],
+            ]),
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
         patch(
@@ -4342,13 +4322,13 @@ async def test_workflow_runs_endpoint_ignores_delegated_specialist_reordering(cl
 
     assert response.status_code == 200
     run = response.json()["runs"][0]
-    assert run["approval_context_mismatch"] is False
+    assert run["trust_boundary"]["status"] == "stable"
+    assert run["trust_boundary"]["blocked"] is False
+    assert run["trust_boundary"]["reason"] is None
     assert run["replay_allowed"] is False
     assert run["replay_block_reason"] == "secret_ref_surface"
-    assert run["current_approval_context"]["delegated_specialists"] == [
-        "mcp_github",
-        "mcp_jira",
-    ]
+    assert "current_approval_context" not in run
+    assert "approval_context_mismatch" not in run
 
 
 @pytest.mark.asyncio

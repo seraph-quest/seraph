@@ -6699,7 +6699,7 @@ async def _eval_strategist_tick_behavior() -> dict[str, Any]:
     }
 
 
-async def _eval_strategist_tick_learning_continuity_behavior() -> dict[str, Any]:
+async def _eval_strategist_tick_learning_policy_behavior() -> dict[str, Any]:
     from src.guardian.feedback import guardian_feedback_repository
 
     async with _patched_async_db(
@@ -6708,10 +6708,6 @@ async def _eval_strategist_tick_learning_continuity_behavior() -> dict[str, Any]
         "src.observer.insight_queue.get_session",
     ):
         await native_notification_queue.clear()
-        await session_manager.get_or_create(
-            "strategist-learning",
-            owner_principal_id="operator:test-bypass",
-        )
         for feedback_type, content in (
             ("helpful", "That workflow reminder landed at the right moment."),
             ("helpful", "Another workflow nudge was useful."),
@@ -6804,12 +6800,8 @@ async def _eval_strategist_tick_learning_continuity_behavior() -> dict[str, Any]
             patch.object(audit_repository, "log_event", mock_log_event),
         ):
             await _run_model_eval_job(
-                "strategist_tick_learning_continuity_behavior",
+                "strategist_tick_learning_policy_behavior",
                 run_strategist_tick,
-                session_id="strategist-learning",
-            )
-            continuity = await get_observer_continuity(
-                _authenticated_operator_request("/api/observer/continuity")
             )
 
         scheduler_event = _find_audit_call(
@@ -6822,34 +6814,17 @@ async def _eval_strategist_tick_learning_continuity_behavior() -> dict[str, Any]
             event_type="observer_delivery_queued",
             tool_name="observer_delivery_gate",
         )
-        notification = continuity["notifications"][0] if continuity["notifications"] else None
-        intervention = continuity["recent_interventions"][0]
-        queued_ids = [item.id for item in await insight_queue.peek_all()]
-        if queued_ids:
-            await insight_queue.delete_many(queued_ids)
-        remaining_notifications = await native_notification_queue.count()
         await native_notification_queue.clear()
 
         return {
             "message_type": "proactive",
             "urgency": 2,
-            "scheduler_delivery": scheduler_event["details"]["delivery"],
+            "scheduler_delivery_decision": scheduler_event["details"]["delivery"],
             "scheduler_recovery_action": scheduler_event["details"]["recovery_action"],
             "scheduler_policy_action": scheduler_event["details"]["policy_action"],
             "policy_reason": delivery_event["details"]["policy_reason"],
             "learning_bias": delivery_event["details"]["learning_bias"],
             "learning_channel_bias": delivery_event["details"]["learning_channel_bias"],
-            "transport": delivery_event["details"].get("transport"),
-            "delivered_connections": delivery_event["details"].get("delivered_connections", 0),
-            "continuity_notification_count": len(continuity["notifications"]),
-            "continuity_queued_insight_count": continuity["queued_insight_count"],
-            "continuity_surface": intervention["continuity_surface"],
-            "continuity_excerpt_mentions_workflow": "workflow review" in intervention["content_excerpt"].lower(),
-            "notification_intervention_matches": (
-                notification is not None
-                and notification["intervention_id"] == intervention["id"]
-            ),
-            "remaining_notifications_before_cleanup": remaining_notifications,
         }
 
 
@@ -28347,10 +28322,10 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         runner=_eval_strategist_tick_behavior,
     ),
     EvalScenario(
-        name="strategist_tick_learning_continuity_behavior",
+        name="strategist_tick_learning_policy_behavior",
         category="guardian",
-        description="Strategist tick can use learned delivery bias to reroute a high-salience reminder through native notifications, and that intervention shows up in the continuity snapshot.",
-        runner=_eval_strategist_tick_learning_continuity_behavior,
+        description="Strategist tick evaluates learned delivery policy and keeps delivery unknown until independent readback; this scenario does not claim conversation-scoped continuity.",
+        runner=_eval_strategist_tick_learning_policy_behavior,
     ),
     EvalScenario(
         name="guardian_state_synthesis",

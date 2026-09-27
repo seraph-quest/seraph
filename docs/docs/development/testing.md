@@ -42,7 +42,7 @@ uv run python -m src.evals.harness --scenario websocket_chat_behavior
 uv run python -m src.evals.harness --scenario websocket_chat_approval_contract
 uv run python -m src.evals.harness --scenario websocket_chat_timeout_contract
 uv run python -m src.evals.harness --scenario strategist_tick_behavior
-uv run python -m src.evals.harness --scenario strategist_tick_learning_continuity_behavior
+uv run python -m src.evals.harness --scenario strategist_tick_learning_policy_behavior
 uv run python -m src.evals.harness --scenario guardian_state_synthesis
 uv run python -m src.evals.harness --scenario guardian_world_model_behavior
 uv run python -m src.evals.harness --scenario observer_refresh_behavior

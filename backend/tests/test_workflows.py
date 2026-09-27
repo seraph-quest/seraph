@@ -1949,7 +1949,7 @@ async def test_workflow_runs_endpoint_projects_history_and_boundaries(client):
     with (
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-result",
                     "session_id": "session-1",
@@ -1989,7 +1989,7 @@ async def test_workflow_runs_endpoint_projects_history_and_boundaries(client):
                         "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
                     },
                 },
-            ],
+            ]),
         ),
         patch(
             "src.api.workflows.approval_repository.list_pending",
@@ -2086,7 +2086,7 @@ async def test_workflow_runs_endpoint_uses_stored_fingerprint_for_redacted_argum
     with (
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-result",
                     "session_id": "session-1",
@@ -2119,7 +2119,7 @@ async def test_workflow_runs_endpoint_uses_stored_fingerprint_for_redacted_argum
                         },
                     },
                 },
-            ],
+            ]),
         ),
         patch(
             "src.api.workflows.approval_repository.list_pending",
@@ -2207,7 +2207,7 @@ async def test_workflow_runs_endpoint_hides_resume_metadata_when_pending_run_lac
     with (
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-call",
                     "session_id": "session-1",
@@ -2220,7 +2220,7 @@ async def test_workflow_runs_endpoint_hides_resume_metadata_when_pending_run_lac
                         "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
                     },
                 },
-            ],
+            ]),
         ),
         patch(
             "src.api.workflows.approval_repository.list_pending",
@@ -2299,7 +2299,7 @@ async def test_workflow_runs_endpoint_marks_waiting_runs_as_awaiting_approval(cl
     with (
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-call",
                     "session_id": "session-1",
@@ -2309,7 +2309,7 @@ async def test_workflow_runs_endpoint_marks_waiting_runs_as_awaiting_approval(cl
                     "created_at": "2026-03-18T12:01:00Z",
                     "details": {"arguments": {"query": "seraph", "file_path": "notes/brief.md"}},
                 },
-            ],
+            ]),
         ),
         patch(
             "src.api.workflows.approval_repository.list_pending",
@@ -2368,7 +2368,7 @@ async def test_workflow_runs_endpoint_does_not_suggest_tool_policy_for_unrelated
     with (
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-result",
                     "session_id": "session-1",
@@ -2406,7 +2406,7 @@ async def test_workflow_runs_endpoint_does_not_suggest_tool_policy_for_unrelated
                     "created_at": "2026-03-18T12:01:00Z",
                     "details": {"run_fingerprint": "web-brief-error", "arguments": {"query": "seraph"}},
                 },
-            ],
+            ]),
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
         patch(
@@ -2715,7 +2715,7 @@ async def test_workflow_runs_endpoint_hides_later_retry_draft_without_checkpoint
     with (
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-result",
                     "session_id": "session-1",
@@ -2767,7 +2767,7 @@ async def test_workflow_runs_endpoint_hides_later_retry_draft_without_checkpoint
                         "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
                     },
                 },
-            ],
+            ]),
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
         patch(
@@ -3054,7 +3054,7 @@ async def test_workflow_runs_endpoint_disambiguates_duplicate_fingerprinted_runs
     with (
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-call-older",
                     "session_id": "session-1",
@@ -3113,7 +3113,7 @@ async def test_workflow_runs_endpoint_disambiguates_duplicate_fingerprinted_runs
                         "continued_error_steps": [],
                     },
                 },
-            ],
+            ]),
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
         patch(

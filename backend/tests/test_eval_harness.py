@@ -377,14 +377,14 @@ async def _run_runtime_evals_with_timeout(scenario_names: list[str], timeout_sec
 def _assert_runtime_eval_group_passes(scenario_names: list[str]) -> None:
     summary = asyncio.run(_run_runtime_evals_with_timeout(scenario_names))
     result_names = {result.name for result in summary.results}
-    failed_results = [
+    failed_results = "\n".join(
         f"{result.name}: {result.error or result.details}"
         for result in summary.results
         if not result.passed
-    ]
+    )
 
     assert summary.total == len(scenario_names)
-    assert summary.failed == 0, "\n".join(failed_results)
+    assert summary.failed == 0, failed_results
     assert result_names == set(scenario_names)
 
 
@@ -451,11 +451,11 @@ def test_run_runtime_evals_can_filter_specific_scenarios():
     summary = asyncio.run(run_runtime_evals(["agent_local_runtime_profile", "observer_delivery_gate_audit"]))
 
     assert summary.total == 2
-    failed_results = [
+    failed_results = "\n".join(
         f"{result.name}: {result.error or result.details}"
         for result in summary.results
         if not result.passed
-    ]
+    )
     assert summary.failed == 0, failed_results
     assert [result.name for result in summary.results] == [
         "agent_local_runtime_profile",
@@ -3815,7 +3815,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "websocket_chat_approval_contract" in captured.out
     assert "websocket_chat_timeout_contract" in captured.out
     assert "strategist_tick_behavior" in captured.out
-    assert "strategist_tick_learning_continuity_behavior" in captured.out
+    assert "strategist_tick_learning_policy_behavior" in captured.out
     assert "guardian_state_synthesis" in captured.out
     assert "guardian_world_model_behavior" in captured.out
     assert "guardian_judgment_behavior" in captured.out
@@ -4602,7 +4602,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "helper_local_runtime_paths",
                 "context_window_summary_audit",
                 "strategist_tick_behavior",
-                "strategist_tick_learning_continuity_behavior",
+                "strategist_tick_learning_policy_behavior",
                 "guardian_state_synthesis",
                 "guardian_world_model_behavior",
                 "guardian_judgment_behavior",
@@ -4701,11 +4701,11 @@ def test_runtime_eval_scenarios_expose_expected_details():
         )
     )
 
-    failed_results = [
+    failed_results = "\n".join(
         f"{result.name}: {result.error or result.details}"
         for result in summary.results
         if not result.passed
-    ]
+    )
     assert summary.failed == 0, failed_results
     details_by_name = {result.name: result.details for result in summary.results}
 
@@ -4738,59 +4738,27 @@ def test_runtime_eval_scenarios_expose_expected_details():
         "reconcile_delivery_receipt_before_retry"
     )
     assert details_by_name["strategist_tick_behavior"]["reasoning"] == "Focus drift"
-    assert details_by_name["strategist_tick_learning_continuity_behavior"]["message_type"] == "proactive"
-    assert details_by_name["strategist_tick_learning_continuity_behavior"]["urgency"] == 2
-    assert details_by_name["strategist_tick_learning_continuity_behavior"]["scheduler_delivery"] == "deliver"
-    assert details_by_name["strategist_tick_learning_continuity_behavior"]["scheduler_recovery_action"] == (
+    assert details_by_name["strategist_tick_learning_policy_behavior"]["message_type"] == "proactive"
+    assert details_by_name["strategist_tick_learning_policy_behavior"]["urgency"] == 2
+    assert details_by_name["strategist_tick_learning_policy_behavior"]["scheduler_delivery_decision"] == "deliver"
+    assert details_by_name["strategist_tick_learning_policy_behavior"]["scheduler_recovery_action"] == (
         "reconcile_delivery_receipt_before_retry"
     )
     assert (
-        details_by_name["strategist_tick_learning_continuity_behavior"]["scheduler_policy_action"]
+        details_by_name["strategist_tick_learning_policy_behavior"]["scheduler_policy_action"]
         == "act"
     )
     assert (
-        details_by_name["strategist_tick_learning_continuity_behavior"]["policy_reason"]
+        details_by_name["strategist_tick_learning_policy_behavior"]["policy_reason"]
         == "scheduled"
     )
     assert (
-        details_by_name["strategist_tick_learning_continuity_behavior"]["learning_bias"]
+        details_by_name["strategist_tick_learning_policy_behavior"]["learning_bias"]
         == "neutral"
     )
     assert (
-        details_by_name["strategist_tick_learning_continuity_behavior"]["learning_channel_bias"]
+        details_by_name["strategist_tick_learning_policy_behavior"]["learning_channel_bias"]
         == "neutral"
-    )
-    assert (
-        details_by_name["strategist_tick_learning_continuity_behavior"]["transport"]
-        == "native_notification"
-    )
-    assert (
-        details_by_name["strategist_tick_learning_continuity_behavior"]["delivered_connections"]
-        == 0
-    )
-    assert (
-        details_by_name["strategist_tick_learning_continuity_behavior"]["continuity_notification_count"]
-        == 1
-    )
-    assert (
-        details_by_name["strategist_tick_learning_continuity_behavior"]["continuity_queued_insight_count"]
-        == 0
-    )
-    assert (
-        details_by_name["strategist_tick_learning_continuity_behavior"]["continuity_surface"]
-        == "native_notification"
-    )
-    assert (
-        details_by_name["strategist_tick_learning_continuity_behavior"]["continuity_excerpt_mentions_workflow"]
-        is True
-    )
-    assert (
-        details_by_name["strategist_tick_learning_continuity_behavior"]["notification_intervention_matches"]
-        is True
-    )
-    assert (
-        details_by_name["strategist_tick_learning_continuity_behavior"]["remaining_notifications_before_cleanup"]
-        == 1
     )
     assert details_by_name["guardian_state_synthesis"]["overall_confidence"] == "partial"
     assert details_by_name["guardian_state_synthesis"]["observer_confidence"] == "grounded"

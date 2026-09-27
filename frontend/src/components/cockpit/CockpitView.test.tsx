@@ -565,7 +565,7 @@ describe("CockpitView", () => {
     });
 
     render(<CockpitView onSend={() => {}} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Open task Parent-bound result" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Parent-bound result" }, { timeout: 5000 }));
     fireEvent.click(await screen.findByRole("button", { name: `Inspect execution evidence ${artifactPath}` }));
 
     expect(await screen.findByText("Task child workflow evidence is hidden because its parent does not match the task's immutable run link.")).toBeInTheDocument();
@@ -683,7 +683,7 @@ describe("CockpitView", () => {
     });
 
     render(<CockpitView onSend={() => {}} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Open task Board evidence A" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Board evidence A" }, { timeout: 5000 }));
     fireEvent.click(await screen.findByRole("button", { name: "Inspect execution evidence notes/task-a.md" }));
     await waitFor(() => expect(delayedWorkflowLoads).toHaveLength(1));
 

@@ -818,6 +818,42 @@ def test_lifecycle_receipt_redaction_covers_nested_recovery_errors():
     assert api_value["original_error"]["type"] == "OSError"
 
 
+def test_lifecycle_receipt_redaction_preserves_execution_boundary_enums():
+    from src.api.extensions import _redact_lifecycle_api_value
+    from src.extensions.state import redact_lifecycle_receipt_value
+
+    raw = {
+        "capability_contract": {
+            "permissions": {
+                "declared": {
+                    "execution_boundaries": [
+                        "external_read",
+                        "secret_management",
+                        "secret_injection",
+                        "secret_ref_migration",
+                        "secret_read",
+                        "secret-super-secret-value",
+                    ]
+                }
+            }
+        },
+        "secret": "secret-super-secret-value",
+        "token": "token-super-secret-value",
+    }
+
+    for redacted in (redact_lifecycle_receipt_value(raw), _redact_lifecycle_api_value(raw)):
+        assert redacted["capability_contract"]["permissions"]["declared"]["execution_boundaries"] == [
+            "external_read",
+            "secret_management",
+            "secret_injection",
+            "secret_ref_migration",
+            "secret_read",
+            "[redacted]",
+        ]
+        assert "secret-super-secret-value" not in repr(redacted)
+        assert "token-super-secret-value" not in repr(redacted)
+
+
 @pytest.mark.asyncio
 async def test_extension_mutators_deny_invalid_operator_before_side_effects():
     from src.api.extensions import (

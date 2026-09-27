@@ -109,8 +109,10 @@ class TestConsolidateSession:
         assert memories[0].embedding_id == "vec-1"
         assert memories[0].source_session_id == "s1"
         assert memories[0].metadata_json == (
-            '{"input_schema": "legacy", "legacy_field": "facts", "source": "llm_extract", '
-            '"writer": "session_consolidation"}'
+            '{"input_schema": "legacy", "legacy_field": "facts", '
+            '"provenance": {"kind": "inferred_extraction", "source": "llm_extract", '
+            '"source_session_id": "s1"}, "source": "llm_extract", '
+            '"source_role": "inferred", "writer": "session_consolidation"}'
         )
 
     async def test_duplicate_memory_merges_and_reuses_existing_vector_row(self, async_db, sm):
@@ -531,7 +533,10 @@ class TestConsolidateSession:
         assert memories_by_kind["collaborator"].project_entity_id is not None
         assert memories_by_kind["collaborator"].metadata_json == (
             '{"input_schema": "typed", "project_name": "Investor updates", '
-            '"source": "llm_extract", "subject_name": "Alice", "writer": "session_consolidation"}'
+            '"provenance": {"kind": "inferred_extraction", "source": "llm_extract", '
+            '"source_session_id": "s1"}, "source": "llm_extract", '
+            '"source_role": "inferred", "subject_name": "Alice", '
+            '"writer": "session_consolidation"}'
         )
         assert memories_by_kind["communication_preference"].summary == (
             "Prefers concise morning briefings"

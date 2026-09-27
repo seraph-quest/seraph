@@ -770,13 +770,19 @@ async def test_operator_timeline_aggregates_threaded_workflows_notifications_and
 
     workflow_item = next(item for item in payload["items"] if item["kind"] == "workflow_run")
     assert workflow_item["thread_label"] == "Session 1"
-    assert workflow_item["continue_message"] == "Continue from pending workflow approval."
-    assert workflow_item["recommended_actions"][0]["type"] == "set_tool_policy"
+    # A blocked replay boundary must not expose stale continuation or action
+    # controls. The pending approval remains separately actionable below.
+    assert workflow_item["continue_message"] is None
+    assert workflow_item["replay_draft"] is None
+    assert workflow_item["replay_allowed"] is False
+    assert workflow_item["replay_block_reason"] == "pending_approval"
+    assert workflow_item["recommended_actions"] == []
     assert workflow_item["metadata"]["run_identity"] == "session-1:workflow_web_brief_to_file:web-brief"
     assert workflow_item["metadata"]["run_fingerprint"] == "web-brief"
     assert workflow_item["metadata"]["branch_kind"] == "approval_resume"
-    assert workflow_item["metadata"]["checkpoint_candidates"][0]["step_id"] == "approval_gate"
-    assert workflow_item["metadata"]["resume_plan"]["resume_from_step"] == "approval_gate"
+    assert workflow_item["metadata"]["resume_from_step"] is None
+    assert workflow_item["metadata"]["checkpoint_candidates"] == []
+    assert workflow_item["metadata"]["resume_plan"] is None
 
     approval_item = next(item for item in payload["items"] if item["kind"] == "approval")
     assert approval_item["continue_message"] == "Resume after approval."
@@ -3523,7 +3529,14 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert resp.status_code == 200
     payload = resp.json()
     assert payload["summary"]["suite_count"] == len(payload["suites"])
-    assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
+    red_child_postures = {
+        key: value
+        for key, value in payload["summary"].items()
+        if key.endswith("_posture") and "regressions_detected" in str(value)
+    }
+    assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed", (
+        f"Unexpected child benchmark regression posture(s): {red_child_postures}"
+    )
     assert (
         payload["summary"]["production_parity_readiness_posture"]
         == "production_parity_readiness_ci_gated_operator_visible"
@@ -11031,7 +11044,7 @@ async def test_operator_timeline_projects_routing_metadata(client):
 
 
 @pytest.mark.asyncio
-async def test_operator_timeline_uses_retry_draft_when_no_thread_continue_message_exists(client):
+async def test_operator_timeline_hides_retry_draft_when_replay_is_blocked(client):
     with (
         patch(
             "src.api.operator._list_workflow_runs",
@@ -11102,7 +11115,14 @@ async def test_operator_timeline_uses_retry_draft_when_no_thread_continue_messag
     assert resp.status_code == 200
     payload = resp.json()
     workflow_item = next(item for item in payload["items"] if item["kind"] == "workflow_run")
-    assert workflow_item["continue_message"] == "Retry workflow \"retryable-save\" from step \"save\"."
+    assert workflow_item["continue_message"] is None
+    assert workflow_item["replay_draft"] is None
+    assert workflow_item["replay_allowed"] is False
+    assert workflow_item["replay_block_reason"] == "workflow_unavailable"
+    assert workflow_item["recommended_actions"] == []
+    assert workflow_item["metadata"]["resume_from_step"] is None
+    assert workflow_item["metadata"]["checkpoint_candidates"] == []
+    assert workflow_item["metadata"]["resume_plan"] is None
 
 
 @pytest.mark.asyncio

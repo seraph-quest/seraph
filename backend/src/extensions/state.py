@@ -59,6 +59,14 @@ _SENSITIVE_ASSIGNMENT_PATTERN = re.compile(
 _SENSITIVE_BARE_VALUE_PATTERN = re.compile(
     r"(?i)(?:bearer\s+[A-Za-z0-9._~+/=-]{8,}|(?:secret|token|password)[-_][A-Za-z0-9._~+/=-]{6,})"
 )
+_SAFE_EXECUTION_BOUNDARY_ENUMS = frozenset(
+    {
+        "secret_injection",
+        "secret_management",
+        "secret_ref_migration",
+        "secret_read",
+    }
+)
 
 
 class ExtensionStateRevisionConflict(RuntimeError):
@@ -152,6 +160,12 @@ def redact_lifecycle_receipt_value(
     if isinstance(value, (bytes, bytearray)):
         return f"[binary:{len(value)} bytes]"
     if isinstance(value, str):
+        if (
+            key_text == "execution_boundaries"
+            and not error_scope
+            and value in _SAFE_EXECUTION_BOUNDARY_ENUMS
+        ):
+            return value
         if error_scope or sensitive_key:
             return _redacted_text(value)
         return _redact_inline_text(value)

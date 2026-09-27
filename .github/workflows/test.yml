@@ -4,7 +4,7 @@ on:
   push:
     branches: [develop, main]
   pull_request:
-    branches: [develop, main, feat/seraph-native-guardian-epic]
+    branches: [develop, main, feat/seraph-native-guardian-epic, feat/864-operator-work-board]
 
 concurrency:
   group: tests-${{ github.ref }}

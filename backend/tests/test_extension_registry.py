@@ -3,6 +3,7 @@ from pathlib import Path
 from src.extensions.channels import select_active_channel_adapters
 from src.extensions.lifecycle import _contribution_payload
 from src.extensions.observers import select_active_observer_definitions
+from src.extensions import registry as registry_module
 from src.extensions.registry import ExtensionRegistry
 
 
@@ -1137,12 +1138,14 @@ enabled: true
     assert active[0].manifest_root_index == 0
 
 
-def test_registry_reports_layout_error_for_symlink_escape(tmp_path: Path):
+def test_registry_reports_layout_error_for_symlink_escape_and_continues(tmp_path: Path):
     package_dir = tmp_path / "extensions" / "escape-pack"
     skills_dir = package_dir / "skills"
+    valid_package_dir = tmp_path / "extensions" / "valid-pack"
     external_dir = tmp_path / "external"
     package_dir.mkdir(parents=True)
     skills_dir.mkdir()
+    valid_package_dir.mkdir(parents=True)
     external_dir.mkdir()
     (package_dir / "manifest.yaml").write_text(
         """
@@ -1164,6 +1167,23 @@ contributes:
     external_file = external_dir / "outside.md"
     external_file.write_text("---\nname: outside\ndescription: Outside\n---\n", encoding="utf-8")
     (skills_dir / "escape.md").symlink_to(external_file)
+    (valid_package_dir / "manifest.yaml").write_text(
+        """
+id: seraph.valid-pack
+version: 2026.3.21
+display_name: Valid Pack
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.4.11"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  skills:
+    - skills/valid.md
+""".strip(),
+        encoding="utf-8",
+    )
 
     registry = ExtensionRegistry(
         manifest_roots=[str(tmp_path / "extensions")],
@@ -1176,6 +1196,178 @@ contributes:
     snapshot = registry.snapshot()
 
     assert snapshot.get_extension("seraph.escape-pack") is None
+    assert snapshot.get_extension("seraph.valid-pack") is not None
     assert len(snapshot.load_errors) == 1
     assert snapshot.load_errors[0].phase == "layout"
-    assert "escapes the package root" in snapshot.load_errors[0].message
+    assert "symlink" in snapshot.load_errors[0].message
+
+
+def test_registry_reports_explicit_symlink_manifest_roots_without_following_them(tmp_path: Path):
+    package_dir = tmp_path / "real-package"
+    package_dir.mkdir()
+    target_manifest = package_dir / "manifest.yaml"
+    target_manifest.write_text(
+        """
+id: seraph.symlink-target
+version: 2026.3.21
+display_name: Symlink Target
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.4.11"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  skills:
+    - skills/external.md
+""".strip(),
+        encoding="utf-8",
+    )
+    linked_manifest = tmp_path / "linked-manifest.yaml"
+    linked_manifest.symlink_to(target_manifest)
+    broken_manifest = tmp_path / "broken-manifest.yaml"
+    broken_manifest.symlink_to(tmp_path / "missing" / "manifest.yaml")
+
+    registry = ExtensionRegistry(
+        manifest_roots=[str(linked_manifest), str(broken_manifest)],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+        seraph_version="2026.4.11",
+    )
+
+    snapshot = registry.snapshot()
+
+    assert snapshot.extensions == []
+    assert {
+        (Path(error.source), error.phase)
+        for error in snapshot.load_errors
+    } == {
+        (linked_manifest, "layout"),
+        (broken_manifest, "layout"),
+    }
+
+
+def test_registry_reports_symlinked_package_manifest_and_keeps_valid_sibling(tmp_path: Path, monkeypatch):
+    extensions_root = tmp_path / "extensions"
+    unsafe_package = extensions_root / "unsafe-package"
+    valid_package = extensions_root / "valid-package"
+    unsafe_package.mkdir(parents=True)
+    valid_package.mkdir()
+    external_manifest = tmp_path / "external-manifest.yaml"
+    external_manifest.write_text(
+        """
+id: seraph.symlink-manifest
+version: 2026.3.21
+display_name: Symlink Manifest
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.4.11"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  skills:
+    - skills/valid.md
+""".strip(),
+        encoding="utf-8",
+    )
+    (unsafe_package / "manifest.yaml").symlink_to(external_manifest)
+    (valid_package / "manifest.yaml").write_text(
+        """
+id: seraph.valid-sibling
+version: 2026.3.21
+display_name: Valid Sibling
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.4.11"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  skills:
+    - skills/readable.md
+""".strip(),
+        encoding="utf-8",
+    )
+    unreadable_path = extensions_root / "unreadable-subtree"
+    original_walk = registry_module.os.walk
+
+    def walk_with_unreadable_subtree(root, *args, onerror=None, **kwargs):
+        if onerror is not None:
+            onerror(PermissionError(13, "Permission denied", str(unreadable_path)))
+        yield from original_walk(root, *args, onerror=onerror, **kwargs)
+
+    monkeypatch.setattr(registry_module.os, "walk", walk_with_unreadable_subtree)
+
+    snapshot = ExtensionRegistry(
+        manifest_roots=[str(extensions_root)],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+        seraph_version="2026.4.11",
+    ).snapshot()
+
+    assert snapshot.get_extension("seraph.symlink-manifest") is None
+    assert snapshot.get_extension("seraph.valid-sibling") is not None
+    assert any(
+        error.phase == "layout" and "symlink" in error.message
+        for error in snapshot.load_errors
+    )
+    assert any(
+        error.source == str(unreadable_path) and error.phase == "layout"
+        for error in snapshot.load_errors
+    )
+
+
+def test_registry_surfaces_unreadable_root_instead_of_returning_empty_snapshot(tmp_path: Path, monkeypatch):
+    readable_root = tmp_path / "readable"
+    unreadable_root = tmp_path / "unreadable"
+    readable_package = readable_root / "valid-package"
+    readable_package.mkdir(parents=True)
+    unreadable_root.mkdir()
+    (readable_package / "manifest.yaml").write_text(
+        """
+id: seraph.readable-package
+version: 2026.3.21
+display_name: Readable Package
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.4.11"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  skills:
+    - skills/readable.md
+""".strip(),
+        encoding="utf-8",
+    )
+    original_iter = registry_module.iter_extension_manifest_paths
+
+    def fail_for_unreadable_root(roots: list[str]) -> list[Path]:
+        if str(unreadable_root) in roots:
+            raise ValueError("extension package could not be inspected safely")
+        return original_iter(roots)
+
+    monkeypatch.setattr(
+        registry_module,
+        "iter_extension_manifest_paths",
+        fail_for_unreadable_root,
+    )
+
+    snapshot = ExtensionRegistry(
+        manifest_roots=[str(readable_root), str(unreadable_root)],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+        seraph_version="2026.4.11",
+    ).snapshot()
+
+    assert snapshot.get_extension("seraph.readable-package") is not None
+    assert any(
+        error.source == str(unreadable_root)
+        and error.phase == "layout"
+        and "inspected safely" in error.message
+        for error in snapshot.load_errors
+    )

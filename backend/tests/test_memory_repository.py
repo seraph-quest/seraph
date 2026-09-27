@@ -474,7 +474,7 @@ async def test_sync_scoped_memory_suppresses_provider_echo_for_canonical_tombsto
         )
         await db.commit()
 
-    before = await memory_repository.get_memory(memory.id)
+    before = await memory_repository.get_memory(memory.id, include_deleted=True)
     before_sources = await memory_repository.list_sources(memory_id=memory.id)
     assert before is not None
 
@@ -490,7 +490,7 @@ async def test_sync_scoped_memory_suppresses_provider_echo_for_canonical_tombsto
         metadata={"bias_value": "revive_deleted_learning"},
     )
 
-    after = await memory_repository.get_memory(memory.id)
+    after = await memory_repository.get_memory(memory.id, include_deleted=True)
     after_sources = await memory_repository.list_sources(memory_id=memory.id)
     assert result is None
     assert after is not None
@@ -538,7 +538,7 @@ async def test_sync_scoped_memory_suppresses_tombstone_before_legacy_scope_backf
         db.add(memory)
         await db.commit()
 
-    before = await memory_repository.get_memory(memory.id)
+    before = await memory_repository.get_memory(memory.id, include_deleted=True)
     assert before is not None
     result = await memory_repository.sync_scoped_memory(
         kind=MemoryKind.procedural,
@@ -547,7 +547,7 @@ async def test_sync_scoped_memory_suppresses_tombstone_before_legacy_scope_backf
         summary="A legacy scope match must stay deleted.",
         metadata={"bias_value": "revive_deleted_learning"},
     )
-    after = await memory_repository.get_memory(memory.id)
+    after = await memory_repository.get_memory(memory.id, include_deleted=True)
 
     assert result is None
     assert after is not None
@@ -620,7 +620,7 @@ async def test_sync_scoped_memory_fails_safe_for_malformed_suppressed_metadata(a
         db.add(memory)
         await db.commit()
 
-    before = await memory_repository.get_memory(memory.id)
+    before = await memory_repository.get_memory(memory.id, include_deleted=True)
     assert before is not None
     result = await memory_repository.sync_scoped_memory(
         kind=MemoryKind.procedural,
@@ -629,7 +629,7 @@ async def test_sync_scoped_memory_fails_safe_for_malformed_suppressed_metadata(a
         summary="Possible tombstone revival",
         metadata={"bias_value": "unsafe"},
     )
-    after = await memory_repository.get_memory(memory.id)
+    after = await memory_repository.get_memory(memory.id, include_deleted=True)
 
     assert result is None
     assert after is not None
@@ -742,7 +742,7 @@ async def test_cas_scoped_memory_suppresses_tombstone_winning_interleaving():
     )
 
     assert result is None
-    assert db.execute_calls == 2
+    assert db.execute_calls == 3
     assert db.rollback_calls == 1
     assert original.content == "Ordinary content before delete/export."
     assert tombstone.content == "[delete/export propagated by operator]"
@@ -817,11 +817,11 @@ async def test_sync_scoped_memory_integrity_error_recovery_preserves_tombstone()
 
         async def execute(self, _statement):
             self.execute_calls += 1
-            if self.execute_calls == 1:
+            if self.execute_calls in {1, 2}:
                 return _Result(first=None)
-            if self.execute_calls == 2:
-                return _Result(all_rows=[])
             if self.execute_calls == 3:
+                return _Result(all_rows=[])
+            if self.execute_calls == 4:
                 return _Result(first=None)
             return _Result(first=tombstone)
 
@@ -858,7 +858,7 @@ async def test_sync_scoped_memory_integrity_error_recovery_preserves_tombstone()
     assert result is None
     assert db.flush_calls == 1
     assert db.rollback_calls == 1
-    assert db.execute_calls == 4
+    assert db.execute_calls == 6
     assert {
         field: getattr(tombstone, field)
         for field in snapshot
@@ -935,7 +935,7 @@ async def test_sync_scoped_memory_empty_echo_preserves_metadata_only_tombstone()
         )
 
     assert result is None
-    assert db.execute_calls == 1
+    assert db.execute_calls == 2
     assert db.flush_calls == 0
     assert {
         field: getattr(tombstone, field)
@@ -1235,7 +1235,7 @@ async def test_tombstone_reconcile_redacts_restored_row_before_local_reindex(asy
         "reapplied_count": 1,
         "missing_memory_count": 0,
     }
-    restored = await memory_repository.get_memory(created.memory_id)
+    restored = await memory_repository.get_memory(created.memory_id, include_deleted=True)
     assert restored is not None
     assert restored.status is MemoryStatus.archived
     assert restored.content == "[delete/export propagated by operator]"

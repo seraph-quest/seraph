@@ -1,6 +1,7 @@
 """Tests for the OpenRouter embedding adapter and runtime receipts."""
 
 import time
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -89,17 +90,25 @@ def _configured_embedding_route():
         max_cost_microusd=100,
         allowed_provider_kinds=("openrouter",),
     )
-    return patch.multiple(
-        settings,
-        embedding_model="openrouter/openai/text-embedding-3-small",
-        openrouter_api_key="test-openrouter-key",
-        openrouter_provider_only=True,
-        openrouter_allowed_upstreams="openai",
-        openrouter_allow_fallbacks=False,
-        openrouter_require_parameters=True,
-        openrouter_data_collection="deny",
-        llm_api_base=embedder.OPENROUTER_API_BASE,
-    ), patch.object(embedder, "effective_workload_policy", return_value=policy)
+    @contextmanager
+    def settings_patch():
+        with (
+            patch.multiple(
+                settings,
+                embedding_model="openrouter/openai/text-embedding-3-small",
+                openrouter_api_key="test-openrouter-key",
+                openrouter_provider_only=True,
+                openrouter_allowed_upstreams="openai",
+                openrouter_allow_fallbacks=False,
+                openrouter_require_parameters=True,
+                openrouter_data_collection="deny",
+                llm_api_base=embedder.OPENROUTER_API_BASE,
+            ),
+            patch.dict(settings.__dict__, {"openrouter_data_retention_policy": "deny"}),
+        ):
+            yield
+
+    return settings_patch(), patch.object(embedder, "effective_workload_policy", return_value=policy)
 
 
 def _embedding_profile() -> ProviderProfile:
@@ -121,6 +130,9 @@ def _embedding_profile() -> ProviderProfile:
                 "allow_fallbacks": False,
                 "require_parameters": True,
                 "data_collection": "deny",
+                "data_retention_policy": str(
+                    getattr(settings, "openrouter_data_retention_policy", "deny") or "deny"
+                ),
                 "zdr": True,
             }
         },
@@ -234,6 +246,7 @@ def test_embed_posts_validated_openrouter_request_and_records_metadata():
             "allow_fallbacks": False,
             "require_parameters": True,
             "data_collection": "deny",
+            "data_retention_policy": "deny",
             "zdr": True,
         },
     }
@@ -253,6 +266,27 @@ def test_embed_posts_validated_openrouter_request_and_records_metadata():
     assert loaded
     assert loaded[0]["details"]["dimension"] == 2
     assert loaded[0]["details"]["schema_version"] == embedder.EMBEDDING_SCHEMA_VERSION
+
+
+def test_non_deny_retention_policy_blocks_before_provider_request():
+    settings_patch, policy_patch = _configured_embedding_route()
+
+    with (
+        settings_patch,
+        policy_patch,
+        patch.dict(settings.__dict__, {"openrouter_data_retention_policy": "allow"}),
+        patch("src.memory.embedder.httpx.Client") as mock_client,
+    ):
+        with pytest.raises(
+            embedder.EmbeddingConfigurationError,
+            match="openrouter_retention_policy_must_deny",
+        ):
+            embedder.embed("retention policy must block")
+
+    mock_client.assert_not_called()
+    failed = [event for event in _embedding_events() if event["event_type"] == "integration_failed"]
+    assert failed
+    assert failed[0]["details"]["reason_code"] == "openrouter_retention_policy_must_deny"
 
 
 def test_embed_batch_reorders_indexed_vectors_and_normalizes_each_vector():

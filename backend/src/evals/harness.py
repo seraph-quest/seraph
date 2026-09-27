@@ -4870,6 +4870,7 @@ async def _eval_embedding_runtime_audit() -> dict[str, Any]:
             patch.object(settings, "openrouter_allow_fallbacks", False),
             patch.object(settings, "openrouter_require_parameters", True),
             patch.object(settings, "openrouter_data_collection", "deny"),
+            patch.dict(settings.__dict__, {"openrouter_data_retention_policy": "deny"}),
             patch.object(settings, "openrouter_zero_data_retention", True),
             patch.object(embedder_module, "effective_workload_policy", return_value=policy),
             patch.object(embedder_module, "get_current_trust_principal", return_value=principal),
@@ -5054,7 +5055,10 @@ async def _eval_filesystem_runtime_audit() -> dict[str, Any]:
             else:  # pragma: no cover - defensive guard
                 raise AssertionError("Expected path traversal guard to raise")
 
-            with patch("pathlib.Path.write_text", side_effect=PermissionError("denied")):
+            with patch(
+                "src.tools.filesystem_tool._write_workspace_text_bounded",
+                side_effect=PermissionError("denied"),
+            ):
                 write_failure = write_file.forward("blocked.txt", "denied content")
 
             await asyncio.sleep(0)
@@ -6586,7 +6590,10 @@ async def _eval_observer_goal_source_audit() -> dict[str, Any]:
         patch("src.goals.repository.goal_repository", mock_repo),
         patch.object(audit_repository, "log_event", AsyncMock()) as mock_log_event,
     ):
-        result = await gather_goals()
+        result = await gather_goals(
+            owner_principal_id="operator:eval",
+            owner_session_id="eval-goal-session",
+        )
 
     success = _find_audit_call(
         mock_log_event,
@@ -11502,7 +11509,18 @@ async def _eval_workflow_approval_threading_behavior() -> dict[str, Any]:
                     "tool_name": "workflow_web_brief_to_file",
                     "summary": "Calling workflow",
                     "created_at": "2026-03-18T12:01:00Z",
-                    "details": {"arguments": {"query": "seraph", "file_path": "notes/brief.md"}},
+                    "details": {
+                        "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
+                        "run_fingerprint": "web-brief",
+                        "conversation_id": "thread-1",
+                        "operator_session_id": "operator-session-1",
+                        "owner_kind": "user",
+                        "owner_principal_id": "operator:eval",
+                        "goal_id": "goal-1",
+                        "criterion_id": "criterion-1",
+                        "goal_revision": 1,
+                        "plan_revision": 1,
+                    },
                 },
             ],
         ),
@@ -11513,7 +11531,18 @@ async def _eval_workflow_approval_threading_behavior() -> dict[str, Any]:
                     "id": "approval-1",
                     "tool_name": "workflow_web_brief_to_file",
                     "session_id": "thread-1",
-                    "fingerprint": "missing-match",
+                    "workflow_run_identity": "thread-1:workflow_web_brief_to_file:web-brief:evt-call",
+                    "conversation_id": "thread-1",
+                    "operator_session_id": "operator-session-1",
+                    "owner_kind": "user",
+                    "owner_principal_id": "operator:eval",
+                    "goal_id": "goal-1",
+                    "criterion_id": "criterion-1",
+                    "goal_revision": 1,
+                    "plan_revision": 1,
+                    "fingerprint": "web-brief",
+                    "status": "pending",
+                    "approval_expires_at": "2099-03-18T12:01:10Z",
                     "summary": "Approval pending for workflow_web_brief_to_file",
                     "risk_level": "medium",
                     "created_at": "2026-03-18T12:01:10Z",
@@ -11549,6 +11578,14 @@ async def _eval_workflow_approval_threading_behavior() -> dict[str, Any]:
             "src.api.workflows.session_manager.list_sessions",
             return_value=[{"id": "thread-1", "title": "Research thread"}],
         ),
+        patch(
+            "src.api.workflows.workflow_state_repository.list_runs",
+            new=AsyncMock(return_value=[]),
+        ),
+        patch(
+            "src.api.workflows.durable_job_repository.list_jobs",
+            new=AsyncMock(return_value=[]),
+        ),
     ):
         run = (await _list_workflow_runs(limit=4, session_id="thread-1"))[0]
 
@@ -11576,8 +11613,7 @@ async def _eval_workflow_approval_threading_behavior() -> dict[str, Any]:
         "checkpoint_candidate_kinds": [
             checkpoint["kind"] for checkpoint in run["checkpoint_candidates"]
         ],
-        "resume_plan_branch_kind": run["resume_plan"]["branch_kind"],
-        "resume_plan_requires_manual_execution": run["resume_plan"]["requires_manual_execution"],
+        "resume_plan_is_none": run.get("resume_plan") is None,
         "thread_continue_message": run["thread_continue_message"],
         "approval_recovery_message": run["approval_recovery_message"],
     }

@@ -2134,7 +2134,9 @@ def _workflow_orchestration_entries(
             "pending_approval_ids": run.get("pending_approval_ids") if isinstance(run.get("pending_approval_ids"), list) else [],
             "checkpoint_candidate_count": len(checkpoint_candidates) if isinstance(checkpoint_candidates, list) else 0,
             "checkpoint_candidates": checkpoint_candidates if isinstance(checkpoint_candidates, list) else [],
-            "retry_from_step_available": bool(run.get("retry_from_step_draft")),
+            "retry_from_step_available": bool(
+                run.get("retry_from_step_draft") or run.get("retry_from_step_available")
+            ),
             "retry_from_step_draft": run.get("retry_from_step_draft"),
             "replay_allowed": run.get("replay_allowed", True),
             "replay_block_reason": run.get("replay_block_reason"),
@@ -4866,11 +4868,12 @@ async def get_operator_workflow_orchestration(
             for run in workflow_runs
             if isinstance(run.get("thread_id"), str)
         }
-        sessions_payload = _workflow_orchestration_sessions(
+        all_sessions_payload = _workflow_orchestration_sessions(
             workflow_runs,
             session_titles=session_titles,
-            limit=limit_sessions,
+            limit=None,
         )
+        sessions_payload = all_sessions_payload[:limit_sessions]
         workflows_payload = _workflow_orchestration_entries(
             workflow_runs,
             limit=limit_workflows,
@@ -4902,7 +4905,7 @@ async def get_operator_workflow_orchestration(
                 ),
                 "attention_sessions": sum(
                     1
-                    for session in sessions_payload
+                    for session in all_sessions_payload
                     if str(session.get("queue_state") or "") not in {"idle", "active"}
                 ),
             },

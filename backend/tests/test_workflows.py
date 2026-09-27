@@ -1999,6 +1999,17 @@ async def test_workflow_runs_endpoint_projects_history_and_boundaries(client):
                     "tool_name": "workflow_web_brief_to_file",
                     "session_id": "session-1",
                     "fingerprint": "web-brief",
+                    "workflow_run_identity": "session-1:workflow_web_brief_to_file:web-brief",
+                    "conversation_id": "session-1",
+                    "operator_session_id": "test-auth-bypass",
+                    "owner_kind": "user",
+                    "owner_principal_id": "operator:test-bypass",
+                    "goal_id": "goal-1",
+                    "criterion_id": "criterion-1",
+                    "goal_revision": 1,
+                    "plan_revision": 1,
+                    "status": "pending",
+                    "expires_at": "2099-01-01T00:00:00Z",
                     "summary": "Approval pending for workflow_web_brief_to_file",
                     "risk_level": "medium",
                     "created_at": "2026-03-18T12:01:10Z",
@@ -2043,42 +2054,34 @@ async def test_workflow_runs_endpoint_projects_history_and_boundaries(client):
     assert len(payload["runs"]) == 1
     run = payload["runs"][0]
     assert run["workflow_name"] == "web-brief-to-file"
-    assert run["risk_level"] == "medium"
-    assert run["execution_boundaries"] == ["external_read", "workspace_write"]
+    assert run["status"] == "succeeded"
+    assert "risk_level" not in run
+    assert "execution_boundaries" not in run
     assert run["artifact_paths"] == ["notes/brief.md"]
     assert run["artifact_registry"][0]["artifact_id"].startswith("art_")
     assert run["artifact_registry"][0]["file_path"] == "notes/brief.md"
-    assert run["artifact_registry"][0]["producer"] == "workflow:web-brief-to-file"
-    assert run["artifact_registry"][0]["run_id"] == "session-1:workflow_web_brief_to_file:web-brief"
-    assert run["artifact_registry"][0]["trust_boundary"]["status"] == "stable"
-    assert run["run_fingerprint"] == "web-brief"
+    assert set(run["artifact_registry"][0]) == {"artifact_id", "file_path", "content_sha256"}
+    assert "run_fingerprint" not in run
     assert run["run_identity"] == "session-1:workflow_web_brief_to_file:web-brief"
     assert run["step_records"][0]["tool"] == "web_search"
+    assert run["step_records"][0]["id"].startswith("redacted_workflow_step_")
+    assert "arguments" not in run["step_records"][0]
+    assert "result" not in run["step_records"][0]
     assert run["pending_approval_count"] == 1
-    assert run["pending_approval_ids"] == ["approval-1"]
-    assert run["pending_approvals"][0]["resume_message"] == "Continue the web brief once approved"
     assert run["thread_id"] == "session-1"
-    assert run["thread_label"] == "Research thread"
+    assert run["thread_label"] == "workflow thread"
     assert run["replay_allowed"] is False
     assert run["replay_block_reason"] == "pending_approval"
     assert run["availability"] == "ready"
-    assert run["parameter_schema"]["file_path"]["type"] == "string"
-    assert run["resume_from_step"] == "approval_gate"
-    assert run["resume_checkpoint_label"] == "Approval gate"
+    assert run["resume_from_step"] is None
+    assert run["resume_checkpoint_label"] is None
     assert run["branch_kind"] == "approval_resume"
     assert run["parent_run_identity"] is None
     assert run["root_run_identity"] == "session-1:workflow_web_brief_to_file:web-brief"
-    assert run["checkpoint_candidates"][0]["step_id"] == "approval_gate"
-    assert run["checkpoint_candidates"][1]["step_id"] == "search"
-    assert run["resume_plan"]["source_run_identity"] == run["run_identity"]
-    assert run["resume_plan"]["parent_run_identity"] == run["run_identity"]
-    assert run["resume_plan"]["branch_kind"] == "approval_resume"
-    assert run["resume_plan"]["checkpoint_candidates"][0]["kind"] == "approval_gate"
-    assert run["thread_continue_message"] == "Continue the web brief once approved"
-    assert run["approval_recovery_message"]
-    assert run["timeline"][0]["kind"] == "workflow_started"
-    assert run["timeline"][1]["kind"] == "workflow_step_succeeded"
-    assert run["timeline"][2]["kind"] == "approval_pending"
+    assert run["checkpoint_candidates"] == []
+    assert "resume_plan" not in run
+    assert run["thread_continue_message"] == "Use the live workflow recovery controls to continue this run."
+    assert run["approval_recovery_message"] is None
 
 
 @pytest.mark.asyncio
@@ -2129,6 +2132,10 @@ async def test_workflow_runs_endpoint_uses_stored_fingerprint_for_redacted_argum
                     "tool_name": "workflow_web_brief_to_file",
                     "session_id": "session-1",
                     "fingerprint": "web-brief-secret",
+                    "conversation_id": "session-1",
+                    "operator_session_id": "test-auth-bypass",
+                    "owner_kind": "user",
+                    "owner_principal_id": "operator:test-bypass",
                     "summary": "Approval pending for workflow_web_brief_to_file",
                     "risk_level": "medium",
                     "created_at": "2026-03-18T12:01:10Z",
@@ -2173,12 +2180,17 @@ async def test_workflow_runs_endpoint_uses_stored_fingerprint_for_redacted_argum
 
     assert response.status_code == 200
     run = response.json()["runs"][0]
-    assert run["run_fingerprint"] == "web-brief-secret"
+    assert "run_fingerprint" not in run
+    assert run["run_identity"] == "session-1:workflow_web_brief_to_file:web-brief-secret"
     assert run["pending_approval_count"] == 1
-    assert run["pending_approvals"][0]["id"] == "approval-1"
     assert run["replay_block_reason"] == "approval_context_missing"
-    assert run["thread_continue_message"] is None
-    assert "predates trust-boundary tracking" in run["approval_recovery_message"]
+    assert run["thread_continue_message"] == "Use the live workflow recovery controls to continue this run."
+    assert run["approval_recovery_message"] is None
+    assert run["replay_inputs"] == {
+        "redacted": True,
+        "argument_keys": ["file_path", "query", "secret_ref"],
+        "requires_live_control": True,
+    }
 
 
 @pytest.mark.asyncio
@@ -2285,13 +2297,13 @@ async def test_workflow_runs_endpoint_hides_resume_metadata_when_pending_run_lac
     assert run["resume_from_step"] is None
     assert run["resume_checkpoint_label"] is None
     assert run["checkpoint_candidates"] == []
-    assert run["resume_plan"] is None
-    assert run["thread_continue_message"] is None
-    assert "predates trust-boundary tracking" in run["approval_recovery_message"]
+    assert "resume_plan" not in run
+    assert run["thread_continue_message"] == "Use the live workflow recovery controls to continue this run."
+    assert run["approval_recovery_message"] is None
     assert run["trust_boundary"]["status"] == "missing"
     assert run["trust_boundary"]["blocked"] is True
     assert run["trust_boundary"]["reason"] == "approval_context_missing"
-    assert run["trust_boundary"]["current"]["authenticated_source"] is True
+    assert "current" not in run["trust_boundary"]
 
 
 @pytest.mark.asyncio
@@ -2307,7 +2319,10 @@ async def test_workflow_runs_endpoint_marks_waiting_runs_as_awaiting_approval(cl
                     "tool_name": "workflow_web_brief_to_file",
                     "summary": "Calling workflow",
                     "created_at": "2026-03-18T12:01:00Z",
-                    "details": {"arguments": {"query": "seraph", "file_path": "notes/brief.md"}},
+                    "details": {
+                        "run_fingerprint": "waiting-approval",
+                        "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
+                    },
                 },
             ]),
         ),
@@ -2318,7 +2333,18 @@ async def test_workflow_runs_endpoint_marks_waiting_runs_as_awaiting_approval(cl
                     "id": "approval-1",
                     "tool_name": "workflow_web_brief_to_file",
                     "session_id": "session-1",
-                    "fingerprint": "none",
+                    "fingerprint": "waiting-approval",
+                    "workflow_run_identity": "session-1:workflow_web_brief_to_file:waiting-approval",
+                    "conversation_id": "session-1",
+                    "operator_session_id": "test-auth-bypass",
+                    "owner_kind": "user",
+                    "owner_principal_id": "operator:test-bypass",
+                    "goal_id": "goal-1",
+                    "criterion_id": "criterion-1",
+                    "goal_revision": 1,
+                    "plan_revision": 1,
+                    "status": "pending",
+                    "expires_at": "2099-01-01T00:00:00Z",
                     "summary": "Approval pending for workflow_web_brief_to_file",
                     "risk_level": "medium",
                     "created_at": "2026-03-18T12:01:10Z",
@@ -2359,8 +2385,8 @@ async def test_workflow_runs_endpoint_marks_waiting_runs_as_awaiting_approval(cl
     assert run["status"] == "awaiting_approval"
     assert run["pending_approval_count"] == 1
     assert run["availability"] == "blocked"
-    assert any(action["type"] == "set_tool_policy" for action in run["replay_recommended_actions"])
-    assert run["timeline"][1]["kind"] == "approval_pending"
+    assert run["replay_recommended_actions"] == []
+    assert "timeline" not in run
 
 
 @pytest.mark.asyncio
@@ -2806,9 +2832,11 @@ async def test_workflow_runs_endpoint_hides_later_retry_draft_without_checkpoint
     run = response.json()["runs"][0]
     assert run["checkpoint_context_available"] is False
     assert run["retry_from_step_draft"] is None
-    assert run["checkpoint_candidates"][0]["step_id"] == "search"
+    assert run["checkpoint_candidates"][0]["step_id"].startswith("redacted_workflow_step_")
+    assert run["checkpoint_candidates"][0]["step_id"] != "search"
     assert run["checkpoint_candidates"][0]["resume_supported"] is True
-    assert run["checkpoint_candidates"][1]["step_id"] == "save"
+    assert run["checkpoint_candidates"][1]["step_id"].startswith("redacted_workflow_step_")
+    assert run["checkpoint_candidates"][1]["step_id"] != "save"
     assert run["checkpoint_candidates"][1]["resume_supported"] is False
     assert run["checkpoint_candidates"][1]["resume_draft"] is None
 
@@ -3152,9 +3180,17 @@ async def test_workflow_runs_endpoint_disambiguates_duplicate_fingerprinted_runs
     runs = response.json()["runs"]
     assert len(runs) == 2
     assert runs[0]["run_identity"] == "session-1:workflow_web_brief_to_file:shared-fingerprint:evt-call-newer"
-    assert runs[0]["replay_inputs"] == {"query": "newer", "file_path": "notes/newer.md"}
+    assert runs[0]["replay_inputs"] == {
+        "redacted": True,
+        "argument_keys": ["file_path", "query"],
+        "requires_live_control": True,
+    }
     assert runs[1]["run_identity"] == "session-1:workflow_web_brief_to_file:shared-fingerprint:evt-call-older"
-    assert runs[1]["replay_inputs"] == {"query": "older", "file_path": "notes/older.md"}
+    assert runs[1]["replay_inputs"] == {
+        "redacted": True,
+        "argument_keys": ["file_path", "query"],
+        "requires_live_control": True,
+    }
 
 
 @pytest.mark.asyncio
@@ -3166,6 +3202,10 @@ async def test_workflow_runs_endpoint_blocks_replay_for_durable_only_rows(client
         "workflow_name": "web-brief-to-file",
         "tool_name": "workflow_web_brief_to_file",
         "session_id": "session-1",
+        "conversation_id": "session-1",
+        "operator_session_id": "test-auth-bypass",
+        "owner_kind": "user",
+        "owner_principal_id": "operator:test-bypass",
         "status": "succeeded",
         "run_fingerprint": "web-brief-secret",
         "arguments": {"query": "[redacted]"},
@@ -3204,11 +3244,11 @@ async def test_workflow_runs_endpoint_blocks_replay_for_durable_only_rows(client
 
     assert response.status_code == 200
     run = response.json()["runs"][0]
-    assert run["audit_projection_available"] is False
+    assert "audit_projection_available" not in run
     assert run["availability"] == "audit_projection_missing"
     assert run["replay_allowed"] is False
     assert run["replay_block_reason"] == "durable_projection_missing"
-    assert run["resume_plan"] is None
+    assert "resume_plan" not in run
 
 
 @pytest.mark.asyncio
@@ -3433,7 +3473,7 @@ async def test_workflow_runs_endpoint_hides_repair_actions_when_boundary_drift_b
     with (
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-failed",
                     "session_id": "session-1",
@@ -3471,7 +3511,7 @@ async def test_workflow_runs_endpoint_hides_repair_actions_when_boundary_drift_b
                         "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
                     },
                 },
-            ],
+            ]),
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
         patch("src.api.workflows.get_base_tools_and_active_skills", return_value=([], [], "balanced")),
@@ -3514,7 +3554,7 @@ async def test_workflow_runs_endpoint_hides_repair_actions_when_boundary_drift_b
     assert run["replay_block_reason"] == "approval_context_changed"
     assert run["replay_recommended_actions"] == []
     assert run["step_records"][1]["recovery_actions"] == []
-    assert run["step_records"][1]["recovery_hint"] is None
+    assert "recovery_hint" not in run["step_records"][1]
     assert run["step_records"][1]["is_recoverable"] is False
 
 

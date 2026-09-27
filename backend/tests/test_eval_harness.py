@@ -5147,30 +5147,17 @@ def test_runtime_eval_scenarios_expose_expected_details():
         "file_path",
         "query",
     ]
-    assert details_by_name["workflow_approval_threading_behavior"]["replay_recommended_actions"] == [
-        "open_settings",
-    ]
-    assert details_by_name["workflow_approval_threading_behavior"]["resume_from_step"] == "approval_gate"
-    assert details_by_name["workflow_approval_threading_behavior"]["resume_checkpoint_label"] == "Approval gate"
+    assert details_by_name["workflow_approval_threading_behavior"]["replay_recommended_actions"] == []
+    assert details_by_name["workflow_approval_threading_behavior"]["resume_from_step"] is None
+    assert details_by_name["workflow_approval_threading_behavior"]["resume_checkpoint_label"] is None
     assert details_by_name["workflow_approval_threading_behavior"]["branch_kind"] == "approval_resume"
     assert (
         details_by_name["workflow_approval_threading_behavior"]["root_run_identity_matches_source"]
         is True
     )
-    assert details_by_name["workflow_approval_threading_behavior"]["checkpoint_candidate_kinds"] == [
-        "approval_gate",
-    ]
-    assert details_by_name["workflow_approval_threading_behavior"]["resume_plan_branch_kind"] == (
-        "approval_resume"
-    )
-    assert (
-        details_by_name["workflow_approval_threading_behavior"]["resume_plan_requires_manual_execution"]
-        is True
-    )
-    assert (
-        details_by_name["workflow_approval_threading_behavior"]["thread_continue_message"]
-        == "Continue once the web brief is approved"
-    )
+    assert details_by_name["workflow_approval_threading_behavior"]["checkpoint_candidate_kinds"] == []
+    assert details_by_name["workflow_approval_threading_behavior"]["resume_plan_is_none"] is True
+    assert details_by_name["workflow_approval_threading_behavior"]["thread_continue_message"] is None
     assert (
         details_by_name["workflow_approval_threading_behavior"]["approval_recovery_message"]
         == "Review pending approval(s) for workflow 'web-brief-to-file' before replaying."

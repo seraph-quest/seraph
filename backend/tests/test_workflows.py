@@ -3652,7 +3652,7 @@ async def test_workflow_runs_endpoint_detects_authenticated_source_context_drift
     with (
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-result",
                     "session_id": "session-1",
@@ -3683,7 +3683,7 @@ async def test_workflow_runs_endpoint_detects_authenticated_source_context_drift
                         "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
                     },
                 },
-            ],
+            ]),
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
         patch(
@@ -3805,7 +3805,7 @@ async def test_workflow_runs_endpoint_ignores_authenticated_source_system_reorde
     with (
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-result",
                     "session_id": "session-1",
@@ -3836,7 +3836,7 @@ async def test_workflow_runs_endpoint_ignores_authenticated_source_system_reorde
                         "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
                     },
                 },
-            ],
+            ]),
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
         patch(

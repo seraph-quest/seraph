@@ -16,6 +16,7 @@ import types
 from contextlib import ExitStack, asynccontextmanager, suppress
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from functools import wraps
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Sequence
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -797,7 +798,7 @@ from src.workflows.post_dx_live_durable_orchestration import (
 from src.evolution.engine import evolution_benchmark_gate_policy
 from src.approval.exceptions import ApprovalRequired
 from src.approval.runtime import get_current_trust_principal, reset_runtime_context, set_runtime_context
-from src.auth.service import test_bypass_operator
+from src.auth.service import AuthenticatedOperator, test_bypass_operator
 from src.security.trust_contract import AuthorityGrant, EgressClass, PrincipalType, TrustPrincipal
 from src.model_fabric.configuration import WorkloadPolicy
 from src.agent.session import SessionManager, session_manager
@@ -1007,8 +1008,8 @@ from src.tools.process_tools import (
 from src.tools.secret_ref_tools import SecretRefResolvingTool
 from src.tools.shell_tool import shell_execute
 from src.tools.web_search_tool import web_search
-from src.db.engine import _ensure_search_indexes
-from src.utils.background import drain_tracked_tasks
+from src.db.engine import _ensure_search_indexes, override_session_factory
+from src.utils.background import background_task_scope, drain_tracked_tasks
 from src.workflows.manager import WorkflowManager
 from src.models.schemas import WSResponse
 from src.vault.refs import issue_secret_ref
@@ -1029,6 +1030,44 @@ def _authenticated_daemon_request(worker_id: str) -> Request:
             "path": "/api/observer/notifications/next",
             "headers": [(b"x-seraph-daemon-id", worker_id.encode("utf-8"))],
             "state": {"operator": object()},
+        }
+    )
+
+
+def _eval_operator_principal(session_id: str = "test-auth-bypass") -> TrustPrincipal:
+    """Build the explicit synthetic operator identity used by direct route evals."""
+    return TrustPrincipal(
+        principal_id="operator:test-bypass",
+        principal_type=PrincipalType.OPERATOR,
+        authenticated=True,
+        grants=(
+            AuthorityGrant.INGRESS,
+            AuthorityGrant.MODEL_INFERENCE,
+            AuthorityGrant.CAPABILITY_EXECUTE,
+            AuthorityGrant.ARTIFACT_TRANSFER,
+        ),
+        session_id=session_id,
+        operator_session_id="test-auth-bypass",
+    )
+
+
+def _authenticated_operator_request(path: str = "/api/observer/continuity") -> Request:
+    """Build the operator request context enforced by authenticated API routes."""
+    now = datetime.now(timezone.utc)
+    operator = AuthenticatedOperator(
+        session_id="test-auth-bypass",
+        principal=_eval_operator_principal(),
+        idle_expires_at=now + timedelta(minutes=30),
+        absolute_expires_at=now + timedelta(hours=12),
+    )
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": path,
+            "headers": [],
+            "query_string": b"",
+            "state": {"operator": operator},
         }
     )
 
@@ -1332,6 +1371,7 @@ async def _run_governed_completion_fixture(
 EVAL_SYNC_CLIENT_DB_PATCH_TARGETS: tuple[str, ...] = (
     "src.db.engine.get_session",
     "src.agent.session.get_session",
+    "src.guardian.audio_worker.get_session",
     "src.approval.repository.get_session",
     "src.audit.repository.get_session",
     "src.goals.repository.get_session",
@@ -1349,6 +1389,7 @@ EVAL_SYNC_CLIENT_DB_PATCH_TARGETS: tuple[str, ...] = (
     "src.observer.screenshot_folder_source.get_session",
     "src.observer.screen_repository.get_session",
     "src.workflows.durable_state.get_session",
+    "src.workflows.job_runtime.get_session",
     "src.workflows.manager.get_session",
     "src.workflows.production_workflow_guarantees.get_session",
     "src.memory.repository.get_session",
@@ -1631,7 +1672,13 @@ class _FakeScreenRepoContext:
 
 
 @asynccontextmanager
-async def _patched_async_db(*patch_targets: str):
+async def _patched_async_db(*_legacy_patch_targets: str):
+    """Run an eval against an isolated DB without changing module globals.
+
+    Older call sites still name the imported accessors they used to patch.
+    Those accessors now resolve the same task-local factory in ``get_session``;
+    globally replacing them would redirect unrelated live requests.
+    """
     engine = create_async_engine(
         "sqlite+aiosqlite://",
         connect_args={"check_same_thread": False},
@@ -1642,39 +1689,27 @@ async def _patched_async_db(*patch_targets: str):
     async with engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
 
-    @asynccontextmanager
-    async def _get_session():
-        async with factory() as session:
-            try:
-                yield session
-                await session.commit()
-            except Exception:
-                await session.rollback()
-                raise
-
     try:
-        with ExitStack() as stack:
-            for target in dict.fromkeys((
-                *patch_targets,
-                "src.agent.session.get_session",
-                "src.memory.repository.get_session",
-                "src.profile.service.get_db",
-                "src.memory.hybrid_retrieval.get_session",
-                "src.memory.decay.get_session",
-                "src.memory.flush.get_session",
-            )):
-                stack.enter_context(patch(target, _get_session))
-            yield
+        with background_task_scope():
+            with override_session_factory(factory):
+                try:
+                    yield
+                finally:
+                    await drain_tracked_tasks(timeout_seconds=5.0)
     finally:
-        teardown_error: Exception | None = None
-        try:
-            await drain_tracked_tasks(timeout_seconds=5.0)
-        except Exception as exc:
-            teardown_error = exc
-        finally:
-            await engine.dispose()
-        if teardown_error is not None:
-            raise teardown_error
+        await engine.dispose()
+
+
+def _isolated_eval_database(
+    runner: Callable[[], Awaitable[dict[str, Any]]],
+) -> Callable[[], Awaitable[dict[str, Any]]]:
+    """Run one eval against an isolated database, including direct queue helpers."""
+    @wraps(runner)
+    async def _run() -> dict[str, Any]:
+        async with _patched_async_db():
+            return await runner()
+
+    return _run
 
 
 def _make_sync_client_with_db():
@@ -6635,16 +6670,17 @@ async def _eval_strategist_tick_behavior() -> dict[str, Any]:
     mock_deliver = AsyncMock(return_value=DeliveryDecision.deliver)
     mock_log_event = AsyncMock()
 
-    with (
-        patch("src.scheduler.jobs.strategist_tick.build_guardian_state", AsyncMock(return_value=MagicMock())),
-        patch(
-            "src.scheduler.jobs.strategist_tick.run_strategist_decision_completion",
-            AsyncMock(return_value=strategist_response),
-        ),
-        patch("src.observer.delivery.deliver_or_queue", mock_deliver),
-        patch.object(audit_repository, "log_event", mock_log_event),
-    ):
-        await _run_model_eval_job("strategist_tick_behavior", run_strategist_tick)
+    async with _patched_async_db():
+        with (
+            patch("src.scheduler.jobs.strategist_tick.build_guardian_state", AsyncMock(return_value=MagicMock())),
+            patch(
+                "src.scheduler.jobs.strategist_tick.run_strategist_decision_completion",
+                AsyncMock(return_value=strategist_response),
+            ),
+            patch("src.observer.delivery.deliver_or_queue", mock_deliver),
+            patch.object(audit_repository, "log_event", mock_log_event),
+        ):
+            await _run_model_eval_job("strategist_tick_behavior", run_strategist_tick)
 
     delivered_message = mock_deliver.await_args.args[0]
     succeeded = _find_audit_call(
@@ -6730,6 +6766,30 @@ async def _eval_strategist_tick_learning_continuity_behavior() -> dict[str, Any]
         with (
             patch("src.scheduler.jobs.strategist_tick.build_guardian_state", AsyncMock(return_value=guardian_state)),
             patch(
+                "src.scheduler.jobs.strategist_tick._run_opted_in_goal_web_brief",
+                AsyncMock(
+                    return_value={
+                        "status": "skipped",
+                        "reason": "eval_fixture_no_goal_work",
+                        "goal_id": None,
+                        "notification_owner_principal_id": "operator:test-bypass",
+                        "notification_operator_session_id": "test-auth-bypass",
+                    }
+                ),
+            ),
+            patch(
+                "src.scheduler.jobs.strategist_tick._run_opted_in_goal_snapshot",
+                AsyncMock(
+                    return_value={
+                        "status": "skipped",
+                        "reason": "eval_fixture_no_goal_work",
+                        "goal_id": None,
+                        "notification_owner_principal_id": "operator:test-bypass",
+                        "notification_operator_session_id": "test-auth-bypass",
+                    }
+                ),
+            ),
+            patch(
                 "src.scheduler.jobs.strategist_tick.run_strategist_decision_completion",
                 AsyncMock(return_value=strategist_response),
             ),
@@ -6742,7 +6802,9 @@ async def _eval_strategist_tick_learning_continuity_behavior() -> dict[str, Any]
                 "strategist_tick_learning_continuity_behavior",
                 run_strategist_tick,
             )
-            continuity = await get_observer_continuity()
+            continuity = await get_observer_continuity(
+                _authenticated_operator_request("/api/observer/continuity")
+            )
 
         scheduler_event = _find_audit_call(
             mock_log_event,
@@ -10508,6 +10570,7 @@ async def _eval_observer_delivery_decision_behavior() -> dict[str, Any]:
     }
 
 
+@_isolated_eval_database
 async def _eval_native_presence_notification_behavior() -> dict[str, Any]:
     await native_notification_queue.clear()
     available_ctx = _make_context(
@@ -10592,20 +10655,22 @@ async def _eval_native_presence_notification_behavior() -> dict[str, Any]:
     }
 
 
+@_isolated_eval_database
 async def _eval_native_desktop_shell_behavior() -> dict[str, Any]:
     await native_notification_queue.clear()
     mgr = ContextManager()
     mgr.update_screen_context("VS Code — shell.py", "Editing native presence shell state.")
     mgr.update_capture_mode("balanced")
     mock_log_event = AsyncMock()
+    operator_request = _authenticated_operator_request("/api/observer/daemon-status")
 
     with (
         patch("src.api.observer.context_manager", mgr),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
-        initial_status = await daemon_status()
-        queued = await enqueue_test_native_notification()
-        queued_status = await daemon_status()
+        initial_status = await daemon_status(operator_request)
+        queued = await enqueue_test_native_notification(operator_request)
+        queued_status = await daemon_status(operator_request)
         polled = await get_next_native_notification(
             _authenticated_daemon_request("eval-daemon"),
             worker_id="eval-daemon",
@@ -10626,7 +10691,7 @@ async def _eval_native_desktop_shell_behavior() -> dict[str, Any]:
             ),
             request=_authenticated_daemon_request("eval-daemon"),
         )
-        acked_status = await daemon_status()
+        acked_status = await daemon_status(operator_request)
 
     queued_event = _find_audit_call(
         mock_log_event,
@@ -10654,23 +10719,25 @@ async def _eval_native_desktop_shell_behavior() -> dict[str, Any]:
     }
 
 
+@_isolated_eval_database
 async def _eval_cross_surface_notification_controls_behavior() -> dict[str, Any]:
     await native_notification_queue.clear()
     mgr = ContextManager()
     mgr.update_screen_context("Arc — Guardian Cockpit", "Reviewing pending desktop notifications.")
     mock_log_event = AsyncMock()
+    operator_request = _authenticated_operator_request("/api/observer/notifications")
 
     with (
         patch("src.api.observer.context_manager", mgr),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
-        first = await enqueue_test_native_notification()
-        second = await enqueue_test_native_notification()
-        listed_before = await list_native_notifications()
-        dismissed = await dismiss_native_notification(first["id"])
-        listed_after_single = await list_native_notifications()
-        dismissed_all = await dismiss_all_native_notifications()
-        final_status = await daemon_status()
+        first = await enqueue_test_native_notification(operator_request)
+        second = await enqueue_test_native_notification(operator_request)
+        listed_before = await list_native_notifications(operator_request)
+        dismissed = await dismiss_native_notification(first["id"], operator_request)
+        listed_after_single = await list_native_notifications(operator_request)
+        dismissed_all = await dismiss_all_native_notifications(operator_request)
+        final_status = await daemon_status(operator_request)
 
     dismiss_event = _find_audit_call(
         mock_log_event,
@@ -10713,6 +10780,10 @@ async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
         "src.observer.insight_queue.get_session",
     ):
         await native_notification_queue.clear()
+        await session_manager.get_or_create(
+            "continuity-session",
+            owner_principal_id="operator:test-bypass",
+        )
         mgr = ContextManager()
         mgr.update_screen_context("Arc — Guardian Cockpit", "Reviewing continuity across browser and desktop.")
         mgr.update_capture_mode("balanced")
@@ -10747,6 +10818,8 @@ async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
             thread_source="session",
             continuation_mode="resume_thread",
             resume_message="Continue from this guardian intervention: Desktop fallback is active.",
+            owner_principal_id="operator:test-bypass",
+            operator_session_id="test-auth-bypass",
         )
         await guardian_feedback_repository.update_outcome(
             native_intervention.id,
@@ -10944,7 +11017,9 @@ async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
             patch("src.api.activity.audit_repository.list_events", AsyncMock(return_value=[])),
             patch("src.api.activity.list_recent_llm_calls", return_value=[]),
         ):
-            continuity = await get_observer_continuity()
+            continuity = await get_observer_continuity(
+                _authenticated_operator_request("/api/observer/continuity")
+            )
             operator_timeline = await get_operator_timeline(limit=20, session_id=None)
             activity_ledger = await get_activity_ledger(limit=40, session_id=None, window_hours=24)
 
@@ -11028,21 +11103,23 @@ async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
     }
 
 
+@_isolated_eval_database
 async def _eval_desktop_notification_action_replay_behavior() -> dict[str, Any]:
     await native_notification_queue.clear()
     mgr = ContextManager()
     mgr.update_screen_context("Desktop shell", "Replaying notification actions across browser and daemon surfaces.")
     mgr.update_capture_mode("balanced")
     mock_log_event = AsyncMock()
+    operator_request = _authenticated_operator_request("/api/observer/notifications")
 
     with (
         patch("src.api.observer.context_manager", mgr),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
-        first = await enqueue_test_native_notification()
-        listed = await list_native_notifications()
-        dismissed = await dismiss_native_notification(first["id"])
-        second = await enqueue_test_native_notification()
+        first = await enqueue_test_native_notification(operator_request)
+        listed = await list_native_notifications(operator_request)
+        dismissed = await dismiss_native_notification(first["id"], operator_request)
+        second = await enqueue_test_native_notification(operator_request)
         polled = await get_next_native_notification(
             _authenticated_daemon_request("eval-daemon"),
             worker_id="eval-daemon",
@@ -11063,7 +11140,7 @@ async def _eval_desktop_notification_action_replay_behavior() -> dict[str, Any]:
             ),
             request=_authenticated_daemon_request("eval-daemon"),
         )
-        final_status = await daemon_status()
+        final_status = await daemon_status(operator_request)
 
     dismiss_event = _find_audit_call(
         mock_log_event,
@@ -11095,6 +11172,7 @@ async def _eval_desktop_notification_action_replay_behavior() -> dict[str, Any]:
     }
 
 
+@_isolated_eval_database
 async def _eval_guardian_feedback_loop() -> dict[str, Any]:
     from src.guardian.feedback import guardian_feedback_repository
 
@@ -11104,10 +11182,16 @@ async def _eval_guardian_feedback_loop() -> dict[str, Any]:
         "src.guardian.feedback.get_session",
         "src.observer.insight_queue.get_session",
     ):
-        await session_manager.get_or_create("feedback-current")
+        await session_manager.get_or_create(
+            "feedback-current",
+            owner_principal_id="operator:test-bypass",
+        )
         await session_manager.add_message("feedback-current", "user", "How should Seraph intervene better?")
         await session_manager.add_message("feedback-current", "assistant", "Track intervention outcomes explicitly.")
-        await session_manager.get_or_create("feedback-prior")
+        await session_manager.get_or_create(
+            "feedback-prior",
+            owner_principal_id="operator:test-bypass",
+        )
         await session_manager.update_title("feedback-prior", "Guardian feedback retrospective")
         await session_manager.add_message(
             "feedback-prior",
@@ -11151,11 +11235,21 @@ async def _eval_guardian_feedback_loop() -> dict[str, Any]:
             patch("src.agent.factory.ToolCallingAgent") as mock_agent_cls,
             patch.object(audit_repository, "log_event", mock_log_event),
         ):
-            decision = await deliver_or_queue(
-                message,
-                guardian_confidence="grounded",
-                session_id="feedback-current",
+            runtime_tokens = set_runtime_context(
+                "feedback-current",
+                "high_risk",
+                trust_principal=_eval_operator_principal("feedback-current"),
             )
+            try:
+                decision = await deliver_or_queue(
+                    message,
+                    guardian_confidence="grounded",
+                    session_id="feedback-current",
+                    owner_principal_id="operator:test-bypass",
+                    operator_session_id="test-auth-bypass",
+                )
+            finally:
+                reset_runtime_context(runtime_tokens)
             polled = await get_next_native_notification(
                 _authenticated_daemon_request("eval-daemon"),
                 worker_id="eval-daemon",

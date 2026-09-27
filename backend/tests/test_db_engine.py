@@ -10,6 +10,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
 
 from config.settings import settings
+import src.db.engine as db_engine
 from src.db.engine import (
     _configure_sqlite_connection,
     _ensure_legacy_columns,
@@ -23,6 +24,49 @@ from src.db.models import (
     ModelRouteReceiptRecord,
     OperatorSession,
 )
+
+
+async def test_session_factory_override_is_task_local(monkeypatch):
+    class MarkerSession:
+        def __init__(self, marker: str):
+            self.info = {"marker": marker}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def commit(self):
+            return None
+
+        async def rollback(self):
+            return None
+
+    monkeypatch.setattr(
+        db_engine,
+        "async_session_factory",
+        lambda: MarkerSession("canonical"),
+    )
+    release_canonical_reader = asyncio.Event()
+
+    async def read_marker() -> str:
+        async with db_engine.get_session() as session:
+            return str(session.info["marker"])
+
+    async def unrelated_application_request() -> str:
+        await release_canonical_reader.wait()
+        return await read_marker()
+
+    # This task captures the canonical context before the eval override is set.
+    unrelated_request = asyncio.create_task(unrelated_application_request())
+    with db_engine.override_session_factory(lambda: MarkerSession("eval")):
+        release_canonical_reader.set()
+        eval_value = await read_marker()
+        canonical_value = await unrelated_request
+
+    assert eval_value == "eval"
+    assert canonical_value == "canonical"
 
 
 async def test_ensure_m5_columns_adds_m5_candidate_digests(tmp_path):

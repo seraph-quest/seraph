@@ -137,6 +137,8 @@ class TestSchedulerEngine:
                     "screenshot_observation_digest",
                     "weekly_activity_review",
                     "screen_cleanup",
+                    "audio_ingress_cleanup",
+                    "work_board_dispatch",
                 }
                 screenshot_analysis_job = scheduler.get_job("screenshot_folder_analysis")
                 assert screenshot_analysis_job is not None

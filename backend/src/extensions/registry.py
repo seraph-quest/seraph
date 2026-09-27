@@ -45,6 +45,13 @@ from src.workflows.loader import scan_workflows
 
 _MCP_RUNTIME_UNSET = object()
 _SYMLINK_LAYOUT_ERROR = "extension package cannot contain symlink entries"
+_RECOVERABLE_LAYOUT_ERRORS = frozenset(
+    {
+        _SYMLINK_LAYOUT_ERROR,
+        "extension package could not be inspected safely",
+        "extension package contains an unsupported file entry",
+    }
+)
 
 
 def _slugify(value: str) -> str:
@@ -233,13 +240,15 @@ class ExtensionRegistry:
             symlink_entries: dict[str, Path] = {}
             for root in configured_roots:
                 root_path = Path(root)
+                root_error: str | None = None
                 try:
                     root_manifest_paths = iter_extension_manifest_paths([root])
                 except ValueError as root_exc:
-                    if str(root_exc) != _SYMLINK_LAYOUT_ERROR:
+                    root_error = str(root_exc)
+                    if root_error not in _RECOVERABLE_LAYOUT_ERRORS:
                         discovery_errors[str(root_path)] = ExtensionLoadErrorRecord(
                             source=str(root_path),
-                            message=str(root_exc),
+                            message=root_error,
                             phase="layout",
                         )
                         continue
@@ -253,8 +262,11 @@ class ExtensionRegistry:
                 if root_path.is_file():
                     continue
 
+                walk_errors: list[str] = []
+
                 def record_walk_error(error: OSError, *, source_root: Path = root_path) -> None:
                     source = error.filename or str(source_root)
+                    walk_errors.append(str(source))
                     discovery_errors[str(source)] = ExtensionLoadErrorRecord(
                         source=str(source),
                         message="extension package could not be inspected safely",
@@ -287,6 +299,13 @@ class ExtensionRegistry:
                         if not is_package_manifest_path(entry_path, root_path):
                             continue
                         discovered[str(entry_path.absolute())] = entry_path
+
+                if not walk_errors and root_error != _SYMLINK_LAYOUT_ERROR:
+                    discovery_errors[str(root_path)] = ExtensionLoadErrorRecord(
+                        source=str(root_path),
+                        message=root_error or "extension package could not be inspected safely",
+                        phase="layout",
+                    )
 
             for symlink_entry in symlink_entries.values():
                 package_is_reported = any(

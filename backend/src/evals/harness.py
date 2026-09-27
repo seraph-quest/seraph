@@ -7447,7 +7447,8 @@ async def _eval_memory_provider_stale_evidence_behavior() -> dict[str, Any]:
                 return_value=("- [goal] Keep Atlas moving", {"goal": ("Keep Atlas moving",)}),
             ),
         ):
-            retrieval = await plan_memory_retrieval(query="", active_projects=("Atlas launch",))
+            async with _patched_async_db():
+                retrieval = await plan_memory_retrieval(query="", active_projects=("Atlas launch",))
     finally:
         clear_memory_provider_adapters()
 
@@ -8600,21 +8601,17 @@ async def _eval_memory_contradiction_ranking_behavior() -> dict[str, Any]:
             importance=0.94,
             confidence=0.92,
         )
+        await memory_repository.create_memory(
+            content="Atlas release is delayed.",
+            kind="project",
+            summary="Atlas release is delayed.",
+            importance=0.41,
+            confidence=0.55,
+        )
 
         with patch(
             "src.memory.hybrid_retrieval.search_with_status",
-            return_value=(
-                [
-                    {
-                        "id": "",
-                        "text": "Atlas release is delayed.",
-                        "category": "project",
-                        "score": 0.39,
-                        "created_at": "2026-04-08T10:00:00+00:00",
-                    }
-                ],
-                False,
-            ),
+            return_value=([], False),
         ):
             hybrid = await retrieve_hybrid_memory(
                 query="Atlas release status",

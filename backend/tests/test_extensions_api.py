@@ -3232,6 +3232,10 @@ async def test_update_records_lifecycle_snapshot_and_rollback_restores_previous_
     )
 
     with (
+        patch("src.api.extensions.settings.deployment_environment", "test"),
+        patch("src.api.extensions.settings.operator_auth_allow_unauthenticated_tests", True),
+        patch("src.api.extensions.settings.operator_auth_secret", ""),
+        patch("src.api.extensions.settings.operator_auth_secret_hash", ""),
         patch(
             "src.extensions.lifecycle.get_base_tools_and_active_skills",
             return_value=([SimpleNamespace(name="read_file")], [], "approval"),
@@ -3251,7 +3255,7 @@ async def test_update_records_lifecycle_snapshot_and_rollback_restores_previous_
         assert lifecycle["rollback"]["available"] is True
         snapshot = lifecycle["rollback"]["snapshots"][0]
         assert snapshot["version"] == "2026.3.21"
-        assert Path(snapshot["path"]).is_dir()
+        assert snapshot["path"].startswith("[redacted:")
         assert lifecycle["diagnostics"]["vulnerability_state"] == "unknown"
         assert lifecycle["diagnostics"]["sbom_state"] == "unknown"
 
@@ -4537,6 +4541,18 @@ async def test_extension_connector_test_endpoint_returns_managed_connector_healt
     package_dir = _write_managed_connector_extension(tmp_path)
 
     with patch(
+        "src.api.extensions.settings.deployment_environment",
+        "test",
+    ), patch(
+        "src.api.extensions.settings.operator_auth_allow_unauthenticated_tests",
+        True,
+    ), patch(
+        "src.api.extensions.settings.operator_auth_secret",
+        "",
+    ), patch(
+        "src.api.extensions.settings.operator_auth_secret_hash",
+        "",
+    ), patch(
         "src.extensions.lifecycle.get_base_tools_and_active_skills",
         return_value=([SimpleNamespace(name="read_file")], [], "approval"),
     ), patch(
@@ -4962,10 +4978,16 @@ async def test_duplicate_automation_trigger_name_invalidates_all_colliding_defin
         extension_id="seraph.dup-automation-b",
     )
 
-    responses = [
-        await client.get("/api/extensions/seraph.dup-automation-a"),
-        await client.get("/api/extensions/seraph.dup-automation-b"),
-    ]
+    with (
+        patch("src.api.extensions.settings.deployment_environment", "test"),
+        patch("src.api.extensions.settings.operator_auth_allow_unauthenticated_tests", True),
+        patch("src.api.extensions.settings.operator_auth_secret", ""),
+        patch("src.api.extensions.settings.operator_auth_secret_hash", ""),
+    ):
+        responses = [
+            await client.get("/api/extensions/seraph.dup-automation-a"),
+            await client.get("/api/extensions/seraph.dup-automation-b"),
+        ]
 
     for response in responses:
         assert response.status_code == 200

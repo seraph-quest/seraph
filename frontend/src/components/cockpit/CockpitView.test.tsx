@@ -185,6 +185,7 @@ describe("CockpitView", () => {
   const fetchMock = vi.fn();
 
   beforeEach(() => {
+    fetchMock.mockClear();
     vi.stubGlobal("fetch", fetchMock);
     vi.stubGlobal("WebSocket", MockCockpitWebSocket);
     vi.stubGlobal("localStorage", {
@@ -6400,7 +6401,7 @@ describe("CockpitView", () => {
     expect(extensionEnableCountAfter).toBe(extensionEnableCountBefore);
   });
 
-  it("keeps step repair visible even when replay is blocked", async () => {
+  it("keeps step repair visible but locked without a current goal binding", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
@@ -6514,13 +6515,10 @@ describe("CockpitView", () => {
     await waitFor(() => expect(screen.getByText("workflow_web_brief_to_file failed at write_file")).toBeInTheDocument());
     fireEvent.click(screen.getByText("workflow_web_brief_to_file failed at write_file"));
     expect(screen.getByRole("button", { name: "Repair step" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Repair step" }));
-    await waitFor(() =>
-      expect(fetchMock).toHaveBeenCalledWith(
-        expect.stringContaining("/api/settings/tool-policy-mode"),
-        expect.objectContaining({ method: "PUT" }),
-      ),
-    );
+    expect(screen.getByRole("button", { name: "Repair step" })).toBeDisabled();
+    expect(fetchMock.mock.calls.some(([input, init]) =>
+      String(input).includes("/api/settings/tool-policy-mode") && init?.method === "PUT",
+    )).toBe(false);
   });
 
   it("surfaces routing summaries in the activity ledger", async () => {
@@ -6616,7 +6614,7 @@ describe("CockpitView", () => {
     expect(screen.queryByRole("button", { name: "Open Thread" })).not.toBeInTheDocument();
   });
 
-  it("keeps repair actions reachable when the actionable event is a grouped child", async () => {
+  it("applies grouped-child policy repair from the activity ledger", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
@@ -6732,7 +6730,7 @@ describe("CockpitView", () => {
           ],
         }));
       }
-      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "full" }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
       if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
       if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
       return Promise.resolve(mockResponse({}));
@@ -6753,7 +6751,7 @@ describe("CockpitView", () => {
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
         expect.stringContaining("/api/settings/tool-policy-mode"),
-        expect.objectContaining({ method: "PUT" }),
+        expect.objectContaining({ method: "PUT", body: JSON.stringify({ mode: "full" }) }),
       ),
     );
   });
@@ -7663,7 +7661,7 @@ describe("CockpitView", () => {
     expect(within(outcomePanel).queryByText("notes/brief.md")).not.toBeInTheDocument();
     expect(within(outcomePanel).getByText(/target reference digest:/)).toBeInTheDocument();
     expect(useChatStore.getState().sessionId).toBe("session-1");
-    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/workflows/runs/") && String(input).includes("/control"))).toBe(false);
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/workflows/runs/workflow-run-1/control"))).toBe(false);
   }, 15000);
 
   it("shows a visible pending state and fresh-thread guidance while the agent is working", async () => {

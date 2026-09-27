@@ -67,6 +67,13 @@ _SAFE_EXECUTION_BOUNDARY_ENUMS = frozenset(
         "secret_read",
     }
 )
+_SAFE_LIFECYCLE_SUMMARIES = frozenset(
+    {
+        "Managed connector is configured but disabled.",
+        "Managed connector configuration is valid and ready.",
+        "Contribution conflicts with another definition.",
+    }
+)
 
 
 class ExtensionStateRevisionConflict(RuntimeError):
@@ -160,6 +167,8 @@ def redact_lifecycle_receipt_value(
     if isinstance(value, (bytes, bytearray)):
         return f"[binary:{len(value)} bytes]"
     if isinstance(value, str):
+        if key_text == "summary" and not error_scope and value in _SAFE_LIFECYCLE_SUMMARIES:
+            return value
         if (
             key_text == "execution_boundaries"
             and not error_scope

@@ -74,6 +74,24 @@ class DummyTool:
         return self.__call__(*args, **kwargs)
 
 
+def _owned_workflow_audit_events(events):
+    """Bind synthetic audit rows to the authenticated test-bypass operator."""
+    owned_events = []
+    for event in events:
+        owned = dict(event)
+        details = dict(owned.get("details") or {})
+        details.setdefault("owner_kind", "user")
+        details.setdefault("owner_principal_id", "operator:test-bypass")
+        details.setdefault("operator_session_id", "test-auth-bypass")
+        details.setdefault("goal_id", "goal-1")
+        details.setdefault("criterion_id", "criterion-1")
+        details.setdefault("goal_revision", 1)
+        details.setdefault("plan_revision", 1)
+        owned["details"] = details
+        owned_events.append(owned)
+    return owned_events
+
+
 def _write_manifest_workflow_package(
     root,
     *,
@@ -3210,9 +3228,13 @@ async def test_workflow_runs_endpoint_uses_approval_context_in_pending_fingerpri
     )
 
     with (
+        patch("src.api.workflows.settings.deployment_environment", "test"),
+        patch("src.api.workflows.settings.operator_auth_allow_unauthenticated_tests", True),
+        patch("src.api.workflows.settings.operator_auth_secret", ""),
+        patch("src.api.workflows.settings.operator_auth_secret_hash", ""),
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-call",
                     "session_id": "session-1",
@@ -3225,7 +3247,7 @@ async def test_workflow_runs_endpoint_uses_approval_context_in_pending_fingerpri
                         "approval_context": approval_context,
                     },
                 },
-            ],
+            ]),
         ),
         patch(
             "src.api.workflows.approval_repository.list_pending",
@@ -3273,9 +3295,12 @@ async def test_workflow_runs_endpoint_uses_approval_context_in_pending_fingerpri
 
     assert response.status_code == 200
     run = response.json()["runs"][0]
-    assert run["run_fingerprint"] == expected_fingerprint
     assert run["pending_approval_count"] == 1
-    assert run["pending_approval_ids"] == ["approval-1"]
+    # The authenticated projection correlates the approval through its opaque
+    # run identity without exposing a separate fingerprint or approval context.
+    assert "run_fingerprint" not in run
+    assert run["run_identity"].endswith(f":{expected_fingerprint}:evt-call")
+    assert "approval_context" not in run
 
 
 @pytest.mark.asyncio
@@ -3296,9 +3321,13 @@ async def test_workflow_runs_endpoint_blocks_replay_when_approval_context_change
     }
 
     with (
+        patch("src.api.workflows.settings.deployment_environment", "test"),
+        patch("src.api.workflows.settings.operator_auth_allow_unauthenticated_tests", True),
+        patch("src.api.workflows.settings.operator_auth_secret", ""),
+        patch("src.api.workflows.settings.operator_auth_secret_hash", ""),
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-result",
                     "session_id": "session-1",
@@ -3329,7 +3358,7 @@ async def test_workflow_runs_endpoint_blocks_replay_when_approval_context_change
                         "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
                     },
                 },
-            ],
+            ]),
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
         patch("src.api.workflows.get_base_tools_and_active_skills", return_value=([], [], "balanced")),
@@ -3369,23 +3398,19 @@ async def test_workflow_runs_endpoint_blocks_replay_when_approval_context_change
 
     assert response.status_code == 200
     run = response.json()["runs"][0]
-    assert run["approval_context_mismatch"] is True
     assert run["replay_allowed"] is False
     assert run["replay_block_reason"] == "approval_context_changed"
-    assert run["risk_level"] == "medium"
-    assert run["execution_boundaries"] == ["external_read", "workspace_write"]
     assert run["resume_from_step"] is None
     assert run["resume_checkpoint_label"] is None
     assert run["checkpoint_candidates"] == []
-    assert run["resume_plan"] is None
-    assert "trust boundary" in run["approval_recovery_message"]
     assert run["trust_boundary"]["status"] == "changed"
     assert run["trust_boundary"]["blocked"] is True
     assert run["trust_boundary"]["reason"] == "approval_context_changed"
-    assert "risk_level" in run["trust_boundary"]["changed_fields"]
-    assert "execution_boundaries" in run["trust_boundary"]["changed_fields"]
-    assert run["trust_boundary"]["recorded"]["risk_level"] == "medium"
-    assert run["trust_boundary"]["current"]["risk_level"] == "high"
+    assert run["approval_recovery_message"] is None
+    assert run.get("resume_plan") is None
+    assert "approval_context_mismatch" not in run
+    assert "current_approval_context" not in run
+    assert "approval_context" not in run
 
 
 @pytest.mark.asyncio
@@ -3511,9 +3536,13 @@ async def test_workflow_runs_endpoint_ignores_approval_context_list_reordering(c
     }
 
     with (
+        patch("src.api.workflows.settings.deployment_environment", "test"),
+        patch("src.api.workflows.settings.operator_auth_allow_unauthenticated_tests", True),
+        patch("src.api.workflows.settings.operator_auth_secret", ""),
+        patch("src.api.workflows.settings.operator_auth_secret_hash", ""),
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-result",
                     "session_id": "session-1",
@@ -3544,7 +3573,7 @@ async def test_workflow_runs_endpoint_ignores_approval_context_list_reordering(c
                         "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
                     },
                 },
-            ],
+            ]),
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
         patch(
@@ -3582,9 +3611,9 @@ async def test_workflow_runs_endpoint_ignores_approval_context_list_reordering(c
 
     assert response.status_code == 200
     run = response.json()["runs"][0]
-    assert run["approval_context_mismatch"] is False
     assert run["replay_allowed"] is True
     assert run["replay_block_reason"] is None
+    assert "approval_context_mismatch" not in run
 
 
 @pytest.mark.asyncio
@@ -4340,9 +4369,13 @@ async def test_workflow_resume_plan_rejects_when_approval_context_changes(client
     }
 
     with (
+        patch("src.api.workflows.settings.deployment_environment", "test"),
+        patch("src.api.workflows.settings.operator_auth_allow_unauthenticated_tests", True),
+        patch("src.api.workflows.settings.operator_auth_secret", ""),
+        patch("src.api.workflows.settings.operator_auth_secret_hash", ""),
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-result",
                     "session_id": "session-1",
@@ -4377,9 +4410,10 @@ async def test_workflow_resume_plan_rejects_when_approval_context_changes(client
                         "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
                     },
                 },
-            ],
+            ]),
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
+        patch("src.api.workflows._workflow_current_goal_binding_detail", return_value=None),
         patch("src.api.workflows.get_base_tools_and_active_skills", return_value=([], [], "balanced")),
         patch("src.api.workflows.workflow_manager.build_workflow_tools", return_value=[]),
         patch(
@@ -4412,11 +4446,20 @@ async def test_workflow_resume_plan_rejects_when_approval_context_changes(client
     ):
         response = await client.post(
             "/api/workflows/runs/session-1:workflow_web_brief_to_file:web-brief-legacy/resume-plan",
-            json={"step_id": "save"},
+            json={
+                "step_id": "save",
+                "operator_context": {
+                    "workflow_run_identity": "session-1:workflow_web_brief_to_file:web-brief-legacy",
+                    "goal_id": "goal-1",
+                    "criterion_id": "criterion-1",
+                    "goal_revision": 1,
+                    "plan_revision": 1,
+                },
+            },
         )
 
     assert response.status_code == 409
-    assert "trust boundary" in response.json()["detail"]
+    assert response.json()["detail"] == "workflow_replay_blocked:approval_context_changed"
 
 
 @pytest.mark.asyncio
@@ -4444,9 +4487,13 @@ async def test_workflow_runs_endpoint_blocks_replay_when_approval_context_is_mis
     )
 
     with (
+        patch("src.api.workflows.settings.deployment_environment", "test"),
+        patch("src.api.workflows.settings.operator_auth_allow_unauthenticated_tests", True),
+        patch("src.api.workflows.settings.operator_auth_secret", ""),
+        patch("src.api.workflows.settings.operator_auth_secret_hash", ""),
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-result",
                     "session_id": "session-1",
@@ -4475,7 +4522,7 @@ async def test_workflow_runs_endpoint_blocks_replay_when_approval_context_is_mis
                         "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
                     },
                 },
-            ],
+            ]),
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
         patch(
@@ -4521,14 +4568,18 @@ async def test_workflow_runs_endpoint_blocks_replay_when_approval_context_is_mis
 
     assert response.status_code == 200
     run = response.json()["runs"][0]
-    assert run["approval_context_mismatch"] is False
     assert run["replay_allowed"] is False
     assert run["replay_block_reason"] == "approval_context_missing"
     assert run["resume_from_step"] is None
     assert run["resume_checkpoint_label"] is None
     assert run["checkpoint_candidates"] == []
-    assert run["resume_plan"] is None
-    assert "predates trust-boundary tracking" in run["approval_recovery_message"]
+    assert run["trust_boundary"]["blocked"] is True
+    assert run["trust_boundary"]["reason"] == "approval_context_missing"
+    assert run["approval_recovery_message"] is None
+    assert run.get("resume_plan") is None
+    assert "approval_context_mismatch" not in run
+    assert "current_approval_context" not in run
+    assert "approval_context" not in run
 
 
 @pytest.mark.asyncio
@@ -4551,9 +4602,13 @@ async def test_workflow_resume_plan_rejects_when_approval_context_is_missing_for
     }
 
     with (
+        patch("src.api.workflows.settings.deployment_environment", "test"),
+        patch("src.api.workflows.settings.operator_auth_allow_unauthenticated_tests", True),
+        patch("src.api.workflows.settings.operator_auth_secret", ""),
+        patch("src.api.workflows.settings.operator_auth_secret_hash", ""),
         patch(
             "src.api.workflows.audit_repository.list_events",
-            return_value=[
+            return_value=_owned_workflow_audit_events([
                 {
                     "id": "evt-result",
                     "session_id": "session-1",
@@ -4586,9 +4641,10 @@ async def test_workflow_resume_plan_rejects_when_approval_context_is_missing_for
                         "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
                     },
                 },
-            ],
+            ]),
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
+        patch("src.api.workflows._workflow_current_goal_binding_detail", return_value=None),
         patch(
             "src.api.workflows.workflow_manager.get_tool_metadata",
             return_value={
@@ -4621,11 +4677,20 @@ async def test_workflow_resume_plan_rejects_when_approval_context_is_missing_for
     ):
         response = await client.post(
             "/api/workflows/runs/session-1:workflow_web_brief_to_file:web-brief-legacy-auth/resume-plan",
-            json={"step_id": "save"},
+            json={
+                "step_id": "save",
+                "operator_context": {
+                    "workflow_run_identity": "session-1:workflow_web_brief_to_file:web-brief-legacy-auth",
+                    "goal_id": "goal-1",
+                    "criterion_id": "criterion-1",
+                    "goal_revision": 1,
+                    "plan_revision": 1,
+                },
+            },
         )
 
     assert response.status_code == 409
-    assert "predates trust-boundary tracking" in response.json()["detail"]
+    assert response.json()["detail"] == "workflow_replay_blocked:approval_context_missing"
 
 
 @pytest.mark.asyncio

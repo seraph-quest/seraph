@@ -1320,6 +1320,65 @@ contributes:
     )
 
 
+def test_registry_keeps_valid_sibling_when_same_root_has_unreadable_subtree(tmp_path: Path, monkeypatch):
+    extensions_root = tmp_path / "extensions"
+    valid_package = extensions_root / "valid-package"
+    unreadable_path = extensions_root / "unreadable-subtree"
+    valid_package.mkdir(parents=True)
+    unreadable_path.mkdir()
+    (valid_package / "manifest.yaml").write_text(
+        """
+id: seraph.valid-sibling
+version: 2026.3.21
+display_name: Valid Sibling
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.4.11"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  skills:
+    - skills/readable.md
+""".strip(),
+        encoding="utf-8",
+    )
+    original_iter = registry_module.iter_extension_manifest_paths
+    original_walk = registry_module.os.walk
+
+    def fail_root_inspection(roots: list[str]) -> list[Path]:
+        if str(extensions_root) in roots:
+            raise ValueError("extension package could not be inspected safely")
+        return original_iter(roots)
+
+    def walk_with_unreadable_subtree(root, *args, onerror=None, **kwargs):
+        for current, directories, filenames in original_walk(root, *args, onerror=onerror, **kwargs):
+            if Path(current) == extensions_root and unreadable_path.name in directories:
+                directories[:] = [name for name in directories if name != unreadable_path.name]
+                if onerror is not None:
+                    onerror(PermissionError(13, "Permission denied", str(unreadable_path)))
+            yield current, directories, filenames
+
+    monkeypatch.setattr(registry_module, "iter_extension_manifest_paths", fail_root_inspection)
+    monkeypatch.setattr(registry_module.os, "walk", walk_with_unreadable_subtree)
+
+    snapshot = ExtensionRegistry(
+        manifest_roots=[str(extensions_root)],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+        seraph_version="2026.4.11",
+    ).snapshot()
+
+    assert snapshot.get_extension("seraph.valid-sibling") is not None
+    assert any(
+        error.source == str(unreadable_path)
+        and error.phase == "layout"
+        and "inspected safely" in error.message
+        for error in snapshot.load_errors
+    )
+
+
 def test_registry_surfaces_unreadable_root_instead_of_returning_empty_snapshot(tmp_path: Path, monkeypatch):
     readable_root = tmp_path / "readable"
     unreadable_root = tmp_path / "unreadable"

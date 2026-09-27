@@ -23,6 +23,13 @@ _EMBEDDING_COST_UPDATED_AT = time.time()
 _AUDIT_EVENTS: list[dict[str, object]] = []
 
 
+class _InlineEmbeddingAdmission:
+    """Keep adapter response-contract tests independent of the live lane."""
+
+    def execute_sync(self, _request, operation, **_kwargs):
+        return operation()
+
+
 class _FakeClient:
     def __init__(self, responses):
         self.responses = list(responses)
@@ -189,6 +196,7 @@ def _governed_embedding_context():
         patch.object(embedder, "get_current_trust_principal", return_value=principal),
         patch("src.llm_runtime.provider_profiles", side_effect=profiles),
         patch("src.model_fabric.caller_context.effective_workload_policy", return_value=policy),
+        patch("src.model_fabric.execution.gpu_admission_broker", _InlineEmbeddingAdmission()),
         patch.object(embedder, "model_fabric_repository", repository),
     ):
         yield

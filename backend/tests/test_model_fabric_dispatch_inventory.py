@@ -441,6 +441,15 @@ _REVIEWED_EXCEPTIONS = (
         "Outbound request to the sandbox evaluator; this is code execution transport, not model inference.",
         "No model-fabric migration; keep behind the sandbox capability policy and reclassify if the endpoint becomes an inference route.",
     ),
+    _review(
+        "security/http_transport.py",
+        196,
+        "request_pinned_https",
+        "client.request",
+        "non_model_transport",
+        "Bounded public-source retrieval pins the resolved destination and does not submit model inference.",
+        "Keep in the guarded source-read transport; route it through model-fabric admission only if it becomes a model request.",
+    ),
 )
 
 _ALL_REVIEWS = tuple(sorted((*_CANONICAL_ADAPTERS, *_REVIEWED_EXCEPTIONS), key=lambda item: (item.path, item.line, item.symbol, item.operation)))

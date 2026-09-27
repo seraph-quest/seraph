@@ -1489,6 +1489,10 @@ async def test_operator_benchmark_proof_does_not_block_event_loop(client):
 @pytest.mark.asyncio
 async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_gates(client):
     with ExitStack() as stack:
+        stack.enter_context(patch("src.api.operator.settings.deployment_environment", "test"))
+        stack.enter_context(patch("src.api.operator.settings.operator_auth_allow_unauthenticated_tests", True))
+        stack.enter_context(patch("src.api.operator.settings.operator_auth_secret", ""))
+        stack.enter_context(patch("src.api.operator.settings.operator_auth_secret_hash", ""))
         stack.enter_context(patch(
         "src.api.operator.list_evolution_targets",
         return_value=[

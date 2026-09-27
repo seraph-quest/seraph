@@ -1198,7 +1198,7 @@ describe("CockpitView", () => {
     render(<CockpitView onSend={() => {}} />);
 
     const consoleRegion = await screen.findByRole("region", { name: "M9 governed extension console" });
-    fireEvent.click(within(consoleRegion).getByRole("button", { name: "diagnostics" }));
+    fireEvent.click(await within(consoleRegion).findByRole("button", { name: "diagnostics" }));
 
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(

@@ -83,6 +83,8 @@ OPERATOR_REQUIRED_TABLES = (
     "guardian_source_watches",
     "guardian_source_baselines",
     "guardian_decision_packets",
+    "guardian_inbox_dispositions",
+    "guardian_inbox_actions",
     "github_followthrough_connections",
     "guardian_routines",
     "guardian_routine_versions",
@@ -324,6 +326,16 @@ async def _ensure_legacy_columns(conn) -> None:
         "memory_snapshots",
         {"canonical_tombstone_revision": "VARCHAR"},
     )
+
+    await _add_missing_columns(
+        "guardian_decision_packets",
+        {"inbox_pending": "BOOLEAN DEFAULT 0"},
+    )
+    if await _table_columns("guardian_decision_packets"):
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_guardian_decision_packets_inbox_pending_updated "
+            "ON guardian_decision_packets (inbox_pending, updated_at, id)"
+        )
 
     session_columns = await _add_missing_columns(
         "sessions",

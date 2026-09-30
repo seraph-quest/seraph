@@ -753,6 +753,13 @@ async def test_goal_existence_owner_and_revision_are_checked(async_db):
 @pytest.mark.asyncio
 async def test_vault_redaction_applies_before_task_comment_and_block_persistence(async_db, monkeypatch):
     repository = WorkBoardRepository()
+    async def readonly_redaction(_db, value, *, fail_closed=True):
+        return value.replace("super-secret-value", "[redacted secret]")
+
+    monkeypatch.setattr(
+        "src.vault.redaction.redact_secrets_in_text_readonly",
+        readonly_redaction,
+    )
     monkeypatch.setattr(
         "src.vault.redaction.vault_repository.list_secret_values",
         AsyncMock(return_value=[("secret-ref", "super-secret-value")]),

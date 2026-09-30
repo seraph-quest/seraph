@@ -432,6 +432,12 @@ class GuardianDecisionPacket(SQLModel, table=True):
             "input_digest",
             unique=True,
         ),
+        Index(
+            "ix_guardian_decision_packets_inbox_pending_updated",
+            "inbox_pending",
+            "updated_at",
+            "id",
+        ),
     )
 
     id: str = Field(default_factory=_uuid, primary_key=True)
@@ -463,6 +469,9 @@ class GuardianDecisionPacket(SQLModel, table=True):
     redaction_manifest_json: str = Field(default="{}")
     outcome_json: str = Field(default="{}")
     failure_code: Optional[str] = Field(default=None, index=True)
+    # Set in the packet finalization transaction when a finite-budget,
+    # material, verified completion still needs its inbox projection.
+    inbox_pending: bool = Field(default=False)
     created_at: datetime = Field(default_factory=_now, index=True)
     updated_at: datetime = Field(default_factory=_now)
 
@@ -493,6 +502,87 @@ class GitHubFollowthroughConnection(SQLModel, table=True):
     active_fence: Optional[int] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=_now, index=True)
     updated_at: datetime = Field(default_factory=_now, index=True)
+
+
+class GuardianInboxDisposition(SQLModel, table=True):
+    """Owner/session-bound disposition for one verified source packet.
+
+    This row deliberately stores only opaque identities, digests and delivery
+    state.  The decision packet and its canonical artifacts remain the source
+    of truth for evidence and execution metadata.
+    """
+
+    __tablename__ = "guardian_inbox_dispositions"
+    __table_args__ = (
+        Index(
+            "ux_guardian_inbox_dispositions_source",
+            "owner_principal_id",
+            "source_kind",
+            "source_id",
+            unique=True,
+        ),
+        Index(
+            "ix_guardian_inbox_dispositions_owner_state",
+            "owner_principal_id",
+            "owner_session_id",
+            "state",
+            "created_at",
+        ),
+    )
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_principal_id: str = Field(index=True)
+    owner_session_id: str = Field(index=True)
+    source_kind: str = Field(default="source_packet", index=True)
+    source_id: str = Field(index=True)
+    source_digest: str = Field(default="", index=True)
+    goal_id: str = Field(index=True)
+    goal_revision: int = Field(default=1, index=True)
+    watch_id: str = Field(index=True)
+    plan_revision: int = Field(default=1, index=True)
+    state: str = Field(default="pending", index=True)
+    revision: int = Field(default=1, index=True)
+    snoozed_until: Optional[datetime] = Field(default=None, index=True)
+    expires_at: datetime = Field(index=True)
+    task_id: Optional[str] = Field(default=None, index=True)
+    last_action_receipt_id: Optional[str] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+
+
+class GuardianInboxAction(SQLModel, table=True):
+    """Append-only, owner/session-scoped inbox action receipt."""
+
+    __tablename__ = "guardian_inbox_actions"
+    __table_args__ = (
+        Index(
+            "ux_guardian_inbox_actions_idempotency",
+            "owner_principal_id",
+            "owner_session_id",
+            "idempotency_key",
+            unique=True,
+        ),
+        Index(
+            "ix_guardian_inbox_actions_item",
+            "owner_principal_id",
+            "owner_session_id",
+            "item_id",
+            "created_at",
+        ),
+    )
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_principal_id: str = Field(index=True)
+    owner_session_id: str = Field(index=True)
+    item_id: str = Field(index=True)
+    idempotency_key: str = Field(index=True)
+    payload_digest: str = Field(default="", index=True)
+    action: str = Field(default="", index=True)
+    prior_revision: int = Field(default=1)
+    result_revision: int = Field(default=1)
+    task_id: Optional[str] = Field(default=None, index=True)
+    safe_result_json: str = Field(default="{}")
+    created_at: datetime = Field(default_factory=_now, index=True)
 
 
 class GuardianRoutine(SQLModel, table=True):

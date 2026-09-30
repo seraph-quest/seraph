@@ -68,6 +68,52 @@ def test_other_readiness_failure_keeps_generic_prerequisite_recovery():
 
 
 @pytest.mark.asyncio
+async def test_goal_snapshot_settlement_persists_explicit_no_learning_result():
+    class _Jobs:
+        def __init__(self):
+            self.effect: dict[str, Any] | None = None
+            self.transition: dict[str, Any] | None = None
+
+        async def get_job(self, _job_id: str):
+            return {"status": "running", "revision": 11}
+
+        async def record_effect(self, _job_id: str, **kwargs: Any):
+            self.effect = kwargs
+            return {"revision": 12}
+
+        async def transition_job(self, _job_id: str, _status: str, **kwargs: Any):
+            self.transition = kwargs
+            return {"status": "succeeded", "revision": 13}
+
+    jobs = _Jobs()
+    dispatcher = WorkBoardDispatcher(jobs=jobs)
+    await dispatcher._settle_parent(
+        "parent-job",
+        "service:work-board:attempt",
+        4,
+        {
+            "verified": True,
+            "content_sha256": "a" * 64,
+            "child_job_id": "goal-snapshot-child",
+            "learning": "no_learning",
+            "readback_id": "readback-1",
+            "verified_at": "2026-09-30T12:00:00+00:00",
+            "result_refs": [
+                {
+                    "artifact_id": "art_snapshot",
+                    "file_path": "artifacts/snapshot.md",
+                }
+            ],
+        },
+    )
+
+    assert jobs.effect is not None
+    assert jobs.effect["details"]["learning"] == "no_learning"
+    assert jobs.transition is not None
+    assert jobs.transition["result"]["learning"] == "no_learning"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("connection", "grants", "repository", "expected"),
     [

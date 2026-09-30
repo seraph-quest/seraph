@@ -346,6 +346,22 @@ This section describes the Epic #864 M6 integration-branch target while its
 aggregate PR is under review. It does not claim full Hermes parity, autonomous
 execution, memory superiority, or production readiness.
 
+### Reviewed source-change follow-up
+
+Goals expose their success criterion, finite proactive budget, quiet hours, and
+review boundary. Source watches offer hourly, six-hourly, or daily cadence and
+retain per-run approval by default. A verified material change appears in the
+Guardian intervention inbox with local evidence, freshness, expiry, and recovery
+state. Accepting it creates one goal-linked **Triage** task in the existing Work
+Board; it does not execute that task or grant additional permissions. Snooze and
+dismiss persist without learning. Zero notification allowance keeps the inbox
+usable without sending a message.
+
+See [Guardian Intelligence](./05-guardian-intelligence.md#reviewed-goals-and-the-source-change-inbox)
+for ownership, readback, idempotency, and bounded recovery contracts. Local
+source execution and live external/provider usefulness have separate evidence
+boundaries. Until integration, the open PR owns branch validation truth.
+
 ## Models And Runtime
 
 The accepted #775 phase changes the active contract to OpenRouter-only

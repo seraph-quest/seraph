@@ -15,6 +15,7 @@ from src.api.chat import router as chat_router
 from src.api.extensions import router as extensions_router
 from src.api.evolution import router as evolution_router
 from src.api.goals import router as goals_router
+from src.api.guardian_inbox import router as guardian_inbox_router
 from src.api.mcp import router as mcp_router
 from src.api.memory import router as memory_router
 from src.api.model_fabric_settings import router as model_fabric_settings_router
@@ -51,6 +52,7 @@ api_router.include_router(extensions_router, prefix="/api", tags=["extensions"])
 api_router.include_router(evolution_router, prefix="/api", tags=["evolution"])
 api_router.include_router(sessions_router, prefix="/api", tags=["sessions"])
 api_router.include_router(goals_router, prefix="/api", tags=["goals"])
+api_router.include_router(guardian_inbox_router, prefix="/api", tags=["guardian-inbox"])
 api_router.include_router(profile_router, prefix="/api", tags=["profile"])
 api_router.include_router(tools_router, prefix="/api", tags=["tools"])
 api_router.include_router(telegram_router, prefix="/api", tags=["telegram"])

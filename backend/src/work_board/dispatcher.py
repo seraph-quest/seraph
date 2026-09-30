@@ -42,6 +42,7 @@ from src.guardian.goal_snapshot_to_file import (
     GoalSnapshotToFileService,
     normalize_workspace_relative_path,
 )
+from src.guardian.inbox import expire_inbox_items, repair_inbox_dispositions
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 from src.workspace import canonical_workspace_root
 from config.settings import settings
@@ -609,6 +610,16 @@ class WorkBoardDispatcher:
 
     async def run_pass(self) -> dict[str, Any]:
         observed_at = self.now()
+        try:
+            inbox_expired = await expire_inbox_items(limit=20)
+            inbox_repaired = await repair_inbox_dispositions(limit=20)
+        except Exception:
+            # Inbox projection repair is bounded optional reconciliation. A
+            # board dispatch pass must remain available when its DB write is
+            # temporarily unavailable; the next managed tick retries it.
+            logger.exception("guardian inbox repair pass failed")
+            inbox_expired = 0
+            inbox_repaired = 0
         expired_reviews = await self._expire_review_windows(now=observed_at)
         reconciled = await self.reconcile_pending_attempts(now=observed_at)
         linked_reconciled = await self.reconcile_linked_attempts(now=observed_at)
@@ -628,6 +639,8 @@ class WorkBoardDispatcher:
             "completed": 0,
             "blocked": expired_reviews + len(reconciled) + len(linked_reconciled),
             "reconciled": len(reconciled) + len(linked_reconciled),
+            "inbox_repaired": inbox_repaired,
+            "inbox_expired": inbox_expired,
             "task_ids": [],
         }
         admissions = 0
@@ -3668,6 +3681,7 @@ class WorkBoardDispatcher:
                 "file_path": child.file_path,
                 "verified": verified,
                 "reason_code": reason,
+                "learning": child.learning,
             }
         ]
         result = {
@@ -3685,6 +3699,7 @@ class WorkBoardDispatcher:
                 }
             ],
             "child_job_id": child.job_id,
+            "learning": child.learning,
         }
         if child_proof is not None:
             result.update(
@@ -3707,6 +3722,8 @@ class WorkBoardDispatcher:
         current = await self.jobs.get_job(job_id)
         if not isinstance(current, Mapping) or _status(current) != "running":
             return
+        learning = outcome.get("learning")
+        learning_detail = {"learning": learning} if learning == "no_learning" else {}
         if outcome.get("verified"):
             target_path = _text((outcome.get("result_refs") or [{}])[0].get("file_path"))
             digest = _text(outcome.get("content_sha256"))
@@ -3727,6 +3744,7 @@ class WorkBoardDispatcher:
                     "goal_id_read_back": True,
                     "child_job_id": outcome.get("child_job_id"),
                     "artifact_id": _text((outcome.get("result_refs") or [{}])[0].get("artifact_id")),
+                    **learning_detail,
                 },
                 owner=owner,
                 fencing_token=fence,
@@ -3738,7 +3756,11 @@ class WorkBoardDispatcher:
                 owner=owner,
                 fencing_token=fence,
                 expected_revision=readback.get("revision"),
-                result={"child_job_id": outcome.get("child_job_id"), "content_sha256": digest},
+                result={
+                    "child_job_id": outcome.get("child_job_id"),
+                    "content_sha256": digest,
+                    **learning_detail,
+                },
                 result_summary="board capability completed with independent readback",
             )
             return
@@ -3750,6 +3772,7 @@ class WorkBoardDispatcher:
             details={
                 "reason_code": _stable_reason_code(outcome.get("reason")),
                 "child_job_id": outcome.get("child_job_id"),
+                **learning_detail,
             },
             owner=owner,
             fencing_token=fence,
@@ -3762,6 +3785,7 @@ class WorkBoardDispatcher:
             fencing_token=fence,
             expected_revision=recorded.get("revision"),
             reason=_text(outcome.get("reason"))[:256] or "board_child_blocked",
+            result=learning_detail or None,
             result_summary="board capability requires operator recovery",
         )
 

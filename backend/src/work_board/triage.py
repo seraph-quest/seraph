@@ -25,6 +25,7 @@ from src.db.models import Goal, WorkBoardLink, WorkBoardProposal, WorkBoardStatu
 from src.llm_runtime import (
     completion_with_fallback,
     fallback_model_ids,
+    preflight_governed_completion_target_async,
     provider_profiles,
     resolve_runtime_profile,
 )
@@ -1948,6 +1949,21 @@ async def create_proposal(
             job_id=proposal.admission_job_id,
             route_id=route_id,
         )
+        preflight_reason = await preflight_governed_completion_target_async(
+            runtime_path=route_id,
+            profile="openrouter",
+            request_context=prepared_prompt[2],
+        )
+        if preflight_reason is not None:
+            # This check is before durable job admission and before the
+            # provider-contact marker.  Keep the external reason generic: the
+            # canonical selector remains the owner of the precise denial,
+            # while the board records a safe no-contact prerequisite block.
+            raise BoardError(
+                "openrouter_route_unavailable",
+                "The governed OpenRouter proposal route is unavailable before provider contact",
+                status_code=409,
+            )
         job_binding = await _admit_proposal_job(owner=owner, task=task_snapshot, proposal=proposal)
         if job_binding is None:
             async with get_session() as db:

@@ -90,6 +90,133 @@ export interface GoalSuccessCriterion {
   evidence_refs: string[];
 }
 
+export interface GoalAdmissionBudget {
+  reviewed_grant: boolean;
+  grant_id?: string | null;
+  max_outstanding_jobs: number;
+  max_attempts: number;
+  max_runtime_seconds: number;
+  notifications_per_day: number;
+  period_started_at?: string | null;
+  period_expires_at?: string | null;
+  quiet_hours_start?: number | null;
+  quiet_hours_end?: number | null;
+  timezone: string;
+}
+
+export type GuardianInboxState = "pending" | "snoozed" | "accepted" | "dismissed" | "expired";
+
+export type GuardianInboxAction = "accept_followup" | "snooze" | "dismiss";
+
+/** Safe evidence metadata exposed by the guardian inbox. Source content stays behind artifact access. */
+export interface GuardianInboxEvidenceRef {
+  artifact_id?: string | null;
+  artifact_type?: string | null;
+  file_path?: string | null;
+  content_sha256?: string | null;
+  sha256?: string | null;
+  kind?: string | null;
+  status?: string | null;
+  verification?: string | null;
+  last_verified_at?: string | null;
+  workflow_run_id?: string | null;
+  owner_session_id?: string | null;
+  target_path?: string | null;
+  artifact_url?: string | null;
+  label?: string | null;
+}
+
+/** Authorized durable source-job/readback receipt shown in item details. */
+export interface GuardianInboxReadback {
+  target_path?: string | null;
+  readback_id?: string | null;
+  verified_at?: string | null;
+  digest?: string | null;
+  status?: string | null;
+}
+
+/** Bounded, redacted, owner-checked detail preview for a verified artifact. */
+export interface GuardianInboxEvidencePreview {
+  artifact_id?: string | null;
+  artifact_type?: string | null;
+  file_path?: string | null;
+  sha256?: string | null;
+  owner_session_id?: string | null;
+  workflow_run_id?: string | null;
+  text?: string | null;
+  trust?: string | null;
+}
+
+export interface GuardianInboxJob {
+  id?: string | null;
+  status?: string | null;
+  attempt_count?: number | null;
+  max_attempts?: number | null;
+  readback_id?: string | null;
+  verified_at?: string | null;
+  digest?: string | null;
+  readback_status?: string | null;
+  readbacks?: GuardianInboxReadback[];
+}
+
+/** Operator-safe projection of a durable, owner-scoped guardian intervention. */
+export interface GuardianInboxItem {
+  id: string;
+  revision: number;
+  state: GuardianInboxState;
+  /** True when the server sent an unknown state; actions are then disabled. */
+  degraded?: boolean;
+  source_kind: string;
+  source_id: string;
+  title: string;
+  summary: string;
+  why_now: string;
+  goal_id: string;
+  goal_revision: number;
+  watch_id: string;
+  plan_revision: number;
+  task_id?: string | null;
+  expires_at: string;
+  snoozed_until?: string | null;
+  evidence_refs: GuardianInboxEvidenceRef[];
+  evidence_previews?: GuardianInboxEvidencePreview[];
+  job?: GuardianInboxJob | null;
+  allowed_actions: GuardianInboxAction[];
+  evidence_status?: string | null;
+  source_status?: string | null;
+  source_freshness?: string | null;
+  verification_status?: string | null;
+  memory_status?: string | null;
+  policy_reason?: string | null;
+  recovery_action?: string | null;
+  evidence_url?: string | null;
+  task_url?: string | null;
+  watch_url?: string | null;
+}
+
+export interface GuardianInboxPage {
+  items: GuardianInboxItem[];
+  next_cursor?: string | null;
+  last_confirmed_at?: string | null;
+}
+
+export interface GuardianInboxActionRequest {
+  action: GuardianInboxAction;
+  expected_revision: number;
+  idempotency_key: string;
+  until?: string;
+  reason?: string;
+}
+
+export interface GuardianInboxActionResponse {
+  id: string;
+  revision: number;
+  state: GuardianInboxState;
+  task_id?: string | null;
+  receipt_id: string;
+  recovery_action?: string | null;
+}
+
 export interface GoalInfo {
   id: string;
   parent_id: string | null;
@@ -108,6 +235,8 @@ export interface GoalInfo {
   revision?: number;
   /** Null when no bounded verification criterion is configured. */
   success_criterion?: GoalSuccessCriterion | null;
+  proactive_enabled?: boolean;
+  admission_budget?: GoalAdmissionBudget | null;
 }
 
 export type WorkBoardStatus =

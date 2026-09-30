@@ -45,7 +45,78 @@ describe("SourceWatchForm", () => {
       goal_id: "goal-1",
       expected_goal_revision: 2,
       write_mode: "approval_each_run",
-      schedule: { cron: "*/15 * * * *", timezone: "UTC" },
+      schedule: { cron: "0 * * * *", timezone: expect.any(String) },
+    });
+  });
+
+  it("selects a loaded goal and persists a daily cadence in the operator timezone", async () => {
+    fetchMock
+      .mockResolvedValueOnce(response([]))
+      .mockResolvedValueOnce(response({ id: "watch-daily", goal_id: "goal-2" }))
+      .mockResolvedValueOnce(response([]));
+
+    render(
+      <SourceWatchForm
+        goal={null}
+        goalOptions={[
+          { id: "goal-1", title: "Old goal", revision: 2 },
+          { id: "goal-2", title: "Loaded goal", revision: 7 },
+        ]}
+      />,
+    );
+    fireEvent.change(screen.getByRole("combobox", { name: "Guardian goal" }), { target: { value: "goal-2" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Guardian cadence" }), { target: { value: "daily" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Guardian daily hour" }), { target: { value: "6" } });
+    fireEvent.change(screen.getByLabelText("Guardian source"), { target: { value: "notes/plan.md" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add watch" }));
+
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === "POST")).toBe(true));
+    const postCall = fetchMock.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === "POST");
+    expect(JSON.parse(String((postCall?.[1] as RequestInit).body))).toMatchObject({
+      goal_id: "goal-2",
+      expected_goal_revision: 7,
+      schedule: { cron: "0 6 * * *", timezone: expect.any(String) },
+    });
+  });
+
+  it("uses the selected goal's reviewed reference without asking for a raw grant ID", async () => {
+    fetchMock
+      .mockResolvedValueOnce(response([]))
+      .mockResolvedValueOnce(response({ id: "watch-standing", goal_id: "goal-reviewed" }))
+      .mockResolvedValueOnce(response([]));
+
+    render(
+      <SourceWatchForm
+        goal={{
+          id: "goal-reviewed",
+          title: "Reviewed goal",
+          revision: 5,
+          proactive_enabled: true,
+          admission_budget: {
+            reviewed_grant: true,
+            grant_id: "budget-review:existing",
+            max_outstanding_jobs: 1,
+            max_attempts: 1,
+            max_runtime_seconds: 300,
+            notifications_per_day: 0,
+            quiet_hours_start: 22,
+            quiet_hours_end: 8,
+            timezone: "Europe/Warsaw",
+          },
+        }}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText("Guardian write mode"), { target: { value: "standing_reviewed" } });
+    expect(screen.getByLabelText("Guardian reviewed grant reference")).toHaveValue("budget-review:existing");
+    expect(screen.getByLabelText("Guardian reviewed grant reference")).toHaveAttribute("readonly");
+    fireEvent.change(screen.getByLabelText("Guardian source"), { target: { value: "notes/plan.md" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add watch" }));
+
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === "POST")).toBe(true));
+    const postCall = fetchMock.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === "POST");
+    expect(JSON.parse(String((postCall?.[1] as RequestInit).body))).toMatchObject({
+      write_mode: "standing_reviewed",
+      reviewed_grant_id: "budget-review:existing",
     });
   });
 

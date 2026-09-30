@@ -12,6 +12,7 @@ import difflib
 import hashlib
 import html
 import json
+import logging
 import re
 import uuid
 from dataclasses import dataclass, replace
@@ -83,6 +84,8 @@ APPROVAL_TTL_SECONDS = 5 * 60
 PACKET_MAX_BYTES = 72 * 1024
 TASK_MAX_BYTES = 8 * 1024
 NO_LEARNING = "no_learning"
+
+logger = logging.getLogger(__name__)
 
 _HTML_SCRIPT_RE = re.compile(r"<(script|style|noscript)\b[^>]*>.*?</\1\s*>", re.I | re.S)
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
@@ -3827,6 +3830,16 @@ class SourceWatchService:
                         "operator_visible": True,
                     }
             final_status = "degraded" if packet.status == "degraded" else "succeeded"
+            if final_status == "succeeded":
+                try:
+                    from src.guardian.inbox import ensure_inbox_disposition
+
+                    await ensure_inbox_disposition(packet_id=packet.id)
+                except Exception:
+                    # The verified source result remains authoritative. The
+                    # bounded dispatcher repair pass will retry the durable
+                    # inbox projection without rerunning the source.
+                    logger.exception("guardian inbox completion repair failed during source-watch recovery")
             notification_id = await self._repair_packet_notification(watch, packet)
             await self._release_watch(watch_id, job_id, int(watch.active_job_fence), final_status)
             return {
@@ -4201,6 +4214,15 @@ class SourceWatchService:
             },
             result_summary="verified source-watch dossier and local task readback",
         )
+        try:
+            from src.guardian.inbox import ensure_inbox_disposition
+
+            await ensure_inbox_disposition(packet_id=packet.id)
+        except Exception:
+            # Do not turn a verified local artifact into a failed source job
+            # because an optional projection write was interrupted. The
+            # existing bounded dispatcher pass repairs the gap.
+            logger.exception("guardian inbox completion repair failed after source-watch completion")
         # Return only the canonical artifact identities and verified digests
         # to the calling capability adapter. The work-board dispatcher uses
         # these references to project the actual output records onto the task
@@ -4430,6 +4452,16 @@ class SourceWatchService:
                     "task_sha256": row.task_sha256,
                     "readback": "passed",
                 }
+            )
+            current_goal = (await db.execute(select(Goal).where(Goal.id == row.goal_id))).scalars().first()
+            current_budget = deserialize_admission_budget(current_goal) if current_goal is not None else None
+            row.inbox_pending = bool(
+                row.status == "succeeded"
+                and row.verification_status == "passed"
+                and _load(row.material_source_keys_json, [])
+                and current_budget is not None
+                and current_budget.period_expires_at is not None
+                and watch.goal_id == row.goal_id
             )
             row.updated_at = _now()
             db.add(row)

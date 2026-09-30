@@ -478,6 +478,123 @@ describe("CockpitView", () => {
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/workflows/runs?"))).toBe(false);
   });
 
+  it("opens an owner-checked Guardian dossier preview when the global artifact index is empty", async () => {
+    const artifactId = "art_guardian_dossier_1";
+    const artifactPath = "guardian/source-watches/watch-1/packets/packet-1.md";
+    const contentDigest = "f".repeat(64);
+    const ownerSessionId = "operator-owner-session";
+    const workflowRunId = "source-watch:watch-1:run-1";
+    const evidenceReference = {
+      artifact_id: artifactId,
+      artifact_type: "source_watch_dossier",
+      file_path: artifactPath,
+      sha256: contentDigest,
+      status: "verified",
+      verification: "byte_hash",
+      last_verified_at: "2026-09-24T08:00:00Z",
+      owner_session_id: ownerSessionId,
+      workflow_run_id: workflowRunId,
+    };
+    const guardianItem = {
+      id: "inbox-guardian-artifact",
+      revision: 3,
+      state: "pending",
+      source_kind: "source_packet",
+      source_id: "watch-1",
+      title: "Inspect source watch dossier",
+      summary: "A verified dossier is ready for review.",
+      why_now: "The watched source produced a verified change.",
+      goal_id: "goal-guardian",
+      goal_revision: 2,
+      watch_id: "watch-1",
+      plan_revision: 4,
+      task_id: null,
+      expires_at: "2026-09-25T08:00:00Z",
+      snoozed_until: null,
+      evidence_refs: [evidenceReference],
+      allowed_actions: ["accept_followup", "snooze", "dismiss"],
+      evidence_status: "verified",
+      source_status: "changed",
+      source_freshness: "fresh",
+      verification_status: "byte_hash",
+      memory_status: "not_updated",
+    };
+    const detailItem = {
+      ...guardianItem,
+      job: {
+        id: "job-source-watch-1",
+        status: "succeeded",
+        attempt_count: 1,
+        max_attempts: 3,
+        readbacks: [
+          {
+            target_path: artifactPath,
+            readback_id: "guardian_readback:dossier-1",
+            verified_at: "2026-09-24T08:00:00Z",
+            digest: contentDigest,
+            status: "succeeded",
+          },
+          {
+            target_path: "guardian/source-watches/watch-1/tasks/packet-1.md",
+            readback_id: "guardian_readback:task-1",
+            verified_at: "2026-09-24T08:00:01Z",
+            digest: "e".repeat(64),
+            status: "succeeded",
+          },
+        ],
+      },
+      evidence_previews: [{
+        artifact_id: artifactId,
+        artifact_type: "source_watch_dossier",
+        file_path: artifactPath,
+        sha256: contentDigest,
+        owner_session_id: ownerSessionId,
+        workflow_run_id: workflowRunId,
+        text: "Bounded redacted dossier preview from the authenticated source job.",
+        trust: "untrusted_source_evidence",
+      }],
+    };
+    mockCockpitBaselineFetch(fetchMock, {});
+    const baselineFetch = fetchMock.getMockImplementation() as
+      ((input: RequestInfo | URL, init?: RequestInit) => unknown) | undefined;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/auth/session")) {
+        return Promise.resolve(mockResponse({ authenticated: true, principal_id: "operator:one", session_id: ownerSessionId }));
+      }
+      if (url.includes("/api/guardian/inbox?") && !url.includes("/api/guardian/inbox/")) {
+        return Promise.resolve(mockResponse({ items: [guardianItem], next_cursor: null, last_confirmed_at: "2026-09-24T08:00:01Z" }));
+      }
+      if (url.endsWith(`/api/guardian/inbox/${encodeURIComponent(guardianItem.id)}`)) {
+        return Promise.resolve(mockResponse({ item: detailItem }));
+      }
+      return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
+    });
+
+    const hiddenInspectorVisibility = {
+      ...getDefaultPaneVisibility("default"),
+      inspector_pane: false,
+    };
+    useCockpitLayoutStore.setState({
+      inspectorVisible: false,
+      paneVisibility: hiddenInspectorVisibility,
+      savedPaneVisibility: { default: hiddenInspectorVisibility },
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "View evidence and task" }));
+    expect(await screen.findByText(new RegExp(`${artifactPath} · guardian_readback:dossier-1 · succeeded`))).toBeInTheDocument();
+    expect(await screen.findByText(/guardian\/source-watches\/watch-1\/tasks\/packet-1\.md · guardian_readback:task-1 · succeeded/)).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: `Inspect guardian evidence ${artifactId}` }));
+
+    expect(await screen.findByText(artifactPath, { selector: ".cockpit-inspector-title" })).toBeInTheDocument();
+    expect(screen.getByText("Bounded redacted dossier preview from the authenticated source job.")).toBeInTheDocument();
+    expect(screen.getByText(artifactId)).toBeInTheDocument();
+    expect(screen.getByText(contentDigest)).toBeInTheDocument();
+    expect(screen.getByText(ownerSessionId)).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/workflows/jobs/"))).toBe(false);
+  });
+
   it("hides a nested board artifact when its durable child run names a different parent", async () => {
     const parentWorkflowRunId = "work-board:task-parent-bound";
     const childWorkflowRunId = "session:workflow:child-parent-mismatch:run-1";
@@ -14232,8 +14349,9 @@ describe("CockpitView", () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     const view = render(<CockpitView onSend={vi.fn()} />);
 
-    // The baseline refresh now also starts the authenticated work-board snapshot.
-    await waitFor(() => expect(cockpitFetchCount).toBe(5));
+    // The baseline refresh now also starts the authenticated work-board snapshot
+    // and the read-only guardian inbox projection.
+    await waitFor(() => expect(cockpitFetchCount).toBe(6));
     view.unmount();
 
     await act(async () => {

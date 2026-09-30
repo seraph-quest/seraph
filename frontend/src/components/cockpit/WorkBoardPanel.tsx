@@ -107,6 +107,8 @@ export interface WorkBoardPanelProps {
   onOpenApprovals?: () => void;
   onInspectWorkflowRun?: (workflowRunId: string, ownerSessionId: string | null) => void;
   onInspectArtifact?: (request: WorkBoardArtifactInspectRequest) => void;
+  focusTaskId?: string | null;
+  onFocusTaskHandled?: (taskId: string) => void;
   ownerPrincipalId?: string | null;
   ownerSessionId?: string | null;
 }
@@ -610,6 +612,8 @@ function WorkBoardPanel({
   onOpenApprovals,
   onInspectWorkflowRun,
   onInspectArtifact,
+  focusTaskId,
+  onFocusTaskHandled,
   ownerPrincipalId,
   ownerSessionId,
 }: WorkBoardPanelProps) {
@@ -1476,6 +1480,12 @@ function WorkBoardPanel({
     setEditMode(false);
     setDetail(null);
   }, [tasks]);
+
+  useEffect(() => {
+    if (!focusTaskId) return;
+    openTask(focusTaskId);
+    onFocusTaskHandled?.(focusTaskId);
+  }, [focusTaskId, onFocusTaskHandled, openTask]);
 
   const closeTask = useCallback(() => {
     selectedTaskIdRef.current = null;

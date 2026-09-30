@@ -27,6 +27,7 @@ from src.db.models import (
     GuardianInboxDisposition,
     GuardianSourceWatch,
     WorkflowRunState,
+    WorkBoardTask,
     WorkBoardStatus,
 )
 from src.goals.repository import deserialize_admission_budget
@@ -45,6 +46,10 @@ _SAFE_KEY = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
 _MAX_CURSOR_BYTES = 512
 _MAX_DISPLAY = 240
 _REPAIR_LIMIT = 20
+_ACTION_HISTORY_LIMIT = 20
+_ACTION_HISTORY_QUERY_LIMIT = _ACTION_HISTORY_LIMIT + 1
+_SAFE_ACTIONS = frozenset({"accept_followup", "snooze", "dismiss"})
+_SAFE_ACTION_OUTCOMES = frozenset({"accepted", "snoozed", "dismissed"})
 
 
 class InboxError(Exception):
@@ -363,6 +368,116 @@ async def _redact_preview_text(db: Any, text: str, *, max_chars: int) -> str:
     return redacted[:max_chars]
 
 
+async def _load_action_history(
+    db: Any,
+    *,
+    owner_principal_id: str,
+    owner_session_id: str,
+    item_id: str,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Project bounded, owner-fenced action receipts for an item detail.
+
+    The query applies the principal, session, and disposition fence before the
+    bounded fetch.  Only typed receipt fields are returned; the original
+    idempotency key, payload digest, and result JSON never cross this boundary.
+    Read-only vault redaction deliberately reuses the caller's session so a
+    passive detail request cannot create audit rows or nested writer sessions.
+    """
+
+    query = (
+        select(GuardianInboxAction)
+        .where(
+            GuardianInboxAction.owner_principal_id == owner_principal_id,
+            GuardianInboxAction.owner_session_id == owner_session_id,
+            GuardianInboxAction.item_id == item_id,
+        )
+        .order_by(
+            GuardianInboxAction.created_at.desc(),
+            GuardianInboxAction.id.desc(),
+        )
+        .limit(_ACTION_HISTORY_QUERY_LIMIT)
+    )
+    rows = list((await db.execute(query)).scalars().all())
+    truncated = len(rows) > _ACTION_HISTORY_LIMIT
+    rows = rows[:_ACTION_HISTORY_LIMIT]
+
+    task_ids = {
+        safe_task_id
+        for safe_task_id in (_safe_id(row.task_id) for row in rows)
+        if safe_task_id is not None
+    }
+    owner_task_ids: set[str] = set()
+    if task_ids:
+        owner_task_ids = set(
+            (
+                await db.execute(
+                    select(WorkBoardTask.task_id).where(
+                        WorkBoardTask.task_id.in_(task_ids),
+                        WorkBoardTask.owner_principal_id == owner_principal_id,
+                        WorkBoardTask.owner_session_id == owner_session_id,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    history: list[dict[str, Any]] = []
+    for row in rows:
+        safe_reason: str | None
+        if row.safe_reason is None:
+            safe_reason = None
+            reason_state = "unavailable"
+        elif str(row.safe_reason) == "":
+            safe_reason = ""
+            reason_state = "not_provided"
+        else:
+            safe_reason = await _redact_preview_text(
+                db,
+                str(row.safe_reason)[:500],
+                max_chars=500,
+            )
+            reason_state = (
+                "unavailable"
+                if safe_reason == "[redaction unavailable]"
+                else "provided"
+            )
+
+        outcome = "unavailable"
+        # Legacy/corrupt rows must not make a passive projection parse an
+        # unbounded JSON blob.  M1 receipts are tiny; oversized values are
+        # treated as unavailable rather than partially exposing them.
+        raw_result_json = str(row.safe_result_json or "")
+        if len(raw_result_json) <= 8192:
+            try:
+                result_payload = json.loads(raw_result_json or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                result_payload = {}
+        else:
+            result_payload = {}
+        if isinstance(result_payload, dict):
+            candidate = result_payload.get("state")
+            if isinstance(candidate, str) and candidate in _SAFE_ACTION_OUTCOMES:
+                outcome = candidate
+
+        task_id = _safe_id(row.task_id)
+        action = str(row.action or "")
+        history.append(
+            {
+                "receipt_id": _safe_id(row.id),
+                "action": action if action in _SAFE_ACTIONS else "unavailable",
+                "created_at": _iso(row.created_at),
+                "expected_revision": int(row.prior_revision or 0),
+                "result_revision": int(row.result_revision or 0),
+                "task_id": task_id if task_id in owner_task_ids else None,
+                "outcome": outcome,
+                "reason_state": reason_state,
+                "safe_reason": safe_reason,
+            }
+        )
+    return history, truncated
+
+
 async def _evidence_previews(
     db: Any,
     *,
@@ -629,6 +744,8 @@ def _project_item(
     run: WorkflowRunState | None = None,
     detail: bool = False,
     evidence_previews: list[dict[str, Any]] | None = None,
+    action_history: list[dict[str, Any]] | None = None,
+    action_history_truncated: bool = False,
 ) -> dict[str, Any]:
     effective_state = disposition.state
     if effective_state in {"pending", "snoozed"} and _utc(disposition.expires_at) <= now:
@@ -720,6 +837,8 @@ def _project_item(
     if detail:
         item["job"] = _job_detail_projection(run, packet=packet, watch=watch)
         item["evidence_previews"] = evidence_previews or []
+        item["action_history"] = action_history or []
+        item["action_history_truncated"] = bool(action_history_truncated)
     if detail:
         links: dict[str, str | None] = {
             "source_watch": f"/api/capabilities/source-watches/{disposition.watch_id}",
@@ -896,6 +1015,15 @@ async def get_owned_item(
                 )
             ).scalars().first()
         status, refs = _artifact_status(packet, watch, run)
+        if detail:
+            action_history, action_history_truncated = await _load_action_history(
+                db,
+                owner_principal_id=owner_principal_id,
+                owner_session_id=owner_session_id,
+                item_id=disposition.id,
+            )
+        else:
+            action_history, action_history_truncated = [], False
         previews = (
             await _evidence_previews(
                 db,
@@ -918,6 +1046,8 @@ async def get_owned_item(
             run=run,
             detail=detail,
             evidence_previews=previews,
+            action_history=action_history,
+            action_history_truncated=action_history_truncated,
         )
 
 
@@ -1201,7 +1331,7 @@ async def apply_action(
             status_code=422,
         )
     normalized_until = _utc(until)
-    safe_reason = _safe_action_reason(reason)
+    normalized_reason = _safe_action_reason(reason)
     payload_digest = _digest(
         _json(
             {
@@ -1209,7 +1339,7 @@ async def apply_action(
                 "expected_revision": expected_revision,
                 "idempotency_key": idempotency_key,
                 "item_id": item_id,
-                "reason": safe_reason,
+                "reason": normalized_reason,
                 "until": _iso(normalized_until),
             }
         )
@@ -1249,8 +1379,16 @@ async def apply_action(
         now = _now()
         if normalized_until < now + timedelta(minutes=15) or normalized_until > now + timedelta(days=7):
             raise InboxError("invalid_snooze_window", "Snooze must be between 15 minutes and 7 days", status_code=422)
-    if action == "dismiss" and safe_reason:
-        safe_reason = await vault_redaction.redact_secrets_in_text(safe_reason, fail_closed=True)
+    # Persist only the bounded, server-redacted reason for every action.  The
+    # digest intentionally uses ``normalized_reason`` above so replay and
+    # M1 payload identity remain unchanged by redaction output.
+    safe_reason = normalized_reason
+    if safe_reason:
+        safe_reason = await vault_redaction.redact_secrets_in_text(
+            safe_reason,
+            fail_closed=True,
+        )
+        safe_reason = str(safe_reason)[:500]
 
     async with db_engine.get_session() as db:
         await _begin_sqlite_immediate(db)
@@ -1434,6 +1572,7 @@ async def apply_action(
             result_revision=result_revision,
             task_id=task_id,
             safe_result_json="{}",
+            safe_reason=safe_reason,
         )
         result = {
             "id": disposition.id,

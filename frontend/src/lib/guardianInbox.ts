@@ -3,6 +3,7 @@ import { apiFetch } from "./api";
 import type {
   GuardianInboxActionRequest,
   GuardianInboxActionResponse,
+  GuardianInboxActionHistoryEntry,
   GuardianInboxEvidenceRef,
   GuardianInboxEvidencePreview,
   GuardianInboxItem,
@@ -142,6 +143,35 @@ function normalizeEvidencePreviews(value: unknown): GuardianInboxEvidencePreview
   });
 }
 
+function normalizeActionHistory(value: unknown): GuardianInboxActionHistoryEntry[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry): GuardianInboxActionHistoryEntry[] => {
+    if (!isRecord(entry)) return [];
+    const action = entry.action === "accept_followup" || entry.action === "snooze" || entry.action === "dismiss"
+      ? entry.action
+      : "unavailable";
+    const outcome = typeof entry.outcome === "string" && KNOWN_STATES.has(entry.outcome)
+      ? entry.outcome as GuardianInboxActionHistoryEntry["outcome"]
+      : "unavailable";
+    const reasonState = entry.reason_state === "provided"
+      ? "provided"
+      : entry.reason_state === "not_provided"
+        ? "not_provided"
+        : "unavailable";
+    return [{
+      receipt_id: stringValue(entry.receipt_id),
+      action,
+      created_at: typeof entry.created_at === "string" ? entry.created_at : null,
+      expected_revision: nullableInteger(entry.expected_revision),
+      result_revision: nullableInteger(entry.result_revision),
+      task_id: typeof entry.task_id === "string" ? entry.task_id : null,
+      outcome,
+      reason_state: reasonState,
+      safe_reason: typeof entry.safe_reason === "string" ? entry.safe_reason.slice(0, 500) : null,
+    }];
+  });
+}
+
 const SUPPORTED_ACTIONS = new Set(["accept_followup", "snooze", "dismiss"]);
 const KNOWN_STATES = new Set(["pending", "snoozed", "accepted", "dismissed", "expired"]);
 
@@ -208,6 +238,8 @@ export function normalizeGuardianInboxItem(value: unknown): GuardianInboxItem | 
     watch_url: typeof value.watch_url === "string"
       ? value.watch_url
       : typeof links?.source_watch === "string" ? links.source_watch : null,
+    action_history: normalizeActionHistory(value.action_history),
+    action_history_truncated: value.action_history_truncated === true,
   };
 }
 
@@ -257,9 +289,11 @@ export async function fetchGuardianInbox(options: { limit?: number; cursor?: str
   };
 }
 
-export async function fetchGuardianInboxItem(id: string): Promise<GuardianInboxItem> {
-  const response = await apiFetch(`${API_URL}/api/guardian/inbox/${encodeURIComponent(id)}`);
+export async function fetchGuardianInboxItem(id: string, signal?: AbortSignal): Promise<GuardianInboxItem> {
+  const response = await apiFetch(`${API_URL}/api/guardian/inbox/${encodeURIComponent(id)}`, { signal });
+  if (signal?.aborted) throw new DOMException("Inbox detail request was cancelled.", "AbortError");
   const payload = await responsePayload(response);
+  if (signal?.aborted) throw new DOMException("Inbox detail request was cancelled.", "AbortError");
   if (!response.ok) throw payloadError(response, payload, "Guardian inbox item could not be loaded");
   const record = isRecord(payload) && isRecord(payload.item) ? payload.item : payload;
   const normalized = normalizeGuardianInboxItem(record);

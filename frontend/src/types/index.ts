@@ -159,6 +159,20 @@ export interface GuardianInboxJob {
   readbacks?: GuardianInboxReadback[];
 }
 
+export type GuardianInboxReasonState = "provided" | "unavailable" | "not_provided";
+
+export interface GuardianInboxActionHistoryEntry {
+  receipt_id: string;
+  action: GuardianInboxAction | "unavailable";
+  created_at: string | null;
+  expected_revision: number | null;
+  result_revision: number | null;
+  task_id: string | null;
+  outcome: GuardianInboxState | "unavailable";
+  reason_state: GuardianInboxReasonState;
+  safe_reason: string | null;
+}
+
 /** Operator-safe projection of a durable, owner-scoped guardian intervention. */
 export interface GuardianInboxItem {
   id: string;
@@ -192,6 +206,8 @@ export interface GuardianInboxItem {
   evidence_url?: string | null;
   task_url?: string | null;
   watch_url?: string | null;
+  action_history?: GuardianInboxActionHistoryEntry[];
+  action_history_truncated?: boolean;
 }
 
 export interface GuardianInboxPage {
@@ -215,6 +231,69 @@ export interface GuardianInboxActionResponse {
   task_id?: string | null;
   receipt_id: string;
   recovery_action?: string | null;
+}
+
+export type CanonicalMemoryKind =
+  | "fact"
+  | "preference"
+  | "pattern"
+  | "goal"
+  | "reflection"
+  | "project"
+  | "collaborator"
+  | "obligation"
+  | "routine"
+  | "timeline"
+  | "commitment"
+  | "communication_preference"
+  | "procedural";
+
+export type CanonicalMemoryStatus = "active" | "archived" | "superseded";
+
+export interface CanonicalMemoryProvenance {
+  source_type?: string | null;
+  source_id?: string | null;
+  source_session_id?: string | null;
+  verified?: boolean | null;
+  [key: string]: unknown;
+}
+
+export interface CanonicalMemoryLink {
+  kind: string;
+  label?: string | null;
+  href?: string | null;
+  id?: string | null;
+}
+
+export interface CanonicalMemoryRecord {
+  id: string;
+  kind: CanonicalMemoryKind;
+  status: CanonicalMemoryStatus;
+  summary: string | null;
+  confidence: number | null;
+  created_at: string;
+  updated_at: string;
+  last_confirmed_at: string | null;
+  source_session_id: string;
+  safe_provenance: CanonicalMemoryProvenance;
+  links: CanonicalMemoryLink[];
+  content?: string | null;
+  current_source?: string | null;
+  conflict?: Record<string, unknown> | null;
+  tombstone?: Record<string, unknown> | null;
+  audit_links?: CanonicalMemoryLink[];
+  privacy_boundary?: string | null;
+  redaction_state?: string | null;
+  sources?: Array<Record<string, unknown>>;
+  source_state?: Record<string, unknown> | null;
+  conflict_state?: Record<string, unknown> | null;
+  tombstone_state?: string | null;
+}
+
+export interface CanonicalMemoryPage {
+  records: CanonicalMemoryRecord[];
+  next_cursor: string | null;
+  last_confirmed_at: string | null;
 }
 
 export interface GoalInfo {

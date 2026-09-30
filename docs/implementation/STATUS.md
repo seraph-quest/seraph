@@ -81,6 +81,7 @@ High-risk strategic wording in this status page remains governed by [19. Strateg
 
 ## Current Snapshot
 
+- [ ] Calm cockpit sections and the canonical-memory inspector provide bounded Home, Inbox, Work, Goals, Library, and Connections navigation. Owner-session-scoped literal memory reads expose redacted provenance and explicit history; canonical controls retain the distinction between ordinary correction, reviewed task learning, archive/redact, and acknowledged deletion. Open milestone/epic PRs own validation until integration; see [Current App Guide](./12-current-app-guide.md#cockpit-navigation-and-canonical-inspector).
 - [ ] Reviewed source-change follow-up is a bounded local capability: the goal budget and source-watch cadence feed an owner-scoped Guardian inbox; verified material packets can become one Triage Work Board task through an explicit, idempotent decision. The open PR owns branch validation until integration. General autonomous operation and live external/provider usefulness remain Partial; see [Guardian Intelligence](./05-guardian-intelligence.md#reviewed-goals-and-the-source-change-inbox).
 - [x] Seraph is usable today as a real guardian workspace with a browser cockpit, memory, screen awareness, proactive behavior, and a real action layer.
 - [x] Public docs target the `v2026.6.30` app era; the published GitHub Pages site updates only after a `main` push touches `docs/**` and the Pages workflow succeeds.

@@ -181,6 +181,18 @@ function mockOperatorControlPlaneRuntime(runtime: Record<string, unknown>) {
   };
 }
 
+function renderLegacyCockpit(ui: Parameters<typeof render>[0]) {
+  const result = render(ui);
+  // Existing deep-pane tests intentionally exercise the advanced Windows
+  // workspace. Show all panes explicitly, then close the launcher drawer so
+  // the test observes the same opt-in legacy surface an operator can reach.
+  const windowsButton = screen.getByRole("button", { name: "Windows" });
+  fireEvent.click(windowsButton);
+  fireEvent.click(screen.getByRole("button", { name: "Show all" }));
+  fireEvent.click(windowsButton);
+  return result;
+}
+
 describe("CockpitView", () => {
   const fetchMock = vi.fn();
 
@@ -214,6 +226,9 @@ describe("CockpitView", () => {
       goalLoopAction: null,
     });
     useCockpitLayoutStore.setState({
+      // Existing cockpit behavior tests exercise the legacy panes directly;
+      // the focused navigation test below opts into the summary Home section.
+      activeSection: "work",
       activeLayoutId: "default",
       inspectorVisible: true,
       paneVisibility: getDefaultPaneVisibility("default"),
@@ -266,7 +281,6 @@ describe("CockpitView", () => {
 
     const baselineUrls = fetchMock.mock.calls.map(([input]) => String(input));
     const deniedDeepEndpoints = [
-      "/api/observer/continuity",
       "/api/activity/ledger",
       "/api/operator/control-plane",
       "/api/operator/benchmark-proof",
@@ -285,11 +299,185 @@ describe("CockpitView", () => {
     expect(baselineUrls.some((url) => deniedDeepEndpoints.some((endpoint) => url.includes(endpoint)))).toBe(false);
   });
 
+  it("switches the persisted workspace section without duplicating the inbox owner", async () => {
+    mockCockpitBaselineFetch(fetchMock, {});
+    useCockpitLayoutStore.setState({ activeSection: "home" });
+    render(<CockpitView onSend={() => {}} />);
+
+    expect(screen.getByTestId("cockpit-section-home")).toHaveAttribute("aria-current", "page");
+    expect(screen.queryByLabelText("Work board")).not.toBeInTheDocument();
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/runtime/status"))).toBe(true));
+    const homeUrls = fetchMock.mock.calls.map(([input]) => String(input));
+    expect(homeUrls.some((url) => ["/api/audit/events", "/api/capabilities/overview", "/api/extensions", "/api/workflows/runs", "/api/operator/"].some((endpoint) => url.includes(endpoint)))).toBe(false);
+    fireEvent.click(screen.getByTestId("cockpit-section-inbox"));
+    expect(await screen.findByRole("heading", { name: "Guardian decisions" })).toBeInTheDocument();
+    expect(screen.getAllByTestId("guardian-inbox-panel")).toHaveLength(1);
+    expect(useCockpitLayoutStore.getState().activeSection).toBe("inbox");
+
+    fireEvent.click(screen.getByTestId("cockpit-section-work"));
+    expect(useCockpitLayoutStore.getState().activeSection).toBe("work");
+    expect(await screen.findByLabelText("Work board")).toBeInTheDocument();
+    expect(screen.queryByText("Operator terminal", { selector: ".cockpit-window-title" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Desktop shell", { selector: ".cockpit-window-title" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("cockpit-section-goals"));
+    expect(useCockpitLayoutStore.getState().activeSection).toBe("goals");
+    expect(screen.queryByLabelText("Work board")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("cockpit-section-library"));
+    expect(await screen.findByRole("heading", { name: "Canonical memory" })).toBeInTheDocument();
+    expect(screen.queryByText("Operator terminal", { selector: ".cockpit-window-title" })).not.toBeInTheDocument();
+
+    const homeContinuityCalls = fetchMock.mock.calls.filter(([input]) => String(input).includes("/api/observer/continuity")).length;
+    fireEvent.click(screen.getByTestId("cockpit-section-connections"));
+    expect(await screen.findByText("Desktop shell", { selector: ".cockpit-window-title" })).toBeInTheDocument();
+    expect(await screen.findByText("Seraph presence", { selector: ".cockpit-window-title" })).toBeInTheDocument();
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => String(input).includes("/api/observer/continuity"))).toHaveLength(homeContinuityCalls + 1));
+    expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument();
+    expect(screen.queryByText("Operator terminal", { selector: ".cockpit-window-title" })).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["an empty 200 response", mockResponse({})],
+    ["a failed continuity response", mockResponse({}, false, 503)],
+  ])("keeps the Connections presence pane unknown when continuity metadata is unavailable in %s", async (_label, continuityResponse) => {
+    mockCockpitBaselineFetch(fetchMock, {});
+    const baselineFetch = fetchMock.getMockImplementation();
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes("/api/observer/continuity")) return Promise.resolve(continuityResponse);
+      return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
+    });
+    useCockpitLayoutStore.setState({ activeSection: "home" });
+
+    render(<CockpitView onSend={() => {}} />);
+    fireEvent.click(screen.getByTestId("cockpit-section-connections"));
+    const pane = await screen.findByRole("region", { name: "Seraph presence" });
+
+    await waitFor(() => expect(within(pane).getAllByText("UNKNOWN")).toHaveLength(3));
+    expect(within(pane).queryByText("GOOD")).not.toBeInTheDocument();
+    expect(within(pane).queryByText("CLEAR")).not.toBeInTheDocument();
+    expect(within(pane).queryByText("READY")).not.toBeInTheDocument();
+    expect(within(pane).queryByText("Guardian continuity and proactive guidance are active.")).not.toBeInTheDocument();
+    expect(within(pane).getByText("reach unknown · load presence continuity to confirm")).toBeInTheDocument();
+    expect(screen.getByText("bundle unknown")).toBeInTheDocument();
+    expect(screen.getByText("presence unknown · bundle unknown · recent unknown")).toBeInTheDocument();
+    expect(screen.getByText("Desktop continuity items unknown. Load presence continuity to confirm.")).toBeInTheDocument();
+  });
+
+  it.each<[string, Record<string, unknown>]>([
+    ["daemon fields are missing", { daemon: {} }],
+    ["the queued count is negative", { daemon: { connected: false, pending_notification_count: 0 }, queued_insight_count: -1 }],
+  ])("does not confirm continuity when %s", async (_label, malformedFields) => {
+    mockCockpitBaselineFetch(fetchMock, {});
+    const baselineFetch = fetchMock.getMockImplementation();
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0 },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+          reach: { route_statuses: [] },
+          summary: {
+            continuity_health: "ready",
+            primary_surface: "presence",
+            actionable_thread_count: 0,
+            ambient_item_count: 0,
+            pending_notification_count: 0,
+            queued_insight_count: 0,
+            recent_intervention_count: 0,
+            degraded_route_count: 0,
+            degraded_source_adapter_count: 0,
+            attention_family_count: 0,
+          },
+          ...malformedFields,
+        }));
+      }
+      return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
+    });
+    useCockpitLayoutStore.setState({ activeSection: "home" });
+
+    render(<CockpitView onSend={() => {}} />);
+    fireEvent.click(screen.getByTestId("cockpit-section-connections"));
+    const pane = await screen.findByRole("region", { name: "Seraph presence" });
+
+    await waitFor(() => expect(within(pane).getAllByText("UNKNOWN")).toHaveLength(3));
+    expect(within(pane).queryByText("GOOD")).not.toBeInTheDocument();
+    expect(within(pane).queryByText("CLEAR")).not.toBeInTheDocument();
+    expect(within(pane).queryByText("READY")).not.toBeInTheDocument();
+  });
+
+  it("keeps the last confirmed Connections values visibly stale after a failed refresh", async () => {
+    const confirmedContinuity = {
+      daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+      notifications: [],
+      queued_insights: [],
+      queued_insight_count: 0,
+      recent_interventions: [],
+      reach: { route_statuses: [] },
+      summary: {
+        continuity_health: "ready",
+        primary_surface: "presence",
+        recommended_focus: null,
+        actionable_thread_count: 0,
+        ambient_item_count: 0,
+        pending_notification_count: 0,
+        queued_insight_count: 0,
+        recent_intervention_count: 0,
+        degraded_route_count: 0,
+        degraded_source_adapter_count: 0,
+        attention_family_count: 0,
+        presence_surface_count: 0,
+        attention_presence_surface_count: 0,
+      },
+    };
+    let continuityResponse = mockResponse(confirmedContinuity);
+    mockCockpitBaselineFetch(fetchMock, {});
+    const baselineFetch = fetchMock.getMockImplementation();
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes("/api/observer/continuity")) return Promise.resolve(continuityResponse);
+      return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
+    });
+    useCockpitLayoutStore.setState({ activeSection: "connections" });
+
+    render(<CockpitView onSend={() => {}} />);
+    const pane = await screen.findByRole("region", { name: "Seraph presence" });
+    await waitFor(() => expect(within(pane).getByText("GOOD")).toBeInTheDocument());
+
+    continuityResponse = mockResponse({}, false, 503);
+    fireEvent.click(screen.getByRole("button", { name: "refresh presence continuity" }));
+
+    await waitFor(() => expect(within(pane).getByText("IDLE · STALE")).toBeInTheDocument());
+    expect(within(pane).getByText("last confirmed · live link")).toBeInTheDocument();
+    expect(within(pane).getByText("last confirmed · clear")).toBeInTheDocument();
+    expect(within(pane).getByText("last confirmed · follow-through 0 · alerts 0 · bundled 0")).toBeInTheDocument();
+    expect(within(pane).getByText("last confirmed · reach ready")).toBeInTheDocument();
+    expect(screen.getByText("bundle 0 queued · last confirmed")).toBeInTheDocument();
+    expect(screen.getByText("presence last confirmed · offline · bundle last confirmed 0 · recent last confirmed 0")).toBeInTheDocument();
+  });
+
+  it("loads the capability inventory only when Library opens its existing terminal", async () => {
+    mockCockpitBaselineFetch(fetchMock, {});
+    useCockpitLayoutStore.setState({ activeSection: "home" });
+    render(<CockpitView onSend={() => {}} />);
+
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/runtime/status"))).toBe(true));
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).includes("/api/capabilities/overview"))).toHaveLength(0);
+
+    fireEvent.click(screen.getByTestId("cockpit-section-library"));
+    expect(await screen.findByRole("heading", { name: "Canonical memory" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Capabilities and procedures" }));
+    expect(await screen.findByText("Operator terminal", { selector: ".cockpit-window-title" })).toBeInTheDocument();
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => String(input).includes("/api/capabilities/overview"))).toHaveLength(1));
+  });
+
   it("mounts the authenticated Kanban board in the default cockpit workspace", async () => {
     mockCockpitBaselineFetch(fetchMock, {});
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
+    fireEvent.click(screen.getByTestId("cockpit-section-work"));
     expect(await screen.findByLabelText("Work board")).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Triage column" })).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Ready column" })).toBeInTheDocument();
@@ -456,7 +644,7 @@ describe("CockpitView", () => {
       return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
     fireEvent.click(await screen.findByRole("button", { name: "Open task GoalSnapshot result" }));
     fireEvent.click(await screen.findByRole("button", { name: "Inspect execution evidence artifacts/output.md" }));
     expect(await screen.findByText("artifacts/output.md", { selector: ".cockpit-inspector-title" })).toBeInTheDocument();
@@ -476,6 +664,155 @@ describe("CockpitView", () => {
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes(`/api/workflows/jobs/${encodeURIComponent(parentWorkflowRunId)}`))).toBe(true);
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes(`/api/workflows/jobs/${encodeURIComponent(childWorkflowRunId)}`))).toBe(true);
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/workflows/runs?"))).toBe(false);
+  });
+
+  it.each([
+    ["matching effect and content digests", "a".repeat(16), "a".repeat(64), true, {}, {}],
+    ["a mismatched effect digest", "b".repeat(16), "a".repeat(64), false, {}, {}],
+    ["a mismatched content digest", "a".repeat(16), "b".repeat(64), false, {}, {}],
+    ["a mismatched path", "a".repeat(16), "a".repeat(64), false, {}, { target_path: "artifacts/other.md" }],
+    ["an untrusted receipt kind", "a".repeat(16), "a".repeat(64), false, { receipt_kind: "effect" }, {}],
+    ["an unfinished receipt status", "a".repeat(16), "a".repeat(64), false, { status: "failed" }, {}],
+    ["an unrelated effect type", "a".repeat(16), "a".repeat(64), false, { effect_type: "other_effect" }, {}],
+    ["a missing content digest", "a".repeat(16), "", false, {}, {}],
+  ])("routes a parent board_child_readback effect with %s", async (_label, effectDigest, effectContentDigest, shouldOpen, effectOverrides, referenceOverrides) => {
+    const parentWorkflowRunId = "work-board:task-readback-effect:attempt-1";
+    const artifactId = "art_" + "c".repeat(24);
+    const artifactPath = "artifacts/readback-only.md";
+    const expectedContentDigest = "a".repeat(64);
+    const readbackReference = {
+      artifact_id: artifactId,
+      readback_id: artifactId,
+      effect_id_digest: "a".repeat(16),
+      content_sha256: expectedContentDigest,
+      workflow_run_id: parentWorkflowRunId,
+      status: "succeeded",
+      verified: true,
+      ...referenceOverrides,
+    };
+    const attempt = {
+      attempt_id: "attempt-readback-effect",
+      task_id: "task-readback-effect",
+      workflow_run_id: parentWorkflowRunId,
+      task_revision_at_claim: 1,
+      lease_owner: null,
+      cancel_requested_at: null,
+      lease_expires_at: null,
+      heartbeat_at: null,
+      fencing_token: 1,
+      executor_id: "executor.local",
+      started_at: "2026-09-24T08:00:00Z",
+      ended_at: "2026-09-24T08:00:01Z",
+      outcome: "succeeded",
+      readback_status: "verified",
+      verification_status: "passed",
+      receipt_refs: [readbackReference],
+      result_refs: [],
+      artifact_refs: [],
+    };
+    const boardTask = {
+      task_id: "task-readback-effect",
+      creation_sequence: 1,
+      owner_principal_id: "operator:one",
+      owner_session_id: "operator-owner-session",
+      origin_session_id: "operator-owner-session",
+      origin_thread_id: null,
+      goal_id: "goal-1",
+      goal_revision: 1,
+      title: "Parent readback effect",
+      body: "Inspect the parent readback receipt.",
+      capability_id: "workflow.goal-snapshot-to-file",
+      typed_input_ref: "workspace-json:inputs/readback.json",
+      typed_input_digest: "b".repeat(64),
+      executor_id: "executor.local",
+      assignee_id: "operator:one",
+      priority: 50,
+      idempotency_scope: "task",
+      idempotency_key: "task-readback-effect-key",
+      scheduled_at: null,
+      status: "done",
+      block_kind: null,
+      block_reason: null,
+      block_source_status: null,
+      cancel_requested_at: null,
+      requires_review: false,
+      reviewer_id: null,
+      dependency_count: 0,
+      completed_dependency_count: 0,
+      dispatch_rank: null,
+      recovery_action: null,
+      readback_status: "verified",
+      verification_status: "passed",
+      task_revision: 2,
+      result_refs: [],
+      artifact_refs: [],
+      latest_attempt: attempt,
+      created_at: "2026-09-24T08:00:00Z",
+      updated_at: "2026-09-24T08:00:01Z",
+      completed_at: "2026-09-24T08:00:01Z",
+      archived_at: null,
+    };
+    const boundParentJob = {
+      job_id: parentWorkflowRunId,
+      parent_job_id: null,
+      status: "succeeded",
+      job_kind: "work-board",
+      artifacts: [],
+      effects: [{
+        receipt_kind: "readback",
+        effect_type: "board_child_readback",
+        status: "succeeded",
+        effect_id_digest: effectDigest,
+        target_path: artifactPath,
+        target_digest: effectContentDigest,
+        content_sha256: effectContentDigest,
+        ...effectOverrides,
+      }],
+      started_at: "2026-09-24T08:00:00Z",
+      updated_at: "2026-09-24T08:00:01Z",
+      finished_at: "2026-09-24T08:00:01Z",
+    };
+    mockCockpitBaselineFetch(fetchMock, {});
+    const baselineFetch = fetchMock.getMockImplementation();
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/auth/session")) {
+        return Promise.resolve(mockResponse({ authenticated: true, principal_id: "operator:one", session_id: "operator-owner-session" }));
+      }
+      if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) {
+        return Promise.resolve(mockResponse({ tasks: [boardTask], next_after: null, last_event_id: 1 }));
+      }
+      if (url.includes("/api/work-board/events")) return Promise.resolve(mockResponse({ events: [], last_event_id: 1, gap: false }));
+      if (url.endsWith("/api/work-board/tasks/task-readback-effect")) {
+        return Promise.resolve(mockResponse({ task: boardTask, attempts: [attempt], parents: [], children: [], comments: [], events: [], revision: 2 }));
+      }
+      if (url.endsWith(`/api/workflows/jobs/${encodeURIComponent(parentWorkflowRunId)}`)) {
+        return Promise.resolve(mockResponse({ job: boundParentJob }));
+      }
+      if (url.includes("/api/work-board/goals/goal-1/execution-limits")) {
+        return Promise.resolve(mockResponse({ effective_max_runtime_seconds: 300, hard_max_runtime_seconds: 900, limit_source: "goal_default" }));
+      }
+      return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
+    });
+
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Parent readback effect" }));
+    const expectedReferenceLabel = "target_path" in referenceOverrides
+      && typeof referenceOverrides.target_path === "string"
+      ? referenceOverrides.target_path
+      : artifactId;
+    fireEvent.click(await screen.findByRole("button", { name: `Inspect execution evidence ${expectedReferenceLabel}` }));
+
+    if (shouldOpen) {
+      expect(await screen.findByText("readback receipt")).toBeInTheDocument();
+      expect(screen.getByText(`readback path ${artifactPath}`)).toBeInTheDocument();
+      expect(screen.getByText(`artifact SHA-256 ${expectedContentDigest}`)).toBeInTheDocument();
+    } else {
+      expect(await screen.findByRole("status", {
+        name: "The task's linked artifact is unavailable in the authenticated durable job evidence. Refresh the task and retry.",
+      })).toBeInTheDocument();
+      expect(screen.queryByText("readback receipt")).not.toBeInTheDocument();
+    }
   });
 
   it("opens an owner-checked Guardian dossier preview when the global artifact index is empty", async () => {
@@ -577,11 +914,12 @@ describe("CockpitView", () => {
     };
     useCockpitLayoutStore.setState({
       inspectorVisible: false,
+      activeSection: "work",
       paneVisibility: hiddenInspectorVisibility,
       savedPaneVisibility: { default: hiddenInspectorVisibility },
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
     fireEvent.click(await screen.findByRole("button", { name: "View evidence and task" }));
     expect(await screen.findByText(new RegExp(`${artifactPath} · guardian_readback:dossier-1 · succeeded`))).toBeInTheDocument();
     expect(await screen.findByText(/guardian\/source-watches\/watch-1\/tasks\/packet-1\.md · guardian_readback:task-1 · succeeded/)).toBeInTheDocument();
@@ -682,11 +1020,13 @@ describe("CockpitView", () => {
       return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
     fireEvent.click(await screen.findByRole("button", { name: "Open task Parent-bound result" }, { timeout: 5000 }));
     fireEvent.click(await screen.findByRole("button", { name: `Inspect execution evidence ${artifactPath}` }));
 
-    expect(await screen.findByText("Task child workflow evidence is hidden because its parent does not match the task's immutable run link.")).toBeInTheDocument();
+    expect(await screen.findByRole("status", {
+      name: "Task child workflow evidence is hidden because its parent does not match the task's immutable run link.",
+    })).toBeInTheDocument();
     expect(screen.queryByText(artifactPath, { selector: ".cockpit-inspector-title" })).not.toBeInTheDocument();
   });
 
@@ -800,7 +1140,7 @@ describe("CockpitView", () => {
       return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
     fireEvent.click(await screen.findByRole("button", { name: "Open task Board evidence A" }, { timeout: 5000 }));
     fireEvent.click(await screen.findByRole("button", { name: "Inspect execution evidence notes/task-a.md" }));
     await waitFor(() => expect(delayedWorkflowLoads).toHaveLength(1));
@@ -891,7 +1231,8 @@ describe("CockpitView", () => {
       return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
     });
 
-    const view = render(<CockpitView onSend={() => {}} />);
+    useCockpitLayoutStore.setState({ activeSection: "work" });
+    const view = renderLegacyCockpit(<CockpitView onSend={() => {}} />);
     await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThan(0));
     fireEvent.click(await screen.findByRole("button", { name: "Open task Unmounted evidence" }));
     fireEvent.click(await screen.findByRole("button", { name: "Inspect execution evidence notes/unmounted.md" }));
@@ -1020,11 +1361,13 @@ describe("CockpitView", () => {
       return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
     fireEvent.click(await screen.findByRole("button", { name: "Open task Foreign linked run" }, { timeout: 5_000 }));
     fireEvent.click(await screen.findByRole("button", { name: "Inspect execution evidence artifacts/foreign-output.md" }));
 
-    expect(await screen.findByText(/linked workflow evidence is unavailable for the current authenticated session/i)).toBeInTheDocument();
+    expect(await screen.findByRole("status", {
+      name: "The task's linked workflow evidence is unavailable for the current authenticated session. Refresh the task and retry.",
+    })).toBeInTheDocument();
     expect(screen.queryByText("PRIVATE OTHER SESSION OUTPUT", { selector: ".cockpit-inspector-body" })).not.toBeInTheDocument();
     expect(screen.queryByText("goal-snapshot-to-file", { selector: ".cockpit-inspector-title" })).not.toBeInTheDocument();
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes(`/api/workflows/jobs/${encodeURIComponent(reference.workflow_run_id)}`))).toBe(true);
@@ -1111,7 +1454,7 @@ describe("CockpitView", () => {
       return baselineImplementation?.(input, init) ?? Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     const panel = await screen.findByTestId("outcome-cockpit-panel");
     await waitFor(() => {
@@ -1127,7 +1470,7 @@ describe("CockpitView", () => {
   it("loads deep cockpit panes only through their explicit endpoint groups", async () => {
     mockCockpitBaselineFetch(fetchMock, {});
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "load activity ledger" })).toBeInTheDocument();
@@ -1228,7 +1571,7 @@ describe("CockpitView", () => {
       }),
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     const consoleRegion = await screen.findByRole("region", { name: "M9 governed extension console" });
     expect(await within(consoleRegion).findByText("Atlas Marketplace Pack")).toBeInTheDocument();
@@ -1312,7 +1655,7 @@ describe("CockpitView", () => {
         : Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     const consoleRegion = await screen.findByRole("region", { name: "M9 governed extension console" });
     fireEvent.click(await within(consoleRegion).findByRole("button", { name: "diagnostics" }));
@@ -1415,7 +1758,7 @@ describe("CockpitView", () => {
       },
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     const browserControls = await screen.findByRole("region", { name: "Browser computer-use live controls" });
     await waitFor(() =>
@@ -1493,7 +1836,7 @@ describe("CockpitView", () => {
     useChatStore.setState({ connectionStatus: "disconnected" });
     mockCockpitBaselineFetch(fetchMock, {});
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByText("DIRECT FALLBACK · BALANCED TOOLS · HIGH_RISK APPROVAL")).toBeInTheDocument());
     expect(screen.getAllByText("disconnected").length).toBeGreaterThan(0);
@@ -1508,7 +1851,9 @@ describe("CockpitView", () => {
       const url = String(input);
       if (url.includes("/api/runtime/status")) {
         runtimeStatusCalls += 1;
-        if (runtimeStatusCalls === 1) {
+        // The legacy workspace owns this read when the test enters Work;
+        // fail the next refresh to exercise the retained stale state.
+        if (runtimeStatusCalls <= 1) {
           return Promise.resolve(mockResponse({
             version: "test",
             build_id: "SERAPH_TEST",
@@ -1548,7 +1893,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
@@ -1590,7 +1935,7 @@ describe("CockpitView", () => {
       },
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     expect(await screen.findByText("OPENROUTER BLOCKED · GROK 4.1 FAST")).toBeInTheDocument();
     expect(screen.queryByText("OPENROUTER · GROK 4.1 FAST")).not.toBeInTheDocument();
@@ -1626,7 +1971,7 @@ describe("CockpitView", () => {
       }),
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     expect(await screen.findByText("OPENROUTER BLOCKED · GROK 4.1 FAST")).toBeInTheDocument();
     fireEvent.click(screen.getAllByRole("button", { name: "load control plane" })[0]);
@@ -1675,7 +2020,7 @@ describe("CockpitView", () => {
       }),
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     expect(await screen.findByText("OPENROUTER BLOCKED DEGRADED STALE · GROK 4.1 FAST")).toBeInTheDocument();
     fireEvent.click(screen.getAllByRole("button", { name: "load control plane" })[0]);
@@ -1711,7 +2056,7 @@ describe("CockpitView", () => {
       },
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     expect(await screen.findByText("OPENROUTER BLOCKED DEGRADED · GROK 4.1 FAST")).toBeInTheDocument();
   });
@@ -1727,7 +2072,7 @@ describe("CockpitView", () => {
       },
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     expect(await screen.findByText("LEGACY PROVIDER · LEGACY MODEL")).toBeInTheDocument();
     expect(screen.queryByText(/LEGACY PROVIDER (BLOCKED|DEGRADED)/)).not.toBeInTheDocument();
@@ -1762,7 +2107,7 @@ describe("CockpitView", () => {
       },
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => {
       expect(screen.getByText("GPU VLM · GEMMA 4 26B A4B IT QAT GGUF")).toBeInTheDocument();
@@ -1803,7 +2148,7 @@ describe("CockpitView", () => {
       },
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => {
       expect(screen.getByText("TEXT LAST ACTUAL FALLBACK DEGRADED · ACTUAL MODEL")).toBeInTheDocument();
@@ -1846,7 +2191,7 @@ describe("CockpitView", () => {
       },
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => {
       expect(screen.getByText("TEXT LOCAL TEXT · GEMMA TEXT")).toBeInTheDocument();
@@ -1888,7 +2233,7 @@ describe("CockpitView", () => {
       },
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => {
       expect(screen.getByText("ATTEMPTED LOCAL TEXT FAILED DEGRADED · GEMMA TEXT")).toBeInTheDocument();
@@ -1940,7 +2285,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await loadAllDeepPanes();
 
@@ -2063,7 +2408,7 @@ describe("CockpitView", () => {
       },
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -2186,7 +2531,7 @@ describe("CockpitView", () => {
       },
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     const consoleRegion = await screen.findByRole("region", { name: "M9 governed extension console" });
     expect(await within(consoleRegion).findByText("Revoked Device Bridge Pack")).toBeInTheDocument();
@@ -2268,7 +2613,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     const consoleRegion = await screen.findByRole("region", { name: "M9 governed extension console" });
     fireEvent.click(await within(consoleRegion).findByRole("button", { name: "quarantine" }));
@@ -2677,6 +3022,21 @@ describe("CockpitView", () => {
                 },
               ],
             },
+            summary: {
+              continuity_health: "degraded",
+              primary_surface: "reach",
+              recommended_focus: "Bundle delivery",
+              actionable_thread_count: 0,
+              ambient_item_count: 1,
+              pending_notification_count: 1,
+              queued_insight_count: 1,
+              recent_intervention_count: 1,
+              degraded_route_count: 3,
+              degraded_source_adapter_count: 0,
+              attention_family_count: 0,
+              presence_surface_count: 0,
+              attention_presence_surface_count: 0,
+            },
           }),
         );
       }
@@ -2727,13 +3087,15 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
     await waitFor(() => expect(screen.getByText("Workflow timeline")).toBeInTheDocument());
     expect(screen.getByText("Activity ledger")).toBeInTheDocument();
-    expect(screen.queryByText("Desktop shell")).not.toBeInTheDocument();
+    // renderLegacyCockpit explicitly opts into the advanced Windows workspace;
+    // the desktop shell is therefore part of this test's mounted surface.
+    expect(screen.getByText("Desktop shell")).toBeInTheDocument();
     expect(screen.getByText("Operator terminal")).toBeInTheDocument();
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "Set tool policy to balanced" })).toHaveAttribute("aria-pressed", "true"),
@@ -2755,13 +3117,13 @@ describe("CockpitView", () => {
     expect(screen.getByText("tools write_file")).toBeInTheDocument();
     expect(screen.getByText("bundle 1 queued")).toBeInTheDocument();
 
+    // All panes are already visible after renderLegacyCockpit. Close the
+    // launcher drawer without toggling the existing Desktop shell pane.
     fireEvent.click(screen.getByRole("button", { name: "Windows" }));
-    const windowsMenu = await screen.findByText("Desktop Shell");
-    fireEvent.click(windowsMenu.closest("button") as HTMLButtonElement);
 
     expect(screen.getByText("Guardian nudge")).toBeInTheDocument();
     expect(screen.getByText(/Bundle delivery: unavailable/i)).toBeInTheDocument();
-    expect(screen.getByText("Run summarize-file")).toBeInTheDocument();
+    expect(screen.getAllByText("Run summarize-file").length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("button", { name: "Test browser" }));
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
@@ -2794,7 +3156,7 @@ describe("CockpitView", () => {
     expect(screen.getByRole("button", { name: "Retry step" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Branch web_search" })).toBeInTheDocument();
     expect(screen.getAllByText("Use Output")).not.toHaveLength(0);
-    const runButton = screen.getByRole("button", { name: "Run summarize-file" });
+    const runButton = screen.getAllByRole("button", { name: "Run summarize-file" })[0];
     expect(runButton).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Run annotate-image" })).not.toBeInTheDocument();
     fireEvent.click(runButton);
@@ -3576,7 +3938,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -4323,7 +4685,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -4800,7 +5162,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -5058,7 +5420,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -5350,7 +5712,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -5575,7 +5937,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     const evidence = await screen.findByLabelText("Evidence shortcuts");
     await waitFor(
@@ -5698,7 +6060,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -5908,7 +6270,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -6037,7 +6399,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await waitFor(() => expect(screen.getByText("Research briefing")).toBeInTheDocument());
     const starterPackRow = screen.getByText("Research briefing").closest(".cockpit-operator-row");
@@ -6163,7 +6525,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await waitFor(() => expect(screen.getByText("GitHub sync")).toBeInTheDocument());
     const runbookRow = screen.getByText("GitHub sync").closest(".cockpit-operator-row");
@@ -6353,7 +6715,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await waitFor(() => expect(screen.getByText("Research briefing")).toBeInTheDocument());
     const runbookRow = screen.getByText("Research briefing").closest(".cockpit-operator-row");
@@ -6484,7 +6846,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await waitFor(() => expect(screen.getByText("Research briefing")).toBeInTheDocument());
     const runbookRow = screen.getByText("Research briefing").closest(".cockpit-operator-row");
@@ -6625,7 +6987,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -6721,7 +7083,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -6853,7 +7215,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -7005,7 +7367,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -7183,7 +7545,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     expect(await screen.findByText("browser providers")).toBeInTheDocument();
     const operatorPane = screen.getByText("Operator terminal").closest("section");
@@ -7301,7 +7663,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -7406,7 +7768,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -7505,7 +7867,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "load activity ledger" }));
 
@@ -7572,7 +7934,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await waitFor(() => expect(screen.getByText("Latest response")).toBeInTheDocument());
     expect(
@@ -7633,6 +7995,22 @@ describe("CockpitView", () => {
             queued_insights: [],
             queued_insight_count: 0,
             recent_interventions: [],
+            reach: { route_statuses: [] },
+            summary: {
+              continuity_health: "attention",
+              primary_surface: "notification",
+              recommended_focus: "Resume stale thread",
+              actionable_thread_count: 1,
+              ambient_item_count: 1,
+              pending_notification_count: 1,
+              queued_insight_count: 0,
+              recent_intervention_count: 0,
+              degraded_route_count: 0,
+              degraded_source_adapter_count: 0,
+              attention_family_count: 0,
+              presence_surface_count: 0,
+              attention_presence_surface_count: 0,
+            },
           }),
         );
       }
@@ -7642,13 +8020,13 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
+    // All panes are already visible after renderLegacyCockpit. Close the
+    // launcher drawer without toggling the existing Desktop shell pane.
     fireEvent.click(screen.getByRole("button", { name: "Windows" }));
-    const menu = await screen.findByText("Desktop Shell");
-    fireEvent.click(menu.closest("button") as HTMLButtonElement);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Continue" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
@@ -7767,7 +8145,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -7825,7 +8203,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getAllByText("Seraph is responding").length).toBeGreaterThan(0));
     expect(screen.getByRole("button", { name: "Working" })).toBeDisabled();
@@ -7863,7 +8241,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() =>
       expect(screen.getByText("Activity ledger", { selector: ".cockpit-window-title" })).toBeInTheDocument(),
@@ -7917,7 +8295,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     const guardianTitle = await screen.findByText("Guardian state", { selector: ".cockpit-window-title" });
 
@@ -8780,7 +9158,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await loadAllDeepPanes();
 
@@ -8897,7 +9275,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() =>
       expect(screen.getByText("Activity ledger", { selector: ".cockpit-window-title" })).toBeInTheDocument(),
@@ -8940,7 +9318,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() =>
       expect(screen.getByText("Activity ledger", { selector: ".cockpit-window-title" })).toBeInTheDocument(),
@@ -9061,7 +9439,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -9178,7 +9556,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -9519,7 +9897,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -9855,7 +10233,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -10011,7 +10389,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -10298,7 +10676,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -10485,7 +10863,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -10633,7 +11011,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -10954,7 +11332,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     await loadAllDeepPanes();
 
@@ -11093,7 +11471,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     const githubLabel = await screen.findByText("github");
     const githubRow = githubLabel.closest(".cockpit-operator-row");
@@ -11212,7 +11590,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     const packagedLabel = await screen.findByText("github-packaged");
     const packagedRow = packagedLabel.closest(".cockpit-operator-row");
@@ -11318,7 +11696,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={() => {}} />);
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
     const packagedLabel = await screen.findByText("github-packaged");
     const packagedRow = packagedLabel.closest(".cockpit-operator-row");
@@ -11435,7 +11813,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -11588,7 +11966,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -11765,7 +12143,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -11870,7 +12248,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -12015,7 +12393,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -12128,7 +12506,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -12263,7 +12641,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -12360,7 +12738,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -12462,7 +12840,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -12582,7 +12960,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -12755,7 +13133,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -13047,7 +13425,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByText("extension health")).toBeInTheDocument());
     await waitFor(() => {
@@ -13244,7 +13622,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -13343,7 +13721,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -13515,7 +13893,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -13730,7 +14108,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -13884,7 +14262,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -14020,7 +14398,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -14195,7 +14573,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await loadAllDeepPanes();
 
@@ -14303,7 +14681,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
@@ -14347,11 +14725,12 @@ describe("CockpitView", () => {
     });
 
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
-    const view = render(<CockpitView onSend={vi.fn()} />);
+    const view = renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
-    // The baseline refresh now also starts the authenticated work-board snapshot
-    // and the read-only guardian inbox projection.
-    await waitFor(() => expect(cockpitFetchCount).toBe(6));
+    // The active Work shell owns its bounded baseline reads and the legacy
+    // Guardian owner; all are aborted before any deferred payload resolves.
+    await waitFor(() => expect(cockpitFetchCount).toBeGreaterThanOrEqual(6));
+    const mountedFetchCount = cockpitFetchCount;
     view.unmount();
 
     await act(async () => {
@@ -14366,6 +14745,7 @@ describe("CockpitView", () => {
     });
 
     expect(jsonSpies.every((spy) => spy.mock.calls.length === 0)).toBe(true);
+    expect(cockpitFetchCount).toBe(mountedFetchCount);
     expect(consoleError).not.toHaveBeenCalled();
   }, 15000);
 
@@ -14409,7 +14789,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn(async () => false)} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn(async () => false)} />);
 
     const composer = await screen.findByPlaceholderText(/Ask Seraph/i);
     fireEvent.change(composer, { target: { value: "keep me" } });
@@ -14607,7 +14987,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await loadAllDeepPanes();
 
@@ -14784,7 +15164,7 @@ describe("CockpitView", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<CockpitView onSend={vi.fn()} />);
+    renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
     await loadAllDeepPanes();
 

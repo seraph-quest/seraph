@@ -12,12 +12,15 @@ import { SERAPH_BUILD_ID } from "../../config/release";
 import { useChatStore } from "../../stores/chatStore";
 import { useQuestStore } from "../../stores/questStore";
 import { useCockpitLayoutStore } from "../../stores/cockpitLayoutStore";
+import type { CockpitSection } from "../../stores/cockpitLayoutStore";
 import { PANEL_MIN_SIZES, usePanelLayoutStore } from "../../stores/panelLayoutStore";
 import type {
   ChatMessage,
+  CanonicalMemoryLink,
   ConnectionStatus,
   GuardianInboxEvidencePreview,
   GuardianInboxEvidenceRef,
+  GuardianInboxItem,
   GoalInfo,
   GoalLoopReceipt,
   WorkBoardReceiptReference,
@@ -60,7 +63,11 @@ import {
   type OutcomeApprovalSummary,
   type GitHubFollowthroughSummary,
 } from "./OutcomeCockpitPanel";
-import { GuardianInboxPanel } from "./GuardianInboxPanel";
+import { GuardianInboxPanel, type GuardianInboxPanelHandle } from "./GuardianInboxPanel";
+import { CockpitSectionNav } from "./CockpitSectionNav";
+import { CockpitHome } from "./CockpitHome";
+import { GuardianCandidateInspector } from "./GuardianCandidateInspector";
+import { CanonicalMemoryPanel } from "./CanonicalMemoryPanel";
 import {
   displayApprovalScopeTarget,
   displayApprovalOwnerMetadata,
@@ -72,6 +79,7 @@ import {
   type ApprovalLoadState,
 } from "./cockpitAuthority";
 import { SeraphPresencePane } from "./SeraphPresencePane";
+import { deriveSeraphPresenceMetadataState } from "./seraphPresence";
 import { PttAudioControl } from "../chat/PttAudioControl";
 import { WorkBoardPanel, type WorkBoardArtifactInspectRequest } from "./WorkBoardPanel";
 
@@ -1695,6 +1703,48 @@ interface ObserverContinuitySnapshot {
   summary?: ObserverContinuitySummary;
   threads?: ObserverContinuityThread[];
   recovery_actions?: ObserverContinuityRecoveryAction[];
+}
+
+function isContinuityRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isFiniteNonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+function hasConfirmedContinuityPayload(value: unknown): value is ObserverContinuitySnapshot {
+  if (!isContinuityRecord(value)) return false;
+  const daemon = isContinuityRecord(value.daemon) ? value.daemon : null;
+  const reach = isContinuityRecord(value.reach) ? value.reach : null;
+  const summary = isContinuityRecord(value.summary) ? value.summary : null;
+  return (
+    typeof daemon?.connected === "boolean"
+    && isFiniteNonNegativeInteger(daemon.pending_notification_count)
+    && Array.isArray(value.notifications)
+    && Array.isArray(value.queued_insights)
+    && isFiniteNonNegativeInteger(value.queued_insight_count)
+    && Array.isArray(value.recent_interventions)
+    && Array.isArray(reach?.route_statuses)
+    && typeof summary?.continuity_health === "string"
+    && typeof summary?.primary_surface === "string"
+    && isFiniteNonNegativeInteger(summary?.actionable_thread_count)
+    && isFiniteNonNegativeInteger(summary?.pending_notification_count)
+    && isFiniteNonNegativeInteger(summary?.queued_insight_count)
+    && isFiniteNonNegativeInteger(summary?.degraded_route_count)
+    && isFiniteNonNegativeInteger(summary?.degraded_source_adapter_count)
+    && isFiniteNonNegativeInteger(summary?.attention_family_count)
+    && [
+      "ambient_item_count",
+      "recent_intervention_count",
+      "presence_surface_count",
+      "attention_presence_surface_count",
+      "paired_presence_surface_count",
+      "unpaired_presence_surface_count",
+      "revoked_presence_surface_count",
+      "blocked_device_surface_count",
+    ].every((key) => summary?.[key] === undefined || isFiniteNonNegativeInteger(summary[key]))
+  );
 }
 
 interface SkillInfo {
@@ -6391,8 +6441,14 @@ function boardBoundJobMatchesReference(
   value: Record<string, unknown>,
   reference: WorkBoardReceiptReference,
 ): boolean {
-  const receipts = [...boardBoundRecords(value.artifacts), ...boardBoundRecords(value.effects)];
-  return receipts.some((receipt) => {
+  const artifactReceipts = boardBoundRecords(value.artifacts);
+  const effectReceipts = boardBoundRecords(value.effects);
+  const receipts = [...artifactReceipts, ...effectReceipts];
+  const directMatch = receipts.some((receipt) => {
+    // A board child readback is a parent effect receipt. Its safe projection
+    // intentionally omits artifact/readback IDs, so it must pass the bounded
+    // effect fence below rather than matching on a path or digest alone.
+    if (receipt.effect_type === "board_child_readback") return false;
     if (reference.artifact_id && receipt.artifact_id !== reference.artifact_id) return false;
     if (
       reference.effect_id_digest
@@ -6418,6 +6474,28 @@ function boardBoundJobMatchesReference(
       || reference.readback_id
       || reference.verification_id,
     );
+  });
+  if (directMatch) return true;
+
+  const referenceEffectDigest = reference.effect_id_digest?.toLowerCase() ?? "";
+  if (!/^[0-9a-f]{16}$/.test(referenceEffectDigest)) return false;
+  const expectedContentDigests = [reference.content_sha256, reference.target_digest]
+    .filter((digest): digest is string => typeof digest === "string" && /^[a-f0-9]{64}$/i.test(digest))
+    .map((digest) => digest.toLowerCase());
+  if (expectedContentDigests.length === 0) return false;
+  return effectReceipts.some((receipt) => {
+    if (receipt.effect_type !== "board_child_readback") return false;
+    if (receipt.receipt_kind !== "readback" || receipt.status !== "succeeded") return false;
+    if (String(receipt.effect_id_digest ?? "").toLowerCase() !== referenceEffectDigest) return false;
+    const receiptContentDigests = [receipt.content_sha256, receipt.target_digest, receipt.readback_digest]
+      .filter((digest): digest is string => typeof digest === "string" && /^[a-f0-9]{64}$/i.test(digest))
+      .map((digest) => digest.toLowerCase());
+    if (!expectedContentDigests.every((digest) => receiptContentDigests.includes(digest))) return false;
+    const expectedPaths = [reference.file_path, reference.target_path]
+      .filter((path): path is string => typeof path === "string" && path.length > 0);
+    const receiptPaths = [receipt.file_path, receipt.target_path]
+      .filter((path): path is string => typeof path === "string" && path.length > 0);
+    return expectedPaths.every((path) => receiptPaths.includes(path));
   });
 }
 
@@ -7367,6 +7445,11 @@ function storeRuntimeReceipt(status: RuntimeStatus) {
 }
 
 type CockpitFetchResult = { ok: boolean; payload: unknown | null; status?: number };
+type CockpitRefreshRequest = {
+  isCancelled: () => boolean;
+  promise: Promise<void>;
+  resolve: () => void;
+};
 type OperatorAuthState = {
   status: "loading" | "authenticated" | "unauthorized" | "degraded";
   principalId: string | null;
@@ -7474,6 +7557,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [feedbackState, setFeedbackState] = useState<Record<string, string>>({});
   const [approvalState, setApprovalState] = useState<Record<string, string>>({});
   const [selectedInspector, setSelectedInspector] = useState<InspectorSelection | null>(null);
+  const [libraryInspectorOpen, setLibraryInspectorOpen] = useState(false);
+  const [selectedGuardianCandidate, setSelectedGuardianCandidate] = useState<GuardianInboxItem | null>(null);
+  const guardianInboxRef = useRef<GuardianInboxPanelHandle | null>(null);
   const [focusTaskId, setFocusTaskId] = useState<string | null>(null);
   const [daemonPresence, setDaemonPresence] = useState<DaemonPresenceState | null>(null);
   const [desktopNotifications, setDesktopNotifications] = useState<ObserverContinuitySnapshot["notifications"]>([]);
@@ -7485,6 +7571,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [continuitySourceAdapters, setContinuitySourceAdapters] = useState<ObserverSourceAdapterSnapshot | null>(null);
   const [continuityPresenceSurfaces, setContinuityPresenceSurfaces] = useState<ObserverPresenceSurfaceSnapshot | null>(null);
   const [continuitySummary, setContinuitySummary] = useState<ObserverContinuitySummary | null>(null);
+  const [continuityHasConfirmedPayload, setContinuityHasConfirmedPayload] = useState(false);
   const [continuityThreads, setContinuityThreads] = useState<ObserverContinuityThread[]>([]);
   const [continuityRecoveryActions, setContinuityRecoveryActions] = useState<ObserverContinuityRecoveryAction[]>([]);
   const [workflows, setWorkflows] = useState<WorkflowInfo[]>([]);
@@ -7525,6 +7612,17 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [activityFilter, setActivityFilter] = useState<ActivityLedgerFilter>("all");
   const activityLedgerScopeRef = useRef<string>("");
   const cockpitRefreshInFlightRef = useRef(false);
+  const cockpitRefreshCurrentRef = useRef<CockpitRefreshRequest | null>(null);
+  const cockpitRefreshPendingRef = useRef<CockpitRefreshRequest | null>(null);
+  const cockpitMountedRef = useRef(false);
+  useEffect(() => {
+    // StrictMode runs effect cleanup/setup during its development probe. Reset
+    // the flag in setup so a probe cleanup cannot suppress the real mount.
+    cockpitMountedRef.current = true;
+    return () => {
+      cockpitMountedRef.current = false;
+    };
+  }, []);
   const goalLoopRequestKeyRef = useRef<string | null>(null);
   const workBoardInspectionGenerationRef = useRef(0);
   useEffect(() => () => {
@@ -7534,6 +7632,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [mcpPolicyMode, setMcpPolicyMode] = useState<McpPolicyMode | "unknown">("unknown");
   const [approvalMode, setApprovalMode] = useState<ApprovalMode | "unknown">("unknown");
   const [operatorStatus, setOperatorStatus] = useState<string | null>(null);
+  const [workBoardEvidenceStatus, setWorkBoardEvidenceStatus] = useState<string | null>(null);
   const [onboardingActionStatus, setOnboardingActionStatus] = useState<string | null>(null);
   const [deepPaneLoadState, setDeepPaneLoadState] = useState<Record<DeepPaneKey, DeepPaneLoadState>>({
     presence: "idle",
@@ -7577,8 +7676,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
   const [windowsMenuOpen, setWindowsMenuOpen] = useState(false);
+  // The section view is intentionally quiet. The existing draggable windows
+  // remain available through the explicit Windows control for operators who
+  // need the full diagnostic workspace.
+  const [advancedWorkspaceOpen, setAdvancedWorkspaceOpen] = useState(false);
+  const [libraryCapabilitiesOpen, setLibraryCapabilitiesOpen] = useState(false);
   const windowsMenuRef = useRef<HTMLDivElement | null>(null);
   const activeLayoutId = useCockpitLayoutStore((s) => s.activeLayoutId);
+  const activeSection = useCockpitLayoutStore((s) => s.activeSection);
   const paneVisibility = useCockpitLayoutStore((s) => s.paneVisibility);
   const savedPaneVisibility = useCockpitLayoutStore((s) => s.savedPaneVisibility);
   const setLayout = useCockpitLayoutStore((s) => s.setLayout);
@@ -7592,6 +7697,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const resetCockpitLayout = usePanelLayoutStore((s) => s.resetCockpitLayout);
   const bringToFront = usePanelLayoutStore((s) => s.bringToFront);
   const syncCockpitPaneStack = usePanelLayoutStore((s) => s.syncCockpitPaneStack);
+  const setActiveSection = useCockpitLayoutStore((s) => s.setActiveSection);
+
+  const legacyWorkspaceVisible = advancedWorkspaceOpen
+    || activeSection === "work"
+    || activeSection === "connections"
+    || (activeSection === "library" && (libraryInspectorOpen || libraryCapabilitiesOpen));
 
   const messages = useChatStore((s) => s.messages);
   const sessions = useChatStore((s) => s.sessions);
@@ -7669,6 +7780,19 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     [bringToFront, paneVisibility, setPaneVisible],
   );
 
+  const selectCockpitSection = useCallback((section: CockpitSection) => {
+    setAdvancedWorkspaceOpen(false);
+    setLibraryInspectorOpen(false);
+    setLibraryCapabilitiesOpen(false);
+    setActiveSection(section);
+    if (section === "work") focusPane("work_board_pane");
+    if (section === "goals") setQuestPanelOpen(true);
+    if (section === "connections") {
+      setPaneVisible("presence_pane", true);
+      focusPane("desktop_shell_pane");
+    }
+  }, [focusPane, setActiveSection, setPaneVisible, setQuestPanelOpen]);
+
   const closeWindowPane = useCallback(
     (paneId: CockpitPaneId) => {
       setPaneVisible(paneId, false);
@@ -7693,8 +7817,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
   useEffect(() => {
     void restoreLastSession();
-    refreshGoals();
-  }, [refreshGoals, restoreLastSession]);
+  }, [restoreLastSession]);
+
+  useEffect(() => {
+    if (activeSection !== "home") void refreshGoals();
+  }, [activeSection, refreshGoals]);
 
   useEffect(() => {
     const goalId = currentGoal?.id ?? null;
@@ -7780,7 +7907,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     return results.map((result) => result ?? { ok: false, payload: null });
   }, []);
 
-  const refreshCockpit = useCallback(async (isCancelled: () => boolean = () => false) => {
+  const refreshCockpitNow = useCallback(async (isCancelled: () => boolean = () => false) => {
     const [
       authResult,
       runtimeStatusResult,
@@ -7921,6 +8048,63 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     }
   }, [fetchCockpitBatch, fetchCockpitJson, sessionId]);
 
+  // Keep one metadata batch in flight while coalescing the latest request
+  // raised by a navigation/effect transition. A cancelled effect never
+  // starts a stale follow-up, but a live successor gets its own refresh as
+  // soon as the current batch releases the gate.
+  const refreshCockpit = useCallback((isCancelled: () => boolean = () => false): Promise<void> => {
+    if (isCancelled()) return Promise.resolve();
+    const createRequest = (): CockpitRefreshRequest => {
+      let resolveRequest: () => void = () => {};
+      const promise = new Promise<void>((resolve) => {
+        resolveRequest = resolve;
+      });
+      return { isCancelled, promise, resolve: resolveRequest };
+    };
+    const run = (next: CockpitRefreshRequest) => {
+      if (next.isCancelled()) {
+        next.resolve();
+        return;
+      }
+      cockpitRefreshInFlightRef.current = true;
+      cockpitRefreshCurrentRef.current = next;
+      void refreshCockpitNow(next.isCancelled)
+        .catch(() => undefined)
+        .finally(() => {
+          next.resolve();
+          if (cockpitRefreshCurrentRef.current === next) {
+            cockpitRefreshCurrentRef.current = null;
+          }
+          cockpitRefreshInFlightRef.current = false;
+          const pending = cockpitRefreshPendingRef.current;
+          // Clear before invoking the successor so a successor-triggered
+          // request replaces this slot instead of recursively reusing it.
+          cockpitRefreshPendingRef.current = null;
+          if (pending && !pending.isCancelled()) run(pending);
+          else pending?.resolve();
+        });
+    };
+
+    if (cockpitRefreshInFlightRef.current) {
+      const current = cockpitRefreshCurrentRef.current;
+      if (current && !current.isCancelled()) return current.promise;
+      const pending = cockpitRefreshPendingRef.current;
+      if (pending) {
+        // Keep one bounded pending promise while allowing the newest live
+        // effect to own cancellation for the successor batch.
+        pending.isCancelled = isCancelled;
+        return pending.promise;
+      }
+      const request = createRequest();
+      cockpitRefreshPendingRef.current = request;
+      return request.promise;
+    }
+
+    const request = createRequest();
+    run(request);
+    return request.promise;
+  }, [refreshCockpitNow]);
+
   const updateDeepPaneState = useCallback((pane: DeepPaneKey, state: DeepPaneLoadState) => {
     setDeepPaneLoadState((current) => ({ ...current, [pane]: state }));
   }, []);
@@ -7929,16 +8113,26 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     updateDeepPaneState(pane, ok ? "loaded" : "stale");
   }, [updateDeepPaneState]);
 
-  const loadPresenceContinuity = useCallback(async () => {
+  const loadPresenceContinuity = useCallback(async (isCurrent: () => boolean = () => true) => {
+    if (!isCurrent()) return;
     updateDeepPaneState("presence", "loading");
-    const result = await fetchCockpitJson(`${API_URL}/api/observer/continuity`, 5000);
-    if (result.ok && result.payload) {
-      const continuityPayload = result.payload as ObserverContinuitySnapshot;
+    const result = await fetchCockpitJson(`${API_URL}/api/observer/continuity`, 5000, () => !isCurrent());
+    if (!isCurrent()) {
+      // A hidden Connections refresh may be cancelled during section
+      // hydration/navigation. Release its visible loading state so an
+      // operator can explicitly retry from the current surface.
+      updateDeepPaneState("presence", "idle");
+      return;
+    }
+    if (result.ok && hasConfirmedContinuityPayload(result.payload)) {
+      const continuityPayload = result.payload;
       setDaemonPresence(continuityPayload.daemon);
       setDesktopNotifications(continuityPayload.notifications ?? []);
-      setQueuedInsights(continuityPayload.queued_insights ?? []);
-      setQueuedBundleCount(continuityPayload.queued_insight_count ?? 0);
-      setRecentInterventions(continuityPayload.recent_interventions ?? []);
+      setQueuedInsights(continuityPayload.queued_insights);
+      // Older observer receipts did not include the aggregate count. Preserve
+      // the useful queued-item signal from the bounded page in that case.
+      setQueuedBundleCount(continuityPayload.queued_insight_count);
+      setRecentInterventions(continuityPayload.recent_interventions);
       setDesktopRouteStatuses(continuityPayload.reach?.route_statuses ?? []);
       setContinuityImportedReach(continuityPayload.imported_reach ?? null);
       setContinuitySourceAdapters(continuityPayload.source_adapters ?? null);
@@ -7946,6 +8140,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       setContinuitySummary(continuityPayload.summary ?? null);
       setContinuityThreads(continuityPayload.threads ?? []);
       setContinuityRecoveryActions(continuityPayload.recovery_actions ?? []);
+      setContinuityHasConfirmedPayload(true);
       markDeepPaneLoaded("presence", true);
       return;
     }
@@ -8136,17 +8331,21 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   }, [fetchCockpitJson, markDeepPaneLoaded, sessionId, updateDeepPaneState]);
 
   useEffect(() => {
-    let cancelled = false;
+    if (!advancedWorkspaceOpen && activeSection !== "work" && activeSection !== "connections") return;
+    let disposed = false;
+    const effectWasAdvanced = advancedWorkspaceOpen;
+    const isCancelled = () => {
+      if (!cockpitMountedRef.current) return true;
+      if (useCockpitLayoutStore.getState().activeSection !== activeSection) return true;
+      // Opening Windows replaces the quiet section effect while keeping the
+      // in-flight batch useful. Closing an already-open Windows workspace
+      // should cancel its refresh because that surface is no longer visible.
+      return disposed && effectWasAdvanced;
+    };
 
-    const refresh = async () => {
-      if (cockpitRefreshInFlightRef.current) return;
-      cockpitRefreshInFlightRef.current = true;
-      try {
-        await refreshCockpit(() => cancelled);
-      } catch {
-      } finally {
-        cockpitRefreshInFlightRef.current = false;
-      }
+    const refresh = () => {
+      if (isCancelled()) return;
+      void refreshCockpit(isCancelled);
     };
 
     void refresh();
@@ -8154,10 +8353,67 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       void refresh();
     }, 30_000);
     return () => {
-      cancelled = true;
+      disposed = true;
       window.clearInterval(interval);
     };
-  }, [refreshCockpit]);
+  }, [activeSection, advancedWorkspaceOpen, refreshCockpit]);
+
+  useEffect(() => {
+    if (activeSection !== "connections") return;
+    let cancelled = false;
+    const isCurrent = () => (
+      !cancelled
+      && cockpitMountedRef.current
+      && useCockpitLayoutStore.getState().activeSection === "connections"
+    );
+    void loadPresenceContinuity(isCurrent);
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSection, loadPresenceContinuity]);
+
+  useEffect(() => {
+    if (activeSection !== "library" || !libraryCapabilitiesOpen) return;
+    let cancelled = false;
+    void refreshCockpit(() => cancelled);
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSection, libraryCapabilitiesOpen, refreshCockpit]);
+
+  useEffect(() => {
+    if (activeSection !== "inbox" && activeSection !== "library" && activeSection !== "work" && activeSection !== "connections") return;
+    let cancelled = false;
+    void fetchCockpitJson(`${API_URL}/api/auth/session`, 5000, () => cancelled).then((result) => {
+      if (cancelled) return;
+      const payload = result.ok && result.payload && typeof result.payload === "object"
+        ? result.payload as { authenticated?: unknown; principal_id?: unknown; session_id?: unknown; absolute_expires_at?: unknown; idle_expires_at?: unknown }
+        : null;
+      if (
+        payload?.authenticated === true
+        && typeof payload.principal_id === "string"
+        && payload.principal_id.trim()
+        && typeof payload.session_id === "string"
+        && payload.session_id.trim()
+      ) {
+        setOperatorAuth({
+          status: "authenticated",
+          principalId: payload.principal_id.trim(),
+          sessionId: payload.session_id.trim(),
+          expiresAt: typeof payload.absolute_expires_at === "string"
+            ? payload.absolute_expires_at
+            : typeof payload.idle_expires_at === "string" ? payload.idle_expires_at : null,
+        });
+      } else if (result.status === 401 || result.status === 403) {
+        setOperatorAuth({ status: "unauthorized", principalId: null, sessionId: null, expiresAt: null });
+      } else {
+        setOperatorAuth({ status: "degraded", principalId: null, sessionId: null, expiresAt: null });
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSection, fetchCockpitJson]);
 
   useEffect(() => {
     const focusComposer = () => inputRef.current?.focus();
@@ -8414,27 +8670,52 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     quarantinedBrowserSessionCount ? `${quarantinedBrowserSessionCount} quarantined` : "no quarantine",
   ].join(" · ");
   const visibleSections = useMemo(
-    () => ({
-      rail:
-        paneVisibility.sessions_pane
-        || paneVisibility.goals_pane
-        || paneVisibility.outputs_pane
-        || paneVisibility.approvals_pane,
-      guardianState: paneVisibility.guardian_state_pane,
-      timeline: paneVisibility.operator_timeline_pane,
-      workflows: paneVisibility.workflows_pane,
-      workBoard: paneVisibility.work_board_pane,
-      interventions: paneVisibility.interventions_pane,
-      audit: paneVisibility.audit_pane,
-      trace: paneVisibility.trace_pane,
-      inspector: paneVisibility.inspector_pane,
-      conversation:
-        paneVisibility.presence_pane
-        || paneVisibility.conversation_pane
-        || paneVisibility.desktop_shell_pane
-        || paneVisibility.operator_surface_pane,
-    }),
-    [paneVisibility],
+    () => {
+      if (advancedWorkspaceOpen) {
+        return {
+          rail:
+            paneVisibility.sessions_pane
+            || paneVisibility.goals_pane
+            || paneVisibility.outputs_pane
+            || paneVisibility.approvals_pane,
+          guardianState: paneVisibility.guardian_state_pane,
+          timeline: paneVisibility.operator_timeline_pane,
+          workflows: paneVisibility.workflows_pane,
+          workBoard: paneVisibility.work_board_pane,
+          interventions: paneVisibility.interventions_pane,
+          audit: paneVisibility.audit_pane,
+          trace: paneVisibility.trace_pane,
+          inspector: paneVisibility.inspector_pane,
+          conversation:
+            paneVisibility.presence_pane
+            || paneVisibility.conversation_pane
+            || paneVisibility.desktop_shell_pane
+            || paneVisibility.operator_surface_pane,
+        };
+      }
+
+      return {
+        // Goals owns the existing priorities overlay. Its legacy windows stay
+        // behind the explicit Windows control rather than reopening the shell.
+        rail: false,
+        guardianState: false,
+        timeline: false,
+        workflows: false,
+        workBoard: activeSection === "work" && paneVisibility.work_board_pane,
+        interventions: false,
+        audit: false,
+        trace: false,
+        inspector:
+          (activeSection === "work" || activeSection === "connections" || (activeSection === "library" && libraryInspectorOpen))
+          && paneVisibility.inspector_pane,
+        // Connections exposes its existing desktop shell; chat/presence and
+        // diagnostics remain available from Windows when explicitly requested.
+          conversation:
+            (activeSection === "connections" && (paneVisibility.desktop_shell_pane || paneVisibility.presence_pane))
+            || (activeSection === "library" && libraryCapabilitiesOpen && paneVisibility.operator_surface_pane),
+      };
+    },
+    [activeSection, advancedWorkspaceOpen, libraryCapabilitiesOpen, libraryInspectorOpen, paneVisibility],
   );
   const recentConversation = messages.slice(-18);
   const latestResponse = useMemo(
@@ -9045,8 +9326,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   function inspectWorkBoardWorkflowRun(workflowRunId: string, ownerSessionId: string | null) {
     const inspectionGeneration = ++workBoardInspectionGenerationRef.current;
     const isCurrentInspection = () => inspectionGeneration === workBoardInspectionGenerationRef.current;
+    setWorkBoardEvidenceStatus("Loading workflow evidence for the task's immutable run link.");
     if (!ownerSessionId) {
-      setOperatorStatus("Task workflow evidence is unavailable because the task's canonical owner session is missing.");
+      const message = "Task workflow evidence is unavailable because the task's canonical owner session is missing.";
+      setWorkBoardEvidenceStatus(message);
+      setOperatorStatus(message);
       return;
     }
     focusPane("workflows_pane");
@@ -9054,41 +9338,56 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     void loadBoardBoundWorkflowRun(workflowRunId, ownerSessionId, isCurrentInspection).then(({ workflow, status }) => {
       if (!isCurrentInspection()) return;
       if (!workflow) {
-        setOperatorStatus(boardWorkflowEvidenceUnavailable(status));
+        const message = boardWorkflowEvidenceUnavailable(status);
+        setWorkBoardEvidenceStatus(message);
+        setOperatorStatus(message);
         return;
       }
       setSelectedInspector({ kind: "workflow", workflow });
+      setWorkBoardEvidenceStatus(null);
     }).catch(() => {
       if (!isCurrentInspection()) return;
-      setOperatorStatus("Workflow evidence could not be loaded. Refresh workflow evidence and retry.");
+      const message = "Workflow evidence could not be loaded. Refresh workflow evidence and retry.";
+      setWorkBoardEvidenceStatus(message);
+      setOperatorStatus(message);
     });
   }
   function inspectWorkBoardArtifact(request: WorkBoardArtifactInspectRequest) {
     const inspectionGeneration = ++workBoardInspectionGenerationRef.current;
     const isCurrentInspection = () => inspectionGeneration === workBoardInspectionGenerationRef.current;
+    setWorkBoardEvidenceStatus(null);
     const { reference, ownerSessionId, workflowRunId, parentWorkflowRunId } = request;
     const expectedParentWorkflowRunId = parentWorkflowRunId && parentWorkflowRunId !== workflowRunId
       ? parentWorkflowRunId
       : null;
     if (workflowRunId) {
       if (!ownerSessionId) {
-        setOperatorStatus("Task workflow evidence is unavailable because the task's canonical owner session is missing.");
+        const message = "Task workflow evidence is unavailable because the task's canonical owner session is missing.";
+        setWorkBoardEvidenceStatus(message);
+        setOperatorStatus(message);
         return;
       }
       focusPane("workflows_pane");
+      setWorkBoardEvidenceStatus("Loading workflow evidence for the task's immutable run link.");
       setOperatorStatus("Loading workflow evidence for the task's immutable run link.");
       void loadBoardBoundWorkflowRun(workflowRunId, ownerSessionId, isCurrentInspection).then(({ job, workflow, status }) => {
         if (!isCurrentInspection()) return;
         if (!job || !workflow) {
-          setOperatorStatus(boardWorkflowEvidenceUnavailable(status));
+          const message = boardWorkflowEvidenceUnavailable(status);
+          setWorkBoardEvidenceStatus(message);
+          setOperatorStatus(message);
           return;
         }
         if (expectedParentWorkflowRunId && workflow.parentRunIdentity !== expectedParentWorkflowRunId) {
-          setOperatorStatus("Task child workflow evidence is hidden because its parent does not match the task's immutable run link.");
+          const message = "Task child workflow evidence is hidden because its parent does not match the task's immutable run link.";
+          setWorkBoardEvidenceStatus(message);
+          setOperatorStatus(message);
           return;
         }
         if (!boardBoundJobMatchesReference(job, reference)) {
-          setOperatorStatus("The task's linked artifact is unavailable in the authenticated durable job evidence. Refresh the task and retry.");
+          const message = "The task's linked artifact is unavailable in the authenticated durable job evidence. Refresh the task and retry.";
+          setWorkBoardEvidenceStatus(message);
+          setOperatorStatus(message);
           return;
         }
         const artifact = resolveWorkBoardArtifact(workflow.artifacts, reference, { ownerSessionId, workflowRunId });
@@ -9098,9 +9397,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         } else {
           setSelectedInspector({ kind: "workflow", workflow });
         }
+        setWorkBoardEvidenceStatus(null);
       }).catch(() => {
         if (!isCurrentInspection()) return;
-        setOperatorStatus("Workflow evidence could not be loaded. Refresh workflow evidence and retry.");
+        const message = "Workflow evidence could not be loaded. Refresh workflow evidence and retry.";
+        setWorkBoardEvidenceStatus(message);
+        setOperatorStatus(message);
       });
       return;
     }
@@ -9109,10 +9411,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     if (artifact) {
       setSelectedInspector({ kind: "artifact", artifact });
       focusPane("inspector_pane");
+      setWorkBoardEvidenceStatus(null);
       return;
     }
     focusPane("inspector_pane");
-    setOperatorStatus(`Exact task evidence ${reference.file_path ?? reference.target_path ?? reference.artifact_id ?? reference.effect_id ?? "reference"} is not in the current session index. Refresh activity and workflow evidence, then inspect again.`);
+    const message = `Exact task evidence ${reference.file_path ?? reference.target_path ?? reference.artifact_id ?? reference.effect_id ?? "reference"} is not in the current session index. Refresh activity and workflow evidence, then inspect again.`;
+    setWorkBoardEvidenceStatus(message);
+    setOperatorStatus(message);
   }
 
   function inspectGuardianInboxArtifact(
@@ -9574,11 +9879,36 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const workspaceTelemetryRight = effectiveConnectionStatus === "connected"
     ? `${connectionLabel.toUpperCase()} LINK · ${toolPolicyMode.toUpperCase()} TOOLS · ${approvalMode.toUpperCase()} APPROVAL`
     : `DIRECT FALLBACK · ${toolPolicyMode.toUpperCase()} TOOLS · ${approvalMode.toUpperCase()} APPROVAL`;
-  const desktopPresenceLabel = daemonPresence?.connected
-    ? "desktop live"
-    : runtimeAvailable
-      ? "desktop optional"
-      : "desktop offline";
+  const presenceMetadataState = deriveSeraphPresenceMetadataState(
+    deepPaneLoadState.presence,
+    continuityHasConfirmedPayload,
+  );
+  const presenceMetadataUnavailable = presenceMetadataState === "unavailable";
+  const presenceMetadataStale = presenceMetadataState === "stale";
+  const desktopPresenceLabel = presenceMetadataUnavailable
+    ? "desktop unknown"
+    : presenceMetadataStale
+      ? "desktop last confirmed"
+      : daemonPresence?.connected
+        ? "desktop live"
+        : runtimeAvailable
+          ? "desktop optional"
+          : "desktop offline";
+  const bundleQueueLabel = presenceMetadataUnavailable
+    ? "bundle unknown"
+    : presenceMetadataStale
+      ? `bundle ${queuedBundleCount} queued · last confirmed`
+      : `bundle ${queuedBundleCount} queued`;
+  const desktopShellMeta = presenceMetadataUnavailable
+    ? "presence unknown · alerts unknown"
+    : presenceMetadataStale
+      ? `last confirmed · ${daemonPresence?.connected ? "linked" : "offline"} · ${desktopNotifications.length} alerts`
+      : `${daemonPresence?.connected ? "linked" : "offline"} · ${desktopNotifications.length} alerts`;
+  const desktopContinuitySummary = presenceMetadataUnavailable
+    ? "presence unknown · bundle unknown · recent unknown"
+    : presenceMetadataStale
+      ? `presence last confirmed · ${daemonPresence?.connected ? "linked" : "offline"} · bundle last confirmed ${queuedInsights.length} · recent last confirmed ${recentInterventions.length}`
+      : `presence ${daemonPresence?.connected ? "linked" : "offline"} · bundle ${queuedInsights.length} · recent ${recentInterventions.length}`;
   const submitDisabled = isAgentBusy || !composer.trim();
   const operatorRunbooks = useMemo(
     () => runbooks,
@@ -9601,6 +9931,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const seraphPresenceSnapshot = useMemo(
     () => ({
       connectionStatus: effectiveConnectionStatus,
+      metadataState: presenceMetadataState,
       animationState: agentVisual.animationState,
       isAgentBusy,
       pendingApprovalCount: pendingApprovals.length,
@@ -9625,6 +9956,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       agentVisual.animationState,
       ambientState,
       effectiveConnectionStatus,
+      continuityHasConfirmedPayload,
+      presenceMetadataState,
       continuitySummary?.actionable_thread_count,
       continuitySummary?.attention_family_count,
       continuitySummary?.attention_presence_surface_count,
@@ -9640,6 +9973,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       continuityThreads.length,
       desktopNotifications.length,
       desktopRouteStatuses,
+      deepPaneLoadState.presence,
       isAgentBusy,
       latestResponse?.role,
       observerState?.data_quality,
@@ -10247,7 +10581,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     approvalMode !== "off" ? "approval" : null,
     toolPolicyMode !== "unknown" ? "tool policy" : null,
     mcpPolicyMode !== "unknown" ? "mcp policy" : null,
-    ...(m7RevocationTarget ? [m7RevocationTarget.boundary_scope ?? m7RevocationTarget.boundary_posture ?? "presence"] : []),
+    ...(m7RevocationTarget
+      || (continuityPresenceSurfaces?.summary.surface_count ?? 0) > 0
+      ? [m7RevocationTarget?.boundary_scope ?? m7RevocationTarget?.boundary_posture ?? "presence"]
+      : []),
   ].filter(Boolean).length;
   const m7TrustBoundaryCount = m7Summary?.trust_boundary_count ?? m7FallbackTrustBoundaryCount;
   const m7MemoryEvidenceCount = operatorM6MemorySuperiority
@@ -15293,7 +15630,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 onClick={() => setSettingsPanelOpen(true)}
                 title="Open settings to inspect or dismiss pending desktop notifications"
               >
-                native {daemonPresence.pending_notification_count} queued
+                native {daemonPresence.pending_notification_count} queued{presenceMetadataStale ? " · last confirmed" : ""}
               </button>
             )}
             <button
@@ -15304,7 +15641,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               onClick={() => void loadPresenceContinuity()}
               title={deepPaneLoadState.presence === "loaded" ? "Refresh deferred bundle items and recent guardian continuity" : "Load deferred bundle items and recent guardian continuity"}
             >
-              bundle {queuedBundleCount} queued
+              {bundleQueueLabel}
             </button>
             <span className="cockpit-pill">
               budget {observerState?.attention_budget_remaining ?? "?"}
@@ -15363,7 +15700,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           <div className="cockpit-menu-anchor" ref={windowsMenuRef}>
             <button
               className={`cockpit-action cockpit-action--ghost ${windowsMenuOpen ? "cockpit-action--active" : ""}`}
-              onClick={() => setWindowsMenuOpen((current) => !current)}
+              onClick={() => {
+                setAdvancedWorkspaceOpen(true);
+                setWindowsMenuOpen((current) => !current);
+              }}
               title="Show or hide workspace windows"
               aria-label="Windows"
             >
@@ -15376,7 +15716,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   <div className="cockpit-window-launcher-meta">{visiblePaneCount}/{COCKPIT_PANES.length} visible</div>
                 </div>
                 <div className="cockpit-windows-menu-toolbar">
-                  <button className="cockpit-windows-menu-action" onClick={() => showAllPanes()}>
+                  <button
+                    className="cockpit-windows-menu-action"
+                    onClick={() => {
+                      setAdvancedWorkspaceOpen(true);
+                      showAllPanes();
+                    }}
+                  >
                     Show all
                   </button>
                   <button className="cockpit-windows-menu-action" onClick={() => hideNonCorePanes()}>
@@ -15449,10 +15795,118 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         </section>
       )}
 
+      <div className="cockpit-main-stage">
+        <CockpitSectionNav activeSection={activeSection} onSelect={selectCockpitSection} />
+        <main className="cockpit-section-content">
+
+      {activeSection === "home" ? (
+        <CockpitHome
+          onOpenSection={selectCockpitSection}
+          onOpenApprovals={() => {
+            setAdvancedWorkspaceOpen(true);
+            focusPane("approvals_pane");
+          }}
+          goalSummary={currentGoal ? {
+            title: currentGoal.title,
+            status: currentGoal.status,
+            criterion: currentGoalLoop?.criterion?.description ?? currentGoal.success_criterion?.description ?? null,
+          } : null}
+          onOpenTask={(taskId) => {
+            setFocusTaskId(taskId);
+            selectCockpitSection("work");
+          }}
+        />
+      ) : null}
+
+      {activeSection === "inbox" ? (
+        <section className="cockpit-section-surface cockpit-inbox-surface" data-testid="cockpit-inbox-section">
+          <div className="cockpit-section-header">
+            <div>
+              <div className="cockpit-eyebrow">INBOX</div>
+              <h2>Guardian decisions</h2>
+              <p>Review verified source changes and route accepted work into the existing board.</p>
+            </div>
+          </div>
+          <div className="cockpit-inbox-layout">
+            <GuardianInboxPanel
+              ref={guardianInboxRef}
+              active
+              pageSize={20}
+              autoFocusAcceptedTask
+              onSelectItem={setSelectedGuardianCandidate}
+              onOpenTask={(taskId) => {
+                setFocusTaskId(taskId);
+                selectCockpitSection("work");
+              }}
+              onOpenGoals={() => selectCockpitSection("goals")}
+              onOpenWork={() => selectCockpitSection("work")}
+              onInspectArtifact={inspectGuardianInboxArtifact}
+            />
+            <GuardianCandidateInspector
+              item={selectedGuardianCandidate}
+              onClose={() => {
+                const itemId = selectedGuardianCandidate?.id;
+                setSelectedGuardianCandidate(null);
+                if (itemId) window.setTimeout(() => {
+                  const testId = `guardian-inbox-row-${itemId}`;
+                  Array.from(document.querySelectorAll<HTMLElement>("[data-testid^=\"guardian-inbox-row-\"]"))
+                    .find((row) => row.dataset.testid === testId)
+                    ?.focus();
+                }, 0);
+              }}
+              onOpenTask={(taskId) => {
+                setFocusTaskId(taskId);
+                selectCockpitSection("work");
+              }}
+              onInspectArtifact={inspectGuardianInboxArtifact}
+            />
+          </div>
+        </section>
+      ) : null}
+
+      {activeSection === "library" ? (
+        <CanonicalMemoryPanel
+          active
+          onOpenTask={(taskId) => {
+            setFocusTaskId(taskId);
+            selectCockpitSection("work");
+          }}
+          onOpenMemoryControls={() => {
+            setAdvancedWorkspaceOpen(true);
+            focusPane("operator_surface_pane");
+            void loadGuardianMemory();
+          }}
+          onOpenCapabilities={() => {
+            setLibraryCapabilitiesOpen(true);
+            setPaneVisible("operator_surface_pane", true);
+            focusPane("operator_surface_pane");
+          }}
+          onInspectLink={(link: CanonicalMemoryLink) => {
+            const id = link.id;
+            if (!id || !operatorAuth.sessionId) {
+              setOperatorStatus("Memory evidence is unavailable because its owner-bound reference is incomplete.");
+              return;
+            }
+            if (link.kind.includes("artifact")) {
+              setLibraryInspectorOpen(true);
+              inspectWorkBoardArtifact({
+                reference: { artifact_id: id },
+                ownerSessionId: operatorAuth.sessionId,
+                workflowRunId: null,
+                parentWorkflowRunId: null,
+              });
+              return;
+            }
+            setOperatorStatus(`Memory ${link.kind} ${id} is an opaque reference without an owner task link. It remains unavailable in this surface.`);
+          }}
+        />
+      ) : null}
+
+      {legacyWorkspaceVisible ? (
       <div className="cockpit-workspace">
         {visibleSections.rail && (
           <>
-            {paneVisibility.sessions_pane && (
+            {advancedWorkspaceOpen && paneVisibility.sessions_pane && (
               <CockpitWorkspaceWindow
                 panelId="sessions_pane"
                 title="Sessions"
@@ -15510,7 +15964,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               </CockpitWorkspaceWindow>
             )}
 
-            {paneVisibility.goals_pane && (
+            {advancedWorkspaceOpen && paneVisibility.goals_pane && (
               <CockpitWorkspaceWindow
                 panelId="goals_pane"
                 title="Priorities"
@@ -15552,7 +16006,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               </CockpitWorkspaceWindow>
             )}
 
-            {paneVisibility.outputs_pane && (
+            {advancedWorkspaceOpen && paneVisibility.outputs_pane && (
               <CockpitWorkspaceWindow
                 panelId="outputs_pane"
                 title="Recent outputs"
@@ -15671,7 +16125,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               </CockpitWorkspaceWindow>
             )}
 
-            {paneVisibility.approvals_pane && (
+            {advancedWorkspaceOpen && paneVisibility.approvals_pane && (
               <CockpitWorkspaceWindow
                 panelId="approvals_pane"
                 title="Pending approvals"
@@ -15763,7 +16217,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           </>
         )}
 
-        {paneVisibility.response_pane && (latestResponse || isAgentBusy) && (
+        {advancedWorkspaceOpen && paneVisibility.response_pane && (latestResponse || isAgentBusy) && (
           <CockpitWorkspaceWindow
             panelId="response_pane"
             title="Latest response"
@@ -15890,13 +16344,18 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   }
                 }}
               />
-              <GuardianInboxPanel
-                onOpenTask={(taskId) => {
-                  setFocusTaskId(taskId);
-                  focusPane("work_board_pane");
-                }}
-                onInspectArtifact={inspectGuardianInboxArtifact}
-              />
+              {activeSection !== "inbox" ? (
+                <GuardianInboxPanel
+                  active={advancedWorkspaceOpen}
+                  pageSize={20}
+                  onSelectItem={setSelectedGuardianCandidate}
+                  onOpenTask={(taskId) => {
+                    setFocusTaskId(taskId);
+                    selectCockpitSection("work");
+                  }}
+                  onInspectArtifact={inspectGuardianInboxArtifact}
+                />
+              ) : null}
               <div className="cockpit-operator-row">
                 <span className="cockpit-key">proof controls</span>
                 <span className="cockpit-operator-link">{renderDeepLoadState("benchmark")} · {renderDeepLoadState("m8")}</span>
@@ -16336,12 +16795,21 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             minHeight={360}
             onClose={() => closeWindowPane("work_board_pane")}
           >
+            {workBoardEvidenceStatus && (
+              <div className="cockpit-sublist-item" role="status" aria-label={workBoardEvidenceStatus} aria-live="polite">
+                {workBoardEvidenceStatus}
+              </div>
+            )}
             <WorkBoardPanel
               ownerPrincipalId={operatorAuth.principalId}
               ownerSessionId={operatorAuth.sessionId}
               focusTaskId={focusTaskId}
               onFocusTaskHandled={() => setFocusTaskId(null)}
               onOpenApprovals={() => focusPane("approvals_pane")}
+              onOpenInboxCandidate={(item) => {
+                setSelectedGuardianCandidate(item);
+                selectCockpitSection("inbox");
+              }}
               onInspectArtifact={inspectWorkBoardArtifact}
               onInspectWorkflowRun={inspectWorkBoardWorkflowRun}
             />
@@ -16749,7 +17217,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
         {visibleSections.conversation && (
           <>
-            {paneVisibility.presence_pane && (
+            {(advancedWorkspaceOpen || activeSection === "connections") && paneVisibility.presence_pane && (
               <CockpitWorkspaceWindow
                 panelId="presence_pane"
                 title="Seraph presence"
@@ -16764,7 +17232,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               </CockpitWorkspaceWindow>
             )}
 
-            {paneVisibility.conversation_pane && (
+            {advancedWorkspaceOpen && paneVisibility.conversation_pane && (
               <CockpitWorkspaceWindow
                 panelId="conversation_pane"
                 title="Conversation"
@@ -16828,11 +17296,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               </CockpitWorkspaceWindow>
             )}
 
-            {paneVisibility.desktop_shell_pane && (
+            {(advancedWorkspaceOpen || activeSection === "connections") && paneVisibility.desktop_shell_pane && (
               <CockpitWorkspaceWindow
                 panelId="desktop_shell_pane"
                 title="Desktop shell"
-                meta={`${daemonPresence?.connected ? "linked" : "offline"} · ${desktopNotifications.length} alerts`}
+                meta={desktopShellMeta}
                 hint={COCKPIT_WINDOW_HINTS.desktopShell}
                 showHint={cockpitHintsEnabled}
                 minWidth={340}
@@ -16849,7 +17317,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     </div>
                   </div>
                   <div className="cockpit-sublist-item">
-                    presence {daemonPresence?.connected ? "linked" : "offline"} · bundle {queuedInsights.length} · recent {recentInterventions.length}
+                    {desktopContinuitySummary}
                   </div>
                   {continuitySummary && (
                     <>
@@ -17154,15 +17622,20 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       </div>
                     </div>
                   ))}
-                  {desktopNotifications.length === 0 && queuedInsights.length === 0 && recentInterventions.length === 0 && (
-                    <div className="cockpit-empty">No desktop continuity items yet.</div>
+                  {presenceMetadataUnavailable && (
+                    <div className="cockpit-empty">Desktop continuity items unknown. Load presence continuity to confirm.</div>
+                  )}
+                  {!presenceMetadataUnavailable && desktopNotifications.length === 0 && queuedInsights.length === 0 && recentInterventions.length === 0 && (
+                    <div className="cockpit-empty">
+                      {presenceMetadataStale ? "No desktop continuity items in the last confirmed snapshot." : "No desktop continuity items yet."}
+                    </div>
                   )}
                 </div>
               </section>
               </CockpitWorkspaceWindow>
             )}
 
-            {paneVisibility.operator_surface_pane && (
+            {(advancedWorkspaceOpen || (activeSection === "library" && libraryCapabilitiesOpen)) && paneVisibility.operator_surface_pane && (
               <CockpitWorkspaceWindow
                 panelId="operator_surface_pane"
                 title="Operator terminal"
@@ -20683,6 +21156,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             )}
           </>
         )}
+      </div>
+      ) : null}
+        </main>
       </div>
 
       {studioOpen && (

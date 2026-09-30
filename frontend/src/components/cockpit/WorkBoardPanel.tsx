@@ -4,9 +4,11 @@ import type { FormEvent, MouseEvent } from "react";
 import { API_URL, WS_URL } from "../../config/constants";
 import { resolveWebSocketUrl } from "../../hooks/useWebSocket";
 import { apiFetch } from "../../lib/api";
+import { fetchGuardianInboxItem } from "../../lib/guardianInbox";
 import { WorkBoardMemoryReview } from "./WorkBoardMemoryReview";
 import type {
   GoalInfo,
+  GuardianInboxItem,
   WorkBoardActionRequest,
   WorkBoardComment,
   WorkBoardCommentCreateRequest,
@@ -102,9 +104,11 @@ const RECONNECT_DELAY_MS = 3_000;
 const BOARD_REQUEST_TIMEOUT_MS = 15_000;
 const ROUTINE_SOURCE_CAPABILITY = "guardian.research-watch.v1";
 const ROUTINE_ACTION_CAPABILITY = "work.github-followthrough.v1";
+const GUARDIAN_INBOX_SCOPE = /^guardian-inbox:([A-Za-z0-9_-]{1,128})$/;
 
 export interface WorkBoardPanelProps {
   onOpenApprovals?: () => void;
+  onOpenInboxCandidate?: (item: GuardianInboxItem) => void;
   onInspectWorkflowRun?: (workflowRunId: string, ownerSessionId: string | null) => void;
   onInspectArtifact?: (request: WorkBoardArtifactInspectRequest) => void;
   focusTaskId?: string | null;
@@ -610,6 +614,7 @@ function referenceWorkflowRunId(
 
 function WorkBoardPanel({
   onOpenApprovals,
+  onOpenInboxCandidate,
   onInspectWorkflowRun,
   onInspectArtifact,
   focusTaskId,
@@ -637,6 +642,7 @@ function WorkBoardPanel({
   const [showArchived, setShowArchived] = useState(false);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [detail, setDetail] = useState<WorkBoardTaskDetail | null>(null);
+  const [inboxOrigin, setInboxOrigin] = useState<{ requestKey: string; item: GuardianInboxItem } | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -723,6 +729,8 @@ function WorkBoardPanel({
   const reconnectRef = useRef<(() => Promise<boolean>) | null>(null);
   const eventReconcileQueueRef = useRef<Promise<void>>(Promise.resolve());
   const taskDetailRequestVersionRef = useRef(new Map<string, number>());
+  const inboxOriginControllerRef = useRef<AbortController | null>(null);
+  const inboxOriginRequestKeyRef = useRef<string | null>(null);
   const requestControllersRef = useRef(new Set<AbortController>());
   const createDialogRef = useRef<HTMLFormElement | null>(null);
   const createOpenerRef = useRef<HTMLElement | null>(null);
@@ -791,6 +799,14 @@ function WorkBoardPanel({
   const allGoals = useMemo(() => flattenGoals(goals), [goals]);
   const selectedDetail = selectedTaskId && detail?.task.task_id === selectedTaskId ? detail : null;
   const selectedTask = selectedDetail?.task ?? tasks.find((task) => task.task_id === selectedTaskId) ?? null;
+  const selectedInboxScope = selectedTask?.idempotency_scope ?? null;
+  const selectedInboxScopeMatch = selectedInboxScope?.match(GUARDIAN_INBOX_SCOPE) ?? null;
+  const selectedInboxOriginKey = selectedTask && selectedInboxScopeMatch
+    ? `${selectedTask.task_id}\u0000${selectedInboxScope}`
+    : null;
+  const selectedInboxOrigin = selectedInboxOriginKey && inboxOrigin?.requestKey === selectedInboxOriginKey
+    ? inboxOrigin.item
+    : null;
   const taskById = useMemo(() => new Map(tasks.map((task) => [task.task_id, task])), [tasks]);
   const verifiedRoutineSourceTasks = useMemo(
     () => tasks.filter((task) => task.status === "done" && task.capability_id === ROUTINE_SOURCE_CAPABILITY),
@@ -1179,6 +1195,8 @@ function WorkBoardPanel({
       eventReconcileQueueRef.current = Promise.resolve();
       requestControllersRef.current.forEach((controller) => controller.abort());
       requestControllersRef.current.clear();
+      inboxOriginControllerRef.current?.abort();
+      inboxOriginControllerRef.current = null;
       if (reconnectTimerRef.current !== null) window.clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
       socketRef.current?.close(1000, "component_unmounted");
@@ -1211,6 +1229,42 @@ function WorkBoardPanel({
       .finally(() => { if (active) setDetailLoading(false); });
     return () => { active = false; };
   }, [readTaskDetail, selectedTaskId]);
+
+  useEffect(() => {
+    const taskId = selectedTask?.task_id ?? null;
+    const scope = selectedTask?.idempotency_scope ?? null;
+    const scopeMatch = scope?.match(GUARDIAN_INBOX_SCOPE) ?? null;
+    const requestKey = taskId && scopeMatch ? `${taskId}\u0000${scope}` : null;
+    const previousRequestKey = inboxOriginRequestKeyRef.current;
+
+    if (previousRequestKey !== requestKey) {
+      inboxOriginControllerRef.current?.abort();
+      inboxOriginControllerRef.current = null;
+      inboxOriginRequestKeyRef.current = requestKey;
+      setInboxOrigin(null);
+    }
+    if (!taskId || !scopeMatch || !requestKey || previousRequestKey === requestKey) return;
+
+    const controller = new AbortController();
+    inboxOriginControllerRef.current = controller;
+    void fetchGuardianInboxItem(scopeMatch[1], controller.signal)
+      .then((item) => {
+        if (stoppedRef.current || controller.signal.aborted
+          || inboxOriginRequestKeyRef.current !== requestKey
+          || selectedTaskIdRef.current !== taskId) return;
+        if (item.task_id !== taskId || item.state !== "accepted") return;
+        setInboxOrigin({ requestKey, item });
+      })
+      .catch(() => {
+        // A missing, mismatched, or unavailable candidate is not an origin
+        // receipt. Keep the board usable without manufacturing provenance.
+      })
+      .finally(() => {
+        if (inboxOriginRequestKeyRef.current === requestKey) {
+          inboxOriginControllerRef.current = null;
+        }
+      });
+  }, [selectedTask?.idempotency_scope, selectedTask?.task_id]);
 
   useEffect(() => {
     setRoutineRecords([]);
@@ -1490,6 +1544,10 @@ function WorkBoardPanel({
   const closeTask = useCallback(() => {
     selectedTaskIdRef.current = null;
     setSelectedTaskId(null);
+    inboxOriginControllerRef.current?.abort();
+    inboxOriginControllerRef.current = null;
+    inboxOriginRequestKeyRef.current = null;
+    setInboxOrigin(null);
   }, []);
 
   const openCreateDialog = (event: MouseEvent<HTMLButtonElement>) => {
@@ -2962,7 +3020,7 @@ function WorkBoardPanel({
       )}
 
       {selectedTask && (
-        <aside ref={taskDetailPanelRef} role="region" aria-label={`Task details for ${selectedTask.title}`} tabIndex={-1} className="fixed inset-y-0 right-0 z-[80] h-full w-full max-w-2xl overflow-y-auto border-l border-white/15 bg-slate-950 p-4 shadow-2xl">
+        <aside ref={taskDetailPanelRef} role="region" aria-label={`Task details for ${selectedTask.title}`} tabIndex={-1} className="fixed inset-y-0 right-0 z-[80] h-full w-full max-w-2xl overflow-y-auto border-l border-white/15 bg-slate-950 p-4 text-slate-100 shadow-2xl">
             <div className="sticky top-0 z-10 -mx-4 -mt-4 mb-4 flex items-center justify-between border-b border-white/10 bg-slate-950/95 px-4 py-3 backdrop-blur">
               <div>
                 <div className="text-[10px] uppercase tracking-wide opacity-70">{STATUS_LABELS[selectedTask.status]} · revision {selectedTask.task_revision}</div>
@@ -2974,6 +3032,21 @@ function WorkBoardPanel({
             {(detailLoading || stale) && <div className="mb-3 text-xs text-amber-200" role="status">{detailLoading ? "Refreshing task detail…" : "Showing the last confirmed task detail."}</div>}
             {detailError && <div className="mb-3 rounded border border-red-500/40 p-2 text-sm" role="alert">{detailError}<button type="button" className="ml-2 underline" onClick={() => void refreshSelectedTask()}>Refresh detail</button></div>}
             {actionError && <div className="mb-3 rounded border border-amber-500/40 p-2 text-sm" role="alert">{actionError}</div>}
+            {selectedInboxOrigin && (
+              <section className="mb-3 rounded border border-cyan-400/30 bg-cyan-950/10 p-3 text-xs" aria-label="Inbox origin">
+                <div className="font-semibold">Created from Inbox candidate</div>
+                <div className="mt-1 break-all">Candidate {selectedInboxOrigin.id} · accepted</div>
+                {onOpenInboxCandidate && (
+                  <button
+                    type="button"
+                    className="cockpit-feedback-button mt-2"
+                    onClick={() => onOpenInboxCandidate(selectedInboxOrigin)}
+                  >
+                    Review Inbox decision
+                  </button>
+                )}
+              </section>
+            )}
 
             <div className="grid gap-3 text-xs">
               <section className="rounded border border-white/10 p-3">
@@ -3641,7 +3714,7 @@ function WorkBoardPanel({
 
       {createOpen && (
         <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/65 p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeCreateDialog(); }}>
-          <form ref={createDialogRef} role="dialog" aria-modal="true" aria-labelledby="work-board-create-title" tabIndex={-1} className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded border border-white/15 bg-slate-950 p-4 shadow-2xl" onSubmit={(event) => void createTask(event)}>
+          <form ref={createDialogRef} role="dialog" aria-modal="true" aria-labelledby="work-board-create-title" tabIndex={-1} className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded border border-white/15 bg-slate-950 p-4 text-slate-100 shadow-2xl" onSubmit={(event) => void createTask(event)}>
             <div className="flex items-center justify-between gap-2"><h2 id="work-board-create-title" className="text-lg font-semibold">Create a goal-linked task</h2><button type="button" className="cockpit-feedback-button" onClick={closeCreateDialog} disabled={createBusy || Boolean(pendingCreate)}>Close</button></div>
             <p className="mt-1 text-xs opacity-70">A free-text idea starts in Triage. Todo requires a typed capability input and current runtime-limit acknowledgment. The dispatcher alone promotes eligible work to Ready.</p>
             {pendingCreate && <p className="mt-2 rounded border border-amber-500/40 p-2 text-sm" role="status">This exact task request has an unconfirmed receipt. Its fields and idempotency key are held until the server confirms the existing task or accepts the same request.</p>}

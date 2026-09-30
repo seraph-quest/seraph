@@ -838,6 +838,17 @@ async def _ensure_m5_columns(conn) -> None:
         )
 
 
+async def _ensure_guardian_inbox_columns(conn) -> None:
+    """Additive columns for durable guardian inbox action history."""
+
+    result = await conn.exec_driver_sql("PRAGMA table_info(guardian_inbox_actions)")
+    existing = {row[1] for row in result.fetchall()}
+    if existing and "safe_reason" not in existing:
+        await conn.exec_driver_sql(
+            "ALTER TABLE guardian_inbox_actions ADD COLUMN safe_reason VARCHAR"
+        )
+
+
 async def _ensure_search_indexes(conn) -> None:
     await conn.exec_driver_sql(
         """
@@ -1305,6 +1316,7 @@ async def init_db() -> None:
         # metadata creates the conditional indexes declared by SQLModel.
         await _ensure_work_board_routine_binding(conn)
         await conn.run_sync(SQLModel.metadata.create_all)
+        await _ensure_guardian_inbox_columns(conn)
         await _ensure_m5_columns(conn)
         await _ensure_work_board_indexes(conn)
         await _ensure_m5_indexes(conn)

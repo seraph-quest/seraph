@@ -134,6 +134,28 @@ function limits(goalRevision = 3) {
   };
 }
 
+function guardianInboxCandidate(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "disposition-12345678",
+    revision: 4,
+    state: "accepted",
+    source_kind: "source_packet",
+    source_id: "packet-1",
+    title: "Watched source changed",
+    summary: "A verified dossier is ready",
+    why_now: "The source changed",
+    goal_id: "goal-1",
+    goal_revision: 3,
+    watch_id: "watch-1",
+    plan_revision: 2,
+    task_id: "task-1",
+    expires_at: "2026-10-07T12:00:00Z",
+    evidence_refs: [],
+    allowed_actions: [],
+    ...overrides,
+  };
+}
+
 function taskResponse(
   fetchMock: ReturnType<typeof vi.fn>,
   currentTask: WorkBoardTask,
@@ -875,6 +897,72 @@ describe("WorkBoardPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "Open workflow evidence" }));
 
     expect(onInspectWorkflowRun).toHaveBeenCalledWith("workflow-run-1", "canonical-owner-session");
+  });
+
+  it("shows a verified Inbox origin and routes review back to the existing Inbox inspector", async () => {
+    const currentTask = task({ idempotency_scope: "guardian-inbox:disposition-12345678" });
+    const candidate = guardianInboxCandidate();
+    const onOpenInboxCandidate = vi.fn();
+    fetchMock.mockClear();
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/guardian/inbox/disposition-12345678")) return Promise.resolve(response({ item: candidate }));
+      if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) return Promise.resolve(response(page([currentTask])));
+      if (url.includes("/api/work-board/events")) return Promise.resolve(response(events()));
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
+      if (url.includes(`/api/work-board/tasks/${currentTask.task_id}`)) return Promise.resolve(response(detail(currentTask)));
+      return Promise.resolve(response({}));
+    });
+
+    render(<WorkBoardPanel onOpenInboxCandidate={onOpenInboxCandidate} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Bounded task" }));
+    expect(await screen.findByText("Created from Inbox candidate")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Review Inbox decision" }));
+
+    expect(onOpenInboxCandidate).toHaveBeenCalledWith(expect.objectContaining({
+      id: candidate.id,
+      state: "accepted",
+      task_id: currentTask.task_id,
+    }));
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).includes("/api/guardian/inbox/"))).toHaveLength(1);
+  });
+
+  it.each([
+    ["a mismatched task", guardianInboxCandidate({ task_id: "another-task" }), 200],
+    ["a non-accepted candidate", guardianInboxCandidate({ state: "pending" }), 200],
+    ["a missing candidate", { detail: { code: "not_found" } }, 404],
+  ])("does not claim an Inbox origin after %s", async (_label, payload, status) => {
+    const currentTask = task({ idempotency_scope: "guardian-inbox:disposition-12345678" });
+    fetchMock.mockClear();
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/guardian/inbox/disposition-12345678")) return Promise.resolve(response(payload, status === 200, status));
+      if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) return Promise.resolve(response(page([currentTask])));
+      if (url.includes("/api/work-board/events")) return Promise.resolve(response(events()));
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
+      if (url.includes(`/api/work-board/tasks/${currentTask.task_id}`)) return Promise.resolve(response(detail(currentTask)));
+      return Promise.resolve(response({}));
+    });
+
+    render(<WorkBoardPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Bounded task" }));
+    await screen.findByRole("region", { name: "Task details for Bounded task" });
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => String(input).includes("/api/guardian/inbox/")).length).toBe(1));
+    expect(screen.queryByText("Created from Inbox candidate")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Review Inbox decision" })).not.toBeInTheDocument();
+  });
+
+  it("does not fetch an Inbox origin for a malformed task scope", async () => {
+    const currentTask = task({ idempotency_scope: "guardian-inbox:../unsafe" });
+    fetchMock.mockClear();
+    taskResponse(fetchMock, currentTask);
+
+    render(<WorkBoardPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Bounded task" }));
+    await screen.findByRole("region", { name: "Task details for Bounded task" });
+
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/guardian/inbox/"))).toBe(false);
+    expect(screen.queryByText("Created from Inbox candidate")).not.toBeInTheDocument();
   });
 
   it("opens attempt receipt artifacts with their immutable workflow run context", async () => {

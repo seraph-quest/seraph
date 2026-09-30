@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 
 import {
   applyGuardianInboxAction,
@@ -18,9 +18,25 @@ import type {
 
 export interface GuardianInboxPanelProps {
   autoLoad?: boolean;
+  active?: boolean;
+  pageSize?: number;
   pollIntervalMs?: number;
+  autoFocusAcceptedTask?: boolean;
   onOpenTask?: (taskId: string) => void;
+  onOpenGoals?: () => void;
+  onOpenWork?: () => void;
+  onSelectItem?: (item: GuardianInboxItem) => void;
   onInspectArtifact?: (reference: GuardianInboxEvidenceRef, preview?: GuardianInboxEvidencePreview) => void;
+}
+
+/**
+ * Composition seam for the M2 inspector. The panel remains the sole owner of
+ * action payloads, idempotency keys, retries, and revision checks; the
+ * inspector can request an already-rendered row's server-advertised action
+ * without implementing a second action client.
+ */
+export interface GuardianInboxPanelHandle {
+  runAction: (itemId: string, action: GuardianInboxAction) => void;
 }
 
 function formatTime(value: string | null | undefined): string {
@@ -28,12 +44,6 @@ function formatTime(value: string | null | undefined): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleString();
-}
-
-function defaultSnoozeValue(): string {
-  const value = new Date(Date.now() + 60 * 60 * 1000);
-  const local = new Date(value.getTime() - value.getTimezoneOffset() * 60 * 1000);
-  return local.toISOString().slice(0, 16);
 }
 
 function safeHref(value: string | null | undefined): string | null {
@@ -113,6 +123,8 @@ function mergeCachedDetail(listItem: GuardianInboxItem, detail: GuardianInboxIte
     task_id: listItem.task_id ?? detail.task_id,
     task_url: listItem.task_url ?? detail.task_url,
     recovery_action: listItem.recovery_action ?? detail.recovery_action,
+    action_history: detail.action_history ?? listItem.action_history,
+    action_history_truncated: detail.action_history_truncated ?? listItem.action_history_truncated,
   };
 }
 
@@ -122,31 +134,231 @@ function actionLabel(action: GuardianInboxAction): string {
   return "Dismiss";
 }
 
-export function GuardianInboxPanel({
+function snoozeReason(item: GuardianInboxItem): string {
+  const history = item.action_history?.find((entry) => entry.action === "snooze");
+  if (history?.reason_state === "provided" && history.safe_reason) return history.safe_reason;
+  if (history?.reason_state === "not_provided") return "reason not provided";
+  return "reason unavailable";
+}
+
+function stateLabel(item: GuardianInboxItem): string {
+  return item.state === "snoozed"
+    ? `Snoozed until ${formatTime(item.snoozed_until)} · ${snoozeReason(item)}`
+    : item.state;
+}
+
+const GESTURE_STORAGE_PREFIX = "seraph.guardian.gesture.v1:";
+const MAX_PERSISTED_GESTURES = 32;
+
+interface PersistedGesture {
+  version: 1;
+  item_id: string;
+  action: GuardianInboxAction;
+  expected_revision: number;
+  idempotency_key: string;
+  until?: string;
+  reason_digest?: string;
+  created_at: number;
+}
+
+function gestureStorage(): Storage | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
+function gestureStorageKey(itemId: string, action: GuardianInboxAction): string {
+  return `${GESTURE_STORAGE_PREFIX}${encodeURIComponent(itemId)}:${action}`;
+}
+
+function normalizedReason(value: string | undefined): string {
+  return value?.trim().slice(0, 500) ?? "";
+}
+
+function sha256Fallback(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  const paddedLength = Math.ceil((bytes.length + 9) / 64) * 64;
+  const padded = new Uint8Array(paddedLength);
+  padded.set(bytes);
+  padded[bytes.length] = 0x80;
+  const bitLength = bytes.length * 8;
+  const lengthOffset = padded.length - 8;
+  for (let index = 0; index < 8; index += 1) {
+    padded[lengthOffset + index] = Math.floor(bitLength / 2 ** (56 - index)) & 0xff;
+  }
+  const constants = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+  ];
+  const hash = [
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+  ];
+  const rotate = (word: number, bits: number): number => (word >>> bits) | (word << (32 - bits));
+  for (let offset = 0; offset < padded.length; offset += 64) {
+    const words = new Uint32Array(64);
+    for (let index = 0; index < 16; index += 1) {
+      const position = offset + index * 4;
+      words[index] = ((padded[position] << 24) | (padded[position + 1] << 16) | (padded[position + 2] << 8) | padded[position + 3]) >>> 0;
+    }
+    for (let index = 16; index < 64; index += 1) {
+      const word = words[index - 15];
+      const smallSigma0 = (rotate(word, 7) ^ rotate(word, 18) ^ (word >>> 3)) >>> 0;
+      const previous = words[index - 2];
+      const smallSigma1 = (rotate(previous, 17) ^ rotate(previous, 19) ^ (previous >>> 10)) >>> 0;
+      words[index] = (words[index - 16] + smallSigma0 + words[index - 7] + smallSigma1) >>> 0;
+    }
+    let [a, b, c, d, e, f, g, h] = hash;
+    for (let index = 0; index < 64; index += 1) {
+      const bigSigma1 = (rotate(e, 6) ^ rotate(e, 11) ^ rotate(e, 25)) >>> 0;
+      const choice = ((e & f) ^ (~e & g)) >>> 0;
+      const first = (h + bigSigma1 + choice + constants[index] + words[index]) >>> 0;
+      const bigSigma0 = (rotate(a, 2) ^ rotate(a, 13) ^ rotate(a, 22)) >>> 0;
+      const majority = ((a & b) ^ (a & c) ^ (b & c)) >>> 0;
+      const second = (bigSigma0 + majority) >>> 0;
+      h = g;
+      g = f;
+      f = e;
+      e = (d + first) >>> 0;
+      d = c;
+      c = b;
+      b = a;
+      a = (first + second) >>> 0;
+    }
+    hash[0] = (hash[0] + a) >>> 0;
+    hash[1] = (hash[1] + b) >>> 0;
+    hash[2] = (hash[2] + c) >>> 0;
+    hash[3] = (hash[3] + d) >>> 0;
+    hash[4] = (hash[4] + e) >>> 0;
+    hash[5] = (hash[5] + f) >>> 0;
+    hash[6] = (hash[6] + g) >>> 0;
+    hash[7] = (hash[7] + h) >>> 0;
+  }
+  return hash.map((word) => word.toString(16).padStart(8, "0")).join("");
+}
+
+async function reasonDigest(value: string): Promise<string> {
+  const normalized = normalizedReason(value);
+  try {
+    if (globalThis.crypto?.subtle) {
+      const bytes = new TextEncoder().encode(normalized);
+      const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+      return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+    }
+  } catch {
+    // Fall back to the local implementation in non-secure or restricted contexts.
+  }
+  return sha256Fallback(normalized);
+}
+
+function readPersistedGesture(itemId: string, action: GuardianInboxAction): PersistedGesture | null {
+  const storage = gestureStorage();
+  if (!storage) return null;
+  try {
+    const raw = storage.getItem(gestureStorageKey(itemId, action));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<PersistedGesture>;
+    if (
+      parsed.version !== 1
+      || parsed.item_id !== itemId
+      || parsed.action !== action
+      || typeof parsed.expected_revision !== "number"
+      || !Number.isInteger(parsed.expected_revision)
+      || typeof parsed.idempotency_key !== "string"
+      || typeof parsed.created_at !== "number"
+    ) {
+      storage.removeItem(gestureStorageKey(itemId, action));
+      return null;
+    }
+    return parsed as PersistedGesture;
+  } catch {
+    return null;
+  }
+}
+
+function persistGesture(record: PersistedGesture): void {
+  const storage = gestureStorage();
+  if (!storage) return;
+  try {
+    storage.setItem(gestureStorageKey(record.item_id, record.action), JSON.stringify(record));
+    const keys = Array.from({ length: storage.length }, (_, index) => storage.key(index))
+      .filter((key): key is string => Boolean(key && key.startsWith(GESTURE_STORAGE_PREFIX)));
+    if (keys.length <= MAX_PERSISTED_GESTURES) return;
+    const records = keys.flatMap((key) => {
+      try {
+        const value = JSON.parse(storage.getItem(key) ?? "null") as Partial<PersistedGesture>;
+        return typeof value.created_at === "number" ? [{ key, created_at: value.created_at }] : [];
+      } catch {
+        return [];
+      }
+    }).sort((left, right) => left.created_at - right.created_at);
+    records.slice(0, Math.max(0, records.length - MAX_PERSISTED_GESTURES)).forEach(({ key }) => storage.removeItem(key));
+  } catch {
+    // The in-memory request remains authoritative when session storage is unavailable.
+  }
+}
+
+function clearPersistedGesture(itemId: string, action: GuardianInboxAction): void {
+  const storage = gestureStorage();
+  try {
+    storage?.removeItem(gestureStorageKey(itemId, action));
+  } catch {
+    // Storage may be unavailable in a private or restricted browsing context.
+  }
+}
+
+export const GuardianInboxPanel = forwardRef<GuardianInboxPanelHandle, GuardianInboxPanelProps>(function GuardianInboxPanel({
   autoLoad = true,
+  active = true,
+  pageSize = 50,
   pollIntervalMs = 30_000,
+  autoFocusAcceptedTask = false,
   onOpenTask,
+  onOpenGoals,
+  onOpenWork,
+  onSelectItem,
   onInspectArtifact,
-}: GuardianInboxPanelProps) {
+}: GuardianInboxPanelProps, ref) {
   const [items, setItems] = useState<GuardianInboxItem[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [lastConfirmedAt, setLastConfirmedAt] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(autoLoad && active);
   const [status, setStatus] = useState<string | null>(null);
   const [actionError, setActionError] = useState<Record<string, string>>({});
+  const [unknownActions, setUnknownActions] = useState<Record<string, boolean>>({});
   const [actionBusy, setActionBusy] = useState<string | null>(null);
   const [receipts, setReceipts] = useState<Record<string, string>>({});
   const [snoozeValues, setSnoozeValues] = useState<Record<string, string>>({});
+  const [snoozeReasons, setSnoozeReasons] = useState<Record<string, string>>({});
   const [dismissReasons, setDismissReasons] = useState<Record<string, string>>({});
+  const [filterText, setFilterText] = useState("");
+  const [filterGoal, setFilterGoal] = useState("");
+  const [filterState, setFilterState] = useState("");
+  const [filterSource, setFilterSource] = useState("");
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [detailLoading, setDetailLoading] = useState<Record<string, boolean>>({});
+  const [listConfirmed, setListConfirmed] = useState(false);
   const gestureKeys = useRef(new Map<string, string>());
   const gestureRequests = useRef(new Map<string, GuardianInboxActionRequest>());
   const detailCacheRef = useRef(new Map<string, GuardianInboxItem>());
+  const detailConfirmedRef = useRef(new Set<string>());
   const expandedRef = useRef<Record<string, boolean>>({});
   const itemsRef = useRef<GuardianInboxItem[]>([]);
   const mountedRef = useRef(true);
-  const controllersRef = useRef(new Set<AbortController>());
+  const listControllerRef = useRef<AbortController | null>(null);
+  const listGenerationRef = useRef(0);
+  const detailControllersRef = useRef(new Map<string, AbortController>());
+  const retryDelayRef = useRef(30_000);
+  const refreshTimerRef = useRef<number | null>(null);
+  const refreshLoopRef = useRef<((reconcile?: boolean) => void) | null>(null);
 
   const rememberDetail = useCallback((item: GuardianInboxItem) => {
     detailCacheRef.current.set(item.id, item);
@@ -167,10 +379,18 @@ export function GuardianInboxPanel({
   }, []);
 
   const loadDetail = useCallback(async (item: GuardianInboxItem) => {
+    detailControllersRef.current.get(item.id)?.abort();
+    const controller = new AbortController();
+    detailControllersRef.current.set(item.id, controller);
     setDetailLoading((current) => ({ ...current, [item.id]: true }));
     try {
-      const next = await fetchGuardianInboxItem(item.id);
-      if (!mountedRef.current) return;
+      const next = await fetchGuardianInboxItem(item.id, controller.signal);
+      if (
+        !mountedRef.current
+        || controller.signal.aborted
+        || detailControllersRef.current.get(item.id) !== controller
+        || !expandedRef.current[item.id]
+      ) return;
       const current = itemsRef.current.find((candidate) => candidate.id === item.id);
       if (!current) {
         detailCacheRef.current.delete(item.id);
@@ -178,22 +398,31 @@ export function GuardianInboxPanel({
       }
       if (!detailMatchesListItem(current, next)) {
         detailCacheRef.current.delete(item.id);
+        detailConfirmedRef.current.delete(item.id);
         setActionError((state) => ({
           ...state,
           [item.id]: "Evidence changed while its detail was loading. Refresh the inbox before inspecting it again.",
         }));
         return;
       }
+      detailConfirmedRef.current.add(item.id);
       rememberDetail(next);
+      const mergedDetail = mergeCachedDetail(current, next);
       setItems((currentItems) => {
         const updated = currentItems.map((candidate) => (
-          candidate.id === next.id ? mergeCachedDetail(candidate, next) : candidate
+          candidate.id === next.id ? mergedDetail : candidate
         ));
         itemsRef.current = updated;
         return updated;
       });
+      onSelectItem?.(mergedDetail);
     } catch (err) {
-      if (!mountedRef.current) return;
+      if (
+        !mountedRef.current
+        || detailControllersRef.current.get(item.id) !== controller
+      ) return;
+      detailConfirmedRef.current.delete(item.id);
+      if (controller.signal.aborted) return;
       setActionError((current) => ({
         ...current,
         [item.id]: err instanceof GuardianInboxApiError
@@ -201,28 +430,43 @@ export function GuardianInboxPanel({
           : "Evidence details unavailable.",
       }));
     } finally {
-      if (mountedRef.current) {
+      const ownsDetailRequest = detailControllersRef.current.get(item.id) === controller;
+      if (ownsDetailRequest) {
+        detailControllersRef.current.delete(item.id);
+      }
+      if (mountedRef.current && ownsDetailRequest) {
         setDetailLoading((current) => ({ ...current, [item.id]: false }));
       }
     }
-  }, [rememberDetail]);
+  }, [onSelectItem, rememberDetail]);
 
-  const load = useCallback(async (cursor?: string | null, append = false, reconcile = false) => {
+  const load = useCallback(async (cursor?: string | null, append = false, reconcile = false): Promise<boolean> => {
+    listControllerRef.current?.abort();
     const controller = new AbortController();
-    controllersRef.current.add(controller);
+    const generation = listGenerationRef.current + 1;
+    listGenerationRef.current = generation;
+    listControllerRef.current = controller;
+    setListConfirmed(false);
     setLoading(true);
     try {
-      const page = await fetchGuardianInbox({ limit: 50, cursor, signal: controller.signal });
-      if (!mountedRef.current) return;
+      const page = await fetchGuardianInbox({ limit: pageSize, cursor, signal: controller.signal });
+      if (
+        !mountedRef.current
+        || controller.signal.aborted
+        || listControllerRef.current !== controller
+        || listGenerationRef.current !== generation
+      ) return false;
       const reloadDetails: GuardianInboxItem[] = [];
       const pageItems = page.items.map((item) => {
         const cached = detailCacheRef.current.get(item.id);
         if (!cached) {
+          detailConfirmedRef.current.delete(item.id);
           if (expandedRef.current[item.id]) reloadDetails.push(item);
           return item;
         }
         if (!detailMatchesListItem(item, cached)) {
           detailCacheRef.current.delete(item.id);
+          detailConfirmedRef.current.delete(item.id);
           if (expandedRef.current[item.id]) reloadDetails.push(item);
           return item;
         }
@@ -235,36 +479,55 @@ export function GuardianInboxPanel({
       if (reconcile) {
         page.items.forEach((item) => {
           ["accept_followup", "snooze", "dismiss"].forEach((action) => {
-            gestureKeys.current.delete(`${item.id}:${action}`);
-            gestureRequests.current.delete(`${item.id}:${action}`);
+            const typedAction = action as GuardianInboxAction;
+            gestureKeys.current.delete(`${item.id}:${typedAction}`);
+            gestureRequests.current.delete(`${item.id}:${typedAction}`);
+            clearPersistedGesture(item.id, typedAction);
           });
         });
       }
       setItems(next);
+      setListConfirmed(true);
       reloadDetails.forEach((item) => void loadDetail(item));
       setNextCursor(page.next_cursor ?? null);
       setLastConfirmedAt(page.last_confirmed_at ?? new Date().toISOString());
       setStatus(null);
+      return true;
     } catch (err) {
-      if (!mountedRef.current || (err instanceof DOMException && err.name === "AbortError")) return;
+      if (
+        !mountedRef.current
+        || controller.signal.aborted
+        || listControllerRef.current !== controller
+        || listGenerationRef.current !== generation
+        || (err instanceof DOMException && err.name === "AbortError")
+      ) return false;
       const message = err instanceof GuardianInboxApiError
         ? err.message
         : "Guardian inbox refresh failed.";
+      setListConfirmed(false);
       setStatus(itemsRef.current.length > 0
         ? `Inbox refresh degraded; showing last-known items. ${message}`
         : message);
+      return false;
     } finally {
-      controllersRef.current.delete(controller);
-      if (mountedRef.current) setLoading(false);
+      if (listControllerRef.current === controller && listGenerationRef.current === generation) {
+        listControllerRef.current = null;
+        if (mountedRef.current) setLoading(false);
+      }
     }
-  }, [loadDetail]);
+    return false;
+  }, [loadDetail, pageSize]);
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
-      controllersRef.current.forEach((controller) => controller.abort());
-      controllersRef.current.clear();
+      listGenerationRef.current += 1;
+      listControllerRef.current?.abort();
+      listControllerRef.current = null;
+      detailControllersRef.current.forEach((controller) => controller.abort());
+      detailControllersRef.current.clear();
+      detailConfirmedRef.current.clear();
     };
   }, []);
 
@@ -273,12 +536,54 @@ export function GuardianInboxPanel({
   }, [expanded]);
 
   useEffect(() => {
-    if (!autoLoad) return;
-    void load();
-    if (pollIntervalMs <= 0) return;
-    const timer = window.setInterval(() => void load(), pollIntervalMs);
-    return () => window.clearInterval(timer);
-  }, [autoLoad, load, pollIntervalMs]);
+    if (!autoLoad || !active) {
+      listGenerationRef.current += 1;
+      listControllerRef.current?.abort();
+      listControllerRef.current = null;
+      detailControllersRef.current.forEach((controller) => controller.abort());
+      detailControllersRef.current.clear();
+      detailConfirmedRef.current.clear();
+      setListConfirmed(false);
+      setLoading(false);
+      refreshLoopRef.current = null;
+      if (refreshTimerRef.current !== null) {
+        window.clearTimeout(refreshTimerRef.current);
+        refreshTimerRef.current = null;
+      }
+      return;
+    }
+    let cancelled = false;
+    const schedule = () => {
+      if (cancelled || pollIntervalMs <= 0) return;
+      if (refreshTimerRef.current !== null) window.clearTimeout(refreshTimerRef.current);
+      refreshTimerRef.current = window.setTimeout(() => {
+        refreshTimerRef.current = null;
+        void refresh();
+      }, pollIntervalMs === 30_000 ? Math.max(pollIntervalMs, retryDelayRef.current) : pollIntervalMs);
+    };
+    const refresh = async (reconcile = false) => {
+      if (cancelled) return;
+      const confirmed = await load(undefined, false, reconcile);
+      if (cancelled) return;
+      retryDelayRef.current = confirmed
+        ? 30_000
+        : Math.min(retryDelayRef.current === 30_000 ? 60_000 : 120_000, 120_000);
+      schedule();
+    };
+    refreshLoopRef.current = (reconcile = false) => {
+      retryDelayRef.current = reconcile ? 30_000 : retryDelayRef.current;
+      void refresh(reconcile);
+    };
+    void refresh();
+    return () => {
+      cancelled = true;
+      refreshLoopRef.current = null;
+      if (refreshTimerRef.current !== null) {
+        window.clearTimeout(refreshTimerRef.current);
+        refreshTimerRef.current = null;
+      }
+    };
+  }, [active, autoLoad, load, pollIntervalMs]);
 
   const orderedItems = useMemo(() => items.slice().sort((a, b) => {
     const aPending = a.state === "pending" || a.state === "snoozed";
@@ -286,6 +591,24 @@ export function GuardianInboxPanel({
     if (aPending !== bPending) return aPending ? -1 : 1;
     return a.title.localeCompare(b.title);
   }), [items]);
+
+  const filteredItems = useMemo(() => {
+    const normalizedText = filterText.trim().toLowerCase();
+    return orderedItems.filter((item) => {
+      if (filterGoal && item.goal_id !== filterGoal) return false;
+      if (filterState && item.state !== filterState) return false;
+      if (filterSource && item.source_kind !== filterSource) return false;
+      if (!normalizedText) return true;
+      return [item.title, item.summary, item.why_now, item.goal_id, item.watch_id, item.source_id, item.source_kind]
+        .some((value) => value.toLowerCase().includes(normalizedText));
+    });
+  }, [filterGoal, filterSource, filterState, filterText, orderedItems]);
+
+  const filterOptions = useMemo(() => ({
+    goals: Array.from(new Set(orderedItems.map((item) => item.goal_id).filter(Boolean))).sort(),
+    states: Array.from(new Set(orderedItems.map((item) => item.state))).sort(),
+    sources: Array.from(new Set(orderedItems.map((item) => item.source_kind).filter(Boolean))).sort(),
+  }), [orderedItems]);
 
   const updateItem = (next: GuardianInboxItem) => {
     setItems((current) => {
@@ -297,6 +620,10 @@ export function GuardianInboxPanel({
 
   const showDetails = async (item: GuardianInboxItem) => {
     if (expanded[item.id]) {
+      detailControllersRef.current.get(item.id)?.abort();
+      detailControllersRef.current.delete(item.id);
+      detailConfirmedRef.current.delete(item.id);
+      setDetailLoading((current) => ({ ...current, [item.id]: false }));
       expandedRef.current[item.id] = false;
       detailCacheRef.current.delete(item.id);
       setExpanded((current) => ({ ...current, [item.id]: false }));
@@ -304,9 +631,12 @@ export function GuardianInboxPanel({
     }
     expandedRef.current[item.id] = true;
     setExpanded((current) => ({ ...current, [item.id]: true }));
+    onSelectItem?.(item);
     const cached = detailCacheRef.current.get(item.id);
     if (cached && detailMatchesListItem(item, cached)) {
-      updateItem(mergeCachedDetail(item, cached));
+      const merged = mergeCachedDetail(item, cached);
+      updateItem(merged);
+      onSelectItem?.(merged);
       return;
     }
     void loadDetail(item);
@@ -324,8 +654,10 @@ export function GuardianInboxPanel({
     request: GuardianInboxActionRequest,
   ): boolean => {
     if (action === "snooze") {
-      const currentValue = snoozeValues[item.id] || defaultSnoozeValue();
-      return normalizedSnoozeUntil(currentValue) !== normalizedSnoozeUntil(request.until);
+      const currentValue = snoozeValues[item.id];
+      const currentReason = normalizedReason(snoozeReasons[item.id]) || undefined;
+      return normalizedSnoozeUntil(currentValue) !== normalizedSnoozeUntil(request.until)
+        || currentReason !== request.reason;
     }
     if (action === "dismiss") {
       const currentReason = dismissReasons[item.id]?.trim().slice(0, 500) || undefined;
@@ -334,9 +666,50 @@ export function GuardianInboxPanel({
     return false;
   };
 
-  const runAction = async (item: GuardianInboxItem, action: GuardianInboxAction) => {
+  const runAction = useCallback(async (item: GuardianInboxItem, action: GuardianInboxAction) => {
     const actionKey = `${item.id}:${action}`;
-    const priorRequest = gestureRequests.current.get(actionKey);
+    let priorRequest = gestureRequests.current.get(actionKey) ?? null;
+    const persisted = priorRequest ? null : readPersistedGesture(item.id, action);
+    if (persisted) {
+      if (action === "snooze" && normalizedSnoozeUntil(snoozeValues[item.id]) !== normalizedSnoozeUntil(persisted.until)) {
+        setActionError((current) => ({
+          ...current,
+          [item.id]: "Re-enter the original snooze time before retrying this unknown outcome; refresh to start a new gesture.",
+        }));
+        return;
+      }
+      if (action === "snooze") {
+        const reason = normalizedReason(snoozeReasons[item.id]);
+        if ((persisted.reason_digest && (!reason || await reasonDigest(reason) !== persisted.reason_digest))
+          || (!persisted.reason_digest && reason)) {
+          setActionError((current) => ({
+            ...current,
+            [item.id]: "Re-enter the same snooze reason before retrying this unknown outcome; refresh to start a new gesture.",
+          }));
+          return;
+        }
+      }
+      if (action === "dismiss") {
+        const reason = normalizedReason(dismissReasons[item.id]);
+        if (!reason || !persisted.reason_digest || await reasonDigest(reason) !== persisted.reason_digest) {
+          setActionError((current) => ({
+            ...current,
+            [item.id]: "Re-enter the same dismiss reason before retrying this unknown outcome; refresh to start a new gesture.",
+          }));
+          return;
+        }
+      }
+      priorRequest = {
+        action,
+        expected_revision: persisted.expected_revision,
+        idempotency_key: persisted.idempotency_key,
+        ...(action === "snooze" && persisted.until ? { until: persisted.until } : {}),
+        ...(action === "snooze" && normalizedReason(snoozeReasons[item.id]) ? { reason: normalizedReason(snoozeReasons[item.id]) } : {}),
+        ...(action === "dismiss" ? { reason: normalizedReason(dismissReasons[item.id]) } : {}),
+      };
+      gestureKeys.current.set(actionKey, persisted.idempotency_key);
+      gestureRequests.current.set(actionKey, priorRequest);
+    }
     if (priorRequest && gestureInputChanged(item, action, priorRequest)) {
       setActionError((current) => ({
         ...current,
@@ -344,79 +717,211 @@ export function GuardianInboxPanel({
       }));
       return;
     }
-    const request = priorRequest ?? (() => {
+    let request = priorRequest;
+    if (!request) {
+      if (action === "snooze" && !snoozeValues[item.id]) {
+        setActionError((current) => ({ ...current, [item.id]: "Choose a snooze time before submitting." }));
+        return;
+      }
+      if (action === "dismiss" && !normalizedReason(dismissReasons[item.id])) {
+        setActionError((current) => ({ ...current, [item.id]: "Enter a reason before dismissing this candidate." }));
+        return;
+      }
       const key = createGuardianInboxIdempotencyKey(item.id, action);
-      const nextRequest: GuardianInboxActionRequest = {
+      const until = action === "snooze" ? normalizedSnoozeUntil(snoozeValues[item.id]) : null;
+      if (action === "snooze" && !until) {
+        setActionError((current) => ({ ...current, [item.id]: "Choose a valid snooze time before submitting." }));
+        return;
+      }
+      const reason = action === "dismiss"
+        ? normalizedReason(dismissReasons[item.id])
+        : action === "snooze" ? normalizedReason(snoozeReasons[item.id]) : "";
+      request = {
         action,
         expected_revision: item.revision,
         idempotency_key: key,
-        ...(action === "snooze"
-          ? (() => {
-            const until = snoozeValues[item.id] || defaultSnoozeValue();
-            if (!snoozeValues[item.id]) {
-              setSnoozeValues((current) => ({ ...current, [item.id]: until }));
-            }
-            return { until: new Date(until).toISOString() };
-          })()
-          : {}),
-        ...(action === "dismiss" && dismissReasons[item.id]?.trim()
-          ? { reason: dismissReasons[item.id].trim().slice(0, 500) }
-          : {}),
+        ...(until ? { until } : {}),
+        ...(reason ? { reason } : {}),
       };
       gestureKeys.current.set(actionKey, key);
-      gestureRequests.current.set(actionKey, nextRequest);
-      return nextRequest;
-    })();
+      gestureRequests.current.set(actionKey, request);
+      const digest = reason ? await reasonDigest(reason) : undefined;
+      persistGesture({
+        version: 1,
+        item_id: item.id,
+        action,
+        expected_revision: item.revision,
+        idempotency_key: key,
+        created_at: Date.now(),
+        ...(until ? { until } : {}),
+        ...(digest ? { reason_digest: digest } : {}),
+      });
+    }
+    if (!request) return;
     setActionBusy(actionKey);
     setActionError((current) => ({ ...current, [item.id]: "" }));
     try {
       const result = await applyGuardianInboxAction(item.id, request);
       const terminal = result.state === "accepted" || result.state === "dismissed" || result.state === "expired";
-      updateItem({
+      const updated = {
         ...item,
         revision: result.revision,
         state: result.state,
         task_id: result.task_id ?? item.task_id,
-        allowed_actions: terminal ? [] : item.allowed_actions,
+        snoozed_until: action === "snooze" ? request.until ?? item.snoozed_until : item.snoozed_until,
+        // A successful snooze is not eligible for another decision until a
+        // fresh server projection says so. Keep the local receipt truthful
+        // while the next list/detail read establishes the new boundary.
+        allowed_actions: action === "snooze" || terminal ? [] : item.allowed_actions,
         recovery_action: result.recovery_action ?? item.recovery_action,
-      });
+      };
+      updateItem(updated);
+      onSelectItem?.(updated);
       setReceipts((current) => ({ ...current, [item.id]: result.receipt_id }));
       setStatus(`${actionLabel(action)} recorded.`);
+      setUnknownActions((current) => ({ ...current, [item.id]: false }));
       gestureKeys.current.delete(actionKey);
       gestureRequests.current.delete(actionKey);
+      clearPersistedGesture(item.id, action);
+      if (autoFocusAcceptedTask && action === "accept_followup" && result.state === "accepted" && result.task_id) {
+        onOpenTask?.(result.task_id);
+      }
     } catch (err) {
       const message = err instanceof GuardianInboxApiError
         ? `${err.message}${err.code ? ` (${err.code})` : ""}${err.recoveryAction ? ` · recovery: ${err.recoveryAction}` : ""}`
         : `${actionLabel(action)} failed.`;
-      setActionError((current) => ({ ...current, [item.id]: message }));
+      if (err instanceof GuardianInboxApiError && err.status === 409) {
+        setActionError((current) => ({
+          ...current,
+          [item.id]: `${message} Another decision won this revision. The current candidate is reloading; the original gesture will be retained.`,
+        }));
+        void load(undefined, false, false);
+      } else if (!(err instanceof GuardianInboxApiError) || err.status >= 500) {
+        setUnknownActions((current) => ({ ...current, [item.id]: true }));
+        setActionError((current) => ({
+          ...current,
+          [item.id]: `${message} Outcome unknown; refresh/read evidence and retry the same gesture.`,
+        }));
+        void (async () => {
+          const confirmed = await load(undefined, false, false);
+          if (!confirmed) return;
+          const current = itemsRef.current.find((candidate) => candidate.id === item.id);
+          if (current && ["accepted", "dismissed", "expired"].includes(current.state)) {
+            gestureKeys.current.delete(actionKey);
+            gestureRequests.current.delete(actionKey);
+            clearPersistedGesture(item.id, action);
+            setUnknownActions((state) => ({ ...state, [item.id]: false }));
+            setActionError((state) => ({ ...state, [item.id]: "The current inbox projection confirms a terminal disposition; the unknown gesture was reconciled." }));
+          } else {
+            setActionError((state) => ({ ...state, [item.id]: "Outcome unknown; refresh/read evidence and retry the same gesture." }));
+          }
+        })();
+      } else if (err instanceof GuardianInboxApiError && err.status >= 400 && err.status < 500) {
+        // A definitive client/request rejection is safe to correct in place.
+        // Drop the failed request metadata so the next valid input receives a
+        // fresh idempotency key; 409 remains above because its original
+        // revision-bound gesture must be reconciled and retried unchanged.
+        gestureKeys.current.delete(actionKey);
+        gestureRequests.current.delete(actionKey);
+        clearPersistedGesture(item.id, action);
+        setUnknownActions((current) => ({ ...current, [item.id]: false }));
+        setActionError((current) => ({ ...current, [item.id]: message }));
+      } else {
+        setActionError((current) => ({ ...current, [item.id]: message }));
+      }
     } finally {
       setActionBusy(null);
     }
-  };
+  }, [autoFocusAcceptedTask, dismissReasons, load, onOpenTask, onSelectItem, snoozeReasons, snoozeValues]);
+
+  useImperativeHandle(ref, () => ({
+    runAction: (itemId, action) => {
+      const item = itemsRef.current.find((candidate) => candidate.id === itemId);
+      if (item) void runAction(item, action);
+    },
+  }), [runAction]);
 
   return (
-    <section className="cockpit-outcome-card" data-testid="guardian-inbox-panel">
+    <section className="cockpit-outcome-card" data-testid="guardian-inbox-panel" aria-busy={loading ? "true" : "false"}>
       <div className="cockpit-outcome-card-header">
         <div>
           <div className="cockpit-outcome-card-label">Guardian intervention inbox</div>
           <div className="cockpit-outcome-copy">Durable, owner-scoped source changes awaiting your decision.</div>
         </div>
-        <button type="button" onClick={() => void load(undefined, false, true)} disabled={loading}>
+        <button
+          type="button"
+          onClick={() => {
+            retryDelayRef.current = 30_000;
+            if (refreshTimerRef.current !== null) {
+              window.clearTimeout(refreshTimerRef.current);
+              refreshTimerRef.current = null;
+            }
+            if (refreshLoopRef.current) refreshLoopRef.current(true);
+            else void load(undefined, false, true);
+          }}
+          disabled={loading}
+        >
           {loading ? "Refreshing…" : "Refresh"}
         </button>
       </div>
-      <div className="cockpit-outcome-card-body">
+      <div className="cockpit-outcome-card-body" data-testid="guardian-inbox-list">
         {status ? <div className="cockpit-outcome-note" role="status">{status}</div> : null}
         {lastConfirmedAt ? <div className="cockpit-outcome-note">last confirmed · {formatTime(lastConfirmedAt)}</div> : null}
-        {orderedItems.length === 0 ? (
-          <div className="cockpit-outcome-copy">No actionable guardian items are waiting.</div>
-        ) : orderedItems.map((item) => {
+        {!(loading && items.length === 0) ? (
+          <div className="guardian-inbox-filters" aria-label="Filter loaded inbox page">
+            <input
+              aria-label="Filter inbox page"
+              value={filterText}
+              onChange={(event) => setFilterText(event.target.value)}
+              placeholder="Filter this loaded page"
+            />
+            <select aria-label="Filter inbox by goal" value={filterGoal} onChange={(event) => setFilterGoal(event.target.value)}>
+              <option value="">All goals</option>
+              {filterOptions.goals.map((value) => <option key={value} value={value}>{value}</option>)}
+            </select>
+            <select aria-label="Filter inbox by state" value={filterState} onChange={(event) => setFilterState(event.target.value)}>
+              <option value="">All states</option>
+              {filterOptions.states.map((value) => <option key={value} value={value}>{value}</option>)}
+            </select>
+            <select aria-label="Filter inbox by source" value={filterSource} onChange={(event) => setFilterSource(event.target.value)}>
+              <option value="">All sources</option>
+              {filterOptions.sources.map((value) => <option key={value} value={value}>{value}</option>)}
+            </select>
+            <span className="cockpit-outcome-note" aria-live="polite">{filteredItems.length} of {orderedItems.length} loaded page items</span>
+          </div>
+        ) : null}
+        {loading && items.length === 0 ? (
+          <div className="guardian-inbox-skeleton" data-testid="guardian-inbox-loading" role="status" aria-label="Loading guardian decisions">
+            <div className="guardian-inbox-skeleton-row" aria-hidden="true" />
+            <div className="guardian-inbox-skeleton-row" aria-hidden="true" />
+            <div className="guardian-inbox-skeleton-row" aria-hidden="true" />
+          </div>
+        ) : filteredItems.length === 0 ? (
+          <div className="cockpit-outcome-copy">
+            {orderedItems.length > 0 ? (
+              <>
+                <p>No matching decisions on this loaded page.</p>
+                <button type="button" onClick={() => { setFilterText(""); setFilterGoal(""); setFilterState(""); setFilterSource(""); }}>Clear filters</button>
+              </>
+            ) : (
+              <>
+                <p>No pending decisions.</p>
+                <div className="source-watch-actions">
+                  {onOpenGoals ? <button type="button" onClick={onOpenGoals}>Open Goals</button> : null}
+                  {onOpenWork ? <button type="button" onClick={onOpenWork}>Open Work</button> : null}
+                </div>
+              </>
+            )}
+          </div>
+        ) : filteredItems.map((item) => {
           const supported = new Set(item.allowed_actions);
           const pendingAction = actionBusy?.startsWith(`${item.id}:`) ?? false;
           const refreshingDetail = Boolean(detailLoading[item.id]);
+          const actionReady = listConfirmed || detailConfirmedRef.current.has(item.id);
+          const actionDisabled = pendingAction || !actionReady;
           return (
-            <article key={item.id} className="source-watch-record" data-testid={`guardian-inbox-item-${item.id}`} data-state={item.state}>
-              <div className="cockpit-outcome-primary">{item.title} · {item.state}</div>
+            <article key={item.id} className="source-watch-record" data-testid={`guardian-inbox-row-${item.id}`} data-state={item.state} tabIndex={-1}>
+              <div className="cockpit-outcome-primary">{item.title} · {stateLabel(item)}</div>
               <div className="cockpit-outcome-copy">{item.summary}</div>
               <div className="cockpit-outcome-copy">Why now: {item.why_now}</div>
               <div className="cockpit-outcome-note">
@@ -425,12 +930,12 @@ export function GuardianInboxPanel({
               <div className="cockpit-outcome-note">
                 source {item.source_status ?? "unknown"} · freshness {item.source_freshness ?? "unknown"} · evidence {item.evidence_status ?? item.verification_status ?? "unknown"} · memory {item.memory_status ?? "unknown"}
               </div>
-              {item.policy_reason ? <div className="cockpit-outcome-note">policy · {item.policy_reason}</div> : null}
+              <div className="cockpit-outcome-note">authority / budget boundary · {item.policy_reason ?? "unavailable in this inbox projection"}</div>
               {item.recovery_action ? <div className="cockpit-outcome-note">recovery · {item.recovery_action}</div> : null}
               {item.degraded ? <div className="cockpit-outcome-note">degraded · server state is not recognized; actions are unavailable</div> : null}
               <div className="source-watch-actions">
                 {supported.has("accept_followup") ? (
-                  <button type="button" onClick={() => void runAction(item, "accept_followup")} disabled={pendingAction}>
+                  <button type="button" onClick={() => void runAction(item, "accept_followup")} disabled={actionDisabled}>
                     {actionBusy === `${item.id}:accept_followup` ? "Accepting…" : "Accept follow-up"}
                   </button>
                 ) : null}
@@ -441,11 +946,20 @@ export function GuardianInboxPanel({
                       type="datetime-local"
                       value={snoozeValues[item.id] ?? ""}
                       onChange={(event) => setSnoozeValues((current) => ({ ...current, [item.id]: event.target.value }))}
-                      disabled={pendingAction}
+                      disabled={actionDisabled}
                     />
-                    <button type="button" onClick={() => void runAction(item, "snooze")} disabled={pendingAction}>
+                    <input
+                      aria-label={`Snooze reason for ${item.title}`}
+                      value={snoozeReasons[item.id] ?? ""}
+                      onChange={(event) => setSnoozeReasons((current) => ({ ...current, [item.id]: event.target.value }))}
+                      placeholder="Snooze reason (optional)"
+                      maxLength={500}
+                      disabled={actionDisabled}
+                    />
+                    <button type="button" onClick={() => void runAction(item, "snooze")} disabled={actionDisabled || !snoozeValues[item.id]}>
                       {actionBusy === `${item.id}:snooze` ? "Snoozing…" : "Snooze"}
                     </button>
+                    {!snoozeValues[item.id] ? <span className="cockpit-outcome-note">Choose a time before snoozing.</span> : null}
                   </>
                 ) : null}
                 {supported.has("dismiss") ? (
@@ -454,13 +968,14 @@ export function GuardianInboxPanel({
                       aria-label={`Dismiss reason for ${item.title}`}
                       value={dismissReasons[item.id] ?? ""}
                       onChange={(event) => setDismissReasons((current) => ({ ...current, [item.id]: event.target.value }))}
-                      placeholder="Dismiss reason (optional)"
+                      placeholder="Dismiss reason (required)"
                       maxLength={500}
-                      disabled={pendingAction}
+                      disabled={actionDisabled}
                     />
-                    <button type="button" onClick={() => void runAction(item, "dismiss")} disabled={pendingAction}>
+                    <button type="button" onClick={() => void runAction(item, "dismiss")} disabled={actionDisabled || !dismissReasons[item.id]?.trim()}>
                       {actionBusy === `${item.id}:dismiss` ? "Dismissing…" : "Dismiss"}
                     </button>
+                    {!dismissReasons[item.id]?.trim() ? <span className="cockpit-outcome-note">A reason is required before dismissing.</span> : null}
                   </>
                 ) : null}
                 <button
@@ -471,6 +986,9 @@ export function GuardianInboxPanel({
                   {expanded[item.id] ? "Hide evidence" : "View evidence and task"}
                 </button>
               </div>
+              {!actionReady && !item.degraded ? (
+                <div className="cockpit-outcome-note" role="status">Refresh before acting because this candidate is not currently confirmed.</div>
+              ) : null}
               {expanded[item.id] ? (
                 <div className="cockpit-outcome-note">
                   {refreshingDetail ? <div role="status">Refreshing verified evidence details…</div> : null}
@@ -535,6 +1053,20 @@ export function GuardianInboxPanel({
                       )}
                     </div>
                   ) : refreshingDetail ? null : <div className="mt-2">Durable source job receipt unavailable.</div>}
+                  {item.action_history?.length || item.action_history_truncated ? (
+                    <div className="mt-2" aria-label="Decision history">
+                      <div>decision history</div>
+                      {(item.action_history ?? []).map((entry) => (
+                        <div key={`${item.id}:history:${entry.receipt_id}`} className="cockpit-outcome-note">
+                          {entry.action} · {entry.outcome} · receipt {entry.receipt_id || "unavailable"}
+                          {entry.created_at ? ` · ${formatTime(entry.created_at)}` : ""}
+                          {entry.reason_state === "provided" && entry.safe_reason ? ` · reason: ${entry.safe_reason}` : ` · reason ${entry.reason_state}`}
+                          {entry.task_id && onOpenTask ? <> · <button type="button" onClick={() => onOpenTask(entry.task_id as string)}>Open task {entry.task_id}</button></> : null}
+                        </div>
+                      ))}
+                      {item.action_history_truncated ? <div>Older decision history is not shown.</div> : null}
+                    </div>
+                  ) : null}
                   {item.task_id ? (
                     <a
                       href={safeHref(item.task_url) ?? `/cockpit?task_id=${encodeURIComponent(item.task_id)}`}
@@ -548,8 +1080,24 @@ export function GuardianInboxPanel({
                     </a>
                   ) : <div>No accepted task yet.</div>}
                   {safeHref(item.watch_url) ? <a href={safeHref(item.watch_url) as string}>Open source watch</a> : null}
-                  {receipts[item.id] ? <div>receipt · {receipts[item.id]}</div> : null}
                 </div>
+              ) : null}
+              {receipts[item.id] ? (
+                <div className="cockpit-outcome-note" role="status">
+                  receipt · {receipts[item.id]}
+                  {item.task_id ? <> · <button type="button" onClick={() => onOpenTask?.(item.task_id as string)}>Open accepted task {item.task_id}</button></> : null}
+                </div>
+              ) : null}
+              {unknownActions[item.id] ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (refreshLoopRef.current) refreshLoopRef.current(false);
+                    else void load(undefined, false, false);
+                  }}
+                >
+                  Refresh and retain gesture
+                </button>
               ) : null}
               {actionError[item.id] ? <div className="cockpit-outcome-note" role="alert">{actionError[item.id]}</div> : null}
             </article>
@@ -563,4 +1111,4 @@ export function GuardianInboxPanel({
       </div>
     </section>
   );
-}
+});

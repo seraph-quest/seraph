@@ -12,6 +12,7 @@ import {
 } from "../components/cockpit/layouts";
 
 interface CockpitLayoutStore {
+  activeSection: CockpitSection;
   activeLayoutId: CockpitLayoutId;
   inspectorVisible: boolean;
   paneVisibility: Record<CockpitPaneId, boolean>;
@@ -25,9 +26,13 @@ interface CockpitLayoutStore {
   showAllPanes: () => void;
   hideNonCorePanes: () => void;
   resetLayout: () => void;
+  setActiveSection: (section: CockpitSection) => void;
 }
 
+export type CockpitSection = "home" | "inbox" | "work" | "goals" | "library" | "connections";
+
 interface PersistedCockpitLayoutStoreState {
+  activeSection?: CockpitSection;
   activeLayoutId?: CockpitLayoutId;
   inspectorVisible?: boolean;
   paneVisibility?: Partial<Record<CockpitPaneId, boolean>>;
@@ -72,6 +77,10 @@ function isCockpitLayoutId(value: unknown): value is CockpitLayoutId {
   return value === "default" || value === "focus" || value === "review";
 }
 
+function isCockpitSection(value: unknown): value is CockpitSection {
+  return ["home", "inbox", "work", "goals", "library", "connections"].includes(String(value));
+}
+
 function normalizePaneVisibility(
   paneVisibility: Partial<Record<CockpitPaneId, boolean>> | undefined,
   layoutId: CockpitLayoutId,
@@ -105,6 +114,7 @@ function normalizeSavedPaneVisibility(
 export const useCockpitLayoutStore = create<CockpitLayoutStore>()(
   persist(
     (set) => ({
+      activeSection: "home",
       activeLayoutId: DEFAULT_COCKPIT_LAYOUT_ID,
       inspectorVisible: true,
       paneVisibility: getDefaultPaneVisibility(DEFAULT_COCKPIT_LAYOUT_ID),
@@ -230,10 +240,11 @@ export const useCockpitLayoutStore = create<CockpitLayoutStore>()(
           paneVisibility: getDefaultPaneVisibility(DEFAULT_COCKPIT_LAYOUT_ID),
           inspectorVisible: true,
         }),
+      setActiveSection: (activeSection) => set({ activeSection }),
     }),
     {
       name: "seraph_cockpit_layout",
-      version: 1,
+      version: 2,
       storage: createJSONStorage(getSafeBrowserStorage),
       migrate: (persistedState) => {
         const legacyState = (persistedState ?? {}) as PersistedCockpitLayoutStoreState;
@@ -246,6 +257,7 @@ export const useCockpitLayoutStore = create<CockpitLayoutStore>()(
           legacyState.inspectorVisible,
         );
         return {
+          activeSection: isCockpitSection(legacyState.activeSection) ? legacyState.activeSection : "home",
           activeLayoutId,
           inspectorVisible: syncInspectorVisibility(paneVisibility),
           paneVisibility,
@@ -257,6 +269,7 @@ export const useCockpitLayoutStore = create<CockpitLayoutStore>()(
         };
       },
       partialize: (state) => ({
+        activeSection: state.activeSection,
         activeLayoutId: state.activeLayoutId,
         inspectorVisible: state.inspectorVisible,
         paneVisibility: state.paneVisibility,

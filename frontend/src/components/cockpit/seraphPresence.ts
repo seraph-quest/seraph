@@ -10,7 +10,17 @@ export type SeraphPresenceState =
   | "proactive"
   | "idle";
 
+export type SeraphPresenceMetadataState = "unavailable" | "confirmed" | "stale";
+
+export type SeraphPresenceLoadState = "idle" | "loading" | "loaded" | "stale" | "failed";
+
 export interface SeraphPresenceSnapshot {
+  /**
+   * The transport connection alone does not prove that continuity metadata
+   * was loaded. Cockpit supplies this state for the operator-facing pane;
+   * callers that omit it retain the legacy snapshot behavior.
+   */
+  metadataState?: SeraphPresenceMetadataState;
   connectionStatus: ConnectionStatus;
   animationState: AgentAnimationState;
   isAgentBusy: boolean;
@@ -31,6 +41,15 @@ export interface SeraphPresenceSnapshot {
   dataQuality?: string | null;
   recentInterventionCount: number;
   operatorStatus?: string | null;
+}
+
+export function deriveSeraphPresenceMetadataState(
+  loadState: SeraphPresenceLoadState,
+  hasConfirmedPayload: boolean,
+): SeraphPresenceMetadataState {
+  if (hasConfirmedPayload && loadState === "stale") return "stale";
+  if (hasConfirmedPayload && (loadState === "loaded" || loadState === "loading")) return "confirmed";
+  return "unavailable";
 }
 
 export interface SeraphPresenceDescriptor {
@@ -65,6 +84,16 @@ export function deriveSeraphPresenceState(snapshot: SeraphPresenceSnapshot): Ser
       state: "offline",
       label: snapshot.connectionStatus === "connecting" ? "Linking" : "Offline",
       detail: "The live workspace is not fully linked to runtime transport.",
+      tone: "muted",
+      cadenceMs: 1200,
+    };
+  }
+
+  if (snapshot.metadataState === "unavailable") {
+    return {
+      state: "idle",
+      label: "Unknown",
+      detail: "Presence continuity metadata is unavailable. Load it to confirm queue and reach state.",
       tone: "muted",
       cadenceMs: 1200,
     };

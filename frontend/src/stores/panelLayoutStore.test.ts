@@ -48,7 +48,8 @@ describe("panelLayoutStore packed cockpit layouts", () => {
     const panels = getPackedCockpitPanels("default", getDefaultPaneVisibility("default"));
     const columns = new Map<number, Array<{ y: number; height: number }>>();
 
-    for (const panel of Object.values(panels)) {
+    for (const [paneId, panel] of Object.entries(panels)) {
+      if (paneId === "work_board_pane") continue;
       const items = columns.get(panel.x) ?? [];
       items.push({ y: panel.y, height: panel.height });
       columns.set(panel.x, items);
@@ -105,6 +106,18 @@ describe("panelLayoutStore packed cockpit layouts", () => {
     expect(panels.guardian_state_pane.width).toBeGreaterThan(panels.goals_pane.width);
     expect(panels.operator_timeline_pane.width).toBeGreaterThanOrEqual(panels.approvals_pane.width);
     expect(panels.presence_pane.width).toBeGreaterThan(panels.response_pane.width);
+  });
+
+  it("opens the work board as a centered, usable floating surface", () => {
+    vi.stubGlobal("window", { innerWidth: 1600, innerHeight: 980 });
+
+    const panels = getPackedCockpitPanels("default", getDefaultPaneVisibility("default"));
+    const workBoard = panels.work_board_pane;
+
+    expect(workBoard.width).toBeGreaterThanOrEqual(640);
+    expect(workBoard.height).toBeGreaterThanOrEqual(360);
+    expect(workBoard.x).toBeGreaterThan(panels.sessions_pane.x);
+    expect(Math.abs(workBoard.x + workBoard.width / 2 - 800)).toBeLessThanOrEqual(8);
   });
 
   it("keeps focus and review layouts functionally distinct", () => {

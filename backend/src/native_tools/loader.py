@@ -27,6 +27,11 @@ def discover_tools() -> list:
             continue
         if module_info.name == "mcp_manager":
             continue
+        # Board worker tools require a server-created task/attempt/fence
+        # binding. They are loaded explicitly by WorkBoardWorkerHost and must
+        # never appear in general or delegated agent tool sets.
+        if module_info.name == "work_board_tools":
+            continue
 
         try:
             module = importlib.import_module(f"src.tools.{module_info.name}")

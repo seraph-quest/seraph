@@ -59,7 +59,7 @@ def test_adapter_result_identity_requires_exact_goal_and_revision():
 
 
 @pytest.mark.asyncio
-async def test_goal_budget_missing_expired_and_valid_admission_are_visible():
+async def test_goal_budget_missing_expired_and_valid_admission_are_visible(async_db):
     missing = Goal(
         id="budget-missing",
         title="Missing budget",

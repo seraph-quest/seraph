@@ -377,11 +377,11 @@ async def _run_runtime_evals_with_timeout(scenario_names: list[str], timeout_sec
 def _assert_runtime_eval_group_passes(scenario_names: list[str]) -> None:
     summary = asyncio.run(_run_runtime_evals_with_timeout(scenario_names))
     result_names = {result.name for result in summary.results}
-    failed_results = [
+    failed_results = "\n".join(
         f"{result.name}: {result.error or result.details}"
         for result in summary.results
         if not result.passed
-    ]
+    )
 
     assert summary.total == len(scenario_names)
     assert summary.failed == 0, failed_results
@@ -451,11 +451,11 @@ def test_run_runtime_evals_can_filter_specific_scenarios():
     summary = asyncio.run(run_runtime_evals(["agent_local_runtime_profile", "observer_delivery_gate_audit"]))
 
     assert summary.total == 2
-    failed_results = [
+    failed_results = "\n".join(
         f"{result.name}: {result.error or result.details}"
         for result in summary.results
         if not result.passed
-    ]
+    )
     assert summary.failed == 0, failed_results
     assert [result.name for result in summary.results] == [
         "agent_local_runtime_profile",
@@ -3435,7 +3435,15 @@ def test_run_benchmark_suites_executes_computer_use_browser_desktop_suite():
 
     result_names = {result.name for result in summary.results}
 
-    assert summary.failed == 0
+    assert summary.failed == 0, [
+        {
+            "name": result.name,
+            "error": result.error,
+            "details": result.details,
+        }
+        for result in summary.results
+        if not result.passed
+    ]
     assert result_names == {
         "browser_execution_task_replay_behavior",
         "browser_runtime_audit",
@@ -3815,7 +3823,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "websocket_chat_approval_contract" in captured.out
     assert "websocket_chat_timeout_contract" in captured.out
     assert "strategist_tick_behavior" in captured.out
-    assert "strategist_tick_learning_continuity_behavior" in captured.out
+    assert "strategist_tick_learning_policy_behavior" in captured.out
     assert "guardian_state_synthesis" in captured.out
     assert "guardian_world_model_behavior" in captured.out
     assert "guardian_judgment_behavior" in captured.out
@@ -4602,7 +4610,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "helper_local_runtime_paths",
                 "context_window_summary_audit",
                 "strategist_tick_behavior",
-                "strategist_tick_learning_continuity_behavior",
+                "strategist_tick_learning_policy_behavior",
                 "guardian_state_synthesis",
                 "guardian_world_model_behavior",
                 "guardian_judgment_behavior",
@@ -4701,11 +4709,11 @@ def test_runtime_eval_scenarios_expose_expected_details():
         )
     )
 
-    failed_results = [
+    failed_results = "\n".join(
         f"{result.name}: {result.error or result.details}"
         for result in summary.results
         if not result.passed
-    ]
+    )
     assert summary.failed == 0, failed_results
     details_by_name = {result.name: result.details for result in summary.results}
 
@@ -4734,57 +4742,31 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["strategist_tick_behavior"]["urgency"] == 3
     assert details_by_name["strategist_tick_behavior"]["content_mentions_refocus"] is True
     assert details_by_name["strategist_tick_behavior"]["delivery"] == "deliver"
+    assert details_by_name["strategist_tick_behavior"]["recovery_action"] == (
+        "reconcile_delivery_receipt_before_retry"
+    )
     assert details_by_name["strategist_tick_behavior"]["reasoning"] == "Focus drift"
-    assert details_by_name["strategist_tick_learning_continuity_behavior"]["message_type"] == "proactive"
-    assert details_by_name["strategist_tick_learning_continuity_behavior"]["urgency"] == 2
-    assert details_by_name["strategist_tick_learning_continuity_behavior"]["scheduler_delivery"] == "queue"
-    assert (
-        details_by_name["strategist_tick_learning_continuity_behavior"]["scheduler_policy_action"]
-        == "bundle"
+    assert details_by_name["strategist_tick_learning_policy_behavior"]["message_type"] == "proactive"
+    assert details_by_name["strategist_tick_learning_policy_behavior"]["urgency"] == 2
+    assert details_by_name["strategist_tick_learning_policy_behavior"]["scheduler_delivery_decision"] == "deliver"
+    assert details_by_name["strategist_tick_learning_policy_behavior"]["scheduler_recovery_action"] == (
+        "reconcile_delivery_receipt_before_retry"
     )
     assert (
-        details_by_name["strategist_tick_learning_continuity_behavior"]["policy_reason"]
-        == "high_interruption_cost"
+        details_by_name["strategist_tick_learning_policy_behavior"]["scheduler_policy_action"]
+        == "act"
     )
     assert (
-        details_by_name["strategist_tick_learning_continuity_behavior"]["learning_bias"]
+        details_by_name["strategist_tick_learning_policy_behavior"]["policy_reason"]
+        == "scheduled"
+    )
+    assert (
+        details_by_name["strategist_tick_learning_policy_behavior"]["learning_bias"]
         == "neutral"
     )
     assert (
-        details_by_name["strategist_tick_learning_continuity_behavior"]["learning_channel_bias"]
+        details_by_name["strategist_tick_learning_policy_behavior"]["learning_channel_bias"]
         == "neutral"
-    )
-    assert (
-        details_by_name["strategist_tick_learning_continuity_behavior"]["transport"]
-        is None
-    )
-    assert (
-        details_by_name["strategist_tick_learning_continuity_behavior"]["delivered_connections"]
-        == 0
-    )
-    assert (
-        details_by_name["strategist_tick_learning_continuity_behavior"]["continuity_notification_count"]
-        == 0
-    )
-    assert (
-        details_by_name["strategist_tick_learning_continuity_behavior"]["continuity_queued_insight_count"]
-        == 1
-    )
-    assert (
-        details_by_name["strategist_tick_learning_continuity_behavior"]["continuity_surface"]
-        == "bundle_queue"
-    )
-    assert (
-        details_by_name["strategist_tick_learning_continuity_behavior"]["continuity_excerpt_mentions_workflow"]
-        is True
-    )
-    assert (
-        details_by_name["strategist_tick_learning_continuity_behavior"]["notification_intervention_matches"]
-        is False
-    )
-    assert (
-        details_by_name["strategist_tick_learning_continuity_behavior"]["remaining_notifications_before_cleanup"]
-        == 0
     )
     assert details_by_name["guardian_state_synthesis"]["overall_confidence"] == "partial"
     assert details_by_name["guardian_state_synthesis"]["observer_confidence"] == "grounded"
@@ -5173,30 +5155,17 @@ def test_runtime_eval_scenarios_expose_expected_details():
         "file_path",
         "query",
     ]
-    assert details_by_name["workflow_approval_threading_behavior"]["replay_recommended_actions"] == [
-        "open_settings",
-    ]
-    assert details_by_name["workflow_approval_threading_behavior"]["resume_from_step"] == "approval_gate"
-    assert details_by_name["workflow_approval_threading_behavior"]["resume_checkpoint_label"] == "Approval gate"
+    assert details_by_name["workflow_approval_threading_behavior"]["replay_recommended_actions"] == []
+    assert details_by_name["workflow_approval_threading_behavior"]["resume_from_step"] is None
+    assert details_by_name["workflow_approval_threading_behavior"]["resume_checkpoint_label"] is None
     assert details_by_name["workflow_approval_threading_behavior"]["branch_kind"] == "approval_resume"
     assert (
         details_by_name["workflow_approval_threading_behavior"]["root_run_identity_matches_source"]
         is True
     )
-    assert details_by_name["workflow_approval_threading_behavior"]["checkpoint_candidate_kinds"] == [
-        "approval_gate",
-    ]
-    assert details_by_name["workflow_approval_threading_behavior"]["resume_plan_branch_kind"] == (
-        "approval_resume"
-    )
-    assert (
-        details_by_name["workflow_approval_threading_behavior"]["resume_plan_requires_manual_execution"]
-        is True
-    )
-    assert (
-        details_by_name["workflow_approval_threading_behavior"]["thread_continue_message"]
-        == "Continue once the web brief is approved"
-    )
+    assert details_by_name["workflow_approval_threading_behavior"]["checkpoint_candidate_kinds"] == []
+    assert details_by_name["workflow_approval_threading_behavior"]["resume_plan_is_none"] is True
+    assert details_by_name["workflow_approval_threading_behavior"]["thread_continue_message"] is None
     assert (
         details_by_name["workflow_approval_threading_behavior"]["approval_recovery_message"]
         == "Review pending approval(s) for workflow 'web-brief-to-file' before replaying."
@@ -6031,10 +6000,10 @@ def test_workflow_operating_layer_runtime_eval_exposes_expected_details():
     assert details["stalled_summary_visible"] is True
     assert details["atlas_queue_state_visible"] is True
     assert details["atlas_queue_reason_visible"] is True
-    assert details["atlas_queue_draft_visible"] is True
+    assert details["atlas_queue_draft_uses_safe_label"] is True
     assert details["atlas_attention_summary_visible"] is True
     assert details["brief_queue_state_visible"] is True
-    assert details["brief_handoff_draft_visible"] is True
+    assert details["brief_handoff_draft_uses_safe_label"] is True
     assert details["brief_related_output_visible"] is True
     assert details["brief_output_history_visible"] is True
     assert details["brief_branch_reference_visible"] is True

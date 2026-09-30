@@ -199,6 +199,12 @@ def test_backup_restore_round_trip_and_rollback_preserve_secret_boundary(tmp_pat
     assert "SECRET-SENTINEL-DO-NOT-ARCHIVE" not in archive.read_bytes().decode("latin1")
     with zipfile.ZipFile(archive, "r") as archive_reader:
         archive_manifest = json.loads(archive_reader.read("manifest.json"))
+        assert archive_manifest["database_operator_contracts"][
+            "work_board_routine_binding"
+        ]["table_name"] == "work_board_routine_bindings"
+        assert archive_manifest["database_operator_contracts"][
+            "work_board_routine_binding"
+        ]["present"] is False
         database_entry = next(
             entry
             for entry in archive_manifest["archive_entries"]

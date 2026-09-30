@@ -1,0 +1,1036 @@
+"""Provider-free proofs for the closed M2 adapter input and identity seams."""
+
+from hashlib import sha256
+import json
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
+import pytest
+from sqlalchemy import select
+
+from config.settings import settings
+from src.db.models import (
+    Goal,
+    OperatorSession,
+    Session,
+    WorkBoardAttempt,
+    WorkBoardReviewIntent,
+    WorkBoardStatus,
+    WorkBoardTask,
+    WorkflowRunState,
+)
+from src.goals.contracts import CriterionVerifierKind, GoalSuccessCriterion
+from src.work_board.dispatcher import (
+    GOAL_SNAPSHOT_CAPABILITY,
+    TypedInputError,
+    WorkBoardDispatcher,
+    _parse_typed_input,
+    registered_executor_id,
+)
+from src.guardian.goal_snapshot_to_file import GoalSnapshotToFileService
+from src.goals.contracts import GoalOutcomeReceipt
+from src.work_board import review as review_service
+from src.work_board.contracts import WorkBoardOwner
+from src.work_board.repository import BoardError, WorkBoardRepository
+from src.work_board.tools import WorkBoardWorkerRequest, WorkBoardWorkerTools
+from src.security.trust_contract import AuthorityGrant
+import src.workflows.routines as routines_module
+
+
+class _VerticalJobs:
+    """Small durable-job protocol double; the capability itself is real."""
+
+    def __init__(self):
+        self.jobs: dict[str, dict] = {}
+        self.artifacts: list[dict] = []
+        self.readbacks: list[dict] = []
+
+    def _view(self, job_id: str) -> dict:
+        row = self.jobs[job_id]
+        return {
+            "job_id": job_id,
+            "run_identity": job_id,
+            "root_run_identity": row.get("root_run_identity"),
+            "parent_run_identity": row.get("parent_run_identity"),
+            "parent_job_id": row.get("parent_job_id"),
+            "parent_fencing_token": row.get("parent_fencing_token"),
+            "owner": row.get("owner"),
+            "job_kind": row.get("job_kind"),
+            "capability_version": row.get("capability_version"),
+            "session_id": row.get("session_id"),
+            "operator_session_id": row.get("operator_session_id"),
+            "goal_id": row.get("goal_id"),
+            "goal_revision": row.get("goal_revision"),
+            "idempotency": row.get("idempotency"),
+            "declared_authority": row.get("declared_authority"),
+            "status": row["status"],
+            "revision": row.get("revision", 1),
+            "lease": {"owner": row.get("lease_owner"), "fencing_token": row.get("fence", 1)},
+            "effects": list(row.get("effects", [])),
+            "artifacts": list(row.get("artifacts", [])),
+            "result": row.get("result"),
+        }
+
+    async def admit_job(self, spec):
+        self.jobs[spec.identity.job_id] = {
+            "status": "accepted",
+            "revision": 1,
+            "effects": [],
+            "artifacts": [],
+            "root_run_identity": spec.parent_job_id or spec.identity.job_id,
+            "parent_run_identity": spec.parent_job_id,
+            "parent_job_id": spec.parent_job_id,
+            "parent_fencing_token": spec.parent_fencing_token,
+            "owner": {
+                "kind": spec.identity.owner_kind,
+                "principal_id": spec.identity.owner_principal_id,
+                "service_id": spec.service_id,
+            },
+            "job_kind": spec.identity.job_kind,
+            "capability_version": spec.identity.capability_version,
+            "session_id": spec.session_id,
+            "operator_session_id": spec.operator_session_id,
+            "goal_id": spec.goal_id,
+            "goal_revision": spec.goal_revision,
+            "idempotency": {
+                "scope": spec.identity.idempotency_scope,
+                "key": spec.identity.idempotency_key,
+            },
+            "declared_authority": dict(spec.declared_authority),
+        }
+        return self._view(spec.identity.job_id)
+
+    async def queue_job(self, job_id, **_kwargs):
+        self.jobs[job_id]["status"] = "queued"
+        self.jobs[job_id]["revision"] += 1
+        return self._view(job_id)
+
+    async def claim_job(self, job_id, *, owner, lease_seconds, **_kwargs):
+        self.jobs[job_id].update(status="running", lease_owner=owner, fence=1)
+        self.jobs[job_id]["revision"] += 1
+        return self._view(job_id)
+
+    async def get_job(self, job_id):
+        return self._view(job_id) if job_id in self.jobs else None
+
+    async def record_artifact(self, job_id, *, file_path, content, **_kwargs):
+        digest = sha256(content).hexdigest()
+        item = {"artifact_id": "artifact-real-goal-snapshot", "artifact_type": "goal_snapshot", "file_path": file_path, "content_sha256": digest, "exists": True}
+        self.jobs[job_id]["artifacts"].append(item)
+        self.artifacts.append(item)
+        return {"receipt": item, **self._view(job_id)}
+
+    async def record_readback(self, job_id, **kwargs):
+        item = {"receipt_kind": "readback", "status": "succeeded", "verified": True, **kwargs}
+        self.jobs[job_id]["effects"].append(item)
+        self.jobs[job_id]["revision"] += 1
+        self.readbacks.append(item)
+        return self._view(job_id)
+
+    async def record_effect(self, job_id, **kwargs):
+        self.jobs[job_id]["effects"].append(dict(kwargs))
+        self.jobs[job_id]["revision"] += 1
+        return self._view(job_id)
+
+    async def transition_job(self, job_id, status, **_kwargs):
+        self.jobs[job_id]["status"] = status
+        self.jobs[job_id]["revision"] += 1
+        return self._view(job_id)
+
+
+def _write_input(tmp_path, envelope: dict) -> tuple[str, str]:
+    path = tmp_path / "inputs" / "task.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    raw = json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode()
+    path.write_bytes(raw)
+    return "workspace-json:inputs/task.json", sha256(raw).hexdigest()
+
+
+def _task(reference: str, digest: str, capability: str = GOAL_SNAPSHOT_CAPABILITY):
+    return SimpleNamespace(
+        typed_input_ref=reference,
+        typed_input_digest=digest,
+        capability_id=capability,
+    )
+
+
+def test_typed_input_is_workspace_bound_and_exact(monkeypatch, tmp_path):
+    reference, digest = _write_input(
+        tmp_path,
+        {
+            "schema_version": 1,
+            "capability_id": GOAL_SNAPSHOT_CAPABILITY,
+            "input": {"file_path": "artifacts/result.md"},
+        },
+    )
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+
+    assert _parse_typed_input(_task(reference, digest)) == {"file_path": "artifacts/result.md"}
+
+    extra_reference, extra_digest = _write_input(
+        tmp_path,
+        {
+            "schema_version": 1,
+            "capability_id": GOAL_SNAPSHOT_CAPABILITY,
+            "input": {"file_path": "artifacts/result.md", "authority": "shell"},
+        },
+    )
+    with pytest.raises(TypedInputError) as exc_info:
+        _parse_typed_input(_task(extra_reference, extra_digest))
+    assert exc_info.value.code == "typed_input_invalid"
+
+
+def test_routine_typed_input_requires_canonical_task_goal_binding(monkeypatch, tmp_path):
+    reference, digest = _write_input(
+        tmp_path,
+        {
+            "schema_version": 1,
+            "capability_id": "guardian-routine.v1",
+            "input": {
+                "routine_id": "routine-identity",
+                "version": 1,
+                "expected_routine_revision": 2,
+                "goal_id": "goal-identity",
+                "expected_goal_revision": 4,
+                "source_watch_id": "watch-identity",
+                "expected_watch_revision": 7,
+            },
+        },
+    )
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    task = SimpleNamespace(
+        typed_input_ref=reference,
+        typed_input_digest=digest,
+        capability_id="guardian-routine.v1",
+        goal_id="goal-identity",
+        goal_revision=4,
+    )
+    parsed = _parse_typed_input(task)
+    assert parsed["goal_id"] == "goal-identity"
+    assert parsed["expected_goal_revision"] == 4
+
+    task.goal_id = "goal-other"
+    with pytest.raises(TypedInputError) as exc_info:
+        _parse_typed_input(task)
+    assert exc_info.value.code == "typed_input_goal_binding_mismatch"
+
+
+def test_typed_input_rejects_traversal_and_symlink(monkeypatch, tmp_path):
+    outside = tmp_path.parent / "outside-board-input.json"
+    outside.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "capability_id": GOAL_SNAPSHOT_CAPABILITY,
+                "input": {"file_path": "artifacts/result.md"},
+            }
+        )
+    )
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    escaped = _task(
+        "workspace-json:../outside-board-input.json",
+        sha256(outside.read_bytes()).hexdigest(),
+    )
+    with pytest.raises(TypedInputError):
+        _parse_typed_input(escaped)
+
+    reference, digest = _write_input(
+        tmp_path,
+        {
+            "schema_version": 1,
+            "capability_id": GOAL_SNAPSHOT_CAPABILITY,
+            "input": {"file_path": "artifacts/result.md"},
+        },
+    )
+    link = tmp_path / "inputs" / "link.json"
+    link.symlink_to(outside)
+    with pytest.raises(TypedInputError):
+        _parse_typed_input(_task("workspace-json:inputs/link.json", digest))
+
+
+def test_goal_snapshot_builds_only_the_board_wrapper_identity(monkeypatch, tmp_path):
+    reference, digest = _write_input(
+        tmp_path,
+        {
+            "schema_version": 1,
+            "capability_id": GOAL_SNAPSHOT_CAPABILITY,
+            "input": {"file_path": "artifacts/result.md"},
+        },
+    )
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    task = SimpleNamespace(
+        task_id="task-1",
+        owner_principal_id="operator:one",
+        owner_session_id="session-1",
+        goal_id="goal-1",
+        goal_revision=2,
+        capability_id=GOAL_SNAPSHOT_CAPABILITY,
+        executor_id=registered_executor_id(GOAL_SNAPSHOT_CAPABILITY),
+        task_revision=1,
+        priority=70,
+        typed_input_ref=reference,
+        typed_input_digest=digest,
+    )
+    attempt = SimpleNamespace(attempt_id="attempt-1")
+
+    spec, inputs, job_id, owner, runtime = WorkBoardDispatcher()._build_spec(
+        task,
+        attempt,
+        runtime_seconds=9_999,
+    )
+
+    assert job_id == "work-board:task-1:attempt-1"
+    assert owner == "service:work-board"
+    assert runtime == 900
+    assert inputs == {"file_path": "artifacts/result.md"}
+    assert spec.identity.idempotency_scope == "work-board-attempt"
+    assert spec.identity.idempotency_key == "task-1:attempt-1"
+    assert spec.parent_job_id is None
+    assert spec.declared_authority["finite_authority"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("capability", "inputs"),
+    [
+        ("guardian.research-watch.v1", {"watch_id": "watch-identity", "expected_plan_revision": 1}),
+        (
+            "engineering.repo-change.v1",
+            {
+                "candidate_id": "candidate-identity",
+                "repository_path": "repo",
+                "patch_artifact_id": "patch-identity",
+                "patch_sha256": "a" * 64,
+                "allowed_paths": ["src/example.py"],
+                "test_args": ["python", "-m", "pytest"],
+            },
+        ),
+        (
+            "work.github-followthrough.v1",
+            {
+                "dossier_artifact_id": "dossier-identity",
+                "dossier_sha256": "b" * 64,
+                "connection_revision": 2,
+                "action": "create_issue",
+                "title": "Identity proof",
+                "body": "Identity proof body",
+            },
+        ),
+        (
+            "guardian-routine.v1",
+            {
+                "routine_id": "routine-identity",
+                "version": 1,
+                "expected_routine_revision": 1,
+                "source_watch_id": "watch-identity",
+                "expected_watch_revision": 1,
+            },
+        ),
+    ],
+)
+async def test_direct_admission_identity_uses_adapter_projection(monkeypatch, capability, inputs):
+    """Each direct adapter supplies the immutable digest envelope for linking."""
+
+    task = SimpleNamespace(
+        task_id=f"task-identity-{capability.split('.')[0]}",
+        owner_principal_id="operator:identity",
+        owner_session_id="session-identity",
+        goal_id="goal-identity",
+        goal_revision=4,
+        capability_id=capability,
+    )
+    attempt = SimpleNamespace(attempt_id="attempt-identity")
+    dispatcher = WorkBoardDispatcher()
+    job_id, owner, job_kind, service_id, binding_key = dispatcher._direct_job_identity(task, attempt, inputs)
+    projection = {
+        "job_id": job_id,
+        "run_identity": job_id,
+        "owner": {
+            "kind": "service" if service_id else "user",
+            "principal_id": owner,
+            "service_id": service_id,
+        },
+        "job_kind": job_kind,
+        "capability_version": dispatcher._direct_capability_version(task),
+        "session_id": task.owner_session_id,
+        "operator_session_id": task.owner_session_id,
+        "goal_id": task.goal_id,
+        "goal_revision": task.goal_revision,
+        "input_digest": "1" * 64,
+        "authority_digest": "2" * 64,
+        "run_fingerprint": "3" * 64,
+        "idempotency": {
+            "scope": "work-board-attempt",
+            "key": binding_key,
+            "binding": f"binding:{capability}",
+        },
+        "declared_authority": (
+            {"capability_id": capability}
+            if capability != "engineering.repo-change.v1"
+            else {}
+        ),
+    }
+    observed_lookup: dict[str, object] = {}
+
+    class _Jobs:
+        async def get_job(self, requested_job_id):
+            assert requested_job_id == job_id
+            return projection
+
+        async def get_by_idempotency_binding(self, **kwargs):
+            observed_lookup.update(kwargs)
+            return projection
+
+    async def _admission_only(*_args, admission_only, **_kwargs):
+        assert admission_only is True
+        return {"job_id": job_id, "status": "running", "admission_only": True}
+
+    dispatcher.jobs = _Jobs()
+    monkeypatch.setattr(dispatcher, "_execute_direct_adapter", _admission_only)
+    response, found, expected = await dispatcher._canonical_direct_admission(
+        task,
+        attempt,
+        inputs,
+        runtime_seconds=300,
+    )
+
+    assert response["job_id"] == job_id
+    assert found["job_id"] == job_id
+    assert expected["job_id"] == job_id
+    assert expected["input_digest"] == projection["input_digest"]
+    assert expected["authority_digest"] == projection["authority_digest"]
+    assert expected["run_fingerprint"] == projection["run_fingerprint"]
+    assert observed_lookup["job_kind"] == job_kind
+    assert observed_lookup["idempotency_key"] == binding_key
+    assert observed_lookup["input_digest"] == projection["input_digest"]
+
+
+@pytest.mark.asyncio
+async def test_goal_snapshot_board_vertical_slice_executes_real_file_and_readback(monkeypatch, tmp_path):
+    """Exercise the actual bounded capability behind the board adapter seam."""
+
+    from src.work_board import dispatcher as dispatcher_module
+
+    reference, digest = _write_input(
+        tmp_path,
+        {
+            "schema_version": 1,
+            "capability_id": GOAL_SNAPSHOT_CAPABILITY,
+            "input": {"file_path": "artifacts/board-real.md"},
+        },
+    )
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    goal = SimpleNamespace(
+        id="goal-real",
+        revision=1,
+        status="active",
+        owner_principal_id="operator:one",
+        owner_session_id="session-one",
+        title="Real board goal",
+        success_criterion_json=None,
+    )
+    jobs = _VerticalJobs()
+    service_holder = {}
+
+    class _Goals:
+        async def get(self, _goal_id):
+            return goal
+
+    class _Workflow:
+        def get_approval_context(self, _arguments):
+            return {"workflow_name": "goal-snapshot-to-file", "risk_level": "low", "execution_boundaries": ["workspace_write"], "step_tools": ["get_goals", "write_file"]}
+
+        def __call__(self, *, file_path, sanitize_inputs_outputs=False):
+            target = tmp_path / file_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("Goal snapshot\n- current goal (id=goal-real, active)\n", encoding="utf-8")
+            return f"Saved the current goal snapshot to {file_path}."
+
+        def get_audit_result_payload(self, _arguments, _result):
+            return "snapshot executed", {"durable_run_identity": "child-goal-real"}
+
+    async def dispatch(candidate, *, adapter):
+        result = await adapter.execute(goal=goal, candidate=candidate)
+        service_holder["adapter_result"] = result
+        service_holder["adapter_receipt"] = adapter.last_receipt
+        return GoalOutcomeReceipt(
+            receipt_type="outcome",
+            outcome_id="outcome-real-board",
+            candidate_id=candidate.candidate_id,
+            dedupe_key=candidate.dedupe_key,
+            goal_id=candidate.goal_id,
+            goal_revision=candidate.goal_revision,
+            execution_status=result.execution_status,
+            verification=result.verification,
+            usefulness=result.usefulness,
+            learning=result.learning,
+            artifact_ref=result.artifact_ref,
+            evidence_refs=list(result.evidence_refs),
+            reason=result.reason,
+        )
+
+    def service_factory(**kwargs):
+        service = GoalSnapshotToFileService(
+            goals=_Goals(),
+            jobs=jobs,
+            dispatcher=dispatch,
+            workflow_tool_provider=lambda _name: _Workflow(),
+            authority_principal=kwargs["authority_principal"],
+        )
+        service_holder["service"] = service
+        return service
+
+    monkeypatch.setattr(dispatcher_module, "GoalSnapshotToFileService", service_factory)
+    linked = False
+    projected: list[dict] = []
+
+    class _BoardSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class _BoardRepository:
+        async def link_attempt_workflow_run(self, _db, *_args, **kwargs):
+            nonlocal linked
+            assert kwargs["workflow_run_id"] == parent_job_id
+            linked = True
+            return SimpleNamespace(task=SimpleNamespace(task_revision=2))
+
+        async def project_attempt(self, _db, *_args, **kwargs):
+            assert linked is True
+            projected.append(dict(kwargs))
+            return SimpleNamespace(task=task, attempt=attempt, event=SimpleNamespace(event_id=len(projected)))
+
+    task = SimpleNamespace(
+        task_id="task-real",
+        owner_principal_id="operator:one",
+        owner_session_id="session-one",
+        goal_id="goal-real",
+        goal_revision=1,
+        title="Write the current goal snapshot",
+        task_revision=1,
+        capability_id=GOAL_SNAPSHOT_CAPABILITY,
+        priority=50,
+        executor_id=registered_executor_id(GOAL_SNAPSHOT_CAPABILITY),
+        typed_input_ref=reference,
+        typed_input_digest=digest,
+        requires_review=False,
+    )
+    attempt = SimpleNamespace(attempt_id="attempt-real", fencing_token=1)
+    dispatcher = WorkBoardDispatcher(jobs=jobs)
+    parent_spec, inputs, parent_job_id, _owner, _runtime = dispatcher._build_spec(task, attempt, runtime_seconds=300)
+    # The test enters the actual board admission path.  The service callback
+    # below asserts that the immutable attempt link was committed first.
+    dispatcher.repository = _BoardRepository()
+    dispatcher.session_provider = lambda: _BoardSession()
+
+    async def _runtime(_task):
+        return 300
+
+    dispatcher._effective_runtime = _runtime
+    claim = SimpleNamespace(task=task, attempt=attempt, event=SimpleNamespace(event_id=1))
+    outcome = await dispatcher._admit_execute_project(claim)
+
+    assert linked is True
+    assert projected and projected[-1]["status"].value == "done"
+    assert any(
+        effect.get("receipt_kind") == "readback"
+        and (effect.get("verified") or (effect.get("details") or {}).get("verified"))
+        for effect in jobs.jobs[parent_job_id]["effects"]
+    )
+
+    assert outcome["completed"] is True, json.dumps(
+        {
+            "outcome": outcome,
+            "adapter_result": service_holder.get("adapter_result"),
+            "receipt": service_holder.get("adapter_receipt"),
+        },
+        default=str,
+    )
+    assert (tmp_path / "artifacts/board-real.md").is_file()
+    assert jobs.artifacts and jobs.readbacks
+    parent = await jobs.get_job(parent_job_id)
+    assert parent["status"] == "succeeded", parent
+
+
+async def _run_real_board_goal_snapshot(
+    async_db,
+    monkeypatch,
+    tmp_path,
+    *,
+    observe_link: bool = False,
+    request_review: bool = False,
+):
+    """Run the board path against the real SQLite and durable job stores."""
+
+    reference, digest = _write_input(
+        tmp_path,
+        {
+            "schema_version": 1,
+            "capability_id": GOAL_SNAPSHOT_CAPABILITY,
+            "input": {"file_path": "artifacts/managed-board-snapshot.md"},
+        },
+    )
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    goal_id = "goal-managed-board"
+    task_id = "task-managed-board"
+    criterion = GoalSuccessCriterion(
+        criterion_id="managed-snapshot",
+        description="A readable managed snapshot exists",
+        verifier_kind=CriterionVerifierKind.artifact_readback,
+        target={"file_path": "artifacts/managed-board-snapshot.md"},
+        evidence_refs=["operator:managed-local-proof"],
+    )
+    task = WorkBoardTask(
+        task_id=task_id,
+        owner_principal_id="operator:single",
+        owner_session_id="managed-session",
+        goal_id=goal_id,
+        goal_revision=1,
+        title="Write a managed goal snapshot",
+        idempotency_key=task_id,
+        capability_id=GOAL_SNAPSHOT_CAPABILITY,
+        typed_input_ref=reference,
+        typed_input_digest=digest,
+        executor_id=registered_executor_id(GOAL_SNAPSHOT_CAPABILITY),
+        priority=80,
+        status=WorkBoardStatus.ready,
+    )
+    async with async_db() as db:
+        now = datetime.now(timezone.utc)
+        db.add(
+            Goal(
+                id=goal_id,
+                title="Managed board goal",
+                status="active",
+                revision=1,
+                owner_principal_id="operator:single",
+                owner_session_id="managed-session",
+                success_criterion_json=criterion.model_dump_json(),
+            )
+        )
+        db.add(Session(id="managed-session", owner_principal_id="operator:single"))
+        db.add(
+            OperatorSession(
+                id="managed-session",
+                token_hash="managed-session-token-hash",
+                idle_expires_at=now + timedelta(hours=1),
+                absolute_expires_at=now + timedelta(hours=1),
+            )
+        )
+        db.add(task)
+        await db.commit()
+
+    # Exercise the registered governed WorkflowTool.  Observe only the final
+    # bounded filesystem transport so the real get_goals and write_file steps
+    # remain in the execution path.
+    from src.agent import factory as agent_factory
+    from src.tools import filesystem_tool
+    from src.workflows import manager as manager_module
+    from src.extensions.registry import default_manifest_roots_for_workspace
+    from src.skills.manager import skill_manager
+
+    manifest_roots = default_manifest_roots_for_workspace(str(tmp_path))
+    workflow_manager = manager_module.workflow_manager
+    for attribute in (
+        "_workflows",
+        "_load_errors",
+        "_shared_manifest_errors",
+        "_workflows_dir",
+        "_manifest_roots",
+        "_config_path",
+        "_disabled",
+        "_registry",
+    ):
+        monkeypatch.setattr(workflow_manager, attribute, getattr(workflow_manager, attribute))
+    for attribute in (
+        "_skills",
+        "_load_errors",
+        "_skills_dir",
+        "_manifest_roots",
+        "_config_path",
+        "_disabled",
+        "_registry",
+    ):
+        monkeypatch.setattr(skill_manager, attribute, getattr(skill_manager, attribute))
+    workflows_dir = tmp_path / "workflows"
+    workflows_dir.mkdir(exist_ok=True)
+    workflow_manager.init(
+        str(workflows_dir),
+        manifest_roots=manifest_roots,
+    )
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir(exist_ok=True)
+    skill_manager.init(str(skills_dir), manifest_roots=manifest_roots)
+
+    workflow = workflow_manager.get_workflow("goal-snapshot-to-file")
+    assert workflow is not None and workflow.enabled
+    registered_tools = agent_factory.get_tools(include_bound_worker=True)
+    workflow_tool = next(
+        (
+            tool
+            for tool in registered_tools
+            if getattr(tool, "name", None) == workflow.tool_name
+        ),
+        None,
+    )
+    assert workflow_tool is not None
+    writes: list[tuple[str, str]] = []
+    write_contexts: list[tuple[str | None, str | None]] = []
+    original_write = filesystem_tool._write_workspace_text_bounded
+
+    def observed_write(path, content, **kwargs):
+        from src.approval.runtime import get_current_fencing_token, get_current_trust_principal
+
+        principal = get_current_trust_principal()
+        writes.append((str(path), content))
+        write_contexts.append(
+            (
+                getattr(principal, "job_id", None),
+                get_current_fencing_token(),
+            )
+        )
+        return original_write(path, content, **kwargs)
+
+    monkeypatch.setattr(filesystem_tool, "_write_workspace_text_bounded", observed_write)
+
+    repository = WorkBoardRepository()
+    async with async_db() as db:
+        claim = await repository.claim_ready_task(
+            db,
+            task_id,
+            expected_revision=task.task_revision,
+            lease_owner="service:work-board",
+            actor_principal_id="service:work-board",
+            actor_session_id="service:work-board:session",
+        )
+        assert claim is not None
+        await db.commit()
+
+    if observe_link or request_review:
+        original_run = GoalSnapshotToFileService.run
+
+        async def observed_run(service, request, **kwargs):
+            async with async_db() as db:
+                linked_attempt = (
+                    await db.execute(
+                        select(WorkBoardAttempt).where(
+                            WorkBoardAttempt.attempt_id == claim.attempt.attempt_id,
+                        )
+                )
+                ).scalar_one()
+                assert linked_attempt.workflow_run_id == request.parent_job_id
+                linked_task = (
+                    await db.execute(
+                        select(WorkBoardTask).where(
+                            WorkBoardTask.task_id == task_id,
+                        )
+                    )
+                ).scalar_one()
+                worker = WorkBoardWorkerTools(session_provider=async_db)
+                current_request = WorkBoardWorkerRequest(
+                    task_id=task_id,
+                    attempt_id=linked_attempt.attempt_id,
+                    expected_task_revision=linked_task.task_revision,
+                    board_fencing_token=linked_attempt.fencing_token,
+                    workflow_run_id=request.parent_job_id,
+                    workflow_fencing_token=request.parent_fencing_token,
+                )
+                heartbeat = await worker.heartbeat(current_request)
+                assert heartbeat["status"] == "ok"
+                stale_request = current_request.model_copy(
+                    update={"expected_task_revision": claim.task.task_revision}
+                )
+                with pytest.raises(Exception) as stale_error:
+                    await worker.heartbeat(stale_request)
+                assert getattr(stale_error.value, "code", None) == "stale_revision"
+                if request_review:
+                    requested = await review_service.request_review(
+                        db,
+                        WorkBoardOwner(
+                            principal_id=task.owner_principal_id,
+                            session_id=task.owner_session_id,
+                        ),
+                        task_id,
+                        expected_revision=linked_task.task_revision,
+                        attempt_id=linked_attempt.attempt_id,
+                        evidence_refs=[],
+                    )
+                    assert requested.task.requires_review is True
+            return await original_run(service, request, **kwargs)
+
+        monkeypatch.setattr(GoalSnapshotToFileService, "run", observed_run)
+
+    dispatcher = WorkBoardDispatcher(repository=repository)
+    outcome = await dispatcher._admit_execute_project(claim)
+    async with async_db() as db:
+        stored_task = (
+            await db.execute(
+                select(WorkBoardTask).where(WorkBoardTask.task_id == task_id)
+            )
+        ).scalar_one()
+        stored_attempt = (
+            await db.execute(
+                select(WorkBoardAttempt).where(
+                    WorkBoardAttempt.attempt_id == claim.attempt.attempt_id,
+                )
+            )
+        ).scalar_one()
+        runs = list((await db.execute(select(WorkflowRunState))).scalars().all())
+    assert writes, (
+        "the registered WorkflowTool did not execute write_file: "
+        f"outcome={outcome!r}; task={stored_task.status}; "
+        f"block={stored_task.block_reason!r}; attempt={stored_attempt.outcome!r}; "
+        f"receipts={stored_attempt.receipt_refs_json!r}; "
+        f"runs={[(run.run_identity, run.status, run.failure_reason) for run in runs]!r}"
+    )
+    assert any(goal_id in content for _path, content in writes)
+    nested = next(
+        run
+        for run in runs
+        if run.run_identity not in {
+            f"work-board:{task.task_id}:{claim.attempt.attempt_id}",
+            f"goal-snapshot-work-board:{task.task_id}:{claim.attempt.attempt_id}",
+        }
+    )
+    assert write_contexts == [(nested.run_identity, str(nested.fencing_token))]
+    return outcome, stored_task, stored_attempt, runs
+
+
+@pytest.mark.asyncio
+async def test_goal_snapshot_executes_and_reads_back(async_db, monkeypatch, tmp_path):
+    """The board proves real durable admission, execution, artifact, and readback."""
+
+    outcome, task, attempt, runs = await _run_real_board_goal_snapshot(
+        async_db,
+        monkeypatch,
+        tmp_path,
+    )
+
+    assert outcome["admitted"] is True, outcome
+    assert outcome["completed"] is True, outcome
+    assert task.status is WorkBoardStatus.done
+    assert attempt.workflow_run_id == f"work-board:{task.task_id}:{attempt.attempt_id}"
+    assert attempt.outcome == "verified"
+    assert json.loads(task.result_refs_json)[0]["reason_code"] == "goal_snapshot_executed_and_verified"
+    assert (tmp_path / "artifacts/managed-board-snapshot.md").is_file()
+    content = (tmp_path / "artifacts/managed-board-snapshot.md").read_text(encoding="utf-8")
+    assert task.goal_id in content
+    assert len(runs) == 3
+    root = next(run for run in runs if run.run_identity == attempt.workflow_run_id)
+    child = next(run for run in runs if run.run_identity == f"goal-snapshot-work-board:{task.task_id}:{attempt.attempt_id}")
+    nested = next(
+        run
+        for run in runs
+        if run.run_identity not in {root.run_identity, child.run_identity}
+    )
+    assert root.status == child.status == nested.status == "succeeded"
+    assert child.parent_run_identity == root.run_identity
+    assert child.root_run_identity == root.run_identity
+    assert nested.parent_run_identity == child.run_identity
+    assert nested.parent_job_id == child.run_identity
+    assert nested.parent_fencing_token == child.fencing_token
+    assert nested.root_run_identity == root.run_identity
+    root_effects = json.loads(root.metadata_json or "{}") if root.metadata_json else {}
+    assert root_effects is not None
+
+
+@pytest.mark.asyncio
+async def test_attempt_run_link_persisted_before_adapter_execution(async_db, monkeypatch, tmp_path):
+    """A real registered GoalSnapshot adapter sees its immutable link first."""
+
+    outcome, task, attempt, _runs = await _run_real_board_goal_snapshot(
+        async_db,
+        monkeypatch,
+        tmp_path,
+        observe_link=True,
+    )
+    assert outcome["completed"] is True, outcome
+    assert attempt.workflow_run_id == f"work-board:{task.task_id}:{attempt.attempt_id}"
+
+
+@pytest.mark.asyncio
+async def test_goal_snapshot_dynamic_review_survives_stale_done_projection(async_db, monkeypatch, tmp_path):
+    """The real GoalSnapshot dispatcher path preserves a worker review request."""
+
+    outcome, task, attempt, _runs = await _run_real_board_goal_snapshot(
+        async_db,
+        monkeypatch,
+        tmp_path,
+        observe_link=True,
+        request_review=True,
+    )
+    assert outcome["completed"] is True, outcome
+    assert task.status is WorkBoardStatus.review
+    assert task.requires_review is True
+    async with async_db() as db:
+        intent = (
+            await db.execute(
+                select(WorkBoardReviewIntent).where(
+                    WorkBoardReviewIntent.task_id == task.task_id,
+                    WorkBoardReviewIntent.attempt_id == attempt.attempt_id,
+                )
+            )
+        ).scalar_one()
+        assert intent.workflow_run_id == attempt.workflow_run_id
+        assert intent.status == "projected"
+
+
+def _github_adapter_inputs() -> dict[str, object]:
+    return {
+        "dossier_artifact_id": "dossier-1",
+        "dossier_sha256": "a" * 64,
+        "connection_revision": 2,
+        "action": "create_issue",
+        "title": "Create governed issue",
+        "body": "bounded body",
+        "issue_number": None,
+    }
+
+
+def _github_adapter_task_and_attempt() -> tuple[WorkBoardTask, WorkBoardAttempt]:
+    task = WorkBoardTask(
+        task_id="github-adapter-task",
+        owner_principal_id="operator:github",
+        owner_session_id="session:github",
+        goal_id="goal:github",
+        goal_revision=3,
+        capability_id="work.github-followthrough.v1",
+        executor_id=registered_executor_id("work.github-followthrough.v1"),
+    )
+    attempt = WorkBoardAttempt(
+        task_id=task.task_id,
+        attempt_id="github-adapter-attempt",
+    )
+    return task, attempt
+
+
+@pytest.mark.asyncio
+async def test_github_board_adapter_reauthenticates_and_passes_live_grant(monkeypatch):
+    task, attempt = _github_adapter_task_and_attempt()
+    captured: dict[str, object] = {}
+
+    async def live_session(session_id: str, *, touch: bool = False):
+        assert session_id == task.owner_session_id
+        assert touch is False
+        return SimpleNamespace(
+            session_id=session_id,
+            principal=SimpleNamespace(
+                principal_id=task.owner_principal_id,
+                grants=(AuthorityGrant.EXTERNAL_MUTATION,),
+            ),
+        )
+
+    class FakeGitHubFollowthroughService:
+        async def prepare(self, **kwargs):
+            captured.update(kwargs)
+            return {"status": "awaiting_approval", "job_id": "github-board-job"}
+
+    monkeypatch.setattr("src.work_board.dispatcher.authenticate_session", live_session)
+    monkeypatch.setattr(
+        "src.extensions.github_followthrough.GitHubFollowthroughService",
+        FakeGitHubFollowthroughService,
+    )
+
+    result = await WorkBoardDispatcher()._execute_direct_adapter(
+        task,
+        attempt,
+        _github_adapter_inputs(),
+        runtime_seconds=300,
+        admission_only=False,
+    )
+
+    assert result["status"] == "awaiting_approval"
+    assert captured["external_mutation_granted"] is True
+
+
+@pytest.mark.asyncio
+async def test_github_board_adapter_blocks_without_live_grant_and_never_prepares(monkeypatch):
+    task, attempt = _github_adapter_task_and_attempt()
+    prepare_calls = 0
+
+    async def revoked_session(session_id: str, *, touch: bool = False):
+        return SimpleNamespace(
+            session_id=session_id,
+            principal=SimpleNamespace(
+                principal_id=task.owner_principal_id,
+                grants=(),
+            ),
+        )
+
+    class FakeGitHubFollowthroughService:
+        async def prepare(self, **_kwargs):
+            nonlocal prepare_calls
+            prepare_calls += 1
+            return {"status": "awaiting_approval", "job_id": "should-not-exist"}
+
+    monkeypatch.setattr("src.work_board.dispatcher.authenticate_session", revoked_session)
+    monkeypatch.setattr(
+        "src.extensions.github_followthrough.GitHubFollowthroughService",
+        FakeGitHubFollowthroughService,
+    )
+
+    result = await WorkBoardDispatcher()._execute_direct_adapter(
+        task,
+        attempt,
+        _github_adapter_inputs(),
+        runtime_seconds=300,
+        admission_only=False,
+    )
+
+    assert result == {
+        "status": "blocked",
+        "reason_code": "external_mutation_grant_required",
+        "recovery_action": "retry_after_prerequisite",
+        "admission_only": False,
+    }
+    assert prepare_calls == 0
+
+    with pytest.raises(BoardError, match="external mutation grant") as error:
+        await WorkBoardDispatcher()._execute_direct_adapter(
+            task,
+            attempt,
+            _github_adapter_inputs(),
+            runtime_seconds=300,
+            admission_only=True,
+        )
+    assert error.value.code == "external_mutation_grant_required"
+
+
+@pytest.mark.asyncio
+async def test_routine_board_adapter_passes_effective_goal_runtime_to_durable_admission(monkeypatch):
+    captured = {}
+
+    async def invoke(*_args, **kwargs):
+        captured.update(kwargs)
+        return {"status": "awaiting_approval", "job_id": "routine-invocation:bounded"}
+
+    monkeypatch.setattr(routines_module.routine_service, "invoke", invoke)
+    task = SimpleNamespace(
+        task_id="task-runtime",
+        owner_principal_id="operator:runtime",
+        owner_session_id="session:runtime",
+        goal_id="goal-runtime",
+        goal_revision=6,
+        capability_id="guardian-routine.v1",
+    )
+    attempt = SimpleNamespace(attempt_id="attempt-runtime")
+    result = await WorkBoardDispatcher()._execute_direct_adapter(
+        task,
+        attempt,
+        {
+            "routine_id": "0123456789abcdef0123456789abcdef",
+            "version": 1,
+            "expected_routine_revision": 2,
+            "source_watch_id": "watch-runtime",
+            "expected_watch_revision": 3,
+        },
+        runtime_seconds=300,
+        admission_only=True,
+    )
+
+    assert result["admission_only"] is True
+    assert captured["runtime_seconds"] == 300
+    assert captured["work_board_idempotency_key"].startswith("task-runtime:")

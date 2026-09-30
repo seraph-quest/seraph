@@ -107,6 +107,13 @@ def test_manifest_is_deterministic_redacted_and_explicit(tmp_path):
     assert first["database"]["table_count"] == 2
     assert first["database"]["row_count"] == 2
     assert first["database"]["schema_fingerprint"]
+    assert first["database"]["operator_contracts"]["work_board_routine_binding"] == {
+        "schema_version": "seraph.work-board-routine-binding.v1",
+        "table_name": "work_board_routine_bindings",
+        "state_class": "canonical",
+        "backup_scope": "canonical_sqlite",
+        "present": False,
+    }
     assert {item["state_class"] for item in first["database"]["tables"]} == {"canonical"}
     assert first["counts"]["external_references"] == 2
     assert [item["reference_id"] for item in first["external_references"]] == [

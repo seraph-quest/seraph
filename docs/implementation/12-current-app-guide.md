@@ -305,6 +305,47 @@ cross-surface identity, selected voice/messaging channels, and outcome-first UX
 need Epic #736 milestones. Existing canaries or deterministic receipts do not
 make those product capabilities complete.
 
+### Operator work board (Epic #864 M6 branch-local target)
+
+The M4 work-board slice adds an authenticated, single-operator Kanban surface
+under `/api/work-board`. Seraph's SQLModel/SQLite workspace remains the
+canonical task store; `WorkflowRunState` remains authoritative for execution,
+leases, attempts, effects, checkpoints, and unknown external outcomes. A task
+card can therefore show `Triage`, `Todo`, `Ready`, `Running`, `Blocked`,
+`Review`, `Done`, or `Archived` while its durable workflow receipt remains the
+execution evidence.
+
+Review and handoff actions require a current owner session, the latest fenced
+attempt, and an independently verified readback containing a stable artifact or
+readback identity plus the producer's verification timestamp. A generic worker
+summary cannot complete a card. Expired review cards require the named
+reviewer's renewal path; unknown external effects require reconciliation and
+are never replayed automatically. Manual Specify and Decompose requests are
+provider-governed proposals that remain staged until operator acceptance; a
+missing route, authority, or budget is visible as a blocked recovery state.
+
+Epic #864 M5 adds a candidate from a verified task outcome only after
+independent readback. The candidate keeps its task, attempt, workflow, artifact,
+goal revision, content digest, provenance, confidence, and supersession evidence.
+Accept, edit and accept, reject, and rollback are operator actions; only an
+accepted candidate writes canonical memory. Failed, weak, unverified, or
+irrelevant outcomes record `no_learning`.
+
+Epic #864 M6 can draft a versioned declarative procedure from an operator-
+selected, verified research task and its linked verified follow-through task.
+The preview binds the source tasks, attempts, artifacts, readbacks, owner,
+session, goal revision, and fixed capability steps. Operator acceptance and the
+existing capability-pack review and activation lifecycle are required before
+reuse. Each invocation gets fresh goal revision, grants, approvals, budget,
+tasks, jobs, and readback. If a run needs publication, the operator inspects an
+exact same-card preview, approves it through Pending approvals, and resumes the
+same durable routine parent. The card reaches Done only after independent
+readback.
+
+This section describes the Epic #864 M6 integration-branch target while its
+aggregate PR is under review. It does not claim full Hermes parity, autonomous
+execution, memory superiority, or production readiness.
+
 ## Models And Runtime
 
 The accepted #775 phase changes the active contract to OpenRouter-only

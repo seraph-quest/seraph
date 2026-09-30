@@ -36,6 +36,7 @@ def _require_context(context: RoutineStepContext | None) -> RoutineStepContext:
 async def guardian_watch_run(
     routine_invocation_job_id: str,
     *,
+    child_job_id: str,
     context: RoutineStepContext | None = None,
     service: Any | None = None,
 ) -> dict[str, Any]:
@@ -46,12 +47,14 @@ async def guardian_watch_run(
         raise ValueError("routine_invocation_job_id is required")
     if trusted.runtime_job_id != routine_invocation_job_id.strip():
         raise PermissionError("routine runtime parent mismatch")
+    if not isinstance(child_job_id, str) or not child_job_id.strip():
+        raise ValueError("child_job_id is required")
     if service is None:
         from src.workflows.routines import routine_service
 
         service = routine_service
     return await service.execute_watch_step(
-        routine_invocation_job_id.strip(),
+        child_job_id.strip(),
         context=trusted,
     )
 

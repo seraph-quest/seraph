@@ -40,10 +40,12 @@ from src.workspace.state_registry import (
     WorkspaceStateClass,
     WorkspaceStateRegistry,
     WorkspaceRootKind,
+    WORK_BOARD_ROUTINE_BINDING_TABLE,
     canonical_workspace_root,
     canonical_workspace_root_identity,
     _canonical_json,
     _sha256_bytes,
+    work_board_routine_binding_contract,
 )
 
 
@@ -805,6 +807,24 @@ def _archive_manifest(
         "source_manifest_sha256": source_manifest.get("manifest_sha256"),
         "workspace_manifest": source_manifest,
         "archive_entries": archive_entries,
+        # Carry the explicit M6 schema contract through the archive envelope;
+        # the SQLite payload remains the canonical source of binding rows.
+        "database_operator_contracts": (
+            dict(
+                source_manifest.get("database", {}).get("operator_contracts", {})
+            )
+            if isinstance(source_manifest.get("database"), dict)
+            and isinstance(source_manifest.get("database", {}).get("operator_contracts"), dict)
+            else {
+                "work_board_routine_binding": work_board_routine_binding_contract(
+                    present=any(
+                        item.get("name") == WORK_BOARD_ROUTINE_BINDING_TABLE
+                        for item in source_manifest.get("database", {}).get("tables", [])
+                        if isinstance(item, dict)
+                    )
+                )
+            }
+        ),
     }
     body["manifest_sha256"] = _digest_json(body)
     return body
@@ -1035,6 +1055,21 @@ def _load_archive(
                 raise InvalidWorkspaceArchiveError("archive workspace version does not match target")
             if source_manifest.get("root_kind") != registry.config.identity.root_kind.value:
                 raise InvalidWorkspaceArchiveError("archive workspace root kind does not match target")
+            archive_contracts = manifest.get("database_operator_contracts")
+            source_database = source_manifest.get("database")
+            source_contracts = (
+                source_database.get("operator_contracts")
+                if isinstance(source_database, dict)
+                else None
+            )
+            if (
+                archive_contracts is not None
+                and source_contracts is not None
+                and archive_contracts != source_contracts
+            ):
+                raise InvalidWorkspaceArchiveError(
+                    "archive database operator contract does not match source manifest"
+                )
             source_entries = _manifest_entries(source_manifest)
             if len(source_entries) > registry.config.max_entries:
                 raise InvalidWorkspaceArchiveError("archive source manifest has too many entries")
@@ -1392,6 +1427,23 @@ def _validate_stage(
         for field in ("schema_fingerprint", "table_count", "row_count", "schema_object_count"):
             if actual_database.get(field) != expected_database.get(field):
                 raise WorkspaceLifecycleError(f"staged database {field} mismatch")
+        expected_contracts = expected_database.get("operator_contracts")
+        actual_contracts = actual_database.get("operator_contracts")
+        if isinstance(expected_contracts, dict) and isinstance(actual_contracts, dict):
+            expected_binding = expected_contracts.get("work_board_routine_binding")
+            actual_binding = actual_contracts.get("work_board_routine_binding")
+            if (
+                isinstance(expected_binding, dict)
+                and bool(expected_binding.get("present"))
+                and not (
+                    isinstance(actual_binding, dict)
+                    and bool(actual_binding.get("present"))
+                    and actual_binding.get("table_name") == WORK_BOARD_ROUTINE_BINDING_TABLE
+                )
+            ):
+                raise WorkspaceLifecycleError(
+                    "staged database work-board routine binding contract is missing"
+                )
     return {
         "canonical_entry_count": sum(
             1

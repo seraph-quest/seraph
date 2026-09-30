@@ -271,6 +271,38 @@ TOOL_METADATA: dict[str, dict] = {
         "policy_modes": ["balanced", "full"],
         "execution_boundaries": ["workspace_write", "local_compute"],
     },
+    # Work-board worker controls are visible to the governed runtime only when
+    # the server injects an active task/attempt/fence context.
+    "work_board_show": {
+        "description": "Inspect the server-bound operator work-board task and attempt",
+        "policy_modes": ["full"],
+        "execution_boundaries": ["work_board_worker"],
+    },
+    "work_board_heartbeat": {
+        "description": "Heartbeat the server-bound operator work-board attempt lease",
+        "policy_modes": ["full"],
+        "execution_boundaries": ["work_board_worker"],
+    },
+    "work_board_comment": {
+        "description": "Add bounded progress to the server-bound operator work-board task",
+        "policy_modes": ["full"],
+        "execution_boundaries": ["work_board_worker"],
+    },
+    "work_board_block": {
+        "description": "Report a bounded block for the server-bound operator work-board attempt",
+        "policy_modes": ["full"],
+        "execution_boundaries": ["work_board_worker"],
+    },
+    "work_board_request_review": {
+        "description": "Request operator review for the server-bound work-board attempt",
+        "policy_modes": ["full"],
+        "execution_boundaries": ["work_board_worker"],
+    },
+    "work_board_request_completion": {
+        "description": "Request completion verification for the server-bound work-board attempt",
+        "policy_modes": ["full"],
+        "execution_boundaries": ["work_board_worker"],
+    },
     # Vault tools
     "store_secret": {
         "description": "Store an encrypted secret in the vault",

@@ -110,6 +110,542 @@ export interface GoalInfo {
   success_criterion?: GoalSuccessCriterion | null;
 }
 
+export type WorkBoardStatus =
+  | "triage"
+  | "todo"
+  | "ready"
+  | "running"
+  | "blocked"
+  | "review"
+  | "done"
+  | "archived";
+
+export type WorkBoardRecoveryAction =
+  | "cancel"
+  | "unblock"
+  | "retry"
+  | "approve_existing_run"
+  | "restore_prerequisite"
+  | "configure_goal_success_criterion"
+  | "reconcile_admission_binding"
+  | "reconcile_external_effect"
+  | "renew_review"
+  | "prepare_routine_publication"
+  | "resume_routine_publication";
+
+export type WorkBoardReadbackStatus =
+  | "not_started"
+  | "pending"
+  | "verified"
+  | "failed"
+  | "unknown"
+  | "not_applicable";
+
+export type WorkBoardVerificationStatus =
+  | "not_started"
+  | "pending"
+  | "passed"
+  | "failed"
+  | "reconciliation_required"
+  | "cancelled";
+
+export interface WorkBoardReceiptReference {
+  artifact_id?: string;
+  artifact_type?: string;
+  file_path?: string;
+  content_sha256?: string;
+  size_bytes?: number;
+  exists?: boolean | null;
+  effect_id?: string;
+  effect_id_digest?: string;
+  effect_type?: string;
+  readback_id?: string;
+  verification_id?: string;
+  status?: string;
+  verified?: boolean | null;
+  target_digest?: string;
+  target_path?: string;
+  job_id?: string;
+  workflow_run_id?: string;
+  recovery_action?: string;
+  reason_code?: string;
+  error_code?: string;
+  child_job_id?: string;
+  readback_status?: WorkBoardReadbackStatus;
+  verification_status?: WorkBoardVerificationStatus;
+  outcome?: string;
+}
+
+export interface WorkBoardAttempt {
+  attempt_id: string;
+  task_id: string;
+  workflow_run_id: string | null;
+  task_revision_at_claim: number;
+  lease_owner: string | null;
+  cancel_requested_at: string | null;
+  lease_expires_at: string | null;
+  heartbeat_at: string | null;
+  fencing_token: number;
+  executor_id: string | null;
+  started_at: string;
+  ended_at: string | null;
+  outcome: string | null;
+  receipt_refs: WorkBoardReceiptReference[];
+  readback_status: WorkBoardReadbackStatus;
+  verification_status: WorkBoardVerificationStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Safe task projection returned by the authenticated /api/work-board routes. */
+export interface WorkBoardTask {
+  task_id: string;
+  creation_sequence: number;
+  owner_principal_id: string;
+  owner_session_id: string;
+  origin_session_id: string | null;
+  origin_thread_id: string | null;
+  goal_id: string;
+  goal_revision: number;
+  title: string;
+  body: string;
+  capability_id: string | null;
+  typed_input_ref: string | null;
+  typed_input_digest: string | null;
+  executor_id: string | null;
+  assignee_id: string | null;
+  priority: number;
+  idempotency_scope: string;
+  idempotency_key: string;
+  scheduled_at: string | null;
+  status: WorkBoardStatus;
+  block_kind: string | null;
+  block_reason: string | null;
+  block_source_status: WorkBoardStatus | null;
+  cancel_requested_at: string | null;
+  requires_review: boolean;
+  reviewer_id: string | null;
+  review_expires_at?: string | null;
+  dependency_count: number;
+  completed_dependency_count: number;
+  dispatch_rank: number | null;
+  recovery_action: WorkBoardRecoveryAction | null;
+  readback_status: WorkBoardReadbackStatus;
+  verification_status: WorkBoardVerificationStatus;
+  task_revision: number;
+  result_refs: WorkBoardReceiptReference[];
+  artifact_refs: WorkBoardReceiptReference[];
+  latest_attempt: WorkBoardAttempt | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+  archived_at: string | null;
+}
+
+export interface WorkBoardComment {
+  comment_id: string;
+  task_id: string;
+  author_principal_id: string;
+  author_session_id: string;
+  body: string;
+  created_at: string;
+}
+
+export interface WorkBoardEvent {
+  event_id: number;
+  task_id: string;
+  kind: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface WorkBoardTaskDetail {
+  task: WorkBoardTask;
+  attempts: WorkBoardAttempt[];
+  parents: string[];
+  children: string[];
+  comments: WorkBoardComment[];
+  events: WorkBoardEvent[];
+  parent_handoffs?: WorkBoardSafeParentHandoff[];
+  revision: number;
+}
+
+export interface WorkBoardSafeParentHandoff {
+  handoff_id: string;
+  parent_task_id: string;
+  child_task_id: string;
+  status: string;
+  summary: string;
+  artifact_refs: WorkBoardReceiptReference[];
+  result_refs: WorkBoardReceiptReference[];
+  verification_receipt: Record<string, unknown>;
+  source_attempt_id: string | null;
+  source_task_revision: number;
+  risks: string[];
+}
+
+export interface WorkBoardTaskPage {
+  tasks: WorkBoardTask[];
+  next_after: number | null;
+  last_event_id: number;
+}
+
+export interface WorkBoardEventPage {
+  events: WorkBoardEvent[];
+  last_event_id: number;
+  gap: boolean;
+}
+
+export interface WorkBoardExecutionLimits {
+  goal_id: string;
+  goal_revision: number;
+  effective_max_runtime_seconds: number;
+  default_max_runtime_seconds: number;
+  hard_max_runtime_seconds: number;
+  attempt_limit: number;
+  limit_source: "goal_admission_budget" | "default";
+}
+
+export interface WorkBoardTaskCreateRequest {
+  title: string;
+  body?: string;
+  goal_id: string;
+  goal_revision: number;
+  status?: "triage" | "todo";
+  capability_id?: string | null;
+  typed_input_ref?: string | null;
+  typed_input_digest?: string | null;
+  executor_id?: string | null;
+  assignee_id?: string | null;
+  priority?: number;
+  idempotency_scope?: string;
+  idempotency_key: string;
+  scheduled_at?: string | null;
+  requires_review?: boolean;
+  reviewer_id?: string | null;
+  origin_thread_id?: string | null;
+}
+
+export interface WorkBoardTaskPatchRequest {
+  expected_revision: number;
+  title?: string;
+  body?: string;
+  priority?: number;
+  capability_id?: string | null;
+  typed_input_ref?: string | null;
+  typed_input_digest?: string | null;
+  executor_id?: string | null;
+  assignee_id?: string | null;
+  scheduled_at?: string | null;
+}
+
+export type WorkBoardAction =
+  | "promote" | "block" | "unblock" | "retry" | "cancel" | "archive"
+  | "request_review" | "request_changes" | "complete_review" | "renew_review";
+
+export interface WorkBoardActionRequest {
+  action: WorkBoardAction;
+  expected_revision: number;
+  block_kind?: "operator" | "dependency" | "needs_input" | "capability" | "transient" | "cancelled" | "review_expired" | "unknown_effect";
+  source_status?: WorkBoardStatus;
+  attempt_id?: string;
+  evidence_refs?: string[];
+  reason?: string;
+  resolution?: string;
+}
+
+export interface WorkBoardProposalTask {
+  task_id?: string;
+  title: string;
+  body?: string;
+  goal_id?: string;
+  goal_revision?: number;
+  capability_id: string;
+  typed_input_ref?: string | null;
+  typed_input_digest?: string | null;
+  executor_id: string;
+  authority: string;
+  dependencies?: string[];
+  cost_estimate?: string | null;
+  capability_version?: string;
+}
+
+export interface WorkBoardProposalLink {
+  parent_task_id: string;
+  child_task_id: string;
+}
+
+export interface WorkBoardProposal {
+  kind: "specify" | "decompose";
+  proposal_id: string;
+  proposal_revision: number;
+  parent_task_id: string;
+  parent_revision: number;
+  idempotency_key?: string;
+  proposal_digest: string;
+  expires_at: string;
+  proposed_tasks: WorkBoardProposalTask[];
+  proposed_links: WorkBoardProposalLink[];
+  estimated_cost: string | null;
+  blocked_reason?: string | null;
+  recovery_action?: string | null;
+  status?: string;
+  request_digest?: string;
+  route_id?: string;
+  capability_id?: string;
+  capability_version?: string;
+  grant_revision?: number;
+  input_digest?: string;
+  admission_job_id?: string;
+  effect_id_digest?: string;
+  provider_contact_state?: string;
+}
+
+export interface WorkBoardCommentCreateRequest {
+  expected_revision: number;
+  body: string;
+}
+
+export interface WorkBoardLinkCreateRequest {
+  parent_task_id: string;
+  child_task_id: string;
+  expected_child_revision: number;
+}
+
+export interface WorkBoardLinkDeleteRequest extends WorkBoardLinkCreateRequest {}
+
+/** Safe preview returned before a verified board journey can become a routine. */
+export interface WorkBoardRoutinePreviewRequest {
+  source_task_id: string;
+  action_task_id: string;
+  expected_source_revision: number;
+  expected_action_revision: number;
+  name: string;
+  idempotency_key: string;
+}
+
+export interface WorkBoardRoutinePreview {
+  preview_digest: string;
+  source_refs: Record<string, string | number | boolean | null>;
+  version_plan: {
+    version: number;
+    steps: string[];
+    workflow: string;
+  };
+  typed_parameters: Record<string, string | number | boolean | null>;
+  permissions: {
+    capability_id: string;
+    external_mutation: string;
+    package_review: string;
+    shell_or_arbitrary_connector: boolean;
+  };
+  limits: {
+    runtime_seconds: number;
+    attempts: number;
+    remote_inference: boolean;
+  };
+  verifier: {
+    source: string;
+    required: boolean;
+    unknown_effect: string;
+  };
+  expires_at: string;
+  safe_summary: string;
+}
+
+export interface WorkBoardRoutineBinding {
+  routine_id: string;
+  state: string;
+  status: string;
+  revision: number;
+  version: number;
+  install_job_id: string;
+  preview_digest: string;
+  binding_id: string;
+  /** Present when the server can expose the exact approval receipt safely. */
+  approval_id?: string | null;
+}
+
+export interface WorkBoardRoutineVersion {
+  id: string;
+  routine_id: string;
+  version: number;
+  workflow_sha256: string;
+  runbook_sha256: string;
+  installed_package_digest: string | null;
+  source_provenance: Record<string, string | number | boolean | null | string[]>;
+  source_repository: string | null;
+  source_action: string | null;
+  source_issue_number: number | null;
+  created_at: string;
+  installed_at: string | null;
+}
+
+export interface WorkBoardRoutineRead {
+  id: string;
+  owner_principal_id: string;
+  state: string;
+  revision: number;
+  current_version: number | null;
+  name: string;
+  versions: WorkBoardRoutineVersion[];
+  package: {
+    status: string;
+    digest?: string | null;
+    review_id?: string | null;
+    reason?: string | null;
+  };
+}
+
+/** Redacted server-generated capability-pack proposal for one routine version. */
+export interface WorkBoardRoutinePackagePreview {
+  routine_id: string;
+  version: number;
+  pack_id: string;
+  digest: string;
+  installed_package_digest: string | null;
+  review_id: string | null;
+  status: string;
+  manifest: {
+    display_name: string;
+    summary: string;
+    version: string;
+    authority: {
+      tools: string[];
+      filesystem: string[];
+      network: boolean;
+      secrets: string[];
+      approval: string;
+    };
+    resources: {
+      max_runtime_seconds: number;
+      max_artifact_bytes: number;
+      max_inference_cost_microusd: number;
+      inference_priority: string;
+    };
+    data_policy: { classes: string[]; egress: string[] };
+  };
+  runbook: {
+    title: string;
+    summary: string;
+    procedure: {
+      capability_id: string;
+      steps: Array<{ id: string; capability: string; tool: string }>;
+    };
+    bindings: {
+      workflow_sha256: string;
+      legacy_runbook_sha256: string;
+      source_provenance_sha256: string;
+    };
+  };
+}
+
+/** Redacted JSON snapshot for one installed, digest-verified procedure version. */
+export interface WorkBoardRoutineProcedureExport {
+  schema_version: 1;
+  kind: "seraph.reviewed_procedure.v1";
+  pack_id: string;
+  version: number;
+  package_digest: string;
+  manifest: Record<string, unknown>;
+  runbook: Record<string, unknown>;
+}
+
+export interface WorkBoardRoutinePackageApproval {
+  approval_id: string;
+  status: "pending" | "approved" | "denied" | "expired" | "consumed";
+  action: string;
+  pack_id: string;
+  version: string;
+  digest: string;
+  goal_id: string;
+  expires_at?: string | null;
+}
+
+/** Owner/session-scoped source-watch fields safe for routine invocation selection. */
+export interface WorkBoardSourceWatch {
+  id: string;
+  goal_id: string;
+  goal_revision: number;
+  plan_revision: number;
+  state: string;
+  last_status: string | null;
+}
+
+export interface WorkBoardRoutineInvokeRequest {
+  version: number;
+  expected_routine_revision: number;
+  goal_id: string;
+  expected_goal_revision: number;
+  source_watch_id: string;
+  expected_watch_revision: number;
+  invocation_uuid: string;
+}
+
+export interface WorkBoardRoutineInvokeReceipt {
+  status: string;
+  task_id: string;
+  task_revision?: number;
+  deduped?: boolean;
+  preview?: {
+    routine_id?: string;
+    routine_revision?: number;
+    version?: number;
+    goal_id?: string;
+    goal_revision?: number;
+    source_watch_id?: string;
+    source_watch_revision?: number;
+    steps?: string[];
+  };
+}
+
+export interface WorkBoardRoutinePublicationPrepareRequest {
+  expected_revision: number;
+  title?: string | null;
+  body: string;
+}
+
+export interface WorkBoardRoutinePublicationState {
+  task_id: string;
+  task_revision: number;
+  attempt_id: string;
+  parent_workflow_run_id: string | null;
+  routine_id: string;
+  routine_version: number;
+  routine_revision: number;
+  source_watch_id: string;
+  source_watch_revision: number;
+  parent_status: string | null;
+  m3_job_id: string | null;
+  m3_status: string | null;
+  approval_id: string | null;
+  approval_status: string | null;
+  preview: {
+    repository?: string;
+    action?: string;
+    issue_number?: number | null;
+    title?: string | null;
+    body?: string | null;
+    body_sha256?: string;
+    marker?: string;
+    dossier_artifact_id?: string;
+    dossier_sha256?: string;
+    source_watch_id?: string;
+    connection_revision?: number;
+  } | null;
+  status: string | null;
+  recovery_action: "prepare_routine_publication" | "resume_routine_publication";
+}
+
+export interface WorkBoardRoutinePublicationResponse {
+  task: WorkBoardTask;
+  publication: WorkBoardRoutinePublicationState;
+  approval_required?: boolean;
+  operator_action?: string;
+  recovery?: Record<string, unknown>;
+  readback_required?: boolean;
+}
+
 /** The smaller goal shape returned by the loop inspection endpoint. */
 export interface GoalLoopGoal {
   id: string;

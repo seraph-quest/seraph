@@ -7,6 +7,8 @@ import hashlib
 import hmac
 import secrets
 import asyncio
+import threading
+import weakref
 
 from sqlalchemy import select, update
 
@@ -86,6 +88,32 @@ def _verify_secret_sync(value: str) -> bool:
 
 
 _VERIFY_LIMIT = asyncio.Semaphore(2)
+
+# Authentication is read-heavy: the cockpit can issue a burst of authenticated
+# requests for one browser session while it refreshes several panels.  Keep
+# validation on every request, but only persist the sliding idle-expiry touch
+# once per process-local interval.  The database row remains authoritative;
+# this lock only coalesces the stale-touch write path.
+_AUTH_TOUCH_INTERVAL = timedelta(seconds=30)
+_AUTH_TOUCH_LOCKS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+_AUTH_TOUCH_LOCKS_GUARD = threading.Lock()
+
+
+def _auth_touch_lock() -> asyncio.Lock:
+    """Return the bounded coalescing lock for the current event loop.
+
+    ASGI normally uses one loop per worker, while test and embedding hosts can
+    create and close loops sequentially.  A weak per-loop registry keeps the
+    slow path serialized without retaining closed loops or binding one lock to
+    a loop that no longer exists.
+    """
+    loop = asyncio.get_running_loop()
+    with _AUTH_TOUCH_LOCKS_GUARD:
+        lock = _AUTH_TOUCH_LOCKS.get(loop)
+        if lock is None:
+            lock = asyncio.Lock()
+            _AUTH_TOUCH_LOCKS[loop] = lock
+        return lock
 
 
 async def verify_secret(value: str) -> bool:
@@ -197,32 +225,115 @@ async def create_session(*, replace_session_id: str | None = None) -> tuple[str,
     )
 
 
-async def authenticate_token(token: str | None, *, touch: bool = True) -> AuthenticatedOperator:
-    if not token:
-        raise AuthFailure("authentication_required")
-    now = datetime.now(timezone.utc)
-    async with get_session() as db:
-        result = await db.execute(select(OperatorSession).where(OperatorSession.token_hash == _token_hash(token)))
-        record = result.scalar_one_or_none()
+def _touch_is_due(record: OperatorSession, now: datetime) -> bool:
+    last_seen_at = _aware(record.last_seen_at)
+    configured_idle_seconds = max(float(settings.operator_auth_idle_seconds), 0.001)
+    interval = min(
+        _AUTH_TOUCH_INTERVAL,
+        timedelta(seconds=configured_idle_seconds / 2),
+    )
+    return now - last_seen_at >= interval
+
+
+def _operator_for_record(record: OperatorSession) -> AuthenticatedOperator:
+    return AuthenticatedOperator(
+        record.id,
+        _principal(record.id),
+        _aware(record.idle_expires_at),
+        _aware(record.absolute_expires_at),
+    )
+
+
+async def _find_token_record(
+    db,
+    token_hash: str,
+    now: datetime,
+) -> tuple[OperatorSession | None, str | None]:
+    result = await db.execute(
+        select(OperatorSession).where(OperatorSession.token_hash == token_hash)
+    )
+    record = result.scalar_one_or_none()
+    if record is None:
+        return None, "authentication_required"
+    if record.revoked_at is not None:
+        return None, "session_revoked"
+    idle_expires_at = _aware(record.idle_expires_at)
+    absolute_expires_at = _aware(record.absolute_expires_at)
+    if now >= idle_expires_at or now >= absolute_expires_at:
+        # The caller deliberately lets this context exit normally so the
+        # revocation is committed before the failure is returned.
+        record.revoked_at = now
+        db.add(record)
+        return None, "session_expired"
+    return record, None
+
+
+async def _find_session_record(
+    db,
+    session_id: str,
+    now: datetime,
+) -> tuple[OperatorSession | None, str | None]:
+    current_id = session_id
+    visited: set[str] = set()
+    for _ in range(8):
+        if not current_id or current_id in visited:
+            return None, "session_revoked"
+        visited.add(current_id)
+        record = await db.get(OperatorSession, current_id)
         if record is None:
-            raise AuthFailure("authentication_required")
+            return None, "authentication_required"
         if record.revoked_at is not None:
-            raise AuthFailure("session_revoked")
+            if record.replaced_by_id:
+                current_id = record.replaced_by_id
+                continue
+            return None, "session_revoked"
         idle_expires_at = _aware(record.idle_expires_at)
         absolute_expires_at = _aware(record.absolute_expires_at)
         if now >= idle_expires_at or now >= absolute_expires_at:
+            # See _find_token_record: expiry revocation must be committed by
+            # the normal session-context exit before the error is raised.
             record.revoked_at = now
             db.add(record)
-            raise AuthFailure("session_expired")
-        if touch:
-            record.last_seen_at = now
-            record.idle_expires_at = min(
-                now + timedelta(seconds=settings.operator_auth_idle_seconds), absolute_expires_at
-            )
-            db.add(record)
-        return AuthenticatedOperator(
-            record.id, _principal(record.id), record.idle_expires_at, record.absolute_expires_at
-        )
+            return None, "session_expired"
+        return record, None
+    return None, "session_revoked"
+
+
+async def _touch_token(token_hash: str) -> AuthenticatedOperator:
+    async with _auth_touch_lock():
+        now = datetime.now(timezone.utc)
+        async with get_session() as db:
+            record, error = await _find_token_record(db, token_hash, now)
+            if record is not None and _touch_is_due(record, now):
+                absolute_expires_at = _aware(record.absolute_expires_at)
+                record.last_seen_at = now
+                record.idle_expires_at = min(
+                    now + timedelta(seconds=settings.operator_auth_idle_seconds),
+                    absolute_expires_at,
+                )
+                db.add(record)
+            operator = _operator_for_record(record) if record is not None else None
+        if error:
+            raise AuthFailure(error)
+        assert operator is not None
+        return operator
+
+
+async def authenticate_token(token: str | None, *, touch: bool = True) -> AuthenticatedOperator:
+    if not token:
+        raise AuthFailure("authentication_required")
+    token_hash = _token_hash(token)
+    now = datetime.now(timezone.utc)
+    async with get_session() as db:
+        record, error = await _find_token_record(db, token_hash, now)
+        operator = _operator_for_record(record) if record is not None else None
+        touch_due = bool(record is not None and touch and _touch_is_due(record, now))
+    if error:
+        raise AuthFailure(error)
+    assert operator is not None
+    if touch_due:
+        return await _touch_token(token_hash)
+    return operator
 
 
 async def authenticate_session(
@@ -241,37 +352,36 @@ async def authenticate_session(
     if not session_id:
         raise AuthFailure("authentication_required")
     now = datetime.now(timezone.utc)
-    current_id = session_id
-    visited: set[str] = set()
     async with get_session() as db:
-        for _ in range(8):
-            if not current_id or current_id in visited:
-                raise AuthFailure("session_revoked")
-            visited.add(current_id)
-            record = await db.get(OperatorSession, current_id)
-            if record is None:
-                raise AuthFailure("authentication_required")
-            if record.revoked_at is not None:
-                if record.replaced_by_id:
-                    current_id = record.replaced_by_id
-                    continue
-                raise AuthFailure("session_revoked")
-            idle_expires_at = _aware(record.idle_expires_at)
-            absolute_expires_at = _aware(record.absolute_expires_at)
-            if now >= idle_expires_at or now >= absolute_expires_at:
-                record.revoked_at = now
-                db.add(record)
-                raise AuthFailure("session_expired")
-            if touch:
+        record, error = await _find_session_record(db, session_id, now)
+        operator = _operator_for_record(record) if record is not None else None
+        touch_due = bool(record is not None and touch and _touch_is_due(record, now))
+    if error:
+        raise AuthFailure(error)
+    assert operator is not None
+    if touch_due:
+        return await _touch_session(session_id)
+    return operator
+
+
+async def _touch_session(session_id: str) -> AuthenticatedOperator:
+    async with _auth_touch_lock():
+        now = datetime.now(timezone.utc)
+        async with get_session() as db:
+            record, error = await _find_session_record(db, session_id, now)
+            if record is not None and _touch_is_due(record, now):
+                absolute_expires_at = _aware(record.absolute_expires_at)
                 record.last_seen_at = now
                 record.idle_expires_at = min(
-                    now + timedelta(seconds=settings.operator_auth_idle_seconds), absolute_expires_at
+                    now + timedelta(seconds=settings.operator_auth_idle_seconds),
+                    absolute_expires_at,
                 )
                 db.add(record)
-            return AuthenticatedOperator(
-                record.id, _principal(record.id), record.idle_expires_at, record.absolute_expires_at
-            )
-    raise AuthFailure("session_revoked")
+            operator = _operator_for_record(record) if record is not None else None
+        if error:
+            raise AuthFailure(error)
+        assert operator is not None
+        return operator
 
 
 async def revoke_session(session_id: str) -> None:

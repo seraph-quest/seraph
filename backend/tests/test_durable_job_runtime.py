@@ -14,13 +14,21 @@ from sqlalchemy.sql.dml import Update
 from sqlmodel import select
 from src.approval.repository import approval_repository
 from src.db.engine import _ensure_legacy_columns, _map_legacy_workflow_status
-from src.db.models import ApprovalRequest, Goal, WorkflowRunState
+from src.db.models import (
+    ApprovalRequest,
+    Goal,
+    GuardianRoutine,
+    GuardianRoutineVersion,
+    WorkflowRunState,
+)
 
 from src.workflows.job_runtime import (
     DURABLE_JOB_STATUSES,
     DURABLE_JOB_TRANSITIONS,
     DurableJobIdentity,
+    DurableJobAdmissionDenied,
     DurableJobIdempotencyConflict,
+    DurableJobRoutinePublicationAdmissionGuard,
     DurableJobSpec,
     DurableJobNotFound,
     DurableJobLeaseError,
@@ -536,6 +544,85 @@ async def test_typed_resume_consumes_only_the_exact_approval_run_identity():
     assert request.status == "consumed"
 
 
+@pytest.mark.asyncio
+async def test_typed_resume_requires_explicit_null_service_binding_for_user_jobs():
+    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).timestamp()
+    details = {
+        "durable_job_id": "job-user-identity",
+        "durable_owner_kind": "user",
+        "durable_owner_principal_id": "operator:user-identity",
+        "durable_service_id": None,
+        "durable_authority_digest": "authority-user-identity",
+        "durable_goal_id": "goal-user-identity",
+        "durable_goal_revision": 3,
+        "durable_plan_revision": 2,
+        "durable_capability_version": "github-followthrough-v1",
+        "durable_budget_digest": _digest({"budget_microusd": 0}),
+        "durable_approval_id": "approval-user-identity",
+        "approval_operator_principal_id": "operator:user-identity",
+        "approval_owner_principal_id": "operator:user-identity",
+        "approval_owner_operator_session_id": "operator-session-user-identity",
+        "approval_expires_at": expires_at,
+    }
+    request = ApprovalRequest(
+        id="approval-user-identity",
+        session_id="operator-session-user-identity",
+        conversation_id="operator-session-user-identity",
+        owner_principal_id="operator:user-identity",
+        operator_session_id="operator-session-user-identity",
+        status="approved",
+        tool_name="github:followthrough",
+        fingerprint="user-identity-fingerprint",
+        expires_at=datetime.fromtimestamp(expires_at, tz=timezone.utc),
+        details_json=json.dumps(details),
+    )
+
+    class _Result:
+        def scalars(self):
+            return self
+
+        def first(self):
+            return request if request.status == "approved" else None
+
+    class _Db:
+        async def execute(self, statement):
+            if isinstance(statement, Update):
+                request.status = "consumed"
+                return SimpleNamespace(rowcount=1)
+            return _Result()
+
+    common = {
+        "db": _Db(),
+        "approval_id": request.id,
+        "owner_operator_session_id": "operator-session-user-identity",
+        "operator_principal_id": "operator:user-identity",
+        "job_id": "job-user-identity",
+        "owner_kind": "user",
+        "owner_principal_id": "operator:user-identity",
+        "service_id": None,
+        "authority_digest": "authority-user-identity",
+        "goal_id": "goal-user-identity",
+        "goal_revision": 3,
+        "plan_revision": 2,
+        "capability_version": "github-followthrough-v1",
+        "budget_digest": _digest({"budget_microusd": 0}),
+        "expires_at": expires_at,
+        "session_id": "operator-session-user-identity",
+        "conversation_id": "operator-session-user-identity",
+    }
+
+    assert await approval_repository.consume_approved_for_resume(**common) is not None
+    assert request.status == "consumed"
+
+    # Missing null bindings remain invalid: only an explicitly persisted null
+    # distinguishes a user-owned run from a malformed/incomplete approval.
+    request.status = "approved"
+    details.pop("durable_service_id")
+    request.details_json = json.dumps(details)
+    assert await approval_repository.consume_approved_for_resume(**common) is None
+    assert request.status == "approved"
+
+
 def test_remote_admission_receipts_are_allowlisted_and_redacted():
     safe, digest = _canonical_remote_inference_receipt(
         {
@@ -752,6 +839,275 @@ def _spec(*, job_id: str = "job-743-1", dedupe_key: str = "candidate-1") -> Dura
     )
 
 
+async def _routine_publication_guard_fixture(async_db):
+    """Create a live routine parent/child and an unadmitted guarded M3 spec."""
+
+    owner = "operator:routine-guard"
+    session_id = "session:routine-guard"
+    routine_id = "0123456789abcdef0123456789abcdef"
+    package_digest = "d" * 64
+    goal = Goal(
+        id="goal-routine-publication-guard",
+        title="Routine publication guard",
+        revision=1,
+        owner_principal_id=owner,
+        owner_session_id=session_id,
+    )
+    routine = GuardianRoutine(
+        id=routine_id,
+        owner_principal_id=owner,
+        owner_session_id=session_id,
+        name="Routine publication guard",
+        state="active",
+        revision=1,
+        current_version=1,
+    )
+    routine_version = GuardianRoutineVersion(
+        id="routine-version-guard-publication",
+        routine_id=routine_id,
+        version=1,
+        installed_package_digest=package_digest,
+        workflow_sha256="w" * 64,
+        runbook_sha256="r" * 64,
+    )
+    async with async_db() as db:
+        db.add_all([goal, routine, routine_version])
+        await db.flush()
+
+    parent_id = "routine-invocation:guard-parent"
+    child_id = "routine-child:guard-publication"
+    m3_id = "ghfollow_guard-publication"
+    operation_uuid = "22222222-2222-4222-8222-222222222222"
+    invocation_uuid = "11111111-1111-4111-8111-111111111111"
+    binding = {
+        "routine_id": routine_id,
+        "routine_revision": 1,
+        "routine_version": 1,
+        "package_digest": package_digest,
+        "parent_invocation_job_id": parent_id,
+        "publication_child_job_id": child_id,
+        "invocation_uuid": invocation_uuid,
+        "owner_principal_id": owner,
+        "owner_session_id": session_id,
+        "goal_id": goal.id,
+        "goal_revision": 1,
+        "source_watch_id": "watch-routine-guard",
+        "connection_id": "connection-routine-guard",
+        "connection_revision": 1,
+        "repository": "seraph-quest/seraph",
+        "action": "create_issue",
+        "operation_uuid": operation_uuid,
+    }
+    parent_authority = {
+        "principal": owner,
+        "owner_kind": "user",
+        "session_id": session_id,
+        "routine_id": binding["routine_id"],
+        "routine_revision": binding["routine_revision"],
+        "routine_version": binding["routine_version"],
+        "package_digest": package_digest,
+        "invocation_uuid": invocation_uuid,
+        "source_watch_id": binding["source_watch_id"],
+        "github_connection_id": binding["connection_id"],
+        "github_connection_revision": binding["connection_revision"],
+        "github_repository": binding["repository"],
+        "github_action": binding["action"],
+        "budget_microusd": 0,
+    }
+
+    async def admit_and_claim(
+        job_id: str,
+        job_kind: str,
+        scope: str,
+        key: str,
+        authority: dict[str, object],
+        inputs: dict[str, object],
+        *,
+        parent_job_id: str | None = None,
+        parent_fencing_token: int | None = None,
+    ):
+        admitted = await durable_job_repository.admit_job(
+            DurableJobSpec(
+                identity=DurableJobIdentity(
+                    job_id=job_id,
+                    owner_kind="user",
+                    owner_principal_id=owner,
+                    job_kind=job_kind,
+                    capability_version="guard-test-v1",
+                    idempotency_scope=scope,
+                    idempotency_key=key,
+                ),
+                inputs=inputs,
+                session_id=session_id,
+                operator_session_id=session_id,
+                parent_job_id=parent_job_id,
+                parent_fencing_token=parent_fencing_token,
+                goal_id=goal.id,
+                goal_revision=1,
+                declared_authority=authority,
+                budget_microusd=0,
+            )
+        )
+        queued = await durable_job_repository.queue_job(
+            job_id, expected_revision=admitted["revision"]
+        )
+        return await durable_job_repository.claim_job(
+            job_id,
+            owner=f"guard:{job_id}",
+            expected_revision=queued["revision"],
+            expected_fencing_token=(queued["lease"] or {}).get("fencing_token"),
+            lease_seconds=300,
+        )
+
+    parent = await admit_and_claim(
+        parent_id,
+        "routine_invocation",
+        "guard-parent",
+        "guard-parent",
+        parent_authority,
+        {"invocation_uuid": invocation_uuid},
+    )
+    parent_fence = int(parent["lease"]["fencing_token"])
+    child_authority = {
+        **parent_authority,
+        "parent_job_id": parent_id,
+        "parent_fencing_token": parent_fence,
+        "routine_invocation_job_id": parent_id,
+        "step_id": "github_followthrough",
+        "m3_job_id": m3_id,
+        "publication_operation_uuid": operation_uuid,
+    }
+    child = await admit_and_claim(
+        child_id,
+        "routine_github_followthrough_child",
+        "guard-child",
+        "guard-child",
+        child_authority,
+        {"routine_invocation_job_id": parent_id},
+        parent_job_id=parent_id,
+        parent_fencing_token=parent_fence,
+    )
+    child = await durable_job_repository.record_checkpoint(
+        child_id,
+        checkpoint_id="routine-child:adoption_pending",
+        state={"step_id": "github_followthrough", "m3_job_id": m3_id},
+        checkpoint_payload={
+            "m3_job_id": m3_id,
+            "publication_operation_uuid": operation_uuid,
+            "status": "prepare_pending",
+        },
+        owner=child["lease"]["owner"],
+        fencing_token=child["lease"]["fencing_token"],
+        expected_revision=child["revision"],
+    )
+    m3_spec = DurableJobSpec(
+        identity=DurableJobIdentity(
+            job_id=m3_id,
+            owner_kind="user",
+            owner_principal_id=owner,
+            job_kind="github_followthrough_v1",
+            capability_version="1",
+            idempotency_scope="guard-m3",
+            idempotency_key=operation_uuid,
+        ),
+        inputs={"routine_binding": binding},
+        session_id=session_id,
+        operator_session_id=session_id,
+        goal_id=goal.id,
+        goal_revision=1,
+        declared_authority={
+            "principal": owner,
+            "owner_kind": "user",
+            "session_id": session_id,
+            "budget_microusd": 0,
+            "routine_binding": binding,
+        },
+        budget_microusd=0,
+        routine_publication_admission_guard=DurableJobRoutinePublicationAdmissionGuard(
+            routine_parent_job_id=parent_id,
+            routine_parent_fencing_token=parent_fence,
+            publication_child_job_id=child_id,
+            publication_child_fencing_token=int(child["lease"]["fencing_token"]),
+            publication_child_parent_fencing_token=int(child["parent_fencing_token"]),
+            owner_principal_id=owner,
+            owner_session_id=session_id,
+        ),
+    )
+    return {
+        "owner": owner,
+        "session_id": session_id,
+        "parent": parent,
+        "child": child,
+        "m3_spec": m3_spec,
+        "m3_id": m3_id,
+        "routine_id": routine_id,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation", ["cancelled", "fenced"])
+async def test_routine_publication_guard_rejects_child_change_before_m3_insert(
+    async_db, mutation
+):
+    fixture = await _routine_publication_guard_fixture(async_db)
+    child = fixture["child"]
+    if mutation == "cancelled":
+        await durable_job_repository.cancel_job(
+            child["job_id"],
+            owner=child["lease"]["owner"],
+            fencing_token=child["lease"]["fencing_token"],
+            expected_revision=child["revision"],
+            reason="routine_cancelled_before_publication_admission",
+        )
+    else:
+        async with async_db() as db:
+            await db.execute(
+                update(WorkflowRunState)
+                .where(WorkflowRunState.run_identity == child["job_id"])
+                .values(parent_fencing_token=child["parent_fencing_token"] + 1)
+            )
+
+    with pytest.raises(
+        (DurableJobLeaseError, DurableJobTransitionError),
+        match="routine publication admission",
+    ):
+        await durable_job_repository.admit_job(fixture["m3_spec"])
+    assert await durable_job_repository.get_job(fixture["m3_id"]) is None
+
+
+@pytest.mark.asyncio
+async def test_routine_publication_guard_insert_can_be_cancelled_by_bound_m3_id(async_db):
+    """When guarded admission wins, the deterministic M3 remains cancellable."""
+
+    fixture = await _routine_publication_guard_fixture(async_db)
+    admitted = await durable_job_repository.admit_job(fixture["m3_spec"])
+    assert admitted["status"] == "accepted"
+    cancelled = await durable_job_repository.cancel_job(
+        fixture["m3_id"],
+        expected_revision=admitted["revision"],
+        reason="routine_parent_cancelled_after_m3_admission",
+    )
+    assert cancelled["status"] == "cancelled"
+    assert cancelled["receipt"]["reason"] == "routine_parent_cancelled_after_m3_admission"
+
+
+@pytest.mark.asyncio
+async def test_routine_publication_guard_rejects_revoked_canonical_routine(async_db):
+    """A routine revoke wins the same durable admission boundary as cancellation."""
+
+    fixture = await _routine_publication_guard_fixture(async_db)
+    async with async_db() as db:
+        await db.execute(
+            update(GuardianRoutine)
+            .where(GuardianRoutine.id == fixture["routine_id"])
+            .values(state="revoked", revision=2)
+        )
+
+    with pytest.raises(DurableJobLeaseError, match="canonical routine"):
+        await durable_job_repository.admit_job(fixture["m3_spec"])
+    assert await durable_job_repository.get_job(fixture["m3_id"]) is None
+
+
 def test_goal_revision_requires_goal_id_before_admission():
     spec = replace(_spec(), goal_id=None, goal_revision=4)
     with pytest.raises(ValueError, match="goal_revision requires a canonical goal"):
@@ -814,6 +1170,14 @@ async def test_admission_is_idempotent_and_lifecycle_records_safe_receipts(async
     await durable_job_repository.queue_job(admitted["job_id"])
     claimed = await durable_job_repository.claim_job(admitted["job_id"], owner="runner-a")
     token = claimed["lease"]["fencing_token"]
+    current_lease = await durable_job_repository.assert_active_lease(
+        admitted["job_id"], owner="runner-a", fencing_token=token
+    )
+    assert current_lease["lease"]["owner"] == "runner-a"
+    with pytest.raises(DurableJobLeaseError):
+        await durable_job_repository.assert_active_lease(
+            admitted["job_id"], owner="runner-stale", fencing_token=token
+        )
     with pytest.raises(DurableJobLeaseError):
         await durable_job_repository.record_artifact(
             admitted["job_id"], file_path="reports/unsafe.json"
@@ -866,6 +1230,69 @@ async def test_admission_is_idempotent_and_lifecycle_records_safe_receipts(async
     assert retried["status"] == "queued"
     assert retried["receipt"]["reconciliation_receipt_digest"]
     assert retried["effects"][0]["status"] == "reconciled"
+
+
+@pytest.mark.asyncio
+async def test_active_lease_read_rejects_stale_owner_fence_and_status(monkeypatch):
+    from src.workflows import job_runtime as job_runtime_module
+
+    repository = DurableJobRepository()
+    expiry = datetime.now(timezone.utc) + timedelta(minutes=1)
+    run = SimpleNamespace(
+        status="running",
+        lease_owner="runner-current",
+        fencing_token=8,
+        lease_expires_at=expiry,
+    )
+
+    class _Session:
+        def expunge(self, _run):
+            return None
+
+    class _SessionContext:
+        async def __aenter__(self):
+            return _Session()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    async def fetch(_db, _job_id):
+        return run
+
+    monkeypatch.setattr(repository, "_session", lambda: _SessionContext())
+    monkeypatch.setattr(repository, "_fetch", fetch)
+    monkeypatch.setattr(
+        job_runtime_module,
+        "_serialize",
+        lambda _run: {"job_id": "job-lease-read", "status": run.status},
+    )
+
+    current = await repository.assert_active_lease(
+        "job-lease-read", owner="runner-current", fencing_token=8
+    )
+    assert current == {"job_id": "job-lease-read", "status": "running"}
+
+    with pytest.raises(DurableJobLeaseError):
+        await repository.assert_active_lease(
+            "job-lease-read", owner="runner-stale", fencing_token=8
+        )
+    with pytest.raises(DurableJobLeaseError):
+        await repository.assert_active_lease(
+            "job-lease-read", owner="runner-current", fencing_token=7
+        )
+
+    run.lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    with pytest.raises(DurableJobLeaseError, match="expired"):
+        await repository.assert_active_lease(
+            "job-lease-read", owner="runner-current", fencing_token=8
+        )
+
+    run.lease_expires_at = expiry
+    run.status = "blocked"
+    with pytest.raises(DurableJobLeaseError, match="not running"):
+        await repository.assert_active_lease(
+            "job-lease-read", owner="runner-current", fencing_token=8
+        )
 
 
 @pytest.mark.asyncio
@@ -1574,6 +2001,189 @@ async def test_child_admission_requires_the_current_parent_fence(async_db):
 
 
 @pytest.mark.asyncio
+async def test_goal_outstanding_budget_counts_roots_not_bounded_workflow_children(async_db):
+    goal = Goal(
+        id="goal-root-budget",
+        title="Root scoped admission budget",
+        revision=1,
+        owner_principal_id="service:strategist",
+        owner_session_id="job-session",
+    )
+    async with async_db() as db:
+        db.add(goal)
+        await db.flush()
+
+    def goal_spec(job_id: str, *, parent_job_id: str | None = None, fence: int | None = None):
+        base = _spec(job_id=job_id, dedupe_key=job_id)
+        return replace(
+            base,
+            goal_id=goal.id,
+            goal_revision=goal.revision,
+            parent_job_id=parent_job_id,
+            parent_fencing_token=fence,
+            declared_authority={
+                **base.declared_authority,
+                "goal_owner_principal_id": "service:strategist",
+                "goal_owner_session_id": "job-session",
+            },
+            max_outstanding_jobs=2,
+        )
+
+    root = await durable_job_repository.admit_job(goal_spec("goal-budget-root"))
+    root = await durable_job_repository.queue_job(root["job_id"])
+    root = await durable_job_repository.claim_job(root["job_id"], owner="root-budget-worker")
+    child = await durable_job_repository.admit_job(
+        goal_spec(
+            "goal-budget-child",
+            parent_job_id=root["job_id"],
+            fence=root["lease"]["fencing_token"],
+        )
+    )
+
+    assert child["parent_run_identity"] == root["job_id"]
+    second_root = await durable_job_repository.admit_job(goal_spec("goal-budget-second-root"))
+    assert second_root["status"] == "accepted"
+    with pytest.raises(DurableJobAdmissionDenied, match="goal_budget_outstanding_limit"):
+        await durable_job_repository.admit_job(goal_spec("goal-budget-third-root"))
+
+
+@pytest.mark.asyncio
+async def test_cancel_job_tree_inherits_root_and_cancels_exact_tree_child_first(async_db):
+    """Cancellation follows the durable parent tree, including deep children."""
+
+    root = await durable_job_repository.admit_job(
+        _spec(job_id="job-tree-root", dedupe_key="candidate-tree-root")
+    )
+    await durable_job_repository.queue_job(root["job_id"])
+    root_claim = await durable_job_repository.claim_job(root["job_id"], owner="runner-tree-root")
+
+    child_spec = replace(
+        _spec(job_id="job-tree-child", dedupe_key="candidate-tree-child"),
+        parent_job_id=root["job_id"],
+        parent_fencing_token=root_claim["lease"]["fencing_token"],
+    )
+    child = await durable_job_repository.admit_job(child_spec)
+    await durable_job_repository.queue_job(child["job_id"])
+    child_claim = await durable_job_repository.claim_job(child["job_id"], owner="runner-tree-child")
+
+    grandchild = await durable_job_repository.admit_job(
+        replace(
+            _spec(job_id="job-tree-grandchild", dedupe_key="candidate-tree-grandchild"),
+            parent_job_id=child["job_id"],
+            parent_fencing_token=child_claim["lease"]["fencing_token"],
+        )
+    )
+    await durable_job_repository.queue_job(grandchild["job_id"])
+    await durable_job_repository.claim_job(grandchild["job_id"], owner="runner-tree-grandchild")
+
+    other_root = await durable_job_repository.admit_job(
+        _spec(job_id="job-other-root", dedupe_key="candidate-other-root")
+    )
+    await durable_job_repository.queue_job(other_root["job_id"])
+    await durable_job_repository.claim_job(other_root["job_id"], owner="runner-other-root")
+
+    assert root["root_run_identity"] == root["job_id"]
+    assert child["root_run_identity"] == root["job_id"]
+    assert grandchild["root_run_identity"] == root["job_id"]
+    assert child["branch_depth"] == 1
+    assert grandchild["branch_depth"] == 2
+    assert other_root["root_run_identity"] == other_root["job_id"]
+
+    cancelled = await durable_job_repository.cancel_job_tree(root["job_id"])
+
+    # The repository performs each real SQLite CAS in this returned order, so
+    # a deeper worker is cancelled before its parent can be released.
+    assert [receipt["job_id"] for receipt in cancelled] == [
+        grandchild["job_id"],
+        child["job_id"],
+        root["job_id"],
+    ]
+    assert all(receipt["status"] == "cancelled" for receipt in cancelled)
+
+    for job_id in (grandchild["job_id"], child["job_id"], root["job_id"]):
+        readback = await durable_job_repository.get_job(job_id)
+        assert readback is not None
+        assert readback["status"] == "cancelled"
+        assert readback["root_run_identity"] == root["job_id"]
+        assert readback["lease"]["owner"] is None
+        assert readback["lease"]["expires_at"] is None
+        assert readback["finished_at"] is not None
+
+    other_readback = await durable_job_repository.get_job(other_root["job_id"])
+    assert other_readback is not None
+    assert other_readback["status"] == "running"
+    assert other_readback["root_run_identity"] == other_root["job_id"]
+    assert other_readback["lease"]["owner"] == "runner-other-root"
+
+
+@pytest.mark.asyncio
+async def test_cancel_job_tree_recovers_legacy_self_root_descendants(async_db):
+    """Parent links recover active pre-lineage rows without crossing roots."""
+
+    root = await durable_job_repository.admit_job(
+        _spec(job_id="job-legacy-root", dedupe_key="candidate-legacy-root")
+    )
+    await durable_job_repository.queue_job(root["job_id"])
+    root_claim = await durable_job_repository.claim_job(root["job_id"], owner="runner-legacy-root")
+
+    child = await durable_job_repository.admit_job(
+        replace(
+            _spec(job_id="job-legacy-child", dedupe_key="candidate-legacy-child"),
+            parent_job_id=root["job_id"],
+            parent_fencing_token=root_claim["lease"]["fencing_token"],
+        )
+    )
+    await durable_job_repository.queue_job(child["job_id"])
+    child_claim = await durable_job_repository.claim_job(child["job_id"], owner="runner-legacy-child")
+
+    grandchild = await durable_job_repository.admit_job(
+        replace(
+            _spec(job_id="job-legacy-grandchild", dedupe_key="candidate-legacy-grandchild"),
+            parent_job_id=child["job_id"],
+            parent_fencing_token=child_claim["lease"]["fencing_token"],
+        )
+    )
+    await durable_job_repository.queue_job(grandchild["job_id"])
+    await durable_job_repository.claim_job(grandchild["job_id"], owner="runner-legacy-grandchild")
+
+    other_root = await durable_job_repository.admit_job(
+        _spec(job_id="job-legacy-other-root", dedupe_key="candidate-legacy-other-root")
+    )
+    await durable_job_repository.queue_job(other_root["job_id"])
+    await durable_job_repository.claim_job(other_root["job_id"], owner="runner-legacy-other-root")
+
+    # Simulate active rows admitted before root/branch lineage was persisted.
+    async with async_db() as db:
+        await db.execute(
+            update(WorkflowRunState)
+            .where(
+                WorkflowRunState.run_identity.in_([
+                    child["job_id"],
+                    grandchild["job_id"],
+                ])
+            )
+            .values(
+                root_run_identity=WorkflowRunState.run_identity,
+                branch_depth=0,
+            )
+        )
+
+    cancelled = await durable_job_repository.cancel_job_tree(root["job_id"])
+    assert [receipt["job_id"] for receipt in cancelled] == [
+        grandchild["job_id"],
+        child["job_id"],
+        root["job_id"],
+    ]
+    for job_id in (grandchild["job_id"], child["job_id"], root["job_id"]):
+        readback = await durable_job_repository.get_job(job_id)
+        assert readback is not None
+        assert readback["status"] == "cancelled"
+    other_readback = await durable_job_repository.get_job(other_root["job_id"])
+    assert other_readback is not None
+    assert other_readback["status"] == "running"
+
+
+@pytest.mark.asyncio
 async def test_illegal_transition_stale_lease_and_restart_recovery_are_fail_closed(async_db):
     admitted = await durable_job_repository.admit_job(_spec(job_id="job-743-2", dedupe_key="candidate-2"))
     with pytest.raises(DurableJobTransitionError):
@@ -1591,6 +2201,10 @@ async def test_illegal_transition_stale_lease_and_restart_recovery_are_fail_clos
     assert recovered_job["failure_reason"] == "stale_lease_requires_reconciliation"
     assert recovered_job["receipt"]["operator_action"] == "reconcile_effects_then_retry_or_cancel"
 
+    with pytest.raises(DurableJobLeaseError):
+        await durable_job_repository.assert_active_lease(
+            admitted["job_id"], owner="runner-a", fencing_token=token
+        )
     with pytest.raises(DurableJobLeaseError):
         await durable_job_repository.record_checkpoint(
             admitted["job_id"],
@@ -1943,3 +2557,292 @@ async def test_restart_recovery_keeps_unknown_effect_and_cost_liability_out_of_r
         },
     )
     assert settled["status"] == "failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("child_shape", "approval_status"),
+    [("blocked", "approved"), ("running_expired", "pending")],
+)
+async def test_routine_publication_child_adoption_is_fenced_and_preserves_approval(
+    async_db, child_shape, approval_status
+):
+    now = datetime.now(timezone.utc)
+    owner = "operator:publication-adoption"
+    session_id = "session:publication-adoption"
+    goal = Goal(
+        id=f"goal-publication-adoption-{child_shape}",
+        title="Publication recovery goal",
+        revision=3,
+        owner_principal_id=owner,
+        owner_session_id=session_id,
+    )
+    async with async_db() as db:
+        db.add(goal)
+        await db.flush()
+
+    parent_id = f"routine-invocation:routine-adoption:{child_shape}"
+    child_id = f"routine-child:publication-adoption-{child_shape}"
+    m3_id = f"ghfollow_publication_adoption_{child_shape}"
+    approval_id = f"approval-publication-adoption-{child_shape}"
+    invocation_uuid = "11111111-1111-4111-8111-111111111111"
+    operation_uuid = "22222222-2222-4222-8222-222222222222"
+    binding = {
+        "routine_id": "routine-adoption",
+        "routine_revision": 7,
+        "routine_version": 2,
+        "package_digest": "d" * 64,
+        "parent_invocation_job_id": parent_id,
+        "publication_child_job_id": child_id,
+        "invocation_uuid": invocation_uuid,
+        "owner_principal_id": owner,
+        "owner_session_id": session_id,
+        "goal_id": goal.id,
+        "goal_revision": 3,
+        "source_watch_id": "watch-publication-adoption",
+        "connection_id": "connection-publication-adoption",
+        "connection_revision": 4,
+        "repository": "seraph-quest/seraph",
+        "action": "create_issue",
+        "operation_uuid": operation_uuid,
+    }
+    parent_authority = {
+        "principal": owner,
+        "owner_kind": "user",
+        "session_id": session_id,
+        "goal_owner_principal_id": owner,
+        "goal_owner_session_id": session_id,
+        "routine_id": binding["routine_id"],
+        "routine_revision": binding["routine_revision"],
+        "routine_version": binding["routine_version"],
+        "package_digest": binding["package_digest"],
+        "source_watch_id": binding["source_watch_id"],
+        "github_connection_id": binding["connection_id"],
+        "github_connection_revision": binding["connection_revision"],
+        "github_repository": binding["repository"],
+        "github_action": binding["action"],
+        "invocation_uuid": invocation_uuid,
+    }
+
+    async def admit_and_claim(
+        job_id,
+        kind,
+        scope,
+        key,
+        authority,
+        inputs,
+        *,
+        parent=None,
+        parent_fence=None,
+        max_attempts=1,
+    ):
+        job = await durable_job_repository.admit_job(
+            DurableJobSpec(
+                identity=DurableJobIdentity(
+                    job_id=job_id,
+                    owner_kind="user",
+                    owner_principal_id=owner,
+                    job_kind=kind,
+                    capability_version="test-v1",
+                    idempotency_scope=scope,
+                    idempotency_key=key,
+                ),
+                inputs=inputs,
+                session_id=session_id,
+                operator_session_id=session_id,
+                parent_job_id=parent,
+                parent_fencing_token=parent_fence,
+                goal_id=goal.id,
+                goal_revision=3,
+                declared_authority=authority,
+                max_attempts=max_attempts,
+            )
+        )
+        job = await durable_job_repository.queue_job(job_id, expected_revision=job["revision"])
+        return await durable_job_repository.claim_job(
+            job_id,
+            owner=f"runner:{job_id}",
+            expected_revision=job["revision"],
+            lease_seconds=300,
+        )
+
+    parent = await admit_and_claim(
+        parent_id,
+        "routine_invocation",
+        "test-routine-invocation",
+        child_shape,
+        parent_authority,
+        {"invocation_uuid": invocation_uuid},
+        max_attempts=2,
+    )
+    original_parent_fence = parent["lease"]["fencing_token"]
+    child_authority = {
+        **parent_authority,
+        "parent_job_id": parent_id,
+        "parent_fencing_token": original_parent_fence,
+        "routine_invocation_job_id": parent_id,
+        "step_id": "github_followthrough",
+        "m3_job_id": m3_id,
+        "publication_operation_uuid": operation_uuid,
+    }
+    child = await admit_and_claim(
+        child_id,
+        "routine_github_followthrough_child",
+        "guardian-routine-child",
+        f"{parent_id}:github_followthrough",
+        child_authority,
+        {"routine_invocation_job_id": parent_id},
+        parent=parent_id,
+        parent_fence=original_parent_fence,
+    )
+    original_child_fence = child["lease"]["fencing_token"]
+    child = await durable_job_repository.record_checkpoint(
+        child_id,
+        checkpoint_id="routine-child:adoption_pending",
+        state={"step_id": "github_followthrough", "m3_job_id": m3_id},
+        checkpoint_payload={
+            "m3_job_id": m3_id,
+            "publication_operation_uuid": operation_uuid,
+            "status": "prepare_pending",
+        },
+        owner=child["lease"]["owner"],
+        fencing_token=original_child_fence,
+        expected_revision=child["revision"],
+    )
+    m3_authority = {
+        "principal": owner,
+        "owner_kind": "user",
+        "session_id": session_id,
+        "approval_id": approval_id,
+        "routine_binding": binding,
+    }
+    m3 = await admit_and_claim(
+        m3_id,
+        "github_followthrough_v1",
+        "test-routine-publication",
+        operation_uuid,
+        m3_authority,
+        {"routine_binding": binding},
+    )
+    m3 = await durable_job_repository.transition_job(
+        m3_id,
+        "awaiting_approval",
+        owner=m3["lease"]["owner"],
+        fencing_token=m3["lease"]["fencing_token"],
+        expected_revision=m3["revision"],
+        reason="approval_required",
+    )
+    async with async_db() as db:
+        db.add(
+            ApprovalRequest(
+                id=approval_id,
+                session_id=session_id,
+                conversation_id=session_id,
+                owner_principal_id=owner,
+                operator_session_id=session_id,
+                status=approval_status,
+                tool_name="github:followthrough",
+                fingerprint=f"fingerprint-{approval_id}",
+                expires_at=now + timedelta(minutes=5),
+                details_json="{}",
+            )
+        )
+
+    if child_shape == "blocked":
+        blocked_receipt = await durable_job_repository.record_effect(
+            child_id,
+            effect_type="guardian_routine_child",
+            target_path=f"routine-child:{child_id}",
+            target_digest="approval-hold-receipt",
+            status="blocked",
+            details={
+                "step_id": "github_followthrough",
+                "reason": "awaiting_publication_approval",
+                "status": "awaiting_approval",
+                "approval_id": approval_id,
+            },
+            owner=child["lease"]["owner"],
+            fencing_token=original_child_fence,
+            expected_revision=child["revision"],
+        )
+        child = await durable_job_repository.transition_job(
+            child_id,
+            "blocked",
+            owner=child["lease"]["owner"],
+            fencing_token=original_child_fence,
+            expected_revision=blocked_receipt["revision"],
+            reason="awaiting_publication_approval",
+        )
+    else:
+        async with async_db() as db:
+            await db.execute(
+                update(WorkflowRunState)
+                .where(WorkflowRunState.run_identity == child_id)
+                .values(lease_expires_at=now - timedelta(seconds=1))
+            )
+        child = await durable_job_repository.get_job(child_id)
+
+    parent = await durable_job_repository.transition_job(
+        parent_id,
+        "blocked",
+        owner=parent["lease"]["owner"],
+        fencing_token=original_parent_fence,
+        expected_revision=parent["revision"],
+        reason="awaiting_publication_approval",
+    )
+    parent = await durable_job_repository.resume_job(
+        parent_id,
+        expected_revision=parent["revision"],
+        reason="routine_recovery_resume",
+    )
+    parent = await durable_job_repository.claim_job(
+        parent_id,
+        owner="routine:publication-adoption-recovery",
+        expected_revision=parent["revision"],
+        lease_seconds=300,
+    )
+    recovered_parent_fence = parent["lease"]["fencing_token"]
+    assert recovered_parent_fence > original_parent_fence
+
+    recovered_parent, recovered_child = await durable_job_repository.adopt_routine_publication_child(
+        parent_id,
+        child_id,
+        parent_owner=parent["lease"]["owner"],
+        parent_fencing_token=recovered_parent_fence,
+        expected_parent_revision=parent["revision"],
+        expected_child_parent_fencing_token=original_parent_fence,
+        expected_child_revision=child["revision"],
+        m3_job_id=m3_id,
+        approval_id=approval_id,
+        expected_m3_binding=binding,
+    )
+    child_checkpoint = next(
+        item for item in recovered_child["checkpoints"]
+        if item["checkpoint_id"] == "routine-child:prepared"
+    )
+    parent_checkpoint = next(
+        item for item in recovered_parent["checkpoints"]
+        if item["checkpoint_id"] == "routine:publication_child_recorded"
+    )
+    assert recovered_child["status"] == "blocked"
+    assert recovered_child["parent_fencing_token"] == recovered_parent_fence
+    assert recovered_child["declared_authority"]["parent_fencing_token"] == recovered_parent_fence
+    assert child_checkpoint["payload"]["m3_job_id"] == m3_id
+    assert child_checkpoint["payload"]["approval_id"] == approval_id
+    assert parent_checkpoint["payload"]["m3_job_id"] == m3_id
+    assert parent_checkpoint["payload"]["approval_id"] == approval_id
+    assert (await durable_job_repository.get_job(m3_id))["status"] == "awaiting_approval"
+    async with async_db() as db:
+        persisted_approval = (
+            await db.execute(select(ApprovalRequest).where(ApprovalRequest.id == approval_id))
+        ).scalars().one()
+        assert persisted_approval.status == approval_status
+
+    with pytest.raises(DurableJobLeaseError):
+        await durable_job_repository.record_checkpoint(
+            child_id,
+            checkpoint_id="stale-parent-worker",
+            state={"step_id": "github_followthrough"},
+            owner="runner:" + child_id,
+            fencing_token=original_child_fence,
+        )

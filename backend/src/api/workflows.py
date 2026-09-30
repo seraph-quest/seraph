@@ -16,6 +16,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
+from sqlalchemy import or_
 from sqlmodel import col, select
 
 from config.settings import settings
@@ -37,9 +38,17 @@ from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.audit.repository import audit_repository
 from src.audit.runtime import log_integration_event
 from src.auth.cancellation import RuntimeRevokedError, assert_runtime_not_revoked
-from src.auth.service import bind_operator_principal
+from src.auth.service import AuthFailure, AuthenticatedOperator, authenticate_session, bind_operator_principal
 from src.db.engine import get_session
-from src.db.models import AuditEvent, Goal, GuardianDecisionPacket, GuardianSourceWatch
+from src.db.models import (
+    AuditEvent,
+    Goal,
+    GuardianDecisionPacket,
+    GuardianSourceWatch,
+    WorkBoardAttempt,
+    WorkBoardTask,
+    WorkflowRunState,
+)
 from src.extensions.registry import ExtensionRegistry
 from src.extensions.registry import default_manifest_roots_for_workspace
 from src.extensions.workflow_runtimes import list_workflow_runtime_inventory
@@ -82,6 +91,178 @@ from src.workspace import WorkspaceStateClass, canonical_workspace_registry
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+_SAFE_BOARD_JOB_ID = re.compile(r"^[A-Za-z0-9_.:/-]{1,512}$")
+_SAFE_BOARD_REASON_CODES = frozenset(
+    {
+        "adapter_blocked",
+        "capability",
+        "cancelled",
+        "cost_liability",
+        "deadline_expired",
+        "execution_blocked",
+        "goal_binding_stale",
+        "goal_not_active",
+        "goal_revision_stale",
+        "needs_input",
+        "reconcile_admission_binding",
+        "reconcile_external_effect",
+        "transient",
+        "unknown_effect",
+        "verified_readback_missing",
+    }
+)
+_PRIVATE_BOARD_RECEIPT_TOKENS = (
+    "private",
+    "secret",
+    "credential",
+    "password",
+    "token",
+    "prompt",
+    "source",
+    "payload",
+)
+
+
+def _safe_board_job_reference(value: Any) -> str | None:
+    candidate = str(value or "").strip()
+    if not candidate or not _SAFE_BOARD_JOB_ID.fullmatch(candidate):
+        return None
+    return candidate
+
+
+def _safe_board_failure_reason(value: Any) -> str | None:
+    candidate = str(value or "").strip().lower()
+    if candidate in _SAFE_BOARD_REASON_CODES:
+        return candidate
+    if any(token in candidate for token in ("unknown", "effect", "cost", "reconcile")):
+        return "unknown_effect"
+    if any(token in candidate for token in ("approval", "input", "consent")):
+        return "needs_input"
+    if any(token in candidate for token in ("cancel", "revok")):
+        return "cancelled"
+    if any(token in candidate for token in ("deadline", "timeout", "rate", "failed", "failure")):
+        return "transient"
+    return "execution_blocked" if candidate else None
+
+
+def _safe_board_receipt_token(value: Any) -> str | None:
+    """Keep public receipt labels inside the established workflow token form."""
+
+    candidate = str(value or "").strip()
+    if not _WORKFLOW_SAFE_TOKEN_RE.fullmatch(candidate):
+        return None
+    lowered = candidate.casefold()
+    if any(token in lowered for token in _PRIVATE_BOARD_RECEIPT_TOKENS):
+        return None
+    return candidate
+
+
+def _safe_board_job_receipts(value: Any) -> list[dict[str, Any]]:
+    """Return only artifact/readback identifiers for a board job projection."""
+
+    if not isinstance(value, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for item in value[:32]:
+        if not isinstance(item, dict):
+            continue
+        safe: dict[str, Any] = {}
+        artifact_id = _safe_workflow_artifact_id(item.get("artifact_id"))
+        if artifact_id is not None:
+            safe["artifact_id"] = artifact_id
+        for key in ("artifact_type", "status", "job_id", "child_job_id", "workflow_run_id"):
+            token = _safe_board_receipt_token(item.get(key))
+            if token is not None:
+                safe[key] = token
+        effect_id = item.get("effect_id")
+        if isinstance(effect_id, str) and effect_id.strip():
+            # Effect identifiers are opaque durable handles.  Preserve a
+            # stable correlation value without returning the provider or
+            # adapter's raw identifier to the cockpit.
+            safe["effect_id_digest"] = _workflow_identity_digest(effect_id.strip())
+        effect_type = _safe_board_receipt_token(item.get("effect_type"))
+        if effect_type is not None:
+            safe["effect_type"] = effect_type
+        receipt_kind = item.get("receipt_kind")
+        if receipt_kind in {"effect", "readback"}:
+            safe["receipt_kind"] = receipt_kind
+        for key in ("verified", "exists"):
+            if isinstance(item.get(key), bool):
+                safe[key] = item[key]
+        if item.get("size_bytes") is not None:
+            try:
+                safe["size_bytes"] = max(0, int(item["size_bytes"]))
+            except (TypeError, ValueError, OverflowError):
+                pass
+        for key in ("content_sha256", "target_digest", "readback_digest"):
+            digest = _safe_workflow_artifact_digest(item.get(key))
+            if digest is not None:
+                safe[key] = digest
+        for key in ("file_path", "target_path"):
+            path = _safe_workflow_artifact_path(item.get(key))
+            if path is not None:
+                safe[key] = path
+        if safe:
+            result.append(safe)
+    return result
+
+
+def _bounded_lineage_expansion(
+    allowed: set[str],
+    values: list[Any],
+    *,
+    limit: int = 256,
+) -> list[str] | None:
+    """Return new lineage identities only when the aggregate bound holds."""
+
+    next_frontier: list[str] = []
+    for value in values:
+        identity = str(value)
+        if identity not in allowed and identity not in next_frontier:
+            next_frontier.append(identity)
+    if len(allowed) + len(next_frontier) > limit:
+        return None
+    return next_frontier
+
+
+def _safe_board_job_projection(run: WorkflowRunState) -> dict[str, Any]:
+    """Serialize the durable run fields M3 needs without inputs or prose."""
+
+    def loads(value: str | None, fallback: Any) -> Any:
+        try:
+            parsed = json.loads(value or "")
+        except (TypeError, ValueError):
+            return fallback
+        return parsed
+
+    safe_failure = _safe_board_failure_reason(getattr(run, "failure_reason", None))
+    return {
+        "job_id": run.run_identity,
+        "parent_job_id": getattr(run, "parent_job_id", None),
+        "status": run.status,
+        "goal_id": getattr(run, "goal_id", None),
+        "goal_revision": getattr(run, "goal_revision", None),
+        "job_kind": getattr(run, "job_kind", None),
+        "capability_version": getattr(run, "capability_version", None),
+        "input_digest": getattr(run, "input_digest", None),
+        "authority_digest": getattr(run, "authority_digest", None),
+        "run_fingerprint": getattr(run, "run_fingerprint", None),
+        "idempotency": {
+            "scope": getattr(run, "idempotency_scope", None),
+            "key": getattr(run, "idempotency_key", None),
+            "binding": getattr(run, "idempotency_binding", None),
+        },
+        "revision": int(getattr(run, "revision", 0) or 0),
+        "attempt_count": int(getattr(run, "attempt_count", 0) or 0),
+        "max_attempts": int(getattr(run, "max_attempts", 1) or 1),
+        "failure_reason": safe_failure,
+        "artifacts": _safe_board_job_receipts(loads(getattr(run, "artifact_receipts_json", None), [])),
+        "effects": _safe_board_job_receipts(loads(getattr(run, "effect_receipts_json", None), [])),
+        "started_at": run.started_at.isoformat() if run.started_at else None,
+        "updated_at": run.updated_at.isoformat() if run.updated_at else None,
+        "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+    }
 
 _WORKFLOW_FILENAME_RE = re.compile(r"[^a-zA-Z0-9_-]+")
 
@@ -793,6 +974,54 @@ def _safe_workflow_artifact_projection(value: Any) -> dict[str, Any]:
             path = _safe_workflow_artifact_path(item.get("file_path") or item.get("path"))
             if path is not None:
                 candidates.append((path, item))
+    # Typed durable runs persist artifact receipts directly on the canonical
+    # job row.  Keep those receipts as the source of the artifact registry so
+    # a child run can be inspected from a board result reference without
+    # requiring a legacy audit event or a fabricated parent registry.
+    raw_artifacts = value.get("artifacts")
+    if not isinstance(raw_artifacts, list):
+        raw_artifacts = value.get("artifact_receipts")
+    if isinstance(raw_artifacts, list):
+        for item in raw_artifacts:
+            if not isinstance(item, dict):
+                continue
+            path = _safe_workflow_artifact_path(item.get("file_path") or item.get("path"))
+            if path is not None:
+                candidates.append((path, item))
+
+    # The board's registered capability settles its parent with an
+    # independent readback receipt.  When that receipt carries the child
+    # artifact identity, expose the same bounded artifact handle on the
+    # parent projection.  Only the canonical workspace path, identifier, and
+    # digest are eligible; receipt details remain private.
+    raw_effects = value.get("effects")
+    if not isinstance(raw_effects, list):
+        raw_effects = value.get("effect_receipts")
+    if isinstance(raw_effects, list):
+        for item in raw_effects:
+            if not isinstance(item, dict):
+                continue
+            if item.get("receipt_kind") != "readback" or item.get("effect_type") != "board_child_readback":
+                continue
+            details = item.get("details") if isinstance(item.get("details"), dict) else {}
+            artifact_id = _safe_workflow_artifact_id(details.get("artifact_id"))
+            path = _safe_workflow_artifact_path(item.get("target_path"))
+            if artifact_id is None or path is None:
+                continue
+            candidates.append(
+                (
+                    path,
+                    {
+                        "artifact_id": artifact_id,
+                        "file_path": path,
+                        "content_sha256": item.get("content_sha256") or item.get("target_digest"),
+                    },
+                )
+            )
+
+    # Bare paths are a compatibility fallback.  Add them after typed
+    # registries and receipts so an explicit artifact ID and digest win when
+    # several sources describe the same path.
     if isinstance(raw_paths, list):
         for raw_path in raw_paths:
             path = _safe_workflow_artifact_path(raw_path)
@@ -907,6 +1136,17 @@ def _safe_canonical_receipt_projection(
             path = _safe_workflow_artifact_path(item["file_path"])
             if path is not None:
                 receipt["file_path"] = path
+        if kind == "effect":
+            target_path = _safe_workflow_artifact_path(item.get("target_path"))
+            if target_path is not None:
+                receipt["target_path"] = target_path
+            details = item.get("details") if isinstance(item.get("details"), dict) else {}
+            child_job_id = _safe_workflow_token(details.get("child_job_id"), fallback="")
+            if child_job_id:
+                receipt["child_job_id"] = child_job_id
+            artifact_id = _safe_workflow_artifact_id(details.get("artifact_id"))
+            if artifact_id is not None:
+                receipt["artifact_id"] = artifact_id
         safe.append(receipt)
     return safe
 
@@ -4039,6 +4279,28 @@ _REPO_CHANGE_APPROVAL_TTL_SECONDS = 5 * 60
 _REPO_CHANGE_JOB_TTL_SECONDS = 10 * 60
 
 
+async def authenticate_repo_change_operator(
+    owner_session_id: str,
+    *,
+    owner_principal_id: str | None = None,
+) -> AuthenticatedOperator:
+    """Resolve a live operator for server initiated repo-change dispatch.
+
+    Board adapters use the same session validation as the HTTP route and never
+    construct a synthetic ``Request`` object.  The optional principal check
+    binds the task owner to the authenticated session before any preview or
+    durable admission work begins.
+    """
+
+    try:
+        operator = await authenticate_session(owner_session_id, touch=False)
+    except AuthFailure as exc:
+        raise HTTPException(status_code=403, detail={"code": exc.code}) from exc
+    if owner_principal_id is not None and str(operator.principal.principal_id) != str(owner_principal_id):
+        raise HTTPException(status_code=403, detail={"code": "repo_change_owner_mismatch"})
+    return operator
+
+
 def _repo_change_workspace_root() -> Path:
     return Path(settings.workspace_dir).expanduser().resolve()
 
@@ -5236,11 +5498,48 @@ async def _recover_repo_change_preview_job(*, job: dict[str, Any], operator: Any
 
 
 
-@router.post("/workflows/repo-change/preview")
-async def preview_repo_change(req: RepoChangePreviewRequest, request: Request):
-    operator = _require_authenticated_capability_operator(request)
+async def _preview_repo_change_for_operator(
+    req: RepoChangePreviewRequest,
+    operator: AuthenticatedOperator,
+    *,
+    work_board_task_id: str | None = None,
+    work_board_attempt_id: str | None = None,
+    work_board_parent_handoff_context: list[dict[str, Any]] | None = None,
+    work_board_parent_handoff_digest: str | None = None,
+):
+    if (work_board_task_id is None) != (work_board_attempt_id is None):
+        raise HTTPException(status_code=409, detail={"code": "work_board_binding_invalid"})
+    parent_handoff_context = list(work_board_parent_handoff_context or [])
+    parent_handoff_digest = str(work_board_parent_handoff_digest or "")
+    if parent_handoff_context:
+        encoded_handoffs = json.dumps(
+            parent_handoff_context,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if (
+            not work_board_task_id
+            or len(encoded_handoffs.encode("utf-8")) > 32_768
+            or hashlib.sha256(encoded_handoffs.encode("utf-8")).hexdigest() != parent_handoff_digest
+            or any(
+                not isinstance(item, dict)
+                or item.get("status") != "verified"
+                or item.get("child_task_id") != work_board_task_id
+                for item in parent_handoff_context
+            )
+        ):
+            raise HTTPException(status_code=409, detail={"code": "work_board_handoff_binding_invalid"})
+    elif parent_handoff_digest:
+        raise HTTPException(status_code=409, detail={"code": "work_board_handoff_binding_invalid"})
     principal_id = str(operator.principal.principal_id)
-    job_id = _repo_change_job_id(principal_id, req.idempotency_key)
+    idempotency_scope = "work-board-attempt" if work_board_task_id else "repo-change"
+    idempotency_key = (
+        f"{work_board_task_id}:{work_board_attempt_id}"
+        if work_board_task_id
+        else req.idempotency_key
+    )
+    job_id = _repo_change_job_id(principal_id, idempotency_key)
     existing = await durable_job_repository.get_job(job_id)
     if existing is not None:
         owner = existing.get("owner") if isinstance(existing.get("owner"), dict) else {}
@@ -5264,6 +5563,11 @@ async def preview_repo_change(req: RepoChangePreviewRequest, request: Request):
                 status_code=409,
                 detail={"code": "repo_change_idempotency_conflict", "fields": immutable_conflicts},
             )
+        if authority.get("parent_handoff_digest") != (parent_handoff_digest or None):
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "repo_change_idempotency_conflict", "fields": ["parent_handoff_digest"]},
+            )
         # The idempotency row is authoritative.  Compare every execution
         # input before the recovery/preflight branch so a repeated key cannot
         # silently adopt a different repository, sandbox policy, or priority.
@@ -5284,6 +5588,7 @@ async def preview_repo_change(req: RepoChangePreviewRequest, request: Request):
             ("test_args", list(requested_test_args), authority.get("test_args")),
             ("priority", req.priority, existing.get("priority")),
             ("deadline_seconds", req.deadline_seconds, authority.get("deadline_seconds")),
+            ("parent_handoff_digest", parent_handoff_digest or None, authority.get("parent_handoff_digest")),
         ):
             if stored is not None and requested != stored:
                 immutable_conflicts.append(field)
@@ -5355,12 +5660,14 @@ async def preview_repo_change(req: RepoChangePreviewRequest, request: Request):
         "dossier_artifact_id": candidate_proof["dossier_artifact_id"],
         "dossier_sha256": candidate_proof["dossier_sha256"],
     }
+    if parent_handoff_context:
+        authority["parent_handoff_digest"] = parent_handoff_digest
     spec = DurableJobSpec(
         identity=DurableJobIdentity(
             job_id=job_id, owner_kind="user", owner_principal_id=principal_id, job_kind=_REPO_CHANGE_JOB_KIND,
-            capability_version=_REPO_CHANGE_CAPABILITY_VERSION, idempotency_scope="repo-change", idempotency_key=req.idempotency_key,
+            capability_version=_REPO_CHANGE_CAPABILITY_VERSION, idempotency_scope=idempotency_scope, idempotency_key=idempotency_key,
         ),
-        inputs={"base_digest": snapshot.digest, "patch_sha256": req.patch_sha256, "candidate_id": req.candidate_id, "repository_ref": repository_ref, "allowed_paths": list(allowed_paths), "test_args": list(test_args), **candidate_proof},
+        inputs={"base_digest": snapshot.digest, "patch_sha256": req.patch_sha256, "candidate_id": req.candidate_id, "repository_ref": repository_ref, "allowed_paths": list(allowed_paths), "test_args": list(test_args), **candidate_proof, **({"parent_handoff_context": parent_handoff_context, "parent_handoff_digest": parent_handoff_digest} if parent_handoff_context else {})},
         session_id=str(operator.session_id), operator_session_id=str(operator.session_id), goal_id=req.goal_id,
         goal_revision=req.goal_revision, candidate_id=req.candidate_id, priority=req.priority, declared_authority=authority,
         deadline_at=datetime.now(timezone.utc) + timedelta(seconds=_REPO_CHANGE_JOB_TTL_SECONDS), max_attempts=1,
@@ -5444,6 +5751,12 @@ async def preview_repo_change(req: RepoChangePreviewRequest, request: Request):
         return {"status": "awaiting_approval", "approval_id": approval.id, "base_digest": snapshot.digest, "patch_sha256": req.patch_sha256, "profile": str(sandbox.config.profile), "image_digest": image, "allowed_paths": list(allowed_paths), "test_args": list(test_args), "limits": {field: getattr(sandbox.limits, field) for field in sandbox.limits.__dataclass_fields__}, **held}
     except (DurableJobError, RepoSandboxError, ValueError) as exc:
         raise HTTPException(status_code=409, detail={"code": "repo_change_admission_blocked", "reason": str(exc)}) from exc
+
+
+@router.post("/workflows/repo-change/preview")
+async def preview_repo_change(req: RepoChangePreviewRequest, request: Request):
+    operator = _require_authenticated_capability_operator(request)
+    return await _preview_repo_change_for_operator(req, operator)
 
 
 @router.get("/workflows/repo-change/{job_id}")
@@ -5584,9 +5897,20 @@ async def retry_repo_change(job_id: str, req: RepoChangeRetryRequest, request: R
     }
 
 
-@router.post("/workflows/repo-change/{job_id}/cancel")
-async def cancel_repo_change(job_id: str, req: RepoChangeCancelRequest, request: Request):
-    operator = _require_authenticated_capability_operator(request)
+async def cancel_repo_change_for_authenticated_operator(
+    job_id: str,
+    *,
+    operator: AuthenticatedOperator,
+    reason: str,
+):
+    """Cancel a repo-change job for an already authenticated owner.
+
+    The HTTP route and the work-board adapter share this exact cleanup and
+    durable readback path.  The board dispatcher passes the live operator
+    resolved from the task owner session; it never constructs a synthetic
+    ``Request`` or bypasses the route's owner/session checks.
+    """
+
     job = await durable_job_repository.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail={"code": "repo_change_job_not_found"})
@@ -5632,7 +5956,7 @@ async def cancel_repo_change(job_id: str, req: RepoChangeCancelRequest, request:
                 job_id,
                 settled_status,
                 expected_revision=job.get("revision"),
-                reason=req.reason if cleanup_proven else "cleanup_unproven",
+                    reason=reason if cleanup_proven else "cleanup_unproven",
                 result={
                     "learning": "no_learning",
                     "memory_status": "no_learning",
@@ -5650,7 +5974,7 @@ async def cancel_repo_change(job_id: str, req: RepoChangeCancelRequest, request:
         cancelled = await durable_job_repository.transition_job(
             job_id,
             "cancelled",
-            reason=req.reason,
+            reason=reason,
             expected_revision=job.get("revision"),
             result={"learning": "no_learning", "memory_status": "no_learning"},
         )
@@ -5662,7 +5986,7 @@ async def cancel_repo_change(job_id: str, req: RepoChangeCancelRequest, request:
             checkpoint = await durable_job_repository.record_checkpoint(
                 job_id,
                 checkpoint_id="cancel_requested",
-                state={"phase": "cancel_requested", "reason": req.reason},
+                    state={"phase": "cancel_requested", "reason": reason},
                 owner=str(lease.get("owner") or ""),
                 fencing_token=int(lease.get("fencing_token") or 0),
                 expected_revision=job.get("revision"),
@@ -5805,7 +6129,7 @@ async def cancel_repo_change(job_id: str, req: RepoChangeCancelRequest, request:
         transition_status = "unknown_external_effect" if cleanup_unproven else "cancelled"
         transition_lease = latest_after_cleanup.get("lease") or checkpoint_lease
         transition_revision = latest_after_cleanup.get("revision")
-        transition_reason = "cleanup_unproven" if cleanup_unproven else req.reason
+        transition_reason = "cleanup_unproven" if cleanup_unproven else reason
         transition_result = (
             {
                 "learning": "no_learning",
@@ -5860,6 +6184,16 @@ async def cancel_repo_change(job_id: str, req: RepoChangeCancelRequest, request:
             "learning": "no_learning",
         }
     return {"status": status, "job": job, "operator_action": "reconcile" if status == "unknown_external_effect" else "none"}
+
+
+@router.post("/workflows/repo-change/{job_id}/cancel")
+async def cancel_repo_change(job_id: str, req: RepoChangeCancelRequest, request: Request):
+    operator = _require_authenticated_capability_operator(request)
+    return await cancel_repo_change_for_authenticated_operator(
+        job_id,
+        operator=operator,
+        reason=req.reason,
+    )
 
 
 async def _recover_repo_change_after_restart(*, job: dict[str, Any], operator: Any) -> dict[str, Any]:
@@ -6235,6 +6569,137 @@ async def recover_repo_change(job_id: str, request: Request):
     if str((job.get("declared_authority") or {}).get("session_id") or "") != str(operator.session_id):
         raise HTTPException(status_code=403, detail={"code": "repo_change_session_mismatch"})
     return await _recover_repo_change_after_restart(job=job, operator=operator)
+
+
+@router.get("/workflows/jobs/{job_id}")
+@router.get("/jobs/{job_id}")
+async def get_board_bound_workflow_job(job_id: str, request: Request):
+    """Return a safe durable-run projection for an owned board attempt.
+
+    Generic workflow reads intentionally remain separate. This route first
+    proves that the requested run is the parent of an attempt owned by the
+    authenticated operator, then permits only that run's durable descendants.
+    Raw arguments, private results, and unbounded runtime prose never cross
+    this board readback boundary.
+    """
+
+    operator = _require_authenticated_capability_operator(request)
+    requested = _safe_board_job_reference(job_id)
+    if requested is None:
+        raise HTTPException(status_code=404, detail={"code": "workflow_job_not_found"})
+    principal_id = str(operator.principal.principal_id)
+    session_id = str(operator.session_id)
+    async with get_session() as db:
+        root_rows = (
+            await db.execute(
+                select(WorkBoardAttempt.workflow_run_id)
+                .join(WorkBoardTask, WorkBoardTask.task_id == WorkBoardAttempt.task_id)
+                .where(
+                    WorkBoardTask.owner_principal_id == principal_id,
+                    WorkBoardTask.owner_session_id == session_id,
+                    WorkBoardAttempt.workflow_run_id.is_not(None),
+                )
+                .limit(257)
+            )
+        ).scalars().all()
+        if len(root_rows) > 256:
+            raise HTTPException(status_code=404, detail={"code": "workflow_job_not_found"})
+        root_candidates = {str(value) for value in root_rows if value}
+        root_records = []
+        if root_candidates:
+            root_records = (
+                await db.execute(
+                    select(WorkflowRunState)
+                    .where(WorkflowRunState.run_identity.in_(root_candidates))
+                    .limit(257)
+                )
+            ).scalars().all()
+        if len(root_records) > 256:
+            raise HTTPException(status_code=404, detail={"code": "workflow_job_not_found"})
+
+        def lineage_is_consistent(row: WorkflowRunState) -> bool:
+            parent_job_id = str(getattr(row, "parent_job_id", None) or "").strip()
+            parent_run_identity = str(getattr(row, "parent_run_identity", None) or "").strip()
+            return not (parent_job_id and parent_run_identity and parent_job_id != parent_run_identity)
+
+        # A task attempt is an authorization root only when its durable row
+        # exists, is a true root, and does not carry contradictory lineage.
+        owned_attempt_roots = {
+            str(row.run_identity)
+            for row in root_records
+            if str(getattr(row, "root_run_identity", None) or "").strip() == str(row.run_identity)
+            and str(getattr(row, "operator_session_id", None) or "").strip() == session_id
+            and lineage_is_consistent(row)
+        }
+        allowed = set(owned_attempt_roots)
+        if requested not in allowed:
+            frontier = list(allowed)
+            # Descendant traversal is bounded; a malformed lineage cannot
+            # turn an operator read into an unbounded database scan.
+            for _ in range(32):
+                if not frontier or len(allowed) >= 256:
+                    break
+                descendants = (
+                    await db.execute(
+                        select(WorkflowRunState.run_identity).where(
+                            or_(
+                                WorkflowRunState.parent_job_id.in_(frontier),
+                                WorkflowRunState.parent_run_identity.in_(frontier),
+                            ),
+                            # Every descendant must retain the exact durable
+                            # root that was proven against the current
+                            # operator's owned task attempt.  A parent pointer
+                            # alone cannot authorize a row whose root is
+                            # missing or belongs to another tree.
+                            WorkflowRunState.root_run_identity.in_(owned_attempt_roots),
+                            # If both durable parent columns are present they
+                            # must identify the same parent.  A contradictory
+                            # pair is not a usable lineage proof.
+                            or_(
+                                WorkflowRunState.parent_job_id.is_(None),
+                                WorkflowRunState.parent_run_identity.is_(None),
+                                WorkflowRunState.parent_job_id == WorkflowRunState.parent_run_identity,
+                            ),
+                            # An explicitly foreign operator session cannot
+                            # become a trusted bridge to a later NULL-session
+                            # descendant.  Only current-session or unbound
+                            # adapter rows may extend the owned lineage.
+                            or_(
+                                WorkflowRunState.operator_session_id.is_(None),
+                                WorkflowRunState.operator_session_id == session_id,
+                            ),
+                        )
+                        .limit(257)
+                    )
+                ).scalars().all()
+                if len(descendants) > 256:
+                    raise HTTPException(status_code=404, detail={"code": "workflow_job_not_found"})
+                next_frontier = _bounded_lineage_expansion(allowed, descendants)
+                if next_frontier is None:
+                    raise HTTPException(status_code=404, detail={"code": "workflow_job_not_found"})
+                allowed.update(next_frontier)
+                frontier = next_frontier
+            if requested not in allowed:
+                raise HTTPException(status_code=404, detail={"code": "workflow_job_not_found"})
+        run = (
+            await db.execute(
+                select(WorkflowRunState).where(WorkflowRunState.run_identity == requested)
+            )
+        ).scalar_one_or_none()
+        if run is None:
+            raise HTTPException(status_code=404, detail={"code": "workflow_job_not_found"})
+        bound_session = str(getattr(run, "operator_session_id", None) or "").strip()
+        # Board wrapper roots carry the authenticated operator session.  The
+        # governed child adapter can omit that field while retaining its
+        # validated parent_job_id; the bounded traversal above proves that
+        # such a child belongs to the current operator's board attempt tree.
+        # An explicit session on any descendant must still match exactly.
+        is_proven_descendant = requested not in owned_attempt_roots and requested in allowed
+        if bound_session and bound_session != session_id:
+            raise HTTPException(status_code=404, detail={"code": "workflow_job_not_found"})
+        if not bound_session and not is_proven_descendant:
+            raise HTTPException(status_code=404, detail={"code": "workflow_job_not_found"})
+        return {"job": _safe_board_job_projection(run)}
 
 
 @router.get("/workflows")

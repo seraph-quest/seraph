@@ -109,6 +109,29 @@ def _package(tmp_path: Path, *, manifest_text: str | None = None) -> tuple[Path,
     return root, parse_capability_pack_manifest(text)
 
 
+def _routine_package(tmp_path: Path) -> tuple[Path, object]:
+    """Build the server-generated runbook-only package shape for the gate."""
+
+    root = tmp_path / "routine-pack"
+    (root / "runbooks").mkdir(parents=True)
+    text = (
+        _manifest()
+        .replace("id: seraph.local-proof-pack", "id: seraph.routine.0123456789abcdef0123456789abcdef.v1")
+        .replace("version: 1.0.0", "version: 1.0.1")
+        .replace("capabilities: [research-brief, goal-snapshot]", "capabilities: [guardian-routine.v1]")
+        .replace("workflows: [workflows/local-research.md, workflows/local-snapshot.md]", "workflows: []")
+        .replace("runbooks: []", "runbooks: [runbooks/verified-guardian-procedure.yaml]")
+        .replace("tools: [read_file, write_file, get_goals, web_search]", "tools: []")
+        .replace("filesystem: [workspace_read, workspace_write, artifact_write]", "filesystem: []")
+    )
+    (root / "manifest.yaml").write_text(text, encoding="utf-8")
+    (root / "runbooks" / "verified-guardian-procedure.yaml").write_text(
+        "procedure: guardian-routine.v1\n",
+        encoding="utf-8",
+    )
+    return root, parse_capability_pack_manifest(text)
+
+
 def _activate(store: CapabilityPackLifecycle, root: Path, pack, *, owner: str, session: str):
     review = store.review(pack, root_path=root, goal_id="goal-local", reviewed_by=owner)
     approval = store.create_operator_approval(
@@ -146,6 +169,50 @@ def _goal_snapshot(owner: str, session: str, *, revision: int = 1, **values: obj
         "canonical_source": "goals",
         **values,
     }
+
+
+@pytest.mark.parametrize("method_name", ["execute_local", "run_local", "execute_local_job"])
+def test_guardian_routine_pack_local_execution_requires_routine_service(
+    tmp_path: Path,
+    method_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    root, pack = _routine_package(tmp_path)
+    store = CapabilityPackLifecycle(tmp_path / "lifecycle.json")
+    owner = "operator:routine-gate"
+    session = "session:routine-gate"
+    _activate(store, root, pack, owner=owner, session=session)
+    artifact_root = tmp_path / "artifacts"
+    admissions: list[object] = []
+    original_register_job = store.register_job
+
+    def record_register_job(*args: object, **kwargs: object):
+        admissions.append((args, kwargs))
+        return original_register_job(*args, **kwargs)
+
+    monkeypatch.setattr(store, "register_job", record_register_job)
+    with pytest.raises(
+        CapabilityPackLifecycleError,
+        match="guardian_routine_execution_requires_routine_service",
+    ):
+        getattr(store, method_name)(
+            pack.id,
+            goal_id="goal-local",
+            job_id=f"job-routine-gate-{method_name}",
+            domain="secondary",
+            artifact_root=artifact_root,
+            artifact_path="snapshot.md",
+            owner_principal_id=owner,
+            session_id=session,
+            goal_snapshot=_goal_snapshot(owner, session),
+        )
+
+    assert admissions == []
+    status = store.status(pack.id)
+    assert status["active"]["status"] == "active"
+    assert status["jobs"] == []
+    assert status["local_executions"] == []
+    assert not artifact_root.exists()
 
 
 def test_local_two_domain_execution_is_real_and_intercepted(tmp_path: Path):

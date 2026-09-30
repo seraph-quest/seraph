@@ -322,7 +322,7 @@ _CANONICAL_ADAPTERS = (
     ),
     _review(
         "memory/embedder.py",
-        467,
+        476,
         "_request_embeddings",
         "client.post",
         "canonical_adapter",
@@ -440,6 +440,15 @@ _REVIEWED_EXCEPTIONS = (
         "non_model_transport",
         "Outbound request to the sandbox evaluator; this is code execution transport, not model inference.",
         "No model-fabric migration; keep behind the sandbox capability policy and reclassify if the endpoint becomes an inference route.",
+    ),
+    _review(
+        "security/http_transport.py",
+        196,
+        "request_pinned_https",
+        "client.request",
+        "non_model_transport",
+        "Bounded public-source retrieval pins the resolved destination and does not submit model inference.",
+        "Keep in the guarded source-read transport; route it through model-fabric admission only if it becomes a model request.",
     ),
 )
 

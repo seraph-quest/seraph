@@ -8,6 +8,7 @@ from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
+from sqlmodel import SQLModel
 
 from config.settings import settings
 import src.db.engine as db_engine
@@ -19,11 +20,75 @@ from src.db.engine import (
     engine as production_engine,
 )
 from src.db.models import (
+    GuardianDecisionPacket,
     ModelCapabilityProofRecord,
     ModelRouteAttemptReceiptRecord,
     ModelRouteReceiptRecord,
     OperatorSession,
 )
+
+
+async def test_guardian_inbox_pending_index_shape_is_stable_for_fresh_and_legacy_databases(tmp_path):
+    expected_columns = ["inbox_pending", "updated_at", "id"]
+
+    fresh_engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'fresh-guardian-packet.db'}")
+    event.listen(fresh_engine.sync_engine, "connect", _configure_sqlite_connection)
+    try:
+        async with fresh_engine.begin() as conn:
+            await conn.run_sync(
+                lambda sync: SQLModel.metadata.create_all(
+                    sync,
+                    tables=[GuardianDecisionPacket.__table__],
+                )
+            )
+            fresh_columns = [
+                row[2]
+                for row in (
+                    await conn.exec_driver_sql(
+                        "PRAGMA index_info(ix_guardian_decision_packets_inbox_pending_updated)"
+                    )
+                ).fetchall()
+            ]
+        assert fresh_columns == expected_columns
+    finally:
+        await fresh_engine.dispose()
+
+    legacy_engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'legacy-guardian-packet.db'}")
+    event.listen(legacy_engine.sync_engine, "connect", _configure_sqlite_connection)
+    try:
+        async with legacy_engine.begin() as conn:
+            await conn.exec_driver_sql(
+                "CREATE TABLE guardian_decision_packets (id VARCHAR PRIMARY KEY, updated_at DATETIME)"
+            )
+            await _ensure_legacy_columns(conn)
+            await _ensure_legacy_columns(conn)
+            await conn.exec_driver_sql(
+                "DROP INDEX ix_guardian_decision_packets_inbox_pending_updated"
+            )
+            # A workspace may already have the additive column from an older
+            # startup but have missed the bounded-repair index.  Re-running
+            # migration must restore the exact composite shape.
+            await _ensure_legacy_columns(conn)
+            legacy_columns = [
+                row[2]
+                for row in (
+                    await conn.exec_driver_sql(
+                        "PRAGMA index_info(ix_guardian_decision_packets_inbox_pending_updated)"
+                    )
+                ).fetchall()
+            ]
+            inbox_pending_column = [
+                row[1]
+                for row in (
+                    await conn.exec_driver_sql(
+                        "PRAGMA table_info(guardian_decision_packets)"
+                    )
+                ).fetchall()
+            ]
+        assert legacy_columns == expected_columns
+        assert "inbox_pending" in inbox_pending_column
+    finally:
+        await legacy_engine.dispose()
 
 
 async def test_session_factory_override_is_task_local(monkeypatch):

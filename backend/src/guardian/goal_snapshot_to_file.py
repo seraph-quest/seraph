@@ -1831,7 +1831,16 @@ class GoalSnapshotToFileAdapter:
             effect_type="workspace_write",
             status="succeeded",
             content_sha256=readback.content_sha256,
-            details={"artifact_id": artifact_id, "goal_id": candidate.goal_id, "file_path": path},
+            details={
+                "artifact_id": artifact_id,
+                "goal_id": candidate.goal_id,
+                "file_path": path,
+                # Keep the adapter's typed no-learning result on the
+                # canonical effect ledger.  The board and job projections
+                # can expose this explicit outcome without inferring it from
+                # a missing memory mutation.
+                "learning": "no_learning",
+            },
             owner=runner_owner,
             fencing_token=fencing_token,
         )

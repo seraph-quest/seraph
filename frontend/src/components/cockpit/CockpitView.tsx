@@ -16,6 +16,8 @@ import { PANEL_MIN_SIZES, usePanelLayoutStore } from "../../stores/panelLayoutSt
 import type {
   ChatMessage,
   ConnectionStatus,
+  GuardianInboxEvidencePreview,
+  GuardianInboxEvidenceRef,
   GoalInfo,
   GoalLoopReceipt,
   WorkBoardReceiptReference,
@@ -58,6 +60,7 @@ import {
   type OutcomeApprovalSummary,
   type GitHubFollowthroughSummary,
 } from "./OutcomeCockpitPanel";
+import { GuardianInboxPanel } from "./GuardianInboxPanel";
 import {
   displayApprovalScopeTarget,
   displayApprovalOwnerMetadata,
@@ -7471,6 +7474,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [feedbackState, setFeedbackState] = useState<Record<string, string>>({});
   const [approvalState, setApprovalState] = useState<Record<string, string>>({});
   const [selectedInspector, setSelectedInspector] = useState<InspectorSelection | null>(null);
+  const [focusTaskId, setFocusTaskId] = useState<string | null>(null);
   const [daemonPresence, setDaemonPresence] = useState<DaemonPresenceState | null>(null);
   const [desktopNotifications, setDesktopNotifications] = useState<ObserverContinuitySnapshot["notifications"]>([]);
   const [queuedInsights, setQueuedInsights] = useState<ObserverContinuitySnapshot["queued_insights"]>([]);
@@ -9109,6 +9113,59 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     }
     focusPane("inspector_pane");
     setOperatorStatus(`Exact task evidence ${reference.file_path ?? reference.target_path ?? reference.artifact_id ?? reference.effect_id ?? "reference"} is not in the current session index. Refresh activity and workflow evidence, then inspect again.`);
+  }
+
+  function inspectGuardianInboxArtifact(
+    reference: GuardianInboxEvidenceRef,
+    preview?: GuardianInboxEvidencePreview,
+  ) {
+    const currentOwnerSession = operatorAuth.sessionId;
+    const ownerSessionId = reference.owner_session_id ?? preview?.owner_session_id ?? currentOwnerSession;
+    const contentSha256 = reference.content_sha256 ?? reference.sha256 ?? preview?.sha256 ?? null;
+    if (!currentOwnerSession || !ownerSessionId || ownerSessionId !== currentOwnerSession) {
+      setOperatorStatus("Guardian evidence is unavailable because its canonical owner session does not match this operator session.");
+      return;
+    }
+    if (preview?.owner_session_id && preview.owner_session_id !== currentOwnerSession) {
+      setOperatorStatus("Guardian evidence preview is unavailable because its owner session does not match this operator session.");
+      return;
+    }
+    if (preview?.artifact_id && preview.artifact_id !== reference.artifact_id) {
+      setOperatorStatus("Guardian evidence preview is unavailable because its artifact identity does not match the verified reference.");
+      return;
+    }
+    if (preview?.sha256 && contentSha256 && preview.sha256.toLowerCase() !== contentSha256.toLowerCase()) {
+      setOperatorStatus("Guardian evidence preview is unavailable because its digest does not match the verified reference.");
+      return;
+    }
+    const artifactId = reference.artifact_id ?? preview?.artifact_id;
+    const filePath = reference.file_path ?? preview?.file_path;
+    if (!artifactId || !filePath || !contentSha256 || !/^[a-f0-9]{64}$/i.test(contentSha256)) {
+      setOperatorStatus("Guardian evidence is unavailable because its verified artifact metadata is incomplete.");
+      return;
+    }
+    const workflowRunId = reference.workflow_run_id ?? preview?.workflow_run_id ?? null;
+    const artifact: ArtifactRecord = {
+      id: artifactId,
+      source: "authenticated guardian inbox evidence",
+      filePath,
+      sessionId: currentOwnerSession,
+      createdAt: reference.last_verified_at ?? new Date().toISOString(),
+      summary: preview?.text ?? "Verified Guardian evidence preview unavailable; refresh the inbox detail.",
+      artifactType: reference.artifact_type ?? preview?.artifact_type ?? "guardian_evidence",
+      producer: "guardian.research-watch.v1",
+      runId: workflowRunId,
+      contentSha256,
+      trustBoundary: {
+        owner_session_id: currentOwnerSession,
+        workflow_run_id: workflowRunId,
+        trust: preview?.trust ?? "verified_metadata_only",
+        source: "authenticated_guardian_inbox_detail",
+      },
+      recoveryHint: preview ? null : "Refresh Guardian evidence details to load the bounded redacted preview.",
+    };
+    setSelectedInspector({ kind: "artifact", artifact });
+    focusPane("inspector_pane");
   }
   async function queueLiveWorkflowResumePlan(
     workflow: WorkflowRunRecord | null | undefined,
@@ -15833,6 +15890,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   }
                 }}
               />
+              <GuardianInboxPanel
+                onOpenTask={(taskId) => {
+                  setFocusTaskId(taskId);
+                  focusPane("work_board_pane");
+                }}
+                onInspectArtifact={inspectGuardianInboxArtifact}
+              />
               <div className="cockpit-operator-row">
                 <span className="cockpit-key">proof controls</span>
                 <span className="cockpit-operator-link">{renderDeepLoadState("benchmark")} · {renderDeepLoadState("m8")}</span>
@@ -16275,6 +16339,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             <WorkBoardPanel
               ownerPrincipalId={operatorAuth.principalId}
               ownerSessionId={operatorAuth.sessionId}
+              focusTaskId={focusTaskId}
+              onFocusTaskHandled={() => setFocusTaskId(null)}
               onOpenApprovals={() => focusPane("approvals_pane")}
               onInspectArtifact={inspectWorkBoardArtifact}
               onInspectWorkflowRun={inspectWorkBoardWorkflowRun}

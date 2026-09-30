@@ -448,6 +448,7 @@ def _safe_receipt_refs(
         "verification_status",
         "verified_at",
         "outcome",
+        "learning",
     }
     safe_items: list[dict[str, Any]] = []
     for item in values[:limit]:
@@ -553,6 +554,12 @@ def _safe_receipt_refs(
                     if len(bounded) > 64 or "\n" in bounded or "\r" in bounded:
                         continue
                     safe[key] = bounded
+                elif key == "learning":
+                    # This is a closed typed outcome from the capability
+                    # contract.  Never project arbitrary memory labels, and
+                    # never turn absence into a learning claim.
+                    if bounded == "no_learning":
+                        safe[key] = bounded
                 elif key in {"file_path", "target_path"}:
                     safe_path = _safe_receipt_path(bounded)
                     if safe_path is None:
@@ -850,13 +857,19 @@ class WorkBoardRepository:
         return task
 
     @staticmethod
-    async def _safe_text(value: str) -> str:
+    async def _safe_text(value: str, *, db: AsyncSession | None = None) -> str:
         """Persist only vault-redacted bounded operator text.
 
         The redaction helper returns a fixed placeholder when the vault cannot
         be read with ``fail_closed=True``.  That keeps a database or API error
         from becoming a secret disclosure through a task card.
         """
+        if db is not None:
+            return await vault_redaction.redact_secrets_in_text_readonly(
+                db,
+                value,
+                fail_closed=True,
+            )
         return await vault_redaction.redact_secrets_in_text(value, fail_closed=True)
 
     @staticmethod
@@ -1139,8 +1152,8 @@ class WorkBoardRepository:
                     status_code=403,
                 )
             reviewer_id = owner.principal_id
-        safe_title = await self._safe_text(request.title)
-        safe_body = await self._safe_text(request.body)
+        safe_title = await self._safe_text(request.title, db=db)
+        safe_body = await self._safe_text(request.body, db=db)
 
         task = WorkBoardTask(
             owner_principal_id=owner.principal_id,

@@ -18,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from config.settings import settings
+from src.auth.service import AuthenticatedOperator
 from src.db import engine as db_engine
 from src.db.models import (
     Goal,
@@ -49,6 +50,7 @@ from src.work_board.repository import (
     BoardRevisionConflict,
     WorkBoardRepository,
 )
+from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 
 
 OWNER = WorkBoardOwner(principal_id="operator:m4", session_id="session:m4")
@@ -930,6 +932,133 @@ async def test_missing_openrouter_route_blocks_without_provider_call(async_db, m
     assert result["blocked_reason"] == "openrouter_route_unavailable"
     provider_call.assert_not_awaited()
     admit_call.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_missing_openrouter_credential_blocks_before_admission(async_db, monkeypatch):
+    async with async_db() as db:
+        await _goal(db, goal_id="goal-m4-missing-key")
+        task = await _task(
+            db,
+            task_id="triage-missing-openrouter-key",
+            goal_id="goal-m4-missing-key",
+            status=WorkBoardStatus.triage,
+            requires_review=False,
+        )
+
+    principal = TrustPrincipal(
+        principal_id=OWNER.principal_id,
+        principal_type=PrincipalType.OPERATOR,
+        grants=(AuthorityGrant.MODEL_INFERENCE,),
+        session_id=OWNER.session_id,
+    )
+    operator = AuthenticatedOperator(
+        session_id=OWNER.session_id,
+        principal=principal,
+        idle_expires_at=_now() + timedelta(minutes=5),
+        absolute_expires_at=_now() + timedelta(hours=1),
+    )
+    monkeypatch.setattr(settings, "openrouter_api_key", "")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    provider_call = AsyncMock()
+    admit_call = AsyncMock()
+    monkeypatch.setattr(triage_service, "_invoke_governed_proposal", provider_call)
+    monkeypatch.setattr(triage_service, "_admit_proposal_job", admit_call)
+
+    result = await triage_service.create_proposal(
+        OWNER,
+        task.task_id,
+        kind="specify",
+        request=WorkBoardProposalRequest(
+            expected_revision=task.task_revision,
+            idempotency_key="missing-openrouter-key",
+        ),
+        operator=operator,
+    )
+
+    assert result["status"] == "blocked"
+    assert result["blocked_reason"] == "openrouter_route_unavailable"
+    assert result["provider_contact_state"] == "not_started"
+    provider_call.assert_not_awaited()
+    admit_call.assert_not_awaited()
+    async with async_db() as db:
+        stored = await db.scalar(
+            select(WorkBoardProposal).where(
+                WorkBoardProposal.parent_task_id == task.task_id,
+                WorkBoardProposal.idempotency_key == "missing-openrouter-key",
+            )
+        )
+        assert stored is not None
+        assert stored.provider_contact_started is False
+        assert stored.provider_contact_state == "not_started"
+
+
+@pytest.mark.asyncio
+async def test_post_marker_provider_timeout_remains_unknown(async_db, monkeypatch):
+    async with async_db() as db:
+        await _goal(db, goal_id="goal-m4-post-marker-timeout")
+        task = await _task(
+            db,
+            task_id="triage-post-marker-timeout",
+            goal_id="goal-m4-post-marker-timeout",
+            status=WorkBoardStatus.triage,
+            requires_review=False,
+        )
+
+    principal = TrustPrincipal(
+        principal_id=OWNER.principal_id,
+        principal_type=PrincipalType.OPERATOR,
+        grants=(AuthorityGrant.MODEL_INFERENCE,),
+        session_id=OWNER.session_id,
+    )
+    operator = AuthenticatedOperator(
+        session_id=OWNER.session_id,
+        principal=principal,
+        idle_expires_at=_now() + timedelta(minutes=5),
+        absolute_expires_at=_now() + timedelta(hours=1),
+    )
+    monkeypatch.setattr(
+        triage_service,
+        "preflight_governed_completion_target_async",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        triage_service,
+        "_admit_proposal_job",
+        AsyncMock(return_value=("work-board-proposal:post-marker-timeout", "lease", 1)),
+    )
+    provider_call = AsyncMock(side_effect=TimeoutError("provider timeout"))
+    transition_call = AsyncMock()
+    monkeypatch.setattr(triage_service, "_invoke_governed_proposal", provider_call)
+    monkeypatch.setattr(triage_service, "_transition_proposal_job", transition_call)
+
+    result = await triage_service.create_proposal(
+        OWNER,
+        task.task_id,
+        kind="specify",
+        request=WorkBoardProposalRequest(
+            expected_revision=task.task_revision,
+            idempotency_key="post-marker-timeout",
+        ),
+        operator=operator,
+    )
+
+    assert result["status"] == "blocked"
+    assert result["blocked_reason"] == "proposal_provider_contact_unknown"
+    assert result["provider_contact_state"] == "unknown"
+    assert result["recovery_action"] == "reconcile_external_effect"
+    provider_call.assert_awaited_once()
+    transition_call.assert_awaited_once()
+    async with async_db() as db:
+        stored = await db.scalar(
+            select(WorkBoardProposal).where(
+                WorkBoardProposal.parent_task_id == task.task_id,
+                WorkBoardProposal.idempotency_key == "post-marker-timeout",
+            )
+        )
+        assert stored is not None
+        assert stored.provider_contact_started is True
+        assert stored.provider_contact_state == "unknown"
 
 
 @pytest.mark.asyncio

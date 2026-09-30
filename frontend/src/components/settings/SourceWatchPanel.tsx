@@ -2,82 +2,52 @@ import { useCallback, useEffect, useState } from "react";
 
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
+import { SourceWatchForm, type SourceWatchFormGoal } from "../cockpit/SourceWatchForm";
+import type { GoalInfo } from "../../types";
 
-type SourceWatch = {
-  id: string;
-  goal_id: string;
-  goal_revision: number;
-  plan_revision: number;
-  state: string;
-  write_mode: string;
-  sources: Array<{ source_key: string; kind: string; target: string; priority: number }>;
-  last_status?: string | null;
-  last_error_code?: string | null;
-  latest_packet?: { status?: string; approval_id?: string | null } | null;
-};
+function flattenGoals(goals: GoalInfo[]): SourceWatchFormGoal[] {
+  const result: SourceWatchFormGoal[] = [];
+  const visit = (goal: GoalInfo) => {
+    result.push({
+      id: goal.id,
+      title: goal.title,
+      revision: goal.revision,
+      proactive_enabled: goal.proactive_enabled,
+      admission_budget: goal.admission_budget,
+    });
+    goal.children?.forEach(visit);
+  };
+  goals.forEach(visit);
+  return result;
+}
 
 export function SourceWatchPanel() {
-  const [watches, setWatches] = useState<SourceWatch[]>([]);
-  const [goalId, setGoalId] = useState("");
-  const [goalRevision, setGoalRevision] = useState("1");
-  const [source, setSource] = useState("");
+  const [goals, setGoals] = useState<SourceWatchFormGoal[]>([]);
   const [status, setStatus] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
 
-  const loadWatches = useCallback(async () => {
+  const loadGoals = useCallback(async () => {
     try {
-      const response = await apiFetch(`${API_URL}/api/capabilities/source-watches`);
+      const response = await apiFetch(`${API_URL}/api/goals/tree`);
+      const payload = await response.json().catch(() => null);
       if (!response.ok) {
-        setStatus("Unable to read guardian watches");
+        setStatus("Goal labels unavailable; refresh before configuring a watch.");
         return;
       }
-      const payload = await response.json() as SourceWatch[] | { watches?: SourceWatch[] };
-      setWatches(Array.isArray(payload) ? payload : Array.isArray(payload.watches) ? payload.watches : []);
+      const tree = Array.isArray(payload)
+        ? payload as GoalInfo[]
+        : payload && typeof payload === "object" && Array.isArray((payload as { goals?: unknown }).goals)
+          ? (payload as { goals: GoalInfo[] }).goals
+          : [];
+      setGoals(flattenGoals(tree));
       setStatus(null);
     } catch {
-      setStatus("Guardian watch status unavailable");
+      setStatus("Goal labels unavailable; refresh before configuring a watch.");
     }
   }, []);
 
   useEffect(() => {
-    void loadWatches();
-  }, [loadWatches]);
-
-  const createWatch = async () => {
-    if (!goalId.trim() || !source.trim()) {
-      setStatus("Goal and HTTPS source are required");
-      return;
-    }
-    setSaving(true);
-    try {
-      const response = await apiFetch(`${API_URL}/api/capabilities/source-watches`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          goal_id: goalId.trim(),
-          expected_goal_revision: Number(goalRevision) || 1,
-          sources: [{ source_key: "primary", kind: "public_https_text", target: source.trim(), priority: 3 }],
-          criteria: { min_changed_lines: 1, min_changed_chars: 1, max_material_sources: 3 },
-          schedule: { cron: "*/15 * * * *", timezone: "UTC" },
-          write_mode: "approval_each_run",
-        }),
-      });
-      if (!response.ok) {
-        const payload = await response.json().catch(() => ({})) as { detail?: { code?: string } | string };
-        const detail = typeof payload.detail === "string" ? payload.detail : payload.detail?.code;
-        setStatus(detail ? `Watch blocked: ${detail}` : "Watch creation blocked");
-        return;
-      }
-      setGoalId("");
-      setSource("");
-      setStatus("Guardian watch created; approval is required for local writes");
-      await loadWatches();
-    } catch {
-      setStatus("Guardian watch creation failed");
-    } finally {
-      setSaving(false);
-    }
-  };
+    void loadGoals();
+  }, [loadGoals]);
 
   return (
     <div className="px-1">
@@ -85,61 +55,21 @@ export function SourceWatchPanel() {
         Guardian source watches
       </div>
       <div className="text-[9px] text-retro-text/40 mb-2">
-        Public HTTPS observations run no more often than every 15 minutes. Writes remain approval-bound.
+        Choose a loaded goal and bounded cadence. Existing 15-minute watches stay visible as legacy schedules; new watches use the operator timezone.
       </div>
-      <div className="space-y-1 border border-retro-text/10 rounded p-1 mb-2">
-        <input
-          aria-label="Guardian goal id"
-          value={goalId}
-          onChange={(event) => setGoalId(event.target.value)}
-          placeholder="Goal id"
-          className="w-full bg-transparent text-[9px] text-retro-text border-b border-retro-text/20 px-0.5 py-0.5 outline-none focus:border-retro-highlight"
-        />
-        <input
-          aria-label="Guardian goal revision"
-          value={goalRevision}
-          onChange={(event) => setGoalRevision(event.target.value)}
-          inputMode="numeric"
-          placeholder="Goal revision"
-          className="w-full bg-transparent text-[9px] text-retro-text border-b border-retro-text/20 px-0.5 py-0.5 outline-none focus:border-retro-highlight"
-        />
-        <input
-          aria-label="Guardian HTTPS source"
-          value={source}
-          onChange={(event) => setSource(event.target.value)}
-          placeholder="https://example.org/updates.txt"
-          className="w-full bg-transparent text-[9px] text-retro-text border-b border-retro-text/20 px-0.5 py-0.5 outline-none focus:border-retro-highlight"
-        />
-        <button
-          type="button"
-          onClick={() => void createWatch()}
-          disabled={saving}
-          className="text-[9px] text-retro-highlight hover:text-retro-text uppercase tracking-wider disabled:text-retro-text/20"
-        >
-          {saving ? "Saving..." : "Add watch"}
-        </button>
-      </div>
-      {watches.length > 0 ? (
-        <div className="border border-retro-text/10 rounded">
-          {watches.map((watch) => (
-            <div key={watch.id} className="px-1 py-1 border-b border-retro-text/10 last:border-b-0">
-              <div className="flex items-center gap-1 text-[10px] text-retro-text">
-                <span className={`w-1.5 h-1.5 rounded-full ${watch.state === "active" ? "bg-green-400" : "bg-yellow-400"}`} />
-                <span className="truncate">{watch.goal_id}</span>
-                <span className="ml-auto text-retro-text/40">{watch.last_status ?? watch.state}</span>
-              </div>
-              <div className="text-[9px] text-retro-text/40">
-                rev {watch.goal_revision}/{watch.plan_revision} · {watch.sources.length} source · {watch.write_mode}
-              </div>
-              {watch.last_error_code && <div className="text-[9px] text-amber-300/70">blocked · {watch.last_error_code}</div>}
-              {watch.latest_packet?.status === "awaiting_approval" && <div className="text-[9px] text-retro-highlight">approval required for proposed intervention</div>}
-            </div>
-          ))}
-        </div>
+      {status ? <div className="text-[9px] text-retro-highlight mb-1" role="status">{status}</div> : null}
+      {goals.length > 0 ? (
+        <SourceWatchForm goal={null} goalOptions={goals} />
       ) : (
-        <div className="text-[9px] text-retro-text/30">No guardian watches configured</div>
+        <div className="text-[9px] text-retro-text/30">No goal revisions are available for a source watch.</div>
       )}
-      {status && <div className="text-[9px] text-retro-highlight mt-1">{status}</div>}
+      <button
+        type="button"
+        onClick={() => void loadGoals()}
+        className="mt-1 text-[9px] text-retro-highlight hover:text-retro-text uppercase tracking-wider"
+      >
+        Refresh goal labels
+      </button>
     </div>
   );
 }

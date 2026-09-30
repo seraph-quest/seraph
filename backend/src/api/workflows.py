@@ -199,6 +199,9 @@ def _safe_board_job_receipts(value: Any) -> list[dict[str, Any]]:
             digest = _safe_workflow_artifact_digest(item.get(key))
             if digest is not None:
                 safe[key] = digest
+        details = item.get("details") if isinstance(item.get("details"), dict) else {}
+        if item.get("learning") == "no_learning" or details.get("learning") == "no_learning":
+            safe["learning"] = "no_learning"
         for key in ("file_path", "target_path"):
             path = _safe_workflow_artifact_path(item.get(key))
             if path is not None:
@@ -1147,6 +1150,8 @@ def _safe_canonical_receipt_projection(
             artifact_id = _safe_workflow_artifact_id(details.get("artifact_id"))
             if artifact_id is not None:
                 receipt["artifact_id"] = artifact_id
+            if item.get("learning") == "no_learning" or details.get("learning") == "no_learning":
+                receipt["learning"] = "no_learning"
         safe.append(receipt)
     return safe
 

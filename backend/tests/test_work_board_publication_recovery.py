@@ -111,6 +111,11 @@ def _patch_route_context(monkeypatch, *contexts):
         AsyncMock(side_effect=lambda value, **_kwargs: value),
     )
     monkeypatch.setattr(
+        api.vault_redaction,
+        "redact_secrets_in_text_readonly",
+        AsyncMock(side_effect=lambda _db, value, **_kwargs: value),
+    )
+    monkeypatch.setattr(
         api,
         "_routine_publication_context",
         AsyncMock(side_effect=list(contexts)),

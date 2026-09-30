@@ -2685,7 +2685,7 @@ type InspectorSelection =
   | { kind: "trace"; message: ChatMessage }
   | { kind: "audit"; event: CockpitAuditEvent }
   | { kind: "operator"; entity: OperatorEntity }
-  | { kind: "artifact"; artifact: ArtifactRecord };
+  | { kind: "artifact"; artifact: BoardArtifactRecord };
 
 function formatAge(value: number | string): string {
   const timestamp = typeof value === "number" ? value : new Date(value).getTime();
@@ -6341,6 +6341,59 @@ type BoardBoundWorkflowRun = WorkflowRunRecord & {
   [BOARD_BOUND_WORKFLOW]: true;
 };
 
+const BROWSER_RESULT_ARTIFACT_TYPE = "browser_public_task_result" as const;
+const BROWSER_RESULT_MAX_BYTES = 64 * 1024;
+const BROWSER_RESULT_MAX_EXTRACTS = 8;
+const BROWSER_RESULT_MAX_CHECKS = 72;
+const BROWSER_RESULT_CHECK_KINDS = new Set([
+  "url_host",
+  "url_path_prefix",
+  "text_contains",
+  "text_sha256",
+]);
+const BROWSER_RESULT_ATTRIBUTES = new Set([
+  "href",
+  "title",
+  "aria-label",
+  "alt",
+  "datetime",
+  "src",
+]);
+
+interface BoardBrowserResultExtract {
+  action_index: number;
+  kind: "extract";
+  attribute: string | null;
+  selector_digest: string;
+  value: string;
+}
+
+interface BoardBrowserResultCheck {
+  action_index: number | null;
+  kind: string;
+  selector_digest: string | null;
+  expected_digest: string;
+  actual_digest: string | null;
+  passed: boolean;
+}
+
+interface BoardBrowserResultPreview {
+  schema_version: 1;
+  capability_id: "browser.public-task.v1";
+  artifact_id: string;
+  readback_id: string;
+  content_sha256: string;
+  file_path: string;
+  extracts: BoardBrowserResultExtract[];
+  checks: BoardBrowserResultCheck[];
+  request_count: number;
+}
+
+type BoardArtifactRecord = ArtifactRecord & {
+  browserResultRequested?: boolean;
+  browserResult?: BoardBrowserResultPreview | null;
+};
+
 function isBoardBoundWorkflowRun(workflow: WorkflowRunRecord): workflow is BoardBoundWorkflowRun {
   return (workflow as Partial<BoardBoundWorkflowRun>)[BOARD_BOUND_WORKFLOW] === true;
 }
@@ -6358,6 +6411,158 @@ function boardBoundRecords(value: unknown): Record<string, unknown>[] {
         return record ? [record] : [];
       })
     : [];
+}
+
+function boardSafeReceiptIdentifier(value: unknown, maxLength = 256): string | null {
+  if (typeof value !== "string" || value.length === 0 || value.length > maxLength) return null;
+  return /^[A-Za-z0-9:_-]+$/.test(value) ? value : null;
+}
+
+function boardSafeReceiptDigest(value: unknown): string | null {
+  return typeof value === "string" && /^[a-f0-9]{64}$/i.test(value) ? value.toLowerCase() : null;
+}
+
+function boardSafeReceiptPath(value: unknown): string | null {
+  if (
+    typeof value !== "string"
+    || value.length === 0
+    || value.length > 512
+    || value.startsWith("/")
+    || value.includes("\\")
+    || value.includes("\u0000")
+  ) return null;
+  const segments = value.split("/");
+  return segments.some((segment) => segment.length === 0 || segment === "." || segment === "..")
+    ? null
+    : value;
+}
+
+function boardSafeReceiptText(value: unknown, maxLength: number): string | null {
+  if (typeof value !== "string" || value.length > maxLength) return null;
+  return /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value) ? null : value;
+}
+
+function boardUtf8ByteLength(value: string): number {
+  if (typeof TextEncoder !== "undefined") return new TextEncoder().encode(value).length;
+  return value.length;
+}
+
+function isBrowserResultReference(reference: WorkBoardReceiptReference): boolean {
+  if (reference.artifact_type === BROWSER_RESULT_ARTIFACT_TYPE) return true;
+  const path = reference.file_path;
+  return typeof path === "string"
+    && /^artifacts\/work-board\/browser\/result-[a-f0-9]{32}\.json$/i.test(path);
+}
+
+function normalizeBoardBrowserResult(
+  value: unknown,
+  reference: WorkBoardReceiptReference,
+): BoardBrowserResultPreview | null {
+  const record = boardBoundRecord(value);
+  if (!record || record.schema_version !== 1 || record.capability_id !== "browser.public-task.v1") return null;
+  const artifactId = boardSafeReceiptIdentifier(record.artifact_id);
+  const readbackId = boardSafeReceiptIdentifier(record.readback_id);
+  const contentSha256 = boardSafeReceiptDigest(record.content_sha256);
+  const filePath = boardSafeReceiptPath(record.file_path);
+  if (!artifactId || !readbackId || !contentSha256 || !filePath) return null;
+  if (
+    !reference.artifact_id
+    || reference.artifact_id !== artifactId
+    || !reference.readback_id
+    || reference.readback_id !== readbackId
+    || !reference.file_path
+    || reference.file_path !== filePath
+    || !reference.content_sha256
+    || reference.content_sha256.toLowerCase() !== contentSha256
+  ) return null;
+
+  const rawExtracts = record.extracts;
+  const rawChecks = record.checks;
+  if (!Array.isArray(rawExtracts) || rawExtracts.length > BROWSER_RESULT_MAX_EXTRACTS) return null;
+  if (!Array.isArray(rawChecks) || rawChecks.length > BROWSER_RESULT_MAX_CHECKS) return null;
+
+  const extracts: BoardBrowserResultExtract[] = [];
+  for (const value of rawExtracts) {
+    const item = boardBoundRecord(value);
+    if (!item) return null;
+    const actionIndex = item.action_index;
+    const attribute = item.attribute === null ? null : boardSafeReceiptText(item.attribute, 128);
+    const selectorDigest = boardSafeReceiptDigest(item.selector_digest);
+    const extractValue = boardSafeReceiptText(item.value, BROWSER_RESULT_MAX_BYTES);
+    if (
+      typeof actionIndex !== "number"
+      || !Number.isInteger(actionIndex)
+      || actionIndex < 0
+      || actionIndex > 7
+      || item.kind !== "extract"
+      || (item.attribute !== null && attribute === null)
+      || (attribute !== null && !BROWSER_RESULT_ATTRIBUTES.has(attribute))
+      || !selectorDigest
+      || extractValue === null
+    ) return null;
+    extracts.push({
+      action_index: actionIndex,
+      kind: "extract",
+      attribute,
+      selector_digest: selectorDigest,
+      value: extractValue,
+    });
+  }
+
+  const checks: BoardBrowserResultCheck[] = [];
+  for (const value of rawChecks) {
+    const item = boardBoundRecord(value);
+    if (!item) return null;
+    const actionIndex = item.action_index === null ? null : item.action_index;
+    const kind = boardSafeReceiptText(item.kind, 128);
+    const selectorDigest = item.selector_digest === null ? null : boardSafeReceiptDigest(item.selector_digest);
+    const expectedDigest = boardSafeReceiptDigest(item.expected_digest);
+    const actualDigest = item.actual_digest === null ? null : boardSafeReceiptDigest(item.actual_digest);
+    if (
+      (actionIndex !== null && (
+        typeof actionIndex !== "number"
+        || !Number.isInteger(actionIndex)
+        || actionIndex < -1
+        || actionIndex > 7
+      ))
+      || !kind
+      || !BROWSER_RESULT_CHECK_KINDS.has(kind)
+      || (item.selector_digest !== null && !selectorDigest)
+      || !expectedDigest
+      || (item.actual_digest !== null && !actualDigest)
+      || typeof item.passed !== "boolean"
+    ) return null;
+    checks.push({
+      action_index: actionIndex,
+      kind,
+      selector_digest: selectorDigest,
+      expected_digest: expectedDigest,
+      actual_digest: actualDigest,
+      passed: item.passed,
+    });
+  }
+
+  const requestCount = record.request_count;
+  if (
+    typeof requestCount !== "number"
+    || !Number.isInteger(requestCount)
+    || requestCount < 0
+    || requestCount > 32
+  ) return null;
+  const boundedPayload = JSON.stringify({ extracts, checks });
+  if (typeof boundedPayload !== "string" || boardUtf8ByteLength(boundedPayload) > BROWSER_RESULT_MAX_BYTES) return null;
+
+  return {
+    schema_version: 1,
+    capability_id: "browser.public-task.v1",
+    artifact_id: artifactId,
+    readback_id: readbackId,
+    content_sha256: contentSha256,
+    file_path: filePath,
+    extracts,
+    checks,
+    request_count: requestCount,
+  };
 }
 
 function boardBoundStatus(value: unknown): WorkflowRunRecord["status"] {
@@ -9291,28 +9496,53 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     workflowRunId: string,
     ownerSessionId: string,
     isCurrentInspection: () => boolean,
+    browserReference?: WorkBoardReceiptReference | null,
   ): Promise<{
     job: Record<string, unknown> | null;
     workflow: BoardBoundWorkflowRun | null;
     status?: number;
+    browserResultRequested?: boolean;
+    browserResult?: BoardBrowserResultPreview | null;
   }> {
+    const browserResultRequested = Boolean(
+      browserReference && isBrowserResultReference(browserReference),
+    );
+    const query = browserResultRequested ? "?include_browser_result=true" : "";
     const result = await fetchCockpitJson(
-      `${API_URL}/api/workflows/jobs/${encodeURIComponent(workflowRunId)}`,
+      `${API_URL}/api/workflows/jobs/${encodeURIComponent(workflowRunId)}${query}`,
       5000,
       () => !isCurrentInspection(),
     );
     if (!isCurrentInspection() || !result.ok) {
-      return { job: null, workflow: null, status: result.status };
+      return {
+        job: null,
+        workflow: null,
+        status: result.status,
+        browserResultRequested,
+        browserResult: null,
+      };
     }
     const payload = boardBoundRecord(result.payload);
     const job = boardBoundRecord(payload?.job);
     if (!job || job.job_id !== workflowRunId) {
-      return { job: null, workflow: null, status: result.status };
+      return {
+        job: null,
+        workflow: null,
+        status: result.status,
+        browserResultRequested,
+        browserResult: null,
+      };
     }
+    const browserResultStatus = job.browser_result_status;
+    const browserResult = browserResultRequested && browserResultStatus === "available"
+      ? normalizeBoardBrowserResult(job.browser_result, browserReference!)
+      : null;
     return {
       job,
       workflow: normalizeBoardBoundWorkflowJob(job, ownerSessionId),
       status: result.status,
+      browserResultRequested,
+      browserResult,
     };
   }
 
@@ -9370,7 +9600,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       focusPane("workflows_pane");
       setWorkBoardEvidenceStatus("Loading workflow evidence for the task's immutable run link.");
       setOperatorStatus("Loading workflow evidence for the task's immutable run link.");
-      void loadBoardBoundWorkflowRun(workflowRunId, ownerSessionId, isCurrentInspection).then(({ job, workflow, status }) => {
+      void loadBoardBoundWorkflowRun(workflowRunId, ownerSessionId, isCurrentInspection, reference).then(({ job, workflow, status, browserResultRequested, browserResult }) => {
         if (!isCurrentInspection()) return;
         if (!job || !workflow) {
           const message = boardWorkflowEvidenceUnavailable(status);
@@ -9392,7 +9622,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         }
         const artifact = resolveWorkBoardArtifact(workflow.artifacts, reference, { ownerSessionId, workflowRunId });
         if (artifact) {
-          setSelectedInspector({ kind: "artifact", artifact });
+          const selectedArtifact: BoardArtifactRecord = {
+            ...artifact,
+            ...(browserResultRequested
+              ? { browserResultRequested: true, browserResult: browserResult ?? null }
+              : {}),
+          };
+          setSelectedInspector({ kind: "artifact", artifact: selectedArtifact });
           focusPane("inspector_pane");
         } else {
           setSelectedInspector({ kind: "workflow", workflow });
@@ -14063,6 +14299,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     const selectedWorkflowBestContinuation = selectedWorkflow ? workflowBestContinuationRun(selectedWorkflow) : null;
     const selectedWorkflowCheckpointActions = selectedWorkflow ? workflowCheckpointActions(selectedWorkflow) : [];
     const selectedWorkflowHistorySummary = selectedWorkflow ? workflowHistorySummary(selectedWorkflow) : [];
+    const selectedBrowserArtifact = selectedInspector.kind === "artifact"
+      ? selectedInspector.artifact
+      : null;
+    const selectedBrowserResult = selectedBrowserArtifact?.browserResult ?? null;
+    const browserResultRequested = selectedBrowserArtifact?.browserResultRequested === true;
     const selectedWorkflowName = selectedWorkflow?.workflowName ?? "workflow";
     const selectedWorkflowCheckpointDraftByStep = new Map(
       selectedWorkflowCheckpointActions.map((action) => [action.stepId, action.draft]),
@@ -14208,6 +14449,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         file_path: artifact.filePath,
         session_id: artifact.sessionId ?? "n/a",
         created_at: artifact.createdAt,
+        ...(artifact.browserResultRequested
+          ? { browser_result_status: artifact.browserResult ? "available" : "unavailable" }
+          : {}),
       };
     }
 
@@ -15573,6 +15817,54 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             </>
           );
         })()}
+        {selectedInspector.kind === "artifact" && browserResultRequested && (
+          <section className="cockpit-inspector-stack" aria-label="Verified browser result preview">
+            {selectedBrowserResult ? (
+              <>
+                <div className="cockpit-inspector-stack-row">
+                  <div className="cockpit-key">browser result</div>
+                  <div className="cockpit-value">verified extraction readback</div>
+                  <div className="cockpit-value">
+                    requests {selectedBrowserResult.request_count ?? "unavailable"}
+                  </div>
+                </div>
+                <section className="cockpit-inspector-stack-row" aria-label="Verified browser result extracts">
+                  <div className="cockpit-key">extracts</div>
+                  {selectedBrowserResult.extracts.length > 0 ? selectedBrowserResult.extracts.map((extract, index) => (
+                    <div key={`browser-extract:${index}:${extract.action_index}`} className="cockpit-inspector-detail">
+                      <div className="cockpit-value">
+                        extract {index + 1} · action {extract.action_index + 1}
+                        {extract.attribute ? ` · attribute ${extract.attribute}` : " · page text"}
+                      </div>
+                      <pre className="cockpit-inspector-value">{extract.value}</pre>
+                    </div>
+                  )) : (
+                    <div className="cockpit-value">No extracted values.</div>
+                  )}
+                </section>
+                <section className="cockpit-inspector-stack-row" aria-label="Verified browser result checks">
+                  <div className="cockpit-key">checks</div>
+                  {selectedBrowserResult.checks.length > 0 ? selectedBrowserResult.checks.map((check, index) => (
+                    <div key={`browser-check:${index}:${check.kind}`} className="cockpit-value">
+                      check {index + 1} · {check.kind} · {check.passed ? "passed" : "failed"}
+                      {check.actual_digest ? ` · actual ${check.actual_digest}` : ""}
+                    </div>
+                  )) : (
+                    <div className="cockpit-value">No checks recorded.</div>
+                  )}
+                </section>
+              </>
+            ) : (
+              <div
+                className="cockpit-feedback-status"
+                role="status"
+                aria-label="Browser result preview unavailable; verified artifact metadata remains available."
+              >
+                Browser result preview unavailable; verified artifact metadata remains available. Refresh task evidence and retry.
+              </div>
+            )}
+          </section>
+        )}
         <div className="cockpit-inspector-details">
           {Object.entries(details).map(([key, value]) => (
             <div key={key} className="cockpit-inspector-detail">

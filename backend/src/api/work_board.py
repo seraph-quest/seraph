@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 import json
+import re
 import uuid
 from typing import Any, Mapping
 
@@ -27,6 +29,8 @@ from src.work_board.contracts import (
     WorkBoardActionRequest,
     WORK_BOARD_AUTHENTICATED_BLOCK_KINDS,
     WorkBoardCommentCreate,
+    WorkBoardInputArtifactCreate,
+    WorkBoardInputArtifactDelete,
     WorkBoardLinkCreate,
     WorkBoardLinkDelete,
     WorkBoardOwner,
@@ -43,10 +47,16 @@ from src.work_board.repository import (
     BoardMutation,
     WorkBoardRepository,
     _safe_receipt_refs,
+    effective_browser_limits,
     safe_board_reference,
     safe_board_identifier,
     safe_sha256_digest,
     safe_workflow_run_id,
+)
+from src.work_board.input_artifacts import (
+    delete_input_artifact,
+    prepare_input_artifact,
+    read_input_artifact_metadata,
 )
 from src.work_board.events import (
     _SAFE_EVENT_BLOCK_KINDS,
@@ -60,6 +70,8 @@ from src.work_board import review as review_service
 from src.work_board import triage as triage_service
 from src.work_board.time import serialize_utc_datetime
 from src.security.trust_contract import AuthorityGrant
+from src.security.site_policy import _parse_rules
+from config.settings import settings
 from src.workflows.job_runtime import durable_job_repository
 from src.workflows.routines import (
     RoutinePublicationRequest,
@@ -90,6 +102,348 @@ _RECOVERY_ACTIONS = frozenset(
         "resume_routine_publication",
     }
 )
+
+
+_BROWSER_POLICY_RULE_LIMIT = 50
+
+_BROWSER_EXECUTION_STATUSES = frozenset(
+    {
+        "accepted",
+        "queued",
+        "running",
+        "paused",
+        "awaiting_approval",
+        "succeeded",
+        "failed",
+        "blocked",
+        "cancelled",
+        "degraded",
+        "unknown_external_effect",
+        "cost_liability",
+    }
+)
+
+
+def _strict_bounded_int(value: Any, *, minimum: int, maximum: int) -> int | None:
+    if type(value) is not int or value < minimum or value > maximum:
+        return None
+    return value
+
+
+def _safe_browser_projection_text(value: Any, *, max_length: int = 256) -> str | None:
+    if not isinstance(value, str):
+        return None
+    bounded = value.strip()
+    if not bounded or len(bounded) > max_length or "\n" in bounded or "\r" in bounded:
+        return None
+    return bounded
+
+
+def _browser_projection_digest(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _browser_execution_progress(projection: Mapping[str, Any]) -> tuple[int | None, int | None]:
+    """Read one current, server-retained bounded progress checkpoint.
+
+    The runner emits action and request counters together for current browser
+    checkpoints. A legacy checkpoint without the counter remains explicitly
+    unknown instead of borrowing an older network receipt.
+    """
+
+    checkpoints = projection.get("checkpoints")
+    if not isinstance(checkpoints, list):
+        return None, None
+    # Checkpoints are append-only and bounded by the durable runtime. Walk
+    # newest first and use the first recognized browser progress checkpoint as
+    # one atomic projection.
+    for checkpoint in reversed(checkpoints[-50:]):
+        if not isinstance(checkpoint, Mapping):
+            continue
+        payload = checkpoint.get("payload")
+        if not isinstance(payload, Mapping):
+            continue
+        checkpoint_id = str(checkpoint.get("checkpoint_id") or "")
+        if not (
+            checkpoint_id.startswith("action-")
+            or checkpoint_id == "network-dispatch"
+            or checkpoint_id.startswith("network-progress-")
+        ):
+            continue
+        action_index = _strict_bounded_int(payload.get("action_index"), minimum=-1, maximum=7)
+        request_count = _strict_bounded_int(payload.get("request_count"), minimum=0, maximum=32)
+        return action_index, request_count
+    return None, None
+
+
+def _browser_artifact_projection(projection: Mapping[str, Any]) -> dict[str, str] | None:
+    """Return one verified artifact/readback pair from a durable job."""
+
+    artifacts = projection.get("artifacts")
+    effects = projection.get("effects")
+    if not isinstance(artifacts, list) or not isinstance(effects, list):
+        return None
+    artifact_rows: list[dict[str, str | None]] = []
+    for item in reversed(artifacts[-100:]):
+        if not isinstance(item, Mapping) or item.get("exists") is not True:
+            continue
+        digest = safe_sha256_digest(item.get("content_sha256"))
+        artifact_path = _safe_receipt_refs([item], limit=1)
+        if digest is None or not artifact_path:
+            continue
+        safe_item = artifact_path[0]
+        if safe_item.get("artifact_type") != "browser_public_task_result":
+            continue
+        path = safe_item.get("file_path")
+        if not isinstance(path, str):
+            continue
+        if not (
+            path.startswith("artifacts/work-board/browser/")
+            and re.fullmatch(r"artifacts/work-board/browser/result-[0-9a-f]{32}\.json", path)
+        ):
+            continue
+        artifact_id = safe_board_identifier(safe_item.get("artifact_id"), max_length=256)
+        artifact_rows.append({"artifact_id": artifact_id, "file_path": path, "digest": digest})
+
+    for effect in reversed(effects[-100:]):
+        if not isinstance(effect, Mapping):
+            continue
+        if effect.get("receipt_kind") != "readback" or effect.get("effect_type") != "browser_public_task_result":
+            continue
+        if effect.get("status") not in {"succeeded", "read_back", "reconciled"}:
+            continue
+        details = effect.get("details")
+        if not isinstance(details, Mapping) or details.get("verified") is not True:
+            continue
+        readback_id = safe_board_identifier(effect.get("readback_id"), max_length=256)
+        verified_at = _safe_browser_projection_text(effect.get("verified_at"), max_length=64)
+        readback_path = _safe_receipt_refs([effect], limit=1)
+        if not readback_id or not verified_at or not readback_path:
+            continue
+        safe_effect = readback_path[0]
+        path = safe_effect.get("target_path")
+        digest = safe_sha256_digest(safe_effect.get("content_sha256") or safe_effect.get("target_digest"))
+        if not isinstance(path, str) or digest is None:
+            continue
+        if not (
+            path.startswith("artifacts/work-board/browser/")
+            and re.fullmatch(r"artifacts/work-board/browser/result-[0-9a-f]{32}\.json", path)
+        ):
+            continue
+        for artifact in artifact_rows:
+            if artifact["file_path"] != path or artifact["digest"] != digest:
+                continue
+            return {
+                "readback_id": readback_id,
+                "artifact_id": artifact["artifact_id"],
+                "file_path": path,
+                "content_sha256": digest,
+            }
+    return None
+
+
+def _browser_cleanup_projection(projection: Mapping[str, Any]) -> tuple[str, str]:
+    """Return cleanup and memory state from the typed cleanup effect only."""
+
+    effects = projection.get("effects")
+    if not isinstance(effects, list):
+        return "unknown", "unknown"
+    for effect in reversed(effects[-100:]):
+        if not isinstance(effect, Mapping):
+            continue
+        if effect.get("receipt_kind") != "effect" or effect.get("effect_type") != "browser_context_cleanup":
+            continue
+        details = effect.get("details")
+        if not isinstance(details, Mapping):
+            return "unknown", "unknown"
+        cleanup = details.get("cleanup_status")
+        cleanup_status = cleanup if cleanup in {"cleanup_verified", "not_needed", "cleanup_unknown"} else "unknown"
+        if cleanup_status == "cleanup_verified":
+            if effect.get("status") != "succeeded":
+                cleanup_status = "unknown"
+        elif cleanup_status == "not_needed":
+            if effect.get("status") != "succeeded" or details.get("context_not_started") is not True:
+                cleanup_status = "unknown"
+        elif effect.get("status") != "succeeded":
+            cleanup_status = "unknown"
+        memory_status = "no_learning" if details.get("memory_status") == "no_learning" else "unknown"
+        return cleanup_status, memory_status
+    return "unknown", "unknown"
+
+
+async def _browser_execution_payload(
+    task: WorkBoardTask,
+    attempt: WorkBoardAttempt,
+    *,
+    projection: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Project verified browser progress from its exact durable root.
+
+    This helper intentionally returns no browser execution object when any
+    owner, goal, task/attempt, capability, or artifact binding is incomplete.
+    The Work Board row is already owner-scoped; the second fence protects the
+    durable job projection from being treated as a matching foreign receipt.
+    """
+
+    if task.capability_id != "browser.public-task.v1":
+        return None
+    attempt_id = safe_board_identifier(attempt.attempt_id, max_length=256)
+    task_id = safe_board_identifier(task.task_id, max_length=256)
+    workflow_run_id = safe_workflow_run_id(attempt.workflow_run_id)
+    if not task_id or not attempt_id or not workflow_run_id:
+        return None
+    expected_job_id = f"browser-task:{task_id}:{attempt_id}"
+    if workflow_run_id != expected_job_id:
+        return None
+    if projection is None:
+        try:
+            projection = await durable_job_repository.get_job(workflow_run_id)
+        except Exception:
+            return None
+    if not isinstance(projection, Mapping):
+        return None
+    if attempt.task_id != task.task_id:
+        return None
+    status = projection.get("status")
+    if status not in _BROWSER_EXECUTION_STATUSES:
+        return None
+    owner = projection.get("owner")
+    authority = projection.get("declared_authority")
+    identity = projection.get("idempotency")
+    if not isinstance(owner, Mapping) or not isinstance(authority, Mapping) or not isinstance(identity, Mapping):
+        return None
+    owner_principal = safe_board_identifier(task.owner_principal_id, max_length=256)
+    owner_session = safe_board_identifier(task.owner_session_id, max_length=512)
+    task_digest = safe_sha256_digest(task.typed_input_digest)
+    if (
+        not owner_principal
+        or not owner_session
+        or not task_digest
+        or not safe_board_identifier(task.input_artifact_id, max_length=512)
+        or not safe_board_identifier(task.goal_id, max_length=256)
+        or type(task.goal_revision) is not int
+        or task.goal_revision < 1
+    ):
+        return None
+    if (
+        projection.get("job_id") != expected_job_id
+        or projection.get("run_identity") != expected_job_id
+        or projection.get("job_kind") != "browser_public_task"
+        or projection.get("capability_version") != "1"
+        or owner.get("kind") != "service"
+        or owner.get("principal_id") != "service:browser-task"
+        or owner.get("service_id") != "service:browser-task"
+        or projection.get("session_id") != owner_session
+        or projection.get("operator_session_id") != owner_session
+        or projection.get("goal_id") != task.goal_id
+        or projection.get("goal_revision") != task.goal_revision
+        or projection.get("root_run_identity") != expected_job_id
+        or projection.get("parent_run_identity") not in (None, "")
+        or projection.get("parent_job_id") not in (None, "")
+        or identity.get("scope") != "work-board-attempt"
+        or identity.get("key") != f"{task_id}:{attempt_id}"
+    ):
+        return None
+    if (
+        authority.get("principal") != "service:browser-task"
+        or authority.get("owner_kind") != "service"
+        or authority.get("service_id") != "service:browser-task"
+        or authority.get("capability_id") != "browser.public-task.v1"
+        or authority.get("capability_version") != "1"
+        or authority.get("operator_owner_principal_id") != owner_principal
+        or authority.get("operator_owner_session_id") != owner_session
+        or authority.get("goal_owner_principal_id") != owner_principal
+        or authority.get("goal_owner_session_id") != owner_session
+        or authority.get("goal_id") != task.goal_id
+        or authority.get("goal_revision") != task.goal_revision
+        or authority.get("board_task_revision") != int(attempt.task_revision_at_claim) + 1
+        or int(task.task_revision or 0) < int(authority.get("board_task_revision") or 0)
+        or authority.get("board_fencing_token") != attempt.fencing_token
+        or authority.get("priority") != task.priority
+        or authority.get("input_artifact_id") != task.input_artifact_id
+        or authority.get("input_artifact_digest") != task_digest
+        or authority.get("input_envelope_digest") != task_digest
+        or safe_sha256_digest(authority.get("browser_input_digest")) is None
+        or safe_sha256_digest(authority.get("action_consent_digest")) is None
+    ):
+        return None
+    input_digest = safe_sha256_digest(projection.get("input_digest"))
+    authority_digest = safe_sha256_digest(projection.get("authority_digest"))
+    run_fingerprint = safe_sha256_digest(projection.get("run_fingerprint"))
+    if input_digest is None or authority_digest is None or run_fingerprint != input_digest:
+        return None
+    if _browser_projection_digest(dict(authority)) != authority_digest:
+        return None
+    action_count = _strict_bounded_int(authority.get("action_count"), minimum=1, maximum=8)
+    if action_count is None:
+        return None
+    action_index, request_count = _browser_execution_progress(projection)
+    cleanup_status, memory_status = _browser_cleanup_projection(projection)
+    proof = _browser_artifact_projection(projection)
+    return {
+        "capability_id": "browser.public-task.v1",
+        "job_id": expected_job_id,
+        "durable_status": status,
+        "action_index": action_index,
+        "action_count": action_count,
+        "request_count": request_count,
+        "cleanup_status": cleanup_status,
+        "memory_status": memory_status,
+        "readback_id": proof.get("readback_id") if proof else None,
+        "artifact_id": proof.get("artifact_id") if proof else None,
+        "file_path": proof.get("file_path") if proof else None,
+        "content_sha256": proof.get("content_sha256") if proof else None,
+    }
+
+
+def _browser_policy_rules(raw: Any) -> dict[str, Any]:
+    """Expose bounded normalized site-policy metadata without doing DNS."""
+
+    if not isinstance(raw, str):
+        return {"rules": [], "truncated": False, "known": False}
+    try:
+        values = list(_parse_rules(raw))
+    except (AttributeError, TypeError, ValueError):
+        return {"rules": [], "truncated": False, "known": False}
+    return {
+        "rules": values[:_BROWSER_POLICY_RULE_LIMIT],
+        "truncated": len(values) > _BROWSER_POLICY_RULE_LIMIT,
+        "known": True,
+    }
+
+
+def _browser_task_policy(
+    *,
+    effective_runtime_seconds: int,
+    max_attempts: int = 2,
+    max_outstanding_jobs: int = 8,
+) -> dict[str, Any]:
+    """Return the read-only, operator-visible public browser policy contract."""
+
+    allowlist = _browser_policy_rules(getattr(settings, "browser_site_allowlist", None))
+    blocklist = _browser_policy_rules(getattr(settings, "browser_site_blocklist", None))
+    policy_known = bool(allowlist["known"] and blocklist["known"])
+    return {
+        "policy_state": "confirmed" if policy_known else "unknown",
+        "policy_source": "configured_site_policy" if policy_known else None,
+        "allowlist": allowlist,
+        "blocklist": blocklist,
+        "limits": {
+            "max_runtime_seconds": max(1, min(int(effective_runtime_seconds), 180)),
+            "hard_max_runtime_seconds": 180,
+            "max_actions": 8,
+            "max_navigations": 8,
+            "max_requests": 32,
+            "max_extract_bytes": 65_536,
+            "max_browser_contexts": 1,
+            "ready_capacity": 8,
+            "max_attempts": max(1, min(int(max_attempts), 2)),
+            "max_outstanding_jobs": max(1, int(max_outstanding_jobs)),
+            "inference": "none",
+        },
+    }
 
 
 def _recovery_action(
@@ -195,6 +549,31 @@ def _owner(operator: AuthenticatedOperator) -> WorkBoardOwner:
     )
 
 
+def _input_artifact_payload(metadata, *, include_details: bool = False) -> dict[str, Any]:
+    """Serialize bounded artifact metadata without ever returning input bytes."""
+
+    payload = {
+        "artifact_id": metadata.artifact_id,
+        "typed_input_ref": metadata.typed_input_ref,
+        "typed_input_digest": metadata.typed_input_digest,
+        "capability_id": metadata.capability_id,
+        "goal_id": metadata.goal_id,
+        "goal_revision": metadata.goal_revision,
+        "expires_at": serialize_utc_datetime(metadata.expires_at),
+    }
+    if include_details:
+        payload.update(
+            {
+                "state": metadata.state,
+                "size_bytes": metadata.size_bytes,
+                "bound_task_id": metadata.bound_task_id,
+                "bound_task_revision": metadata.bound_task_revision,
+                "revision": metadata.revision,
+            }
+        )
+    return payload
+
+
 def _operator_has_external_mutation(operator: AuthenticatedOperator) -> bool:
     grants = {
         str(getattr(item, "value", item))
@@ -241,6 +620,7 @@ def _task_payload(
         "title": task.title,
         "body": task.body,
         "capability_id": safe_board_identifier(task.capability_id, max_length=128),
+        "input_artifact_id": safe_board_identifier(task.input_artifact_id, max_length=512),
         "typed_input_ref": safe_board_reference(task.typed_input_ref, max_length=512),
         "typed_input_digest": safe_sha256_digest(task.typed_input_digest),
         "executor_id": safe_board_identifier(task.executor_id, max_length=128),
@@ -269,6 +649,7 @@ def _task_payload(
         "dependency_count": dependency_count,
         "completed_dependency_count": completed_dependency_count,
         "dispatch_rank": dispatch_rank,
+        "dispatch_wait_reason": None,
         "recovery_action": _recovery_action(
             task,
             latest_attempt=latest_attempt,
@@ -290,10 +671,12 @@ def _task_payload(
 async def _safe_task_payload(
     task: WorkBoardTask,
     *,
+    db: Any | None = None,
     dependency_counts: tuple[int, int] | None = None,
     latest_attempt: WorkBoardAttempt | None = None,
     attempt_count: int = 0,
     dispatch_rank: int | None = None,
+    browser_projection: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload = _task_payload(
         task,
@@ -302,13 +685,40 @@ async def _safe_task_payload(
         attempt_count=attempt_count,
         dispatch_rank=dispatch_rank,
     )
+    if (
+        task.status is WorkBoardStatus.ready
+        and task.capability_id == "browser.public-task.v1"
+        and latest_attempt is None
+    ):
+        # This is a process-local, read-only projection. Ordinary lane
+        # contention remains silent; only an unverified cleanup quarantine is
+        # safe to explain to the owner without creating scheduler writes.
+        from src.browser.task_lane import browser_task_lane_wait_reason
+
+        payload["dispatch_wait_reason"] = browser_task_lane_wait_reason(settings.workspace_dir)
+    if task.capability_id == "browser.public-task.v1" and latest_attempt is not None:
+        # Keep the browser execution surface additive to the established
+        # latest-attempt DTO. A missing or mismatched durable root is exposed
+        # as null rather than a guessed status/count.
+        payload["latest_attempt"]["browser_execution"] = await _browser_execution_payload(
+            task,
+            latest_attempt,
+            projection=browser_projection,
+        )
     for key in ("title", "body", "block_reason"):
         value = payload.get(key)
         if isinstance(value, str):
-            payload[key] = await vault_redaction.redact_secrets_in_text(
-                value,
-                fail_closed=True,
-            )
+            if db is not None:
+                payload[key] = await vault_redaction.redact_secrets_in_text_readonly(
+                    db,
+                    value,
+                    fail_closed=True,
+                )
+            else:
+                payload[key] = await vault_redaction.redact_secrets_in_text(
+                    value,
+                    fail_closed=True,
+                )
     if payload.get("recovery_action") == "retry":
         # Recovery controls are an operator projection of current authority,
         # not a cached promise from the last dispatcher pass.  Re-run the
@@ -950,13 +1360,28 @@ def _attempt_payload(attempt: WorkBoardAttempt) -> dict[str, Any]:
     }
 
 
-async def _safe_comment_payload(comment: WorkBoardComment) -> dict[str, Any]:
+async def _safe_comment_payload(
+    comment: WorkBoardComment,
+    *,
+    db: Any | None = None,
+) -> dict[str, Any]:
+    if db is not None:
+        body = await vault_redaction.redact_secrets_in_text_readonly(
+            db,
+            comment.body,
+            fail_closed=True,
+        )
+    else:
+        body = await vault_redaction.redact_secrets_in_text(
+            comment.body,
+            fail_closed=True,
+        )
     return {
         "comment_id": comment.comment_id,
         "task_id": comment.task_id,
         "author_principal_id": comment.author_principal_id,
         "author_session_id": comment.author_session_id,
-        "body": await vault_redaction.redact_secrets_in_text(comment.body, fail_closed=True),
+        "body": body,
         "created_at": _json_value(comment.created_at),
     }
 
@@ -984,14 +1409,34 @@ async def list_work_board_tasks(
                 after=after,
                 limit=limit,
             )
+            browser_job_ids = [
+                str(attempt.workflow_run_id)
+                for task in page.tasks
+                if task.capability_id == "browser.public-task.v1"
+                for attempt in ([page.latest_attempts.get(task.task_id)] if page.latest_attempts.get(task.task_id) is not None else [])
+                if attempt.workflow_run_id
+            ]
+            try:
+                browser_projections = await durable_job_repository.get_jobs(browser_job_ids)
+            except Exception:
+                # Durable progress is additive operator metadata. A locked or
+                # unavailable read must make only that metadata unavailable;
+                # it must not make the authenticated board list unusable.
+                browser_projections = {}
             return {
                 "tasks": [
                     await _safe_task_payload(
                         task,
+                        db=db,
                         dependency_counts=page.dependency_counts.get(task.task_id),
                         latest_attempt=page.latest_attempts.get(task.task_id),
                         attempt_count=page.attempt_counts.get(task.task_id, 0),
                         dispatch_rank=page.dispatch_ranks.get(task.task_id),
+                        browser_projection=(
+                            browser_projections.get(str(page.latest_attempts[task.task_id].workflow_run_id))
+                            if task.task_id in page.latest_attempts and page.latest_attempts[task.task_id].workflow_run_id
+                            else None
+                        ),
                     )
                     for task in page.tasks
                 ],
@@ -1043,17 +1488,98 @@ async def get_work_board_execution_limits(
             budget = deserialize_admission_budget(goal)
             configured = int(budget.max_runtime_seconds) if budget is not None else 300
             effective = min(max(configured, 1), 900)
+            browser_max_attempts, browser_max_outstanding = effective_browser_limits(goal)
             return {
                 "goal_id": goal_id,
                 "goal_revision": current_revision,
                 "effective_max_runtime_seconds": effective,
                 "default_max_runtime_seconds": 300,
                 "hard_max_runtime_seconds": 900,
-                "attempt_limit": 2,
+                "attempt_limit": (
+                    browser_max_attempts
+                    if budget is not None
+                    else 2
+                ),
+                "max_outstanding_jobs": browser_max_outstanding,
                 "limit_source": "goal_admission_budget" if budget is not None else "default",
+                "browser_task_policy": _browser_task_policy(
+                    effective_runtime_seconds=(
+                        min(effective, 180)
+                        if goal is not None
+                        else effective
+                    ),
+                    max_attempts=browser_max_attempts,
+                    max_outstanding_jobs=browser_max_outstanding,
+                ),
             }
     except HTTPException:
         raise
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "board_storage_unavailable", "recovery": "Retry after the workspace database is ready."},
+        ) from exc
+
+
+@router.post("/input-artifacts")
+async def create_work_board_input_artifact(
+    request: Request,
+    body: WorkBoardInputArtifactCreate,
+):
+    """Reserve one owner-bound, typed input without returning its payload."""
+
+    operator = _operator(request)
+    try:
+        async with get_session() as db:
+            metadata = await prepare_input_artifact(db, _owner(operator), body)
+            return _input_artifact_payload(metadata)
+    except BoardError as exc:
+        _raise_board_error(exc)
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "board_storage_unavailable", "recovery": "Check the workspace database readiness receipt and retry."},
+        ) from exc
+
+
+@router.get("/input-artifacts/{artifact_id}")
+async def get_work_board_input_artifact(request: Request, artifact_id: str):
+    operator = _operator(request)
+    try:
+        async with get_session() as db:
+            metadata = await read_input_artifact_metadata(
+                db,
+                _owner(operator),
+                artifact_id=artifact_id,
+            )
+            return _input_artifact_payload(metadata, include_details=True)
+    except BoardError as exc:
+        _raise_board_error(exc)
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "board_storage_unavailable", "recovery": "Retry after the workspace database is ready."},
+        ) from exc
+
+
+@router.delete("/input-artifacts/{artifact_id}")
+async def delete_work_board_input_artifact(
+    request: Request,
+    artifact_id: str,
+    body: WorkBoardInputArtifactDelete,
+):
+    operator = _operator(request)
+    try:
+        async with get_session() as db:
+            metadata = await delete_input_artifact(
+                db,
+                _owner(operator),
+                artifact_id=artifact_id,
+                expected_revision=body.expected_revision,
+            )
+            return _input_artifact_payload(metadata, include_details=True)
+    except BoardError as exc:
+        _raise_board_error(exc)
     except SQLAlchemyError as exc:
         raise HTTPException(
             status_code=503,
@@ -1073,7 +1599,7 @@ async def create_work_board_task(request: Request, body: WorkBoardTaskCreate):
                 origin_session_id=operator.session_id,
             )
             payload = {
-                "task": await _safe_task_payload(mutation.task),
+                "task": await _safe_task_payload(mutation.task, db=db),
                 "idempotent_replay": mutation.idempotent_replay,
             }
         return payload
@@ -1093,18 +1619,32 @@ async def get_work_board_task(request: Request, task_id: str):
         async with get_session() as db:
             detail = await repository.get_detail(db, _owner(operator), task_id)
             dispatch_rank = await repository.dispatch_rank(db, _owner(operator), detail["task"])
+            latest_attempt = detail["attempts"][0] if detail["attempts"] else None
+            task_payload = await _safe_task_payload(
+                detail["task"],
+                db=db,
+                dependency_counts=detail["dependency_counts"],
+                latest_attempt=latest_attempt,
+                attempt_count=len(detail["attempts"]),
+                dispatch_rank=dispatch_rank,
+            )
+            attempts_payload = []
+            for item in detail["attempts"]:
+                item_payload = _attempt_payload(item)
+                latest_payload = task_payload.get("latest_attempt")
+                if (
+                    isinstance(latest_payload, dict)
+                    and item.attempt_id == latest_payload.get("attempt_id")
+                    and "browser_execution" in latest_payload
+                ):
+                    item_payload["browser_execution"] = latest_payload.get("browser_execution")
+                attempts_payload.append(item_payload)
             return {
-                "task": await _safe_task_payload(
-                    detail["task"],
-                    dependency_counts=detail["dependency_counts"],
-                    latest_attempt=(detail["attempts"][0] if detail["attempts"] else None),
-                    attempt_count=len(detail["attempts"]),
-                    dispatch_rank=dispatch_rank,
-                ),
-                "attempts": [_attempt_payload(item) for item in detail["attempts"]],
+                "task": task_payload,
+                "attempts": attempts_payload,
                 "parents": detail["parents"],
                 "children": detail["children"],
-                "comments": [await _safe_comment_payload(item) for item in detail["comments"]],
+                "comments": [await _safe_comment_payload(item, db=db) for item in detail["comments"]],
                 "events": [_event_payload(item) for item in detail["events"]],
                 "parent_handoffs": await review_service.parent_handoffs(
                     db,
@@ -1132,6 +1672,7 @@ async def get_work_board_routine_publication(request: Request, task_id: str):
             context = await _routine_publication_context(db, operator, task_id)
             task_payload = await _safe_task_payload(
                 context["task"],
+                db=db,
                 latest_attempt=context["attempt"],
                 attempt_count=len(context["detail"]["attempts"]),
             )
@@ -1217,6 +1758,7 @@ async def prepare_work_board_routine_publication(
             refreshed = await _routine_publication_context(db, operator, task_id)
             task_payload = await _safe_task_payload(
                 refreshed["task"],
+                db=db,
                 latest_attempt=refreshed["attempt"],
                 attempt_count=len(refreshed["detail"]["attempts"]),
             )
@@ -1302,6 +1844,7 @@ async def recover_work_board_routine_publication(
             latest_attempt = detail["attempts"][0] if detail["attempts"] else None
             task_payload = await _safe_task_payload(
                 detail["task"],
+                db=db,
                 dependency_counts=detail["dependency_counts"],
                 latest_attempt=latest_attempt,
                 attempt_count=len(detail["attempts"]),
@@ -1339,7 +1882,7 @@ async def patch_work_board_task(request: Request, task_id: str, body: WorkBoardT
     try:
         async with get_session() as db:
             mutation = await repository.patch_task(db, _owner(operator), task_id, body)
-            payload = {"task": await _safe_task_payload(mutation.task)}
+            payload = {"task": await _safe_task_payload(mutation.task, db=db)}
         return payload
     except BoardError as exc:
         _raise_board_error(exc)
@@ -1613,7 +2156,7 @@ async def add_work_board_comment(request: Request, task_id: str, body: WorkBoard
     try:
         async with get_session() as db:
             comment, event = await repository.add_comment(db, _owner(operator), task_id, body)
-            payload = {"comment": await _safe_comment_payload(comment)}
+            payload = {"comment": await _safe_comment_payload(comment, db=db)}
         return payload
     except BoardError as exc:
         _raise_board_error(exc)

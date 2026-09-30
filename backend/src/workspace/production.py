@@ -31,10 +31,12 @@ from src.workspace.lifecycle import (
     workspace_restore_staging_dir,
 )
 from src.workspace.state_registry import (
+    WORK_BOARD_INPUT_ARTIFACT_TABLE,
     WORK_BOARD_ROUTINE_BINDING_TABLE,
     WorkspaceStateError,
     canonical_workspace_root,
     canonical_workspace_root_identity,
+    work_board_input_artifact_contract,
     work_board_routine_binding_contract,
 )
 
@@ -235,8 +237,12 @@ class ProductionWorkspace:
                 "work_board_routine_binding": work_board_routine_binding_contract(
                     present=None
                 ),
+                "work_board_input_artifact": work_board_input_artifact_contract(
+                    present=None
+                ),
                 "inventory_source": "workspace_state_registry",
                 "table_name": WORK_BOARD_ROUTINE_BINDING_TABLE,
+                "input_artifact_table_name": WORK_BOARD_INPUT_ARTIFACT_TABLE,
             },
         }
 

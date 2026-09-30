@@ -32,6 +32,7 @@ from src.db.models import (
     WorkBoardTask,
 )
 from src.vault import redaction as vault_redaction
+from src.goals.repository import deserialize_admission_budget
 from src.work_board.contracts import (
     WORK_BOARD_AUTHENTICATED_BLOCK_KINDS,
     WorkBoardActionRequest,
@@ -108,6 +109,10 @@ _BOARD_BLOCK_KINDS = frozenset(
         "attempt_limit",
     }
 )
+_BROWSER_CAPABILITY_ID = "browser.public-task.v1"
+_BROWSER_GLOBAL_READY_CAPACITY = 8
+_BROWSER_HARD_MAX_ATTEMPTS = 2
+_BROWSER_LEGACY_MAX_OUTSTANDING = _BROWSER_GLOBAL_READY_CAPACITY
 _PRIVATE_RECEIPT_TOKENS = (
     "private",
     "secret",
@@ -135,6 +140,28 @@ _UNSAFE_RECEIPT_PATH_PARTS = frozenset(
         "vault",
     }
 )
+
+
+def effective_browser_limits(goal: Goal | None) -> tuple[int, int]:
+    """Return server-derived browser attempt and outstanding-work limits.
+
+    Browser tasks retain the historical two-attempt/eight-ready defaults for
+    legacy goals without an admission-budget row.  Once a goal carries an
+    admission budget, its finite limits become the authority for that goal;
+    the browser lane can never raise ``max_attempts`` above its two-attempt
+    hard cap.  The values are intentionally derived from the owner-checked
+    ``Goal`` row and are never accepted from a typed browser input payload.
+    """
+
+    budget = deserialize_admission_budget(goal) if goal is not None else None
+    if budget is None:
+        return _BROWSER_HARD_MAX_ATTEMPTS, _BROWSER_LEGACY_MAX_OUTSTANDING
+    return (
+        max(1, min(_BROWSER_HARD_MAX_ATTEMPTS, int(budget.max_attempts))),
+        max(1, int(budget.max_outstanding_jobs)),
+    )
+
+
 _UNSAFE_RECEIPT_FILE_TOKENS = (
     "api-key",
     "api_key",
@@ -279,6 +306,12 @@ def _canonical_json(value: object) -> str:
 
 def _payload_digest(request: WorkBoardTaskCreate) -> str:
     payload = request.model_dump(mode="json")
+    # The server fills the typed reference/digest from an already verified
+    # input artifact.  Keep the legacy idempotency digest independent of that
+    # derived metadata, while including the opaque artifact identity itself so
+    # two reservations cannot replay the same task key interchangeably.
+    if payload.get("input_artifact_id") is None:
+        payload.pop("input_artifact_id", None)
     return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
 
 
@@ -1064,6 +1097,7 @@ class WorkBoardRepository:
     def _validate_task_fields(request: WorkBoardTaskCreate) -> None:
         _validate_safe_identifier(request.goal_id, field="goal_id", max_length=128)
         _validate_opaque_identifier(request.capability_id, field="capability_id", max_length=128)
+        _validate_opaque_identifier(request.input_artifact_id, field="input_artifact_id", max_length=512)
         _validate_safe_identifier(request.typed_input_ref, field="typed_input_ref")
         _validate_opaque_identifier(request.executor_id, field="executor_id", max_length=128)
         _validate_opaque_identifier(request.assignee_id, field="assignee_id", max_length=128)
@@ -1103,6 +1137,23 @@ class WorkBoardRepository:
                 )
             if request.status is WorkBoardStatus.todo:
                 request = request.model_copy(update={"executor_id": expected_executor})
+        if (
+            request.status is WorkBoardStatus.todo
+            and request.capability_id == "browser.public-task.v1"
+            and not request.input_artifact_id
+        ):
+            raise BoardError(
+                "browser_input_artifact_required",
+                "Public browser tasks require a server-bound input artifact",
+                status_code=422,
+            )
+        artifact = None
+        if request.input_artifact_id:
+            # Reserve the writer before reading the owner/goal/artifact graph.
+            # Those reads establish the authority that is bound by the task
+            # insert; moving the fence after redaction would allow a stale
+            # graph snapshot to be bound by a later mutation.
+            await _begin_sqlite_immediate(db)
         digest = _payload_digest(request)
         existing_result = await db.execute(
             select(WorkBoardTask).where(
@@ -1114,6 +1165,29 @@ class WorkBoardRepository:
         )
         existing = existing_result.scalar_one_or_none()
         if existing is not None:
+            if request.input_artifact_id:
+                # Replays must remain idempotent after a successful browser
+                # execution consumes its input artifact. The task already
+                # stores the immutable artifact reference/digest, so a
+                # replay only needs an owner-fenced metadata lookup; the
+                # executable resolver is reserved for a new task or a live
+                # dispatch and correctly rejects terminal artifact states.
+                from src.work_board.input_artifacts import read_input_artifact_metadata
+
+                artifact_metadata = await read_input_artifact_metadata(
+                    db,
+                    owner,
+                    artifact_id=request.input_artifact_id,
+                )
+                if (
+                    existing.input_artifact_id != request.input_artifact_id
+                    or artifact_metadata.goal_id != request.goal_id
+                    or int(artifact_metadata.goal_revision) != int(request.goal_revision)
+                    or artifact_metadata.capability_id != (request.capability_id or "")
+                    or existing.typed_input_ref != artifact_metadata.typed_input_ref
+                    or existing.typed_input_digest != artifact_metadata.typed_input_digest
+                ):
+                    raise BoardIdempotencyConflict(request.idempotency_scope, request.idempotency_key)
             if existing.idempotency_payload_digest != digest:
                 raise BoardIdempotencyConflict(request.idempotency_scope, request.idempotency_key)
             latest_event = await db.execute(
@@ -1143,6 +1217,23 @@ class WorkBoardRepository:
             goal_id=request.goal_id,
             goal_revision=request.goal_revision,
         )
+        if request.input_artifact_id:
+            if artifact is None:
+                from src.work_board.input_artifacts import resolve_input_artifact_for_task
+
+                artifact = await resolve_input_artifact_for_task(
+                    db,
+                    owner,
+                    artifact_id=request.input_artifact_id,
+                    goal_id=request.goal_id,
+                    goal_revision=request.goal_revision,
+                    capability_id=request.capability_id or "",
+                )
+            typed_input_ref = artifact.row.typed_input_ref
+            typed_input_digest = artifact.row.payload_sha256
+        else:
+            typed_input_ref = request.typed_input_ref
+            typed_input_digest = request.typed_input_digest
         reviewer_id = request.reviewer_id
         if request.requires_review:
             if reviewer_id is not None and reviewer_id != owner.principal_id:
@@ -1165,8 +1256,9 @@ class WorkBoardRepository:
             title=safe_title,
             body=safe_body,
             capability_id=request.capability_id,
-            typed_input_ref=request.typed_input_ref,
-            typed_input_digest=request.typed_input_digest,
+            input_artifact_id=request.input_artifact_id,
+            typed_input_ref=typed_input_ref,
+            typed_input_digest=typed_input_digest,
             executor_id=request.executor_id,
             assignee_id=request.assignee_id,
             priority=request.priority,
@@ -1239,6 +1331,16 @@ class WorkBoardRepository:
             kind="task.created",
             metadata={"status": task.status.value, "task_revision": task.task_revision},
         )
+        if artifact is not None:
+            from src.work_board.input_artifacts import bind_input_artifact
+
+            await bind_input_artifact(
+                db,
+                owner,
+                artifact=artifact,
+                task_id=task.task_id,
+                task_revision=task.task_revision,
+            )
         return BoardMutation(task, event)
 
     async def get_task(self, db: AsyncSession, owner: WorkBoardOwner, task_id: str) -> WorkBoardTask:
@@ -1482,6 +1584,18 @@ class WorkBoardRepository:
         changes = request.model_dump(exclude_unset=True, exclude={"expected_revision"})
         if not changes:
             raise BoardError("empty_mutation", "At least one task field must change", status_code=400)
+        if task.input_artifact_id and {
+            "capability_id",
+            "typed_input_ref",
+            "typed_input_digest",
+            "executor_id",
+            "goal_id",
+        }.intersection(changes):
+            raise BoardError(
+                "input_artifact_immutable",
+                "An artifact-bound task cannot change its executable input authority",
+                status_code=409,
+            )
         safe_changes: dict[str, Any] = {}
         for field, value in changes.items():
             if field in {"title", "body"}:
@@ -1923,7 +2037,7 @@ class WorkBoardRepository:
                 "This block requires its typed recovery path before retry",
                 status_code=409,
             )
-        await self.validate_task_goal(db, owner, task)
+        live_goal = await self.validate_task_goal(db, owner, task)
         if task.scheduled_at is not None and _utc_datetime(task.scheduled_at) > _now():
             raise BoardError(
                 "retry_prerequisite",
@@ -1976,7 +2090,10 @@ class WorkBoardRepository:
             )
             or 0
         )
-        if attempt_count >= 2:
+        max_attempts = 2
+        if task.capability_id == _BROWSER_CAPABILITY_ID:
+            max_attempts, _max_outstanding_jobs = effective_browser_limits(live_goal)
+        if attempt_count >= max_attempts:
             raise BoardError(
                 "attempt_limit",
                 "The board attempt limit has been exhausted",
@@ -2389,6 +2506,80 @@ class WorkBoardRepository:
             principal_id=task.owner_principal_id,
             session_id=task.owner_session_id,
         )
+        if task.capability_id == _BROWSER_CAPABILITY_ID:
+            live_goal_for_limits = await db.scalar(
+                select(Goal).where(
+                    Goal.id == task.goal_id,
+                    Goal.owner_principal_id == task.owner_principal_id,
+                    Goal.owner_session_id == task.owner_session_id,
+                )
+            )
+            _browser_max_attempts, browser_max_outstanding = effective_browser_limits(
+                live_goal_for_limits
+            )
+            browser_outstanding = int(
+                await db.scalar(
+                    select(func.count(WorkBoardTask.task_id)).where(
+                        WorkBoardTask.owner_principal_id == task.owner_principal_id,
+                        WorkBoardTask.owner_session_id == task.owner_session_id,
+                        WorkBoardTask.goal_id == task.goal_id,
+                        WorkBoardTask.capability_id == _BROWSER_CAPABILITY_ID,
+                        WorkBoardTask.status.in_(
+                            (WorkBoardStatus.ready, WorkBoardStatus.running)
+                        ),
+                    )
+                )
+                or 0
+            )
+            if browser_outstanding >= browser_max_outstanding:
+                reason = "browser_goal_outstanding_capacity"
+                if task.block_reason != reason:
+                    task.block_reason = reason
+                    await db.flush()
+                    await self._event(
+                        db,
+                        task,
+                        owner,
+                        kind="task.browser_goal_capacity",
+                        metadata={
+                            "status": WorkBoardStatus.todo.value,
+                            "task_revision": task.task_revision,
+                            "block_reason": reason,
+                        },
+                        actor_principal_id=actor_principal_id,
+                        actor_session_id=actor_session_id or "work-board-dispatch",
+                    )
+                return None
+            # Eight Ready browser rows is the global bounded admission cap.
+            # This check runs under the same SQLite writer fence as the CAS
+            # promotion, so concurrent owners cannot over-admit the lane.
+            browser_ready = int(
+                await db.scalar(
+                    select(func.count(WorkBoardTask.task_id)).where(
+                        WorkBoardTask.status == WorkBoardStatus.ready,
+                        WorkBoardTask.capability_id == _BROWSER_CAPABILITY_ID,
+                    )
+                )
+                or 0
+            )
+            if browser_ready >= _BROWSER_GLOBAL_READY_CAPACITY:
+                if task.block_reason != "browser_ready_capacity":
+                    task.block_reason = "browser_ready_capacity"
+                    await db.flush()
+                    await self._event(
+                        db,
+                        task,
+                        owner,
+                        kind="task.browser_ready_capacity",
+                        metadata={
+                            "status": WorkBoardStatus.todo.value,
+                            "task_revision": task.task_revision,
+                            "block_reason": "browser_ready_capacity",
+                        },
+                        actor_principal_id=actor_principal_id,
+                        actor_session_id=actor_session_id or "work-board-dispatch",
+                    )
+                return None
         parent_rows = list(
             (
                 await db.execute(
@@ -2487,6 +2678,11 @@ class WorkBoardRepository:
             }
         else:
             values = {"status": WorkBoardStatus.ready}
+            if task.block_reason in {
+                "browser_ready_capacity",
+                "browser_goal_outstanding_capacity",
+            }:
+                values["block_reason"] = None
             event_kind = "task.ready"
             metadata = {"status": WorkBoardStatus.ready.value}
         values.update(
@@ -2545,6 +2741,8 @@ class WorkBoardRepository:
             principal_id=task.owner_principal_id,
             session_id=task.owner_session_id,
         )
+        browser_max_attempts = _BROWSER_HARD_MAX_ATTEMPTS
+        browser_max_outstanding = _BROWSER_LEGACY_MAX_OUTSTANDING
         # Re-read the owner-bound goal inside the same immediate transaction
         # that creates the board claim.  The preflight pass is advisory; a
         # concurrent revision/owner/status change must not launch stale work.
@@ -2556,6 +2754,8 @@ class WorkBoardRepository:
             live_goal_status = str(getattr(live_goal.status, "value", live_goal.status) or "")
             if live_goal_status and live_goal_status != "active":
                 raise BoardError("goal_not_admitted", "The task goal is not currently executable")
+            if task.capability_id == _BROWSER_CAPABILITY_ID:
+                browser_max_attempts, browser_max_outstanding = effective_browser_limits(live_goal)
         except BoardError as exc:
             safe_reason = await self._safe_text(exc.message)
             await self._cas_task_update(
@@ -2582,6 +2782,30 @@ class WorkBoardRepository:
                 actor_session_id=actor_session_id or "work-board-dispatch",
             )
             return None
+
+        if task.capability_id == _BROWSER_CAPABILITY_ID:
+            # A task can remain Ready after a goal budget is tightened or
+            # after an older process promoted siblings under a prior budget.
+            # Recheck the owner/goal queue capacity under the same writer
+            # fence as the claim so a stale Ready row cannot launch beyond
+            # the current server-owned max_outstanding_jobs.
+            browser_outstanding = int(
+                await db.scalar(
+                    select(func.count(WorkBoardTask.task_id)).where(
+                        WorkBoardTask.owner_principal_id == task.owner_principal_id,
+                        WorkBoardTask.owner_session_id == task.owner_session_id,
+                        WorkBoardTask.goal_id == task.goal_id,
+                        WorkBoardTask.capability_id == _BROWSER_CAPABILITY_ID,
+                        WorkBoardTask.task_id != task.task_id,
+                        WorkBoardTask.status.in_(
+                            (WorkBoardStatus.ready, WorkBoardStatus.running)
+                        ),
+                    )
+                )
+                or 0
+            )
+            if browser_outstanding >= browser_max_outstanding:
+                return None
 
         parent_statuses = list(
             (
@@ -2683,7 +2907,8 @@ class WorkBoardRepository:
             )
             or 0
         )
-        if attempt_count >= 2:
+        attempt_limit = browser_max_attempts if task.capability_id == _BROWSER_CAPABILITY_ID else 2
+        if attempt_count >= attempt_limit:
             safe_reason = await self._safe_text("The board attempt limit has been exhausted")
             await self._cas_task_update(
                 db,
@@ -3723,7 +3948,17 @@ class WorkBoardRepository:
             )
             or 0
         )
-        if attempt_count >= 2:
+        attempt_limit = 2
+        if task.capability_id == _BROWSER_CAPABILITY_ID:
+            live_goal = await db.scalar(
+                select(Goal).where(
+                    Goal.id == task.goal_id,
+                    Goal.owner_principal_id == task.owner_principal_id,
+                    Goal.owner_session_id == task.owner_session_id,
+                )
+            )
+            attempt_limit, _max_outstanding_jobs = effective_browser_limits(live_goal)
+        if attempt_count >= attempt_limit:
             await self._cas_task_update(
                 db,
                 owner,

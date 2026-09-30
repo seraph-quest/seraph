@@ -112,6 +112,8 @@ class WorkspaceStateClass(str, Enum):
 # workspace inventory boundary so backup/restore and production receipts can
 # name the exact SQLite object without exposing rows or procedure content.
 WORK_BOARD_ROUTINE_BINDING_TABLE = "work_board_routine_bindings"
+WORK_BOARD_INPUT_ARTIFACT_TABLE = "work_board_input_artifacts"
+WORK_BOARD_INPUT_ARTIFACT_ROOT = "artifacts/work-board/inputs"
 
 
 def work_board_routine_binding_contract(*, present: bool | None) -> dict[str, Any]:
@@ -122,6 +124,20 @@ def work_board_routine_binding_contract(*, present: bool | None) -> dict[str, An
         "table_name": WORK_BOARD_ROUTINE_BINDING_TABLE,
         "state_class": WorkspaceStateClass.CANONICAL.value,
         "backup_scope": "canonical_sqlite",
+        "present": None if present is None else bool(present),
+    }
+
+
+def work_board_input_artifact_contract(*, present: bool | None) -> dict[str, Any]:
+    """Return the redacted inventory contract for typed board inputs."""
+
+    return {
+        "schema_version": "seraph.work-board-input-artifact.v1",
+        "table_name": WORK_BOARD_INPUT_ARTIFACT_TABLE,
+        "state_class": WorkspaceStateClass.CANONICAL.value,
+        "backup_scope": "canonical_sqlite",
+        "payload_root": WORK_BOARD_INPUT_ARTIFACT_ROOT,
+        "secret_like_capabilities_rejected": True,
         "present": None if present is None else bool(present),
     }
 
@@ -1236,7 +1252,13 @@ class WorkspaceStateRegistry:
             "operator_contracts": {
                 "work_board_routine_binding": work_board_routine_binding_contract(
                     present=binding_present
-                )
+                ),
+                "work_board_input_artifact": work_board_input_artifact_contract(
+                    present=any(
+                        item.get("name") == WORK_BOARD_INPUT_ARTIFACT_TABLE
+                        for item in tables
+                    )
+                ),
             },
         }
 
@@ -1261,6 +1283,8 @@ __all__ = [
     "WorkspaceStateError",
     "WorkspaceStateRegistry",
     "WORK_BOARD_ROUTINE_BINDING_TABLE",
+    "WORK_BOARD_INPUT_ARTIFACT_TABLE",
+    "WORK_BOARD_INPUT_ARTIFACT_ROOT",
     "DEFAULT_MAX_INVENTORY_ENTRIES",
     "DEFAULT_MAX_INVENTORY_DEPTH",
     "DEFAULT_MAX_INVENTORY_TOTAL_BYTES",
@@ -1273,6 +1297,7 @@ __all__ = [
     "canonical_workspace_root_identity",
     "production_workspace_inventory",
     "work_board_routine_binding_contract",
+    "work_board_input_artifact_contract",
 ]
 
 

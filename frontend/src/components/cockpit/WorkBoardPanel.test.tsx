@@ -52,6 +52,7 @@ function task(overrides: Partial<WorkBoardTask> = {}): WorkBoardTask {
     dependency_count: 0,
     completed_dependency_count: 0,
     dispatch_rank: null,
+    dispatch_wait_reason: null,
     recovery_action: null,
     readback_status: "not_started",
     verification_status: "not_started",
@@ -985,6 +986,190 @@ describe("WorkBoardPanel", () => {
     });
   });
 
+  it("projects BrowserRunner progress and artifact receipts into the owner-bound inspector", async () => {
+    const browserReference = {
+      artifact_ref: "artifacts/browser/result.json",
+      artifact_sha256: "c".repeat(64),
+      checkpoint_id: "action-0-post-checks",
+      action_index: 0,
+      action_count: 2,
+      request_count: 3,
+      durable_status: "succeeded",
+      cleanup_status: "cleanup_verified",
+      memory_status: "no_learning",
+      job_id: "browser-job-1",
+      workflow_run_id: "workflow-run-1",
+      readback_id: "readback-browser-1",
+      verified: true,
+    };
+    const currentTask = task({ title: "Browser result task" });
+    taskResponse(fetchMock, currentTask, 7, detail(currentTask, {
+      attempts: [endedAttempt({ receipt_refs: [browserReference] })],
+    }));
+    const onInspectArtifact = vi.fn();
+    render(<WorkBoardPanel onInspectArtifact={onInspectArtifact} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Browser result task" }));
+    expect(await screen.findByText(/Browser progress · checkpoint action-0-post-checks · action 1\/2 · 3 requests/)).toBeInTheDocument();
+    expect(screen.getByText("Browser artifact receipt artifacts/browser/result.json")).toBeInTheDocument();
+    expect(screen.getByText("Cleanup cleanup_verified")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Inspect execution evidence artifacts/browser/result.json" }));
+
+    expect(onInspectArtifact).toHaveBeenCalledWith({
+      reference: {
+        ...browserReference,
+        file_path: "artifacts/browser/result.json",
+        content_sha256: "c".repeat(64),
+      },
+      ownerSessionId: "operator-session-1",
+      workflowRunId: "browser-job-1",
+      parentWorkflowRunId: "workflow-run-1",
+    });
+  });
+
+  it("renders the canonical owner-bound browser execution DTO and keeps unknown progress explicit", async () => {
+    const currentTask = task({
+      title: "Canonical browser execution",
+      capability_id: "browser.public-task.v1",
+    });
+    const browserExecution = {
+      capability_id: "browser.public-task.v1" as const,
+      job_id: "browser-task:task-1:attempt-1",
+      durable_status: "running",
+      action_index: 1,
+      action_count: 3,
+      request_count: 4,
+      cleanup_status: "cleanup_unknown" as const,
+      memory_status: "unknown" as const,
+      readback_id: null,
+      artifact_id: "browser-artifact-1",
+      file_path: "artifacts/browser/result.json",
+      content_sha256: "d".repeat(64),
+    };
+    const onInspectArtifact = vi.fn();
+    taskResponse(fetchMock, currentTask, 7, detail(currentTask, {
+      attempts: [endedAttempt({
+        workflow_run_id: "browser-task:task-1:attempt-1",
+        browser_execution: browserExecution,
+      })],
+    }));
+    render(<WorkBoardPanel onInspectArtifact={onInspectArtifact} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Canonical browser execution" }));
+    const receipt = await screen.findByLabelText("Browser durable execution receipt");
+    expect(receipt).toHaveTextContent(/Browser durable execution.*status running/);
+    expect(receipt).toHaveTextContent("Browser progress · action 2/3 · 4 requests");
+    expect(receipt).toHaveTextContent("Cleanup cleanup_unknown · Memory unknown");
+    fireEvent.click(screen.getByRole("button", { name: "Inspect execution evidence artifacts/browser/result.json" }));
+    expect(onInspectArtifact).toHaveBeenCalledWith({
+      reference: {
+        artifact_id: "browser-artifact-1",
+        file_path: "artifacts/browser/result.json",
+        content_sha256: "d".repeat(64),
+        job_id: "browser-task:task-1:attempt-1",
+        verified: true,
+      },
+      ownerSessionId: "operator-session-1",
+      workflowRunId: "browser-task:task-1:attempt-1",
+      parentWorkflowRunId: "browser-task:task-1:attempt-1",
+    });
+  });
+
+  it("uses the verified browser DTO on task.latest_attempt when the attempts list is metadata-only", async () => {
+    const browserExecution = {
+      capability_id: "browser.public-task.v1" as const,
+      job_id: "browser-task:task-1:attempt-1",
+      durable_status: "succeeded",
+      action_index: 1,
+      action_count: 2,
+      request_count: 2,
+      cleanup_status: "cleanup_verified" as const,
+      memory_status: "no_learning" as const,
+      readback_id: "readback-detail-1",
+      artifact_id: "artifact-detail-1",
+      file_path: "artifacts/browser/detail.json",
+      content_sha256: "f".repeat(64),
+    };
+    const latestAttempt = endedAttempt({ browser_execution: browserExecution });
+    const currentTask = task({
+      title: "Browser detail projection",
+      capability_id: "browser.public-task.v1",
+      latest_attempt: latestAttempt,
+    });
+    taskResponse(fetchMock, currentTask, 7, detail(currentTask, {
+      // The real detail endpoint keeps the attempts list metadata-only while
+      // enriching task.latest_attempt with the verified browser projection.
+      attempts: [endedAttempt({ attempt_id: latestAttempt.attempt_id, workflow_run_id: latestAttempt.workflow_run_id })],
+    }));
+    const onInspectArtifact = vi.fn();
+    render(<WorkBoardPanel onInspectArtifact={onInspectArtifact} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Browser detail projection" }));
+    const receipt = await screen.findByLabelText("Browser durable execution receipt");
+    expect(receipt).toHaveTextContent("Browser durable execution");
+    expect(receipt).toHaveTextContent("status succeeded");
+    expect(receipt).toHaveTextContent("2 requests");
+    fireEvent.click(screen.getByRole("button", { name: "Inspect execution evidence artifacts/browser/detail.json" }));
+    expect(onInspectArtifact).toHaveBeenCalledWith({
+      reference: {
+        artifact_id: "artifact-detail-1",
+        file_path: "artifacts/browser/detail.json",
+        content_sha256: "f".repeat(64),
+        job_id: "browser-task:task-1:attempt-1",
+        readback_id: "readback-detail-1",
+        verified: true,
+      },
+      ownerSessionId: "operator-session-1",
+      workflowRunId: "browser-task:task-1:attempt-1",
+      parentWorkflowRunId: "workflow-run-1",
+    });
+  });
+
+  it("shows the server quarantine wait reason without inventing browser progress", async () => {
+    const currentTask = task({
+      title: "Browser cleanup waiter",
+      capability_id: "browser.public-task.v1",
+      status: "ready",
+      dispatch_wait_reason: "browser_cleanup_required",
+    });
+    taskResponse(fetchMock, currentTask, 7, detail(currentTask));
+    render(<WorkBoardPanel />);
+
+    expect(await screen.findByText("Dispatch waiting: browser cleanup recovery is required")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Open task Browser cleanup waiter" }));
+    const details = await screen.findByRole("region", { name: "Task details for Browser cleanup waiter" });
+    expect(within(details).getByText("Dispatch waiting: browser cleanup recovery is required before this task can run.")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Browser durable execution receipt")).not.toBeInTheDocument();
+  });
+
+  it("does not invent browser progress or a success receipt for a missing or foreign execution DTO", async () => {
+    const currentTask = task({ title: "Unverified browser execution", capability_id: "browser.public-task.v1" });
+    taskResponse(fetchMock, currentTask, 7, detail(currentTask, {
+      attempts: [endedAttempt({
+        browser_execution: {
+          capability_id: "other.capability" as unknown as "browser.public-task.v1",
+          job_id: "",
+          durable_status: "succeeded",
+          action_index: 7,
+          action_count: 8,
+          request_count: 32,
+          cleanup_status: "cleanup_verified",
+          memory_status: "no_learning",
+          readback_id: "foreign-readback",
+          artifact_id: "foreign-artifact",
+          file_path: "artifacts/foreign.json",
+          content_sha256: "e".repeat(64),
+        },
+      })],
+    }));
+    render(<WorkBoardPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Unverified browser execution" }));
+    const receipt = await screen.findByLabelText("Browser durable execution receipt");
+    expect(receipt).toHaveTextContent(/receipt unavailable/i);
+    expect(receipt).not.toHaveTextContent(/status succeeded/);
+    expect(receipt).not.toHaveTextContent(/32 requests/);
+    expect(screen.queryByRole("button", { name: /Inspect execution evidence artifacts\/foreign\.json/ })).not.toBeInTheDocument();
+  });
+
   it("retries a create after a transient 429 with the same payload and idempotency key after remount", async () => {
     const goal = {
       id: "goal-pending-create",
@@ -1366,5 +1551,91 @@ describe("WorkBoardPanel", () => {
     }));
     expect(JSON.stringify(actionBody)).not.toContain("run_id");
     expect(JSON.stringify(actionBody)).not.toContain("workflow_run_id");
+  });
+
+  it("restores an unknown public browser submission after Work Board remount with the same artifact request", async () => {
+    const browserGoal = {
+      id: "goal-browser-remount",
+      parent_id: null,
+      path: "/goal-browser-remount",
+      level: "root" as const,
+      title: "Browser remount goal",
+      description: "A bounded public browser goal",
+      status: "active" as const,
+      domain: "research",
+      start_date: null,
+      due_date: null,
+      sort_order: 0,
+      revision: 4,
+    };
+    const browserTask = task({
+      task_id: "task-browser-remount",
+      title: "Read public page",
+      owner_principal_id: "operator:browser-owner",
+      owner_session_id: "session:browser-owner",
+      goal_id: browserGoal.id,
+      goal_revision: browserGoal.revision,
+      capability_id: "browser.public-task.v1",
+      input_artifact_id: "artifact-browser-remount",
+    });
+    const artifact = {
+      artifact_id: "artifact-browser-remount",
+      typed_input_ref: "workspace-json:artifacts/browser-remount.json",
+      typed_input_digest: "b".repeat(64),
+      capability_id: "browser.public-task.v1" as const,
+      goal_id: browserGoal.id,
+      goal_revision: browserGoal.revision,
+      expires_at: "2026-10-01T12:00:00Z",
+    };
+    let artifactAttempts = 0;
+    let taskAttempts = 0;
+    let firstArtifactBody: unknown = null;
+    let retryArtifactBody: unknown = null;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) return Promise.resolve(response(page([], 0)));
+      if (url.includes("/api/work-board/events")) return Promise.resolve(response(events(0)));
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([browserGoal]));
+      if (url.endsWith(`/api/work-board/goals/${browserGoal.id}/execution-limits`)) return Promise.resolve(response(limits(browserGoal.revision)));
+      if (url.endsWith("/input-artifacts") && init?.method === "POST") {
+        artifactAttempts += 1;
+        const body = JSON.parse(String(init.body));
+        if (artifactAttempts === 1) {
+          firstArtifactBody = body;
+          return Promise.reject(new TypeError("connection lost after artifact commit"));
+        }
+        retryArtifactBody = body;
+        return Promise.resolve(response(artifact));
+      }
+      if (url.endsWith("/api/work-board/tasks") && init?.method === "POST") {
+        taskAttempts += 1;
+        return Promise.resolve(response({ task: browserTask, idempotent_replay: true }));
+      }
+      if (url.endsWith(`/api/work-board/tasks/${browserTask.task_id}`)) return Promise.resolve(response(detail(browserTask)));
+      return Promise.resolve(response({}));
+    });
+
+    const props = { ownerPrincipalId: "operator:browser-owner", ownerSessionId: "session:browser-owner" };
+    const firstMount = render(<WorkBoardPanel {...props} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Public browser task" }));
+    await waitFor(() => expect(screen.getByLabelText("Browser goal")).toHaveValue(browserGoal.id));
+    fireEvent.change(await screen.findByLabelText("Browser start URL"), { target: { value: "https://public.example/docs" } });
+    fireEvent.change(screen.getByLabelText("Approved URL prefixes"), { target: { value: "https://public.example/docs" } });
+    fireEvent.change(screen.getByLabelText("Browser action 1 URL"), { target: { value: "https://public.example/docs" } });
+    fireEvent.change(screen.getByLabelText("Final check 1 value"), { target: { value: "public.example" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: /I consent to this one bounded task/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Create public browser task" }));
+    await screen.findByRole("button", { name: "Retry exact request" });
+    firstMount.unmount();
+
+    render(<WorkBoardPanel {...props} />);
+    const restored = await screen.findByRole("dialog", { name: "Public browser task" });
+    const retryButton = within(restored).getByRole("button", { name: "Retry exact request" });
+    await waitFor(() => expect(within(restored).getByLabelText("Browser goal")).toHaveValue(browserGoal.id));
+    expect(retryButton).toBeInTheDocument();
+    fireEvent.click(retryButton);
+    await waitFor(() => expect(taskAttempts).toBe(1));
+    expect(retryArtifactBody).toEqual(firstArtifactBody);
+    expect(artifactAttempts).toBe(2);
   });
 });

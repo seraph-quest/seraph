@@ -1,6 +1,7 @@
 """Workflows API — list, toggle, reload reusable multi-step workflows."""
 
 from collections import defaultdict
+from collections.abc import Mapping
 import asyncio
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -13,6 +14,7 @@ import stat
 import tempfile
 import uuid
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -39,6 +41,18 @@ from src.audit.repository import audit_repository
 from src.audit.runtime import log_integration_event
 from src.auth.cancellation import RuntimeRevokedError, assert_runtime_not_revoked
 from src.auth.service import AuthFailure, AuthenticatedOperator, authenticate_session, bind_operator_principal
+from src.browser.task_runner import (
+    BROWSER_MAX_ACTIONS,
+    BROWSER_MAX_CHECKS,
+    BROWSER_MAX_EXTRACT_BYTES,
+    BROWSER_MAX_EXTRACT_CHARS,
+    BROWSER_MAX_REQUESTS,
+    BROWSER_TASK_CAPABILITY_ID,
+    BROWSER_TASK_CAPABILITY_VERSION,
+    BROWSER_TASK_JOB_KIND,
+    browser_artifact_path_for_job,
+    read_browser_artifact_bytes,
+)
 from src.db.engine import get_session
 from src.db.models import (
     AuditEvent,
@@ -123,6 +137,19 @@ _PRIVATE_BOARD_RECEIPT_TOKENS = (
     "payload",
 )
 
+_BROWSER_PREVIEW_STATUS_UNAVAILABLE = "unavailable"
+_BROWSER_PREVIEW_MAX_CHECKS = BROWSER_MAX_CHECKS * (BROWSER_MAX_ACTIONS + 1)
+_BROWSER_PREVIEW_PATH_RE = re.compile(
+    r"^artifacts/work-board/browser/result-[0-9a-f]{32}\.json$"
+)
+_BROWSER_PREVIEW_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+_BROWSER_PREVIEW_ALLOWED_ATTRIBUTES = frozenset(
+    {"href", "title", "aria-label", "alt", "datetime", "src"}
+)
+_BROWSER_PREVIEW_CHECK_KINDS = frozenset(
+    {"url_host", "url_path_prefix", "text_contains", "text_sha256"}
+)
+
 
 def _safe_board_job_reference(value: Any) -> str | None:
     candidate = str(value or "").strip()
@@ -158,6 +185,22 @@ def _safe_board_receipt_token(value: Any) -> str | None:
     return candidate
 
 
+def _safe_board_receipt_time(value: Any) -> str | None:
+    """Preserve one bounded, timezone-aware RFC3339-like receipt timestamp."""
+
+    if not isinstance(value, str) or not value or len(value) > 64:
+        return None
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return value
+
+
 def _safe_board_job_receipts(value: Any) -> list[dict[str, Any]]:
     """Return only artifact/readback identifiers for a board job projection."""
 
@@ -187,6 +230,15 @@ def _safe_board_job_receipts(value: Any) -> list[dict[str, Any]]:
         receipt_kind = item.get("receipt_kind")
         if receipt_kind in {"effect", "readback"}:
             safe["receipt_kind"] = receipt_kind
+        if receipt_kind == "readback":
+            details = item.get("details") if isinstance(item.get("details"), dict) else {}
+            if details.get("verified") is True:
+                readback_id = _safe_board_receipt_token(item.get("readback_id"))
+                verified_at = _safe_board_receipt_time(item.get("verified_at"))
+                if readback_id is not None:
+                    safe["readback_id"] = readback_id
+                if verified_at is not None:
+                    safe["verified_at"] = verified_at
         for key in ("verified", "exists"):
             if isinstance(item.get(key), bool):
                 safe[key] = item[key]
@@ -240,6 +292,63 @@ def _safe_board_job_projection(run: WorkflowRunState) -> dict[str, Any]:
         return parsed
 
     safe_failure = _safe_board_failure_reason(getattr(run, "failure_reason", None))
+    raw_effects = loads(getattr(run, "effect_receipts_json", None), [])
+    artifacts = _safe_board_job_receipts(loads(getattr(run, "artifact_receipts_json", None), []))
+    # The inspector binds artifact and readback identities together. Preserve
+    # that relationship on the artifact row only after proving the exact
+    # browser job/path/digest receipt pair; never weaken the client matcher.
+    if (
+        run.job_kind == BROWSER_TASK_JOB_KIND
+        and run.capability_version == BROWSER_TASK_CAPABILITY_VERSION
+        and run.owner_kind == "service"
+        and run.owner_principal_id == "service:browser-task"
+        and run.service_id == "service:browser-task"
+        and run.status == "succeeded"
+        and run.root_run_identity == run.run_identity
+        and not run.parent_run_identity
+        and not run.parent_job_id
+        and _browser_preview_cleanup_verified(raw_effects, job_id=run.run_identity)
+    ):
+        expected_path = browser_artifact_path_for_job(run.run_identity)
+        for artifact in artifacts:
+            digest = artifact.get("content_sha256")
+            if (
+                artifact.get("artifact_type") != "browser_public_task_result"
+                or artifact.get("exists") is not True
+                or artifact.get("file_path") != expected_path
+                or not digest
+                or artifact.get("artifact_id") != artifact_id_for(
+                    file_path=expected_path,
+                    artifact_type="browser_public_task_result",
+                    producer=BROWSER_TASK_JOB_KIND,
+                    run_id=run.run_identity,
+                    content_sha256=digest,
+                )
+            ):
+                continue
+            expected_readback = "readback-" + _browser_preview_digest(
+                {"job_id": run.run_identity, "path": expected_path, "digest": digest}
+            )[:32]
+            for effect in raw_effects[-100:]:
+                if not isinstance(effect, dict):
+                    continue
+                details = effect.get("details")
+                verified_at = _safe_board_receipt_time(effect.get("verified_at"))
+                if (
+                    effect.get("receipt_kind") == "readback"
+                    and effect.get("effect_type") == "browser_public_task_result"
+                    and effect.get("status") in {"succeeded", "read_back", "reconciled"}
+                    and effect.get("job_id") in (None, "", run.run_identity)
+                    and effect.get("target_path") == expected_path
+                    and effect.get("target_digest") == digest
+                    and effect.get("content_sha256") == digest
+                    and effect.get("readback_id") == expected_readback
+                    and isinstance(details, dict)
+                    and details.get("verified") is True
+                    and verified_at is not None
+                ):
+                    artifact.update(readback_id=expected_readback, verified_at=verified_at, verified=True)
+                    break
     return {
         "job_id": run.run_identity,
         "parent_job_id": getattr(run, "parent_job_id", None),
@@ -260,11 +369,382 @@ def _safe_board_job_projection(run: WorkflowRunState) -> dict[str, Any]:
         "attempt_count": int(getattr(run, "attempt_count", 0) or 0),
         "max_attempts": int(getattr(run, "max_attempts", 1) or 1),
         "failure_reason": safe_failure,
-        "artifacts": _safe_board_job_receipts(loads(getattr(run, "artifact_receipts_json", None), [])),
-        "effects": _safe_board_job_receipts(loads(getattr(run, "effect_receipts_json", None), [])),
+        "artifacts": artifacts,
+        "effects": _safe_board_job_receipts(raw_effects),
         "started_at": run.started_at.isoformat() if run.started_at else None,
         "updated_at": run.updated_at.isoformat() if run.updated_at else None,
         "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+    }
+
+
+def _browser_preview_digest(value: Any) -> str:
+    """Match the browser runner's canonical identity digest."""
+
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _browser_preview_safe_url(value: Any) -> bool:
+    """Validate the writer's redacted final URL without returning it."""
+
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        if len(value.encode("utf-8")) > 2 * 1024:
+            return False
+    except UnicodeEncodeError:
+        return False
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
+        return False
+    try:
+        parsed = urlsplit(value.strip())
+        port = parsed.port
+    except (TypeError, ValueError):
+        return False
+    if (
+        parsed.scheme.lower() != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in (None, 443)
+        or parsed.fragment
+        or "\\" in parsed.path
+        or any(segment in {".", ".."} for segment in parsed.path.split("/"))
+    ):
+        return False
+    return True
+
+
+def _browser_preview_safe_text(value: Any, *, max_bytes: int) -> str | None:
+    if not isinstance(value, str) or "\x00" in value:
+        return None
+    try:
+        if len(value.encode("utf-8")) > max_bytes:
+            return None
+    except UnicodeEncodeError:
+        return None
+    return value
+
+
+def _browser_preview_extracts(value: Any) -> list[dict[str, Any]] | None:
+    if not isinstance(value, list) or len(value) > BROWSER_MAX_ACTIONS:
+        return None
+    result: list[dict[str, Any]] = []
+    expected_keys = {"action_index", "kind", "selector", "attribute", "value"}
+    for item in value:
+        if not isinstance(item, Mapping) or set(item) != expected_keys:
+            return None
+        action_index = item.get("action_index")
+        if type(action_index) is not int or not 0 <= action_index < BROWSER_MAX_ACTIONS:
+            return None
+        if item.get("kind") != "extract":
+            return None
+        selector = _browser_preview_safe_text(item.get("selector"), max_bytes=2 * 1024)
+        extracted = _browser_preview_safe_text(
+            item.get("value"),
+            max_bytes=BROWSER_MAX_EXTRACT_BYTES,
+        )
+        if (
+            selector is None
+            or extracted is None
+            or len(extracted) > BROWSER_MAX_EXTRACT_CHARS
+        ):
+            return None
+        attribute = item.get("attribute")
+        if attribute is not None:
+            attribute = _browser_preview_safe_text(attribute, max_bytes=64)
+            if attribute not in _BROWSER_PREVIEW_ALLOWED_ATTRIBUTES:
+                return None
+        result.append(
+            {
+                "action_index": action_index,
+                "kind": "extract",
+                "attribute": attribute,
+                "value": extracted,
+                # The selector is validated against the writer shape but is
+                # intentionally omitted from the operator response.
+                "selector_digest": _browser_preview_digest(selector),
+            }
+        )
+    return result
+
+
+def _browser_preview_checks(value: Any) -> list[dict[str, Any]] | None:
+    if not isinstance(value, list) or len(value) > _BROWSER_PREVIEW_MAX_CHECKS:
+        return None
+    result: list[dict[str, Any]] = []
+    expected_keys = {
+        "action_index",
+        "kind",
+        "selector_digest",
+        "expected_digest",
+        "actual_digest",
+        "passed",
+    }
+    for item in value:
+        if not isinstance(item, Mapping) or set(item) != expected_keys:
+            return None
+        action_index = item.get("action_index")
+        if action_index is not None and (
+            type(action_index) is not int
+            or not -1 <= action_index < BROWSER_MAX_ACTIONS
+        ):
+            return None
+        kind = item.get("kind")
+        if kind not in _BROWSER_PREVIEW_CHECK_KINDS:
+            return None
+        selector_digest = item.get("selector_digest")
+        if selector_digest is not None and (
+            not isinstance(selector_digest, str)
+            or not _BROWSER_PREVIEW_DIGEST_RE.fullmatch(selector_digest)
+        ):
+            return None
+        expected_digest = item.get("expected_digest")
+        if not isinstance(expected_digest, str) or not _BROWSER_PREVIEW_DIGEST_RE.fullmatch(expected_digest):
+            return None
+        actual_digest = item.get("actual_digest")
+        if actual_digest is not None and (
+            not isinstance(actual_digest, str)
+            or not _BROWSER_PREVIEW_DIGEST_RE.fullmatch(actual_digest)
+        ):
+            return None
+        if type(item.get("passed")) is not bool:
+            return None
+        result.append(
+            {
+                "action_index": action_index,
+                "kind": kind,
+                "selector_digest": selector_digest,
+                "expected_digest": expected_digest,
+                "actual_digest": actual_digest,
+                "passed": item["passed"],
+            }
+        )
+    return result
+
+
+def _browser_preview_cleanup_verified(effects: Any, *, job_id: str) -> bool:
+    if not isinstance(effects, list):
+        return False
+    for item in reversed(effects[-100:]):
+        if not isinstance(item, Mapping):
+            continue
+        if item.get("receipt_kind") != "effect" or item.get("effect_type") != "browser_context_cleanup":
+            continue
+        if item.get("status") != "succeeded":
+            continue
+        if item.get("job_id") not in (None, "", job_id):
+            continue
+        details = item.get("details")
+        if not isinstance(details, Mapping) or details.get("memory_status") != "no_learning":
+            continue
+        cleanup_status = details.get("cleanup_status")
+        if cleanup_status == "cleanup_verified" and details.get("context_not_started") is False:
+            return True
+        if cleanup_status == "not_needed" and details.get("context_not_started") is True:
+            return True
+    return False
+
+
+def _browser_preview_projection(
+    run: WorkflowRunState,
+    *,
+    task: WorkBoardTask | None,
+    attempt: WorkBoardAttempt | None,
+    goal: Goal | None,
+) -> dict[str, Any] | None:
+    """Return the verified browser result body for one owned root.
+
+    Every identity, receipt, file, and schema check is server-derived.  The
+    caller supplies no path or artifact selector, and all failures collapse to
+    ``None`` so the authenticated metadata route remains useful and bounded.
+    """
+
+    if task is None or attempt is None or goal is None:
+        return None
+    task_id = _safe_board_job_reference(getattr(task, "task_id", None))
+    attempt_id = _safe_board_job_reference(getattr(attempt, "attempt_id", None))
+    job_id = _safe_board_job_reference(getattr(run, "run_identity", None))
+    if not task_id or not attempt_id or not job_id:
+        return None
+    expected_job_id = f"browser-task:{task_id}:{attempt_id}"
+    if job_id != expected_job_id or getattr(attempt, "workflow_run_id", None) != expected_job_id:
+        return None
+    if (
+        task.capability_id != BROWSER_TASK_CAPABILITY_ID
+        or task.owner_principal_id != goal.owner_principal_id
+        or task.owner_session_id != goal.owner_session_id
+        or task.goal_id != goal.id
+        or type(task.goal_revision) is not int
+        or task.goal_revision < 1
+        or goal.revision != task.goal_revision
+        or attempt.task_id != task.task_id
+        or run.status != "succeeded"
+        or run.job_kind != BROWSER_TASK_JOB_KIND
+        or run.capability_version != BROWSER_TASK_CAPABILITY_VERSION
+        or run.owner_kind != "service"
+        or run.owner_principal_id != "service:browser-task"
+        or run.service_id != "service:browser-task"
+        or run.root_run_identity != expected_job_id
+        or run.parent_run_identity not in (None, "")
+        or run.parent_job_id not in (None, "")
+        or run.session_id != task.owner_session_id
+        or run.operator_session_id != task.owner_session_id
+        or run.goal_id != task.goal_id
+        or run.goal_revision != task.goal_revision
+    ):
+        return None
+
+    def _loads(value: str | None) -> Any:
+        try:
+            return json.loads(value or "")
+        except (TypeError, ValueError):
+            return None
+
+    artifacts = _loads(getattr(run, "artifact_receipts_json", None))
+    effects = _loads(getattr(run, "effect_receipts_json", None))
+    if not _browser_preview_cleanup_verified(effects, job_id=expected_job_id):
+        return None
+    expected_path = browser_artifact_path_for_job(expected_job_id)
+    if not _BROWSER_PREVIEW_PATH_RE.fullmatch(expected_path):
+        return None
+
+    artifact: Mapping[str, Any] | None = None
+    if isinstance(artifacts, list):
+        for item in reversed(artifacts[-100:]):
+            if not isinstance(item, Mapping):
+                continue
+            if item.get("job_id") not in (None, "", expected_job_id):
+                continue
+            if (
+                item.get("exists") is True
+                and item.get("artifact_type") == "browser_public_task_result"
+                and item.get("file_path") == expected_path
+                and isinstance(item.get("content_sha256"), str)
+                and _BROWSER_PREVIEW_DIGEST_RE.fullmatch(item["content_sha256"])
+            ):
+                expected_artifact_id = artifact_id_for(
+                    file_path=expected_path,
+                    artifact_type="browser_public_task_result",
+                    producer=BROWSER_TASK_JOB_KIND,
+                    run_id=expected_job_id,
+                    content_sha256=item["content_sha256"],
+                )
+                if item.get("artifact_id") != expected_artifact_id:
+                    continue
+                if item.get("size_bytes") is not None and (
+                    type(item.get("size_bytes")) is not int
+                    or not 0 <= item["size_bytes"] <= BROWSER_MAX_EXTRACT_BYTES
+                ):
+                    continue
+                artifact = item
+                break
+    if artifact is None:
+        return None
+    artifact_digest = artifact["content_sha256"]
+    readback: Mapping[str, Any] | None = None
+    if isinstance(effects, list):
+        for item in reversed(effects[-100:]):
+            if not isinstance(item, Mapping):
+                continue
+            if item.get("job_id") not in (None, "", expected_job_id):
+                continue
+            if (
+                item.get("receipt_kind") != "readback"
+                or item.get("effect_type") != "browser_public_task_result"
+                or item.get("status") not in {"succeeded", "read_back", "reconciled"}
+                or item.get("target_path") != expected_path
+                or item.get("target_digest") != artifact_digest
+                or item.get("content_sha256") != artifact_digest
+                or item.get("details") is not None
+                and (
+                    not isinstance(item.get("details"), Mapping)
+                    or item["details"].get("verified") is not True
+                )
+            ):
+                continue
+            details = item.get("details")
+            if not isinstance(details, Mapping) or details.get("verified") is not True:
+                continue
+            verified_at = _safe_board_receipt_time(item.get("verified_at"))
+            expected_readback_id = "readback-" + _browser_preview_digest(
+                {"job_id": expected_job_id, "path": expected_path, "digest": artifact_digest}
+            )[:32]
+            if item.get("readback_id") != expected_readback_id or verified_at is None:
+                continue
+            if details.get("size_bytes") is not None and (
+                type(details.get("size_bytes")) is not int
+                or not 0 <= details["size_bytes"] <= BROWSER_MAX_EXTRACT_BYTES
+            ):
+                continue
+            readback = item
+            break
+    if readback is None:
+        return None
+
+    payload_bytes = read_browser_artifact_bytes(
+        expected_path,
+        workspace_root=settings.workspace_dir,
+        max_bytes=BROWSER_MAX_EXTRACT_BYTES,
+    )
+    if payload_bytes is None or hashlib.sha256(payload_bytes).hexdigest() != artifact_digest:
+        return None
+    if artifact.get("size_bytes") is not None and artifact["size_bytes"] != len(payload_bytes):
+        return None
+    readback_details = readback.get("details")
+    if (
+        isinstance(readback_details, Mapping)
+        and readback_details.get("size_bytes") is not None
+        and readback_details["size_bytes"] != len(payload_bytes)
+    ):
+        return None
+    try:
+        payload = json.loads(payload_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(payload, Mapping) or set(payload) != {
+        "schema_version",
+        "capability_id",
+        "task_id",
+        "attempt_id",
+        "final_url",
+        "extracts",
+        "checks",
+        "request_count",
+    }:
+        return None
+    if (
+        type(payload.get("schema_version")) is not int
+        or payload["schema_version"] != 1
+        or payload.get("capability_id") != BROWSER_TASK_CAPABILITY_ID
+        or payload.get("task_id") != task.task_id
+        or payload.get("attempt_id") != attempt.attempt_id
+        or not _browser_preview_safe_url(payload.get("final_url"))
+        or type(payload.get("request_count")) is not int
+        or not 0 <= payload["request_count"] <= BROWSER_MAX_REQUESTS
+    ):
+        return None
+    extracts = _browser_preview_extracts(payload.get("extracts"))
+    checks = _browser_preview_checks(payload.get("checks"))
+    if extracts is None or checks is None:
+        return None
+    return {
+        "schema_version": 1,
+        "capability_id": BROWSER_TASK_CAPABILITY_ID,
+        "artifact_id": artifact["artifact_id"],
+        "readback_id": readback["readback_id"],
+        "content_sha256": artifact_digest,
+        "file_path": expected_path,
+        "extracts": extracts,
+        "checks": checks,
+        "request_count": payload["request_count"],
     }
 
 _WORKFLOW_FILENAME_RE = re.compile(r"[^a-zA-Z0-9_-]+")
@@ -6578,7 +7058,11 @@ async def recover_repo_change(job_id: str, request: Request):
 
 @router.get("/workflows/jobs/{job_id}")
 @router.get("/jobs/{job_id}")
-async def get_board_bound_workflow_job(job_id: str, request: Request):
+async def get_board_bound_workflow_job(
+    job_id: str,
+    request: Request,
+    include_browser_result: bool = Query(False),
+):
     """Return a safe durable-run projection for an owned board attempt.
 
     Generic workflow reads intentionally remain separate. This route first
@@ -6704,7 +7188,45 @@ async def get_board_bound_workflow_job(job_id: str, request: Request):
             raise HTTPException(status_code=404, detail={"code": "workflow_job_not_found"})
         if not bound_session and not is_proven_descendant:
             raise HTTPException(status_code=404, detail={"code": "workflow_job_not_found"})
-        return {"job": _safe_board_job_projection(run)}
+        projected = _safe_board_job_projection(run)
+        if include_browser_result:
+            task_attempt = (
+                await db.execute(
+                    select(WorkBoardTask, WorkBoardAttempt)
+                    .join(WorkBoardAttempt, WorkBoardAttempt.task_id == WorkBoardTask.task_id)
+                    .where(
+                        WorkBoardAttempt.workflow_run_id == requested,
+                        WorkBoardTask.owner_principal_id == principal_id,
+                        WorkBoardTask.owner_session_id == session_id,
+                    )
+                    .limit(2)
+                )
+            ).first()
+            preview_task: WorkBoardTask | None = None
+            preview_attempt: WorkBoardAttempt | None = None
+            preview_goal: Goal | None = None
+            if task_attempt is not None:
+                preview_task, preview_attempt = task_attempt
+                preview_goal = (
+                    await db.execute(
+                        select(Goal).where(
+                            Goal.id == preview_task.goal_id,
+                            Goal.owner_principal_id == principal_id,
+                            Goal.owner_session_id == session_id,
+                        )
+                    )
+                ).scalar_one_or_none()
+            browser_result = _browser_preview_projection(
+                run,
+                task=preview_task,
+                attempt=preview_attempt,
+                goal=preview_goal,
+            )
+            projected["browser_result_status"] = (
+                "available" if browser_result is not None else _BROWSER_PREVIEW_STATUS_UNAVAILABLE
+            )
+            projected["browser_result"] = browser_result
+        return {"job": projected}
 
 
 @router.get("/workflows")

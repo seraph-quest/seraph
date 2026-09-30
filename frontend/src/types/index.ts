@@ -359,6 +359,9 @@ export type WorkBoardVerificationStatus =
 
 export interface WorkBoardReceiptReference {
   artifact_id?: string;
+  /** Browser runner's safe artifact handle before board projection normalization. */
+  artifact_ref?: string;
+  artifact_sha256?: string;
   artifact_type?: string;
   file_path?: string;
   content_sha256?: string;
@@ -382,6 +385,32 @@ export interface WorkBoardReceiptReference {
   readback_status?: WorkBoardReadbackStatus;
   verification_status?: WorkBoardVerificationStatus;
   outcome?: string;
+  receipt_kind?: "effect" | "readback" | string;
+  readback_digest?: string;
+  checkpoint_id?: string;
+  action_index?: number;
+  action_count?: number;
+  request_count?: number;
+  durable_status?: string;
+  cleanup_status?: string;
+  memory_status?: "no_learning" | string;
+  actual_page_url?: string;
+  actual_page_url_digest?: string;
+}
+
+export interface WorkBoardBrowserExecution {
+  capability_id: "browser.public-task.v1";
+  job_id: string;
+  durable_status: string;
+  action_index: number | null;
+  action_count: number | null;
+  request_count: number | null;
+  cleanup_status: "cleanup_verified" | "not_needed" | "cleanup_unknown" | "unknown";
+  memory_status: "no_learning" | "unknown";
+  readback_id: string | null;
+  artifact_id: string | null;
+  file_path: string | null;
+  content_sha256: string | null;
 }
 
 export interface WorkBoardAttempt {
@@ -399,6 +428,7 @@ export interface WorkBoardAttempt {
   ended_at: string | null;
   outcome: string | null;
   receipt_refs: WorkBoardReceiptReference[];
+  browser_execution?: WorkBoardBrowserExecution | null;
   readback_status: WorkBoardReadbackStatus;
   verification_status: WorkBoardVerificationStatus;
   created_at: string;
@@ -418,6 +448,7 @@ export interface WorkBoardTask {
   title: string;
   body: string;
   capability_id: string | null;
+  input_artifact_id?: string | null;
   typed_input_ref: string | null;
   typed_input_digest: string | null;
   executor_id: string | null;
@@ -437,6 +468,7 @@ export interface WorkBoardTask {
   dependency_count: number;
   completed_dependency_count: number;
   dispatch_rank: number | null;
+  dispatch_wait_reason?: string | null;
   recovery_action: WorkBoardRecoveryAction | null;
   readback_status: WorkBoardReadbackStatus;
   verification_status: WorkBoardVerificationStatus;
@@ -511,7 +543,59 @@ export interface WorkBoardExecutionLimits {
   default_max_runtime_seconds: number;
   hard_max_runtime_seconds: number;
   attempt_limit: number;
+  max_outstanding_jobs?: number;
   limit_source: "goal_admission_budget" | "default";
+  browser_task_policy?: BrowserTaskPolicy | null;
+}
+
+export interface BrowserTaskPolicyRuleSet {
+  rules: string[];
+  truncated: boolean;
+  known: boolean;
+}
+
+export interface BrowserTaskPolicy {
+  policy_state: "confirmed" | "unknown";
+  policy_source: "configured_site_policy" | null;
+  allowlist: BrowserTaskPolicyRuleSet;
+  blocklist: BrowserTaskPolicyRuleSet;
+  limits: {
+    max_runtime_seconds: number;
+    hard_max_runtime_seconds: number;
+    max_actions: number;
+    max_navigations: number;
+    max_requests: number;
+    max_extract_bytes: number;
+    max_browser_contexts: number;
+    ready_capacity: number;
+    max_attempts: number;
+    max_outstanding_jobs: number;
+    inference: "none";
+  };
+}
+
+export interface WorkBoardInputArtifactCreateRequest {
+  schema_version: 1;
+  capability_id: "browser.public-task.v1";
+  goal_id: string;
+  goal_revision: number;
+  input: Record<string, unknown>;
+  idempotency_key: string;
+}
+
+export interface WorkBoardInputArtifactResponse {
+  artifact_id: string;
+  typed_input_ref: string;
+  typed_input_digest: string;
+  capability_id: "browser.public-task.v1";
+  goal_id: string;
+  goal_revision: number;
+  expires_at: string;
+  state?: string | null;
+  size_bytes?: number | null;
+  bound_task_id?: string | null;
+  bound_task_revision?: number | null;
+  revision?: number | null;
 }
 
 export interface WorkBoardTaskCreateRequest {
@@ -521,6 +605,7 @@ export interface WorkBoardTaskCreateRequest {
   goal_revision: number;
   status?: "triage" | "todo";
   capability_id?: string | null;
+  input_artifact_id?: string | null;
   typed_input_ref?: string | null;
   typed_input_digest?: string | null;
   executor_id?: string | null;

@@ -114,6 +114,28 @@ async def test_assignee_filter_is_owner_scoped(async_db):
 
 
 @pytest.mark.asyncio
+async def test_api_task_projection_uses_caller_readonly_vault_path(async_db, monkeypatch):
+    """An in-transaction projection must not open the audited vault writer."""
+
+    task_id = await _seed_task(async_db, OWNER, key_suffix="readonly-projection")
+    audited = AsyncMock(side_effect=AssertionError("audited redaction must not run"))
+    readonly = AsyncMock(side_effect=lambda _db, value, **_kwargs: value)
+    monkeypatch.setattr("src.api.work_board.vault_redaction.redact_secrets_in_text", audited)
+    monkeypatch.setattr(
+        "src.api.work_board.vault_redaction.redact_secrets_in_text_readonly",
+        readonly,
+    )
+
+    async with async_db() as db:
+        detail = await WorkBoardRepository().get_detail(db, OWNER, task_id)
+        payload = await _safe_task_payload(detail["task"], db=db)
+
+    assert payload["task_id"] == task_id
+    assert readonly.await_count == 2
+    audited.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_http_assignee_filter_returns_only_matching_owner_tasks(client, async_db):
     await _seed_task(async_db, OWNER, key_suffix="http-assignee-a", assignee_id="operator:a")
     await _seed_task(async_db, OWNER, key_suffix="http-assignee-b", assignee_id="operator:b")

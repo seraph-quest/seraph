@@ -582,6 +582,10 @@ class GuardianInboxAction(SQLModel, table=True):
     result_revision: int = Field(default=1)
     task_id: Optional[str] = Field(default=None, index=True)
     safe_result_json: str = Field(default="{}")
+    # A bounded, server-redacted operator reason.  Keep this nullable so
+    # rows written before inbox history shipped remain distinguishable from a
+    # new action that explicitly supplied no reason.
+    safe_reason: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=_now, index=True)
 
 

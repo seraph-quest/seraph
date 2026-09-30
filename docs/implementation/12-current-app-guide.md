@@ -419,6 +419,62 @@ data egress.
 
 ## Memory
 
+### Cockpit navigation and canonical inspector
+
+The integration target provides six persistent cockpit sections: **Home**,
+**Inbox**, **Work**, **Goals**, **Library**, and **Connections**. These select
+existing cockpit surfaces and retain the conversation, selected task, and
+window layout. Home is a bounded operational summary, not a second scheduler:
+page counts are labelled as such, failed refreshes preserve last-known data,
+and unavailable queue or spend evidence remains unavailable. Pending approvals
+open the existing approval surface.
+
+Connections labels Seraph presence as unknown until a complete continuity
+payload has been confirmed. A failed refresh retains previously confirmed
+values with explicit stale and last-confirmed labels. Missing metadata does
+not establish a clear queue, ready reach, or active proactive guidance; the
+operator can continue using Work while continuity metadata is unavailable.
+
+Inbox has one active owner for the candidate list and selected inspector.
+Selected detail reads at most 20 append-only action receipts, with explicit
+history truncation. New optional action reasons are bounded and server-redacted;
+legacy receipts show unavailable reasons rather than invented explanations.
+The receipt projection preserves action response and exact replay semantics.
+Last-known evidence remains readable during a failed refresh, while actions
+require current confirmed detail. Page-scoped filters do not claim global
+search. Accepting a follow-up opens its existing Triage task for review; it does
+not authorize execution. Work shows the Inbox origin only after an
+authenticated candidate lookup confirms the exact accepted task relation;
+the origin link returns to that decision. Inbox owns disposition controls and
+the adjacent evidence inspector remains read-only.
+
+Library reads canonical records through authenticated, owner-session-scoped
+`GET /api/memory/records` and `GET /api/memory/records/{id}`. Search is literal
+SQL text matching with bounded pagination; it performs no embedding or model
+request. The list is metadata-first. Selecting a record loads redacted content,
+bounded provenance, source/conflict state, and authorized task, artifact,
+readback, and audit references. Explicit history can inspect superseded or
+archived records; tombstoned, ownerless, and foreign-session records are not
+discoverable. This session boundary does not establish cross-login identity
+continuity. Task-linked artifact and readback references open the existing
+Work evidence route. Artifact inspection requires the authenticated job,
+parent lineage, identity and digest; a parent readback effect is matched by
+its exact effect and content digests rather than a fabricated artifact handle.
+Evidence-load failures appear in Work with a bounded explanation and retry
+guidance, including when the advanced operator pane is closed.
+
+Ordinary correction, pin, and archive/redact use existing canonical memory
+controls with a reason and an authoritative refresh. Strong deletion uses the
+separate acknowledged delete/export live control; archive is not deletion.
+Reviewed task learning opens the existing Work Board memory review. Its signed
+proposal and correction path supplies later comparison authority; a generic
+text correction does not acquire that authority. No automatic learning follows
+from opening Library, Home, or Inbox.
+
+These are the intended post-merge contracts. Milestone PRs carry branch-specific
+validation until the reviewed epic PR lands on `develop`; live provider quality
+and external-account behavior remain explicitly unverified.
+
 **Shipped foundation:** Seraph owns canonical local memory and can augment
 retrieval through guarded provider integrations.
 

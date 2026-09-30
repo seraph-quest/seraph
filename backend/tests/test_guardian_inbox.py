@@ -986,3 +986,214 @@ async def test_inbox_detail_returns_bound_job_readback_metadata(async_db, tmp_pa
         for ref in detail["evidence_refs"]
     )
     assert "details" not in json.dumps(detail["job"])
+
+
+@pytest.mark.asyncio
+async def test_action_reasons_are_redacted_for_all_actions_without_changing_replay_digest(
+    async_db, tmp_path, monkeypatch
+):
+    secret = "inbox-action-secret"
+    preview_key = Fernet.generate_key()
+    async with async_db() as db:
+        db.add(
+            Secret(
+                key="inbox-action-secret",
+                encrypted_value=Fernet(preview_key).encrypt(secret.encode()).decode(),
+            )
+        )
+    monkeypatch.setattr(settings, "vault_encryption_key", preview_key.decode())
+
+    cases = [
+        ("snooze", "packet-reason-snooze", datetime.now(timezone.utc) + timedelta(minutes=20)),
+        ("dismiss", "packet-reason-dismiss", None),
+        ("accept_followup", "packet-reason-accept", None),
+    ]
+    receipts: list[tuple[str, str, dict[str, object], datetime | None]] = []
+    reason = f"operator follow-up contains {secret}"
+    for action, packet_id, until in cases:
+        _, _, packet = await _seed_packet(async_db, tmp_path, monkeypatch, packet_id=packet_id)
+        row = await ensure_inbox_disposition(packet_id=packet.id)
+        assert row is not None
+        idempotency_key = f"reason-{action}"
+        first = await apply_action(
+            owner_principal_id=OWNER,
+            owner_session_id=SESSION,
+            item_id=row.id,
+            action=action,
+            expected_revision=1,
+            idempotency_key=idempotency_key,
+            until=until,
+            reason=reason,
+        )
+        replay = await apply_action(
+            owner_principal_id=OWNER,
+            owner_session_id=SESSION,
+            item_id=row.id,
+            action=action,
+            expected_revision=1,
+            idempotency_key=idempotency_key,
+            until=until,
+            reason=reason,
+        )
+        assert replay == first
+        receipts.append((row.id, idempotency_key, first, until))
+
+    async with async_db() as db:
+        actions = list((await db.execute(select(GuardianInboxAction))).scalars())
+    assert len(actions) == len(cases)
+    actions_by_key = {action.idempotency_key: action for action in actions}
+    for item_id, idempotency_key, result, until in receipts:
+        action = actions_by_key[idempotency_key]
+        expected_digest = inbox_module._digest(
+            inbox_module._json(
+                {
+                    "action": action.action,
+                    "expected_revision": 1,
+                    "idempotency_key": idempotency_key,
+                    "item_id": item_id,
+                    "reason": inbox_module._safe_action_reason(reason),
+                    "until": inbox_module._iso(inbox_module._utc(until)),
+                }
+            )
+        )
+        assert action.payload_digest == expected_digest
+        assert action.safe_reason == "operator follow-up contains [redacted secret]"
+        assert secret not in action.safe_reason
+        assert result["receipt_id"] == action.id
+
+
+@pytest.mark.asyncio
+async def test_inbox_detail_projects_bounded_owner_fenced_action_history(async_db, tmp_path, monkeypatch):
+    _, _, packet = await _seed_packet(async_db, tmp_path, monkeypatch, packet_id="packet-action-history")
+    row = await ensure_inbox_disposition(packet_id=packet.id)
+    assert row is not None
+    preview_key = Fernet.generate_key()
+    secret = "history-secret-value"
+    base = datetime.now(timezone.utc)
+    async with async_db() as db:
+        db.add(
+            Secret(
+                key="history-secret",
+                encrypted_value=Fernet(preview_key).encrypt(secret.encode()).decode(),
+            )
+        )
+        db.add(
+            WorkBoardTask(
+                task_id="foreign-history-task",
+                owner_principal_id="operator:foreign",
+                owner_session_id="foreign-session",
+                goal_id="foreign-goal",
+                idempotency_scope="history-test",
+                idempotency_key="foreign-history-task",
+            )
+        )
+        for index in range(21):
+            db.add(
+                GuardianInboxAction(
+                    id=f"history-{index:02d}",
+                    owner_principal_id=OWNER,
+                    owner_session_id=SESSION,
+                    item_id=row.id,
+                    idempotency_key=f"history-key-{index:02d}",
+                    payload_digest="d" * 64,
+                    action="unknown-action" if index == 15 else "dismiss",
+                    prior_revision=index + 1,
+                    result_revision=index + 2,
+                    task_id="foreign-history-task" if index == 17 else None,
+                    safe_result_json=json.dumps(
+                        {
+                            "state": "unknown-state" if index == 15 else "dismissed",
+                            "private": "must not cross projection",
+                        }
+                    ),
+                    safe_reason=(
+                        ""
+                        if index == 20
+                        else None
+                        if index == 19
+                        else f"operator note {secret}"
+                        if index == 18
+                        else "x" * 700
+                        if index == 16
+                        else "ordinary note"
+                    ),
+                    created_at=base + timedelta(seconds=index),
+                )
+            )
+        # Both the foreign principal and foreign session share the item id;
+        # neither is eligible for this owner's detail history.
+        db.add(
+            GuardianInboxAction(
+                id="history-foreign-principal",
+                owner_principal_id="operator:foreign",
+                owner_session_id=SESSION,
+                item_id=row.id,
+                idempotency_key="history-foreign-principal",
+                payload_digest="e" * 64,
+                action="dismiss",
+                prior_revision=99,
+                result_revision=100,
+                safe_result_json=json.dumps({"state": "dismissed", "private": "foreign"}),
+                safe_reason="foreign private reason",
+                created_at=base + timedelta(days=1),
+            )
+        )
+        db.add(
+            GuardianInboxAction(
+                id="history-foreign-session",
+                owner_principal_id=OWNER,
+                owner_session_id="foreign-session",
+                item_id=row.id,
+                idempotency_key="history-foreign-session",
+                payload_digest="f" * 64,
+                action="dismiss",
+                prior_revision=98,
+                result_revision=99,
+                safe_result_json=json.dumps({"state": "dismissed", "private": "foreign"}),
+                safe_reason="foreign private reason",
+                created_at=base + timedelta(days=1),
+            )
+        )
+    monkeypatch.setattr(settings, "vault_encryption_key", preview_key.decode())
+
+    async with async_db() as db:
+        action_count_before = len(list((await db.execute(select(GuardianInboxAction))).scalars()))
+        audit_count_before = len(list((await db.execute(select(AuditEvent))).scalars()))
+    detail = await get_owned_item(owner_principal_id=OWNER, owner_session_id=SESSION, item_id=row.id)
+    history = detail["action_history"]
+    assert len(history) == 20
+    assert detail["action_history_truncated"] is True
+    assert history[0]["receipt_id"] == "history-20"
+    assert history[-1]["receipt_id"] == "history-01"
+    allowed_fields = {
+        "receipt_id",
+        "action",
+        "created_at",
+        "expected_revision",
+        "result_revision",
+        "task_id",
+        "outcome",
+        "reason_state",
+        "safe_reason",
+    }
+    assert all(set(entry) == allowed_fields for entry in history)
+    assert all("foreign" not in json.dumps(entry) for entry in history)
+    by_id = {entry["receipt_id"]: entry for entry in history}
+    assert by_id["history-20"]["reason_state"] == "not_provided"
+    assert by_id["history-19"]["reason_state"] == "unavailable"
+    assert by_id["history-18"]["safe_reason"] == "operator note [redacted secret]"
+    assert by_id["history-18"]["reason_state"] == "provided"
+    assert len(by_id["history-16"]["safe_reason"]) == 500
+    assert by_id["history-17"]["task_id"] is None
+    assert by_id["history-15"]["action"] == "unavailable"
+    assert by_id["history-15"]["outcome"] == "unavailable"
+    assert all(
+        entry["outcome"] in {"dismissed", "unavailable"}
+        for entry in history
+    )
+
+    async with async_db() as db:
+        action_count_after = len(list((await db.execute(select(GuardianInboxAction))).scalars()))
+        audit_count_after = len(list((await db.execute(select(AuditEvent))).scalars()))
+    assert action_count_after == action_count_before
+    assert audit_count_after == audit_count_before

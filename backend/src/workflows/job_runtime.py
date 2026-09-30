@@ -544,16 +544,17 @@ def _safe_structure(value: Any, *, max_depth: int = 3) -> Any:
         for key, item in value.items():
             key_text = str(key)
             normalized_key = re.sub(r"[^a-z0-9]", "", key_text.lower())
-            # A parent fencing counter is a monotonic CAS identity, not a
-            # bearer credential. Preserve only its typed non-negative integer
-            # form so durable child authority can be rebound and verified
-            # after recovery; all other token-like values remain redacted.
-            is_parent_fencing_counter = (
-                normalized_key == "parentfencingtoken"
+            # Parent and board fencing counters are monotonic CAS identities,
+            # not bearer credentials. Preserve only their typed non-negative
+            # integer form so durable child authority can be rebound and
+            # verified after recovery; all other token-like values remain
+            # redacted, including strings and negative values.
+            is_fencing_counter = (
+                normalized_key in {"parentfencingtoken", "boardfencingtoken"}
                 and type(item) is int
                 and item >= 0
             )
-            if not is_parent_fencing_counter and (any(
+            if not is_fencing_counter and (any(
                 marker in normalized_key
                 for marker in (
                     "secret",
@@ -2313,6 +2314,24 @@ class DurableJobRepository:
                 return None
             db.expunge(run)
             return _serialize(run)
+
+    async def get_jobs(self, job_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
+        """Read a bounded set of typed jobs in one readonly session."""
+
+        bounded_ids = list(dict.fromkeys(str(item).strip() for item in job_ids if str(item).strip()))[:100]
+        if not bounded_ids:
+            return {}
+        async with self._session() as db:
+            runs = (
+                await db.execute(
+                    select(WorkflowRunState).where(WorkflowRunState.run_identity.in_(bounded_ids))
+                )
+            ).scalars().all()
+            result: dict[str, dict[str, Any]] = {}
+            for run in runs:
+                db.expunge(run)
+                result[str(run.run_identity)] = _serialize(run)
+            return result
 
     async def assert_active_lease(
         self,

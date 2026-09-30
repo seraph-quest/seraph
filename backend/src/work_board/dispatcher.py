@@ -21,10 +21,11 @@ from typing import Any, Mapping
 import uuid
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from src.approval.repository import approval_repository
 from src.approval.runtime import reset_runtime_context, set_runtime_context
+from src.artifacts.registry import artifact_id_for
 from src.auth.service import AuthFailure, authenticate_session
 from src.db.engine import get_session
 from src.db.models import (
@@ -55,6 +56,7 @@ from src.work_board.repository import (
     WorkBoardOwner,
     WorkBoardRepository,
     _utc_datetime,
+    effective_browser_limits,
 )
 from src.work_board.tools import WorkBoardWorkerRequest
 from src.tools.work_board_tools import WorkBoardWorkerHost
@@ -81,6 +83,10 @@ DISPATCHER_PRINCIPAL = "service:work-board"
 DISPATCHER_SERVICE = "service:work-board"
 DISPATCHER_SESSION = "service-session:work-board"
 _SAFE_HANDOFF_ATTEMPT_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
+_BROWSER_RESULT_PATH = re.compile(
+    r"^artifacts/work-board/browser/result-[0-9a-f]{32}\.json$"
+)
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 # All managed scheduler and API dispatcher entry points share this registry.
 # It contains only live server asyncio tasks; it is not persisted or exposed
@@ -118,7 +124,12 @@ _TYPED_INPUT_FAILURE_CODES = frozenset(
         "typed_input_goal_binding_mismatch",
         "typed_input_invalid",
         "typed_input_too_large",
+        "typed_input_authority_field",
+        "typed_input_category_invalid",
         "capability_unregistered",
+        "browser_slot_busy",
+        "browser_input_invalid",
+        "browser_input_artifact_required",
     }
 )
 
@@ -128,6 +139,12 @@ class CapabilitySpec:
     capability_id: str
     version: str
     blocked_reason: str | None = None
+    input_category: str = "task"
+    # Typed input artifacts are an explicit public-storage boundary.  New
+    # capabilities remain ineligible unless their registration opts in after
+    # a storage/privacy review; legacy execution continues to use its own
+    # workspace references and does not consult this flag.
+    secret_like: bool = True
 
 
 class TypedInputError(ValueError):
@@ -196,6 +213,70 @@ _TYPED_INPUT_MODELS: dict[str, type[BaseModel]] = {
 }
 
 
+_AUTHORITY_INPUT_KEYS = frozenset(
+    {
+        "owner",
+        "owner_id",
+        "owner_principal_id",
+        "owner_session_id",
+        "session_id",
+        "operator_session_id",
+        "approval",
+        "approval_id",
+        "budget",
+        "budget_microusd",
+        "executor",
+        "executor_id",
+        "priority",
+        "grant",
+        "grant_id",
+        "authority",
+        "authority_digest",
+        "lease",
+        "lease_id",
+        "fence",
+        "fencing_token",
+        "task_id",
+        "attempt_id",
+        "input_artifact_id",
+        "artifact_id",
+        "expires_at",
+    }
+)
+
+
+def _reject_authority_input_keys(value: Any, *, path: str = "input") -> None:
+    """Reject server-owned authority fields at every input nesting level."""
+
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            normalized = str(key).strip().casefold().replace("-", "_")
+            if normalized in _AUTHORITY_INPUT_KEYS:
+                raise TypedInputError(
+                    "typed_input_authority_field",
+                    f"{path} contains a server-owned authority field",
+                )
+            _reject_authority_input_keys(child, path=f"{path}.{normalized[:64]}")
+    elif isinstance(value, (list, tuple)):
+        for index, child in enumerate(value[:64]):
+            _reject_authority_input_keys(child, path=f"{path}[{index}]")
+
+
+def _typed_input_model(capability_id: str) -> type[BaseModel] | None:
+    model_type = _TYPED_INPUT_MODELS.get(capability_id)
+    if model_type is not None:
+        return model_type
+    if capability_id == "browser.public-task.v1":
+        # Keep the runner as the owner of the strict browser grammar while
+        # avoiding an import cycle during normal dispatcher startup.
+        try:
+            from src.browser.task_runner import BrowserTaskInput
+        except (ImportError, ModuleNotFoundError):
+            return None
+        return BrowserTaskInput
+    return None
+
+
 REGISTERED_CAPABILITIES: dict[str, CapabilitySpec] = {
     GOAL_SNAPSHOT_CAPABILITY: CapabilitySpec(
         GOAL_SNAPSHOT_CAPABILITY,
@@ -217,7 +298,40 @@ REGISTERED_CAPABILITIES: dict[str, CapabilitySpec] = {
         "guardian-routine.v1",
         "1",
     ),
+    "browser.public-task.v1": CapabilitySpec(
+        "browser.public-task.v1",
+        "1",
+        input_category="task",
+        secret_like=False,
+    ),
 }
+
+
+def validate_capability_input(capability_id: str, raw: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate and canonicalize one registered capability input.
+
+    This provider-free bridge is shared by typed-input artifact creation and
+    execution-time parsing.  It intentionally returns only the strict model
+    dump; owner/session/approval/budget/executor authority stays server-side.
+    """
+
+    normalized_capability = _text(capability_id)
+    spec = REGISTERED_CAPABILITIES.get(normalized_capability)
+    if spec is None:
+        raise TypedInputError("capability_unregistered", "the task names no registered capability")
+    if spec.input_category != "task":
+        raise TypedInputError("typed_input_category_invalid", "the capability is not executable as a task")
+    if not isinstance(raw, Mapping):
+        raise TypedInputError("typed_input_invalid", "typed input must be an object")
+    _reject_authority_input_keys(raw)
+    model_type = _typed_input_model(normalized_capability)
+    if model_type is None:
+        raise TypedInputError("capability_unregistered", "the capability input model is unavailable")
+    try:
+        validated = model_type.model_validate(dict(raw))
+    except ValidationError as exc:
+        raise TypedInputError("typed_input_invalid", "typed input does not match the capability schema") from exc
+    return validated.model_dump(mode="json", exclude_none=True)
 
 
 def registered_executor_id(capability_id: str) -> str | None:
@@ -281,6 +395,131 @@ def _status(value: Any) -> str:
     return _text(value)
 
 
+def _browser_cleanup_receipt_proven(projection: Mapping[str, Any]) -> bool:
+    """Require the canonical typed cleanup effect before board success."""
+
+    effects = projection.get("effects")
+    if not isinstance(effects, list):
+        return False
+    for effect in reversed(effects[-100:]):
+        if not isinstance(effect, Mapping):
+            continue
+        if effect.get("receipt_kind") != "effect" or effect.get("effect_type") != "browser_context_cleanup":
+            continue
+        details = effect.get("details")
+        if not isinstance(details, Mapping) or effect.get("status") != "succeeded":
+            return False
+        cleanup_status = details.get("cleanup_status")
+        if cleanup_status == "cleanup_verified":
+            return details.get("memory_status") == "no_learning"
+        if cleanup_status == "not_needed":
+            return details.get("context_not_started") is True and details.get("memory_status") == "no_learning"
+        return False
+    return False
+
+
+def _browser_verified_artifact_reference(
+    projection: Mapping[str, Any],
+    *,
+    job_id: str,
+    file_path: str,
+    content_sha256: str,
+    readback_id: str,
+) -> dict[str, Any] | None:
+    """Join the canonical artifact and readback receipts for board output.
+
+    The runner returns a path as its execution receipt, while the Work Board
+    inspector requires the opaque artifact identity recorded by the durable
+    repository.  Only a same-job, same-path, same-digest verified pair may be
+    projected as an inspectable artifact reference.
+    """
+
+    if (
+        not _BROWSER_RESULT_PATH.fullmatch(file_path)
+        or not _SHA256.fullmatch(content_sha256)
+        or not _text(readback_id)
+    ):
+        return None
+    from src.browser.task_runner import browser_artifact_path_for_job
+
+    if browser_artifact_path_for_job(job_id) != file_path:
+        return None
+    artifacts = projection.get("artifacts")
+    if not isinstance(artifacts, list):
+        return None
+    artifact: Mapping[str, Any] | None = None
+    for item in reversed(artifacts[-100:]):
+        if not isinstance(item, Mapping):
+            continue
+        if (
+            item.get("artifact_type") != "browser_public_task_result"
+            or item.get("producer") != "browser_public_task"
+            or item.get("file_path") != file_path
+            or item.get("content_sha256") != content_sha256
+            or item.get("exists") is not True
+            or item.get("job_id") not in (None, "", job_id)
+        ):
+            continue
+        expected_id = artifact_id_for(
+            file_path=file_path,
+            artifact_type="browser_public_task_result",
+            producer="browser_public_task",
+            run_id=job_id,
+            content_sha256=content_sha256,
+        )
+        if item.get("artifact_id") == expected_id:
+            artifact = item
+            break
+    if artifact is None:
+        return None
+
+    effects = projection.get("effects")
+    if not isinstance(effects, list):
+        return None
+    verified_at: str | None = None
+    for item in reversed(effects[-100:]):
+        if not isinstance(item, Mapping):
+            continue
+        details = item.get("details")
+        if (
+            item.get("receipt_kind") != "readback"
+            or item.get("effect_type") != "browser_public_task_result"
+            or item.get("status") not in {"succeeded", "read_back", "reconciled"}
+            or item.get("target_path") != file_path
+            or item.get("target_digest") != content_sha256
+            or item.get("content_sha256") != content_sha256
+            or item.get("readback_id") != readback_id
+            or item.get("job_id") not in (None, "", job_id)
+            or not isinstance(details, Mapping)
+            or details.get("verified") is not True
+        ):
+            continue
+        raw_verified_at = _text(item.get("verified_at"))
+        if raw_verified_at:
+            try:
+                parsed = datetime.fromisoformat(raw_verified_at.replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                continue
+            if parsed.tzinfo is None or len(raw_verified_at) > 64:
+                continue
+            verified_at = raw_verified_at
+        break
+    else:
+        return None
+
+    reference = {
+        "artifact_id": artifact["artifact_id"],
+        "file_path": file_path,
+        "content_sha256": content_sha256,
+        "workflow_run_id": job_id,
+        "readback_id": readback_id,
+        "verified": True,
+    }
+    if verified_at is not None:
+        reference["verified_at"] = verified_at
+    return reference
+
+
 def _safe_error_code(exc: BaseException) -> str:
     code = _text(getattr(exc, "code", None))
     if code and len(code) <= 128 and all(char.isalnum() or char in {"_", "-", ":", "."} for char in code):
@@ -291,6 +530,12 @@ def _safe_error_code(exc: BaseException) -> str:
 _STABLE_REASON_CODES = frozenset(
     {
         "adapter_blocked",
+        "browser_input_invalid",
+        "browser_policy_blocked",
+        "browser_runtime_unavailable",
+        "browser_slot_busy",
+        "browser_lane_unavailable",
+        "browser_unknown_effect",
         "admission_or_execution_blocked",
         "admission_binding_missing",
         "cancelled",
@@ -304,6 +549,7 @@ _STABLE_REASON_CODES = frozenset(
         "executor_missing",
         "executor_lane_mismatch",
         "executor_requires_capability",
+        "extract_selector_timeout",
         "goal_binding_stale",
         "goal_not_admitted",
         "goal_not_active",
@@ -497,7 +743,16 @@ def _parse_typed_input(task: WorkBoardTask) -> dict[str, Any]:
     raw_input = envelope.get("input")
     if not isinstance(raw_input, Mapping):
         raise TypedInputError("typed_input_invalid", "typed input must contain an object input")
-    model_type = _TYPED_INPUT_MODELS.get(capability_id)
+    try:
+        _reject_authority_input_keys(raw_input)
+    except TypedInputError as exc:
+        # Preserve the legacy workspace-envelope contract.  Older callers and
+        # their operator receipts intentionally expose one generic invalid
+        # input reason; the typed-artifact creation seam calls
+        # ``validate_capability_input`` directly and may retain the more
+        # specific authority-field code.
+        raise TypedInputError("typed_input_invalid", str(exc)) from exc
+    model_type = _typed_input_model(capability_id)
     if model_type is None:
         raise TypedInputError("capability_unregistered", "the task names no registered capability")
     try:
@@ -642,6 +897,7 @@ class WorkBoardDispatcher:
             "inbox_repaired": inbox_repaired,
             "inbox_expired": inbox_expired,
             "task_ids": [],
+            "wait_reasons": [],
         }
         admissions = 0
         for candidate in candidates:
@@ -698,18 +954,50 @@ class WorkBoardDispatcher:
                 continue
             if task.status is not WorkBoardStatus.ready:
                 continue
+            browser_lane = None
+            if _text(getattr(task, "capability_id", None)) == "browser.public-task.v1":
+                # The lane is a resource admission guard, so acquire it before
+                # claiming the board row.  A busy lane leaves the Ready row
+                # untouched for the next managed pass and cannot consume an
+                # attempt or durable job slot.
+                from src.browser.task_lane import BrowserTaskLaneError, try_acquire_browser_task_lane
+
+                try:
+                    browser_lane = try_acquire_browser_task_lane(settings.workspace_dir)
+                except BrowserTaskLaneError:
+                    # A lane identity/permission/filesystem failure is a
+                    # bounded capability wait. Do not claim or mutate the
+                    # Ready row; expose one safe recovery reason on this pass
+                    # so the operator can restore the managed workspace lane.
+                    receipt["wait_reasons"].append(
+                        {
+                            "task_id": task.task_id,
+                            "reason_code": "browser_lane_unavailable",
+                            "recovery_action": "restore_browser_lane",
+                        }
+                    )
+                    continue
+                if browser_lane is None:
+                    continue
             async with self.session_provider() as db:
-                claim = await self.repository.claim_ready_task(
-                    db,
-                    task.task_id,
-                    expected_revision=task.task_revision,
-                    lease_owner=self.runner_id,
-                    lease_seconds=await self._effective_runtime(task),
-                    now=observed_at,
-                    actor_principal_id=self.runner_id,
-                    actor_session_id=self.runner_session,
-                )
+                try:
+                    claim = await self.repository.claim_ready_task(
+                        db,
+                        task.task_id,
+                        expected_revision=task.task_revision,
+                        lease_owner=self.runner_id,
+                        lease_seconds=await self._effective_runtime(task),
+                        now=observed_at,
+                        actor_principal_id=self.runner_id,
+                        actor_session_id=self.runner_session,
+                    )
+                except Exception:
+                    if browser_lane is not None:
+                        browser_lane.release()
+                    raise
             if claim is None:
+                if browser_lane is not None:
+                    browser_lane.release()
                 continue
             try:
                 current_handoffs = await self._parent_handoff_context(claim.task)
@@ -751,12 +1039,24 @@ class WorkBoardDispatcher:
                     exc.code,
                     retryable_input=True,
                 )
+                if browser_lane is not None:
+                    browser_lane.release()
                 receipt["blocked"] += 1
                 continue
+            except Exception:
+                if browser_lane is not None:
+                    browser_lane.release()
+                raise
             receipt["claimed"] += 1
             admissions += 1
             receipt["task_ids"].append(claim.task.task_id)
-            outcome = await self._admit_execute_project(claim)
+            if browser_lane is None:
+                # Preserve the narrow test/adapter seam used by existing
+                # non-browser capabilities; only the browser path receives a
+                # resource lease argument.
+                outcome = await self._admit_execute_project(claim)
+            else:
+                outcome = await self._admit_execute_project(claim, browser_lane=browser_lane)
             receipt["admitted"] += int(outcome.get("admitted", False))
             receipt["completed"] += int(outcome.get("completed", False))
             receipt["blocked"] += int(outcome.get("blocked", False))
@@ -1630,10 +1930,29 @@ class WorkBoardDispatcher:
                 )
             ).scalar_one_or_none()
         if goal is None:
-            return DEFAULT_RUNTIME_SECONDS
+            return min(DEFAULT_RUNTIME_SECONDS, 180) if _text(task.capability_id) == "browser.public-task.v1" else DEFAULT_RUNTIME_SECONDS
         budget = deserialize_admission_budget(goal)
         configured = int(getattr(budget, "max_runtime_seconds", DEFAULT_RUNTIME_SECONDS)) if budget else DEFAULT_RUNTIME_SECONDS
-        return max(1, min(configured, MAX_RUNTIME_SECONDS))
+        hard_cap = 180 if _text(task.capability_id) == "browser.public-task.v1" else MAX_RUNTIME_SECONDS
+        return max(1, min(configured, hard_cap))
+
+    async def _effective_browser_limits(self, task: WorkBoardTask) -> tuple[int, int]:
+        """Read the current owner-bound goal budget for the browser adapter."""
+
+        if _text(task.capability_id) != "browser.public-task.v1":
+            return MAX_ATTEMPTS_PER_TASK, 1
+        async with self.session_provider() as db:
+            goal = (
+                await db.execute(
+                    select(Goal).where(
+                        Goal.id == task.goal_id,
+                        Goal.owner_principal_id == task.owner_principal_id,
+                        Goal.owner_session_id == task.owner_session_id,
+                        Goal.revision == task.goal_revision,
+                    )
+                )
+            ).scalar_one_or_none()
+        return effective_browser_limits(goal)
 
     async def _readiness(self, task: WorkBoardTask) -> tuple[str | None, str | None]:
         """Check live owner/goal authority before a claim is made."""
@@ -1663,11 +1982,29 @@ class WorkBoardDispatcher:
                     )
                 )
             ).scalar_one_or_none()
+            if goal is not None and _text(task.capability_id) == "browser.public-task.v1":
+                max_attempts, _max_outstanding_jobs = effective_browser_limits(goal)
+                attempt_count = int(
+                    await db.scalar(
+                        select(func.count(WorkBoardAttempt.attempt_id)).where(
+                            WorkBoardAttempt.task_id == task.task_id
+                        )
+                    )
+                    or 0
+                )
+                if attempt_count >= max_attempts:
+                    return "attempt_limit", "The board attempt limit has been exhausted"
         if goal is None:
             return "goal_not_found_or_not_owned", "The task goal is missing or owned by another operator"
         if int(goal.revision or 0) != int(task.goal_revision):
             return "goal_revision_stale", "The task goal revision is stale"
         goal_status = _text(getattr(goal.status, "value", goal.status))
+        if _text(task.capability_id) == "browser.public-task.v1" and goal_status != "active":
+            # Browser work must be admitted against an active canonical goal
+            # before the Ready claim. Generic board tasks retain their draft
+            # planning/readiness behavior, but a browser claim cannot be
+            # allowed to fail later at durable admission.
+            return "goal_not_admitted", "The browser task goal is not active"
         if goal_status and goal_status not in {"active", "draft"}:
             return "goal_not_admitted", "The task goal is not currently executable"
         async with self.session_provider() as db:
@@ -1721,10 +2058,47 @@ class WorkBoardDispatcher:
             return "executor_lane_mismatch", "The task executor does not match the registered capability lane"
         if not _text(task.typed_input_ref) or not _text(task.typed_input_digest):
             return "typed_input_missing", "The task has no complete typed input reference"
-        try:
-            inputs = _parse_typed_input(task)
-        except TypedInputError as exc:
-            return exc.code, str(exc)
+        if capability_id == "browser.public-task.v1" and not _text(task.input_artifact_id):
+            return "browser_input_artifact_required", "Public browser tasks require a server-bound input artifact"
+        if capability_id == "browser.public-task.v1":
+            # Browser inputs are resolved through the owner-bound artifact
+            # lifecycle before promotion. This checks the current state,
+            # expiry, task/goal/capability binding and bounded nofollow
+            # payload digest rather than treating a workspace path as proof
+            # that the reservation is still executable.
+            try:
+                from src.work_board.input_artifacts import resolve_input_artifact_for_task
+
+                async with self.session_provider() as db:
+                    resolved_artifact = await resolve_input_artifact_for_task(
+                        db,
+                        WorkBoardOwner(
+                            principal_id=task.owner_principal_id,
+                            session_id=task.owner_session_id,
+                        ),
+                        artifact_id=_text(task.input_artifact_id),
+                        goal_id=task.goal_id,
+                        goal_revision=task.goal_revision,
+                        capability_id=capability_id,
+                        expected_task_id=task.task_id,
+                    )
+                if (
+                    resolved_artifact.row.state != "bound"
+                    or resolved_artifact.row.bound_task_id != task.task_id
+                    or resolved_artifact.row.typed_input_ref != task.typed_input_ref
+                    or resolved_artifact.row.payload_sha256 != task.typed_input_digest
+                ):
+                    return "typed_input_digest_mismatch", "The browser input artifact is not bound to the current task"
+                inputs = resolved_artifact.input
+            except BoardError as exc:
+                return exc.code, str(exc)
+            except Exception as exc:
+                return "typed_input_unavailable", f"The browser input artifact could not be checked ({type(exc).__name__})"
+        else:
+            try:
+                inputs = _parse_typed_input(task)
+            except TypedInputError as exc:
+                return exc.code, str(exc)
         if capability_id == GOAL_SNAPSHOT_CAPABILITY:
             criterion = deserialize_success_criterion(goal)
             if criterion is None:
@@ -1788,6 +2162,39 @@ class WorkBoardDispatcher:
                 if not any(_text(getattr(tool, "name", "")) == tool_name for tool in get_tools(include_bound_worker=True)):
                     return "governed_workflow_tool_unavailable", "The registered GoalSnapshot workflow tool is not currently available"
                 return None, None
+
+            if capability == "browser.public-task.v1":
+                # Run the runner's provider-free dependency and site-policy
+                # check before promoting/claiming the board row.  It imports
+                # Playwright, checks the installed executable, evaluates the
+                # configured policy and bounded DNS resolution off the event
+                # loop; it never launches a browser, sends HTTP, contacts a
+                # model, or mutates durable state.  Execution repeats every
+                # transport check after admission.
+                from src.browser.task_runner import BrowserTaskRunner
+
+                try:
+                    preflight = await asyncio.wait_for(
+                        BrowserTaskRunner(
+                            workspace_root=settings.workspace_dir,
+                        ).preflight(inputs, timeout_seconds=1.0),
+                        timeout=10.0,
+                    )
+                except asyncio.TimeoutError:
+                    return "browser_runtime_unavailable", "Browser dependency preflight exceeded its bounded deadline"
+                if _text(preflight.get("status")) == "ready":
+                    return None, None
+                reason_code = _text(preflight.get("reason_code")) or "browser_preflight_blocked"
+                if reason_code in {
+                    "site_policy_blocked",
+                    "site_policy_timeout",
+                    "site_policy_failed",
+                    "site_policy_invalid",
+                }:
+                    return "browser_policy_blocked", f"Browser site policy preflight denied ({reason_code})"
+                if reason_code == "input_invalid":
+                    return "browser_input_invalid", "The browser input failed the strict capability contract"
+                return "browser_runtime_unavailable", f"Browser runtime preflight is blocked ({reason_code})"
 
             if capability == "guardian.research-watch.v1":
                 from src.guardian.source_watch import _goal_admission, source_watch_service
@@ -2044,10 +2451,24 @@ class WorkBoardDispatcher:
         )
         return spec, inputs, job_id, owner_principal, runtime_seconds
 
-    async def _admit_execute_project(self, claim: BoardDispatchClaim) -> dict[str, Any]:
+    async def _admit_execute_project(
+        self,
+        claim: BoardDispatchClaim,
+        *,
+        browser_lane: Any | None = None,
+    ) -> dict[str, Any]:
         task, attempt = claim.task, claim.attempt
         result: dict[str, Any] = {"admitted": False, "completed": False, "blocked": False}
         runtime_seconds = await self._effective_runtime(task)
+        if _text(task.capability_id) == "browser.public-task.v1":
+            max_attempts, max_outstanding_jobs = await self._effective_browser_limits(task)
+            return await self._admit_execute_browser(
+                claim,
+                runtime_seconds=runtime_seconds,
+                max_attempts=max_attempts,
+                max_outstanding_jobs=max_outstanding_jobs,
+                browser_lane=browser_lane,
+            )
         if _text(task.capability_id) != GOAL_SNAPSHOT_CAPABILITY:
             try:
                 inputs = _parse_typed_input(task)
@@ -2228,6 +2649,480 @@ class WorkBoardDispatcher:
                 await self._project_blocked(claim, "unknown_effect", "reconcile_admission_binding")
             result["blocked"] = True
         return result
+
+    async def _browser_assert_current(self, **binding: Any) -> bool:
+        """Revalidate the board fence while a browser action is in flight."""
+
+        try:
+            task_id = _text(binding.get("task_id"))
+            attempt_id = _text(binding.get("attempt_id"))
+            owner = WorkBoardOwner(
+                principal_id=_text(binding.get("owner_principal_id")),
+                session_id=_text(binding.get("owner_session_id")),
+            )
+            expected_revision = int(binding.get("board_task_revision") or 0)
+            expected_fence = int(binding.get("board_fencing_token") or 0)
+            if not task_id or not attempt_id or expected_revision < 1 or expected_fence < 1:
+                return False
+            async with self.session_provider() as db:
+                task = await self.repository.get_task(db, owner, task_id)
+                attempt = (
+                    await db.execute(
+                        select(WorkBoardAttempt).where(
+                            WorkBoardAttempt.task_id == task_id,
+                            WorkBoardAttempt.attempt_id == attempt_id,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if attempt is None:
+                    return False
+                observed_at = _utc_datetime(self.now())
+                if not (
+                    task.status is WorkBoardStatus.running
+                    and int(task.task_revision) == expected_revision
+                    and int(attempt.fencing_token) == expected_fence
+                    and _text(attempt.lease_owner) == self.runner_id
+                    and attempt.lease_expires_at is not None
+                    and _utc_datetime(attempt.lease_expires_at) > observed_at
+                    and attempt.ended_at is None
+                    and not attempt.cancel_requested_at
+                    and _text(task.input_artifact_id) == _text(binding.get("input_artifact_id"))
+                ):
+                    return False
+
+                # A durable board lease is not sufficient authority by
+                # itself. Revalidate the authenticated operator session and
+                # principal binding at every browser transport boundary so a
+                # logout/revocation or owner replacement stops the next
+                # request before it can produce an artifact.
+                try:
+                    operator = await authenticate_session(task.owner_session_id, touch=False)
+                except AuthFailure:
+                    if not (
+                        settings.deployment_environment == "test"
+                        and settings.operator_auth_allow_unauthenticated_tests
+                        and task.owner_session_id == "test-auth-bypass"
+                        and task.owner_principal_id == "operator:test-bypass"
+                    ):
+                        return False
+                else:
+                    if (
+                        _text(getattr(operator, "session_id", None)) != _text(task.owner_session_id)
+                        or _text(getattr(getattr(operator, "principal", None), "principal_id", None))
+                        != _text(task.owner_principal_id)
+                    ):
+                        return False
+
+                goal = (
+                    await db.execute(
+                        select(Goal).where(
+                            Goal.id == task.goal_id,
+                            Goal.owner_principal_id == task.owner_principal_id,
+                            Goal.owner_session_id == task.owner_session_id,
+                        )
+                    )
+                ).scalar_one_or_none()
+                goal_status = _text(getattr(goal, "status", None))
+                if (
+                    goal is None
+                    or int(goal.revision or 0) != int(task.goal_revision)
+                    # Browser execution is admitted only for an active goal;
+                    # a later demotion to draft must revoke the next request
+                    # just like any other goal authority change.
+                    or goal_status != "active"
+                ):
+                    return False
+
+                # Resolve the server-owned artifact with its bounded nofollow
+                # read and current lifecycle CAS. This checks owner/session,
+                # goal/capability binding, expiry, metadata digest, exact
+                # bound task and payload SHA-256 without exposing input bytes.
+                try:
+                    from src.work_board.input_artifacts import resolve_input_artifact_for_task
+
+                    artifact = await resolve_input_artifact_for_task(
+                        db,
+                        WorkBoardOwner(
+                            principal_id=task.owner_principal_id,
+                            session_id=task.owner_session_id,
+                        ),
+                        artifact_id=_text(task.input_artifact_id),
+                        goal_id=task.goal_id,
+                        goal_revision=task.goal_revision,
+                        capability_id=_text(task.capability_id),
+                        expected_task_id=task.task_id,
+                        now=observed_at,
+                    )
+                except Exception:
+                    return False
+                row = artifact.row
+                return bool(
+                    row.state == "bound"
+                    and row.bound_task_id == task.task_id
+                    and row.payload_sha256 == _text(task.typed_input_digest)
+                    and int(row.size_bytes) <= 64 * 1024
+                )
+        except Exception:
+            return False
+
+    @staticmethod
+    def _browser_expected_identity(
+        task: WorkBoardTask,
+        attempt: WorkBoardAttempt,
+        inputs: Mapping[str, Any],
+        projection: Mapping[str, Any],
+        runtime_seconds: int,
+        max_attempts: int = MAX_ATTEMPTS_PER_TASK,
+        max_outstanding_jobs: int = 1,
+    ) -> dict[str, Any]:
+        """Derive the runner's immutable root identity from board state."""
+
+        from src.browser.task_runner import (
+            BROWSER_TASK_CAPABILITY_ID,
+            BROWSER_TASK_CAPABILITY_VERSION,
+            BrowserTaskInput,
+            _browser_input_digests,
+        )
+
+        model = BrowserTaskInput.model_validate(dict(inputs))
+        task_id = _text(task.task_id)
+        attempt_id = _text(attempt.attempt_id)
+        job_id = f"browser-task:{task_id}:{attempt_id}"
+        model_json = model.model_dump(mode="json", exclude_none=True)
+        input_envelope_digest, input_model_digest, action_consent_digest = _browser_input_digests(model)
+        safe_inputs = {
+            "task_id": task_id,
+            "attempt_id": attempt_id,
+            "capability_id": BROWSER_TASK_CAPABILITY_ID,
+            "input_artifact_id": _text(task.input_artifact_id),
+            "input_artifact_digest": _text(task.typed_input_digest) or None,
+            "browser_input": model_json,
+            "input_digest": input_model_digest,
+            "action_consent_digest": action_consent_digest,
+        }
+        authority = {
+            "principal": "service:browser-task",
+            "owner_kind": "service",
+            "service_id": "service:browser-task",
+            "operator_owner_principal_id": task.owner_principal_id,
+            "operator_owner_session_id": task.owner_session_id,
+            "goal_owner_principal_id": task.owner_principal_id,
+            "goal_owner_session_id": task.owner_session_id,
+            "goal_id": task.goal_id,
+            "goal_revision": task.goal_revision,
+            "board_task_revision": int(task.task_revision),
+            "board_fencing_token": int(attempt.fencing_token),
+            "priority": int(task.priority),
+            "action_count": len(model.actions),
+            "input_artifact_id": _text(task.input_artifact_id),
+            "input_artifact_digest": _text(task.typed_input_digest) or None,
+            "input_envelope_digest": input_envelope_digest,
+            "browser_input_digest": input_model_digest,
+            "action_consent_digest": action_consent_digest,
+            "capability_id": BROWSER_TASK_CAPABILITY_ID,
+            "capability_version": BROWSER_TASK_CAPABILITY_VERSION,
+            "finite_authority": True,
+            "budget_microusd": 0,
+            "permissions": ["public_https_get_head", "workspace_artifact_write"],
+            "limits": {
+                "runtime_seconds": max(1, min(int(runtime_seconds), 180)),
+                "max_attempts": max(1, min(int(max_attempts), MAX_ATTEMPTS_PER_TASK)),
+                "max_outstanding_jobs": max(1, int(max_outstanding_jobs)),
+                "max_extract_bytes": 65_536,
+            },
+        }
+        owner = projection.get("owner") if isinstance(projection.get("owner"), Mapping) else {}
+        projected_authority = projection.get("declared_authority") if isinstance(projection.get("declared_authority"), Mapping) else {}
+        if (
+            _text(projection.get("job_id") or projection.get("run_identity")) != job_id
+            or _text(projection.get("job_kind")) != "browser_public_task"
+            or _text(projection.get("capability_version")) != BROWSER_TASK_CAPABILITY_VERSION
+            or _text(owner.get("kind")) != "service"
+            or _text(owner.get("principal_id")) != "service:browser-task"
+            or _text(owner.get("service_id")) != "service:browser-task"
+            or _text(projection.get("session_id")) != _text(task.owner_session_id)
+            or _text(projection.get("operator_session_id")) != _text(task.owner_session_id)
+            or _text(projection.get("goal_id")) != _text(task.goal_id)
+            or int(projection.get("goal_revision") or 0) != int(task.goal_revision)
+            or _text(projected_authority.get("capability_id")) != BROWSER_TASK_CAPABILITY_ID
+            or _text(projected_authority.get("input_artifact_id")) != _text(task.input_artifact_id)
+            or _text(projected_authority.get("goal_owner_principal_id")) != _text(task.owner_principal_id)
+            or _text(projected_authority.get("goal_owner_session_id")) != _text(task.owner_session_id)
+            or _text(projected_authority.get("operator_owner_principal_id")) != _text(task.owner_principal_id)
+            or _text(projected_authority.get("operator_owner_session_id")) != _text(task.owner_session_id)
+            or projected_authority.get("goal_id") != task.goal_id
+            or projected_authority.get("goal_revision") != task.goal_revision
+            or projected_authority.get("board_task_revision") != int(task.task_revision)
+            or projected_authority.get("board_fencing_token") != int(attempt.fencing_token)
+            or _text(projected_authority.get("input_artifact_digest")) != _text(task.typed_input_digest)
+            or projected_authority.get("input_envelope_digest") != input_envelope_digest
+            or projected_authority.get("browser_input_digest") != input_model_digest
+            or projected_authority.get("action_consent_digest") != action_consent_digest
+            or projected_authority.get("action_count") != len(model.actions)
+            or _text(projected_authority.get("capability_version")) != BROWSER_TASK_CAPABILITY_VERSION
+            or projected_authority.get("priority") != int(task.priority)
+        ):
+            raise DurableJobIdempotencyConflict("browser durable admission does not match the board attempt")
+        projected_limits = projected_authority.get("limits")
+        if not isinstance(projected_limits, Mapping):
+            raise DurableJobIdempotencyConflict("browser durable admission has no effective limit binding")
+        if (
+            int(projected_limits.get("max_attempts") or 0)
+            != max(1, min(int(max_attempts), MAX_ATTEMPTS_PER_TASK))
+            or int(projected_limits.get("max_outstanding_jobs") or 0)
+            != max(1, int(max_outstanding_jobs))
+            or int(projected_limits.get("runtime_seconds") or 0)
+            != max(1, min(int(runtime_seconds), 180))
+        ):
+            raise DurableJobIdempotencyConflict("browser durable admission effective limits changed")
+        return {
+            "owner_principal_id": "service:browser-task",
+            "owner_kind": "service",
+            "service_id": "service:browser-task",
+            "job_id": job_id,
+            "job_kind": "browser_public_task",
+            "goal_id": task.goal_id,
+            "goal_revision": task.goal_revision,
+            "operator_session_id": task.owner_session_id,
+            "session_id": task.owner_session_id,
+            "capability_id": BROWSER_TASK_CAPABILITY_ID,
+            "capability_version": BROWSER_TASK_CAPABILITY_VERSION,
+            "idempotency_scope": "work-board-attempt",
+            "idempotency_key": f"{task.task_id}:{attempt.attempt_id}",
+            "input_digest": _safe_digest(safe_inputs),
+            "authority_digest": _safe_digest(authority),
+            "run_fingerprint": _safe_digest(safe_inputs),
+        }
+
+    async def _admit_execute_browser(
+        self,
+        claim: BoardDispatchClaim,
+        *,
+        runtime_seconds: int,
+        max_attempts: int = MAX_ATTEMPTS_PER_TASK,
+        max_outstanding_jobs: int = 1,
+        browser_lane: Any | None = None,
+    ) -> dict[str, Any]:
+        """Admit and execute one public browser task through the runner."""
+
+        task, attempt = claim.task, claim.attempt
+        result: dict[str, Any] = {"admitted": False, "completed": False, "blocked": False}
+        owned_lane = browser_lane
+        execution_started = False
+        cleanup_verified = False
+        cleanup_status = "not_needed"
+        job_id = ""
+        active_claim = claim
+        if owned_lane is None:
+            from src.browser.task_lane import try_acquire_browser_task_lane
+
+            owned_lane = try_acquire_browser_task_lane(settings.workspace_dir)
+            if owned_lane is None:
+                await self._close_unadmitted_or_block(claim, "browser_slot_busy", retryable_input=True)
+                result["blocked"] = True
+                return result
+        try:
+            from src.browser.task_runner import BrowserTaskRunner
+
+            inputs = _parse_typed_input(task)
+            runner = BrowserTaskRunner(
+                jobs=self.jobs,
+                runtime_controls=self._browser_assert_current,
+                workspace_root=settings.workspace_dir,
+            )
+            admission = await runner.run(
+                task_id=task.task_id,
+                attempt_id=attempt.attempt_id,
+                owner_principal_id=task.owner_principal_id,
+                owner_session_id=task.owner_session_id,
+                goal_id=task.goal_id,
+                goal_revision=task.goal_revision,
+                board_task_revision=task.task_revision,
+                board_fencing_token=attempt.fencing_token,
+                task_priority=int(task.priority),
+                input_artifact_id=_text(task.input_artifact_id),
+                input_artifact_digest=_text(task.typed_input_digest) or None,
+                inputs=inputs,
+                runtime_seconds=runtime_seconds,
+                effective_max_attempts=max_attempts,
+                effective_max_outstanding_jobs=max_outstanding_jobs,
+                admission_only=True,
+            )
+            job_id = self._adapter_job_id(admission)
+            if _status(admission) != "admitted" or not job_id:
+                if job_id and isinstance(await self.jobs.get_job(job_id), Mapping):
+                    await self._project_blocked(claim, "unknown_effect", "reconcile_admission_binding")
+                else:
+                    await self._close_unadmitted_or_block(
+                        claim,
+                        _text(admission.get("reason_code")) or "browser_policy_blocked",
+                        retryable_input=True,
+                    )
+                result["blocked"] = True
+                return result
+            projection = await self.jobs.get_job(job_id)
+            if not isinstance(projection, Mapping):
+                raise DurableJobError("browser durable admission projection missing")
+            expected = self._browser_expected_identity(
+                task,
+                attempt,
+                inputs,
+                projection,
+                runtime_seconds,
+                max_attempts=max_attempts,
+                max_outstanding_jobs=max_outstanding_jobs,
+            )
+            linked = await self._link_browser_attempt(claim, job_id, projection, expected)
+            result["admitted"] = True
+            linked_task = linked.task
+            linked_attempt = linked.attempt
+            active_claim = BoardDispatchClaim(linked_task, linked_attempt, claim.event)
+            execution_started = True
+            execution = await runner.run(
+                task_id=linked_task.task_id,
+                attempt_id=linked_attempt.attempt_id,
+                owner_principal_id=linked_task.owner_principal_id,
+                owner_session_id=linked_task.owner_session_id,
+                goal_id=linked_task.goal_id,
+                goal_revision=linked_task.goal_revision,
+                board_task_revision=linked_task.task_revision,
+                board_fencing_token=linked_attempt.fencing_token,
+                admission_board_task_revision=int(task.task_revision),
+                task_priority=int(task.priority),
+                input_artifact_id=_text(linked_task.input_artifact_id),
+                input_artifact_digest=_text(linked_task.typed_input_digest) or None,
+                inputs=inputs,
+                runtime_seconds=runtime_seconds,
+                effective_max_attempts=max_attempts,
+                effective_max_outstanding_jobs=max_outstanding_jobs,
+                admission_only=False,
+                durable_job_id=job_id,
+            )
+            cleanup_status = _text(execution.get("cleanup_status")) or "cleanup_unknown"
+            cleanup_verified = cleanup_status in {"cleanup_verified", "not_needed"}
+            latest = await self.jobs.get_job(job_id)
+            if not isinstance(latest, Mapping):
+                raise DurableJobError("browser durable execution projection missing")
+            # The runner's result field is not independent evidence. The
+            # dispatcher requires the typed durable cleanup effect as well,
+            # otherwise a malformed success receipt could settle the board
+            # while the browser context remains unknown.
+            if cleanup_verified and not _browser_cleanup_receipt_proven(latest):
+                cleanup_status = "cleanup_unknown"
+                cleanup_verified = False
+            proof = self._direct_readback(execution, latest, job_id)
+            if proof is not None and _status(execution) == "succeeded" and cleanup_verified:
+                from src.work_board.input_artifacts import consume_input_artifact, resolve_input_artifact_for_task
+
+                async with self.session_provider() as db:
+                    resolved = await resolve_input_artifact_for_task(
+                        db,
+                        WorkBoardOwner(
+                            principal_id=linked_task.owner_principal_id,
+                            session_id=linked_task.owner_session_id,
+                        ),
+                        artifact_id=_text(linked_task.input_artifact_id),
+                        goal_id=linked_task.goal_id,
+                        goal_revision=linked_task.goal_revision,
+                        capability_id=_text(linked_task.capability_id),
+                        expected_task_id=linked_task.task_id,
+                    )
+                    if resolved.row.bound_task_revision is None:
+                        raise BoardError("input_artifact_task_conflict", "The browser input artifact binding is incomplete")
+                    await consume_input_artifact(
+                        db,
+                        WorkBoardOwner(
+                            principal_id=linked_task.owner_principal_id,
+                            session_id=linked_task.owner_session_id,
+                        ),
+                        task_id=linked_task.task_id,
+                        task_revision=int(resolved.row.bound_task_revision),
+                        artifact_id=resolved.row.artifact_id,
+                    )
+                artifact_ref = _text(execution.get("artifact_ref"))
+                artifact_sha256 = _text(execution.get("artifact_sha256")).lower()
+                readback_id = _text(execution.get("readback_id"))
+                verified_artifact = _browser_verified_artifact_reference(
+                    latest,
+                    job_id=job_id,
+                    file_path=artifact_ref,
+                    content_sha256=artifact_sha256,
+                    readback_id=readback_id,
+                )
+                artifact_refs = [verified_artifact] if verified_artifact is not None else []
+                await self._project(
+                    linked_task,
+                    linked_attempt,
+                    board_revision=linked_task.task_revision,
+                    status=WorkBoardStatus.review if linked_task.requires_review else WorkBoardStatus.done,
+                    outcome="verified",
+                    proof=proof,
+                    result_refs=[{"job_id": job_id, "workflow_run_id": job_id, "status": "succeeded", "verified": True}],
+                    artifact_refs=artifact_refs,
+                )
+                result["completed"] = True
+            else:
+                raw_reason = _text(execution.get("reason_code")) or _text(latest.get("failure_reason")) or "browser_runtime_unavailable"
+                cleanup_required = cleanup_status == "cleanup_unknown"
+                if cleanup_required:
+                    raw_reason = "browser_cleanup_required"
+                unknown = (
+                    cleanup_required
+                    or _status(execution) == "unknown_external_effect"
+                    or _status(latest) in UNCERTAIN_EXTERNAL_EFFECT_STATUSES
+                )
+                await self._project(
+                    linked_task,
+                    linked_attempt,
+                    board_revision=linked_task.task_revision,
+                    status=WorkBoardStatus.blocked,
+                    outcome="unknown_effect" if unknown else _stable_reason_code(raw_reason, fallback="capability"),
+                    block_kind="unknown_effect" if unknown else "capability",
+                    block_reason=(
+                        "browser_cleanup_required"
+                        if cleanup_required
+                        else ("reconcile_admission_binding" if unknown else _stable_reason_code(raw_reason, fallback="capability"))
+                    ),
+                    result_refs=[{"job_id": job_id, "workflow_run_id": job_id, "status": "unknown" if unknown else "blocked", "reason_code": raw_reason}],
+                )
+                result["blocked"] = True
+        except TypedInputError as exc:
+            await self._close_unadmitted_or_block(active_claim, exc.code, retryable_input=True)
+            result["blocked"] = True
+        except Exception as exc:
+            logger.info("browser task %s requires reconciliation: %s", task.task_id, type(exc).__name__)
+            await self._project_blocked(active_claim, "unknown_effect", "reconcile_admission_binding")
+            result["blocked"] = True
+        finally:
+            if owned_lane is not None:
+                if execution_started and not cleanup_verified:
+                    owned_lane.quarantine(job_id or f"browser-task:{task.task_id}")
+                else:
+                    owned_lane.release()
+        return result
+
+    async def _link_browser_attempt(
+        self,
+        claim: BoardDispatchClaim,
+        job_id: str,
+        projection: Mapping[str, Any],
+        expected: Mapping[str, Any],
+    ) -> BoardAttemptProjection:
+        task, attempt = claim.task, claim.attempt
+        async with self.session_provider() as db:
+            return await self.repository.link_attempt_workflow_run(
+                db,
+                task.task_id,
+                attempt.attempt_id,
+                workflow_run_id=job_id,
+                expected_revision=task.task_revision,
+                board_fence=attempt.fencing_token,
+                lease_owner=attempt.lease_owner or self.runner_id,
+                workflow_projection=projection,
+                expected_identity=expected,
+                actor_principal_id=self.runner_id,
+                actor_session_id=self.runner_session,
+            )
 
     async def _admit_execute_direct(
         self,

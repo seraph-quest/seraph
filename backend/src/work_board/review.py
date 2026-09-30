@@ -35,6 +35,7 @@ from src.work_board.repository import (
     BoardMutation,
     BoardRevisionConflict,
     WorkBoardRepository,
+    effective_browser_limits,
     _SAFE_RESTORABLE_PHASES,
     _begin_sqlite_immediate,
     _safe_receipt_refs,
@@ -913,7 +914,7 @@ async def request_changes(
     # Re-run every current readiness gate, including scheduled_at, before
     # reopening it; failure returns the card to Todo so M2 performs fresh
     # admission after the task is eligible.
-    await repository.validate_task_goal(db, owner, task)
+    live_goal = await repository.validate_task_goal(db, owner, task)
     from src.work_board.dispatcher import MAX_ATTEMPTS_PER_TASK, _dispatcher
 
     readiness_error, _readiness_reason = await _dispatcher._current_readiness(task)
@@ -940,7 +941,10 @@ async def request_changes(
         )
         or 0
     )
-    attempt_exhausted = attempt_count >= MAX_ATTEMPTS_PER_TASK
+    max_attempts = MAX_ATTEMPTS_PER_TASK
+    if task.capability_id == "browser.public-task.v1":
+        max_attempts, _max_outstanding_jobs = effective_browser_limits(live_goal)
+    attempt_exhausted = attempt_count >= max_attempts
     reopened = (
         WorkBoardStatus.blocked
         if attempt_exhausted

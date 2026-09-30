@@ -346,6 +346,79 @@ This section describes the Epic #864 M6 integration-branch target while its
 aggregate PR is under review. It does not claim full Hermes parity, autonomous
 execution, memory superiority, or production readiness.
 
+### Bounded public browser tasks
+
+The integration target adds `browser.public-task.v1` through the existing Work
+Board dispatcher and durable job repository. Its form creates an owner-bound,
+immutable input artifact before creating a Todo task; the operator does not
+type a workspace path or digest. Artifact metadata reads return identity,
+digest, expiry, and lifecycle state, never the input body. Creation and task
+binding have separate idempotency keys, and an uncertain response requires
+explicit reconciliation or an exact retry rather than an automatic POST.
+
+The grammar permits HTTPS navigation and bounded DOM extraction only. Exact
+host and URL-prefix consent narrows the configured global site policy; query
+strings are part of that consent. Every request checks all resolved addresses
+and connects to a checked global address with the original Host and TLS name.
+Redirects require fresh consent and DNS checks. The ephemeral browser disables
+JavaScript and service workers and rejects authentication, cookies, popups,
+downloads, uploads, forms, and arbitrary scripts. An allowed public GET can
+still have site-specific effects; finite consent does not prove universal
+absence of mutation.
+
+Each response is limited to 256 KiB. The transport requests identity encoding
+and rejects compressed responses before decoding. A site that needs scripts,
+authentication, or a compressed response can therefore be unavailable to this
+capability even when it works in the operator's ordinary browser.
+
+One browser-task context occupies the cross-process task lane. At most eight
+browser tasks can be Ready globally. Each task has at most eight actions,
+eight navigations including the initial page, 32 requests, 64 KiB of serialized
+output, and 180 seconds, further narrowed by the current goal budget. This
+lane uses no model inference and does not acquire the remote-inference lane.
+Blocked resource and method callbacks share the 32-receipt progress limit.
+Overflow stops further checkpoints and prevents a successful artifact; blocked
+resources remain aborted and do not count as dispatched network effects.
+Missing browser prerequisites block execution while the CPU cockpit, task
+creation, and evidence inspection remain usable.
+
+A blocked durable job still occupies its goal's outstanding-work budget until
+it reaches a terminal state. A known admission-budget refusal reports
+`goal_budget_outstanding_limit` before browser launch and releases the browser
+lane; it does not authorize raising the goal budget or replaying the blocked
+job. A malformed or expired deadline before launch records explicit
+no-context cleanup. Once launch is entered, unverified cleanup remains unknown.
+
+Execution uses one deadline and reserves time for teardown. Awaited browser
+operations use the remaining budget. A stalled operating-system file operation
+can outlast this cooperative deadline; late work cannot publish success, and
+unverified cleanup holds the browser lane for explicit recovery.
+
+Current task, attempt, goal, session, artifact, and durable lease authority are
+rechecked before actions and requests. Success requires expected checks,
+artifact readback, and explicit `no_learning`. Cancellation records context
+cleanup. Unverified cleanup retains the browser resource and shows
+`browser_cleanup_required`; later browser tasks remain unclaimed. Recovery
+requires outcome reconciliation and a managed backend restart after checking
+cleanup. Restart releases the process-owned resource; it does not authorize
+replaying an unknown job. An ambiguous dispatched request or process restart
+requires outcome reconciliation and is never blindly replayed. Work Board
+status remains separate from the durable execution status; last-known metadata is not a
+readiness or success receipt.
+
+Opening a browser result in the existing artifact inspector requests an explicit
+owner-bound preview. The backend rereads only the job's canonical result file,
+checks its size and digest against the artifact and readback, and returns typed
+extracts and checks. The inspector renders the extracted text as plain text.
+Routine job and task reads remain metadata-only; a missing or altered result
+shows an unavailable preview rather than unchecked file content.
+
+This is an intended post-epic contract, not Shipped `develop` behavior. The
+milestone PR owns actual browser, transport, API, interface, and recovery
+validation. Local fixture execution and production-network evidence must be
+identified separately; authenticated browsing and general computer use remain
+outside this capability.
+
 ### Reviewed source-change follow-up
 
 Goals expose their success criterion, finite proactive budget, quiet hours, and

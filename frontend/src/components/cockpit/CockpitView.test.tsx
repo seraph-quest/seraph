@@ -193,6 +193,176 @@ function renderLegacyCockpit(ui: Parameters<typeof render>[0]) {
   return result;
 }
 
+function browserPreviewFixture(options: {
+  browserResult?: Record<string, unknown> | null;
+  browserResultStatus?: "available" | "unavailable";
+} = {}) {
+  const ownerSessionId = "operator-browser-preview-session";
+  const taskId = "task-browser-preview";
+  const workflowRunId = "browser-task:task-browser-preview:attempt-1";
+  const artifactId = "art_browser_preview_1";
+  const readbackId = "readback-browser-preview-1";
+  const contentSha256 = "a".repeat(64);
+  const filePath = `artifacts/work-board/browser/result-${"b".repeat(32)}.json`;
+  const selectorDigest = "c".repeat(64);
+  const expectedDigest = "d".repeat(64);
+  const actualDigest = "e".repeat(64);
+  const defaultBrowserResult = {
+    schema_version: 1,
+    capability_id: "browser.public-task.v1",
+    artifact_id: artifactId,
+    readback_id: readbackId,
+    content_sha256: contentSha256,
+    file_path: filePath,
+    extracts: [{
+      action_index: 0,
+      kind: "extract",
+      attribute: null,
+      selector_digest: selectorDigest,
+      value: "This domain is for use in documentation examples.",
+    }],
+    checks: [{
+      action_index: 0,
+      kind: "text_contains",
+      selector_digest: selectorDigest,
+      expected_digest: expectedDigest,
+      actual_digest: actualDigest,
+      passed: true,
+    }],
+    request_count: 1,
+  };
+  const reference = {
+    artifact_id: artifactId,
+    artifact_type: "browser_public_task_result",
+    file_path: filePath,
+    content_sha256: contentSha256,
+    readback_id: readbackId,
+    verified: true,
+    job_id: workflowRunId,
+  };
+  const execution = {
+    capability_id: "browser.public-task.v1",
+    job_id: workflowRunId,
+    durable_status: "succeeded",
+    action_index: 0,
+    action_count: 1,
+    request_count: 1,
+    cleanup_status: "cleanup_verified",
+    memory_status: "no_learning",
+    readback_id: readbackId,
+    artifact_id: artifactId,
+    file_path: filePath,
+    content_sha256: contentSha256,
+  };
+  const attempt = {
+    attempt_id: "attempt-browser-preview-1",
+    task_id: taskId,
+    workflow_run_id: workflowRunId,
+    task_revision_at_claim: 1,
+    lease_owner: null,
+    cancel_requested_at: null,
+    lease_expires_at: null,
+    heartbeat_at: null,
+    fencing_token: 1,
+    executor_id: "seraph-work-board:browser.public-task.v1",
+    started_at: "2026-09-30T10:00:00Z",
+    ended_at: "2026-09-30T10:00:02Z",
+    outcome: "succeeded",
+    readback_status: "verified",
+    verification_status: "passed",
+    receipt_refs: [],
+    result_refs: [],
+    artifact_refs: [],
+    browser_execution: execution,
+  };
+  const boardTask = {
+    task_id: taskId,
+    creation_sequence: 1,
+    owner_principal_id: "operator:browser-preview",
+    owner_session_id: ownerSessionId,
+    origin_session_id: ownerSessionId,
+    origin_thread_id: null,
+    goal_id: "goal-browser-preview",
+    goal_revision: 1,
+    title: "Browser result preview",
+    body: "Inspect the verified browser extract.",
+    capability_id: "browser.public-task.v1",
+    typed_input_ref: "artifact-input:browser-preview",
+    typed_input_digest: "f".repeat(64),
+    executor_id: "seraph-work-board:browser.public-task.v1",
+    assignee_id: "operator:browser-preview",
+    priority: 50,
+    idempotency_scope: "task",
+    idempotency_key: "task-browser-preview-key",
+    scheduled_at: null,
+    status: "done",
+    block_kind: null,
+    block_reason: null,
+    block_source_status: null,
+    cancel_requested_at: null,
+    requires_review: false,
+    reviewer_id: null,
+    dependency_count: 0,
+    completed_dependency_count: 0,
+    dispatch_rank: null,
+    recovery_action: null,
+    readback_status: "verified",
+    verification_status: "passed",
+    task_revision: 2,
+    result_refs: [reference],
+    artifact_refs: [],
+    latest_attempt: attempt,
+    created_at: "2026-09-30T10:00:00Z",
+    updated_at: "2026-09-30T10:00:02Z",
+    completed_at: "2026-09-30T10:00:02Z",
+    archived_at: null,
+  };
+  const boundJob = {
+    job_id: workflowRunId,
+    parent_job_id: null,
+    status: "succeeded",
+    job_kind: "browser_public_task",
+    artifacts: [{
+      artifact_id: artifactId,
+      artifact_type: "browser_public_task_result",
+      file_path: filePath,
+      content_sha256: contentSha256,
+      readback_id: readbackId,
+      exists: true,
+      verified: true,
+      status: "succeeded",
+    }],
+    effects: [{
+      receipt_kind: "readback",
+      effect_type: "browser_public_task_result",
+      status: "succeeded",
+      artifact_id: artifactId,
+      readback_id: readbackId,
+      target_path: filePath,
+      content_sha256: contentSha256,
+      target_digest: contentSha256,
+      verified: true,
+    }],
+    started_at: "2026-09-30T10:00:00Z",
+    updated_at: "2026-09-30T10:00:02Z",
+    finished_at: "2026-09-30T10:00:02Z",
+    browser_result_status: options.browserResultStatus ?? "available",
+    browser_result: options.browserResult === undefined ? defaultBrowserResult : options.browserResult,
+  };
+  return {
+    ownerSessionId,
+    taskId,
+    workflowRunId,
+    artifactId,
+    readbackId,
+    contentSha256,
+    filePath,
+    boardTask,
+    attempt,
+    boundJob,
+  };
+}
+
 describe("CockpitView", () => {
   const fetchMock = vi.fn();
 
@@ -813,6 +983,179 @@ describe("CockpitView", () => {
       })).toBeInTheDocument();
       expect(screen.queryByText("readback receipt")).not.toBeInTheDocument();
     }
+  });
+
+  it("fetches and renders an owner-bound browser result only after explicit artifact inspection", async () => {
+    const fixture = browserPreviewFixture();
+    mockCockpitBaselineFetch(fetchMock, {});
+    const baselineFetch = fetchMock.getMockImplementation() as
+      ((input: RequestInfo | URL, init?: RequestInit) => unknown) | undefined;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/auth/session")) {
+        return Promise.resolve(mockResponse({
+          authenticated: true,
+          principal_id: "operator:browser-preview",
+          session_id: fixture.ownerSessionId,
+        }));
+      }
+      if (url.includes("/api/work-board/tasks?") && !url.includes("/api/work-board/tasks/")) {
+        return Promise.resolve(mockResponse({ tasks: [fixture.boardTask], next_after: null, last_event_id: 1 }));
+      }
+      if (url.includes("/api/work-board/events")) return Promise.resolve(mockResponse({ events: [], last_event_id: 1, gap: false }));
+      if (url.endsWith(`/api/work-board/tasks/${fixture.taskId}`)) {
+        return Promise.resolve(mockResponse({
+          task: fixture.boardTask,
+          attempts: [fixture.attempt],
+          parents: [],
+          children: [],
+          comments: [],
+          events: [],
+          revision: 2,
+        }));
+      }
+      if (url.includes(`/api/workflows/jobs/${encodeURIComponent(fixture.workflowRunId)}`)) {
+        return Promise.resolve(mockResponse({ job: fixture.boundJob }));
+      }
+      if (url.includes("/api/work-board/goals/goal-browser-preview/execution-limits")) {
+        return Promise.resolve(mockResponse({ effective_max_runtime_seconds: 180, hard_max_runtime_seconds: 180, limit_source: "goal_default" }));
+      }
+      return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
+    });
+
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/work-board/tasks?"))).toBe(true));
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/workflows/jobs/"))).toBe(false);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Browser result preview" }));
+    const inspectButton = await screen.findByRole("button", {
+      name: `Inspect execution evidence ${fixture.filePath}`,
+    });
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/workflows/jobs/"))).toBe(false);
+    fireEvent.click(inspectButton);
+
+    const extractValue = "This domain is for use in documentation examples.";
+    expect(await screen.findByText(extractValue, { selector: "pre", exact: true })).toBeInTheDocument();
+    expect(screen.getByText(/check 1 · text_contains · passed/)).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Verified browser result extracts" })).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes(
+      `/api/workflows/jobs/${encodeURIComponent(fixture.workflowRunId)}?include_browser_result=true`,
+    ))).toBe(true);
+  });
+
+  it.each([
+    ["a mismatched browser result binding", {
+      ...browserPreviewFixture().boundJob,
+      browser_result: {
+        ...browserPreviewFixture().boundJob.browser_result as Record<string, unknown>,
+        artifact_id: "art_foreign_browser_result",
+      },
+      browser_result_status: "available" as const,
+    }, "unavailable"],
+    ["a missing browser result body", {
+      ...browserPreviewFixture().boundJob,
+      browser_result: null,
+      browser_result_status: "unavailable" as const,
+    }, "unavailable"],
+    ["a missing browser result status", {
+      ...browserPreviewFixture().boundJob,
+      browser_result_status: undefined,
+    }, "unavailable"],
+  ] as const)("keeps browser artifact metadata usable when preview is %s", async (_label, boundJob, expectedStatus) => {
+    const fixture = browserPreviewFixture();
+    fixture.boundJob.browser_result = boundJob.browser_result;
+    (fixture.boundJob as Record<string, unknown>).browser_result_status = boundJob.browser_result_status;
+    mockCockpitBaselineFetch(fetchMock, {});
+    const baselineFetch = fetchMock.getMockImplementation() as
+      ((input: RequestInfo | URL, init?: RequestInit) => unknown) | undefined;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/auth/session")) {
+        return Promise.resolve(mockResponse({
+          authenticated: true,
+          principal_id: "operator:browser-preview",
+          session_id: fixture.ownerSessionId,
+        }));
+      }
+      if (url.includes("/api/work-board/tasks?") && !url.includes("/api/work-board/tasks/")) {
+        return Promise.resolve(mockResponse({ tasks: [fixture.boardTask], next_after: null, last_event_id: 1 }));
+      }
+      if (url.includes("/api/work-board/events")) return Promise.resolve(mockResponse({ events: [], last_event_id: 1, gap: false }));
+      if (url.endsWith(`/api/work-board/tasks/${fixture.taskId}`)) {
+        return Promise.resolve(mockResponse({ task: fixture.boardTask, attempts: [fixture.attempt], parents: [], children: [], comments: [], events: [], revision: 2 }));
+      }
+      if (url.includes(`/api/workflows/jobs/${encodeURIComponent(fixture.workflowRunId)}`)) {
+        return Promise.resolve(mockResponse({ job: fixture.boundJob }));
+      }
+      return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
+    });
+
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Browser result preview" }));
+    fireEvent.click(await screen.findByRole("button", { name: `Inspect execution evidence ${fixture.filePath}` }));
+
+    await screen.findByText(fixture.filePath, { selector: ".cockpit-inspector-title" });
+    expect(await screen.findByRole("status", { name: /Browser result preview unavailable/ })).toBeInTheDocument();
+    expect(screen.getByText(fixture.filePath, { selector: ".cockpit-inspector-title" })).toBeInTheDocument();
+    expect(screen.getByText(fixture.contentSha256)).toBeInTheDocument();
+    expect(screen.getByText(expectedStatus)).toBeInTheDocument();
+    expect(screen.queryByText("This domain is for use in documentation examples.", { selector: "pre" })).not.toBeInTheDocument();
+  });
+
+  it("renders browser extraction text as escaped plaintext", async () => {
+    const fixture = browserPreviewFixture();
+    const scriptText = "<script>alert('browser')</script>";
+    (fixture.boundJob.browser_result as Record<string, unknown>).extracts = [{
+      action_index: 0,
+      kind: "extract",
+      attribute: null,
+      selector_digest: "c".repeat(64),
+      value: scriptText,
+    }];
+    mockCockpitBaselineFetch(fetchMock, {});
+    const baselineFetch = fetchMock.getMockImplementation() as
+      ((input: RequestInfo | URL, init?: RequestInit) => unknown) | undefined;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/auth/session")) return Promise.resolve(mockResponse({ authenticated: true, principal_id: "operator:browser-preview", session_id: fixture.ownerSessionId }));
+      if (url.includes("/api/work-board/tasks?") && !url.includes("/api/work-board/tasks/")) return Promise.resolve(mockResponse({ tasks: [fixture.boardTask], next_after: null, last_event_id: 1 }));
+      if (url.includes("/api/work-board/events")) return Promise.resolve(mockResponse({ events: [], last_event_id: 1, gap: false }));
+      if (url.endsWith(`/api/work-board/tasks/${fixture.taskId}`)) return Promise.resolve(mockResponse({ task: fixture.boardTask, attempts: [fixture.attempt], parents: [], children: [], comments: [], events: [], revision: 2 }));
+      if (url.includes(`/api/workflows/jobs/${encodeURIComponent(fixture.workflowRunId)}`)) return Promise.resolve(mockResponse({ job: fixture.boundJob }));
+      return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
+    });
+
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Browser result preview" }));
+    fireEvent.click(await screen.findByRole("button", { name: `Inspect execution evidence ${fixture.filePath}` }));
+    expect(await screen.findByText(scriptText, { selector: "pre", exact: true })).toBeInTheDocument();
+    expect(document.querySelectorAll("script")).toHaveLength(0);
+  });
+
+  it("does not include raw browser selectors or final URLs in the preview surface", async () => {
+    const fixture = browserPreviewFixture();
+    const result = fixture.boundJob.browser_result as Record<string, unknown>;
+    (result.extracts as Array<Record<string, unknown>>)[0]!.selector = "body";
+    result.final_url = "https://example.com/private";
+    mockCockpitBaselineFetch(fetchMock, {});
+    const baselineFetch = fetchMock.getMockImplementation() as
+      ((input: RequestInfo | URL, init?: RequestInit) => unknown) | undefined;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/auth/session")) return Promise.resolve(mockResponse({ authenticated: true, principal_id: "operator:browser-preview", session_id: fixture.ownerSessionId }));
+      if (url.includes("/api/work-board/tasks?") && !url.includes("/api/work-board/tasks/")) return Promise.resolve(mockResponse({ tasks: [fixture.boardTask], next_after: null, last_event_id: 0 }));
+      if (url.includes("/api/work-board/events")) return Promise.resolve(mockResponse({ events: [], last_event_id: 0, gap: false }));
+      if (url.endsWith(`/api/work-board/tasks/${fixture.taskId}`)) return Promise.resolve(mockResponse({ task: fixture.boardTask, attempts: [fixture.attempt], parents: [], children: [], comments: [], events: [], revision: 2 }));
+      if (url.includes(`/api/workflows/jobs/${encodeURIComponent(fixture.workflowRunId)}`)) return Promise.resolve(mockResponse({ job: fixture.boundJob }));
+      return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
+    });
+
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Browser result preview" }));
+    fireEvent.click(await screen.findByRole("button", { name: `Inspect execution evidence ${fixture.filePath}` }));
+    expect(await screen.findByText("This domain is for use in documentation examples.", { selector: "pre" })).toBeInTheDocument();
+    expect(screen.queryByText("body")).not.toBeInTheDocument();
+    expect(screen.queryByText("https://example.com/private")).not.toBeInTheDocument();
   });
 
   it("opens an owner-checked Guardian dossier preview when the global artifact index is empty", async () => {

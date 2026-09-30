@@ -40,11 +40,13 @@ from src.workspace.state_registry import (
     WorkspaceStateClass,
     WorkspaceStateRegistry,
     WorkspaceRootKind,
+    WORK_BOARD_INPUT_ARTIFACT_TABLE,
     WORK_BOARD_ROUTINE_BINDING_TABLE,
     canonical_workspace_root,
     canonical_workspace_root_identity,
     _canonical_json,
     _sha256_bytes,
+    work_board_input_artifact_contract,
     work_board_routine_binding_contract,
 )
 
@@ -822,7 +824,14 @@ def _archive_manifest(
                         for item in source_manifest.get("database", {}).get("tables", [])
                         if isinstance(item, dict)
                     )
-                )
+                ),
+                "work_board_input_artifact": work_board_input_artifact_contract(
+                    present=any(
+                        item.get("name") == WORK_BOARD_INPUT_ARTIFACT_TABLE
+                        for item in source_manifest.get("database", {}).get("tables", [])
+                        if isinstance(item, dict)
+                    )
+                ),
             }
         ),
     }

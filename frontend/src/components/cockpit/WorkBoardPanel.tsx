@@ -5,10 +5,14 @@ import { API_URL, WS_URL } from "../../config/constants";
 import { resolveWebSocketUrl } from "../../hooks/useWebSocket";
 import { apiFetch } from "../../lib/api";
 import { fetchGuardianInboxItem } from "../../lib/guardianInbox";
+import { BrowserTaskForm } from "./BrowserTaskForm";
+import type { BrowserTaskSubmissionReceipt, PendingBrowserSubmission } from "./BrowserTaskForm";
 import { WorkBoardMemoryReview } from "./WorkBoardMemoryReview";
 import type {
   GoalInfo,
   GuardianInboxItem,
+  WorkBoardAttempt,
+  WorkBoardBrowserExecution,
   WorkBoardActionRequest,
   WorkBoardComment,
   WorkBoardCommentCreateRequest,
@@ -183,6 +187,19 @@ interface PendingTaskCreate {
 }
 
 const pendingTaskCreates = new Map<string, PendingTaskCreate>();
+
+const MAX_PENDING_BROWSER_SUBMISSIONS = 32;
+const pendingBrowserSubmissions = new Map<string, PendingBrowserSubmission>();
+
+function rememberPendingBrowserSubmission(scope: string, pending: PendingBrowserSubmission): void {
+  pendingBrowserSubmissions.delete(scope);
+  pendingBrowserSubmissions.set(scope, pending);
+  while (pendingBrowserSubmissions.size > MAX_PENDING_BROWSER_SUBMISSIONS) {
+    const oldest = pendingBrowserSubmissions.keys().next().value;
+    if (typeof oldest !== "string") break;
+    pendingBrowserSubmissions.delete(oldest);
+  }
+}
 
 interface PendingRoutineInvocation {
   routineId: string;
@@ -574,6 +591,7 @@ function receiptTitle(reference: WorkBoardReceiptReference): string {
 
 function safeReferenceLabel(reference: WorkBoardReceiptReference): string {
   return reference.artifact_id
+    || reference.artifact_ref
     || reference.workflow_run_id
     || reference.job_id
     || reference.readback_id
@@ -583,6 +601,82 @@ function safeReferenceLabel(reference: WorkBoardReceiptReference): string {
     || reference.target_path
     || reference.reason_code
     || "Safe reference";
+}
+
+function browserArtifactPath(value: string | undefined): string | undefined {
+  const candidate = value?.trim();
+  if (!candidate || candidate.length > 512 || candidate.startsWith("/") || candidate.includes("\\") || candidate.includes("\u0000")) {
+    return undefined;
+  }
+  const segments = candidate.split("/");
+  if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) return undefined;
+  return candidate;
+}
+
+/**
+ * BrowserRunner receipts use the capability's artifact_ref/artifact_sha256
+ * names. The existing WorkBoard inspector deliberately accepts only its
+ * owner-bound file_path/content_sha256 projection, so adapt those safe server
+ * fields into the established request shape without manufacturing a URL or
+ * weakening the workflow/session checks in CockpitView.
+ */
+function browserEvidenceReference(reference: WorkBoardReceiptReference): WorkBoardReceiptReference {
+  const artifactPath = browserArtifactPath(reference.artifact_ref);
+  const artifactDigest = typeof reference.artifact_sha256 === "string"
+    && /^[a-f0-9]{64}$/i.test(reference.artifact_sha256.trim())
+    ? reference.artifact_sha256.trim().toLowerCase()
+    : undefined;
+  return {
+    ...reference,
+    file_path: reference.file_path ?? artifactPath,
+    content_sha256: reference.content_sha256 ?? artifactDigest,
+  };
+}
+
+function safeBrowserExecution(value: WorkBoardBrowserExecution | null | undefined): WorkBoardBrowserExecution | null {
+  if (!value || value.capability_id !== "browser.public-task.v1") return null;
+  if (typeof value.job_id !== "string" || !value.job_id.trim() || typeof value.durable_status !== "string") return null;
+  return value;
+}
+
+function browserExecutionForAttempt(task: WorkBoardTask, attempt: WorkBoardAttempt): WorkBoardBrowserExecution | null {
+  const latest = task.latest_attempt;
+  // The authenticated task-detail DTO carries the verified browser projection
+  // on latest_attempt. The historical attempts list remains metadata-only;
+  // prefer the detail projection for the same attempt and never replace a
+  // server-provided null with an older list receipt.
+  if (latest?.attempt_id === attempt.attempt_id
+    && Object.prototype.hasOwnProperty.call(latest, "browser_execution")) {
+    return safeBrowserExecution(latest.browser_execution);
+  }
+  return safeBrowserExecution(attempt.browser_execution);
+}
+
+function browserExecutionCount(value: number | null, minimum: number, maximum: number): string {
+  return typeof value === "number" && Number.isInteger(value) && value >= minimum && value <= maximum
+    ? String(value)
+    : "unavailable";
+}
+
+function browserExecutionAction(value: WorkBoardBrowserExecution): string {
+  const count = browserExecutionCount(value.action_count, 1, 8);
+  if (typeof value.action_index !== "number" || !Number.isInteger(value.action_index) || value.action_index < -1 || value.action_index > 7) {
+    return `action unavailable/${count}`;
+  }
+  return value.action_index < 0 ? `action not started/${count}` : `action ${value.action_index + 1}/${count}`;
+}
+
+function browserExecutionReference(value: WorkBoardBrowserExecution): WorkBoardReceiptReference | null {
+  if (!value.file_path || !value.content_sha256 || !/^[a-f0-9]{64}$/i.test(value.content_sha256)) return null;
+  const reference: WorkBoardReceiptReference = {
+    file_path: value.file_path,
+    content_sha256: value.content_sha256.toLowerCase(),
+    job_id: value.job_id,
+    verified: true,
+  };
+  if (value.artifact_id) reference.artifact_id = value.artifact_id;
+  if (value.readback_id) reference.readback_id = value.readback_id;
+  return reference;
 }
 
 function proposalStatusLabel(proposal: WorkBoardProposal): string {
@@ -626,6 +720,15 @@ function WorkBoardPanel({
     ? `${ownerPrincipalId}\u0000${ownerSessionId}`
     : null;
   const pendingCreateAtMount = pendingCreateScope ? pendingTaskCreates.get(pendingCreateScope) ?? null : null;
+  const pendingBrowserAtMount = pendingCreateScope ? pendingBrowserSubmissions.get(pendingCreateScope) ?? null : null;
+  const previousBrowserScopeRef = useRef<string | null>(pendingCreateScope);
+  useEffect(() => {
+    const previousScope = previousBrowserScopeRef.current;
+    if (previousScope && previousScope !== pendingCreateScope) {
+      pendingBrowserSubmissions.delete(previousScope);
+    }
+    previousBrowserScopeRef.current = pendingCreateScope;
+  }, [pendingCreateScope]);
   const createIdempotencyRef = useRef(pendingCreateAtMount?.idempotencyKey ?? makeIdempotencyKey());
   const [pendingCreate, setPendingCreate] = useState<PendingTaskCreate | null>(pendingCreateAtMount);
   const [tasks, setTasks] = useState<WorkBoardTask[]>([]);
@@ -649,6 +752,8 @@ function WorkBoardPanel({
   const [moveFeedback, setMoveFeedback] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState(false);
   const [createOpen, setCreateOpen] = useState(Boolean(pendingCreateAtMount));
+  const [browserTaskOpen, setBrowserTaskOpen] = useState(Boolean(pendingBrowserAtMount));
+  const [browserTaskReceipt, setBrowserTaskReceipt] = useState<BrowserTaskSubmissionReceipt | null>(null);
   const [createError, setCreateError] = useState<string | null>(pendingCreateAtMount
     ? "A previous create did not return a receipt. Retry the same request to reconcile it before editing or starting another task."
     : null);
@@ -2866,6 +2971,23 @@ function WorkBoardPanel({
     }
   };
 
+  const setBrowserPending = (pending: PendingBrowserSubmission | null) => {
+    if (!pendingCreateScope) return;
+    if (pending) {
+      rememberPendingBrowserSubmission(pendingCreateScope, pending);
+      return;
+    }
+    pendingBrowserSubmissions.delete(pendingCreateScope);
+  };
+
+  const closeBrowserTask = () => {
+    if (pendingCreateScope && pendingBrowserSubmissions.has(pendingCreateScope)) {
+      setAnnouncement("The public browser task outcome is unconfirmed. Keep the form open and retry the exact request before closing it.");
+      return;
+    }
+    setBrowserTaskOpen(false);
+  };
+
   return (
     <section className="cockpit-panel cockpit-panel--embedded min-w-0" aria-label="Work board">
       <div className="cockpit-operator-row flex-wrap">
@@ -2879,6 +3001,9 @@ function WorkBoardPanel({
         <div className="cockpit-operator-actions flex-wrap">
           <button type="button" className="cockpit-feedback-button" onClick={openCreateDialog}>
             Create task
+          </button>
+          <button type="button" className="cockpit-feedback-button" onClick={() => { setBrowserTaskReceipt(null); setBrowserTaskOpen(true); }}>
+            Public browser task
           </button>
           <button type="button" className="cockpit-feedback-button" onClick={() => void refreshSnapshot()} disabled={loading}>
             {loading ? "Refreshing…" : "Refresh board"}
@@ -2932,6 +3057,11 @@ function WorkBoardPanel({
       )}
       {moveFeedback && <div className="mt-3 rounded border border-amber-500/40 p-2 text-sm" role="alert">{moveFeedback}</div>}
       {goalError && <div className="mt-2 text-xs text-amber-300" role="status">Goal metadata unavailable: {goalError}</div>}
+      {browserTaskReceipt && (
+        <div className="mt-2 rounded border border-emerald-500/40 bg-emerald-950/20 p-2 text-sm" role="status">
+          Public browser task input artifact verified: <span className="font-mono break-all">{browserTaskReceipt.artifactId}</span> · {browserTaskReceipt.actionCount} action{browserTaskReceipt.actionCount === 1 ? "" : "s"} · SHA-256 <span className="font-mono break-all">{browserTaskReceipt.digest}</span>. The selected task is open below for durable progress and recovery.
+        </div>
+      )}
       <div className="sr-only" aria-live="polite">{announcement}</div>
 
       {loading && tasks.length === 0 ? (
@@ -2980,6 +3110,7 @@ function WorkBoardPanel({
                               <div>Goal: {task.goal_id} · Dependencies: {task.completed_dependency_count}/{task.dependency_count}</div>
                               <div>Latest attempt: {attemptLabel(task)} · Age: {formatAge(task.created_at)}</div>
                               {status === "ready" && task.dispatch_rank !== null && <div>Server dispatch rank: #{task.dispatch_rank}</div>}
+                              {task.dispatch_wait_reason && <div className="text-amber-200">Dispatch waiting: {task.dispatch_wait_reason === "browser_cleanup_required" ? "browser cleanup recovery is required" : task.dispatch_wait_reason}</div>}
                               {status === "running" && <div>Lease: {active ? safeDateTime(latest?.lease_expires_at) : "not active"} · started {formatAge(latest?.started_at)}</div>}
                               {status === "blocked" && <div className="text-amber-200">Blocked: {task.block_reason || "The server did not provide a safe reason."}</div>}
                               {status === "review" && <div>Reviewer: {task.reviewer_id ?? "Not named"} · Readback: {READBACK_LABELS[task.readback_status]} · Verification: {VERIFICATION_LABELS[task.verification_status]}</div>}
@@ -3032,6 +3163,7 @@ function WorkBoardPanel({
             {(detailLoading || stale) && <div className="mb-3 text-xs text-amber-200" role="status">{detailLoading ? "Refreshing task detail…" : "Showing the last confirmed task detail."}</div>}
             {detailError && <div className="mb-3 rounded border border-red-500/40 p-2 text-sm" role="alert">{detailError}<button type="button" className="ml-2 underline" onClick={() => void refreshSelectedTask()}>Refresh detail</button></div>}
             {actionError && <div className="mb-3 rounded border border-amber-500/40 p-2 text-sm" role="alert">{actionError}</div>}
+            {selectedTask.dispatch_wait_reason && <div className="mb-3 rounded border border-amber-500/40 bg-amber-950/20 p-2 text-sm" role="status">Dispatch waiting: {selectedTask.dispatch_wait_reason === "browser_cleanup_required" ? "browser cleanup recovery is required before this task can run." : selectedTask.dispatch_wait_reason}</div>}
             {selectedInboxOrigin && (
               <section className="mb-3 rounded border border-cyan-400/30 bg-cyan-950/10 p-3 text-xs" aria-label="Inbox origin">
                 <div className="font-semibold">Created from Inbox candidate</div>
@@ -3615,28 +3747,107 @@ function WorkBoardPanel({
                       <div>Started {safeDateTime(attempt.started_at)} · ended {safeDateTime(attempt.ended_at)} · executor {attempt.executor_id ?? "Unassigned"}</div>
                       <div>Readback {READBACK_LABELS[attempt.readback_status]} · verification {VERIFICATION_LABELS[attempt.verification_status]}</div>
                       {attempt.workflow_run_id && <div className="mt-1 break-all">Workflow run {attempt.workflow_run_id}{onInspectWorkflowRun && <button type="button" className="ml-2 underline" onClick={() => onInspectWorkflowRun(attempt.workflow_run_id!, selectedTask.owner_session_id)}>Open workflow evidence</button>}</div>}
-                      {[...attempt.receipt_refs].map((receipt, index) => (
-                        <div key={`${attempt.attempt_id}:receipt:${index}`} className="mt-1 border-t border-white/10 pt-1">
-                          <div>{receiptTitle(receipt)} · {safeReferenceLabel(receipt)}</div>
-                          <div>{receipt.status ?? receipt.outcome ?? "Receipt"}{receipt.verified === true ? " · verified" : ""}{receipt.readback_status ? ` · readback ${READBACK_LABELS[receipt.readback_status]}` : ""}</div>
-                          {receipt.content_sha256 && <div className="break-all font-mono text-[10px]">SHA-256 {receipt.content_sha256}</div>}
-                          {receipt.file_path && <div className="break-all text-[10px]">Artifact path {receipt.file_path}</div>}
-                          {(receipt.file_path || receipt.artifact_id || receipt.target_path || receipt.effect_id_digest || receipt.readback_id || receipt.verification_id) && onInspectArtifact && <button type="button" className="mt-1 underline" aria-label={`Inspect execution evidence ${receipt.file_path ?? receipt.target_path ?? receipt.artifact_id ?? receipt.effect_id_digest ?? receipt.readback_id ?? receipt.verification_id}`} onClick={() => onInspectArtifact({ reference: receipt, ownerSessionId: selectedTask.owner_session_id, workflowRunId: referenceWorkflowRunId(receipt, attempt.workflow_run_id), parentWorkflowRunId: attempt.workflow_run_id })}>{receipt.target_path || receipt.effect_id_digest || receipt.readback_id || receipt.verification_id ? "Inspect readback evidence" : "Inspect artifact"}</button>}
-                          {receipt.workflow_run_id && onInspectWorkflowRun && <button type="button" className="underline" onClick={() => onInspectWorkflowRun(receipt.workflow_run_id!, selectedTask.owner_session_id)}>Inspect existing workflow record</button>}
-                        </div>
-                      ))}
+                      {selectedTask.capability_id === "browser.public-task.v1" && (() => {
+                        const execution = browserExecutionForAttempt(selectedTask, attempt);
+                        if (!execution) {
+                          return <div className="mt-1 rounded border border-amber-500/30 p-2 text-[10px]" aria-label="Browser durable execution receipt">Durable browser execution receipt unavailable; progress, cleanup, and readback remain unknown until a current owner-bound receipt is returned.</div>;
+                        }
+                        const executionReference = browserExecutionReference(execution);
+                        return (
+                          <div className="mt-1 rounded border border-cyan-500/30 p-2 text-[10px]" aria-label="Browser durable execution receipt">
+                            <div>Browser durable execution · job <span className="font-mono break-all">{execution.job_id}</span> · status {execution.durable_status || "unknown"}</div>
+                            <div>Browser progress · {browserExecutionAction(execution)} · {browserExecutionCount(execution.request_count, 0, 32)} requests</div>
+                            <div>Cleanup {execution.cleanup_status || "unknown"} · Memory {execution.memory_status || "unknown"}</div>
+                            {execution.readback_id && <div className="break-all">Readback {execution.readback_id}</div>}
+                            {execution.file_path && <div className="break-all">Artifact path {execution.file_path}</div>}
+                            {executionReference && onInspectArtifact && <button type="button" className="mt-1 underline" aria-label={`Inspect execution evidence ${execution.file_path}`} onClick={() => onInspectArtifact({ reference: executionReference, ownerSessionId: selectedTask.owner_session_id, workflowRunId: execution.job_id, parentWorkflowRunId: attempt.workflow_run_id })}>Inspect browser artifact</button>}
+                          </div>
+                        );
+                      })()}
+                      {[...attempt.receipt_refs].map((receipt, index) => {
+                        const inspectReference = browserEvidenceReference(receipt);
+                        const inspectLabel = inspectReference.file_path
+                          ?? inspectReference.target_path
+                          ?? inspectReference.artifact_id
+                          ?? inspectReference.artifact_ref
+                          ?? inspectReference.effect_id_digest
+                          ?? inspectReference.readback_id
+                          ?? inspectReference.verification_id
+                          ?? "available evidence";
+                        const inspectable = Boolean(
+                          inspectReference.file_path
+                          || inspectReference.artifact_id
+                          || inspectReference.target_path
+                          || inspectReference.effect_id_digest
+                          || inspectReference.readback_id
+                          || inspectReference.verification_id,
+                        );
+                        return (
+                          <div key={`${attempt.attempt_id}:receipt:${index}`} className="mt-1 border-t border-white/10 pt-1">
+                            <div>{receiptTitle(receipt)} · {safeReferenceLabel(inspectReference)}</div>
+                            <div>{receipt.status ?? receipt.outcome ?? "Receipt"}{receipt.verified === true ? " · verified" : ""}{receipt.readback_status ? ` · readback ${READBACK_LABELS[receipt.readback_status]}` : ""}</div>
+                            {(receipt.checkpoint_id || typeof receipt.action_index === "number" || typeof receipt.action_count === "number" || typeof receipt.request_count === "number") && (
+                              <div className="mt-1 text-[10px]" aria-label="Browser execution progress">
+                                Browser progress
+                                {receipt.checkpoint_id ? ` · checkpoint ${receipt.checkpoint_id}` : ""}
+                                {typeof receipt.action_index === "number" ? ` · action ${receipt.action_index + 1}${typeof receipt.action_count === "number" ? `/${receipt.action_count}` : ""}` : typeof receipt.action_count === "number" ? ` · ${receipt.action_count} actions` : ""}
+                                {typeof receipt.request_count === "number" ? ` · ${receipt.request_count} requests` : ""}
+                              </div>
+                            )}
+                            {receipt.durable_status && <div className="text-[10px]">Durable status {receipt.durable_status}</div>}
+                            {receipt.artifact_ref && <div className="break-all text-[10px]">Browser artifact receipt {receipt.artifact_ref}</div>}
+                            {inspectReference.content_sha256 && <div className="break-all font-mono text-[10px]">SHA-256 {inspectReference.content_sha256}</div>}
+                            {receipt.file_path && <div className="break-all text-[10px]">Artifact path {receipt.file_path}</div>}
+                            {receipt.cleanup_status && <div className="text-[10px]">Cleanup {receipt.cleanup_status}</div>}
+                            {receipt.memory_status && <div className="text-[10px]">Memory {receipt.memory_status}</div>}
+                            {inspectable && onInspectArtifact && <button type="button" className="mt-1 underline" aria-label={`Inspect execution evidence ${inspectLabel}`} onClick={() => onInspectArtifact({ reference: inspectReference, ownerSessionId: selectedTask.owner_session_id, workflowRunId: referenceWorkflowRunId(receipt, attempt.workflow_run_id), parentWorkflowRunId: attempt.workflow_run_id })}>{receipt.target_path || receipt.effect_id_digest || receipt.readback_id || receipt.verification_id ? "Inspect readback evidence" : "Inspect artifact"}</button>}
+                            {receipt.workflow_run_id && onInspectWorkflowRun && <button type="button" className="underline" onClick={() => onInspectWorkflowRun(receipt.workflow_run_id!, selectedTask.owner_session_id)}>Inspect existing workflow record</button>}
+                          </div>
+                        );
+                      })}
                     </div>
                   ))}
-                  {[...selectedTask.result_refs, ...selectedTask.artifact_refs].map((reference, index) => (
-                    <div key={`task-ref:${index}`} className="rounded bg-black/20 p-2">
-                      <div>{receiptTitle(reference)} · {safeReferenceLabel(reference)}</div>
-                      <div>{reference.status ?? reference.outcome ?? "Reference"}{reference.verified === true ? " · verified" : ""}</div>
-                      {reference.content_sha256 && <div className="break-all font-mono text-[10px]">SHA-256 {reference.content_sha256}</div>}
-                      {reference.file_path && <div className="break-all text-[10px]">Artifact path {reference.file_path}</div>}
-                      {(reference.file_path || reference.artifact_id || reference.target_path || reference.effect_id_digest || reference.readback_id || reference.verification_id) && onInspectArtifact && <button type="button" className="mt-1 underline" aria-label={`Inspect execution evidence ${reference.file_path ?? reference.target_path ?? reference.artifact_id ?? reference.effect_id_digest ?? reference.readback_id ?? reference.verification_id}`} onClick={() => onInspectArtifact({ reference, ownerSessionId: selectedTask.owner_session_id, workflowRunId: referenceWorkflowRunId(reference, selectedTask.latest_attempt?.workflow_run_id ?? null), parentWorkflowRunId: selectedTask.latest_attempt?.workflow_run_id ?? null })}>{reference.target_path || reference.effect_id_digest || reference.readback_id || reference.verification_id ? "Inspect readback evidence" : "Inspect artifact"}</button>}
-                      {reference.workflow_run_id && onInspectWorkflowRun && <button type="button" className="underline" onClick={() => onInspectWorkflowRun(reference.workflow_run_id!, selectedTask.owner_session_id)}>Open workflow evidence</button>}
-                    </div>
-                  ))}
+                  {[...selectedTask.result_refs, ...selectedTask.artifact_refs].map((reference, index) => {
+                    const inspectReference = browserEvidenceReference(reference);
+                    const inspectLabel = inspectReference.file_path
+                      ?? inspectReference.target_path
+                      ?? inspectReference.artifact_id
+                      ?? inspectReference.artifact_ref
+                      ?? inspectReference.effect_id_digest
+                      ?? inspectReference.readback_id
+                      ?? inspectReference.verification_id
+                      ?? "available evidence";
+                    const inspectable = Boolean(
+                      inspectReference.file_path
+                      || inspectReference.artifact_id
+                      || inspectReference.target_path
+                      || inspectReference.effect_id_digest
+                      || inspectReference.readback_id
+                      || inspectReference.verification_id,
+                    );
+                    return (
+                      <div key={`task-ref:${index}`} className="rounded bg-black/20 p-2">
+                        <div>{receiptTitle(reference)} · {safeReferenceLabel(inspectReference)}</div>
+                        <div>{reference.status ?? reference.outcome ?? "Reference"}{reference.verified === true ? " · verified" : ""}</div>
+                        {(reference.checkpoint_id || typeof reference.action_index === "number" || typeof reference.action_count === "number" || typeof reference.request_count === "number") && (
+                          <div className="mt-1 text-[10px]" aria-label="Browser execution progress">
+                            Browser progress
+                            {reference.checkpoint_id ? ` · checkpoint ${reference.checkpoint_id}` : ""}
+                            {typeof reference.action_index === "number" ? ` · action ${reference.action_index + 1}${typeof reference.action_count === "number" ? `/${reference.action_count}` : ""}` : typeof reference.action_count === "number" ? ` · ${reference.action_count} actions` : ""}
+                            {typeof reference.request_count === "number" ? ` · ${reference.request_count} requests` : ""}
+                          </div>
+                        )}
+                        {reference.durable_status && <div className="text-[10px]">Durable status {reference.durable_status}</div>}
+                        {reference.artifact_ref && <div className="break-all text-[10px]">Browser artifact receipt {reference.artifact_ref}</div>}
+                        {inspectReference.content_sha256 && <div className="break-all font-mono text-[10px]">SHA-256 {inspectReference.content_sha256}</div>}
+                        {reference.file_path && <div className="break-all text-[10px]">Artifact path {reference.file_path}</div>}
+                        {reference.cleanup_status && <div className="text-[10px]">Cleanup {reference.cleanup_status}</div>}
+                        {reference.memory_status && <div className="text-[10px]">Memory {reference.memory_status}</div>}
+                        {inspectable && onInspectArtifact && <button type="button" className="mt-1 underline" aria-label={`Inspect execution evidence ${inspectLabel}`} onClick={() => onInspectArtifact({ reference: inspectReference, ownerSessionId: selectedTask.owner_session_id, workflowRunId: referenceWorkflowRunId(reference, selectedTask.latest_attempt?.workflow_run_id ?? null), parentWorkflowRunId: selectedTask.latest_attempt?.workflow_run_id ?? null })}>{reference.target_path || reference.effect_id_digest || reference.readback_id || reference.verification_id ? "Inspect readback evidence" : "Inspect artifact"}</button>}
+                        {reference.workflow_run_id && onInspectWorkflowRun && <button type="button" className="underline" onClick={() => onInspectWorkflowRun(reference.workflow_run_id!, selectedTask.owner_session_id)}>Open workflow evidence</button>}
+                      </div>
+                    );
+                  })}
                   {(!selectedDetail?.attempts.length && !selectedTask.result_refs.length && !selectedTask.artifact_refs.length) && <div className="cockpit-empty">No attempts or output references yet.</div>}
                 </div>
               </section>
@@ -3742,6 +3953,26 @@ function WorkBoardPanel({
             <div className="mt-3 flex flex-wrap justify-end gap-2"><button type="button" className="cockpit-feedback-button" onClick={closeCreateDialog} disabled={createBusy || Boolean(pendingCreate)}>Cancel</button><button type="submit" className="cockpit-feedback-button" disabled={createBusy || (!pendingCreate && (!createDraft.goalId || !createDraft.goalRevision || (createDraft.status === "todo" && (!createLimit || !createLimitAcknowledged || !createDraft.capabilityId.trim() || !createDraft.typedInputRef.trim() || !hasValidDigest(createDraft.typedInputDigest)))))}>{createBusy ? "Creating…" : pendingCreate ? "Retry create and reconcile" : createDraft.status === "triage" ? "Create in Triage" : "Create specified Todo"}</button></div>
           </form>
         </div>
+      )}
+      {browserTaskOpen && (
+        <BrowserTaskForm
+          key={pendingCreateScope ?? "anonymous"}
+          goals={allGoals}
+          initialPending={pendingBrowserAtMount}
+          onPendingChange={setBrowserPending}
+          ownerPrincipalId={ownerPrincipalId}
+          ownerSessionId={ownerSessionId}
+          onClose={closeBrowserTask}
+          onCreated={async (task, receipt) => {
+            if (pendingCreateScope) pendingBrowserSubmissions.delete(pendingCreateScope);
+            setBrowserTaskReceipt(receipt);
+            setBrowserTaskOpen(false);
+            await refreshSnapshot();
+            if (stoppedRef.current) return;
+            openTask(task.task_id);
+            setAnnouncement(`Public browser task ${task.title} was created with input artifact ${receipt.artifactId}, ${receipt.actionCount} actions, digest ${receipt.digest}.`);
+          }}
+        />
       )}
     </section>
   );

@@ -93,6 +93,7 @@ OPERATOR_REQUIRED_TABLES = (
     "audio_ingress_jobs",
     "audio_consent_grants",
     "work_board_tasks",
+    "work_board_input_artifacts",
     "work_board_attempts",
     "work_board_review_intents",
     "work_board_links",
@@ -1116,6 +1117,7 @@ async def _ensure_work_board_columns(conn) -> None:
     task_result = await conn.exec_driver_sql("PRAGMA table_info(work_board_tasks)")
     task_columns = {row[1] for row in task_result.fetchall()}
     task_additions = {
+        "input_artifact_id": "VARCHAR",
         "review_expires_at": "DATETIME",
         "review_request_attempt_id": "VARCHAR",
         "review_request_fence": "INTEGER",

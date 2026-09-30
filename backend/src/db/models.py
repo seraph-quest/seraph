@@ -723,6 +723,10 @@ class WorkBoardTask(SQLModel, table=True):
     title: str = Field(default="", max_length=200)
     body: str = Field(default="", max_length=4_000)
     capability_id: Optional[str] = Field(default=None, index=True)
+    # Server-bound typed input artifact.  The artifact row remains the
+    # authority for state/digest; this opaque pointer makes owner-scoped task
+    # projections and the task/artifact CAS cheap without exposing input bytes.
+    input_artifact_id: Optional[str] = Field(default=None, index=True)
     typed_input_ref: Optional[str] = Field(default=None, index=True)
     typed_input_digest: Optional[str] = Field(default=None, index=True)
     executor_id: Optional[str] = Field(default=None, index=True)
@@ -758,6 +762,64 @@ class WorkBoardTask(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_now, index=True)
     completed_at: Optional[datetime] = Field(default=None, index=True)
     archived_at: Optional[datetime] = Field(default=None, index=True)
+
+
+class WorkBoardInputArtifact(SQLModel, table=True):
+    """Owner-bound canonical typed input for one executable board task.
+
+    The JSON payload lives below the canonical workspace artifact root. This
+    row stores only its verified digest/reference and immutable owner, goal,
+    capability, idempotency, and binding metadata. API projections never
+    return the input mapping.
+    """
+
+    __tablename__ = "work_board_input_artifacts"
+    __table_args__ = (
+        Index(
+            "ux_work_board_input_artifacts_idempotency",
+            "owner_principal_id",
+            "owner_session_id",
+            "capability_id",
+            "goal_id",
+            "goal_revision",
+            "idempotency_key",
+            unique=True,
+        ),
+        Index(
+            "ix_work_board_input_artifacts_payload",
+            "owner_principal_id",
+            "owner_session_id",
+            "capability_id",
+            "goal_id",
+            "goal_revision",
+            "payload_sha256",
+        ),
+        Index(
+            "ix_work_board_input_artifacts_state_expiry",
+            "state",
+            "expires_at",
+        ),
+    )
+
+    artifact_id: str = Field(primary_key=True)
+    owner_principal_id: str = Field(index=True)
+    owner_session_id: str = Field(index=True)
+    goal_id: str = Field(index=True)
+    goal_revision: int = Field(index=True)
+    capability_id: str = Field(index=True)
+    capability_version: str = Field(index=True)
+    idempotency_key: str = Field(index=True)
+    payload_sha256: str = Field(index=True)
+    typed_input_ref: str = Field(index=True)
+    size_bytes: int = Field(default=0)
+    state: str = Field(default="pending", index=True)
+    bound_task_id: Optional[str] = Field(default=None, index=True)
+    bound_task_revision: Optional[int] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    expires_at: datetime = Field(index=True)
+    consumed_at: Optional[datetime] = Field(default=None, index=True)
+    revision: int = Field(default=1, index=True)
+    metadata_digest: Optional[str] = Field(default=None, index=True)
 
 
 class WorkBoardAttempt(SQLModel, table=True):

@@ -550,7 +550,14 @@ def _safe_structure(value: Any, *, max_depth: int = 3) -> Any:
             # verified after recovery; all other token-like values remain
             # redacted, including strings and negative values.
             is_fencing_counter = (
-                normalized_key in {"parentfencingtoken", "boardfencingtoken"}
+                normalized_key in {
+                    "parentfencingtoken",
+                    "boardfencingtoken",
+                    "routineparentfencingtoken",
+                    "routineparentboardfencingtoken",
+                    "watchparentfencingtoken",
+                    "watchparentboardfencingtoken",
+                }
                 and type(item) is int
                 and item >= 0
             )
@@ -748,6 +755,25 @@ def _goal_authority_binding(value: Any) -> tuple[str, str]:
     if not owner or not session:
         raise DurableJobTransitionError("service goal authority owner/session binding is missing")
     return owner, session
+
+
+def _canonical_goal_max_outstanding(goal: Goal | None) -> int | None:
+    """Read the already persisted Goal admission cap without caller input.
+
+    Native procedure children use the same effective Goal cap as their parent
+    Browser/Calendar adapter.  A missing legacy budget retains the historical
+    serial child contract; a present malformed budget fails closed.
+    """
+
+    raw = getattr(goal, "admission_budget_json", None) if goal is not None else None
+    if not raw:
+        return None
+    try:
+        from src.goals.contracts import GoalAdmissionBudget
+
+        return int(GoalAdmissionBudget.model_validate(json.loads(raw)).max_outstanding_jobs)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise DurableJobTransitionError("canonical goal admission budget is malformed") from exc
 
 
 def _is_typed_admission_receipt(
@@ -2053,6 +2079,8 @@ class DurableJobRepository:
         safe_authority = _safe_durable_authority(spec.declared_authority)
         root_run_identity = identity.job_id
         branch_depth = 0
+        native_procedure_leaf = False
+        canonical_goal: Goal | None = None
         async with self._session() as db:
             bind = db.get_bind()
             dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
@@ -2073,7 +2101,7 @@ class DurableJobRepository:
                         .where(Goal.id == spec.goal_id)
                         .with_for_update()
                     )
-                await _assert_canonical_goal_fence(
+                canonical_goal = await _assert_canonical_goal_fence(
                     db,
                     goal_id=spec.goal_id,
                     goal_revision=spec.goal_revision,
@@ -2135,6 +2163,101 @@ class DurableJobRepository:
                 if parent_branch_depth < 0:
                     raise DurableJobTransitionError("parent branch depth is malformed")
                 branch_depth = parent_branch_depth + 1
+                authority_parent = _text(spec.declared_authority.get("routine_parent_job_id"))
+                authority_parent_fence = spec.declared_authority.get("routine_parent_fencing_token")
+                authority_step = _text(spec.declared_authority.get("routine_step_id"))
+                # Native Procedure v2 leaves are real children in the
+                # durable tree. Their goal and parent fence must match the
+                # already validated parent; callers cannot evade the root
+                # outstanding budget by naming an unrelated parent. Legacy
+                # parented workflows without this server-owned marker retain
+                # their historical admission contract.
+                if authority_parent or authority_parent_fence is not None or authority_step:
+                    if (
+                        _text(spec.goal_id) != _text(parent.goal_id)
+                        or spec.goal_revision != parent.goal_revision
+                    ):
+                        raise DurableJobLeaseError("native leaf goal binding is stale")
+                if authority_parent or authority_parent_fence is not None or authority_step:
+                    try:
+                        # The server-owned native marker is part of the
+                        # admission fence.  Do not coerce a bool or string
+                        # into a valid fence and accidentally make an
+                        # untrusted child eligible for the root exemption.
+                        if type(authority_parent_fence) is not int or authority_parent_fence <= 0:
+                            raise ValueError
+                    except (TypeError, ValueError) as exc:
+                        raise DurableJobLeaseError("native leaf parent context is malformed") from exc
+                    if (
+                        authority_parent != _text(spec.parent_job_id)
+                        or authority_parent_fence != parent_fence
+                        or not authority_step
+                        or parent.job_kind != "guardian_routine_v2"
+                        or parent.capability_version != "guardian-routine.v2"
+                    ):
+                        raise DurableJobLeaseError("native leaf parent context is stale")
+                    expected_native_step = {
+                        "browser_public_task": "public_browser_check",
+                        "calendar_meeting_prep": "selected_meeting_prep",
+                        "guardian_source_watch": "source_watch",
+                    }.get(_text(identity.job_kind))
+                    parent_authority = _json_load(
+                        getattr(parent, "declared_authority_json", None), {}
+                    )
+                    parent_owner_principal = _text(
+                        getattr(parent, "owner_principal_id", None)
+                        or parent_authority.get("principal")
+                    )
+                    parent_owner_session = _text(
+                        getattr(parent, "operator_session_id", None)
+                        or getattr(parent, "session_id", None)
+                        or parent_authority.get("session_id")
+                    )
+                    parent_goal_owner_principal = _text(
+                        parent_authority.get("goal_owner_principal_id")
+                        or parent_owner_principal
+                    )
+                    parent_goal_owner_session = _text(
+                        parent_authority.get("goal_owner_session_id")
+                        or parent_owner_session
+                    )
+                    native_procedure_leaf = bool(
+                        expected_native_step
+                        and parent_owner_principal
+                        and parent_owner_session
+                        and parent_goal_owner_principal
+                        and parent_goal_owner_session
+                        and authority_step == expected_native_step
+                        and _text(spec.declared_authority.get("routine_parent_goal_id"))
+                        == _text(parent.goal_id)
+                        and type(spec.declared_authority.get("routine_parent_goal_revision")) is int
+                        and int(spec.declared_authority.get("routine_parent_goal_revision"))
+                        == int(parent.goal_revision)
+                        and _text(spec.declared_authority.get("routine_parent_owner_principal_id"))
+                        == parent_owner_principal
+                        and _text(spec.declared_authority.get("routine_parent_owner_session_id"))
+                        == parent_owner_session
+                        and _text(spec.declared_authority.get("goal_owner_principal_id"))
+                        == parent_goal_owner_principal
+                        and _text(spec.declared_authority.get("goal_owner_session_id"))
+                        == parent_goal_owner_session
+                        and _text(spec.session_id) == _text(parent.session_id)
+                        and _text(spec.operator_session_id or spec.session_id)
+                        == _text(parent.operator_session_id or parent.session_id)
+                        and _text(spec.goal_id) == _text(parent.goal_id)
+                        and type(spec.goal_revision) is int
+                        and int(spec.goal_revision) == int(parent.goal_revision)
+                        and type(spec.parent_fencing_token) is int
+                        and type(spec.max_outstanding_jobs) is int
+                        and (
+                            spec.max_outstanding_jobs
+                            == (_canonical_goal_max_outstanding(canonical_goal) or 1)
+                        )
+                        and _text(parent.job_kind) == "guardian_routine_v2"
+                        and _text(parent.capability_version) == "guardian-routine.v2"
+                    )
+                    if not native_procedure_leaf:
+                        raise DurableJobLeaseError("native leaf parent context is incomplete")
             if spec.routine_publication_admission_guard is not None:
                 if dialect_name == "sqlite" and not transaction_started:
                     # A guard is meaningful even for a goalless internal row.
@@ -2172,7 +2295,11 @@ class DurableJobRepository:
                 db.expunge(existing)
                 return _deduped_admission(existing, binding=binding)
 
-            if spec.goal_id is not None and spec.max_outstanding_jobs is not None:
+            if (
+                spec.goal_id is not None
+                and spec.max_outstanding_jobs is not None
+                and not native_procedure_leaf
+            ):
                 # This count and the child insert share the same durable
                 # transaction.  Unlike the scheduler's advisory listing,
                 # this canonical admission fence cannot be bypassed by the

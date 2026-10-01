@@ -801,6 +801,7 @@ export interface WorkBoardRoutinePackagePreview {
   review_id: string | null;
   status: string;
   manifest: {
+    schema_version?: number;
     display_name: string;
     summary: string;
     version: string;
@@ -823,13 +824,18 @@ export interface WorkBoardRoutinePackagePreview {
     title: string;
     summary: string;
     procedure: {
+      schema_version?: 1 | 2;
       capability_id: string;
-      steps: Array<{ id: string; capability: string; tool: string }>;
+      template_id?: string;
+      plan_digest?: string;
+      steps: Array<{ id: string; capability_id?: string; capability_version?: string; capability?: string; tool?: string }>;
     };
     bindings: {
       workflow_sha256: string;
-      legacy_runbook_sha256: string;
+      legacy_runbook_sha256?: string;
+      runbook_sha256?: string;
       source_provenance_sha256: string;
+      plan_digest?: string;
     };
   };
 }
@@ -1225,7 +1231,7 @@ export interface CalendarMeetingPrepInput {
   calendar_list_revision: string;
   goal_id: string;
   goal_revision: number;
-  purpose: "bounded preparation request";
+  purpose: string;
 }
 
 export interface CreateCalendarPrepRequest {

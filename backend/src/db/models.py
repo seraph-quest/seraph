@@ -916,6 +916,50 @@ class WorkBoardRoutineBinding(SQLModel, table=True):
     revision: int = Field(default=1, index=True)
 
 
+class ProcedureV2Binding(SQLModel, table=True):
+    """Metadata-only preparation fence for a reviewed v2 procedure.
+
+    Immutable procedure bytes and provenance remain in
+    ``GuardianRoutineVersion``. This row is only the owner/session,
+    idempotency, preview-expiry, and restart-reconciliation boundary between
+    a source-proof preview and that existing routine lifecycle.
+    """
+
+    __tablename__ = "procedure_v2_bindings"
+    __table_args__ = (
+        Index(
+            "ux_procedure_v2_bindings_idempotency",
+            "owner_principal_id",
+            "owner_session_id",
+            "idempotency_key",
+            unique=True,
+        ),
+        Index(
+            "ux_procedure_v2_bindings_deterministic_routine",
+            "deterministic_routine_id",
+            unique=True,
+        ),
+    )
+
+    binding_id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_principal_id: str = Field(index=True)
+    owner_session_id: str = Field(index=True)
+    idempotency_key: str = Field(index=True, max_length=256)
+    request_digest: str = Field(default="", index=True, max_length=128)
+    source_refs_json: str = Field(default="{}")
+    deterministic_routine_id: str = Field(index=True)
+    routine_name: str = Field(default="", max_length=80)
+    template_id: str = Field(default="", index=True, max_length=80)
+    version_id: Optional[str] = Field(default=None, index=True)
+    preview_digest: str = Field(default="", index=True, max_length=128)
+    preview_expires_at: datetime = Field(index=True)
+    state: str = Field(default="preparing", index=True)
+    recovery_reason: Optional[str] = Field(default=None, index=True)
+    revision: int = Field(default=1, index=True)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+
+
 # ─── Operator work board ────────────────────────────────
 
 

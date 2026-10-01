@@ -378,6 +378,8 @@ def test_unregistered_and_non_task_capabilities_cannot_enter_artifact_storage(mo
 @pytest.mark.asyncio
 async def test_artifact_owner_digest_file_and_expiry_fences(async_db, tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    observed_at = datetime(2026, 9, 30, tzinfo=timezone.utc)
+    before_expiry = observed_at + timedelta(hours=1)
     async with async_db() as db:
         await _browser_goal(
             db,
@@ -385,7 +387,7 @@ async def test_artifact_owner_digest_file_and_expiry_fences(async_db, tmp_path, 
             budget=GoalAdmissionBudget(max_outstanding_jobs=1, max_attempts=1, max_runtime_seconds=120),
         )
         request = _artifact_request()
-        metadata = await prepare_input_artifact(db, OWNER, request, now=datetime(2026, 9, 30, tzinfo=timezone.utc))
+        metadata = await prepare_input_artifact(db, OWNER, request, now=observed_at)
         assert _artifact_path(metadata).is_file()
 
         with pytest.raises(BoardError) as owner_error:
@@ -396,6 +398,7 @@ async def test_artifact_owner_digest_file_and_expiry_fences(async_db, tmp_path, 
                 goal_id=request.goal_id,
                 goal_revision=1,
                 capability_id=request.capability_id,
+                now=before_expiry,
             )
         assert owner_error.value.code == "input_artifact_not_found"
 
@@ -410,6 +413,7 @@ async def test_artifact_owner_digest_file_and_expiry_fences(async_db, tmp_path, 
                 goal_id=request.goal_id,
                 goal_revision=1,
                 capability_id=request.capability_id,
+                now=before_expiry,
             )
         assert digest_error.value.code == "input_artifact_digest_mismatch"
 
@@ -420,7 +424,7 @@ async def test_artifact_owner_digest_file_and_expiry_fences(async_db, tmp_path, 
             db,
             OWNER,
             expiry_request,
-            now=datetime(2026, 9, 30, tzinfo=timezone.utc),
+            now=observed_at,
         )
         with pytest.raises(BoardError) as expiry_error:
             await resolve_input_artifact_for_task(
@@ -657,12 +661,21 @@ async def test_browser_readiness_rejects_draft_goal_before_claim(async_db, monke
     assert reason == "The browser task goal is not active"
 
 
-def test_public_browser_capability_is_the_only_artifact_storage_opt_in():
-    assert REGISTERED_CAPABILITIES["browser.public-task.v1"].secret_like is False
+def test_public_browser_and_calendar_capabilities_are_the_only_artifact_storage_opt_ins():
+    approved_public_capabilities = {
+        "browser.public-task.v1",
+        "calendar.meeting-prep.v1",
+        "calendar.observe_due_events.v1",
+    }
+    assert {
+        capability_id
+        for capability_id, spec in REGISTERED_CAPABILITIES.items()
+        if spec.secret_like is False
+    } == approved_public_capabilities
     assert all(
         spec.secret_like
         for capability_id, spec in REGISTERED_CAPABILITIES.items()
-        if capability_id != "browser.public-task.v1"
+        if capability_id not in approved_public_capabilities
     )
 
 

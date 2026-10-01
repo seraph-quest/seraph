@@ -103,6 +103,12 @@ OPERATOR_REQUIRED_TABLES = (
     "work_board_handoffs",
     "memory_proposals",
     "work_board_decision_receipts",
+    "google_service_connections",
+    "calendar_read_consents",
+    "calendar_event_bindings",
+    "calendar_prep_receipts",
+    "governed_schedule_bindings",
+    "governed_schedule_occurrences",
 )
 
 _LEGACY_WORKFLOW_STATUS_MAP = {
@@ -839,6 +845,67 @@ async def _ensure_m5_columns(conn) -> None:
         )
 
 
+async def _ensure_calendar_columns(conn) -> None:
+    """Install calendar columns and fences before metadata indexes are created.
+
+    Existing workspaces may predate the consent idempotency columns, and
+    ``create_all`` would try to create the model's partial unique index before
+    an additive migration could inspect legacy rows.  Add the columns and
+    reject an already ambiguous nonempty key explicitly; preserving both
+    authority rows is safer than silently choosing one.
+    """
+
+    consent_result = await conn.exec_driver_sql("PRAGMA table_info(calendar_read_consents)")
+    consent_columns = {row[1] for row in consent_result.fetchall()}
+    if consent_columns:
+        if "creation_idempotency_key" not in consent_columns:
+            await conn.exec_driver_sql(
+                "ALTER TABLE calendar_read_consents ADD COLUMN creation_idempotency_key VARCHAR DEFAULT ''"
+            )
+        if "creation_request_digest" not in consent_columns:
+            await conn.exec_driver_sql(
+                "ALTER TABLE calendar_read_consents ADD COLUMN creation_request_digest VARCHAR DEFAULT ''"
+            )
+        duplicate = await conn.exec_driver_sql(
+            "SELECT 1 FROM calendar_read_consents "
+            "WHERE TRIM(COALESCE(creation_idempotency_key, '')) <> '' "
+            "GROUP BY owner_principal_id, owner_session_id, creation_idempotency_key "
+            "HAVING COUNT(*) > 1 LIMIT 1"
+        )
+        if duplicate.fetchone() is not None:
+            raise RuntimeError(
+                "calendar consent creation idempotency collision requires explicit "
+                "owner/session reconciliation before startup"
+            )
+        await conn.exec_driver_sql(
+            "DROP INDEX IF EXISTS ux_calendar_read_consents_creation_idempotency"
+        )
+        await conn.exec_driver_sql(
+            "CREATE UNIQUE INDEX ux_calendar_read_consents_creation_idempotency "
+            "ON calendar_read_consents (owner_principal_id, owner_session_id, creation_idempotency_key) "
+            "WHERE creation_idempotency_key <> ''"
+        )
+
+    connection_result = await conn.exec_driver_sql(
+        "PRAGMA table_info(google_service_connections)"
+    )
+    connection_columns = {row[1] for row in connection_result.fetchall()}
+    if connection_columns:
+        if "verified_setup_job_id" not in connection_columns:
+            await conn.exec_driver_sql(
+                "ALTER TABLE google_service_connections ADD COLUMN verified_setup_job_id VARCHAR"
+            )
+        # Older development snapshots used a broader temporary index name;
+        # remove it before materializing the SQLModel field's canonical index.
+        await conn.exec_driver_sql(
+            "DROP INDEX IF EXISTS ix_google_service_connections_verified_setup_job"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_google_service_connections_verified_setup_job_id "
+            "ON google_service_connections (verified_setup_job_id)"
+        )
+
+
 async def _ensure_guardian_inbox_columns(conn) -> None:
     """Additive columns for durable guardian inbox action history."""
 
@@ -1317,6 +1384,9 @@ async def init_db() -> None:
         # Existing routine-binding tables need their additive columns before
         # metadata creates the conditional indexes declared by SQLModel.
         await _ensure_work_board_routine_binding(conn)
+        # Calendar additive columns and the consent partial unique index must
+        # inspect legacy rows before ``create_all`` materializes model indexes.
+        await _ensure_calendar_columns(conn)
         await conn.run_sync(SQLModel.metadata.create_all)
         await _ensure_guardian_inbox_columns(conn)
         await _ensure_m5_columns(conn)

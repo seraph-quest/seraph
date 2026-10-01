@@ -9,6 +9,7 @@ type AuthView = "checking" | "login" | "setup" | "unavailable" | "authenticated"
 export interface OperatorSession {
   authenticated: true;
   principal_id: string;
+  session_id?: string;
   idle_expires_at: string;
   absolute_expires_at: string;
 }

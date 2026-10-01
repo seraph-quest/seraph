@@ -56,6 +56,9 @@ from src.browser.task_runner import (
 from src.db.engine import get_session
 from src.db.models import (
     AuditEvent,
+    CalendarPrepReceipt,
+    CalendarReadConsent,
+    GoogleServiceConnection,
     Goal,
     GuardianDecisionPacket,
     GuardianSourceWatch,
@@ -102,6 +105,11 @@ from src.workflows.job_runtime import (
 )
 from src.workflows.run_identity import build_workflow_run_identity, parse_workflow_run_identity
 from src.workspace import WorkspaceStateClass, canonical_workspace_registry
+from src.integrations.google_calendar import (
+    MAX_CALENDAR_RESULT_BYTES,
+    calendar_artifact_path_for_job,
+    read_calendar_result_bytes,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -149,6 +157,11 @@ _BROWSER_PREVIEW_ALLOWED_ATTRIBUTES = frozenset(
 _BROWSER_PREVIEW_CHECK_KINDS = frozenset(
     {"url_host", "url_path_prefix", "text_contains", "text_sha256"}
 )
+_CALENDAR_RESULT_STATUS_UNAVAILABLE = "unavailable"
+_CALENDAR_RESULT_PATH_RE = re.compile(
+    r"^artifacts/work-board/calendar/result-[0-9a-f]{32}\.json$"
+)
+_CALENDAR_RESULT_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _safe_board_job_reference(value: Any) -> str | None:
@@ -745,6 +758,234 @@ def _browser_preview_projection(
         "extracts": extracts,
         "checks": checks,
         "request_count": payload["request_count"],
+    }
+
+
+def _calendar_result_text(value: Any, *, max_bytes: int) -> str | None:
+    if not isinstance(value, str) or not value or "\x00" in value:
+        return None
+    try:
+        if len(value.encode("utf-8")) > max_bytes:
+            return None
+    except UnicodeEncodeError:
+        return None
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
+        return None
+    return value
+
+
+def _calendar_result_digest(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    candidate = value.removeprefix("sha256:").lower()
+    return candidate if _CALENDAR_RESULT_DIGEST_RE.fullmatch(candidate) else None
+
+
+def _calendar_result_list(value: Any) -> list[str] | None:
+    if not isinstance(value, list) or len(value) > 8:
+        return None
+    result: list[str] = []
+    for item in value:
+        text = _calendar_result_text(item, max_bytes=400)
+        if text is None:
+            return None
+        result.append(text)
+    return result
+
+
+async def _calendar_result_projection(
+    run: WorkflowRunState,
+    *,
+    db: Any,
+    task: WorkBoardTask | None,
+    attempt: WorkBoardAttempt | None,
+    goal: Goal | None,
+) -> dict[str, Any] | None:
+    """Read one verified calendar artifact after the full owner/retention fence."""
+
+    if task is None or attempt is None or goal is None:
+        return None
+    task_id = _safe_board_job_reference(getattr(task, "task_id", None))
+    attempt_id = _safe_board_job_reference(getattr(attempt, "attempt_id", None))
+    job_id = _safe_board_job_reference(getattr(run, "run_identity", None))
+    if not task_id or not attempt_id or not job_id:
+        return None
+    expected_job_id = calendar_artifact_path_for_job(job_id)
+    from src.integrations.google_calendar import calendar_job_id
+
+    expected_root = calendar_job_id(task.owner_principal_id, task_id, attempt_id)
+    if (
+        job_id != expected_root
+        or getattr(attempt, "workflow_run_id", None) != expected_root
+        or task.capability_id != "calendar.meeting-prep.v1"
+        or task.owner_principal_id != goal.owner_principal_id
+        or task.owner_session_id != goal.owner_session_id
+        or task.goal_id != goal.id
+        or type(task.goal_revision) is not int
+        or task.goal_revision < 1
+        or goal.revision != task.goal_revision
+        or attempt.task_id != task.task_id
+        or run.status != "succeeded"
+        or run.job_kind != "calendar_meeting_prep"
+        or run.capability_version != "1"
+        or run.owner_kind != "user"
+        or run.owner_principal_id != task.owner_principal_id
+        or run.service_id not in (None, "")
+        or run.root_run_identity != expected_root
+        or run.parent_run_identity not in (None, "")
+        or run.parent_job_id not in (None, "")
+        or run.session_id != task.owner_session_id
+        or run.operator_session_id != task.owner_session_id
+        or run.goal_id != task.goal_id
+        or run.goal_revision != task.goal_revision
+    ):
+        return None
+    if not _CALENDAR_RESULT_PATH_RE.fullmatch(expected_job_id):
+        return None
+    receipt = (
+        await db.execute(
+            select(CalendarPrepReceipt).where(
+                CalendarPrepReceipt.owner_principal_id == task.owner_principal_id,
+                CalendarPrepReceipt.owner_session_id == task.owner_session_id,
+                CalendarPrepReceipt.task_id == task.task_id,
+                CalendarPrepReceipt.attempt_id == attempt.attempt_id,
+                CalendarPrepReceipt.durable_job_id == expected_root,
+                CalendarPrepReceipt.goal_id == task.goal_id,
+                CalendarPrepReceipt.goal_revision == task.goal_revision,
+                CalendarPrepReceipt.status == "succeeded",
+                CalendarPrepReceipt.memory_status == "no_learning",
+            )
+        )
+    ).scalar_one_or_none()
+    if receipt is None:
+        return None
+    consent = (
+        await db.execute(
+            select(CalendarReadConsent).where(
+                CalendarReadConsent.consent_id == receipt.consent_id,
+                CalendarReadConsent.owner_principal_id == task.owner_principal_id,
+                CalendarReadConsent.owner_session_id == task.owner_session_id,
+            )
+        )
+    ).scalar_one_or_none()
+    connection = (
+        await db.execute(
+            select(GoogleServiceConnection).where(
+                GoogleServiceConnection.connection_id == receipt.connection_id,
+                GoogleServiceConnection.owner_principal_id == task.owner_principal_id,
+                GoogleServiceConnection.owner_session_id == task.owner_session_id,
+            )
+        )
+    ).scalar_one_or_none()
+    now = datetime.now(timezone.utc)
+    if (
+        consent is None
+        or connection is None
+        or consent.state != "active"
+        or connection.state != "active"
+        or consent.revision != receipt.consent_revision
+        or connection.revision != receipt.connection_revision
+        or consent.expires_at is None
+        or (consent.expires_at.replace(tzinfo=timezone.utc) if consent.expires_at.tzinfo is None else consent.expires_at) <= now
+    ):
+        return None
+    artifact_digest = _calendar_result_digest(receipt.content_sha256)
+    artifact_id = _safe_workflow_artifact_id(receipt.artifact_id)
+    readback_id = _safe_board_receipt_token(receipt.readback_id)
+    if (
+        not artifact_digest
+        or artifact_id is None
+        or readback_id is None
+        or receipt.file_path != expected_job_id
+    ):
+        return None
+    try:
+        artifacts = json.loads(run.artifact_receipts_json or "[]")
+        effects = json.loads(run.effect_receipts_json or "[]")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(artifacts, list) or not isinstance(effects, list):
+        return None
+    if not any(
+        isinstance(item, Mapping)
+        and item.get("exists") is True
+        and item.get("artifact_type") == "calendar_meeting_prep_result"
+        and item.get("artifact_id") == artifact_id
+        and item.get("file_path") == expected_job_id
+        and item.get("content_sha256") == artifact_digest
+        for item in artifacts[-100:]
+    ):
+        return None
+    verified_at: str | None = None
+    for item in reversed(effects[-100:]):
+        if not isinstance(item, Mapping):
+            continue
+        details = item.get("details")
+        if (
+            item.get("receipt_kind") == "readback"
+            and item.get("effect_type") == "calendar_meeting_prep_result"
+            and item.get("status") in {"succeeded", "read_back", "reconciled"}
+            and item.get("readback_id") == readback_id
+            and item.get("target_path") == expected_job_id
+            and item.get("target_digest") == artifact_digest
+            and item.get("content_sha256") == artifact_digest
+            and isinstance(details, Mapping)
+            and details.get("verified") is True
+            and details.get("memory_status") == "no_learning"
+        ):
+            verified_at = _safe_board_receipt_time(item.get("verified_at"))
+            break
+    if verified_at is None:
+        return None
+    payload_bytes = read_calendar_result_bytes(
+        expected_job_id,
+        workspace_root=settings.workspace_dir,
+        max_bytes=MAX_CALENDAR_RESULT_BYTES,
+    )
+    if payload_bytes is None or hashlib.sha256(payload_bytes).hexdigest() != artifact_digest:
+        return None
+    try:
+        payload = json.loads(payload_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(payload, Mapping) or set(payload) != {
+        "schema_version",
+        "event_key",
+        "event_revision",
+        "summary",
+        "agenda",
+        "questions",
+        "risks",
+        "preparation_steps",
+    }:
+        return None
+    if type(payload.get("schema_version")) is not int or payload.get("schema_version") != 1:
+        return None
+    event_key = _calendar_result_digest(payload.get("event_key"))
+    event_revision = _calendar_result_digest(payload.get("event_revision"))
+    if event_key is None or event_revision is None or receipt.event_key.removeprefix("sha256:") != event_key or receipt.event_revision_read_1.removeprefix("sha256:") != event_revision or receipt.event_revision_read_2.removeprefix("sha256:") != event_revision:
+        return None
+    summary = _calendar_result_text(payload.get("summary"), max_bytes=1200)
+    agenda = _calendar_result_list(payload.get("agenda"))
+    questions = _calendar_result_list(payload.get("questions"))
+    risks = _calendar_result_list(payload.get("risks"))
+    preparation_steps = _calendar_result_list(payload.get("preparation_steps"))
+    if summary is None or agenda is None or questions is None or risks is None or preparation_steps is None:
+        return None
+    return {
+        "schema_version": 1,
+        "capability_id": "calendar.meeting-prep.v1",
+        "artifact_id": artifact_id,
+        "readback_id": readback_id,
+        "file_path": expected_job_id,
+        "content_sha256": artifact_digest,
+        "event_key": payload["event_key"],
+        "event_revision": payload["event_revision"],
+        "summary": summary,
+        "agenda": agenda,
+        "questions": questions,
+        "risks": risks,
+        "preparation_steps": preparation_steps,
     }
 
 _WORKFLOW_FILENAME_RE = re.compile(r"[^a-zA-Z0-9_-]+")
@@ -7062,6 +7303,7 @@ async def get_board_bound_workflow_job(
     job_id: str,
     request: Request,
     include_browser_result: bool = Query(False),
+    include_calendar_result: bool = Query(False),
 ):
     """Return a safe durable-run projection for an owned board attempt.
 
@@ -7189,7 +7431,7 @@ async def get_board_bound_workflow_job(
         if not bound_session and not is_proven_descendant:
             raise HTTPException(status_code=404, detail={"code": "workflow_job_not_found"})
         projected = _safe_board_job_projection(run)
-        if include_browser_result:
+        if include_browser_result or include_calendar_result:
             task_attempt = (
                 await db.execute(
                     select(WorkBoardTask, WorkBoardAttempt)
@@ -7216,16 +7458,29 @@ async def get_board_bound_workflow_job(
                         )
                     )
                 ).scalar_one_or_none()
-            browser_result = _browser_preview_projection(
-                run,
-                task=preview_task,
-                attempt=preview_attempt,
-                goal=preview_goal,
-            )
-            projected["browser_result_status"] = (
-                "available" if browser_result is not None else _BROWSER_PREVIEW_STATUS_UNAVAILABLE
-            )
-            projected["browser_result"] = browser_result
+            if include_browser_result:
+                browser_result = _browser_preview_projection(
+                    run,
+                    task=preview_task,
+                    attempt=preview_attempt,
+                    goal=preview_goal,
+                )
+                projected["browser_result_status"] = (
+                    "available" if browser_result is not None else _BROWSER_PREVIEW_STATUS_UNAVAILABLE
+                )
+                projected["browser_result"] = browser_result
+            if include_calendar_result:
+                calendar_result = await _calendar_result_projection(
+                    run,
+                    db=db,
+                    task=preview_task,
+                    attempt=preview_attempt,
+                    goal=preview_goal,
+                )
+                projected["calendar_result_status"] = (
+                    "available" if calendar_result is not None else _CALENDAR_RESULT_STATUS_UNAVAILABLE
+                )
+                projected["calendar_result"] = calendar_result
         return {"job": projected}
 
 

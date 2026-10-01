@@ -8,6 +8,7 @@ import {
 } from "../../lib/modelFabric";
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
+import { validateCalendarResultPreview } from "../../lib/calendar";
 import { SERAPH_BUILD_ID } from "../../config/release";
 import { useChatStore } from "../../stores/chatStore";
 import { useQuestStore } from "../../stores/questStore";
@@ -6360,6 +6361,24 @@ const BROWSER_RESULT_ATTRIBUTES = new Set([
   "src",
 ]);
 
+const CALENDAR_RESULT_ARTIFACT_TYPE = "calendar_meeting_prep_result" as const;
+
+interface BoardCalendarResultPreview {
+  schema_version: 1;
+  capability_id: "calendar.meeting-prep.v1";
+  artifact_id: string;
+  readback_id: string;
+  file_path: string;
+  content_sha256: string;
+  event_key: string;
+  event_revision: string;
+  summary: string;
+  agenda: string[];
+  questions: string[];
+  risks: string[];
+  preparation_steps: string[];
+}
+
 interface BoardBrowserResultExtract {
   action_index: number;
   kind: "extract";
@@ -6392,6 +6411,8 @@ interface BoardBrowserResultPreview {
 type BoardArtifactRecord = ArtifactRecord & {
   browserResultRequested?: boolean;
   browserResult?: BoardBrowserResultPreview | null;
+  calendarResultRequested?: boolean;
+  calendarResult?: BoardCalendarResultPreview | null;
 };
 
 function isBoardBoundWorkflowRun(workflow: WorkflowRunRecord): workflow is BoardBoundWorkflowRun {
@@ -6452,6 +6473,35 @@ function isBrowserResultReference(reference: WorkBoardReceiptReference): boolean
   const path = reference.file_path;
   return typeof path === "string"
     && /^artifacts\/work-board\/browser\/result-[a-f0-9]{32}\.json$/i.test(path);
+}
+
+function isCalendarResultReference(reference: WorkBoardReceiptReference): boolean {
+  if (reference.artifact_type === CALENDAR_RESULT_ARTIFACT_TYPE) return true;
+  const path = reference.file_path;
+  return typeof path === "string" && /^artifacts\/work-board\/calendar\/result-[a-f0-9]{32}\.json$/i.test(path);
+}
+
+function normalizeBoardCalendarResult(
+  value: unknown,
+  reference: WorkBoardReceiptReference,
+): BoardCalendarResultPreview | null {
+  const parsed = validateCalendarResultPreview(value);
+  if (!parsed) return null;
+  const path = boardSafeReceiptPath(parsed.file_path);
+  const digest = boardSafeReceiptDigest(
+    typeof parsed.content_sha256 === "string"
+      ? parsed.content_sha256.replace(/^sha256:/i, "")
+      : parsed.content_sha256,
+  );
+  if (!path || !digest || !reference.artifact_id || reference.artifact_id !== parsed.artifact_id
+    || !reference.readback_id || reference.readback_id !== parsed.readback_id
+    || !reference.file_path || reference.file_path !== path
+    || !reference.content_sha256 || reference.content_sha256.replace(/^sha256:/i, "").toLowerCase() !== digest) return null;
+  return {
+    ...parsed,
+    file_path: path,
+    content_sha256: digest,
+  };
 }
 
 function normalizeBoardBrowserResult(
@@ -9497,17 +9547,27 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     ownerSessionId: string,
     isCurrentInspection: () => boolean,
     browserReference?: WorkBoardReceiptReference | null,
+    calendarReference?: WorkBoardReceiptReference | null,
   ): Promise<{
     job: Record<string, unknown> | null;
     workflow: BoardBoundWorkflowRun | null;
     status?: number;
     browserResultRequested?: boolean;
     browserResult?: BoardBrowserResultPreview | null;
+    calendarResultRequested?: boolean;
+    calendarResult?: BoardCalendarResultPreview | null;
   }> {
     const browserResultRequested = Boolean(
       browserReference && isBrowserResultReference(browserReference),
     );
-    const query = browserResultRequested ? "?include_browser_result=true" : "";
+    const calendarResultRequested = Boolean(
+      calendarReference && isCalendarResultReference(calendarReference),
+    );
+    const query = browserResultRequested
+      ? "?include_browser_result=true"
+      : calendarResultRequested
+        ? "?include_calendar_result=true"
+        : "";
     const result = await fetchCockpitJson(
       `${API_URL}/api/workflows/jobs/${encodeURIComponent(workflowRunId)}${query}`,
       5000,
@@ -9520,6 +9580,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         status: result.status,
         browserResultRequested,
         browserResult: null,
+        calendarResultRequested,
+        calendarResult: null,
       };
     }
     const payload = boardBoundRecord(result.payload);
@@ -9531,11 +9593,17 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         status: result.status,
         browserResultRequested,
         browserResult: null,
+        calendarResultRequested,
+        calendarResult: null,
       };
     }
     const browserResultStatus = job.browser_result_status;
     const browserResult = browserResultRequested && browserResultStatus === "available"
       ? normalizeBoardBrowserResult(job.browser_result, browserReference!)
+      : null;
+    const calendarResultStatus = job.calendar_result_status;
+    const calendarResult = calendarResultRequested && calendarResultStatus === "available"
+      ? normalizeBoardCalendarResult(job.calendar_result, calendarReference!)
       : null;
     return {
       job,
@@ -9543,6 +9611,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       status: result.status,
       browserResultRequested,
       browserResult,
+      calendarResultRequested,
+      calendarResult,
     };
   }
 
@@ -9600,7 +9670,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       focusPane("workflows_pane");
       setWorkBoardEvidenceStatus("Loading workflow evidence for the task's immutable run link.");
       setOperatorStatus("Loading workflow evidence for the task's immutable run link.");
-      void loadBoardBoundWorkflowRun(workflowRunId, ownerSessionId, isCurrentInspection, reference).then(({ job, workflow, status, browserResultRequested, browserResult }) => {
+      void loadBoardBoundWorkflowRun(workflowRunId, ownerSessionId, isCurrentInspection, reference, reference).then(({ job, workflow, status, browserResultRequested, browserResult, calendarResultRequested, calendarResult }) => {
         if (!isCurrentInspection()) return;
         if (!job || !workflow) {
           const message = boardWorkflowEvidenceUnavailable(status);
@@ -9626,6 +9696,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             ...artifact,
             ...(browserResultRequested
               ? { browserResultRequested: true, browserResult: browserResult ?? null }
+              : {}),
+            ...(calendarResultRequested
+              ? { calendarResultRequested: true, calendarResult: calendarResult ?? null }
               : {}),
           };
           setSelectedInspector({ kind: "artifact", artifact: selectedArtifact });
@@ -14304,6 +14377,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       : null;
     const selectedBrowserResult = selectedBrowserArtifact?.browserResult ?? null;
     const browserResultRequested = selectedBrowserArtifact?.browserResultRequested === true;
+    const selectedCalendarResult = selectedBrowserArtifact?.calendarResult ?? null;
+    const calendarResultRequested = selectedBrowserArtifact?.calendarResultRequested === true;
     const selectedWorkflowName = selectedWorkflow?.workflowName ?? "workflow";
     const selectedWorkflowCheckpointDraftByStep = new Map(
       selectedWorkflowCheckpointActions.map((action) => [action.stepId, action.draft]),
@@ -14451,6 +14526,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         created_at: artifact.createdAt,
         ...(artifact.browserResultRequested
           ? { browser_result_status: artifact.browserResult ? "available" : "unavailable" }
+          : {}),
+        ...(artifact.calendarResultRequested
+          ? { calendar_result_status: artifact.calendarResult ? "available" : "unavailable" }
           : {}),
       };
     }
@@ -15861,6 +15939,33 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 aria-label="Browser result preview unavailable; verified artifact metadata remains available."
               >
                 Browser result preview unavailable; verified artifact metadata remains available. Refresh task evidence and retry.
+              </div>
+            )}
+          </section>
+        )}
+        {selectedInspector.kind === "artifact" && calendarResultRequested && (
+          <section className="cockpit-inspector-stack" aria-label="Verified calendar preparation result">
+            {selectedCalendarResult ? (
+              <>
+                <div className="cockpit-inspector-stack-row">
+                  <div className="cockpit-key">calendar result</div>
+                  <div className="cockpit-value">verified preparation readback</div>
+                  <div className="cockpit-value">event binding {selectedCalendarResult.event_key} · revision {selectedCalendarResult.event_revision}</div>
+                </div>
+                <section className="cockpit-inspector-stack-row" aria-label="Verified calendar preparation text">
+                  <div className="cockpit-key">summary</div>
+                  <pre className="cockpit-inspector-value whitespace-pre-wrap">{selectedCalendarResult.summary}</pre>
+                  {(["agenda", "questions", "risks", "preparation_steps"] as const).map((field) => (
+                    <div key={field} className="cockpit-inspector-detail">
+                      <div className="cockpit-key">{field.replace(/_/g, " ")}</div>
+                      {selectedCalendarResult[field].length > 0 ? selectedCalendarResult[field].map((item, index) => <pre key={`${field}:${index}`} className="cockpit-inspector-value whitespace-pre-wrap">{item}</pre>) : <div className="cockpit-value">None recorded.</div>}
+                    </div>
+                  ))}
+                </section>
+              </>
+            ) : (
+              <div className="cockpit-feedback-status" role="status" aria-label="Calendar result preview unavailable; verified artifact metadata remains available.">
+                Calendar preparation preview unavailable; verified artifact metadata remains available. Refresh task evidence and retry.
               </div>
             )}
           </section>

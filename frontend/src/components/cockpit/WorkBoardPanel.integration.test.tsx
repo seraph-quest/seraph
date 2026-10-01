@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   WorkBoardEvent,
   WorkBoardEventPage,
+  WorkBoardAttempt,
   WorkBoardTask,
   WorkBoardTaskDetail,
   WorkBoardTaskPage,
@@ -226,5 +227,156 @@ describe("WorkBoardPanel integration", () => {
     act(() => IntegrationBoardSocket.instances[1]?.send(taskEvent(12)));
     await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/work-board/events?after=11"))).toBe(true));
     expect(screen.getByText("Current state: Todo")).toBeInTheDocument();
+  });
+
+  it("shows the calendar durable receipt independently from the board task state", async () => {
+    const digest = "a".repeat(64);
+    const calendarAttempt: WorkBoardAttempt = {
+      attempt_id: "attempt-calendar-1",
+      task_id: "task-calendar-1",
+      workflow_run_id: "workflow-calendar-1",
+      task_revision_at_claim: 1,
+      lease_owner: null,
+      cancel_requested_at: null,
+      lease_expires_at: null,
+      heartbeat_at: null,
+      fencing_token: 1,
+      executor_id: "calendar-executor",
+      started_at: "2026-09-30T10:00:00Z",
+      ended_at: "2026-09-30T10:00:05Z",
+      outcome: "succeeded",
+      receipt_refs: [],
+      readback_status: "verified",
+      verification_status: "passed",
+      created_at: "2026-09-30T10:00:00Z",
+      updated_at: "2026-09-30T10:00:05Z",
+      calendar_execution: {
+        capability_id: "calendar.meeting-prep.v1",
+        job_id: "job-calendar-1",
+        durable_status: "succeeded",
+        connection_id: "connection-1",
+        connection_revision: 2,
+        consent_id: "consent-1",
+        consent_revision: 1,
+        event_binding_id: "binding-1",
+        event_key: digest,
+        event_revision: digest,
+        calendar_list_revision: digest,
+        read_1: null,
+        read_2: null,
+        effective_route: null,
+        artifact_id: "artifact-calendar-1",
+        file_path: "artifacts/work-board/calendar/result-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json",
+        content_sha256: digest,
+        readback_id: "readback-calendar-1",
+        verified_at: "2026-09-30T10:00:05Z",
+        memory_status: "no_learning",
+        failure_code: null,
+        recovery_action: null,
+      },
+    };
+    const calendarTask = boardTask({
+      task_id: "task-calendar-1",
+      title: "Prepare customer meeting",
+      capability_id: "calendar.meeting-prep.v1",
+      status: "done",
+      latest_attempt: calendarAttempt,
+      completed_at: "2026-09-30T10:00:05Z",
+    });
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) return Promise.resolve(response(page(calendarTask, 10)));
+      if (url.includes("/api/work-board/events?")) return Promise.resolve(response(emptyEvents(10)));
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
+      if (url.includes("/api/work-board/goals/goal-1/execution-limits")) return Promise.resolve(response({ goal_id: "goal-1", goal_revision: 3, effective_max_runtime_seconds: 300, default_max_runtime_seconds: 300, hard_max_runtime_seconds: 900, attempt_limit: 2, limit_source: "default" }));
+      if (url.endsWith("/api/work-board/tasks/task-calendar-1")) return Promise.resolve(response(detail(calendarTask)));
+      return Promise.resolve(response({}));
+    });
+    render(<WorkBoardPanel />);
+    await waitFor(() => expect(IntegrationBoardSocket.instances).toHaveLength(1));
+    act(() => IntegrationBoardSocket.instances[0]?.open());
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Prepare customer meeting" }));
+    expect(await screen.findByRole("region", { name: "Calendar meeting preparation execution" })).toBeInTheDocument();
+    const calendarRegion = screen.getByRole("region", { name: "Calendar meeting preparation execution" });
+    expect(calendarRegion).toHaveTextContent("Durable job job-calendar-1");
+    expect(calendarRegion).toHaveTextContent("Memory: no_learning");
+  });
+
+  it.each([
+    ["readback", { readback_id: null }],
+    ["artifact path", { file_path: null }],
+    ["content digest", { content_sha256: null }],
+  ] as const)("does not offer calendar inspection without a verified %s", async (_label, missing) => {
+    const digest = "a".repeat(64);
+    const calendarExecution = {
+      capability_id: "calendar.meeting-prep.v1",
+      job_id: "job-calendar-incomplete",
+      durable_status: "succeeded",
+      connection_id: "connection-1",
+      connection_revision: 2,
+      consent_id: "consent-1",
+      consent_revision: 1,
+      event_binding_id: "binding-1",
+      event_key: digest,
+      event_revision: digest,
+      calendar_list_revision: digest,
+      read_1: null,
+      read_2: null,
+      effective_route: null,
+      artifact_id: "artifact-calendar-incomplete",
+      file_path: "artifacts/work-board/calendar/result-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json",
+      content_sha256: digest,
+      readback_id: "readback-calendar-incomplete",
+      verified_at: "2026-09-30T10:00:05Z",
+      memory_status: "no_learning",
+      failure_code: null,
+      recovery_action: null,
+      ...missing,
+    } as unknown as WorkBoardAttempt["calendar_execution"];
+    const calendarAttempt = {
+      attempt_id: "attempt-calendar-incomplete",
+      task_id: "task-calendar-incomplete",
+      workflow_run_id: "workflow-calendar-incomplete",
+      task_revision_at_claim: 1,
+      lease_owner: null,
+      cancel_requested_at: null,
+      lease_expires_at: null,
+      heartbeat_at: null,
+      fencing_token: 1,
+      executor_id: "calendar-executor",
+      started_at: "2026-09-30T10:00:00Z",
+      ended_at: "2026-09-30T10:00:05Z",
+      outcome: "succeeded",
+      receipt_refs: [],
+      readback_status: "verified",
+      verification_status: "passed",
+      created_at: "2026-09-30T10:00:00Z",
+      updated_at: "2026-09-30T10:00:05Z",
+      calendar_execution: calendarExecution,
+    } as WorkBoardAttempt;
+    const calendarTask = boardTask({
+      task_id: "task-calendar-incomplete",
+      title: "Incomplete calendar receipt",
+      capability_id: "calendar.meeting-prep.v1",
+      status: "done",
+      latest_attempt: calendarAttempt,
+      completed_at: "2026-09-30T10:00:05Z",
+    });
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) return Promise.resolve(response(page(calendarTask, 10)));
+      if (url.includes("/api/work-board/events?")) return Promise.resolve(response(emptyEvents(10)));
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
+      if (url.includes("/api/work-board/goals/goal-1/execution-limits")) return Promise.resolve(response({ goal_id: "goal-1", goal_revision: 3, effective_max_runtime_seconds: 300, default_max_runtime_seconds: 300, hard_max_runtime_seconds: 900, attempt_limit: 2, limit_source: "default" }));
+      if (url.endsWith("/api/work-board/tasks/task-calendar-incomplete")) return Promise.resolve(response(detail(calendarTask)));
+      return Promise.resolve(response({}));
+    });
+    render(<WorkBoardPanel />);
+    await waitFor(() => expect(IntegrationBoardSocket.instances).toHaveLength(1));
+    act(() => IntegrationBoardSocket.instances[0]?.open());
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Incomplete calendar receipt" }));
+    const calendarRegion = await screen.findByRole("region", { name: "Calendar meeting preparation execution" });
+    expect(calendarRegion).toHaveTextContent(/Execution receipt unavailable|Verified artifact\/readback is unavailable/);
+    expect(screen.queryByRole("button", { name: "Inspect verified calendar artifact" })).not.toBeInTheDocument();
   });
 });

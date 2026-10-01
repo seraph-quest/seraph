@@ -13,7 +13,7 @@ import hashlib
 import json
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
@@ -2594,10 +2594,20 @@ class DurableJobRepository:
         result: Any = None,
         result_summary: str | None = None,
         approval_resume_receipt: Mapping[str, Any] | None = None,
+        terminal_authority_check: Callable[[Any, Any], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         if to_status not in DURABLE_JOB_STATUSES:
             raise DurableJobTransitionError(f"unknown durable job status: {to_status}")
         async with self._session() as db:
+            # A capability-specific terminal guard must observe its owner,
+            # consent, and artifact rows in the same serialized transaction as
+            # the root CAS.  SQLite otherwise permits a stale read snapshot
+            # between the caller's last preflight and this transition.
+            if terminal_authority_check is not None and to_status in {"succeeded", "degraded"}:
+                bind = db.get_bind()
+                dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
+                if dialect_name == "sqlite":
+                    await db.execute(text("BEGIN IMMEDIATE"))
             run = await self._fetch(db, job_id)
             if to_status not in {"failed", "cancelled"}:
                 await _assert_canonical_goal_fence(
@@ -2819,6 +2829,8 @@ class DurableJobRepository:
                     raise DurableJobTransitionError(
                         "cannot mark durable job terminal: verified capability readback is required"
                     )
+                if terminal_authority_check is not None:
+                    await terminal_authority_check(db, run)
             now = _utc_now()
             values: dict[str, Any] = {
                 "status": to_status,

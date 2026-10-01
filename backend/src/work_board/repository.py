@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import re
-from typing import Any, Mapping
+from typing import Any, Awaitable, Callable, Mapping
 
 from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
@@ -1114,6 +1114,7 @@ class WorkBoardRepository:
         request: WorkBoardTaskCreate,
         *,
         origin_session_id: str | None = None,
+        publication_authority_check: Callable[[AsyncSession], Awaitable[None]] | None = None,
     ) -> BoardMutation:
         self._validate_task_fields(request)
         # Triage rows may remain unbound until Specify/Decompose acceptance,
@@ -1148,7 +1149,7 @@ class WorkBoardRepository:
                 status_code=422,
             )
         artifact = None
-        if request.input_artifact_id:
+        if request.input_artifact_id or publication_authority_check is not None:
             # Reserve the writer before reading the owner/goal/artifact graph.
             # Those reads establish the authority that is bound by the task
             # insert; moving the fence after redaction would allow a stale
@@ -1210,6 +1211,14 @@ class WorkBoardRepository:
                     metadata={"status": existing.status.value, "task_revision": existing.task_revision},
                 )
             return BoardMutation(existing, event, idempotent_replay=True)
+
+        # Capability-specific checks belong after the repository acquires its
+        # writer transaction. A check performed by the caller before this
+        # method can be separated from publication by the transaction boundary
+        # above. This server-only callback neither grants authority nor commits
+        # the transaction; failure prevents a new task and its artifact binding.
+        if publication_authority_check is not None:
+            await publication_authority_check(db)
 
         await self._validate_goal(
             db,

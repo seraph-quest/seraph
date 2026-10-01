@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import Column, Index, Integer, UniqueConstraint, text
+from sqlalchemy import Column, Index, Integer, Text, UniqueConstraint, text
 from sqlmodel import Field, SQLModel, Relationship
 
 
@@ -353,6 +353,244 @@ class ScheduledJobRun(SQLModel, table=True):
     started_at: datetime = Field(default_factory=_now, index=True)
     finished_at: Optional[datetime] = Field(default=None, index=True)
     metadata_json: Optional[str] = Field(default=None)
+
+
+# ─── Governed Calendar (M5) ─────────────────────────────
+
+class GoogleServiceConnection(SQLModel, table=True):
+    """Owner-bound metadata for one encrypted, read-only Calendar credential.
+
+    Secrets are deliberately kept in ``Secret`` through the vault repository;
+    this row contains only the opaque vault key and immutable request digests.
+    """
+
+    __tablename__ = "google_service_connections"
+    __table_args__ = (
+        Index("ix_google_service_connections_owner_state", "owner_principal_id", "owner_session_id", "state"),
+        UniqueConstraint(
+            "owner_principal_id",
+            "owner_session_id",
+            "setup_idempotency_key",
+            name="ux_google_service_connections_setup_key",
+        ),
+    )
+
+    connection_id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_principal_id: str = Field(index=True)
+    owner_session_id: str = Field(index=True)
+    service: str = Field(default="calendar_readonly", index=True)
+    label: str = Field(default="", max_length=200)
+    vault_secret_key: str = Field(index=True, unique=True, max_length=256)
+    credential_fingerprint: str = Field(default="", index=True, max_length=128)
+    setup_idempotency_key: str = Field(default="", max_length=256)
+    setup_request_digest: str = Field(default="", index=True, max_length=128)
+    state: str = Field(default="preparing", index=True)
+    revision: int = Field(default=1, index=True)
+    # The canonical verification result lives in the durable control job.  The
+    # connection keeps only its opaque root identity for owner-bound lookup;
+    # no idempotency key or response payload is cached on this row.
+    verified_setup_job_id: Optional[str] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+
+
+class CalendarReadConsent(SQLModel, table=True):
+    """Finite owner/goal grant for bounded Calendar reads."""
+
+    __tablename__ = "calendar_read_consents"
+    __table_args__ = (
+        Index("ix_calendar_read_consents_owner_state", "owner_principal_id", "owner_session_id", "state"),
+        Index("ix_calendar_read_consents_connection", "connection_id", "state"),
+        # Empty keys are retained by legacy rows and are not idempotency
+        # claims.  Only a real nonempty owner/session key is unique.
+        Index(
+            "ux_calendar_read_consents_creation_idempotency",
+            "owner_principal_id",
+            "owner_session_id",
+            "creation_idempotency_key",
+            unique=True,
+            sqlite_where=text("creation_idempotency_key <> ''"),
+            postgresql_where=text("creation_idempotency_key <> ''"),
+        ),
+    )
+
+    consent_id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_principal_id: str = Field(index=True)
+    owner_session_id: str = Field(index=True)
+    connection_id: str = Field(index=True)
+    creation_idempotency_key: str = Field(default="", max_length=256)
+    creation_request_digest: str = Field(default="", index=True, max_length=128)
+    connection_revision: int = Field(default=1, index=True)
+    # The value is encrypted ciphertext, whose storage length is unrelated to
+    # the public provider-identity bound.  Keep the 1024-character limit at
+    # the API/adapter boundary and use an unrestricted text column here.
+    calendar_id: str = Field(default="", sa_type=Text)
+    goal_id: str = Field(index=True)
+    goal_revision: int = Field(default=1, index=True)
+    allowed_fields_json: str = Field(default="[]")
+    window_minutes: int = Field(default=60)
+    max_events: int = Field(default=10)
+    allow_remote_model: bool = Field(default=False)
+    expires_at: datetime = Field(index=True)
+    state: str = Field(default="active", index=True)
+    revision: int = Field(default=1, index=True)
+    consent_digest: str = Field(default="", index=True, max_length=128)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+
+
+class CalendarEventBinding(SQLModel, table=True):
+    """Owner-private handoff from a bounded provider event read to a task."""
+
+    __tablename__ = "calendar_event_bindings"
+    __table_args__ = (
+        Index("ix_calendar_event_bindings_owner_event", "owner_principal_id", "owner_session_id", "event_key"),
+        UniqueConstraint(
+            "owner_principal_id",
+            "owner_session_id",
+            "connection_id",
+            "provider_identity_digest",
+            name="ux_calendar_event_bindings_provider_identity",
+        ),
+    )
+
+    event_binding_id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_principal_id: str = Field(index=True)
+    owner_session_id: str = Field(index=True)
+    connection_id: str = Field(index=True)
+    connection_revision: int = Field(default=1, index=True)
+    consent_id: str = Field(index=True)
+    consent_revision: int = Field(default=1, index=True)
+    # Provider identities are encrypted at rest by the integration module and
+    # are never projected through a generic API or model prompt.
+    calendar_id_private: str = Field(default="")
+    provider_event_id_private: str = Field(default="")
+    recurrence_identity_private: str = Field(default="")
+    provider_identity_digest: str = Field(default="", index=True, max_length=128)
+    event_key: str = Field(default="", index=True, max_length=128)
+    event_revision: str = Field(default="", index=True, max_length=128)
+    calendar_list_revision: str = Field(default="", index=True, max_length=128)
+    fetched_at: datetime = Field(default_factory=_now, index=True)
+    state: str = Field(default="selected", index=True)
+    revision: int = Field(default=1, index=True)
+    snapshot_digest: str = Field(default="", index=True, max_length=128)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+
+
+class CalendarPrepReceipt(SQLModel, table=True):
+    """Bounded two-read/model/readback receipt for one prep attempt."""
+
+    __tablename__ = "calendar_prep_receipts"
+    __table_args__ = (
+        Index("ix_calendar_prep_receipts_task", "task_id", "attempt_id"),
+        Index("ix_calendar_prep_receipts_owner", "owner_principal_id", "owner_session_id"),
+    )
+
+    receipt_id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_principal_id: str = Field(index=True)
+    owner_session_id: str = Field(index=True)
+    task_id: str = Field(index=True)
+    attempt_id: str = Field(index=True)
+    durable_job_id: str = Field(index=True)
+    goal_id: str = Field(index=True)
+    goal_revision: int = Field(default=1, index=True)
+    connection_id: str = Field(index=True)
+    connection_revision: int = Field(default=1, index=True)
+    consent_id: str = Field(index=True)
+    consent_revision: int = Field(default=1, index=True)
+    event_binding_id: str = Field(index=True)
+    event_key: str = Field(default="", index=True, max_length=128)
+    event_revision_read_1: str = Field(default="", max_length=128)
+    event_revision_read_2: str = Field(default="", max_length=128)
+    calendar_list_revision: str = Field(default="", max_length=128)
+    read_1_json: str = Field(default="{}")
+    read_2_json: str = Field(default="{}")
+    effective_route_json: str = Field(default="{}")
+    output_json: str = Field(default="{}")
+    artifact_id: Optional[str] = Field(default=None, index=True)
+    file_path: Optional[str] = Field(default=None)
+    content_sha256: Optional[str] = Field(default=None, index=True)
+    readback_id: Optional[str] = Field(default=None, index=True)
+    status: str = Field(default="pending", index=True)
+    failure_code: Optional[str] = Field(default=None, index=True)
+    recovery_action: Optional[str] = Field(default=None)
+    memory_status: str = Field(default="no_learning", index=True)
+    expires_at: Optional[datetime] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+
+
+class GovernedScheduleBinding(SQLModel, table=True):
+    """Shared owner-bound binding around an existing ScheduledJob trigger."""
+
+    __tablename__ = "governed_schedule_bindings"
+    __table_args__ = (
+        Index("ix_governed_schedule_bindings_owner_state", "owner_principal_id", "owner_session_id", "state"),
+        UniqueConstraint("scheduled_job_id", name="ux_governed_schedule_binding_job"),
+        UniqueConstraint(
+            "owner_principal_id",
+            "owner_session_id",
+            "schedule_idempotency_key",
+            name="ux_governed_schedule_binding_idempotency",
+        ),
+    )
+
+    binding_id: str = Field(default_factory=_uuid, primary_key=True)
+    scheduled_job_id: str = Field(index=True)
+    owner_principal_id: str = Field(index=True)
+    owner_session_id: str = Field(index=True)
+    goal_id: str = Field(index=True)
+    goal_revision: int = Field(default=1, index=True)
+    capability_id: str = Field(default="calendar.observe_due_events.v1", index=True)
+    action_type: str = Field(default="calendar.observe_due_events.v1", index=True)
+    input_artifact_id: str = Field(index=True)
+    input_digest: str = Field(default="", index=True, max_length=128)
+    action_digest: str = Field(default="", index=True, max_length=128)
+    consent_kind: str = Field(default="calendar_read", index=True)
+    # Goal-budget/system schedules may omit a Calendar read grant. Calendar
+    # observation bindings still require a nonempty consent at admission.
+    read_consent_id: Optional[str] = Field(default=None, index=True)
+    consent_revision: int = Field(default=1, index=True)
+    consent_digest: str = Field(default="", index=True, max_length=128)
+    schedule_idempotency_key: str = Field(default="", max_length=256)
+    schedule_request_digest: str = Field(default="", index=True, max_length=128)
+    cadence_kind: str = Field(default="5min", index=True)
+    timezone: str = Field(default="UTC")
+    daily_hour: Optional[int] = Field(default=None)
+    daily_minute: Optional[int] = Field(default=None)
+    binding_revision: int = Field(default=1, index=True)
+    expires_at: datetime = Field(index=True)
+    state: str = Field(default="active", index=True)
+    last_slot_utc: Optional[datetime] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+
+
+class GovernedScheduleOccurrence(SQLModel, table=True):
+    """One immutable UTC scheduler occurrence/idempotency fence."""
+
+    __tablename__ = "governed_schedule_occurrences"
+    __table_args__ = (
+        Index("ix_governed_schedule_occurrences_binding_slot", "binding_id", "slot_utc"),
+        UniqueConstraint("binding_id", "slot_utc", name="ux_governed_schedule_occurrence_slot"),
+    )
+
+    occurrence_id: str = Field(default_factory=_uuid, primary_key=True)
+    binding_id: str = Field(index=True)
+    binding_revision: int = Field(default=1, index=True)
+    slot_utc: datetime = Field(index=True)
+    idempotency_key: str = Field(default="", index=True, max_length=256)
+    request_digest: str = Field(default="", index=True, max_length=128)
+    claim_token: Optional[str] = Field(default=None)
+    fencing_token: int = Field(default=0)
+    lease_expires_at: Optional[datetime] = Field(default=None, index=True)
+    state: str = Field(default="reserved", index=True)
+    work_board_task_id: Optional[str] = Field(default=None, index=True)
+    durable_job_id: Optional[str] = Field(default=None, index=True)
+    metadata_json: str = Field(default="{}")
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
 
 
 class GuardianSourceWatch(SQLModel, table=True):

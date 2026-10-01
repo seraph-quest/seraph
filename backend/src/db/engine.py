@@ -345,6 +345,7 @@ async def _ensure_legacy_columns(conn) -> None:
             "ON guardian_decision_packets (inbox_pending, updated_at, id)"
         )
 
+
     session_columns = await _add_missing_columns(
         "sessions",
         {"owner_principal_id": "VARCHAR"},
@@ -745,6 +746,52 @@ async def _ensure_legacy_columns(conn) -> None:
                     "id": row[0],
                 },
             )
+
+async def _ensure_operator_session_columns(conn) -> None:
+    """Add the stable-owner bearer tombstone marker before table indexes load.
+
+    Existing SQLite workspaces need an additive non-null server-default column
+    before ``SQLModel.metadata.create_all`` materializes the model index. The
+    information-schema branch keeps the same migration safe for PostgreSQL
+    deployments without changing any existing session rows.
+    """
+
+    dialect = str(getattr(conn.dialect, "name", "")).lower()
+    if dialect == "sqlite":
+        result = await conn.exec_driver_sql("PRAGMA table_info(operator_sessions)")
+        existing = {row[1] for row in result.fetchall()}
+    else:
+        result = await conn.exec_driver_sql(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'operator_sessions'"
+        )
+        existing = {row[0] for row in result.fetchall()}
+    if not existing:
+        return
+    if "is_bearer_tombstone" not in existing:
+        if dialect == "sqlite":
+            await conn.exec_driver_sql(
+                "ALTER TABLE operator_sessions ADD COLUMN "
+                "is_bearer_tombstone BOOLEAN NOT NULL DEFAULT 0"
+            )
+        else:
+            await conn.exec_driver_sql(
+                "ALTER TABLE operator_sessions ADD COLUMN "
+                "is_bearer_tombstone BOOLEAN NOT NULL DEFAULT FALSE"
+            )
+    default_literal = "0" if dialect == "sqlite" else "FALSE"
+    await conn.exec_driver_sql(
+        "UPDATE operator_sessions SET is_bearer_tombstone = "
+        f"{default_literal} WHERE is_bearer_tombstone IS NULL"
+    )
+    await conn.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_operator_sessions_is_bearer_tombstone "
+        "ON operator_sessions (is_bearer_tombstone)"
+    )
+    await conn.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_operator_sessions_replacement_state "
+        "ON operator_sessions (replaced_by_id, is_bearer_tombstone, revoked_at)"
+    )
 
 
 async def _ensure_telegram_transport_columns(conn) -> None:
@@ -1424,6 +1471,7 @@ async def init_db() -> None:
         # make duplicate legacy bindings abort startup before the migration can
         # preserve and block those rows for operator reconciliation.
         await _ensure_legacy_columns(conn)
+        await _ensure_operator_session_columns(conn)
         await _ensure_telegram_transport_columns(conn)
         await _ensure_work_board_columns(conn)
         # Existing routine-binding tables need their additive columns before

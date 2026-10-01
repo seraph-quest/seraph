@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, Request, Response
 from collections import OrderedDict
+from datetime import datetime, timezone
 import ipaddress
 import time
 from pydantic import BaseModel
@@ -59,7 +60,17 @@ class LoginRequest(BaseModel):
     password: str
 
 
-def _set_cookie(response: Response, token: str) -> None:
+def _remaining_cookie_age(absolute_expires_at: datetime) -> int:
+    """Keep the browser cookie no longer-lived than server authority."""
+
+    expiry = absolute_expires_at
+    if expiry.tzinfo is None or expiry.utcoffset() is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+    remaining = (expiry.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds()
+    return max(0, int(remaining))
+
+
+def _set_cookie(response: Response, token: str, *, absolute_expires_at: datetime) -> None:
     response.set_cookie(
         settings.operator_auth_cookie_name,
         token,
@@ -67,8 +78,21 @@ def _set_cookie(response: Response, token: str) -> None:
         secure=settings.operator_auth_cookie_secure,
         samesite="strict",
         path="/",
-        max_age=settings.operator_auth_absolute_seconds,
+        max_age=_remaining_cookie_age(absolute_expires_at),
     )
+
+
+def _operator_payload(operator) -> dict:
+    """Return the additive, non-sensitive operator session contract."""
+    return {
+        "authenticated": True,
+        "principal_id": operator.principal.principal_id,
+        "session_id": operator.session_id,
+        "idle_expires_at": operator.idle_expires_at,
+        "absolute_expires_at": operator.absolute_expires_at,
+        "ownership_continuity": operator.ownership_continuity,
+        "ownership_recovery_action": operator.ownership_recovery_action,
+    }
 
 
 @router.post("/login")
@@ -78,42 +102,40 @@ async def login(payload: LoginRequest, response: Response, request: Request):
     if not await verify_secret(payload.password):
         raise HTTPException(status_code=401, detail={"code": "invalid_credentials"})
     token, operator = await create_session()
-    _set_cookie(response, token)
-    return {
-        "authenticated": True,
-        "principal_id": operator.principal.principal_id,
-        "session_id": operator.session_id,
-        "idle_expires_at": operator.idle_expires_at,
-        "absolute_expires_at": operator.absolute_expires_at,
-    }
+    _set_cookie(response, token, absolute_expires_at=operator.absolute_expires_at)
+    return _operator_payload(operator)
 
 
 @router.get("/session")
 async def session(request: Request):
     _require_configured()
     operator = request.state.operator
-    return {
-        "authenticated": True,
-        "principal_id": operator.principal.principal_id,
-        "session_id": operator.session_id,
-        "idle_expires_at": operator.idle_expires_at,
-        "absolute_expires_at": operator.absolute_expires_at,
-    }
+    return _operator_payload(operator)
 
 
 @router.post("/refresh")
 async def refresh(request: Request, response: Response):
     _require_configured()
     operator = request.state.operator
-    token, replacement = await create_session(replace_session_id=operator.session_id)
-    _set_cookie(response, token)
-    return {
-        "authenticated": True,
-        "principal_id": replacement.principal.principal_id,
-        "session_id": replacement.session_id,
-        "idle_expires_at": replacement.idle_expires_at,
-        "absolute_expires_at": replacement.absolute_expires_at,
-    }
+    try:
+        token, replacement = await create_session(
+            replace_session_id=operator.session_id,
+            expected_token_hash=operator._token_hash,
+        )
+    except AuthFailure as exc:
+        # A second request can pass the middleware with the same old cookie
+        # just before the first request wins the private hash CAS.  Keep that
+        # bounded race an ordinary authenticated denial so the cockpit can
+        # reconcile its current cookie instead of receiving a 500.
+        if exc.code in {"authentication_required", "session_revoked", "session_expired"}:
+            raise HTTPException(status_code=401, detail={"code": exc.code}) from exc
+        raise HTTPException(status_code=503, detail={"code": "session_unavailable"}) from exc
+    except Exception as exc:
+        # A database or transaction failure must remain a bounded auth denial;
+        # never turn it into a successful refresh or expose backend details.
+        raise HTTPException(status_code=503, detail={"code": "session_unavailable"}) from exc
+    _set_cookie(response, token, absolute_expires_at=replacement.absolute_expires_at)
+    return _operator_payload(replacement)
 
 
 @router.post("/logout", status_code=204)

@@ -16,7 +16,7 @@ from sqlalchemy import select, update
 
 from src.auth.service import AuthenticatedOperator
 from src.db.engine import get_session
-from src.db.models import CalendarEventBinding, CalendarReadConsent, Goal, GoogleServiceConnection, GovernedScheduleBinding, OperatorSession, ScheduledJob
+from src.db.models import CalendarEventBinding, CalendarReadConsent, Goal, GoogleServiceConnection, GovernedScheduleBinding, GovernedScheduleOccurrence, OperatorSession, ScheduledJob
 from src.integrations.google_calendar import (
     CalendarIntegrationError,
     GoogleCalendarReadonlyAdapter,

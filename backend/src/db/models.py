@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import Column, Index, Integer, Text, UniqueConstraint, text
+from sqlalchemy import Boolean, Column, Index, Integer, Text, UniqueConstraint, text
 from sqlmodel import Field, SQLModel, Relationship
 
 
@@ -2430,6 +2430,14 @@ class OperatorSession(SQLModel, table=True):
     """Revocable single-operator browser session; raw bearer tokens never persist."""
 
     __tablename__ = "operator_sessions"
+    __table_args__ = (
+        Index(
+            "ix_operator_sessions_replacement_state",
+            "replaced_by_id",
+            "is_bearer_tombstone",
+            "revoked_at",
+        ),
+    )
 
     id: str = Field(default_factory=_uuid, primary_key=True)
     token_hash: str = Field(unique=True, index=True)
@@ -2439,3 +2447,15 @@ class OperatorSession(SQLModel, table=True):
     absolute_expires_at: datetime = Field(index=True)
     revoked_at: Optional[datetime] = Field(default=None, index=True)
     replaced_by_id: Optional[str] = Field(default=None, index=True)
+    # New refreshes retain the active owner id and retire the old bearer hash
+    # in a separate revoked row.  Legacy replacement rows remain represented by
+    # ``is_bearer_tombstone=False`` and are surfaced as recovery-required.
+    is_bearer_tombstone: bool = Field(
+        default=False,
+        sa_column=Column(
+            Boolean,
+            nullable=False,
+            server_default=text("false"),
+            index=True,
+        ),
+    )

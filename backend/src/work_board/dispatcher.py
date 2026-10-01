@@ -5558,6 +5558,21 @@ class WorkBoardDispatcher:
                 fencing_token=fencing_token,
                 consent=consent,
             )
+            # Proposal generation persists private response checkpoints on the
+            # same durable root.  Those checkpoints advance the root revision,
+            # so the pre-generation projection cannot authorize the approval
+            # binding.  Re-read the running root and its original lease fence
+            # before mutating the approval state; never refresh the fence to
+            # adopt a different worker.
+            projection = await self.jobs.get_job(job_id)
+            if not isinstance(projection, Mapping) or _status(projection) != "running":
+                raise DurableJobError("repair_durable_job_changed_after_proposal")
+            proposal_lease = projection.get("lease") if isinstance(projection.get("lease"), Mapping) else {}
+            if (
+                _text(proposal_lease.get("owner")) != lease_owner
+                or int(proposal_lease.get("fencing_token") or 0) != fencing_token
+            ):
+                raise DurableJobLeaseError("repair durable lease changed after proposal generation")
             # Approval identity is deterministic for this proposal, so a
             # crash between approval creation and proposal binding replays the
             # same row rather than creating a second approval or root.

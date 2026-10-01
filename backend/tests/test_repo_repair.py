@@ -405,6 +405,14 @@ async def test_repo_repair_real_input_producer_reaches_private_source_review(
             "api_base": "https://openrouter.ai/api/v1",
         },
     )
+    preview_response = await client.get(
+        f"/api/workflows/repo-repair/{attempt.workflow_run_id}/source-preview"
+    )
+    assert preview_response.status_code == 200, f"{preview_response.status_code}: {preview_response.text!r}"
+    preview_payload = preview_response.json()
+    assert preview_payload["source_packet"]["packet_id"] == packet.id
+    assert preview_payload["source_packet"]["selected_files"][0]["path"] == "src/app.py"
+    assert preview_payload["provider_contacted"] is False
     consent_response = await client.post(
         f"/api/workflows/repo-repair/{attempt.workflow_run_id}/code-egress-consent",
         json={

@@ -50,7 +50,7 @@ from src.auth.middleware import authenticate_websocket
 from src.auth.service import (
     AuthFailure,
     auth_enabled,
-    authenticate_session,
+    authenticate_websocket_session,
     bind_operator_principal,
 )
 from src.db.engine import get_session
@@ -175,7 +175,7 @@ async def watch_operator_session(
     while True:
         await asyncio.sleep(poll_seconds)
         try:
-            await authenticate_session(session_id, touch=False)
+            await authenticate_websocket_session(session_id, touch=False)
         except AuthFailure as exc:
             revoked_event.set()
             revocation_guard.set()
@@ -593,7 +593,7 @@ async def websocket_chat(websocket: WebSocket):
             raw = await websocket.receive_text()
             if auth_session_id:
                 try:
-                    operator = await authenticate_session(operator.session_id, touch=True)
+                    operator = await authenticate_websocket_session(operator.session_id, touch=True)
                 except AuthFailure:
                     auth_revoked.set()
                     revocation_guard.set()

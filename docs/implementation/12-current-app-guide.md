@@ -288,6 +288,20 @@ credentialed cookies across the local frontend/backend ports; raw passwords and
 session tokens never enter frontend state. Multi-operator identity ownership
 remains outside the current single-operator boundary.
 
+On the #895 corrective branch, a refresh rotates only the bearer hash while
+retaining the active `OperatorSession.id` and absolute expiry. The retired hash
+is stored in a revoked tombstone and cannot authenticate or become an owner.
+Login, session, and successful refresh receipts expose
+`ownership_continuity=stable` or `legacy_rebind_required` plus the explicit
+`ownership_recovery_action`. A stable value means the same active owner remains
+current across bearer refresh; logout, idle/absolute expiry, and a new
+independent login still revoke or isolate the prior scope under the existing
+contract. Existing pre-corrective replacement rows are reported as blocked
+recovery: historical grants and approvals are not restored, and the cockpit
+keeps an accessible notice directing the operator to review and recreate work
+in the current scope. A separate audited recovery design is required before
+historical scopes can be migrated.
+
 `/api/runtime/status` and `/api/settings/artifact-storage` are the active
 operator receipts. They expose the effective OpenRouter route, consent,
 allow-list, budget, admission state, and disabled local-runtime reason. A

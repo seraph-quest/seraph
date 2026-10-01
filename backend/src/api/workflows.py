@@ -6884,8 +6884,36 @@ async def grant_repo_repair_code_egress_consent(
         attempt_id = str(authority.get("attempt_id") or "")
         goal_id = str(job.get("goal_id") or authority.get("goal_id") or "")
         goal_revision = int(job.get("goal_revision") or authority.get("goal_revision") or 0)
-        expires_at = datetime.now(timezone.utc) + REPO_REPAIR_MAX_CONSENT_TTL
-        consent = await RepoRepairService().grant_egress_consent(
+        now = datetime.now(timezone.utc)
+        expires_at = now + REPO_REPAIR_MAX_CONSENT_TTL
+        # Consent cannot outlive the already admitted durable root.  The
+        # source service enforces the same boundary from canonical rows; cap
+        # the API request before entering that transaction so a short goal
+        # runtime remains usable.
+        lease = job.get("lease") if isinstance(job.get("lease"), Mapping) else {}
+        for raw_boundary in (job.get("deadline_at"), lease.get("expires_at")):
+            if isinstance(raw_boundary, datetime):
+                boundary = raw_boundary if raw_boundary.tzinfo is not None else raw_boundary.replace(tzinfo=timezone.utc)
+            elif isinstance(raw_boundary, str) and raw_boundary.strip():
+                try:
+                    boundary = datetime.fromisoformat(raw_boundary.replace("Z", "+00:00"))
+                except ValueError:
+                    boundary = None
+                if boundary is not None and boundary.tzinfo is None:
+                    boundary = boundary.replace(tzinfo=timezone.utc)
+            else:
+                boundary = None
+            if boundary is not None:
+                expires_at = min(expires_at, boundary.astimezone(timezone.utc))
+        if expires_at <= now:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "repair_deadline_expired", "recovery_action": "reconcile_external_effect", "operator_visible": True},
+            )
+        # Use the API's owner-bound session factory so the consent write is
+        # part of the same configured database boundary as job/board recovery
+        # (and remains testable against an isolated store).
+        consent = await RepoRepairService(session_factory=get_session).grant_egress_consent(
             owner=WorkBoardOwner(principal_id=str(operator.principal.principal_id), session_id=str(operator.session_id)),
             work_board_task_id=task_id,
             work_board_attempt_id=attempt_id,

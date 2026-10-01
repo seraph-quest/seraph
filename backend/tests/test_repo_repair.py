@@ -237,7 +237,7 @@ def test_repo_repair_input_requires_source_paths_inside_allowlist():
 
 @pytest.mark.asyncio
 async def test_repo_repair_real_input_producer_reaches_private_source_review(
-    async_db, tmp_path: Path, monkeypatch
+    client, async_db, tmp_path: Path, monkeypatch
 ):
     """The shared input producer feeds the governed repair dispatcher.
 
@@ -260,7 +260,7 @@ async def test_repo_repair_real_input_producer_reaches_private_source_review(
     monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", False)
     monkeypatch.setattr(settings, "operator_auth_secret", "repo-repair-producer-auth-secret")
     monkeypatch.setattr(settings, "operator_auth_secret_hash", "")
-    _token, operator = await create_session()
+    token, operator = await create_session()
     owner = WorkBoardOwner(
         principal_id=operator.principal.principal_id,
         session_id=operator.session_id,
@@ -390,6 +390,38 @@ async def test_repo_repair_real_input_producer_reaches_private_source_review(
     assert packet.state == "verified"
     assert packet.owner_principal_id == owner.principal_id
     assert packet.owner_session_id == owner.session_id
+
+    job = await durable_job_repository.get_job(attempt.workflow_run_id)
+    assert job is not None
+    client.cookies.set(settings.operator_auth_cookie_name, token)
+    monkeypatch.setattr(
+        "src.api.workflows._require_authenticated_capability_operator",
+        lambda _request: operator,
+    )
+    monkeypatch.setattr(
+        "src.llm_runtime.build_model_kwargs",
+        lambda **_kwargs: {
+            "runtime_profile": "openrouter",
+            "api_base": "https://openrouter.ai/api/v1",
+        },
+    )
+    consent_response = await client.post(
+        f"/api/workflows/repo-repair/{attempt.workflow_run_id}/code-egress-consent",
+        json={
+            "expected_job_revision": int(job["revision"]),
+            "source_packet_digest": packet.artifact_sha256,
+            "expected_source_manifest_digest": packet.source_manifest_digest,
+            "expected_profile_id": "openrouter",
+            "acknowledged_selected_source": True,
+            "idempotency_key": "producer-consent",
+        },
+        headers={"Origin": "http://localhost:3001"},
+    )
+    assert consent_response.status_code == 200, f"{consent_response.status_code}: {consent_response.text!r}"
+    consent_payload = consent_response.json()
+    assert consent_payload["job_id"] == attempt.workflow_run_id
+    assert consent_payload["recovery_action"] == "dispatcher_will_resume_same_root"
+    assert consent_payload["expires_at"]
 
 
 @pytest.mark.asyncio

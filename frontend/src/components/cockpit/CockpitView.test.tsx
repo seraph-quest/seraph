@@ -7266,6 +7266,13 @@ describe("CockpitView", () => {
     let approvalQueued = false;
     fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      if (url.endsWith("/api/auth/session")) {
+        return Promise.resolve(mockResponse({
+          authenticated: true,
+          principal_id: "operator:extension-studio",
+          session_id: "session-extension-studio",
+        }));
+      }
       if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/goals/dashboard")) {
@@ -13577,6 +13584,13 @@ describe("CockpitView", () => {
     let approvalQueued = false;
     fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      if (url.endsWith("/api/auth/session")) {
+        return Promise.resolve(mockResponse({
+          authenticated: true,
+          principal_id: "operator:extension-studio",
+          session_id: "session-extension-studio",
+        }));
+      }
       if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/goals/dashboard")) {
@@ -14185,6 +14199,13 @@ describe("CockpitView", () => {
     let approvalQueued = false;
     fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      if (url.endsWith("/api/auth/session")) {
+        return Promise.resolve(mockResponse({
+          authenticated: true,
+          principal_id: "operator:extension-studio",
+          session_id: "session-extension-studio",
+        }));
+      }
       if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/goals/dashboard")) {
@@ -14647,6 +14668,13 @@ describe("CockpitView", () => {
     let approvalQueued = false;
     fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      if (url.endsWith("/api/auth/session")) {
+        return Promise.resolve(mockResponse({
+          authenticated: true,
+          principal_id: "operator:extension-studio",
+          session_id: "session-extension-studio",
+        }));
+      }
       if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/goals/dashboard")) {

@@ -24,6 +24,7 @@ import type {
   GuardianInboxItem,
   GoalInfo,
   GoalLoopReceipt,
+  WorkBoardTask,
   WorkBoardReceiptReference,
 } from "../../types";
 import {
@@ -69,6 +70,7 @@ import { CockpitSectionNav } from "./CockpitSectionNav";
 import { CockpitHome } from "./CockpitHome";
 import { GuardianCandidateInspector } from "./GuardianCandidateInspector";
 import { CanonicalMemoryPanel } from "./CanonicalMemoryPanel";
+import { ProcedureV2Review } from "./ProcedureV2Review";
 import {
   displayApprovalScopeTarget,
   displayApprovalOwnerMetadata,
@@ -1386,6 +1388,8 @@ interface PendingApproval {
   lifecycle_boundaries?: string[] | null;
   permissions?: Record<string, unknown> | null;
 }
+
+type ExactApprovalLoadState = "idle" | "loading" | "ready" | "missing" | "unavailable";
 
 function normalizePendingApprovals(value: unknown): PendingApproval[] {
   if (!Array.isArray(value)) return [];
@@ -7800,6 +7804,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [auditEvents, setAuditEvents] = useState<CockpitAuditEvent[]>([]);
   const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([]);
   const [approvalLoadState, setApprovalLoadState] = useState<ApprovalLoadState>("loading");
+  const [exactApprovalLoadState, setExactApprovalLoadState] = useState<ExactApprovalLoadState>("idle");
   const [operatorAuth, setOperatorAuth] = useState<OperatorAuthState>({
     status: "loading",
     principalId: null,
@@ -7816,6 +7821,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [selectedGuardianCandidate, setSelectedGuardianCandidate] = useState<GuardianInboxItem | null>(null);
   const guardianInboxRef = useRef<GuardianInboxPanelHandle | null>(null);
   const [focusTaskId, setFocusTaskId] = useState<string | null>(null);
+  const [selectedProcedureSourceTask, setSelectedProcedureSourceTask] = useState<WorkBoardTask | null>(null);
   const [daemonPresence, setDaemonPresence] = useState<DaemonPresenceState | null>(null);
   const [desktopNotifications, setDesktopNotifications] = useState<ObserverContinuitySnapshot["notifications"]>([]);
   const [queuedInsights, setQueuedInsights] = useState<ObserverContinuitySnapshot["queued_insights"]>([]);
@@ -7869,6 +7875,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const cockpitRefreshInFlightRef = useRef(false);
   const cockpitRefreshCurrentRef = useRef<CockpitRefreshRequest | null>(null);
   const cockpitRefreshPendingRef = useRef<CockpitRefreshRequest | null>(null);
+  const exactApprovalRequestRef = useRef(0);
+  const exactApprovalOwnerKeyRef = useRef<string | null>(null);
   const cockpitMountedRef = useRef(false);
   useEffect(() => {
     // StrictMode runs effect cleanup/setup during its development probe. Reset
@@ -8097,12 +8105,26 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
   useEffect(() => {
     if (!pendingLifecycleApprovalId) return;
+    if (exactApprovalLoadState !== "ready") return;
     const approval = pendingApprovals.find((item) => item.id === pendingLifecycleApprovalId);
     if (!approval) return;
     focusPane("approvals_pane");
     setSelectedInspector({ kind: "approval", approval });
     setPendingLifecycleApprovalId(null);
-  }, [focusPane, pendingApprovals, pendingLifecycleApprovalId]);
+    setExactApprovalLoadState("idle");
+  }, [exactApprovalLoadState, focusPane, pendingApprovals, pendingLifecycleApprovalId]);
+
+  useEffect(() => {
+    if (exactApprovalOwnerKeyRef.current === null) return;
+    const ownerKey = operatorAuth.principalId && operatorAuth.sessionId
+      ? `${operatorAuth.principalId}:${operatorAuth.sessionId}`
+      : null;
+    if (exactApprovalOwnerKeyRef.current === ownerKey) return;
+    exactApprovalRequestRef.current += 1;
+    exactApprovalOwnerKeyRef.current = ownerKey;
+    setPendingLifecycleApprovalId(null);
+    setExactApprovalLoadState("idle");
+  }, [operatorAuth.principalId, operatorAuth.sessionId]);
 
   const fetchCockpitJson = useCallback(async (
     url: string,
@@ -8127,6 +8149,32 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       window.clearTimeout(timeout);
     }
   }, []);
+
+  const loadExactApproval = useCallback(async (approvalId: string, requestNumber: number, ownerKey: string) => {
+    const result = await fetchCockpitJson(
+      `${API_URL}/api/approvals/pending?approval_id=${encodeURIComponent(approvalId)}&limit=1`,
+      5000,
+    );
+    if (exactApprovalRequestRef.current !== requestNumber || exactApprovalOwnerKeyRef.current !== ownerKey) return;
+    if (!result.ok || !Array.isArray(result.payload)) {
+      setExactApprovalLoadState("unavailable");
+      return;
+    }
+    const matches = normalizePendingApprovals(result.payload).filter((approval) => approval.id === approvalId);
+    if (matches.length !== 1) {
+      setExactApprovalLoadState("missing");
+      return;
+    }
+    const [approval] = matches;
+    setPendingApprovals((current) => [
+      ...current.filter((candidate) => candidate.id !== approval.id),
+      approval,
+    ]);
+    // The exact owner-bound row is sufficient authority for this targeted
+    // action even when the capped generic list was unavailable.
+    setApprovalLoadState("ready");
+    setExactApprovalLoadState("ready");
+  }, [fetchCockpitJson]);
 
   // GitHub connection metadata is intentionally loaded only when the operator
   // opens the follow-through action. It must not perturb the cockpit's stable
@@ -8359,6 +8407,29 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     run(request);
     return request.promise;
   }, [refreshCockpitNow]);
+
+  const openApprovalsPane = useCallback((approvalId?: string) => {
+    // The Library card carries the server-created approval id. Refresh before
+    // selecting so a transient empty/stale list never looks like proof that
+    // the exact approval disappeared.
+    const requestNumber = exactApprovalRequestRef.current + 1;
+    exactApprovalRequestRef.current = requestNumber;
+    exactApprovalOwnerKeyRef.current = operatorAuth.principalId && operatorAuth.sessionId
+      ? `${operatorAuth.principalId}:${operatorAuth.sessionId}`
+      : null;
+    setPendingLifecycleApprovalId(approvalId ?? null);
+    setExactApprovalLoadState(approvalId ? "loading" : "idle");
+    setApprovalLoadState("loading");
+    setAdvancedWorkspaceOpen(true);
+    setPaneVisible("approvals_pane", true);
+    window.setTimeout(() => bringToFront("approvals_pane"), 0);
+    setWindowsMenuOpen(false);
+    void refreshCockpit().then(() => {
+      if (approvalId && exactApprovalRequestRef.current === requestNumber && exactApprovalOwnerKeyRef.current) {
+        void loadExactApproval(approvalId, requestNumber, exactApprovalOwnerKeyRef.current);
+      }
+    });
+  }, [bringToFront, loadExactApproval, operatorAuth.principalId, operatorAuth.sessionId, refreshCockpit, setPaneVisible]);
 
   const updateDeepPaneState = useCallback((pane: DeepPaneKey, state: DeepPaneLoadState) => {
     setDeepPaneLoadState((current) => ({ ...current, [pane]: state }));
@@ -12483,10 +12554,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   ): Promise<boolean> {
     const approvalDetail = normalizeExtensionLifecycleApprovalDetail(payload);
     if (approvalDetail) {
-      setPendingLifecycleApprovalId(approvalDetail.approval_id || null);
       setStatus(`${approvalDetail.message} Review Pending approvals, then retry.`);
-      focusPane("approvals_pane");
-      await refreshCockpit();
+      openApprovalsPane(approvalDetail.approval_id || undefined);
       appendOperatorFeed(
         `${approvalDetail.tool_name} requires ${approvalDetail.risk_level} approval`,
         "info",
@@ -16199,10 +16268,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       {activeSection === "home" ? (
         <CockpitHome
           onOpenSection={selectCockpitSection}
-          onOpenApprovals={() => {
-            setAdvancedWorkspaceOpen(true);
-            focusPane("approvals_pane");
-          }}
+          onOpenApprovals={openApprovalsPane}
           goalSummary={currentGoal ? {
             title: currentGoal.title,
             status: currentGoal.status,
@@ -16262,41 +16328,62 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       ) : null}
 
       {activeSection === "library" ? (
-        <CanonicalMemoryPanel
-          active
-          onOpenTask={(taskId) => {
-            setFocusTaskId(taskId);
-            selectCockpitSection("work");
-          }}
-          onOpenMemoryControls={() => {
-            setAdvancedWorkspaceOpen(true);
-            focusPane("operator_surface_pane");
-            void loadGuardianMemory();
-          }}
-          onOpenCapabilities={() => {
-            setLibraryCapabilitiesOpen(true);
-            setPaneVisible("operator_surface_pane", true);
-            focusPane("operator_surface_pane");
-          }}
-          onInspectLink={(link: CanonicalMemoryLink) => {
-            const id = link.id;
-            if (!id || !operatorAuth.sessionId) {
-              setOperatorStatus("Memory evidence is unavailable because its owner-bound reference is incomplete.");
-              return;
-            }
-            if (link.kind.includes("artifact")) {
-              setLibraryInspectorOpen(true);
-              inspectWorkBoardArtifact({
-                reference: { artifact_id: id },
-                ownerSessionId: operatorAuth.sessionId,
-                workflowRunId: null,
-                parentWorkflowRunId: null,
-              });
-              return;
-            }
-            setOperatorStatus(`Memory ${link.kind} ${id} is an opaque reference without an owner task link. It remains unavailable in this surface.`);
-          }}
-        />
+        <>
+          <ProcedureV2Review
+            active
+            ownerPrincipalId={operatorAuth.principalId}
+            ownerSessionId={operatorAuth.sessionId}
+            selectedSourceTask={selectedProcedureSourceTask}
+            goals={activeGoalsForCockpit}
+            pendingApprovals={pendingApprovals.map((approval) => ({
+              id: approval.id,
+              status: approval.status,
+              tool_name: approval.tool_name,
+              summary: redactApprovalText(approval.summary, approval.approval_scope ?? approval.approval_context),
+              expires_at: approval.expires_at,
+            }))}
+            onOpenApprovals={openApprovalsPane}
+            onOpenTask={(taskId) => {
+              setFocusTaskId(taskId);
+              selectCockpitSection("work");
+            }}
+          />
+          <CanonicalMemoryPanel
+            active
+            onOpenTask={(taskId) => {
+              setFocusTaskId(taskId);
+              selectCockpitSection("work");
+            }}
+            onOpenMemoryControls={() => {
+              setAdvancedWorkspaceOpen(true);
+              focusPane("operator_surface_pane");
+              void loadGuardianMemory();
+            }}
+            onOpenCapabilities={() => {
+              setLibraryCapabilitiesOpen(true);
+              setPaneVisible("operator_surface_pane", true);
+              focusPane("operator_surface_pane");
+            }}
+            onInspectLink={(link: CanonicalMemoryLink) => {
+              const id = link.id;
+              if (!id || !operatorAuth.sessionId) {
+                setOperatorStatus("Memory evidence is unavailable because its owner-bound reference is incomplete.");
+                return;
+              }
+              if (link.kind.includes("artifact")) {
+                setLibraryInspectorOpen(true);
+                inspectWorkBoardArtifact({
+                  reference: { artifact_id: id },
+                  ownerSessionId: operatorAuth.sessionId,
+                  workflowRunId: null,
+                  parentWorkflowRunId: null,
+                });
+                return;
+              }
+              setOperatorStatus(`Memory ${link.kind} ${id} is an opaque reference without an owner task link. It remains unavailable in this surface.`);
+            }}
+          />
+        </>
       ) : null}
 
       {legacyWorkspaceVisible ? (
@@ -16526,7 +16613,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               <CockpitWorkspaceWindow
                 panelId="approvals_pane"
                 title="Pending approvals"
-                meta={`${pendingApprovals.length} waiting`}
+                meta={approvalLoadState === "loading"
+                  ? "refreshing"
+                  : approvalLoadState === "stale"
+                    ? "unavailable"
+                    : `${pendingApprovals.length} waiting`}
                 hint={COCKPIT_WINDOW_HINTS.approvals}
                 showHint={cockpitHintsEnabled}
                 minWidth={300}
@@ -16534,6 +16625,31 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 onClose={() => closeWindowPane("approvals_pane")}
               >
                 <section className="cockpit-panel cockpit-panel--embedded">
+                  {approvalLoadState === "loading" && (
+                    <div className="cockpit-sublist-item" role="status" aria-live="polite">
+                      Refreshing the authoritative approval list…
+                    </div>
+                  )}
+                  {approvalLoadState === "stale" && (
+                    <div className="cockpit-sublist-item" role="alert">
+                      The approval list could not be refreshed. Existing approval actions remain unavailable until the owner-bound list is read successfully.
+                    </div>
+                  )}
+                  {pendingLifecycleApprovalId && exactApprovalLoadState === "loading" && (
+                    <div className="cockpit-sublist-item" role="status" aria-live="polite">
+                      Reading the exact server-owned approval before selecting it…
+                    </div>
+                  )}
+                  {pendingLifecycleApprovalId && exactApprovalLoadState === "unavailable" && (
+                    <div className="cockpit-sublist-item" role="alert">
+                      The exact approval <span className="font-mono">{pendingLifecycleApprovalId}</span> could not be read for this owner session. No other approval was selected; retry from the procedure card.
+                    </div>
+                  )}
+                  {pendingLifecycleApprovalId && exactApprovalLoadState === "missing" && (
+                    <div className="cockpit-sublist-item" role="status" aria-live="polite">
+                      Exact approval <span className="font-mono">{pendingLifecycleApprovalId}</span> is unavailable for this owner session. No other pending approval was selected; refresh the procedure card to reconcile its server-owned receipt.
+                    </div>
+                  )}
                   <div className="cockpit-list">
                     {pendingApprovals.map((approval) => (
                       <div key={approval.id} className="cockpit-row">
@@ -16604,7 +16720,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       </div>
                       </div>
                     ))}
-                    {pendingApprovals.length === 0 && (
+                    {pendingApprovals.length === 0 && approvalLoadState === "ready" && !pendingLifecycleApprovalId && (
                       <div className="cockpit-empty">No pending approvals.</div>
                     )}
                   </div>
@@ -17202,6 +17318,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               ownerSessionId={operatorAuth.sessionId}
               focusTaskId={focusTaskId}
               onFocusTaskHandled={() => setFocusTaskId(null)}
+              onSelectedTaskChange={setSelectedProcedureSourceTask}
               onOpenApprovals={() => focusPane("approvals_pane")}
               onOpenInboxCandidate={(item) => {
                 setSelectedGuardianCandidate(item);

@@ -15,9 +15,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import tempfile
-from typing import Any, Mapping
+from typing import Any, Awaitable, Callable, Mapping
 import uuid
 
 from sqlalchemy import select, text, update
@@ -557,6 +558,80 @@ async def read_input_artifact_metadata(
     return _metadata(row)
 
 
+async def resolve_input_artifact_for_copy(
+    db: AsyncSession,
+    owner: WorkBoardOwner,
+    *,
+    typed_input_ref: str,
+    typed_input_digest: str,
+    capability_id: str,
+    goal_id: str,
+    goal_revision: int,
+    allow_goal_change: bool = False,
+    now: datetime | None = None,
+) -> ResolvedInputArtifact:
+    """Read an immutable prior input solely to materialize a fresh leaf.
+
+    Procedure invocation creates a new owner-bound artifact for each native
+    leaf.  The reviewed plan stores only the prior reference and digest, so
+    this narrow server helper resolves that reference without treating the
+    prior row as executable authority or binding the new task to it.  Consumed
+    rows remain copyable while their verified file and metadata are present;
+    expired, revoked, or deleted rows fail closed.  Ordinary callers remain
+    bound to ``goal_id``/``goal_revision``.  The fixed procedure runtime may
+    set ``allow_goal_change`` after it has independently verified the reviewed
+    source reference and current invocation goal; this preserves source proof
+    when a new goal revision owns the copied leaf.
+    """
+
+    reference = str(typed_input_ref or "")
+    digest = str(typed_input_digest or "").lower()
+    prefix = "workspace-json:"
+    root_prefix = f"{prefix}{INPUT_ARTIFACT_ROOT}/"
+    if not reference.startswith(root_prefix) or not re.fullmatch(r"[A-Za-z0-9_.:-]+-[0-9a-f]{64}\.json", reference[len(root_prefix) :]):
+        raise BoardError("input_artifact_ref_invalid", "The input artifact reference is invalid", status_code=409)
+    filename = reference[len(root_prefix) :]
+    artifact_id = filename[: -len(digest) - 6] if digest and filename.endswith(f"-{digest}.json") else ""
+    if not artifact_id or len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+        raise BoardError("input_artifact_binding_mismatch", "The input artifact binding is invalid", status_code=409)
+    row = (
+        await db.execute(
+            select(WorkBoardInputArtifact).where(
+                WorkBoardInputArtifact.artifact_id == artifact_id,
+                WorkBoardInputArtifact.owner_principal_id == owner.principal_id,
+                WorkBoardInputArtifact.owner_session_id == owner.session_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise BoardError("input_artifact_not_found", "The input artifact is unavailable", status_code=404)
+    if (
+        row.typed_input_ref != reference
+        or row.payload_sha256 != digest
+        or row.capability_id != capability_id
+        or (
+            not allow_goal_change
+            and (
+                row.goal_id != goal_id
+                or int(row.goal_revision) != int(goal_revision)
+            )
+        )
+        or row.state not in _EXECUTABLE_STATES | {"consumed"}
+        or not row.metadata_digest
+    ):
+        raise BoardError("input_artifact_binding_mismatch", "The input artifact binding does not match the reviewed plan", status_code=409)
+    if _utc(row.expires_at) <= _utc(now or _now()):
+        raise BoardError("input_artifact_expired", "The input artifact has expired", status_code=409)
+    expected_version = REGISTERED_CAPABILITIES.get(capability_id)
+    if expected_version is None or row.capability_version != expected_version.version:
+        raise BoardError("input_artifact_capability_stale", "The input artifact capability version is stale", status_code=409)
+    if _metadata_digest(row) != row.metadata_digest:
+        raise BoardError("input_artifact_metadata_mismatch", "The input artifact metadata changed", status_code=409)
+    payload = _safe_file_bytes(_payload_path(row), expected_digest=row.payload_sha256, expected_size=row.size_bytes)
+    parsed = _decode_and_validate_payload(row, payload)
+    return ResolvedInputArtifact(row=row, input=parsed, payload=payload)
+
+
 async def bind_input_artifact(
     db: AsyncSession,
     owner: WorkBoardOwner,
@@ -683,6 +758,8 @@ async def _set_terminal_state(
     state: str,
     expected_revision: int | None = None,
     now: datetime | None = None,
+    require_pending_unbound: bool = False,
+    publication_guard: Callable[[AsyncSession, WorkBoardInputArtifact], Awaitable[bool]] | None = None,
 ) -> InputArtifactMetadata:
     if state not in {"revoked", "deleted", "expired"}:
         raise ValueError("invalid terminal input artifact state")
@@ -704,6 +781,33 @@ async def _set_terminal_state(
         raise BoardError("input_artifact_not_found", "The input artifact is unavailable", status_code=404)
     if expected_revision is not None and int(row.revision) != int(expected_revision):
         raise BoardError("input_artifact_revision_stale", "The input artifact metadata revision is stale", status_code=409)
+    if require_pending_unbound and (
+        row.state != "pending"
+        or row.bound_task_id is not None
+        or row.metadata_digest is None
+    ):
+        raise BoardError(
+            "input_artifact_publication_protected",
+            "The input artifact publication state must be reconciled",
+            status_code=409,
+        )
+    if publication_guard is not None:
+        try:
+            guard_allows_revoke = await publication_guard(db, row)
+        except BoardError:
+            raise
+        except Exception as exc:
+            raise BoardError(
+                "input_artifact_publication_cleanup_unconfirmed",
+                "The input artifact cleanup could not be confirmed",
+                status_code=503,
+            ) from exc
+        if not guard_allows_revoke:
+            raise BoardError(
+                "input_artifact_publication_protected",
+                "The input artifact publication state must be reconciled",
+                status_code=409,
+            )
     if row.bound_task_id:
         task = (
             await db.execute(
@@ -768,6 +872,13 @@ async def _set_terminal_state(
             status_code=409,
         )
     await db.refresh(row)
+    if require_pending_unbound:
+        # Publication cleanup has a stronger unknown-outcome contract than
+        # ordinary expiry/revocation: commit the tombstone before removing
+        # bytes.  A commit failure therefore leaves the pending row and file
+        # available for exact-key reconciliation rather than a missing file
+        # behind a rolled-back row.
+        await db.commit()
     try:
         if path is not None and (path.exists() or path.is_symlink()):
             path.unlink()
@@ -791,6 +902,33 @@ async def revoke_input_artifact(
         artifact_id=artifact_id,
         state="revoked",
         expected_revision=expected_revision,
+    )
+
+
+async def revoke_unpublished_input_artifact(
+    db: AsyncSession,
+    owner: WorkBoardOwner,
+    *,
+    artifact_id: str,
+    expected_revision: int,
+    publication_guard: Callable[[AsyncSession, WorkBoardInputArtifact], Awaitable[bool]],
+) -> InputArtifactMetadata:
+    """Revoke a prepared artifact only before any canonical publication.
+
+    The guard runs after the lifecycle writer fence and exact owner/revision
+    lookup.  It is intentionally server-internal: callers must provide the
+    canonical task/schedule reference check, while ordinary artifact
+    revocation keeps its existing behavior.
+    """
+
+    return await _set_terminal_state(
+        db,
+        owner,
+        artifact_id=artifact_id,
+        state="revoked",
+        expected_revision=expected_revision,
+        require_pending_unbound=True,
+        publication_guard=publication_guard,
     )
 
 
@@ -885,6 +1023,8 @@ __all__ = [
     "expire_input_artifacts",
     "prepare_input_artifact",
     "read_input_artifact_metadata",
+    "resolve_input_artifact_for_copy",
     "resolve_input_artifact_for_task",
     "revoke_input_artifact",
+    "revoke_unpublished_input_artifact",
 ]

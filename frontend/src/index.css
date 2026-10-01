@@ -3540,7 +3540,9 @@ body {
   border-right: 1px solid var(--cockpit-border);
   background: var(--cockpit-panel-bg);
   position: relative;
-  z-index: 3;
+  /* Floating panes are fixed and can overlap the rail after a saved layout
+     restore. Keep the primary section navigation reachable above those panes. */
+  z-index: 1000;
 }
 
 .cockpit-section-nav-desktop,

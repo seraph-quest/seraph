@@ -1815,6 +1815,10 @@ class SourceWatchService:
         work_board_attempt_id: str | None = None,
         work_board_parent_handoff_context: list[dict[str, Any]] | None = None,
         work_board_parent_handoff_digest: str | None = None,
+        routine_parent_job_id: str | None = None,
+        routine_parent_fencing_token: int | None = None,
+        routine_step_id: str | None = None,
+        routine_parent_deadline_at: datetime | str | None = None,
     ) -> dict[str, Any]:
         if (work_board_task_id is None) != (work_board_attempt_id is None):
             raise SourceWatchError("work_board_binding_invalid")
@@ -1849,11 +1853,32 @@ class SourceWatchService:
         priority = 40 + (max((item.priority for item in sources), default=1) * 10)
         max_runtime = min(JOB_DEADLINE_SECONDS, int(getattr(budget, "max_runtime_seconds", JOB_DEADLINE_SECONDS)))
         max_attempts = min(2, max(1, int(getattr(budget, "max_attempts", 1))))
+        parent_deadline: datetime | None = None
+        if routine_parent_deadline_at is not None:
+            try:
+                parent_deadline = (
+                    routine_parent_deadline_at
+                    if isinstance(routine_parent_deadline_at, datetime)
+                    else datetime.fromisoformat(str(routine_parent_deadline_at).replace("Z", "+00:00"))
+                )
+            except (TypeError, ValueError) as exc:
+                raise SourceWatchError("routine_parent_deadline_malformed") from exc
+            if parent_deadline.tzinfo is None:
+                parent_deadline = parent_deadline.replace(tzinfo=timezone.utc)
+            else:
+                parent_deadline = parent_deadline.astimezone(timezone.utc)
+            if parent_deadline <= _now():
+                raise SourceWatchError("routine_parent_deadline_expired")
         authority = {
             "principal": SERVICE_PRINCIPAL,
             "owner_kind": "service",
             "service_id": SERVICE_ID,
             "session_id": watch.owner_session_id,
+            # Safe native occurrence identities remain in the durable
+            # authority projection because durable job inputs are intentionally
+            # redacted from recovery readbacks.
+            "watch_id": watch.id,
+            "occurrence_id": occurrence_id,
             "goal_id": watch.goal_id,
             "goal_revision": watch.goal_revision,
             "plan_revision": watch.plan_revision,
@@ -1877,6 +1902,20 @@ class SourceWatchService:
         }
         if parent_handoff_inputs:
             authority["parent_handoff_digest"] = parent_handoff_inputs["parent_handoff_digest"]
+        if routine_parent_job_id:
+            if not routine_step_id or type(routine_parent_fencing_token) is not int or routine_parent_fencing_token <= 0:
+                raise SourceWatchError("routine_parent_context_invalid")
+            authority.update(
+                {
+                    "routine_parent_job_id": routine_parent_job_id,
+                    "routine_parent_fencing_token": routine_parent_fencing_token,
+                    "routine_step_id": routine_step_id,
+                    "routine_parent_goal_id": watch.goal_id,
+                    "routine_parent_goal_revision": int(watch.goal_revision),
+                    "routine_parent_owner_principal_id": watch.owner_principal_id,
+                    "routine_parent_owner_session_id": watch.owner_session_id,
+                }
+            )
         idempotency_scope = "work-board-attempt" if work_board_task_id else "guardian-source-watch"
         idempotency_key = (
             f"{work_board_task_id}:{work_board_attempt_id}"
@@ -1884,37 +1923,39 @@ class SourceWatchService:
             else f"{watch.id}:{watch.plan_revision}:{occurrence_id}"
         )
         deadline_at = _now() + timedelta(seconds=max_runtime)
-        if work_board_task_id:
-            # The board deliberately enters the existing adapter twice: the
-            # first call durably admits the workflow root before linking it to
-            # the attempt, and the second starts capability execution. Keep
-            # the first deadline on that exact attempt so the repository sees
-            # an identical immutable admission contract. Recomputing
-            # ``now + max_runtime`` here would turn a safe same-attempt resume
-            # into an idempotency conflict (or, if deadlines were ignored,
-            # risk extending the original runtime bound).
-            existing = await durable_job_repository.get_job(job_id)
-            idempotency = (
-                existing.get("idempotency")
-                if isinstance(existing, Mapping)
-                else None
-            )
-            if (
-                isinstance(idempotency, Mapping)
-                and _text(idempotency.get("scope")) == idempotency_scope
-                and _text(idempotency.get("key")) == idempotency_key
-            ):
-                raw_deadline = _text(existing.get("deadline_at"))
-                try:
-                    deadline_at = datetime.fromisoformat(
-                        raw_deadline.replace("Z", "+00:00")
-                    )
-                except ValueError as exc:
-                    raise SourceWatchError("durable_job_deadline_malformed") from exc
-                if deadline_at.tzinfo is None:
-                    deadline_at = deadline_at.replace(tzinfo=timezone.utc)
-                else:
-                    deadline_at = deadline_at.astimezone(timezone.utc)
+        if parent_deadline is not None:
+            deadline_at = min(deadline_at, parent_deadline)
+        # A Watch occurrence may enter this adapter twice: the first call
+        # durably admits the native root and the second starts capability
+        # execution. Preserve the first deadline for every exact binding,
+        # including a procedure-v2 parent-linked occurrence. Recomputing
+        # ``now + max_runtime`` would turn a safe same-occurrence resume into
+        # an idempotency conflict (or, if deadlines were ignored, extend the
+        # original runtime bound).
+        existing = await durable_job_repository.get_job(job_id)
+        idempotency = (
+            existing.get("idempotency")
+            if isinstance(existing, Mapping)
+            else None
+        )
+        if (
+            isinstance(idempotency, Mapping)
+            and _text(idempotency.get("scope")) == idempotency_scope
+            and _text(idempotency.get("key")) == idempotency_key
+        ):
+            raw_deadline = _text(existing.get("deadline_at"))
+            try:
+                deadline_at = datetime.fromisoformat(
+                    raw_deadline.replace("Z", "+00:00")
+                )
+            except ValueError as exc:
+                raise SourceWatchError("durable_job_deadline_malformed") from exc
+            if deadline_at.tzinfo is None:
+                deadline_at = deadline_at.replace(tzinfo=timezone.utc)
+            else:
+                deadline_at = deadline_at.astimezone(timezone.utc)
+            if parent_deadline is not None and deadline_at > parent_deadline:
+                raise SourceWatchError("routine_parent_deadline_exceeded")
         identity = DurableJobIdentity(
             job_id=job_id,
             owner_kind="service",
@@ -1930,12 +1971,22 @@ class SourceWatchService:
                 inputs={"watch_id": watch.id, "occurrence_id": occurrence_id, **parent_handoff_inputs},
                 session_id=watch.owner_session_id,
                 operator_session_id=watch.owner_session_id,
+                parent_job_id=routine_parent_job_id,
+                parent_fencing_token=(
+                    int(routine_parent_fencing_token)
+                    if routine_parent_job_id is not None and routine_parent_fencing_token is not None
+                    else None
+                ),
                 goal_id=watch.goal_id,
                 goal_revision=watch.goal_revision,
                 plan_revision=watch.plan_revision,
                 declared_authority=authority,
                 deadline_at=deadline_at,
             max_attempts=max_attempts,
+            # The native child is exempt from the root outstanding count in
+            # the durable repository, but it still carries the exact
+            # reviewed goal cap in its immutable admission contract. The
+            # repository compares this value with the canonical Goal row.
             max_outstanding_jobs=int(getattr(budget, "max_outstanding_jobs", 1)),
             priority=priority,
             service_id=SERVICE_ID,
@@ -1995,6 +2046,11 @@ class SourceWatchService:
         work_board_attempt_id: str | None = None,
         work_board_parent_handoff_context: list[dict[str, Any]] | None = None,
         work_board_parent_handoff_digest: str | None = None,
+        routine_parent_job_id: str | None = None,
+        routine_parent_fencing_token: int | None = None,
+        routine_step_id: str | None = None,
+        routine_parent_deadline_at: datetime | str | None = None,
+        routine_parent_guard: Callable[[], Awaitable[bool]] | None = None,
         admit_only: bool = False,
     ) -> dict[str, Any]:
         if (work_board_task_id is None) != (work_board_attempt_id is None):
@@ -2080,6 +2136,19 @@ class SourceWatchService:
         packet: GuardianDecisionPacket | None = None
         expected_claim_plan_revision = int(watch.plan_revision or 0)
         try:
+            async def assert_routine_parent_current() -> bool | None:
+                if routine_parent_job_id is None:
+                    return
+                if routine_parent_guard is None:
+                    raise SourceWatchError("routine_parent_guard_unavailable")
+                try:
+                    allowed = await routine_parent_guard()
+                except Exception as exc:
+                    raise SourceWatchError("routine_parent_board_binding_stale") from exc
+                if allowed is not True:
+                    raise SourceWatchError("routine_parent_board_binding_stale")
+                return True
+
             job = await self._admit_job(
                 watch,
                 occurrence,
@@ -2088,6 +2157,10 @@ class SourceWatchService:
                 work_board_attempt_id=work_board_attempt_id,
                 work_board_parent_handoff_context=work_board_parent_handoff_context,
                 work_board_parent_handoff_digest=work_board_parent_handoff_digest,
+                routine_parent_job_id=routine_parent_job_id,
+                routine_parent_fencing_token=routine_parent_fencing_token,
+                routine_step_id=routine_step_id,
+                routine_parent_deadline_at=routine_parent_deadline_at,
             )
             job = await self._resume_admitted_job(job)
             if admit_only:
@@ -2114,6 +2187,7 @@ class SourceWatchService:
                         "operator_visible": True,
                     }
                 return {"status": "blocked", "reason_code": "durable_job_not_running", "job": job}
+            await assert_routine_parent_current()
             reserved_watch, claim_status = await self._claim_watch(
                 watch_id,
                 job_id,
@@ -2143,6 +2217,7 @@ class SourceWatchService:
                 return {"status": "blocked", "reason_code": claim_status, "job_id": job_id}
             watch = reserved_watch
             fence = int(watch.active_job_fence)
+            await assert_routine_parent_current()
             # The first admission check happens before the watch fence is
             # claimed. Re-read the canonical goal after the claim and before
             # any source transport so a pause, revision, quiet-hours change,
@@ -2187,12 +2262,30 @@ class SourceWatchService:
                     "operator_visible": True,
                 }
             try:
+                current_job = await durable_job_repository.get_job(job_id)
+                raw_deadline = current_job.get("deadline_at") if isinstance(current_job, Mapping) else None
+                try:
+                    native_deadline = (
+                        raw_deadline
+                        if isinstance(raw_deadline, datetime)
+                        else datetime.fromisoformat(str(raw_deadline).replace("Z", "+00:00"))
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise SourceWatchError("durable_job_deadline_malformed") from exc
+                if native_deadline.tzinfo is None:
+                    native_deadline = native_deadline.replace(tzinfo=timezone.utc)
+                else:
+                    native_deadline = native_deadline.astimezone(timezone.utc)
+                scan_timeout = (native_deadline - _now()).total_seconds()
+                if scan_timeout <= 0:
+                    raise SourceWatchError("durable_job_deadline_expired")
                 scan = await asyncio.wait_for(
                     self._scan(watch, occurrence_id=job_id),
-                    timeout=float(SCAN_DEADLINE_SECONDS),
+                    timeout=min(float(SCAN_DEADLINE_SECONDS), scan_timeout),
                 )
             except asyncio.TimeoutError as exc:
                 raise SourceWatchError("scan_deadline") from exc
+            await assert_routine_parent_current()
             current = await durable_job_repository.get_job(job_id)
             if current is None:
                 raise SourceWatchError("durable_job_missing")
@@ -2232,6 +2325,7 @@ class SourceWatchService:
                 # remaining observed rows stay in the action projection and
                 # are committed by the no-change or packet finalization path.
                 baseline_scan = replace(scan, baseline_updates=baseline_only)
+                await assert_routine_parent_current()
                 await self._commit_baselines(
                     watch,
                     baseline_scan,
@@ -2240,6 +2334,7 @@ class SourceWatchService:
                     fencing_token=durable_fence,
                 )
             if baseline_only and not action_scan.observations:
+                await assert_routine_parent_current()
                 await self._settle_observation_job(
                     job_id,
                     status="succeeded",
@@ -2269,6 +2364,7 @@ class SourceWatchService:
                 # local writes, the next occurrence observes the new hash and
                 # produces the same no-change outcome instead of blocking on
                 # an unverifiable recovery packet.
+                await assert_routine_parent_current()
                 await self._commit_baselines(
                     watch,
                     action_scan,
@@ -2276,12 +2372,14 @@ class SourceWatchService:
                     job_id=job_id,
                     fencing_token=durable_fence,
                 )
+                await assert_routine_parent_current()
                 packet = await self._create_no_change_packet(
                     watch,
                     job_id,
                     action_scan,
                     reason_code=baseline_status,
                 )
+                await assert_routine_parent_current()
                 await self._settle_observation_job(
                     job_id,
                     status="succeeded",
@@ -2302,8 +2400,10 @@ class SourceWatchService:
                     reason_code=baseline_status,
                 )
                 return {"status": baseline_status, "packet_id": packet.id, "job_id": job_id}
+            await assert_routine_parent_current()
             packet = await self._create_packet(watch, job_id, action_scan)
             if watch.write_mode == "approval_each_run":
+                await assert_routine_parent_current()
                 approval_id = await self._hold_for_approval(
                     watch,
                     packet,
@@ -2322,7 +2422,13 @@ class SourceWatchService:
                     "approval_id": approval_id,
                     "job_id": job_id,
                 }
-            execution_receipt = await self._execute_packet(watch, packet, job_id, scan=action_scan)
+            execution_receipt = await self._execute_packet(
+                watch,
+                packet,
+                job_id,
+                scan=action_scan,
+                routine_parent_guard=assert_routine_parent_current if routine_parent_job_id else None,
+            )
             final_status = "degraded" if action_scan.degraded else "succeeded"
             if not await self._release_watch(watch.id, job_id, fence, final_status):
                 raise SourceWatchError("active_job_release_conflict")
@@ -2333,9 +2439,10 @@ class SourceWatchService:
                 **execution_receipt,
             }
         except Exception as exc:
+            error_code = exc.code if isinstance(exc, SourceWatchError) else type(exc).__name__
             if packet is not None:
                 try:
-                    await self._mark_packet_failure(packet.id, type(exc).__name__)
+                    await self._mark_packet_failure(packet.id, error_code)
                 except Exception:
                     pass
             if job is not None:
@@ -2349,25 +2456,25 @@ class SourceWatchService:
                             owner=lease.get("owner"),
                             fencing_token=lease.get("fencing_token"),
                             expected_revision=current.get("revision"),
-                            reason=type(exc).__name__,
-                            result=_no_learning_result("failed", type(exc).__name__),
+                            reason=error_code,
+                            result=_no_learning_result("failed", error_code),
                             result_summary="source-watch occurrence failed without learning",
                         )
                 except Exception:
                     pass
-            await self._release_watch(watch.id, job_id, fence, "blocked", type(exc).__name__)
+            await self._release_watch(watch.id, job_id, fence, "blocked", error_code)
             try:
                 await _audit_watch_event(
                     watch,
                     "failed",
                     job_id=job_id,
                     packet_id=packet.id if packet is not None else None,
-                    reason_code=type(exc).__name__,
+                    reason_code=error_code,
                 )
             except Exception:
                 pass
             return {
-                **_no_learning_result("blocked", type(exc).__name__),
+                **_no_learning_result("blocked", error_code),
                 "job_id": job_id,
             }
 
@@ -3107,6 +3214,218 @@ class SourceWatchService:
             and item["details"].get("verified") is True
         }
         return path_set.issubset(verified_paths)
+
+    async def verify_procedure_replay(
+        self,
+        *,
+        watch_id: str,
+        job_id: str,
+        expected_plan_revision: int,
+        occurrence_id: str,
+        owner_principal_id: str,
+        owner_session_id: str,
+        goal_id: str,
+        goal_revision: int,
+        terminal_status: str,
+        packet_id: str | None,
+        artifact_refs: Sequence[Mapping[str, Any]],
+        no_change: bool,
+    ) -> dict[str, Any] | None:
+        """Verify a completed routine Watch without source/provider contact.
+
+        This is intentionally read-only.  It resolves the exact watch, goal,
+        packet, durable occurrence, and local output hashes; it never claims a
+        watch lease, scans a source, sends a notification, or repairs state.
+        """
+
+        if (
+            type(expected_plan_revision) is not int
+            or expected_plan_revision < 1
+            or type(goal_revision) is not int
+            or goal_revision < 1
+            or not _text(watch_id)
+            or not _text(job_id)
+            or not _text(occurrence_id)
+            or not _text(owner_principal_id)
+            or not _text(owner_session_id)
+            or not _text(goal_id)
+            or terminal_status not in {"succeeded", "degraded", "skipped_verified"}
+        ):
+            return None
+        job = await durable_job_repository.get_job(job_id)
+        if not isinstance(job, Mapping):
+            return None
+        if (
+            _text(job.get("job_id") or job.get("run_identity")) != _text(job_id)
+            or _text(job.get("job_kind")) != "guardian_source_watch"
+            or _text(job_id) != f"source-watch:{_text(watch_id)}:{_text(occurrence_id)}"
+            or _text(job.get("status")) not in {"succeeded", "degraded"}
+            or _text(job.get("goal_id")) != _text(goal_id)
+            or type(job.get("goal_revision")) is not int
+            or int(job.get("goal_revision")) != int(goal_revision)
+            or type(job.get("plan_revision")) is not int
+            or int(job.get("plan_revision")) != int(expected_plan_revision)
+        ):
+            return None
+        authority = job.get("declared_authority") if isinstance(job.get("declared_authority"), Mapping) else {}
+        inputs = job.get("inputs") if isinstance(job.get("inputs"), Mapping) else {}
+        persisted_watch_id = _text(authority.get("watch_id"))
+        persisted_occurrence_id = _text(authority.get("occurrence_id"))
+        if (
+            persisted_watch_id != _text(watch_id)
+            or persisted_occurrence_id != _text(occurrence_id)
+            or _text(authority.get("goal_owner_principal_id")) != _text(owner_principal_id)
+            or _text(authority.get("goal_owner_session_id")) != _text(owner_session_id)
+            or _text(authority.get("goal_id")) != _text(goal_id)
+            or int(authority.get("goal_revision") or 0) != int(goal_revision)
+            or int(authority.get("plan_revision") or 0) != int(expected_plan_revision)
+        ):
+            return None
+        async with db_engine.get_session() as db:
+            watch = (
+                await db.execute(
+                    select(GuardianSourceWatch).where(
+                        GuardianSourceWatch.id == watch_id,
+                        GuardianSourceWatch.owner_principal_id == owner_principal_id,
+                        GuardianSourceWatch.owner_session_id == owner_session_id,
+                    )
+                )
+            ).scalars().first()
+            goal = (
+                await db.execute(select(Goal).where(Goal.id == goal_id))
+            ).scalars().first()
+            packet_query = select(GuardianDecisionPacket).where(
+                GuardianDecisionPacket.watch_id == watch_id,
+                GuardianDecisionPacket.run_identity == job_id,
+            )
+            if packet_id:
+                packet_query = packet_query.where(GuardianDecisionPacket.id == packet_id)
+            packet = (await db.execute(packet_query)).scalars().first()
+        if watch is None or goal is None or (packet is None and not no_change):
+            return None
+        if (
+            _text(watch.goal_id) != _text(goal_id)
+            or int(watch.goal_revision or 0) != int(goal_revision)
+            or int(watch.plan_revision or 0) != int(expected_plan_revision)
+            or _text(getattr(goal, "owner_principal_id", None)) != _text(owner_principal_id)
+            or _text(getattr(goal, "owner_session_id", None)) != _text(owner_session_id)
+            or int(getattr(goal, "revision", 0) or 0) != int(goal_revision)
+            or _text(getattr(goal, "status", "").value if hasattr(getattr(goal, "status", ""), "value") else getattr(goal, "status", "")) != "active"
+            or _text(watch.state) not in {"active", "paused"}
+        ):
+            return None
+        binding_error = _recovery_binding_error(
+            watch_id=watch_id,
+            goal_id=goal_id,
+            goal_revision=goal_revision,
+            plan_revision=expected_plan_revision,
+            source_set_digest=_text(watch.source_set_digest),
+            criteria_digest=_text(watch.criteria_digest),
+            sources_json=watch.sources_json,
+            job_id=job_id,
+            job=job,
+            packet=packet,
+        )
+        if binding_error is not None:
+            return None
+        if no_change:
+            if packet is None:
+                if terminal_status != "skipped_verified":
+                    return None
+                observation_checkpoint = any(
+                    isinstance(item, Mapping)
+                    and item.get("safe") is not False
+                    and _text(item.get("checkpoint_id")) == f"source-observation:{watch_id}:{occurrence_id}"
+                    for item in (job.get("checkpoints") or [])
+                )
+                observation_readback = any(
+                    isinstance(item, Mapping)
+                    and _text(item.get("receipt_kind")) == "readback"
+                    and _text(item.get("status")) == "succeeded"
+                    and _text(item.get("target_path")) == f"source-watch:{job_id}"
+                    and isinstance(item.get("details"), Mapping)
+                    and item["details"].get("verified") is True
+                    for item in (job.get("effects") or [])
+                )
+                if not observation_checkpoint or not observation_readback:
+                    return None
+                return {
+                    "status": "succeeded",
+                    "verified": True,
+                    "no_change": True,
+                    "memory_status": NO_LEARNING,
+                }
+            outcome = _load(packet.outcome_json, {})
+            if (
+                artifact_refs
+                or _text(packet.status) != "no_change"
+                or _text(packet.verification_status) != "not_applicable"
+                or not isinstance(outcome, Mapping)
+                or _text(outcome.get("status")) != "no_change"
+                or not self._has_verified_output_effects(job, [f"source-watch:{job_id}"])
+            ):
+                return None
+            return {
+                "status": "succeeded",
+                "packet_id": packet.id,
+                "verified": True,
+                "no_change": True,
+                "memory_status": NO_LEARNING,
+            }
+        if _text(packet.status) not in {"succeeded", "degraded"} or _text(packet.verification_status) != "passed":
+            return None
+        if not artifact_refs:
+            return None
+        try:
+            dossier_record, task_record = await self._read_verified_packet_outputs(watch, packet)
+        except SourceWatchError:
+            return None
+        canonical = {
+            (
+                _text(item.get("artifact_id")),
+                _text(item.get("file_path")),
+                _text(item.get("content_sha256")).lower(),
+                _text(item.get("artifact_type")),
+            )
+            for item in (dossier_record, task_record)
+        }
+        supplied = {
+            (
+                _text(item.get("artifact_id")),
+                _text(item.get("file_path")),
+                _text(item.get("content_sha256")).lower(),
+                _text(item.get("artifact_type")),
+            )
+            for item in artifact_refs
+            if isinstance(item, Mapping) and item.get("verified") is True
+        }
+        if canonical != supplied or not self._has_verified_output_effects(job, [item[1] for item in canonical]):
+            return None
+        readback = next(
+            (
+                item
+                for item in reversed(job.get("effects") or [])
+                if isinstance(item, Mapping)
+                and _text(item.get("receipt_kind")) == "readback"
+                and _text(item.get("status")) == "succeeded"
+                and isinstance(item.get("details"), Mapping)
+                and item["details"].get("verified") is True
+                and _text(item.get("readback_id"))
+            ),
+            None,
+        )
+        if readback is None:
+            return None
+        first_record = dossier_record
+        return {
+            "status": _text(packet.status),
+            "packet_id": packet.id,
+            "artifact_ref": _text(first_record.get("file_path")),
+            "artifact_sha256": _text(first_record.get("content_sha256")),
+            "readback_id": _text(readback.get("readback_id")),
+            "verified": True,
+            "memory_status": NO_LEARNING,
+        }
 
     async def _repair_recovery_baselines(
         self,
@@ -4035,7 +4354,19 @@ class SourceWatchService:
         *,
         claimed: Mapping[str, Any] | None = None,
         scan: ScanResult | None = None,
+        routine_parent_guard: Callable[[], Awaitable[bool]] | None = None,
     ) -> dict[str, Any]:
+        async def assert_routine_parent_current() -> None:
+            if routine_parent_guard is None:
+                return
+            try:
+                allowed = await routine_parent_guard()
+            except Exception as exc:
+                raise SourceWatchError("routine_parent_board_binding_stale") from exc
+            if allowed is not True:
+                raise SourceWatchError("routine_parent_board_binding_stale")
+
+        await assert_routine_parent_current()
         current = dict(claimed or await durable_job_repository.get_job(job_id) or {})
         lease = current.get("lease") or {}
         owner = str(lease.get("owner") or SERVICE_PRINCIPAL)
@@ -4077,6 +4408,7 @@ class SourceWatchService:
             fencing_token=fence,
             expected_revision=revision,
         )
+        await assert_routine_parent_current()
         _write_workspace_text_bounded(_safe_resolve(dossier_path), packet.proposal_text, max_bytes=PACKET_MAX_BYTES)
         await self._assert_execution_fence(
             job_id,
@@ -4084,6 +4416,7 @@ class SourceWatchService:
             fencing_token=fence,
             expected_revision=revision,
         )
+        await assert_routine_parent_current()
         _write_workspace_text_bounded(_safe_resolve(task_path), packet.task_text, max_bytes=TASK_MAX_BYTES)
         await self._assert_execution_fence(
             job_id,
@@ -4114,6 +4447,7 @@ class SourceWatchService:
             trust_boundary="local_workspace",
         )
         for record in (dossier_record, task_record):
+            await assert_routine_parent_current()
             artifact_receipt = await durable_job_repository.record_artifact(
                 job_id,
                 file_path=str(record["file_path"]),
@@ -4163,6 +4497,7 @@ class SourceWatchService:
         # Re-read the durable lease immediately before packet/baseline
         # finalization.  The watch reservation fence is separate from this
         # durable job fence; only the latter authorizes these writes.
+        await assert_routine_parent_current()
         await self._assert_execution_fence(
             job_id,
             owner=owner,
@@ -4188,7 +4523,9 @@ class SourceWatchService:
         # turn verified workspace effects into a failed workflow run. If the
         # queue commit succeeded but recording the packet link did not, the
         # same key is safe to resolve again after restart.
+        await assert_routine_parent_current()
         notification_id = await self._repair_packet_notification(watch, packet)
+        await assert_routine_parent_current()
         current = await self._assert_execution_fence(
             job_id,
             owner=owner,

@@ -8,9 +8,10 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apscheduler.triggers.cron import CronTrigger
-from sqlalchemy import and_, or_, select as sa_select
+from sqlalchemy import and_, func, or_, select as sa_select
 from sqlmodel import select, col
 
 from config.settings import settings
@@ -32,6 +33,8 @@ from src.db.models import (
     ScheduledJob,
     ScheduledJobRun,
     WorkBoardInputArtifact,
+    WorkBoardStatus,
+    WorkBoardTask,
 )
 from src.db.session_refs import ensure_sessions_exist
 from src.models.schemas import WSResponse
@@ -184,6 +187,247 @@ class _GovernedScheduleArtifactCleanupRequired(RuntimeError):
         super().__init__(self.safe_code)
         if cause is not None:
             self.__cause__ = cause
+
+
+class _ProcedureScheduleDeferred(RuntimeError):
+    """A reviewed procedure schedule is currently ineligible without contact."""
+
+    safe_code = "procedure_schedule_deferred"
+
+    def __init__(self, reason_code: str, recovery_action: str = "wait_for_next_slot") -> None:
+        self.reason_code = str(reason_code or self.safe_code)[:128]
+        self.recovery_action = str(recovery_action or "wait_for_next_slot")[:128]
+        super().__init__(self.reason_code)
+
+
+def _procedure_quiet_now(budget: Any, now: datetime) -> bool:
+    start = getattr(budget, "quiet_hours_start", None)
+    end = getattr(budget, "quiet_hours_end", None)
+    if start is None or end is None:
+        return False
+    try:
+        local_hour = _utc(now).astimezone(ZoneInfo(str(getattr(budget, "timezone", "UTC")))).hour
+    except (TypeError, ValueError, ZoneInfoNotFoundError) as exc:
+        raise _ProcedureScheduleDeferred("procedure_goal_budget_timezone_invalid", "repair_goal_budget") from exc
+    return local_hour >= int(start) or local_hour < int(end) if int(start) > int(end) else int(start) <= local_hour < int(end)
+
+
+def _procedure_budget_timestamp(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return _utc(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            return _utc(datetime.fromisoformat(value.replace("Z", "+00:00")))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+async def _load_governed_procedure_authority(
+    db: Any,
+    job: dict[str, Any],
+    binding_id: str,
+    *,
+    now: datetime | None = None,
+    slot_utc: datetime | None = None,
+) -> tuple[GovernedScheduleBinding, Goal, WorkBoardInputArtifact, dict[str, Any], dict[str, Any]]:
+    """Re-read the pinned routine/goal/budget before a scheduled task claim.
+
+    This is the procedure counterpart to the existing Calendar authority
+    loader.  It intentionally performs no model/provider work and does not
+    reuse the strategist notification budget: a zero notification allowance
+    still permits a governed task, while delivery remains separately gated.
+    """
+
+    from src.scheduler.governed_schedules import PROCEDURE_ACTION, normalize_cadence
+    from src.goals.repository import deserialize_admission_budget
+    from src.workflows.procedure_service import goal_admission_budget_snapshot
+
+    observed = _utc(now or _utc_now())
+    canonical_job = await db.get(ScheduledJob, str(job.get("id") or ""), populate_existing=True)
+    if (
+        canonical_job is None
+        or not canonical_job.enabled
+        or canonical_job.trigger_type != "governed"
+        or canonical_job.action_type != PROCEDURE_ACTION
+    ):
+        raise RuntimeError("procedure_schedule_prerequisite_stale")
+    try:
+        action_spec = json.loads(canonical_job.action_spec_json or "{}")
+        trigger_spec = json.loads(canonical_job.trigger_spec_json or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError("procedure_schedule_binding_link_invalid") from exc
+    if not isinstance(action_spec, dict) or action_spec.get("binding_id") != binding_id:
+        raise RuntimeError("procedure_schedule_binding_link_invalid")
+    binding = (
+        await db.execute(
+            sa_select(GovernedScheduleBinding)
+            .where(
+                GovernedScheduleBinding.binding_id == binding_id,
+                GovernedScheduleBinding.scheduled_job_id == canonical_job.id,
+            )
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if (
+        binding is None
+        or binding.action_type != PROCEDURE_ACTION
+        or binding.capability_id != PROCEDURE_ACTION
+        or binding.read_consent_id is not None
+        or binding.consent_kind != "goal_budget"
+    ):
+        raise RuntimeError("procedure_schedule_binding_missing")
+    try:
+        cadence = normalize_cadence(trigger_spec)
+    except (TypeError, ValueError, ZoneInfoNotFoundError) as exc:
+        raise RuntimeError("procedure_schedule_trigger_invalid") from exc
+    if cadence != {
+        "kind": binding.cadence_kind,
+        "timezone": binding.timezone,
+        "daily_hour": binding.daily_hour,
+        "daily_minute": binding.daily_minute,
+    }:
+        raise RuntimeError("procedure_schedule_trigger_binding_mismatch")
+    if binding.state != "active" or _utc(binding.expires_at) <= observed:
+        raise _ProcedureScheduleDeferred("procedure_schedule_prerequisite_stale", "review_schedule")
+
+    goal = await db.get(Goal, binding.goal_id, populate_existing=True)
+    session = await db.get(OperatorSession, binding.owner_session_id, populate_existing=True)
+    goal_status = getattr(getattr(goal, "status", None), "value", getattr(goal, "status", None))
+    if (
+        goal is None
+        or session is None
+        or session.revoked_at is not None
+        or _utc(session.idle_expires_at) <= observed
+        or _utc(session.absolute_expires_at) <= observed
+        or goal.owner_principal_id != binding.owner_principal_id
+        or goal.owner_session_id != binding.owner_session_id
+        or goal_status != "active"
+        or int(goal.revision) != int(binding.goal_revision)
+        or not bool(getattr(goal, "proactive_enabled", False))
+    ):
+        raise _ProcedureScheduleDeferred("procedure_goal_authority_stale", "review_goal_authority")
+    budget = deserialize_admission_budget(goal)
+    if budget is None or not bool(budget.reviewed_grant) or not str(budget.grant_id or "").strip():
+        raise _ProcedureScheduleDeferred("procedure_goal_budget_missing_reviewed_grant", "review_goal_budget")
+    try:
+        snapshot = goal_admission_budget_snapshot(
+            goal_id=str(goal.id), goal_revision=int(goal.revision), budget=budget
+        )
+    except (TypeError, ValueError) as exc:
+        raise _ProcedureScheduleDeferred("procedure_goal_budget_invalid", "repair_goal_budget") from exc
+    period_expires = _utc(budget.period_expires_at) if budget.period_expires_at is not None else None
+    period_started = _utc(budget.period_started_at) if budget.period_started_at is not None else None
+    if period_expires is None:
+        raise _ProcedureScheduleDeferred("procedure_goal_budget_finite_expiry_required", "set_goal_budget_expiry")
+    if period_started is not None and period_started > observed:
+        raise _ProcedureScheduleDeferred("procedure_goal_budget_period_not_started", "wait_for_goal_budget_period")
+    if period_expires <= observed:
+        raise _ProcedureScheduleDeferred("procedure_goal_budget_period_expired", "review_goal_budget")
+    if _procedure_quiet_now(budget, observed):
+        raise _ProcedureScheduleDeferred("goal_quiet_hours", "wait_for_next_eligible_slot")
+
+    # These are the exact fields emitted by the API schedule-v2 contract.  Do
+    # not accept aliases or coerce JSON scalars: a string/bool here would make
+    # a malformed action spec look like a reviewed grant.
+    expected_budget = {
+        "goal_budget_digest": snapshot.digest,
+        "consent_digest": snapshot.digest,
+        "goal_budget_grant_id": str(budget.grant_id),
+        "goal_budget_max_outstanding_jobs": int(budget.max_outstanding_jobs),
+        "goal_budget_max_attempts": int(budget.max_attempts),
+        "goal_budget_max_runtime_seconds": int(budget.max_runtime_seconds),
+    }
+    for key, expected in expected_budget.items():
+        observed_value = action_spec.get(key)
+        if key in {
+            "goal_budget_max_outstanding_jobs",
+            "goal_budget_max_attempts",
+            "goal_budget_max_runtime_seconds",
+        }:
+            valid = type(observed_value) is int and observed_value == expected
+        else:
+            valid = type(observed_value) is str and observed_value == expected
+        if not valid:
+            raise _ProcedureScheduleDeferred("procedure_goal_budget_changed", "refresh_goal_budget")
+    action_period = _procedure_budget_timestamp(action_spec.get("goal_budget_period_expires_at"))
+    if action_period is None or action_period != period_expires or type(action_spec.get("goal_budget_period_expires_at")) is not str:
+        raise _ProcedureScheduleDeferred("procedure_goal_budget_changed", "refresh_goal_budget")
+    if (
+        str(action_spec.get("goal_id") or "") != str(binding.goal_id)
+        or int(action_spec.get("goal_revision") or 0) != int(binding.goal_revision)
+        or str(action_spec.get("routine_id") or "") == ""
+        or int(action_spec.get("version") or 0) < 1
+    ):
+        raise RuntimeError("procedure_schedule_action_binding_invalid")
+
+    artifact = await db.get(WorkBoardInputArtifact, binding.input_artifact_id, populate_existing=True)
+    if (
+        artifact is None
+        or artifact.owner_principal_id != binding.owner_principal_id
+        or artifact.owner_session_id != binding.owner_session_id
+        or artifact.capability_id != "guardian-routine.v2"
+        or artifact.goal_id != binding.goal_id
+        or int(artifact.goal_revision) != int(binding.goal_revision)
+        or artifact.payload_sha256 != binding.input_digest.removeprefix("sha256:")
+        or artifact.bound_task_id is not None
+        or artifact.state not in {"pending", "bound"}
+        or not artifact.metadata_digest
+    ):
+        raise RuntimeError("procedure_schedule_input_artifact_invalid")
+    try:
+        if _metadata_digest(artifact) != artifact.metadata_digest:
+            raise RuntimeError("artifact_metadata_digest_mismatch")
+        payload_bytes = _safe_file_bytes(
+            _payload_path(artifact), expected_digest=artifact.payload_sha256, expected_size=artifact.size_bytes
+        )
+        payload = _decode_and_validate_payload(artifact, payload_bytes)
+    except Exception as exc:
+        raise RuntimeError("procedure_schedule_input_artifact_invalid") from exc
+    if (
+        payload.get("routine_id") != action_spec.get("routine_id")
+        or int(payload.get("version") or 0) != int(action_spec.get("version") or 0)
+        or payload.get("goal_id") != binding.goal_id
+        or int(payload.get("expected_goal_revision") or 0) != int(binding.goal_revision)
+        or payload.get("parameters") != (action_spec.get("parameters") or {})
+    ):
+        raise RuntimeError("procedure_schedule_input_binding_mismatch")
+
+    outstanding_states = (WorkBoardStatus.todo, WorkBoardStatus.ready, WorkBoardStatus.running, WorkBoardStatus.review)
+    outstanding_query = select(func.count(WorkBoardTask.task_id)).where(
+        WorkBoardTask.owner_principal_id == binding.owner_principal_id,
+        WorkBoardTask.owner_session_id == binding.owner_session_id,
+        WorkBoardTask.goal_id == binding.goal_id,
+        WorkBoardTask.goal_revision == binding.goal_revision,
+        WorkBoardTask.capability_id == "guardian-routine.v2",
+        WorkBoardTask.status.in_(outstanding_states),
+    )
+    # An exact same-slot replay is allowed to adopt its already-published
+    # task.  Other slots, including a new slot for this binding, still count
+    # every outstanding procedure task against the reviewed goal budget.
+    if slot_utc is not None:
+        normalized_slot = _utc(slot_utc)
+        try:
+            if getattr(db.get_bind().dialect, "name", "") == "sqlite":
+                normalized_slot = normalized_slot.replace(tzinfo=None)
+        except (AttributeError, RuntimeError):
+            pass
+        same_slot_task = (
+            await db.execute(
+                sa_select(GovernedScheduleOccurrence.work_board_task_id).where(
+                    GovernedScheduleOccurrence.binding_id == binding.binding_id,
+                    GovernedScheduleOccurrence.slot_utc == normalized_slot,
+                    GovernedScheduleOccurrence.state.in_(("reserved", "running")),
+                    GovernedScheduleOccurrence.work_board_task_id.is_not(None),
+                )
+            )
+        ).scalar_one_or_none()
+        if same_slot_task:
+            outstanding_query = outstanding_query.where(WorkBoardTask.task_id != str(same_slot_task))
+    outstanding = int((await db.execute(outstanding_query)).scalar_one() or 0)
+    if outstanding >= int(budget.max_outstanding_jobs):
+        raise _ProcedureScheduleDeferred("procedure_goal_outstanding_limit", "wait_for_outstanding_work")
+    return binding, goal, artifact, payload, action_spec
 
 
 def _reject_legacy_governed_mutation(action_type: str | None) -> None:
@@ -358,6 +602,7 @@ async def _run_governed_calendar_observation(
     occurrence_id: str | None = None
     claim_token: str | None = None
     claim_fence: int | None = None
+    occurrence_run_id: str | None = None
     owner_principal_id = ""
     owner_session_id = ""
     adapter: Any | None = None
@@ -786,9 +1031,254 @@ async def _run_governed_calendar_observation(
         await _persist_failure(exc)
         raise
 
+
+async def _run_governed_procedure_schedule(
+    job: dict[str, Any],
+    *,
+    scheduled_slot_utc: datetime | None,
+    scheduled_run_id: str | None = None,
+) -> dict[str, Any]:
+    """Admit one pinned v2 procedure occurrence into the existing Work Board.
+
+    The scheduler owns the slot/lease and creates exactly one fresh parent task
+    artifact.  The normal Work Board dispatcher remains the execution owner;
+    no second queue or scheduler is introduced.  The occurrence stays
+    running until a later governed slot observes the task's terminal state,
+    which preserves the shared at-most-one-outstanding rule across restarts.
+    """
+
+    from src.scheduler.governed_schedules import (
+        PROCEDURE_ACTION,
+        claim_occurrence,
+        reserve_occurrence,
+        settle_occurrence,
+    )
+
+    if scheduled_slot_utc is None:
+        raise RuntimeError("governed_schedule_slot_unavailable")
+    action_spec = job.get("action_spec") if isinstance(job.get("action_spec"), dict) else {}
+    binding_id = str(action_spec.get("binding_id") or "").strip()
+    if not binding_id:
+        raise RuntimeError("procedure_schedule_binding_missing")
+    occurrence_id: str | None = None
+    claim_token: str | None = None
+    claim_fence: int | None = None
+    occurrence_run_id: str | None = None
+    task_id: str | None = None
+    owner: WorkBoardOwner | None = None
+    fresh_artifact_id: str | None = None
+
+    async def _settle_failure(exc: BaseException) -> None:
+        if not occurrence_id or not claim_token or claim_fence is None:
+            return
+        try:
+            async with get_session() as recovery_db:
+                current = await recovery_db.get(GovernedScheduleOccurrence, occurrence_id)
+                if (
+                    current is not None
+                    and current.state == "running"
+                    and current.claim_token == claim_token
+                    and int(current.fencing_token) == int(claim_fence)
+                ):
+                    await settle_occurrence(
+                        recovery_db,
+                        current,
+                        state="blocked",
+                        task_id=task_id,
+                        job_id=scheduled_run_id,
+                        failure_code=(
+                            getattr(exc, "reason_code", None)
+                            or _safe_error_label(exc)
+                            if isinstance(exc, Exception)
+                            else type(exc).__name__
+                        ),
+                        recovery_action=(
+                            getattr(exc, "recovery_action", None)
+                            or "retry_after_prerequisite"
+                            if isinstance(exc, Exception)
+                            else "reconcile_admission_binding"
+                        ),
+                        claim_token=claim_token,
+                        fencing_token=claim_fence,
+                    )
+        except Exception:
+            logger.exception("Could not settle governed procedure occurrence %s", occurrence_id)
+
+    try:
+        async with get_session() as db:
+            binding, _goal, source_artifact, source_payload, canonical_action = await _load_governed_procedure_authority(
+                db, job, binding_id, slot_utc=scheduled_slot_utc
+            )
+            occurrence, replay = await reserve_occurrence(db, binding, slot_utc=scheduled_slot_utc)
+            occurrence_id = occurrence.occurrence_id
+            occurrence_run_id = occurrence.durable_job_id
+            if replay:
+                if occurrence.state in {"succeeded", "blocked", "cancelled", "coalesced"}:
+                    return {
+                        "status": occurrence.state,
+                        "occurrence_id": occurrence.occurrence_id,
+                        "task_id": occurrence.work_board_task_id,
+                        "replayed": True,
+                    }
+                if occurrence.state == "unknown":
+                    raise RuntimeError("governed_occurrence_requires_reconciliation")
+                if occurrence.state == "running":
+                    # A replay must adopt the exact fenced occurrence.  A
+                    # worker can crash after claiming and before publishing
+                    # its board task; claiming it again would either fail or
+                    # create a second authority path.
+                    claim_token = occurrence.claim_token
+                    claim_fence = occurrence.fencing_token
+                    occurrence_run_id = occurrence.durable_job_id
+                    if occurrence.work_board_task_id:
+                        return {
+                            "status": "queued",
+                            "occurrence_id": occurrence.occurrence_id,
+                            "task_id": occurrence.work_board_task_id,
+                            "replayed": True,
+                            "memory_status": "no_learning",
+                        }
+            if occurrence.state == "reserved":
+                await claim_occurrence(db, occurrence)
+                claim_token = occurrence.claim_token
+                claim_fence = occurrence.fencing_token
+            elif occurrence.state != "running":
+                raise RuntimeError("governed_occurrence_not_claimable")
+            if not claim_token:
+                raise RuntimeError("procedure_schedule_claim_missing")
+            if scheduled_run_id:
+                if occurrence_run_id is None:
+                    occurrence.durable_job_id = scheduled_run_id
+                    occurrence_run_id = scheduled_run_id
+                if not replay:
+                    run_row = await db.get(ScheduledJobRun, scheduled_run_id)
+                    if run_row is None or run_row.scheduled_job_id != str(job.get("id") or ""):
+                        raise RuntimeError("governed_schedule_run_binding_invalid")
+                    run_metadata = _loads(run_row.metadata_json or "{}")
+                    run_metadata.update(
+                        {
+                            "governed_occurrence_id": occurrence.occurrence_id,
+                            "governed_binding_id": binding.binding_id,
+                            "governed_claim_fence": claim_fence,
+                        }
+                    )
+                    run_row.metadata_json = _dumps(run_metadata)
+            owner = WorkBoardOwner(
+                principal_id=binding.owner_principal_id,
+                session_id=binding.owner_session_id,
+            )
+            # The scheduled source artifact is immutable reviewed invocation
+            # data.  Each occurrence gets a fresh executable artifact and a
+            # deterministic occurrence UUID, so a consumed/expired prior task
+            # can never become authority for a later run.
+            slot_key = _utc(scheduled_slot_utc).strftime("%Y%m%dT%H%M%SZ")
+            occurrence_key = f"{binding.binding_id}:{slot_key}"
+            occurrence_payload = dict(source_payload)
+            occurrence_payload["invocation_uuid"] = f"schedule:{occurrence_key}"
+
+        async with get_session() as artifact_db:
+            fresh = await prepare_input_artifact(
+                artifact_db,
+                owner,
+                WorkBoardInputArtifactCreate(
+                    schema_version=1,
+                    capability_id="guardian-routine.v2",
+                    goal_id=binding.goal_id,
+                    goal_revision=int(binding.goal_revision),
+                    input=occurrence_payload,
+                    idempotency_key=f"procedure-occurrence:{occurrence_key}",
+                ),
+            )
+            fresh_artifact_id = fresh.artifact_id
+
+        repository = WorkBoardRepository()
+
+        async def publication_authority_check(check_db: Any) -> None:
+            current_binding, _current_goal, _current_artifact, _current_payload, _current_action = (
+                await _load_governed_procedure_authority(
+                    check_db, job, binding_id, slot_utc=scheduled_slot_utc
+                )
+            )
+            if current_binding.binding_id != binding.binding_id or int(current_binding.binding_revision) != int(binding.binding_revision):
+                raise RuntimeError("procedure_schedule_publication_fence_stale")
+            current_occurrence = (
+                await check_db.execute(
+                    sa_select(GovernedScheduleOccurrence).where(
+                        GovernedScheduleOccurrence.occurrence_id == occurrence_id,
+                        GovernedScheduleOccurrence.binding_id == binding.binding_id,
+                        GovernedScheduleOccurrence.binding_revision == int(binding.binding_revision),
+                        GovernedScheduleOccurrence.state == "running",
+                        GovernedScheduleOccurrence.claim_token == claim_token,
+                        GovernedScheduleOccurrence.fencing_token == claim_fence,
+                        GovernedScheduleOccurrence.durable_job_id == occurrence_run_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if current_occurrence is None:
+                raise RuntimeError("procedure_schedule_occurrence_fence_stale")
+
+        async with get_session() as db:
+            mutation = await repository.create_task(
+                db,
+                owner,
+                WorkBoardTaskCreate(
+                    title=f"Scheduled procedure: {canonical_action.get('routine_id') or 'reviewed routine'}",
+                    body="A reviewed procedure occurrence is queued for the operator Work Board.",
+                    goal_id=binding.goal_id,
+                    goal_revision=int(binding.goal_revision),
+                    status=WorkBoardStatus.todo,
+                    capability_id="guardian-routine.v2",
+                    input_artifact_id=fresh_artifact_id,
+                    priority=60,
+                    idempotency_scope="guardian-routine-v2-schedule",
+                    idempotency_key=occurrence_key,
+                    origin_thread_id=binding.owner_session_id,
+                ),
+                origin_session_id=binding.owner_session_id,
+                publication_authority_check=publication_authority_check,
+            )
+            task_id = mutation.task.task_id
+            occurrence = await db.get(GovernedScheduleOccurrence, occurrence_id)
+            if occurrence is None:
+                raise RuntimeError("procedure_schedule_occurrence_missing")
+            occurrence.work_board_task_id = task_id
+            occurrence.metadata_json = _dumps(
+                {
+                    "status": "queued",
+                    "task_id": task_id,
+                    "capability_id": "guardian-routine.v2",
+                    "routine_id": canonical_action.get("routine_id"),
+                    "version": canonical_action.get("version"),
+                    "input_artifact_id": fresh_artifact_id,
+                    "memory_status": "no_learning",
+                }
+            )
+            await db.flush()
+        return {
+            "status": "queued",
+            "occurrence_id": occurrence_id,
+            "task_id": task_id,
+            "replayed": False,
+            "memory_status": "no_learning",
+        }
+    except (Exception, asyncio.CancelledError) as exc:
+        # A cancellation before provider contact is a durable blocked
+        # occurrence; preserve the original signal after cleanup.
+        if fresh_artifact_id and owner is not None and task_id is None:
+            try:
+                async with get_session() as cleanup_db:
+                    await revoke_input_artifact(cleanup_db, owner, artifact_id=fresh_artifact_id)
+            except Exception:
+                logger.exception("Could not revoke orphan procedure artifact %s", fresh_artifact_id)
+        await _settle_failure(exc)
+        raise
+
 def build_cron_trigger(job: dict[str, Any]) -> CronTrigger:
     trigger_spec = job.get("trigger_spec") or {}
-    if str(job.get("action_type") or "") == "calendar.observe_due_events.v1":
+    if str(job.get("action_type") or "") in {
+        "calendar.observe_due_events.v1",
+        "guardian.run_procedure.v2",
+    }:
         from src.scheduler.governed_schedules import cron_for_cadence
 
         return cron_for_cadence(trigger_spec)
@@ -1187,7 +1677,7 @@ async def execute_scheduled_job(job_id: str, *, scheduled_slot_utc: datetime | N
     if job is None:
         return
     action_type = str(job.get("action_type") or "")
-    if action_type == "calendar.observe_due_events.v1" and scheduled_slot_utc is None:
+    if action_type in {"calendar.observe_due_events.v1", "guardian.run_procedure.v2"} and scheduled_slot_utc is None:
         # The public legacy/manual execution seam cannot mint a governed
         # occurrence.  Only the APScheduler wrapper may forward a canonical
         # slot to this handler.
@@ -1255,6 +1745,40 @@ async def execute_scheduled_job(job_id: str, *, scheduled_slot_utc: datetime | N
                     "scheduled_job_run_id": run["id"],
                     "action_type": action_type,
                     "occurrence_id": observation.get("occurrence_id"),
+                },
+            )
+            return
+        if action_type == "guardian.run_procedure.v2":
+            scheduled = await _run_governed_procedure_schedule(
+                job,
+                scheduled_slot_utc=scheduled_slot_utc,
+                scheduled_run_id=run["id"],
+            )
+            outcome = str(scheduled.get("status") or "blocked")
+            await scheduled_job_repository.record_run(
+                job_id,
+                outcome=outcome,
+            )
+            await scheduled_job_repository.finish_run(
+                run["id"],
+                outcome=outcome,
+                status="finished" if outcome in {"queued", "succeeded"} else outcome,
+                metadata={
+                    "occurrence_id": scheduled.get("occurrence_id"),
+                    "task_id": scheduled.get("task_id"),
+                    "replayed": bool(scheduled.get("replayed", False)),
+                    "memory_status": scheduled.get("memory_status", "no_learning"),
+                },
+            )
+            await log_scheduler_job_event(
+                job_name=f"user_cron:{job_id}",
+                outcome="succeeded" if outcome in {"queued", "succeeded"} else outcome,
+                details={
+                    "scheduled_job_id": job_id,
+                    "scheduled_job_run_id": run["id"],
+                    "action_type": action_type,
+                    "occurrence_id": scheduled.get("occurrence_id"),
+                    "task_id": scheduled.get("task_id"),
                 },
             )
             return
@@ -1361,6 +1885,30 @@ async def execute_scheduled_job(job_id: str, *, scheduled_slot_utc: datetime | N
             return
 
         raise RuntimeError(f"Unsupported scheduled action '{action_type}'.")
+    except _ProcedureScheduleDeferred as exc:
+        await scheduled_job_repository.record_run(
+            job_id,
+            outcome="deferred",
+            error=exc.reason_code,
+        )
+        await scheduled_job_repository.finish_run(
+            run["id"],
+            outcome="deferred",
+            status="deferred",
+            error=exc.reason_code,
+            metadata={"recovery_action": exc.recovery_action},
+        )
+        await log_scheduler_job_event(
+            job_name=f"user_cron:{job_id}",
+            outcome="deferred",
+            details={
+                "scheduled_job_id": job_id,
+                "scheduled_job_run_id": run["id"],
+                "action_type": action_type,
+                "reason_code": exc.reason_code,
+                "recovery_action": exc.recovery_action,
+            },
+        )
     except ApprovalRequired as exc:
         await scheduled_job_repository.record_run(
             job_id,

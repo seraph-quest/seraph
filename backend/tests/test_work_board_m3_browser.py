@@ -661,11 +661,157 @@ async def test_browser_readiness_rejects_draft_goal_before_claim(async_db, monke
     assert reason == "The browser task goal is not active"
 
 
-def test_public_browser_and_calendar_capabilities_are_the_only_artifact_storage_opt_ins():
+@pytest.mark.asyncio
+async def test_post_claim_readiness_allows_exact_final_attempt(async_db, monkeypatch, tmp_path):
+    """The newly claimed final attempt is not rejected by its own budget."""
+
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    async with async_db() as db:
+        goal = await _browser_goal(
+            db,
+            goal_id="goal-browser-final-attempt",
+            budget=GoalAdmissionBudget(max_outstanding_jobs=1, max_attempts=1, max_runtime_seconds=120),
+        )
+        request = _artifact_request(
+            goal_id=goal.id,
+            idempotency_key="final-attempt-input",
+        )
+        metadata = await prepare_input_artifact(db, OWNER, request)
+        task = _browser_task(
+            task_id="browser-final-attempt",
+            goal_id=goal.id,
+            status=WorkBoardStatus.running,
+        )
+        task.task_revision = 2
+        task.input_artifact_id = metadata.artifact_id
+        task.typed_input_ref = metadata.typed_input_ref
+        task.typed_input_digest = metadata.typed_input_digest
+        db.add(task)
+        await db.flush()
+        resolved = await resolve_input_artifact_for_task(
+            db,
+            OWNER,
+            artifact_id=metadata.artifact_id,
+            goal_id=goal.id,
+            goal_revision=1,
+            capability_id=request.capability_id,
+        )
+        await bind_input_artifact(
+            db,
+            OWNER,
+            artifact=resolved,
+            task_id=task.task_id,
+            task_revision=1,
+        )
+        attempt = WorkBoardAttempt(
+            task_id=task.task_id,
+            task_revision_at_claim=1,
+            lease_owner="service:work-board",
+            lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=2),
+            heartbeat_at=datetime.now(timezone.utc),
+            fencing_token=1,
+            executor_id=task.executor_id or "",
+            started_at=datetime.now(timezone.utc),
+            outcome="pending_admission",
+        )
+        db.add(attempt)
+        await db.commit()
+
+    async def authenticated(*_args, **_kwargs):
+        return SimpleNamespace(principal=SimpleNamespace(principal_id=OWNER.principal_id))
+
+    monkeypatch.setattr("src.work_board.dispatcher.authenticate_session", authenticated)
+    dispatcher = WorkBoardDispatcher(session_provider=async_db)
+
+    async def capability_preflight(_task, _goal, _inputs):
+        return None, None
+
+    dispatcher._capability_preflight = capability_preflight
+    claim = SimpleNamespace(task=task, attempt=attempt)
+    error, reason = await dispatcher._post_claim_readiness(claim)
+    assert (error, reason) == (None, None)
+
+
+@pytest.mark.asyncio
+async def test_post_claim_readiness_rejects_forged_attempt_context(async_db, monkeypatch, tmp_path):
+    """A different attempt or fence cannot consume the final-attempt allowance."""
+
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    async with async_db() as db:
+        goal = await _browser_goal(
+            db,
+            goal_id="goal-browser-forged-attempt",
+            budget=GoalAdmissionBudget(max_outstanding_jobs=1, max_attempts=1, max_runtime_seconds=120),
+        )
+        request = _artifact_request(
+            goal_id=goal.id,
+            idempotency_key="forged-attempt-input",
+        )
+        metadata = await prepare_input_artifact(db, OWNER, request)
+        task = _browser_task(
+            task_id="browser-forged-attempt",
+            goal_id=goal.id,
+            status=WorkBoardStatus.running,
+        )
+        task.task_revision = 2
+        task.input_artifact_id = metadata.artifact_id
+        task.typed_input_ref = metadata.typed_input_ref
+        task.typed_input_digest = metadata.typed_input_digest
+        db.add(task)
+        await db.flush()
+        resolved = await resolve_input_artifact_for_task(
+            db,
+            OWNER,
+            artifact_id=metadata.artifact_id,
+            goal_id=goal.id,
+            goal_revision=1,
+            capability_id=request.capability_id,
+        )
+        await bind_input_artifact(db, OWNER, artifact=resolved, task_id=task.task_id, task_revision=1)
+        current_attempt = WorkBoardAttempt(
+            attempt_id="current-final-attempt",
+            task_id=task.task_id,
+            task_revision_at_claim=1,
+            lease_owner="service:work-board",
+            lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=2),
+            heartbeat_at=datetime.now(timezone.utc),
+            fencing_token=7,
+            executor_id=task.executor_id or "",
+            started_at=datetime.now(timezone.utc),
+            outcome="pending_admission",
+        )
+        db.add(current_attempt)
+        await db.commit()
+
+    async def authenticated(*_args, **_kwargs):
+        return SimpleNamespace(principal=SimpleNamespace(principal_id=OWNER.principal_id))
+
+    monkeypatch.setattr("src.work_board.dispatcher.authenticate_session", authenticated)
+    dispatcher = WorkBoardDispatcher(session_provider=async_db)
+
+    async def capability_preflight(_task, _goal, _inputs):
+        return None, None
+
+    dispatcher._capability_preflight = capability_preflight
+    forged = WorkBoardAttempt(
+        attempt_id="forged-attempt",
+        task_id=task.task_id,
+        task_revision_at_claim=1,
+        lease_owner="service:work-board",
+        lease_expires_at=current_attempt.lease_expires_at,
+        fencing_token=7,
+    )
+    error, reason = await dispatcher._post_claim_readiness(SimpleNamespace(task=task, attempt=forged))
+    assert error == "attempt_limit"
+    assert reason == "The board attempt limit has been exhausted"
+
+
+def test_public_browser_calendar_and_reviewed_procedure_capabilities_are_the_only_artifact_storage_opt_ins():
     approved_public_capabilities = {
         "browser.public-task.v1",
         "calendar.meeting-prep.v1",
         "calendar.observe_due_events.v1",
+        "guardian-routine.v2",
     }
     assert {
         capability_id
@@ -677,6 +823,34 @@ def test_public_browser_and_calendar_capabilities_are_the_only_artifact_storage_
         for capability_id, spec in REGISTERED_CAPABILITIES.items()
         if capability_id not in approved_public_capabilities
     )
+
+
+def test_reviewed_procedure_input_rejects_malformed_executor_and_permission_fields():
+    valid = {
+        "routine_id": "routine-1",
+        "version": 1,
+        "expected_routine_revision": 1,
+        "goal_id": "goal-1",
+        "expected_goal_revision": 1,
+        "parameters": {},
+        "invocation_uuid": "01234567-89ab-cdef-0123-456789abcdef",
+    }
+    assert validate_capability_input("guardian-routine.v2", valid)["version"] == 1
+
+    with pytest.raises(TypedInputError) as malformed:
+        validate_capability_input("guardian-routine.v2", {**valid, "version": "1"})
+    assert malformed.value.code == "typed_input_invalid"
+
+    with pytest.raises(TypedInputError) as executor:
+        validate_capability_input("guardian-routine.v2", {**valid, "executor_id": "seraph-work-board:forged"})
+    assert executor.value.code == "typed_input_authority_field"
+
+    with pytest.raises(TypedInputError) as permission:
+        validate_capability_input("guardian-routine.v2", {**valid, "permissions": ["workspace_write"]})
+    # ``permissions`` is rejected by the strict v2 envelope grammar. It is
+    # not an accepted authority key, so the parser reports the generic
+    # malformed-input code rather than treating it as a server-owned field.
+    assert permission.value.code == "typed_input_invalid"
 
 
 def test_browser_policy_dto_is_bounded_normalized_and_truthful(monkeypatch):

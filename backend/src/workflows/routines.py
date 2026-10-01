@@ -20,6 +20,7 @@ from typing import Any, AsyncIterator, Mapping
 import yaml
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import text, update
 from sqlalchemy.exc import IntegrityError
@@ -33,6 +34,7 @@ from src.db.models import (
     GuardianDecisionPacket,
     GuardianRoutine,
     GuardianRoutineVersion,
+    ProcedureV2Binding,
     WorkBoardAttempt,
     WorkBoardLink,
     WorkBoardRoutineBinding,
@@ -89,6 +91,21 @@ from src.workflows.routine_templates import (
     validate_generated_files,
 )
 from src.workflows.routine_steps import RoutineStepContext, github_followthrough, guardian_watch_run
+from src.workflows.procedure_contracts import (
+    ROUTINE_V2_CAPABILITY_VERSION,
+    build_procedure_plan,
+    get_procedure_template,
+    plan_digest,
+    validate_procedure_plan,
+)
+from src.workflows.procedure_service import (
+    ProcedureV2CreateRequest,
+    ProcedureV2Error,
+    ProcedureV2InvokeRequest,
+    ProcedureV2PreviewRequest,
+    ProcedureV2ScheduleRequest,
+    ProcedureV2Service,
+)
 
 
 ROUTINE_CAPABILITY_VERSION = "guardian-routine.v1"
@@ -247,6 +264,14 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _utc(value: datetime) -> datetime:
+    """Normalize database timestamps without treating SQLite naive values as local time."""
+
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def _bounded_runtime_seconds(value: Any) -> int:
     try:
         requested = int(value)
@@ -290,6 +315,33 @@ def _routine_approval_scope(job: Mapping[str, Any], tool_name: str) -> dict[str,
         "routine_version": int(authority.get("routine_version") or 0),
     }
     if tool_name == ROUTINE_INSTALL_TOOL:
+        if common["capability_id"] == ROUTINE_V2_CAPABILITY_VERSION:
+            scope = {
+                "action": "install_reviewed_procedure_v2",
+                **common,
+                "template_id": str(authority.get("template_id") or ""),
+                "plan_digest": str(authority.get("plan_digest") or ""),
+                "source_proof_digest": str(authority.get("source_proof_digest") or ""),
+                "workflow_sha256": str(authority.get("workflow_sha256") or ""),
+                "runbook_sha256": str(authority.get("runbook_sha256") or ""),
+            }
+            required = (
+                "job_id",
+                "goal_id",
+                "routine_id",
+                "template_id",
+                "plan_digest",
+                "source_proof_digest",
+                "workflow_sha256",
+                "runbook_sha256",
+            )
+            if (
+                any(not str(scope.get(key) or "").strip() for key in required)
+                or scope["goal_revision"] < 1
+                or scope["routine_version"] < 1
+            ):
+                raise RoutineError("routine_approval_scope_incomplete")
+            return scope
         scope = {
             "action": "install_guardian_procedure",
             **common,
@@ -501,15 +553,56 @@ def _routine_pack_runbook_payload(
     version: GuardianRoutineVersion,
     provenance: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Build the fixed, declarative v2 procedure snapshot.
+    """Build the package runbook for the persisted procedure schema.
 
-    The legacy runbook is intentionally not copied here.  Its workflow target
-    is an execution implementation, while this package contribution is only a
-    reviewed procedure definition with typed inputs and immutable evidence
-    bindings. Invocation authority is still minted by the routine service.
+    ``CapabilityPackManifest.schema_version == 2`` is the generic pack
+    format.  The routine's procedure schema is selected from validated source
+    provenance so a legacy guardian-routine.v1 version keeps its exact bytes.
     """
 
     safe_provenance = _safe_routine_provenance(provenance)
+    if provenance.get("schema_version") == 2:
+        try:
+            template_id = str(provenance["template_id"])
+            spec = get_procedure_template(template_id)
+            plan = validate_procedure_plan(provenance["plan"])
+        except Exception as exc:
+            raise RoutineError("routine_package_procedure_invalid", status_code=409) from exc
+        observed_plan_digest = str(provenance.get("plan_digest") or "").lower()
+        if observed_plan_digest != plan_digest(plan):
+            raise RoutineError("routine_package_procedure_digest_invalid", status_code=409)
+        return {
+            "id": f"runbook:{_routine_pack_id(routine_id, int(version.version))}",
+            "title": "Seraph reviewed guardian procedure",
+            "summary": "A reviewed, owner-bound fixed procedure definition.",
+            "starter_pack": "seraph.guardian-routine.v2",
+            "inputs": {
+                "routine_invocation_job_id": {"type": "string", "required": True},
+            },
+            "procedure": {
+                "schema_version": 2,
+                "capability_id": ROUTINE_V2_CAPABILITY_VERSION,
+                "template_id": spec.template_id,
+                "steps": [
+                    {
+                        "id": step.step_id,
+                        "capability_id": step.capability_id,
+                        "capability_version": step.capability_version,
+                    }
+                    for step in spec.steps
+                ],
+                "plan_digest": observed_plan_digest,
+            },
+            "bindings": {
+                "routine_id": _routine_pack_token(routine_id),
+                "version": int(version.version),
+                "workflow_sha256": str(version.workflow_sha256),
+                "runbook_sha256": str(version.runbook_sha256),
+                "source_provenance_sha256": _sha(_dump(safe_provenance)),
+                "source_provenance": safe_provenance,
+                "plan_digest": observed_plan_digest,
+            },
+        }
     artifact_refs: list[dict[str, Any]] = []
     for key in (
         "source_task_artifact_refs",
@@ -553,8 +646,71 @@ def _routine_pack_runbook_payload(
     }
 
 
-def _routine_pack_manifest_payload(*, routine_id: str, version: int) -> dict[str, Any]:
+def _routine_pack_manifest_payload(
+    *, routine_id: str, version: int, provenance: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
     pack_id = _routine_pack_id(routine_id, version)
+    if isinstance(provenance, Mapping) and provenance.get("schema_version") == 2:
+        try:
+            spec = get_procedure_template(str(provenance.get("template_id") or ""))
+            plan = validate_procedure_plan(provenance.get("plan") or {})
+        except Exception as exc:
+            raise RoutineError("routine_package_procedure_invalid", status_code=409) from exc
+        if str(provenance.get("plan_digest") or "").lower() != plan_digest(plan):
+            raise RoutineError("routine_package_procedure_digest_invalid", status_code=409)
+        return {
+            "schema_version": ROUTINE_PACK_SCHEMA_VERSION,
+            "id": pack_id,
+            "version": f"2.0.{int(version)}",
+            "kind": "capability-pack",
+            "publisher": {"name": "Seraph", "provenance": "local-reviewed"},
+            "signature": {"state": "unsigned-local", "signer": None},
+            "compatibility": {"seraph": ">=0"},
+            "dependencies": [],
+            "contributes": {
+                "capabilities": list(spec.permissions),
+                "skills": [],
+                "workflows": [],
+                "prompts": [],
+                "sources": [],
+                "reports": [],
+                "evals": [],
+                "runbooks": [ROUTINE_PACK_RUNBOOK_REFERENCE],
+            },
+            "authority": {
+                "tools": [step.step_id for step in spec.steps],
+                "filesystem": ["artifact_read", "artifact_write"],
+                "network": False,
+                "secrets": [],
+                "approval": "always",
+            },
+            "resources": {
+                "inference_priority": "approved_operator",
+                "max_inference_cost_microusd": 0,
+                "max_runtime_seconds": 300,
+                "max_artifact_bytes": 10 * 1024 * 1024,
+            },
+            "data_policy": {
+                "classes": ["private", "operator_context"]
+                if spec.template_id == "selected-meeting-prep"
+                else ["public"],
+                "egress": [],
+            },
+            "policy_overlays": [],
+            "lifecycle": {
+                "hooks": {
+                    "activate": "required",
+                    "pause": "required",
+                    "update": "required",
+                    "revoke": "required",
+                    "uninstall": "required",
+                },
+                "artifact_migration": "preserve",
+                "revoke_running_jobs": "cancel_at_safe_checkpoint",
+            },
+            "display_name": f"Seraph reviewed procedure {spec.template_id} v{int(version)}",
+            "summary": "Fixed reviewed procedure; fresh authority is required per invocation.",
+        }
     return {
         "schema_version": ROUTINE_PACK_SCHEMA_VERSION,
         "id": pack_id,
@@ -606,7 +762,7 @@ def _routine_pack_manifest_payload(*, routine_id: str, version: int) -> dict[str
 
 
 def _validate_routine_pack_runbook(content: str, *, routine_id: str, version: GuardianRoutineVersion) -> dict[str, Any]:
-    """Validate the v2 runbook representation independently of legacy loaders."""
+    """Validate the package runbook selected by immutable source provenance."""
 
     try:
         payload = yaml.safe_load(content)
@@ -614,6 +770,50 @@ def _validate_routine_pack_runbook(content: str, *, routine_id: str, version: Gu
         raise RoutineError("routine_package_runbook_invalid", status_code=409) from exc
     if not isinstance(payload, dict):
         raise RoutineError("routine_package_runbook_invalid", status_code=409)
+    provenance = _load(version.source_provenance_json, {})
+    if isinstance(provenance, Mapping) and provenance.get("schema_version") == 2:
+        try:
+            template_id = str(provenance.get("template_id") or "")
+            spec = get_procedure_template(template_id)
+            plan = validate_procedure_plan(provenance.get("plan") or {})
+        except Exception as exc:
+            raise RoutineError("routine_package_procedure_invalid", status_code=409) from exc
+        expected_digest = plan_digest(plan)
+        expected = {
+            "id": f"runbook:{_routine_pack_id(routine_id, int(version.version))}",
+            "title": "Seraph reviewed guardian procedure",
+            "summary": "A reviewed, owner-bound fixed procedure definition.",
+            "starter_pack": "seraph.guardian-routine.v2",
+            "inputs": {
+                "routine_invocation_job_id": {"type": "string", "required": True},
+            },
+            "procedure": {
+                "schema_version": 2,
+                "capability_id": ROUTINE_V2_CAPABILITY_VERSION,
+                "template_id": template_id,
+                "steps": [
+                    {
+                        "id": step.step_id,
+                        "capability_id": step.capability_id,
+                        "capability_version": step.capability_version,
+                    }
+                    for step in spec.steps
+                ],
+                "plan_digest": expected_digest,
+            },
+            "bindings": {
+                "routine_id": _routine_pack_token(routine_id),
+                "version": int(version.version),
+                "workflow_sha256": str(version.workflow_sha256),
+                "runbook_sha256": str(version.runbook_sha256),
+                "source_provenance_sha256": _sha(_dump(_safe_routine_provenance(provenance))),
+                "source_provenance": _safe_routine_provenance(provenance),
+                "plan_digest": expected_digest,
+            },
+        }
+        if payload != expected:
+            raise RoutineError("routine_package_runbook_contract_invalid", status_code=409)
+        return payload
     required = {"id", "title", "summary", "starter_pack", "inputs", "procedure", "bindings"}
     if (
         set(payload) != required
@@ -631,7 +831,7 @@ def _validate_routine_pack_runbook(content: str, *, routine_id: str, version: Gu
     bindings = payload.get("bindings")
     if not isinstance(bindings, Mapping):
         raise RoutineError("routine_package_runbook_binding_invalid", status_code=409)
-    expected_provenance = _safe_routine_provenance(_load(version.source_provenance_json, {}))
+    expected_provenance = _safe_routine_provenance(provenance)
     expected = {
         "routine_id": _routine_pack_token(routine_id),
         "version": int(version.version),
@@ -806,6 +1006,23 @@ def _safe_routine_provenance(value: Mapping[str, Any]) -> dict[str, Any]:
         "action_task_artifact_refs",
         "source_attempt_receipt_refs",
         "action_attempt_receipt_refs",
+        # Reviewed procedure v2 provenance.  These fields are immutable
+        # identifiers, digests, and the strict server-owned plan; no source
+        # content, URL, credential, or caller authority is retained here.
+        "schema_version",
+        "template_id",
+        "source_refs",
+        "source_task_ids",
+        "source_attempt_ids",
+        "source_job_ids",
+        "verified_artifact_ids_and_hashes",
+        "capability_versions",
+        "plan_digest",
+        "parameter_schema",
+        "plan",
+        "source_proof_digest",
+        "preview_expires_at",
+        "version",
     }
     evidence_keys = {
         "source_task_artifact_refs",
@@ -822,6 +1039,64 @@ def _safe_routine_provenance(value: Mapping[str, Any]) -> dict[str, Any]:
             bounded_refs = _safe_board_evidence_refs(item)
             if bounded_refs:
                 result[key] = bounded_refs
+            continue
+        if key in {"plan", "parameter_schema"}:
+            try:
+                plan = validate_procedure_plan(item) if key == "plan" else item
+                value_to_store = (
+                    plan.model_dump(mode="json")
+                    if key == "plan"
+                    else [
+                        {
+                            "name": entry.get("name"),
+                            "kind": entry.get("kind"),
+                            "required": entry.get("required"),
+                        }
+                        for entry in item
+                        if isinstance(entry, Mapping)
+                    ]
+                )
+                if isinstance(value_to_store, (dict, list)):
+                    result[key] = value_to_store
+            except Exception:
+                continue
+            continue
+        if key == "source_refs":
+            if isinstance(item, list) and len(item) <= 2:
+                safe_refs: list[dict[str, Any]] = []
+                for entry in item:
+                    if not isinstance(entry, Mapping):
+                        continue
+                    safe_entry = {
+                        field: entry[field]
+                        for field in (
+                            "task_id",
+                            "task_revision",
+                            "attempt_id",
+                            "job_id",
+                            "artifact_ids_and_hashes",
+                            "capability_id",
+                            "capability_version",
+                            "goal_id",
+                            "goal_revision",
+                        )
+                        if field in entry
+                    }
+                    artifacts = safe_entry.get("artifact_ids_and_hashes")
+                    if isinstance(artifacts, list) and len(artifacts) <= 20:
+                        safe_entry["artifact_ids_and_hashes"] = [
+                            {
+                                "artifact_id": artifact.get("artifact_id"),
+                                "sha256": artifact.get("sha256"),
+                            }
+                            for artifact in artifacts
+                            if isinstance(artifact, Mapping)
+                            and isinstance(artifact.get("artifact_id"), str)
+                            and isinstance(artifact.get("sha256"), str)
+                        ]
+                    safe_refs.append(safe_entry)
+                if len(safe_refs) == len(item):
+                    result[key] = safe_refs
             continue
         if isinstance(item, (str, int, float, bool)) or item is None:
             result[key] = item
@@ -1349,6 +1624,190 @@ def _expected_publication_job_id(owner_principal_id: str, operation_uuid: str) -
 class RoutineService:
     """Small service over existing package, watch, approval, and job stores."""
 
+    async def _v2_install_approval_projection(
+        self,
+        *,
+        job_id: str,
+        job: Mapping[str, Any] | None,
+        owner_principal_id: str,
+        owner_session_id: str,
+        routine_id: str,
+        version: int,
+    ) -> dict[str, Any]:
+        """Project one v2 install approval from its canonical bound row.
+
+        The durable install job is the locator, but its embedded approval id
+        is not sufficient proof for a public projection.  Require the job's
+        immutable owner/session/routine binding and then re-read the canonical
+        ApprovalRequest with the same owner/session and durable job id.  A
+        missing or mismatched row is deliberately indistinguishable from a
+        missing approval so an operator cannot use another session's receipt.
+        Expiry is evaluated against current UTC time without mutating the
+        approval row; the existing approval lifecycle remains the authority
+        for decisions and consumption.
+        """
+
+        def text_value(value: Any) -> str:
+            return str(value or "").strip()
+
+        def missing(*, recovery_action: str = "create_fresh_preview") -> dict[str, Any]:
+            return {
+                "approval_id": None,
+                "install_approval_status": "missing",
+                "install_approval_expires_at": None,
+                "install_recovery_action": recovery_action,
+            }
+
+        expected_job_id = str(job_id or "").strip()
+        if not expected_job_id or not isinstance(job, Mapping):
+            return missing()
+        if str(job.get("job_id") or "").strip() != expected_job_id:
+            return missing()
+        authority = job.get("declared_authority")
+        if not isinstance(authority, Mapping):
+            return missing()
+        if (
+            str(authority.get("principal") or "").strip() != str(owner_principal_id).strip()
+            or str(authority.get("owner_kind") or "").strip() != "user"
+            or str(authority.get("session_id") or "").strip() != str(owner_session_id).strip()
+            or str(authority.get("routine_id") or "").strip() != str(routine_id).strip()
+        ):
+            return missing()
+        try:
+            authority_version = int(authority.get("routine_version") or 0)
+        except (TypeError, ValueError, OverflowError):
+            return missing()
+        if authority_version != int(version):
+            return missing()
+        approval_id = text_value(authority.get("approval_id"))
+        if not approval_id:
+            return missing()
+
+        approval = await approval_repository.get(approval_id)
+        if approval is None:
+            return missing()
+        if (
+            text_value(getattr(approval, "id", None)) != approval_id
+            or text_value(getattr(approval, "session_id", None)) != str(owner_session_id).strip()
+            or text_value(getattr(approval, "owner_principal_id", None)) != str(owner_principal_id).strip()
+            or text_value(getattr(approval, "operator_session_id", None)) != str(owner_session_id).strip()
+            or text_value(getattr(approval, "tool_name", None)) != ROUTINE_INSTALL_TOOL
+        ):
+            return missing()
+        details = _load(getattr(approval, "details_json", None), {})
+        if not isinstance(details, Mapping):
+            return missing()
+        if (
+            text_value(details.get("approval_id")) != approval_id
+            or text_value(details.get("durable_approval_id")) != approval_id
+            or text_value(details.get("durable_job_id")) != expected_job_id
+            or text_value(details.get("durable_owner_kind")) != "user"
+            or text_value(details.get("durable_owner_principal_id")) != str(owner_principal_id).strip()
+            or text_value(details.get("approval_owner_operator_session_id")) != str(owner_session_id).strip()
+        ):
+            return missing()
+
+        status = text_value(getattr(approval, "status", None)).lower()
+        if status not in {"pending", "approved", "denied", "expired", "consumed"}:
+            return missing()
+        expires_at_value = getattr(approval, "expires_at", None)
+        expires_at = _utc(expires_at_value) if isinstance(expires_at_value, datetime) else None
+        if status in {"pending", "approved"} and expires_at is None:
+            return missing()
+        if status in {"pending", "approved"} and expires_at <= _now():
+            status = "expired"
+        recovery_action: str | None = None
+        if status in {"expired", "denied", "missing"}:
+            recovery_action = "create_fresh_preview"
+        elif status == "consumed":
+            # A consumed approval may correspond to an install whose final
+            # receipt has not reached this projection yet.  Keep that receipt
+            # addressable so the existing lifecycle can reconcile it; never
+            # mint a second approval here.
+            recovery_action = "reconcile_install_receipt"
+        return {
+            "approval_id": approval_id,
+            "install_approval_status": status,
+            "install_approval_expires_at": expires_at.isoformat().replace("+00:00", "Z") if expires_at else None,
+            "install_recovery_action": recovery_action,
+        }
+
+    def _procedure_v2(self) -> ProcedureV2Service:
+        """Return the narrow schema-2 service behind the routines surface."""
+
+        return ProcedureV2Service(self)
+
+    async def preview_from_tasks(
+        self,
+        req: ProcedureV2PreviewRequest,
+        *,
+        owner_principal_id: str,
+        owner_session_id: str,
+    ) -> dict[str, Any]:
+        return await self._procedure_v2().preview_from_tasks(
+            req,
+            owner_principal_id=owner_principal_id,
+            owner_session_id=owner_session_id,
+        )
+
+    async def create_from_tasks(
+        self,
+        req: ProcedureV2CreateRequest,
+        *,
+        owner_principal_id: str,
+        owner_session_id: str,
+    ) -> tuple[dict[str, Any], int]:
+        return await self._procedure_v2().create_from_tasks(
+            req,
+            owner_principal_id=owner_principal_id,
+            owner_session_id=owner_session_id,
+        )
+
+    async def invoke_v2(
+        self,
+        routine_id: str,
+        req: ProcedureV2InvokeRequest,
+        *,
+        owner_principal_id: str,
+        owner_session_id: str,
+    ) -> tuple[dict[str, Any], int]:
+        return await self._procedure_v2().invoke_v2(
+            routine_id,
+            req,
+            owner_principal_id=owner_principal_id,
+            owner_session_id=owner_session_id,
+        )
+
+    async def schedule_v2(
+        self,
+        routine_id: str,
+        req: ProcedureV2ScheduleRequest,
+        *,
+        owner_principal_id: str,
+        owner_session_id: str,
+    ) -> tuple[dict[str, Any], int]:
+        return await self._procedure_v2().schedule_v2(
+            routine_id,
+            req,
+            owner_principal_id=owner_principal_id,
+            owner_session_id=owner_session_id,
+        )
+
+    async def resolve_v2_version(
+        self,
+        routine_id: str,
+        version: int,
+        *,
+        owner_principal_id: str,
+        owner_session_id: str,
+    ):
+        return await self._procedure_v2().resolve_v2_version(
+            routine_id,
+            version,
+            owner_principal_id=owner_principal_id,
+            owner_session_id=owner_session_id,
+        )
+
     async def _routine(self, routine_id: str, owner_principal_id: str) -> GuardianRoutine:
         async with db_engine.get_session() as db:
             row = (
@@ -1472,8 +1931,22 @@ class RoutineService:
                     .order_by(GuardianRoutineVersion.version)
                 )
             ).scalars().all()
+            procedure_bindings = (
+                await db.execute(
+                    select(ProcedureV2Binding).where(
+                        ProcedureV2Binding.owner_principal_id == owner_principal_id,
+                        ProcedureV2Binding.owner_session_id == owner_session_id,
+                        ProcedureV2Binding.deterministic_routine_id == routine.id,
+                    )
+                )
+            ).scalars().all()
             for item in versions:
                 db.expunge(item)
+            for item in procedure_bindings:
+                db.expunge(item)
+        binding_by_version_id = {
+            str(item.version_id): item for item in procedure_bindings if item.version_id
+        }
         version_payloads: list[dict[str, Any]] = []
         package_by_version: dict[int, dict[str, Any]] = {}
         for item in versions:
@@ -1493,6 +1966,42 @@ class RoutineService:
             package_by_version[int(item.version)] = package
             payload = self._version_json(item)
             payload["package"] = package
+            provenance = _load(item.source_provenance_json, {})
+            if isinstance(provenance, Mapping) and provenance.get("schema_version") == 2:
+                binding = binding_by_version_id.get(str(item.id))
+                install_job_id = f"routine-install:{routine.id}:v{int(item.version)}"
+                install_job = await durable_job_repository.get_job(install_job_id)
+                install_approval = await self._v2_install_approval_projection(
+                    job_id=install_job_id,
+                    job=install_job if isinstance(install_job, Mapping) else None,
+                    owner_principal_id=owner_principal_id,
+                    owner_session_id=owner_session_id,
+                    routine_id=str(routine.id),
+                    version=int(item.version),
+                )
+                payload.update(
+                    {
+                        "schema_version": 2,
+                        "template_id": str(provenance.get("template_id") or ""),
+                        "plan_digest": str(provenance.get("plan_digest") or ""),
+                        "source_proof_digest": str(provenance.get("source_proof_digest") or ""),
+                        "source_refs": provenance.get("source_refs") if isinstance(provenance.get("source_refs"), list) else [],
+                        "parameter_schema": provenance.get("parameter_schema") if isinstance(provenance.get("parameter_schema"), list) else [],
+                        "procedure_binding": {
+                            "binding_id": binding.binding_id if binding else None,
+                            "state": binding.state if binding else "prepared",
+                            "revision": int(binding.revision) if binding else None,
+                            "preview_digest": binding.preview_digest if binding else provenance.get("preview_digest"),
+                            "preview_expires_at": (
+                                _utc(binding.preview_expires_at).isoformat().replace("+00:00", "Z")
+                                if binding
+                                else provenance.get("preview_expires_at")
+                            ),
+                            "install_job_id": install_job_id,
+                            **install_approval,
+                        },
+                    }
+                )
             version_payloads.append(payload)
         package = package_by_version.get(
             int(routine.current_version or 0),
@@ -1541,12 +2050,17 @@ class RoutineService:
             raise RoutineError("routine_package_version_binding_invalid", status_code=409)
         using_override = root_override is not None
         root = Path(root_override) if using_override else _routine_pack_root(routine_id, int(version.version))
-        manifest_payload = _routine_pack_manifest_payload(routine_id=routine_id, version=int(version.version))
+        provenance = _load(version.source_provenance_json, {})
+        manifest_payload = _routine_pack_manifest_payload(
+            routine_id=routine_id,
+            version=int(version.version),
+            provenance=provenance if isinstance(provenance, Mapping) else None,
+        )
         manifest_content = yaml.safe_dump(manifest_payload, sort_keys=True, allow_unicode=False)
         runbook_payload = _routine_pack_runbook_payload(
             routine_id=routine_id,
             version=version,
-            provenance=_load(version.source_provenance_json, {}),
+            provenance=provenance if isinstance(provenance, Mapping) else {},
         )
         runbook_content = yaml.safe_dump(runbook_payload, sort_keys=True, allow_unicode=False)
         expected_files = {
@@ -1656,16 +2170,68 @@ class RoutineService:
             except yaml.YAMLError:
                 runbook_payload = None
             procedure_payload = runbook_payload.get("procedure") if isinstance(runbook_payload, Mapping) else None
-            if (
-                runbook_truncated
-                or not isinstance(runbook_payload, Mapping)
-                or set(runbook_payload) != {"id", "title", "summary", "starter_pack", "inputs", "procedure", "bindings"}
-                or runbook_payload.get("id") != f"runbook:{_routine_pack_id(routine_id, int(version))}"
-                or runbook_payload.get("starter_pack") != "seraph.guardian-routine.v1"
-                or runbook_payload.get("inputs") != ROUTINE_PACK_INPUTS
-                or not isinstance(procedure_payload, Mapping)
-                or procedure_payload.get("steps") != [dict(step) for step in ROUTINE_PACK_STEP_CONTRACT]
-            ):
+            common_runbook_shape = (
+                not runbook_truncated
+                and isinstance(runbook_payload, Mapping)
+                and set(runbook_payload)
+                == {"id", "title", "summary", "starter_pack", "inputs", "procedure", "bindings"}
+                and runbook_payload.get("id")
+                == f"runbook:{_routine_pack_id(routine_id, int(version))}"
+                and isinstance(procedure_payload, Mapping)
+            )
+            v1_runbook_valid = common_runbook_shape and (
+                runbook_payload.get("starter_pack") == "seraph.guardian-routine.v1"
+                and runbook_payload.get("inputs") == ROUTINE_PACK_INPUTS
+                and procedure_payload.get("steps") == [dict(step) for step in ROUTINE_PACK_STEP_CONTRACT]
+            )
+            v2_runbook_valid = False
+            if common_runbook_shape and procedure_payload.get("schema_version") == 2:
+                template_id = str(procedure_payload.get("template_id") or "")
+                try:
+                    spec = get_procedure_template(template_id)
+                    v2_plan = validate_procedure_plan(
+                        {
+                            "schema_version": 2,
+                            "template_id": template_id,
+                            "steps": [
+                                {
+                                    "step_id": step.step_id,
+                                    "capability_id": step.capability_id,
+                                    "capability_version": step.capability_version,
+                                    "typed_input_ref": "server-owned-ref",
+                                    "typed_input_digest": "0" * 64,
+                                }
+                                for step in spec.steps
+                            ],
+                            "parameters": [
+                                {"name": name, "kind": kind, "required": required}
+                                for name, kind, required in spec.parameters
+                            ],
+                            "verifier": "leaf_readbacks",
+                            "limits": {"max_steps": 2, "max_total_seconds": 300},
+                        }
+                    )
+                    v2_runbook_valid = (
+                        runbook_payload.get("starter_pack") == "seraph.guardian-routine.v2"
+                        and runbook_payload.get("inputs")
+                        == {"routine_invocation_job_id": {"type": "string", "required": True}}
+                        and procedure_payload.get("capability_id") == ROUTINE_V2_CAPABILITY_VERSION
+                        and procedure_payload.get("steps")
+                        == [
+                            {
+                                "id": step.step_id,
+                                "capability_id": step.capability_id,
+                                "capability_version": step.capability_version,
+                            }
+                            for step in spec.steps
+                        ]
+                        and isinstance(procedure_payload.get("plan_digest"), str)
+                        and len(procedure_payload["plan_digest"]) == 64
+                        and v2_plan.template_id == template_id
+                    )
+                except Exception:
+                    v2_runbook_valid = False
+            if not (v1_runbook_valid or v2_runbook_valid):
                 return {"status": "blocked", "reason": "routine_package_runbook_contract_invalid"}
             lifecycle = CapabilityPackLifecycle()
             status = lifecycle.status(
@@ -3429,6 +3995,7 @@ class RoutineService:
         candidate_id: str | None,
         work_board_idempotency_key: str | None = None,
         runtime_seconds: int = ROUTINE_DEADLINE_SECONDS,
+        capability_version: str = ROUTINE_CAPABILITY_VERSION,
     ) -> dict[str, Any]:
         runtime_seconds = _bounded_runtime_seconds(runtime_seconds)
         admitted = await durable_job_repository.admit_job(
@@ -3438,7 +4005,7 @@ class RoutineService:
                     owner_kind="user",
                     owner_principal_id=owner_principal_id,
                     job_kind=job_kind,
-                    capability_version=ROUTINE_CAPABILITY_VERSION,
+                    capability_version=capability_version,
                     idempotency_scope=("work-board-attempt" if work_board_idempotency_key else job_kind),
                     idempotency_key=(work_board_idempotency_key or idempotency_key),
                 ),
@@ -6691,11 +7258,24 @@ class RoutineService:
                     )
                     if truncated or stored != content or _sha(stored) != expected_sha:
                         raise RoutineError("routine_install_readback_mismatch")
+                # v2 versions carry a fixed template-specific package schema;
+                # v1 keeps the legacy two-step guardian validation.  The
+                # install fence already verified the immutable version, so
+                # choose the validator from that persisted provenance rather
+                # than silently applying the v1 parser to a v2 package.
+                provenance = _load(version.source_provenance_json, {})
+                template_id = (
+                    str(provenance.get("template_id") or "")
+                    if isinstance(provenance, Mapping)
+                    and provenance.get("schema_version") == 2
+                    else None
+                )
                 validation = validate_generated_files(
                     workflow=version.workflow_bytes,
                     runbook=version.runbook_bytes,
                     routine_id=routine_id,
                     version=version.version,
+                    template_id=template_id,
                 )
                 if not validation.get("valid"):
                     raise RoutineError("routine_install_parse_failed")
@@ -9156,6 +9736,18 @@ def _http_error(exc: RoutineError) -> HTTPException:
     return HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)})
 
 
+def _procedure_http_error(exc: ProcedureV2Error) -> HTTPException:
+    detail = {
+        "code": exc.code,
+        "message": str(exc),
+        "recovery_action": exc.recovery_action,
+        "retryable": exc.retryable,
+        "binding_id": exc.binding_id,
+        "audit_receipt_id": exc.audit_receipt_id,
+    }
+    return HTTPException(status_code=exc.status_code, detail=detail)
+
+
 @routine_router.get("")
 async def list_routines(request: Request):
     operator = _operator(request)
@@ -9204,6 +9796,33 @@ async def create_board_routine(req: RoutineFromBoardCreateRequest, request: Requ
         )
     except RoutineError as exc:
         raise _http_error(exc) from exc
+
+
+@routine_router.post("/from-tasks/preview")
+async def preview_procedure_from_tasks(req: ProcedureV2PreviewRequest, request: Request):
+    operator = _operator(request)
+    try:
+        return await routine_service.preview_from_tasks(
+            req,
+            owner_principal_id=operator.principal.principal_id,
+            owner_session_id=operator.session_id,
+        )
+    except ProcedureV2Error as exc:
+        raise _procedure_http_error(exc) from exc
+
+
+@routine_router.post("/from-tasks")
+async def create_procedure_from_tasks(req: ProcedureV2CreateRequest, request: Request):
+    operator = _operator(request)
+    try:
+        payload, status_code = await routine_service.create_from_tasks(
+            req,
+            owner_principal_id=operator.principal.principal_id,
+            owner_session_id=operator.session_id,
+        )
+        return JSONResponse(status_code=status_code, content=payload)
+    except ProcedureV2Error as exc:
+        raise _procedure_http_error(exc) from exc
 
 
 @routine_router.post("/{routine_id}/versions/{version}/package/preview")
@@ -9346,6 +9965,36 @@ async def invoke_routine(routine_id: str, req: RoutineInvokeRequest, request: Re
         raise _http_error(exc) from exc
 
 
+@routine_router.post("/{routine_id}/invoke-v2")
+async def invoke_procedure_v2(routine_id: str, req: ProcedureV2InvokeRequest, request: Request):
+    operator = _operator(request)
+    try:
+        payload, status_code = await routine_service.invoke_v2(
+            routine_id,
+            req,
+            owner_principal_id=operator.principal.principal_id,
+            owner_session_id=operator.session_id,
+        )
+        return JSONResponse(status_code=status_code, content=payload)
+    except ProcedureV2Error as exc:
+        raise _procedure_http_error(exc) from exc
+
+
+@routine_router.post("/{routine_id}/schedule-v2")
+async def schedule_procedure_v2(routine_id: str, req: ProcedureV2ScheduleRequest, request: Request):
+    operator = _operator(request)
+    try:
+        payload, status_code = await routine_service.schedule_v2(
+            routine_id,
+            req,
+            owner_principal_id=operator.principal.principal_id,
+            owner_session_id=operator.session_id,
+        )
+        return JSONResponse(status_code=status_code, content=payload)
+    except ProcedureV2Error as exc:
+        raise _procedure_http_error(exc) from exc
+
+
 @routine_router.post("/{routine_id}/invocations/{job_id}/execute")
 async def execute_routine(routine_id: str, job_id: str, req: RoutineExecuteRequest, request: Request):
     operator = _operator(request)
@@ -9414,6 +10063,11 @@ async def recover_routine(routine_id: str, job_id: str, req: RoutineRecoverReque
 
 
 __all__ = [
+    "ProcedureV2CreateRequest",
+    "ProcedureV2Error",
+    "ProcedureV2InvokeRequest",
+    "ProcedureV2PreviewRequest",
+    "ProcedureV2ScheduleRequest",
     "RoutineError",
     "RoutineFromBoardCreateRequest",
     "RoutineFromBoardPreviewRequest",

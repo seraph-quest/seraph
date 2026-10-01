@@ -112,12 +112,14 @@ def _require_approval_owner(request: Request, approval, operator) -> dict:
 async def list_pending_approvals(
     request: Request,
     session_id: str | None = Query(default=None),
+    approval_id: str | None = Query(default=None, min_length=1, max_length=256),
     limit: int = Query(default=20, ge=1, le=100),
 ):
     """List pending approval requests."""
     operator = _require_approval_operator(request)
     approvals = await approval_repository.list_pending(
         session_id=session_id,
+        approval_id=approval_id,
         limit=limit,
     )
     session_titles = {

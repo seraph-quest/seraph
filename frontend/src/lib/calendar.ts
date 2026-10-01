@@ -559,8 +559,9 @@ export function revokeReadConsent(consentId: string, request: CalendarConnection
   return calendarRequest(`/api/calendar/read-consents/${id(consentId)}`, { method: "DELETE", signal, headers: { "Content-Type": "application/json" }, body: JSON.stringify(request) }, validateCalendarConsentResponse);
 }
 
-export function listCalendarEvents(connectionId: string, signal?: AbortSignal): Promise<CalendarEventListResponse> {
-  return calendarRequest(`/api/calendar/connections/${id(connectionId)}/events`, { method: "GET", signal }, validateCalendarEventsResponse);
+export function listCalendarEvents(connectionId: string, consentId: string, signal?: AbortSignal): Promise<CalendarEventListResponse> {
+  const query = new URLSearchParams({ consent_id: consentId });
+  return calendarRequest(`/api/calendar/connections/${id(connectionId)}/events?${query.toString()}`, { method: "GET", signal }, validateCalendarEventsResponse);
 }
 
 export function createCalendarPrep(request: CreateCalendarPrepRequest, signal?: AbortSignal): Promise<CalendarPrepResponse> {

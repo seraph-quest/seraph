@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CockpitView } from "./CockpitView";
+import { procedureV2Api, type ProcedureV2Routine } from "../../lib/procedureV2Api";
 import { useChatStore } from "../../stores/chatStore";
 import { useCockpitLayoutStore } from "../../stores/cockpitLayoutStore";
 import { usePanelLayoutStore } from "../../stores/panelLayoutStore";
@@ -676,6 +677,109 @@ describe("CockpitView", () => {
     await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => String(input).includes("/api/observer/continuity"))).toHaveLength(homeContinuityCalls + 1));
     expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument();
     expect(screen.queryByText("Operator terminal", { selector: ".cockpit-window-title" })).not.toBeInTheDocument();
+  });
+
+  it("reads a ninth install approval by exact id instead of substituting the capped list", async () => {
+    mockCockpitBaselineFetch(fetchMock, {});
+    const baselineFetch = fetchMock.getMockImplementation();
+    const approvalRows = Array.from({ length: 9 }, (_, index) => ({
+      id: `approval-${index + 1}`,
+      tool_name: "guardian:routine-install",
+      risk_level: "medium",
+      status: "pending",
+      summary: `Install approval ${index + 1}`,
+      created_at: "2026-10-01T08:00:00Z",
+    }));
+    const exactApproval = approvalRows[8];
+    const genericApprovalUrls: string[] = [];
+    const exactApprovalUrls: string[] = [];
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/auth/session")) {
+        return Promise.resolve(mockResponse({
+          authenticated: true,
+          principal_id: "operator:one",
+          session_id: "session-1",
+        }));
+      }
+      if (url.includes("/api/approvals/pending?approval_id=")) {
+        exactApprovalUrls.push(url);
+        return Promise.resolve(mockResponse([exactApproval]));
+      }
+      if (url.includes("/api/approvals/pending?limit=8")) {
+        genericApprovalUrls.push(url);
+        return Promise.resolve(mockResponse(approvalRows.slice(0, 8)));
+      }
+      return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
+    });
+
+    const digest = "a".repeat(64);
+    const routine = {
+      id: "routine-pending",
+      owner_principal_id: "operator:one",
+      state: "prepared",
+      revision: 1,
+      current_version: 1,
+      name: "Pending procedure",
+      versions: [{
+        id: "version-pending",
+        routine_id: "routine-pending",
+        version: 1,
+        workflow_sha256: digest,
+        runbook_sha256: digest,
+        installed_package_digest: null,
+        source_provenance: {},
+        source_repository: null,
+        source_action: null,
+        source_issue_number: null,
+        created_at: "2026-10-01T08:00:00Z",
+        installed_at: null,
+        schema_version: 2,
+        template_id: "public-browser-check",
+        procedure_binding: {
+          binding_id: "binding-pending",
+          state: "prepared",
+          revision: 1,
+          preview_digest: digest,
+          preview_expires_at: "2026-10-02T08:00:00Z",
+          install_job_id: "install-pending",
+          approval_id: exactApproval.id,
+          install_approval_status: "pending",
+          install_approval_expires_at: "2026-10-02T08:00:00Z",
+          install_recovery_action: null,
+        },
+      }],
+      package: { status: "not_installed", digest: null, review_id: null },
+    } as ProcedureV2Routine;
+    vi.spyOn(procedureV2Api, "listRoutines").mockResolvedValue([]);
+    vi.spyOn(procedureV2Api, "getRoutine").mockResolvedValue(routine);
+    window.sessionStorage.setItem("seraph.procedure-v2.prepared:operator%3Aone:session-1", JSON.stringify({
+      schema_version: 1,
+      routineId: routine.id,
+      bindingId: "binding-pending",
+      revision: 1,
+      version: 1,
+      installJobId: "install-pending",
+      approvalId: exactApproval.id,
+      installApprovalStatus: "pending",
+      installApprovalExpiresAt: "2026-10-02T08:00:00Z",
+      installRecoveryAction: null,
+    }));
+    useCockpitLayoutStore.setState({ activeSection: "library" });
+
+    try {
+      render(<CockpitView onSend={() => {}} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Review this exact approval in Pending approvals" }));
+
+      await waitFor(() => expect(exactApprovalUrls).toHaveLength(1));
+      expect(genericApprovalUrls.length).toBeGreaterThan(0);
+      expect(exactApprovalUrls[0]).toContain(`approval_id=${encodeURIComponent(exactApproval.id)}`);
+      expect(await screen.findByText("Install approval 9")).toBeInTheDocument();
+      expect(screen.getByText(/9 waiting/)).toBeInTheDocument();
+      expect(screen.getByText("Install approval 1")).toBeInTheDocument();
+    } finally {
+      window.sessionStorage.removeItem("seraph.procedure-v2.prepared:operator%3Aone:session-1");
+    }
   });
 
   it.each([

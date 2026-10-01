@@ -12,6 +12,7 @@ import { WorkflowPanel } from "./settings/WorkflowPanel";
 import { SourceWatchPanel } from "./settings/SourceWatchPanel";
 import { ArtifactStoragePanel } from "./settings/ArtifactStoragePanel";
 import { CalendarConnectionPanel } from "./settings/CalendarConnectionPanel";
+import { MailConnectionPanel } from "./settings/MailConnectionPanel";
 import { useOptionalOperatorAuth } from "./auth/OperatorAuthGate";
 
 interface SkillInfo {
@@ -135,7 +136,7 @@ interface McpServer {
   auth_hint: string;
 }
 
-type SettingsSection = "artifacts" | "general" | "native" | "policies" | "audit" | "workflows" | "guardian" | "calendar" | "skills" | "discover" | "mcp";
+type SettingsSection = "artifacts" | "general" | "native" | "policies" | "audit" | "workflows" | "guardian" | "calendar" | "mail" | "skills" | "discover" | "mcp";
 
 const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string }> = [
   { id: "artifacts", label: "Screenshot/VLM" },
@@ -146,6 +147,7 @@ const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string }> = [
   { id: "workflows", label: "Workflows" },
   { id: "guardian", label: "Guardian" },
   { id: "calendar", label: "Calendar" },
+  { id: "mail", label: "Mail" },
   { id: "skills", label: "Skills" },
   { id: "discover", label: "Discover" },
   { id: "mcp", label: "MCP" },
@@ -732,6 +734,11 @@ export function SettingsPanel() {
 
           {activeSection === "calendar" && <CalendarConnectionPanel
             service="calendar_readonly"
+            ownerPrincipalId={operatorAuth?.session.principal_id ?? null}
+            ownerSessionId={operatorAuth?.session.session_id ?? null}
+          />}
+
+          {activeSection === "mail" && <MailConnectionPanel
             ownerPrincipalId={operatorAuth?.session.principal_id ?? null}
             ownerSessionId={operatorAuth?.session.session_id ?? null}
           />}

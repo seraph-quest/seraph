@@ -22,6 +22,7 @@ from src.api.workflows import (
     _repo_change_dispatch_contract,
     _repo_change_local_finalize_pending,
     _repo_change_patch_read_blocked,
+    _repo_change_reconcile_verified_local_result,
     _repo_change_read_patch,
     _repo_change_settle_cancelled_sandbox,
     _repo_change_verify_persisted_artifact,
@@ -730,6 +731,55 @@ def test_result_artifact_reopen_hash_rejects_tamper(tmp_path: Path, monkeypatch:
     artifact = workspace / relative
     artifact.write_bytes(b'{"status":"tampered"}')
     assert _repo_change_verify_persisted_artifact(relative) != hashlib.sha256(payload).hexdigest()
+
+
+def test_restart_readback_reconcile_rejects_private_mode_tamper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+    job_id = "repo-change-" + "f" * 32
+    payload = b'{"status":"succeeded"}'
+    relative = _repo_change_write_artifact(job_id, "readback.json", payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    job = {
+        "job_id": job_id,
+        "status": "blocked",
+        "revision": 4,
+        "owner": {"kind": "user", "principal_id": "operator:one"},
+        "effects": [
+            {
+                "receipt_kind": "readback",
+                "status": "succeeded",
+                "target_path": relative,
+                "content_sha256": digest,
+                "details": {"verified": True},
+            }
+        ],
+    }
+    finalized = False
+
+    class FakeRepository:
+        async def get_job(self, _job_id):
+            return dict(job)
+
+        async def finalize_reconciled_job(self, *_args, **_kwargs):
+            nonlocal finalized
+            finalized = True
+            return {**job, "status": "succeeded"}
+
+    monkeypatch.setattr("src.api.workflows.durable_job_repository", FakeRepository())
+    artifact = workspace / relative
+    artifact.chmod(0o644)
+
+    result = asyncio.run(
+        _repo_change_reconcile_verified_local_result(job=job, authority={})
+    )
+
+    assert result is None
+    assert finalized is False
+    assert artifact.read_bytes() == payload
 
 
 def test_approved_patch_read_failure_blocks_restart_recovery_job(monkeypatch: pytest.MonkeyPatch):

@@ -379,4 +379,128 @@ describe("WorkBoardPanel integration", () => {
     expect(calendarRegion).toHaveTextContent(/Execution receipt unavailable|Verified artifact\/readback is unavailable/);
     expect(screen.queryByRole("button", { name: "Inspect verified calendar artifact" })).not.toBeInTheDocument();
   });
+
+  it("opens the selected repository repair with the exact current owner binding", async () => {
+    const repoTask = boardTask({
+      task_id: "task-repo-1",
+      title: "Repair selected repository",
+      capability_id: "engineering.repo-repair.v1",
+      latest_attempt: {
+        attempt_id: "attempt-repo-1",
+        task_id: "task-repo-1",
+        workflow_run_id: "workflow-repo-1",
+        task_revision_at_claim: 3,
+        lease_owner: null,
+        cancel_requested_at: null,
+        lease_expires_at: null,
+        heartbeat_at: null,
+        fencing_token: 1,
+        executor_id: "repo-repair",
+        started_at: "2026-09-30T10:00:00Z",
+        ended_at: null,
+        outcome: null,
+        receipt_refs: [],
+        readback_status: "not_started",
+        verification_status: "not_started",
+        created_at: "2026-09-30T10:00:00Z",
+        updated_at: "2026-09-30T10:00:00Z",
+      },
+    });
+    const projection = {
+      job_id: "workflow-repo-1",
+      status: "paused",
+      owner_principal_id: "operator:one",
+      operator_session_id: "operator-session-1",
+      task_id: "task-repo-1",
+      attempt_id: "attempt-repo-1",
+      workflow_run_id: "workflow-repo-1",
+      goal_id: "goal-1",
+      goal_revision: 3,
+      revision: 1,
+      authority_digest: "a".repeat(64),
+      input_digest: "b".repeat(64),
+      run_fingerprint: "c".repeat(64),
+      capability_id: "engineering.repo-repair.v1",
+      capability_version: "1",
+      limits: { max_cpu_seconds: 120, max_memory_bytes: 512 * 1024 * 1024, max_pids: 64, max_wall_seconds: 180 },
+      preflight: { ok: false, status: "blocked", reason: "resource_controller_unavailable:cpu" },
+      source_packet: null,
+      egress: null,
+      proposal: null,
+      execution: { artifacts: [], readback: null, memory_status: "no_learning", provider_contacted: false },
+      approval: null,
+      approval_id: null,
+      memory_status: "no_learning",
+      recovery_action: "restore_prerequisite",
+      operator_visible: true,
+    };
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) return Promise.resolve(response(page(repoTask, 10)));
+      if (url.includes("/api/work-board/events?")) return Promise.resolve(response(emptyEvents(10)));
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
+      if (url.includes("/api/work-board/goals/goal-1/execution-limits")) return Promise.resolve(response({ goal_id: "goal-1", goal_revision: 3, effective_max_runtime_seconds: 300, default_max_runtime_seconds: 300, hard_max_runtime_seconds: 900, attempt_limit: 2, limit_source: "default" }));
+      if (url.endsWith("/api/work-board/tasks/task-repo-1")) return Promise.resolve(response(detail(repoTask)));
+      if (url.endsWith("/api/workflows/repo-repair/workflow-repo-1")) return Promise.resolve(response(projection));
+      if (url.includes("/api/capabilities/routines")) return Promise.resolve(response([]));
+      if (url.includes("/api/capabilities/source-watches")) return Promise.resolve(response([]));
+      return Promise.resolve(response({}));
+    });
+    render(<WorkBoardPanel ownerPrincipalId="operator:one" ownerSessionId="operator-session-1" />);
+    await waitFor(() => expect(IntegrationBoardSocket.instances).toHaveLength(1));
+    act(() => IntegrationBoardSocket.instances[0]?.open());
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Repair selected repository" }));
+    expect(await screen.findByRole("region", { name: "Repository repair execution" })).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith("/api/workflows/repo-repair/workflow-repo-1"))).toBe(true);
+  });
+
+  it("opens an accepted Inbox Mail origin through the selected task owner binding", async () => {
+    const mailTask = boardTask({
+      task_id: "task-mail-origin",
+      title: "Review accepted Mail candidate",
+      capability_id: "goal-snapshot-to-file",
+      idempotency_scope: "guardian-inbox:mail-candidate-1",
+    });
+    const candidate = {
+      id: "mail-candidate-1",
+      revision: 2,
+      state: "accepted",
+      source_kind: "mail_watch",
+      source_id: "watch-1",
+      title: "Accepted Mail candidate",
+      summary: "A bounded message is ready",
+      why_now: "The watched source changed",
+      goal_id: "goal-1",
+      goal_revision: 3,
+      watch_id: "watch-1",
+      plan_revision: 1,
+      task_id: "task-mail-origin",
+      expires_at: "2030-01-01T00:00:00Z",
+      allowed_actions: [],
+      mail: { watch_id: "watch-1", message_binding_id: "message-binding-1", message_revision: "sha256:" + "d".repeat(64), status: "present", private: true },
+    };
+    const connection = { connection_id: "connection-1", service: "gmail_readonly", label: "Work Gmail", revision: 3, state: "active", scope_status: "verified", declared_scopes: ["gmail.readonly"], provider_scopes_verified: true, verified_setup_job_id: "setup-1" };
+    const consent = { consent_id: "consent-1", connection_id: "connection-1", connection_revision: 3, goal_id: "goal-1", goal_revision: 3, label_ids: ["INBOX"], window_days: 7, max_messages: 1, source_read_allowed: true, source_revision: 5, model_egress_allowed: false, model_revision: null, allowed_body_fields: [], expires_at: "2030-01-01T00:00:00Z", state: "active", revision: 6 };
+    const watch = { watch_id: "watch-1", scheduled_job_id: "scheduled-watch-1", capability_id: "gmail.scan_metadata.v1", connection_id: "connection-1", connection_revision: 3, mail_consent_id: "consent-1", source_consent_revision: 5, goal_id: "goal-1", goal_revision: 3, label_ids: ["INBOX"], cadence: { kind: "hourly", timezone: "UTC", daily_hour: null, daily_minute: null }, binding_revision: 2, expires_at: "2030-01-01T00:00:00Z", state: "active", watch_state: "baseline_complete", baseline_complete: true, last_observed_at: null, last_completed_occurrence_id: null, skipped_coverage_reason: null, list_page_complete: true, latest_occurrence: null };
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) return Promise.resolve(response(page(mailTask, 10)));
+      if (url.includes("/api/work-board/events?")) return Promise.resolve(response(emptyEvents(10)));
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
+      if (url.includes("/api/work-board/goals/goal-1/execution-limits")) return Promise.resolve(response({ goal_id: "goal-1", goal_revision: 3, effective_max_runtime_seconds: 300, default_max_runtime_seconds: 300, hard_max_runtime_seconds: 900, attempt_limit: 2, limit_source: "default" }));
+      if (url.endsWith("/api/work-board/tasks/task-mail-origin")) return Promise.resolve(response(detail(mailTask)));
+      if (url.endsWith("/api/guardian/inbox/mail-candidate-1")) return Promise.resolve(response({ item: candidate }));
+      if (url.endsWith("/api/capabilities/mail/connections")) return Promise.resolve(response({ connections: [connection] }));
+      if (url.endsWith("/api/capabilities/mail/read-consents")) return Promise.resolve(response({ consents: [consent], provider_contact: false }));
+      if (url.endsWith("/api/capabilities/mail/watches/watch-1")) return Promise.resolve(response({ watch }));
+      return Promise.resolve(response({}));
+    });
+    render(<WorkBoardPanel ownerPrincipalId="operator:one" ownerSessionId="operator-session-1" />);
+    await waitFor(() => expect(IntegrationBoardSocket.instances).toHaveLength(1));
+    act(() => IntegrationBoardSocket.instances[0]?.open());
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Review accepted Mail candidate" }));
+    expect(await screen.findByText("Created from Inbox candidate")).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: "Private Mail source review" })).toBeInTheDocument();
+    expect(screen.getByText(/accepted task origin/i)).toBeInTheDocument();
+  });
 });

@@ -18,6 +18,16 @@ os.environ.setdefault("OPENROUTER_API_KEY", "test-key")
 os.environ.setdefault("WORKSPACE_DIR", "/tmp/seraph-test")
 os.environ.setdefault("CAPABILITY_JOURNAL_SECRET", "test-capability-journal-secret")
 
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--run-real-repo-sandbox",
+        action="store_true",
+        default=False,
+        help="run the explicit rootless Docker repository-repair acceptance journey",
+    )
+
+
 from config.settings import settings
 from src.app import create_app
 from src.audit.repository import AuditRepository, audit_repository
@@ -131,9 +141,30 @@ def app():
     return create_app()
 
 
+@pytest.fixture(autouse=True)
+def isolate_operator_auth_defaults(monkeypatch):
+    """Keep ordinary route tests independent of a copied live env file.
+
+    Authentication-negative tests opt back into a configured secret or turn
+    the bypass off in their own monkeypatch scope.  The default applies only
+    to this test process; production settings and middleware are unchanged.
+    """
+
+    monkeypatch.setattr(settings, "deployment_environment", "test")
+    monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", True)
+    monkeypatch.setattr(settings, "operator_auth_secret", "")
+    monkeypatch.setattr(settings, "operator_auth_secret_hash", "")
+    yield
+
+
 @pytest_asyncio.fixture
-async def client(app, async_db):
+async def client(app, async_db, monkeypatch):
     """Async HTTP test client backed by the in-memory DB."""
+    # The repository's live ``.env.dev`` may be copied into the test process
+    # by managed tooling.  Keep this fixture's synthetic ASGI host and origin
+    # explicitly isolated instead of weakening production authentication.
+    monkeypatch.setattr(settings, "operator_auth_allowed_hosts", "test,localhost,127.0.0.1")
+    monkeypatch.setattr(settings, "operator_auth_allowed_origins", "http://localhost:3001")
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac

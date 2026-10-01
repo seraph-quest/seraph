@@ -31,6 +31,50 @@ const FALLBACK: RepoSandboxPayload = {
   operator_visible: true,
 };
 
+const REQUIRED_LIMITS = ["max_cpu_seconds", "max_memory_bytes", "max_pids", "max_wall_seconds"] as const;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function normalizeRepoSandboxPayload(payload: unknown): RepoSandboxPayload | null {
+  if (!isRecord(payload)) return null;
+  if (
+    typeof payload.enabled !== "boolean"
+    || typeof payload.docker_socket !== "string"
+    || typeof payload.worker_image_digest !== "string"
+    || payload.profile !== "repo-python-pytest-v1"
+    || payload.limits_editable !== false
+    || typeof payload.status !== "string"
+    || payload.operator_visible !== true
+    || !(payload.limits_digest === null || typeof payload.limits_digest === "string")
+    || !(payload.configuration_error === null || typeof payload.configuration_error === "string" || typeof payload.configuration_error === "undefined")
+    || !isRecord(payload.limits)
+    || !isRecord(payload.preflight)
+  ) return null;
+  const limits = payload.limits;
+  if (REQUIRED_LIMITS.some((key) => typeof limits[key] !== "number" || !Number.isSafeInteger(limits[key]) || limits[key] < 1)) return null;
+  const preflight = payload.preflight;
+  if (typeof preflight.ok !== "undefined" && typeof preflight.ok !== "boolean") return null;
+  if (typeof preflight.status !== "undefined" && typeof preflight.status !== "string") return null;
+  if (typeof preflight.reason !== "undefined" && typeof preflight.reason !== "string") return null;
+  return {
+    enabled: payload.enabled,
+    docker_socket: payload.docker_socket,
+    worker_image_digest: payload.worker_image_digest,
+    profile: payload.profile,
+    limits: Object.fromEntries(Object.entries(limits).filter(([, value]) => typeof value === "number")) as Record<string, number>,
+    limits_digest: payload.limits_digest,
+    limits_editable: false,
+    preflight: preflight as RepoSandboxPayload["preflight"],
+    status: payload.status,
+    configuration_error: typeof payload.configuration_error === "string" ? payload.configuration_error : null,
+    operator_visible: true,
+  };
+}
+
+const MALFORMED_METADATA_MESSAGE = "Sandbox metadata was malformed; the last known controls are retained and execution remains blocked until refreshed.";
+
 function digest(value: string | null): string {
   return value ? `${value.slice(0, 12)}…${value.slice(-8)}` : "unavailable";
 }
@@ -146,7 +190,19 @@ export function RepoSandboxPanel() {
     setError(null);
     try {
       const payload = await requestJson({}, generation);
-      if (payload && generationRef.current === generation) setValue(payload as RepoSandboxPayload);
+      if (generationRef.current === generation) {
+        const normalized = normalizeRepoSandboxPayload(payload);
+        if (normalized) {
+          setValue(normalized);
+        } else {
+          setValue((current) => ({
+            ...current,
+            status: "degraded",
+            preflight: { ...current.preflight, ok: false, status: "degraded", reason: "metadata_malformed" },
+            configuration_error: MALFORMED_METADATA_MESSAGE,
+          }));
+        }
+      }
     } catch (cause) {
       if (generationRef.current === generation) setError(cause instanceof Error ? cause.message : "Repository sandbox metadata is unavailable.");
     } finally {
@@ -181,8 +237,18 @@ export function RepoSandboxPanel() {
           profile: value.profile,
         }),
       }, generation);
-      if (payload && generationRef.current === generation) {
-        setValue(payload as RepoSandboxPayload);
+      if (generationRef.current === generation) {
+        const normalized = normalizeRepoSandboxPayload(payload);
+        if (!normalized) {
+          setValue((current) => ({
+            ...current,
+            status: "degraded",
+            preflight: { ...current.preflight, ok: false, status: "degraded", reason: "metadata_malformed" },
+            configuration_error: MALFORMED_METADATA_MESSAGE,
+          }));
+          return;
+        }
+        setValue(normalized);
         setNotice("Repository sandbox settings saved. Saving never starts Docker or changes host limits.");
       }
     } catch (cause) {

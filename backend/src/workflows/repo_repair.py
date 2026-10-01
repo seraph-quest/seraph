@@ -807,7 +807,12 @@ class RepoRepairService:
                     raise RepoRepairError("private_artifact_permissions_invalid", "The private artifact directory is unsafe", status_code=409)
             target_fd = os.open(path.parts[-1], os.O_RDONLY | nofollow | cloexec, dir_fd=parent_fd)
             metadata = os.fstat(target_fd)
-            if not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o077 or metadata.st_nlink != 1:
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_mode & 0o077
+                or metadata.st_uid != os.getuid()
+                or metadata.st_nlink != 1
+            ):
                 raise RepoRepairError("private_artifact_permissions_invalid", "The private artifact is not a private regular file", status_code=409)
             with os.fdopen(target_fd, "rb") as handle:
                 target_fd = -1

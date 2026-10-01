@@ -10,6 +10,12 @@ import type {
 interface RepoRepairInspectorProps {
   jobId: string;
   onOpenApprovals?: () => void;
+  /** The authenticated operator binding currently mounted in the cockpit. */
+  ownerPrincipalId?: string | null;
+  ownerSessionId?: string | null;
+  /** The owner binding returned by the selected WorkBoard task. */
+  taskOwnerPrincipalId?: string | null;
+  taskOwnerSessionId?: string | null;
 }
 
 interface ApiErrorPayload {
@@ -36,12 +42,51 @@ function safeDigest(value: string | null | undefined): string {
   return `${value.slice(0, 12)}…${value.slice(-8)}`;
 }
 
+function isFiniteFutureTimestamp(value: unknown): value is string {
+  if (typeof value !== "string" || !value.trim()) return false;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && timestamp > Date.now();
+}
+
 function makeRequestKey(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
   return `repo-repair-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 const REPAIR_REQUEST_TIMEOUT_MS = 15_000;
+const SOURCE_PREVIEW_MAX_FILES = 8;
+const SOURCE_PREVIEW_MAX_PACKET_BYTES = 64 * 1024;
+const SOURCE_PREVIEW_MAX_OUTPUT_TOKENS = 4096;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function utf8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
+function isBoundedString(value: unknown, maxBytes: number, allowEmpty = false): value is string {
+  return typeof value === "string"
+    && (allowEmpty || value.length > 0)
+    && !value.includes("\u0000")
+    && utf8ByteLength(value) <= maxBytes;
+}
+
+function isSha256Digest(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+}
+
+function isSafeNonNegativeInteger(value: unknown, maximum: number): value is number {
+  return typeof value === "number"
+    && Number.isSafeInteger(value)
+    && value >= 0
+    && value <= maximum;
+}
+
+function isNullableBoundedString(value: unknown, maxBytes: number): value is string | null {
+  return value === null || isBoundedString(value, maxBytes);
+}
 
 class RepairRequestTimeout extends Error {
   constructor() {
@@ -61,6 +106,16 @@ class StaleRepairRequest extends Error {
   constructor() {
     super("The repair request belongs to an earlier operator view.");
     this.name = "StaleRepairRequest";
+  }
+}
+
+class RepairHttpError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "RepairHttpError";
+    this.status = status;
   }
 }
 
@@ -112,7 +167,14 @@ async function boundedJsonRequest(
   }
 }
 
-export function RepoRepairInspector({ jobId, onOpenApprovals }: RepoRepairInspectorProps) {
+export function RepoRepairInspector({
+  jobId,
+  onOpenApprovals,
+  ownerPrincipalId,
+  ownerSessionId,
+  taskOwnerPrincipalId,
+  taskOwnerSessionId,
+}: RepoRepairInspectorProps) {
   const [projection, setProjection] = useState<WorkBoardRepoRepairProjection | null>(null);
   const [sourcePreview, setSourcePreview] = useState<WorkBoardRepoRepairSourcePreview | null>(null);
   const [loading, setLoading] = useState(true);
@@ -130,20 +192,57 @@ export function RepoRepairInspector({ jobId, onOpenApprovals }: RepoRepairInspec
     () => `${API_URL}/api/workflows/repo-repair/${encodeURIComponent(jobId)}`,
     [jobId],
   );
+  const bindingKey = useMemo(
+    () => [ownerPrincipalId, ownerSessionId, taskOwnerPrincipalId, taskOwnerSessionId].map((value) => value ?? "").join("\u0000"),
+    [ownerPrincipalId, ownerSessionId, taskOwnerPrincipalId, taskOwnerSessionId],
+  );
+  const activeScopeRef = useRef({ jobId, bindingKey });
+  const generationScopeRef = useRef({ generation: 0, jobId, bindingKey });
+  // This render-time scope is intentionally updated before effects run.  A
+  // response settling in the prop-rotation window must fail closed even for
+  // the one render before the invalidating effect executes.
+  activeScopeRef.current = { jobId, bindingKey };
+  const hasCurrentBinding = Boolean(
+    ownerPrincipalId
+    && ownerSessionId
+    && taskOwnerPrincipalId
+    && taskOwnerSessionId
+    && ownerPrincipalId === taskOwnerPrincipalId
+    && ownerSessionId === taskOwnerSessionId,
+  );
 
   function isCurrent(generation: number): boolean {
-    return generationRef.current === generation;
+    const generationScope = generationScopeRef.current;
+    const activeScope = activeScopeRef.current;
+    return generationRef.current === generation
+      && generationScope.generation === generation
+      && generationScope.jobId === activeScope.jobId
+      && generationScope.bindingKey === activeScope.bindingKey;
   }
 
   function invalidateRequests(): number {
     generationRef.current += 1;
+    generationScopeRef.current = { generation: generationRef.current, jobId, bindingKey };
     for (const controller of controllersRef.current) controller.abort();
     controllersRef.current.clear();
     return generationRef.current;
   }
 
+  function clearOwnerState(message: string): void {
+    invalidateRequests();
+    ownerBindingRef.current = null;
+    setProjection(null);
+    setSourcePreview(null);
+    setSourceError(null);
+    setNotice(null);
+    setBusy(false);
+    setSourceLoading(false);
+    setLoading(false);
+    setError(message);
+  }
+
   async function requestJson(path: string, init: RequestInit = {}, generation: number): Promise<unknown> {
-    if (!isCurrent(generation)) throw new StaleRepairRequest();
+    if (!isCurrent(generation) || !hasCurrentBinding) throw new StaleRepairRequest();
     const controller = new AbortController();
     controllersRef.current.add(controller);
     try {
@@ -152,10 +251,14 @@ export function RepoRepairInspector({ jobId, onOpenApprovals }: RepoRepairInspec
         controller,
       );
       if (!isCurrent(generation)) throw new StaleRepairRequest();
-      if (!response.ok) throw new Error(errorMessage(payload, "The repair request failed."));
+      if (!response.ok) throw new RepairHttpError(response.status, errorMessage(payload, "The repair request failed."));
       return payload;
     } catch (cause) {
       if (cause instanceof StaleRepairRequest) throw cause;
+      if (cause instanceof RepairHttpError && (cause.status === 401 || cause.status === 403)) {
+        if (isCurrent(generation)) clearOwnerState("The operator session is no longer authorized for this repair. Select it again after signing in.");
+        throw new StaleRepairRequest();
+      }
       if (cause instanceof RepairRequestTimeout || cause instanceof RepairRequestCancelled || (cause instanceof DOMException && cause.name === "AbortError")) {
         throw new Error("The repair request timed out or was cancelled.");
       }
@@ -171,8 +274,17 @@ export function RepoRepairInspector({ jobId, onOpenApprovals }: RepoRepairInspec
     if (next.job_id !== jobId || next.capability_id !== "engineering.repo-repair.v1" || !next.workflow_run_id) {
       throw new Error("The repair status response is bound to a different workflow.");
     }
-    if (!next.owner_principal_id || !next.operator_session_id) {
-      throw new Error("The repair status response has no operator ownership binding.");
+    if (!next.owner_principal_id || !next.operator_session_id || next.operator_visible !== true) {
+      clearOwnerState("The repair status is not operator-visible or has no valid ownership binding. Private repair data was cleared.");
+      throw new StaleRepairRequest();
+    }
+    if (!hasCurrentBinding
+      || next.owner_principal_id !== ownerPrincipalId
+      || next.operator_session_id !== ownerSessionId
+      || next.owner_principal_id !== taskOwnerPrincipalId
+      || next.operator_session_id !== taskOwnerSessionId) {
+      clearOwnerState("The repair status belongs to a different operator session. Private repair data was cleared.");
+      throw new StaleRepairRequest();
     }
     const binding = `${next.owner_principal_id}:${next.operator_session_id}`;
     if (ownerBindingRef.current && ownerBindingRef.current !== binding) {
@@ -180,8 +292,7 @@ export function RepoRepairInspector({ jobId, onOpenApprovals }: RepoRepairInspec
       // the old projection and private preview before surfacing the binding
       // error so a late response cannot leave the previous owner's source on
       // screen.
-      setProjection(null);
-      setSourcePreview(null);
+      clearOwnerState("The repair status changed operator ownership. Private repair data was cleared.");
       throw new Error("The repair status response changed operator ownership.");
     }
     ownerBindingRef.current = binding;
@@ -192,13 +303,14 @@ export function RepoRepairInspector({ jobId, onOpenApprovals }: RepoRepairInspec
     return validateProjection(await requestJson(endpoint, {}, generation));
   }
 
-  async function refresh(generation = generationRef.current) {
-    if (!isCurrent(generation)) return;
+  async function refresh(generation = generationRef.current): Promise<WorkBoardRepoRepairProjection | null> {
+    if (!isCurrent(generation) || !hasCurrentBinding) return null;
     setLoading(true);
     setError(null);
     try {
       const next = await readProjection(generation);
       if (isCurrent(generation)) setProjection(next);
+      return next;
     } catch (cause) {
       if (isCurrent(generation) && !(cause instanceof StaleRepairRequest)) {
         setError(cause instanceof Error ? cause.message : "The repair status could not be read.");
@@ -206,6 +318,7 @@ export function RepoRepairInspector({ jobId, onOpenApprovals }: RepoRepairInspec
     } finally {
       if (isCurrent(generation)) setLoading(false);
     }
+    return null;
   }
 
   function persistedMutationKey(kind: "consent" | "resume", fingerprint: string): string {
@@ -235,22 +348,105 @@ export function RepoRepairInspector({ jobId, onOpenApprovals }: RepoRepairInspec
   }
 
   function validateSourcePreview(payload: unknown, current: WorkBoardRepoRepairProjection): WorkBoardRepoRepairSourcePreview {
-    if (!payload || typeof payload !== "object") throw new Error("The private source preview is malformed.");
-    const next = payload as WorkBoardRepoRepairSourcePreview;
-    const expected = current.source_packet;
-    if (
-      !next.operator_visible
-      || next.job_id !== jobId
-      || !next.source_packet
-      || !Array.isArray(next.source_packet.selected_files)
-      || !expected
-      || next.source_packet.packet_id !== expected.packet_id
-      || next.source_packet.artifact_sha256 !== expected.artifact_sha256
-      || next.source_packet.source_manifest_sha256 !== expected.source_manifest_sha256
-    ) {
+    const reject = (): never => {
       throw new Error("The source preview did not match the current owner-bound packet.");
+    };
+    if (
+      !hasCurrentBinding
+      || current.job_id !== jobId
+      || current.owner_principal_id !== ownerPrincipalId
+      || current.operator_session_id !== ownerSessionId
+      || current.owner_principal_id !== taskOwnerPrincipalId
+      || current.operator_session_id !== taskOwnerSessionId
+      || current.operator_visible !== true
+      || current.capability_id !== "engineering.repo-repair.v1"
+      || !isRecord(current.source_packet)
+    ) reject();
+
+    const expected = current.source_packet as unknown as Record<string, unknown>;
+    if (
+      !isBoundedString(expected.packet_id, SOURCE_PREVIEW_MAX_PACKET_BYTES)
+      || !isBoundedString(expected.state, SOURCE_PREVIEW_MAX_PACKET_BYTES)
+      || !isBoundedString(expected.repository_ref, SOURCE_PREVIEW_MAX_PACKET_BYTES)
+      || !isSha256Digest(expected.base_snapshot_sha256)
+      || !isSha256Digest(expected.source_manifest_sha256)
+      || !isSha256Digest(expected.artifact_sha256)
+      || !isSafeNonNegativeInteger(expected.revision, Number.MAX_SAFE_INTEGER)
+      || expected.revision < 1
+    ) reject();
+
+    if (!isRecord(payload)) reject();
+    const next = payload as Record<string, unknown>;
+    if (
+      next.job_id !== jobId
+      || !isBoundedString(next.status, SOURCE_PREVIEW_MAX_PACKET_BYTES)
+      || !isBoundedString(next.recovery_action, SOURCE_PREVIEW_MAX_PACKET_BYTES)
+      || next.operator_visible !== true
+      || typeof next.provider_contacted !== "boolean"
+      || !isRecord(next.source_packet)
+      || !isRecord(next.egress)
+    ) reject();
+
+    const packet = next.source_packet as Record<string, unknown>;
+    if (
+      !isBoundedString(packet.packet_id, SOURCE_PREVIEW_MAX_PACKET_BYTES)
+      || !isBoundedString(packet.state, SOURCE_PREVIEW_MAX_PACKET_BYTES)
+      || !isBoundedString(packet.repository_ref, SOURCE_PREVIEW_MAX_PACKET_BYTES)
+      || !isSha256Digest(packet.base_snapshot_sha256)
+      || !isSha256Digest(packet.source_manifest_sha256)
+      || !isSha256Digest(packet.artifact_sha256)
+      || !isSafeNonNegativeInteger(packet.revision, Number.MAX_SAFE_INTEGER)
+      || packet.revision < 1
+      || packet.packet_id !== expected.packet_id
+      || packet.state !== expected.state
+      || packet.repository_ref !== expected.repository_ref
+      || packet.base_snapshot_sha256 !== expected.base_snapshot_sha256
+      || packet.source_manifest_sha256 !== expected.source_manifest_sha256
+      || packet.artifact_sha256 !== expected.artifact_sha256
+      || packet.revision !== expected.revision
+      || !Array.isArray(packet.selected_files)
+      || packet.selected_files.length < 1
+      || packet.selected_files.length > SOURCE_PREVIEW_MAX_FILES
+      || !Array.isArray(packet.omissions)
+      || packet.omissions.some((omission: unknown) => !isBoundedString(omission, SOURCE_PREVIEW_MAX_PACKET_BYTES))
+    ) reject();
+
+    const selectedFiles = packet.selected_files as unknown[];
+    const paths = new Set<string>();
+    let selectedBytes = 0;
+    for (const fileValue of selectedFiles) {
+      if (!isRecord(fileValue)) reject();
+      const file = fileValue as Record<string, unknown>;
+      if (
+        !isBoundedString(file.path, SOURCE_PREVIEW_MAX_PACKET_BYTES)
+        || !isBoundedString(file.text, SOURCE_PREVIEW_MAX_PACKET_BYTES, true)
+        || !isSafeNonNegativeInteger(file.size_bytes, SOURCE_PREVIEW_MAX_PACKET_BYTES)
+        || !isSha256Digest(file.sha256)
+      ) reject();
+      const path = file.path as string;
+      const text = file.text as string;
+      const sizeBytes = file.size_bytes as number;
+      if (sizeBytes !== utf8ByteLength(text) || paths.has(path)) reject();
+      paths.add(path);
+      selectedBytes += sizeBytes;
+      if (selectedBytes > SOURCE_PREVIEW_MAX_PACKET_BYTES) reject();
     }
-    return next;
+
+    const egress = next.egress as Record<string, unknown>;
+    if (
+      egress.runtime_path !== "strategist_agent"
+      || !isNullableBoundedString(egress.effective_profile_id, SOURCE_PREVIEW_MAX_PACKET_BYTES)
+      || !isNullableBoundedString(egress.effective_upstream, SOURCE_PREVIEW_MAX_PACKET_BYTES)
+      || !isSafeNonNegativeInteger(egress.maximum_input_bytes, SOURCE_PREVIEW_MAX_PACKET_BYTES)
+      || egress.maximum_input_bytes < 1
+      || !isSafeNonNegativeInteger(egress.maximum_output_tokens, SOURCE_PREVIEW_MAX_OUTPUT_TOKENS)
+      || egress.maximum_output_tokens < 1
+      || (egress.expires_at !== null
+        && (!isBoundedString(egress.expires_at, SOURCE_PREVIEW_MAX_PACKET_BYTES)
+          || !Number.isFinite(Date.parse(egress.expires_at))))
+    ) reject();
+
+    return next as unknown as WorkBoardRepoRepairSourcePreview;
   }
 
   useEffect(() => {
@@ -263,7 +459,13 @@ export function RepoRepairInspector({ jobId, onOpenApprovals }: RepoRepairInspec
     setNotice(null);
     setBusy(false);
     setSourceLoading(false);
-    setLoading(true);
+    setLoading(hasCurrentBinding);
+    if (!hasCurrentBinding) {
+      setError("Select a repair owned by the current operator session before viewing private repair data.");
+      return () => {
+        invalidateRequests();
+      };
+    }
     void readProjection(generation)
       .then((next) => {
         if (isCurrent(generation)) setProjection(next);
@@ -279,7 +481,7 @@ export function RepoRepairInspector({ jobId, onOpenApprovals }: RepoRepairInspec
     };
     // The job id is the owner-bound identity for this inspector.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [endpoint]);
+  }, [bindingKey, endpoint, hasCurrentBinding]);
 
   async function inspectSource() {
     const generation = generationRef.current;
@@ -323,12 +525,38 @@ export function RepoRepairInspector({ jobId, onOpenApprovals }: RepoRepairInspec
           idempotency_key: persistedMutationKey("consent", fingerprint),
         }),
       }, generation);
-      if (!payload || typeof payload !== "object" || (payload as { job_id?: unknown }).job_id !== jobId) throw new Error("The consent receipt is bound to a different repair.");
+      if (!payload || typeof payload !== "object") throw new Error("The consent receipt is malformed; the exact request key is retained.");
+      const receipt = payload as {
+        job_id?: unknown;
+        consent_id?: unknown;
+        consent_revision?: unknown;
+        expires_at?: unknown;
+        operator_visible?: unknown;
+      };
+      if (
+        receipt.job_id !== jobId
+        || receipt.operator_visible !== true
+        || typeof receipt.consent_id !== "string"
+        || !receipt.consent_id.trim()
+        || typeof receipt.consent_revision !== "number"
+        || !Number.isSafeInteger(receipt.consent_revision)
+        || !isFiniteFutureTimestamp(receipt.expires_at)
+      ) throw new Error("The consent receipt is malformed or expired; the exact request key is retained.");
+      const refreshed = await refresh(generation);
+      const refreshedConsent = refreshed?.egress;
+      if (
+        !refreshed
+        || !refreshedConsent
+        || refreshedConsent.consent_id !== receipt.consent_id
+        || refreshedConsent.revision !== receipt.consent_revision
+        || refreshedConsent.expires_at !== receipt.expires_at
+        || refreshedConsent.state !== "active"
+        || !isFiniteFutureTimestamp(refreshedConsent.expires_at)
+      ) throw new Error("The consent readback did not match the current owner-bound consent; the exact request key is retained.");
       if (isCurrent(generation)) {
         setNotice("Selected source consent recorded. The same durable root will continue after the next board pass.");
         setSourcePreview(null);
       }
-      await refresh(generation);
     } catch (cause) {
       if (isCurrent(generation) && !(cause instanceof StaleRepairRequest)) setSourceError(cause instanceof Error ? cause.message : "The source consent could not be recorded.");
     } finally {
@@ -374,20 +602,32 @@ export function RepoRepairInspector({ jobId, onOpenApprovals }: RepoRepairInspec
     }
   }
 
-  if (loading && !projection) {
+  const projectionForRender = projection
+    && hasCurrentBinding
+    && projection.job_id === jobId
+    && projection.owner_principal_id === ownerPrincipalId
+    && projection.operator_session_id === ownerSessionId
+    && projection.owner_principal_id === taskOwnerPrincipalId
+    && projection.operator_session_id === taskOwnerSessionId
+    && projection.operator_visible === true
+    ? projection
+    : null;
+  const sourcePreviewForRender = projectionForRender ? sourcePreview : null;
+
+  if (loading && !projectionForRender) {
     return <section className="rounded border border-cyan-400/30 bg-cyan-950/10 p-3" aria-label="Repository repair execution"><div className="font-semibold">Repository repair</div><div className="mt-1 text-[11px] opacity-80">Loading owner-bound repair status…</div></section>;
   }
 
-  if (error && !projection) {
+  if (error && !projectionForRender) {
     return <section className="rounded border border-amber-500/40 bg-amber-950/10 p-3" aria-label="Repository repair execution"><div className="font-semibold">Repository repair</div><div className="mt-1" role="alert">{error}</div><button type="button" className="cockpit-feedback-button mt-2" onClick={() => void refresh()}>Refresh repair status</button></section>;
   }
 
-  if (!projection) return null;
-  const packet = projection.source_packet;
-  const proposal = projection.proposal;
-  const approval = projection.approval;
-  const status = projection.status;
-  const canConsent = Boolean(packet && sourcePreview && !projection.egress);
+  if (!projectionForRender) return null;
+  const packet = projectionForRender.source_packet;
+  const proposal = projectionForRender.proposal;
+  const approval = projectionForRender.approval;
+  const status = projectionForRender.status;
+  const canConsent = Boolean(packet && sourcePreviewForRender && !projectionForRender.egress);
   const canResume = Boolean(
     proposal
     && approval
@@ -401,30 +641,30 @@ export function RepoRepairInspector({ jobId, onOpenApprovals }: RepoRepairInspec
       <div className="flex items-start justify-between gap-2">
         <div>
           <div className="font-semibold">Repository repair execution</div>
-          <div className="mt-1 text-[11px] opacity-80">{statusLabel(status)} · durable revision {projection.revision ?? "unavailable"}</div>
+          <div className="mt-1 text-[11px] opacity-80">{statusLabel(status)} · durable revision {projectionForRender.revision ?? "unavailable"}</div>
         </div>
         <button type="button" className="cockpit-feedback-button" onClick={() => void refresh()} disabled={busy || loading}>Refresh</button>
       </div>
       <div className="mt-2 grid gap-1 text-[11px]">
-        <div>Root <span className="font-mono break-all">{projection.job_id}</span> · authority <span className="font-mono">{safeDigest(projection.authority_digest)}</span></div>
-        <div>Preflight: {projection.preflight?.status === "verified" ? "verified" : `blocked or unknown${projection.preflight && typeof projection.preflight.reason === "string" ? ` · ${projection.preflight.reason}` : ""}`}</div>
-        <div>Memory: {projection.memory_status} · provider contact: {projection.execution.provider_contacted ? "recorded" : "not recorded"}</div>
+        <div>Root <span className="font-mono break-all">{projectionForRender.job_id}</span> · authority <span className="font-mono">{safeDigest(projectionForRender.authority_digest)}</span></div>
+        <div>Preflight: {projectionForRender.preflight?.status === "verified" ? "verified" : `blocked or unknown${projectionForRender.preflight && typeof projectionForRender.preflight.reason === "string" ? ` · ${projectionForRender.preflight.reason}` : ""}`}</div>
+        <div>Memory: {projectionForRender.memory_status} · provider contact: {projectionForRender.execution.provider_contacted ? "recorded" : "not recorded"}</div>
       </div>
 
       {packet && (
         <div className="mt-3 rounded border border-white/10 p-2">
           <div className="font-semibold">Selected source packet</div>
           <div className="mt-1 break-all">{packet.repository_ref} · packet {safeDigest(packet.artifact_sha256)} · source manifest {safeDigest(packet.source_manifest_sha256)}</div>
-          {!projection.egress && <div className="mt-1 text-amber-200">Private source stays local until you explicitly inspect and acknowledge this packet.</div>}
+          {!projectionForRender.egress && <div className="mt-1 text-amber-200">Private source stays local until you explicitly inspect and acknowledge this packet.</div>}
           <div className="mt-2 flex flex-wrap gap-2">
             <button type="button" className="cockpit-feedback-button" onClick={() => void inspectSource()} disabled={sourceLoading || busy}>{sourceLoading ? "Loading selected source…" : "Inspect selected source"}</button>
             {canConsent && <button type="button" className="cockpit-feedback-button" onClick={() => void grantSourceConsent()} disabled={busy}>Allow exact source packet</button>}
           </div>
           {sourceError && <div className="mt-2 rounded border border-amber-500/40 p-2" role="alert">{sourceError}</div>}
-          {sourcePreview && (
+          {sourcePreviewForRender && (
             <div className="mt-2 grid gap-2" aria-label="Private source preview">
-              <div className="text-[10px] opacity-75">Explicit owner preview only · {sourcePreview.source_packet.selected_files.length} selected file(s) · no provider contact recorded.</div>
-              {sourcePreview.source_packet.selected_files.map((file) => (
+              <div className="text-[10px] opacity-75">Explicit owner preview only · {sourcePreviewForRender.source_packet.selected_files.length} selected file(s) · provider contact {sourcePreviewForRender.provider_contacted ? "recorded" : "not recorded"}.</div>
+              {sourcePreviewForRender.source_packet.selected_files.map((file) => (
                 <article key={`${file.path}:${file.sha256}`} className="rounded bg-black/20 p-2">
                   <div className="font-mono text-[10px]">{file.path} · {file.size_bytes} bytes · {safeDigest(file.sha256)}</div>
                   <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words text-[10px]">{file.text}</pre>
@@ -435,11 +675,11 @@ export function RepoRepairInspector({ jobId, onOpenApprovals }: RepoRepairInspec
         </div>
       )}
 
-      {projection.egress && (
+      {projectionForRender.egress && (
         <div className="mt-3 rounded border border-emerald-500/30 p-2">
           <div className="font-semibold">Governed model consent</div>
-          <div className="mt-1">{projection.egress.effective_profile_id} via {projection.egress.effective_upstream} · expires {new Date(projection.egress.expires_at).toLocaleString()}</div>
-          <div className="text-[10px] opacity-75">Input bound to {projection.egress.maximum_input_bytes} bytes and {projection.egress.maximum_output_tokens} output tokens.</div>
+          <div className="mt-1">{projectionForRender.egress.effective_profile_id} via {projectionForRender.egress.effective_upstream} · expires {new Date(projectionForRender.egress.expires_at).toLocaleString()}</div>
+          <div className="text-[10px] opacity-75">Input bound to {projectionForRender.egress.maximum_input_bytes} bytes and {projectionForRender.egress.maximum_output_tokens} output tokens.</div>
         </div>
       )}
 
@@ -458,11 +698,11 @@ export function RepoRepairInspector({ jobId, onOpenApprovals }: RepoRepairInspec
 
       <div className="mt-3 rounded border border-white/10 p-2">
         <div className="font-semibold">Sandbox readback</div>
-        {projection.execution.readback ? (
-          <div className="mt-1">{statusLabel(projection.execution.readback.status)} · {projection.execution.readback.verified ? "independently verified" : "verification unavailable"} · {projection.execution.readback.target_path ?? "target unavailable"}</div>
+        {projectionForRender.execution.readback ? (
+          <div className="mt-1">{statusLabel(projectionForRender.execution.readback.status)} · {projectionForRender.execution.readback.verified ? "independently verified" : "verification unavailable"} · {projectionForRender.execution.readback.target_path ?? "target unavailable"}</div>
         ) : <div className="mt-1 text-amber-200">No verified readback receipt is available.</div>}
-        {projection.execution.artifacts.length > 0 && <div className="mt-1 text-[10px]">{projection.execution.artifacts.length} bounded execution artifact(s) are recorded by digest.</div>}
-        {terminal && status !== "succeeded" && <div className="mt-2 rounded border border-amber-500/40 p-2" role="status">Recovery: {status === "unknown_external_effect" || status === "cost_liability" ? "reconcile the exact sandbox effect before any retry" : projection.recovery_action.replace(/_/g, " ")}.</div>}
+        {projectionForRender.execution.artifacts.length > 0 && <div className="mt-1 text-[10px]">{projectionForRender.execution.artifacts.length} bounded execution artifact(s) are recorded by digest.</div>}
+        {terminal && status !== "succeeded" && <div className="mt-2 rounded border border-amber-500/40 p-2" role="status">Recovery: {status === "unknown_external_effect" || status === "cost_liability" ? "reconcile the exact sandbox effect before any retry" : projectionForRender.recovery_action.replace(/_/g, " ")}.</div>}
       </div>
       {notice && <div className="mt-2 rounded border border-emerald-500/40 p-2" role="status">{notice}</div>}
       {error && <div className="mt-2 rounded border border-amber-500/40 p-2" role="alert">{error}</div>}

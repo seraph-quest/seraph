@@ -3343,6 +3343,10 @@ function WorkBoardPanel({
                   <RepoRepairInspector
                     jobId={currentAttempt.workflow_run_id}
                     onOpenApprovals={onOpenApprovals}
+                    ownerPrincipalId={ownerPrincipalId}
+                    ownerSessionId={ownerSessionId}
+                    taskOwnerPrincipalId={selectedTask.owner_principal_id}
+                    taskOwnerSessionId={selectedTask.owner_session_id}
                   />
                 )}
 

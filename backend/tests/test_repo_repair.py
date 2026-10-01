@@ -7,13 +7,16 @@ from datetime import datetime, timedelta, timezone
 import asyncio
 import hashlib
 import json
+import os
 from pathlib import Path
+import stat
 from types import SimpleNamespace
 
 import pytest
 from sqlmodel import select
 
 from config.settings import RepoSandboxSettings, settings
+from src.execution import repo_sandbox as repo_sandbox_module
 from src.execution.repo_sandbox import RootlessDockerRepoSandbox
 from src.auth.service import create_session
 from src.db.models import (
@@ -66,6 +69,15 @@ def _repair_input(**overrides):
     }
     value.update(overrides)
     return value
+
+
+def pytest_generate_tests(metafunc):
+    if "repo_sandbox_mode" not in metafunc.fixturenames:
+        return
+    modes = ["mocked"]
+    if metafunc.config.getoption("--run-real-repo-sandbox"):
+        modes.append("real")
+    metafunc.parametrize("repo_sandbox_mode", modes, ids=modes)
 
 
 async def _seed_canonical_repair(
@@ -237,7 +249,7 @@ def test_repo_repair_input_requires_source_paths_inside_allowlist():
 
 @pytest.mark.asyncio
 async def test_repo_repair_real_input_producer_reaches_private_source_review(
-    client, async_db, tmp_path: Path, monkeypatch
+    client, async_db, tmp_path: Path, monkeypatch, repo_sandbox_mode
 ):
     """The shared input producer feeds the governed repair dispatcher.
 
@@ -245,14 +257,24 @@ async def test_repo_repair_real_input_producer_reaches_private_source_review(
     seeding an input row or claiming the task directly.  The public dispatcher
     then performs readiness, admission, and source inspection before pausing
     for the explicit code-egress decision and any model call.
+
+    The default ``mocked`` case keeps ordinary suites deterministic.  The
+    explicit ``real`` case uses the effective configured rootless Docker
+    profile, the real model wrapper/broker with only its provider transport
+    intercepted, and fails if the host cannot satisfy the sandbox preflight.
     """
 
+    real_sandbox = repo_sandbox_mode == "real"
+    effective_sandbox_settings = repo_sandbox_module._effective_repo_sandbox_settings()
     workspace = tmp_path / "workspace"
     (workspace / "repo" / "src").mkdir(parents=True)
     (workspace / "repo" / "tests").mkdir()
     (workspace / "repo" / "src" / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
     (workspace / "repo" / "tests" / "test_app.py").write_text(
-        "def test_value():\n    assert True\n", encoding="utf-8"
+        "from pathlib import Path\n\n"
+        "def test_value():\n"
+        "    assert Path('src/app.py').read_text(encoding='utf-8').strip() == 'VALUE = 2'\n",
+        encoding="utf-8",
     )
     monkeypatch.setattr(settings, "workspace_dir", str(workspace))
     now = datetime.now(timezone.utc)
@@ -260,16 +282,40 @@ async def test_repo_repair_real_input_producer_reaches_private_source_review(
     monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", False)
     monkeypatch.setattr(settings, "operator_auth_secret", "repo-repair-producer-auth-secret")
     monkeypatch.setattr(settings, "operator_auth_secret_hash", "")
-    sandbox_settings = RepoSandboxSettings(
-        enabled=True,
-        docker_socket="unix:///tmp/seraph-repo-repair-docker.sock",
-        worker_image_digest="ghcr.io/operator/seraph-repo-python-pytest@sha256:" + "a" * 64,
-    )
-    monkeypatch.setattr(settings, "repo_sandbox", sandbox_settings)
-    monkeypatch.setattr(
-        "src.execution.repo_sandbox._effective_repo_sandbox_settings",
-        lambda: sandbox_settings,
-    )
+    if real_sandbox:
+        sandbox_settings = effective_sandbox_settings
+        if not sandbox_settings.enabled:
+            pytest.fail("--run-real-repo-sandbox requires an enabled effective RepoSandboxSettings profile")
+        if not sandbox_settings.docker_socket or not sandbox_settings.worker_image_digest:
+            pytest.fail("--run-real-repo-sandbox requires the effective Docker socket and pinned worker image")
+        # Keep the authority/receipt size limits on the same persisted profile
+        # that was captured before the temporary workspace override.
+        monkeypatch.setattr(settings, "repo_sandbox", sandbox_settings)
+        monkeypatch.setattr(
+            repo_sandbox_module,
+            "_effective_repo_sandbox_settings",
+            lambda: sandbox_settings,
+        )
+        preflight = RootlessDockerRepoSandbox(config=sandbox_settings).preflight()
+        if not preflight.ok:
+            pytest.fail(
+                "--run-real-repo-sandbox host readiness failed: "
+                + json.dumps(preflight.as_receipt(), sort_keys=True)
+            )
+        preflight_receipt = preflight.as_receipt()
+        assert preflight_receipt["support_confirmed"] is True
+    else:
+        sandbox_settings = RepoSandboxSettings(
+            enabled=True,
+            docker_socket="unix:///tmp/seraph-repo-repair-docker.sock",
+            worker_image_digest="ghcr.io/operator/seraph-repo-python-pytest@sha256:" + "a" * 64,
+        )
+        monkeypatch.setattr(settings, "repo_sandbox", sandbox_settings)
+        monkeypatch.setattr(
+            repo_sandbox_module,
+            "_effective_repo_sandbox_settings",
+            lambda: sandbox_settings,
+        )
     token, operator = await create_session()
     owner = WorkBoardOwner(
         principal_id=operator.principal.principal_id,
@@ -288,24 +334,41 @@ async def test_repo_repair_real_input_producer_reaches_private_source_review(
         timezone="UTC",
     )
 
-    monkeypatch.setattr(
-        RootlessDockerRepoSandbox,
-        "preflight",
-        lambda _sandbox: SimpleNamespace(
-            ok=True,
-            status="verified",
-            reason="",
-            as_receipt=lambda: {
-                "ok": True,
-                "status": "verified",
-                "reason": "",
-                "operator_visible": True,
-            },
-        ),
-    )
+    if not real_sandbox:
+        monkeypatch.setattr(
+            RootlessDockerRepoSandbox,
+            "preflight",
+            lambda _sandbox: SimpleNamespace(
+                ok=True,
+                status="verified",
+                reason="",
+                as_receipt=lambda: {
+                    "ok": True,
+                    "status": "verified",
+                    "reason": "",
+                    "operator_visible": True,
+                },
+            ),
+        )
 
     model_calls = 0
     sandbox_calls = 0
+
+    def _proposal_for_digest(base_digest: str) -> dict[str, object]:
+        return {
+            "summary": "Update the bounded repository value.",
+            "base_snapshot_sha256": base_digest,
+            "patch_unified_diff": (
+                "--- a/src/app.py\n"
+                "+++ b/src/app.py\n"
+                "@@ -1 +1 @@\n"
+                "-VALUE = 1\n"
+                "+VALUE = 2\n"
+            ),
+            "allowed_paths": ["src/app.py", "tests/test_app.py"],
+            "test_args": ["pytest", "tests/test_app.py"],
+            "expected_outcome": "The focused test passes.",
+        }
 
     class _Model:
         def __init__(self, **_kwargs):
@@ -315,24 +378,30 @@ async def test_repo_repair_real_input_producer_reaches_private_source_review(
             nonlocal model_calls
             model_calls += 1
             prompt = json.loads(messages[1]["content"])
-            base_digest = prompt["source_packet"]["base_snapshot_sha256"]
-            return json.dumps(
-                {
-                    "summary": "Update the bounded repository value.",
-                    "base_snapshot_sha256": base_digest,
-                    "patch_unified_diff": (
-                        "--- a/src/app.py\n"
-                        "+++ b/src/app.py\n"
-                        "@@ -1 +1 @@\n"
-                        "-VALUE = 1\n"
-                        "+VALUE = 2\n"
-                    ),
-                    "allowed_paths": ["src/app.py", "tests/test_app.py"],
-                    "test_args": ["pytest", "tests/test_app.py"],
-                    "expected_outcome": "The focused test passes.",
-                },
-                sort_keys=True,
-            )
+            return json.dumps(_proposal_for_digest(prompt["source_packet"]["base_snapshot_sha256"]), sort_keys=True)
+
+    def governed_transport(**kwargs):
+        nonlocal model_calls
+        model_calls += 1
+        body = kwargs["body"]
+        base_digest = None
+        for message in body.get("messages", []):
+            content = message.get("content") if isinstance(message, dict) else None
+            if not isinstance(content, str):
+                continue
+            try:
+                prompt = json.loads(content)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if isinstance(prompt, dict) and isinstance(prompt.get("source_packet"), dict):
+                base_digest = prompt["source_packet"].get("base_snapshot_sha256")
+                break
+        if not isinstance(base_digest, str):
+            raise AssertionError("governed repair transport did not receive the canonical source prompt")
+        content = json.dumps(_proposal_for_digest(base_digest), sort_keys=True)
+        message = SimpleNamespace(role="assistant", content=content)
+        response = SimpleNamespace(choices=[SimpleNamespace(message=message)])
+        return response, {"choices": [{"message": {"role": "assistant", "content": content}}]}
 
     def execute_job(_sandbox, job, *, before_dispatch=None):
         nonlocal sandbox_calls
@@ -374,12 +443,23 @@ async def test_repo_repair_real_input_producer_reaches_private_source_review(
             "learning": "no_learning",
         }
 
-    monkeypatch.setattr("src.workflows.repo_repair.FallbackLiteLLMModel", _Model)
+    if real_sandbox:
+        monkeypatch.setattr("src.llm_runtime._governed_openai_chat_completion", governed_transport)
+        original_execute_job = RootlessDockerRepoSandbox.execute_job
+
+        def counted_execute_job(_sandbox, job, *, before_dispatch=None):
+            nonlocal sandbox_calls
+            sandbox_calls += 1
+            return original_execute_job(_sandbox, job, before_dispatch=before_dispatch)
+
+        monkeypatch.setattr(RootlessDockerRepoSandbox, "execute_job", counted_execute_job)
+    else:
+        monkeypatch.setattr("src.workflows.repo_repair.FallbackLiteLLMModel", _Model)
+        monkeypatch.setattr(RootlessDockerRepoSandbox, "execute_job", execute_job)
     monkeypatch.setattr("src.workflows.repo_repair.build_model_kwargs", lambda **_kwargs: {
         "runtime_profile": "openrouter",
         "api_base": "https://openrouter.ai/api/v1",
     })
-    monkeypatch.setattr(RootlessDockerRepoSandbox, "execute_job", execute_job)
 
     async with async_db() as db:
         db.add(
@@ -482,10 +562,6 @@ async def test_repo_repair_real_input_producer_reaches_private_source_review(
     assert job is not None
     client.cookies.set(settings.operator_auth_cookie_name, token)
     monkeypatch.setattr(
-        "src.api.workflows._require_authenticated_capability_operator",
-        lambda _request: operator,
-    )
-    monkeypatch.setattr(
         "src.llm_runtime.build_model_kwargs",
         lambda **_kwargs: {
             "runtime_profile": "openrouter",
@@ -576,6 +652,26 @@ async def test_repo_repair_real_input_producer_reaches_private_source_review(
     assert execution["readback"]["readback_id"]
     assert execution["artifacts"]
     assert any(item["artifact_type"] == "repo_change_readback_json" for item in execution["artifacts"])
+    if real_sandbox:
+        # The sandbox receives a snapshot and must never mutate the operator's
+        # canonical checkout.  The worker's readback is the evidence that the
+        # patch was applied and the focused test passed inside the real
+        # rootless container.
+        assert (workspace / "repo" / "src" / "app.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+        readback_artifact = next(
+            item for item in execution["artifacts"]
+            if item["artifact_type"] == "repo_change_readback_json"
+        )
+        readback_path = workspace / readback_artifact["file_path"]
+        assert readback_path.is_file()
+        readback_bytes = readback_path.read_bytes()
+        assert hashlib.sha256(readback_bytes).hexdigest() == readback_artifact["content_sha256"]
+        readback_manifest = json.loads(readback_bytes.decode("utf-8"))
+        assert readback_manifest["status"] == "succeeded"
+        assert readback_manifest["exit_code"] == 0
+        assert "src/app.py" in readback_manifest["diff_paths"]
+        assert readback_manifest["base_digest"] == packet.base_snapshot_digest
+        assert preflight_receipt["support_confirmed"] is True
     async with async_db() as db:
         final_task = (await db.execute(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id))).scalar_one()
         final_attempt = (
@@ -594,9 +690,19 @@ async def test_repo_repair_real_input_producer_reaches_private_source_review(
         ).scalar_one()
     assert final_task.status is WorkBoardStatus.done
     assert final_attempt is not None and final_attempt.workflow_run_id == attempt.workflow_run_id
+    assert final_attempt.attempt_id == attempt.attempt_id
     assert final_attempt.ended_at is not None
     assert final_proposal.status == "consumed"
     assert final_proposal.approval_id == proposal_payload["approval_id"]
+    if real_sandbox:
+        final_job = await durable_job_repository.get_job(attempt.workflow_run_id)
+        assert final_job is not None and final_job["status"] == "succeeded"
+        checkpoint_ids = {
+            str(item.get("checkpoint_id"))
+            for item in final_job.get("checkpoints", [])
+            if isinstance(item, dict)
+        }
+        assert {"cleanup_verified", "readback_verified"}.issubset(checkpoint_ids)
 
     # The exact consumed request is replay-safe: the canonical approval/root
     # receipt is returned without a second execution side effect.
@@ -820,6 +926,39 @@ def test_private_artifact_writer_rejects_existing_broad_permissions(tmp_path: Pa
     with pytest.raises(RepoRepairError) as blocked:
         service._write_private_artifact("artifacts/repo-repair/source/existing.json", b"{}")
     assert blocked.value.code == "private_artifact_permissions_invalid"
+
+
+def test_private_artifact_cleanup_rejects_foreign_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    service = RepoRepairService(workspace_dir=str(workspace))
+    artifact_ref, artifact_digest = service._write_private_artifact(
+        "artifacts/repo-repair/source/foreign-owner.json",
+        b"private evidence",
+    )
+    target = workspace / artifact_ref.removeprefix("workspace-json:")
+    original_fstat = os.fstat
+
+    def foreign_target_owner(fd):
+        metadata = original_fstat(fd)
+        if stat.S_ISREG(metadata.st_mode):
+            return SimpleNamespace(
+                st_mode=metadata.st_mode,
+                st_nlink=metadata.st_nlink,
+                st_uid=os.getuid() + 1,
+            )
+        return metadata
+
+    monkeypatch.setattr("src.workflows.repo_repair.os.fstat", foreign_target_owner)
+    with pytest.raises(RepoRepairError) as blocked:
+        service._unlink_private_artifact_exact(
+            artifact_ref,
+            expected_digest=artifact_digest,
+        )
+    assert blocked.value.code == "private_artifact_permissions_invalid"
+    assert target.is_file()
 
 
 @pytest.mark.asyncio

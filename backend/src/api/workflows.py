@@ -6036,14 +6036,14 @@ async def _repo_change_reconcile_verified_local_result(
     if not expected_digest:
         return None
     try:
-        descriptor = _repo_change_open_workspace_file(expected_path, flags=os.O_RDONLY)
-        with os.fdopen(descriptor, "rb") as handle:
-            payload = handle.read(RepoSandboxLimits.from_settings(settings.repo_sandbox).max_output_bytes + 1)
-        if len(payload) > RepoSandboxLimits.from_settings(settings.repo_sandbox).max_output_bytes:
-            return None
+        # Restart adoption must apply the same private owner/mode/link checks
+        # as the normal success path.  A matching digest alone cannot prove
+        # that a readback file remained private after the original worker
+        # wrote it.
+        actual_digest = _repo_change_verify_persisted_artifact(expected_path)
     except (OSError, RepoSandboxError, ValueError):
         return None
-    if hashlib.sha256(payload).hexdigest() != expected_digest:
+    if actual_digest != expected_digest:
         return None
     current = await durable_job_repository.get_job(job_id) or job
     if str(current.get("status") or "") == "succeeded":

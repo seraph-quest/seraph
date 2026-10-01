@@ -16,6 +16,23 @@ from src.db.models import UserProfile
 from src.observer.context import CurrentContext
 
 
+@pytest.fixture(autouse=True)
+def isolate_settings_api_auth_boundary(monkeypatch):
+    """Keep settings route tests on the explicit synthetic test identity.
+
+    Managed test commands may inherit a live ``.env.dev`` auth secret.  These
+    tests intentionally exercise the unauthenticated test surface; isolate
+    that behavior here without changing production middleware or credentials.
+    """
+
+    monkeypatch.setattr(settings, "deployment_environment", "test")
+    monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", True)
+    monkeypatch.setattr(settings, "operator_auth_secret", "")
+    monkeypatch.setattr(settings, "operator_auth_secret_hash", "")
+    monkeypatch.setattr(settings, "operator_auth_allowed_hosts", "test,localhost,127.0.0.1")
+    monkeypatch.setattr(settings, "operator_auth_allowed_origins", "http://localhost:3001")
+
+
 @pytest.mark.asyncio
 async def test_get_interruption_mode(client):
     # Reset context_manager to a fresh default so the test is time-independent

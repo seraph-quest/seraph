@@ -73,6 +73,33 @@ describe("RepoSandboxPanel", () => {
     });
   });
 
+  it("retains the last known controls when a refresh returns malformed metadata", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockResolvedValueOnce(response(payload))
+      .mockResolvedValueOnce(response({ status: "blocked", limits: { max_cpu_seconds: "unknown" } }));
+    render(<RepoSandboxPanel />);
+    await screen.findByText(/Effective status: blocked/);
+    fireEvent.click(screen.getByRole("button", { name: "refresh status" }));
+    await waitFor(() => expect(screen.getByText(/last known controls are retained/i)).toBeInTheDocument());
+    expect(screen.getByRole("textbox", { name: "Docker socket" })).toHaveValue("");
+    expect(screen.getByText(/CPU 120s/)).toBeInTheDocument();
+    expect(screen.getByText(/Effective status: degraded/)).toBeInTheDocument();
+  });
+
+  it("retains the last known controls when a save returns malformed metadata", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockResolvedValueOnce(response(payload))
+      .mockResolvedValueOnce(response({ enabled: true, profile: "repo-python-pytest-v1" }));
+    render(<RepoSandboxPanel />);
+    await screen.findByText(/Effective status: blocked/);
+    fireEvent.click(screen.getByRole("button", { name: "save selectors" }));
+    await waitFor(() => expect(screen.getByText(/last known controls are retained/i)).toBeInTheDocument());
+    expect(screen.getByText(/CPU 120s/)).toBeInTheDocument();
+    expect(screen.queryByText(/Repository sandbox settings saved/)).not.toBeInTheDocument();
+  });
+
   it("surfaces a deadline when the settings fetch ignores abort", async () => {
     vi.useFakeTimers();
     vi.mocked(fetch).mockImplementation(() => new Promise<Response>(() => undefined));

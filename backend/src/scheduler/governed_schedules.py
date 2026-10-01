@@ -28,6 +28,10 @@ from src.db.models import (
     OperatorSession,
     ScheduledJob,
     ScheduledJobRun,
+    WorkBoardAttempt,
+    WorkBoardInputArtifact,
+    WorkBoardStatus,
+    WorkBoardTask,
 )
 from src.work_board.contracts import WorkBoardInputArtifactCreate, WorkBoardOwner
 from src.work_board.dispatcher import validate_capability_input
@@ -36,6 +40,7 @@ from src.work_board.input_artifacts import prepare_input_artifact
 
 ALLOWED_CADENCES = frozenset({"5min", "hourly", "6h", "daily"})
 GOVERNED_ACTION = "calendar.observe_due_events.v1"
+PROCEDURE_ACTION = "guardian.run_procedure.v2"
 OCCURRENCE_STATES = frozenset(
     {"reserved", "running", "coalesced", "succeeded", "blocked", "cancelled", "unknown"}
 )
@@ -91,11 +96,11 @@ ACTION_REGISTRY: dict[str, dict[str, Any]] = {
         "model": False,
         "enabled": True,
     },
-    "guardian.run_procedure.v2": {
-        "capability_id": "guardian.run_procedure.v2",
+    PROCEDURE_ACTION: {
+        "capability_id": PROCEDURE_ACTION,
         "consent_kind": "goal_budget",
         "model": False,
-        "enabled": False,
+        "enabled": True,
     },
     "gmail.scan_metadata.v1": {
         "capability_id": "gmail.scan_metadata.v1",
@@ -133,6 +138,168 @@ def _json(value: Mapping[str, Any]) -> str:
 
 def is_governed_action(action_type: str | None) -> bool:
     return str(action_type or "").strip() in ACTION_REGISTRY
+
+
+def _action_pair_is_supported(action_type: Any, capability_id: Any) -> bool:
+    """Accept only a registered governed action with its exact capability."""
+
+    action = str(action_type or "").strip()
+    capability = str(capability_id or "").strip()
+    return bool(action) and action == capability and is_governed_action(action)
+
+
+async def _procedure_terminal_state(
+    db: Any,
+    occurrence: GovernedScheduleOccurrence,
+    task: WorkBoardTask,
+) -> tuple[str, str | None, str | None] | None:
+    """Return a safe terminal transition for one completed procedure task.
+
+    A Work Board ``review``/``done`` projection is not itself a native
+    procedure proof.  The parent durable root and its independently verified
+    readback must still match the occurrence before the scheduler can mark the
+    slot succeeded.  Uncertain durable effects deliberately return ``None``;
+    the normal occurrence lease path then quarantines them as ``unknown``.
+    """
+
+    task_state = str(getattr(getattr(task, "status", None), "value", getattr(task, "status", "")) or "")
+    if task_state == WorkBoardStatus.blocked.value:
+        return "blocked", "procedure_task_blocked", "retry_after_prerequisite"
+    if task_state == WorkBoardStatus.review.value:
+        return "blocked", "procedure_task_review_required", "review_procedure_task"
+    if task_state != WorkBoardStatus.done.value:
+        return None
+
+    binding = await db.get(GovernedScheduleBinding, occurrence.binding_id)
+    if (
+        binding is None
+        or binding.action_type != PROCEDURE_ACTION
+        or binding.capability_id != PROCEDURE_ACTION
+        or task.capability_id != "guardian-routine.v2"
+        or task.owner_principal_id != binding.owner_principal_id
+        or task.owner_session_id != binding.owner_session_id
+        or task.goal_id != binding.goal_id
+        or int(task.goal_revision or 0) != int(binding.goal_revision or 0)
+        or task.idempotency_scope != "guardian-routine-v2-schedule"
+        or task.idempotency_key
+        != f"{binding.binding_id}:{_utc(occurrence.slot_utc).strftime('%Y%m%dT%H%M%SZ')}"
+    ):
+        return "blocked", "procedure_parent_binding_mismatch", "reconcile_admission_binding"
+
+    # The occurrence durable_job_id is the scheduler wrapper/run identity and
+    # must remain unchanged for occurrence idempotency and cleanup.  The native
+    # procedure root is server-derived from the exact terminal Board attempt.
+    artifact_id = str(task.input_artifact_id or "").strip()
+    artifact = await db.get(WorkBoardInputArtifact, artifact_id) if artifact_id else None
+    if (
+        artifact is None
+        or artifact.owner_principal_id != task.owner_principal_id
+        or artifact.owner_session_id != task.owner_session_id
+        or artifact.goal_id != task.goal_id
+        or int(artifact.goal_revision or 0) != int(task.goal_revision or 0)
+        or artifact.capability_id != "guardian-routine.v2"
+        or artifact.bound_task_id != task.task_id
+        or artifact.state not in {"bound", "consumed"}
+        or not artifact.typed_input_ref
+        or not task.typed_input_ref
+        or artifact.typed_input_ref != task.typed_input_ref
+        or not task.typed_input_digest
+        or artifact.payload_sha256 != task.typed_input_digest
+    ):
+        return "blocked", "procedure_input_binding_missing", "reconcile_admission_binding"
+
+    attempt = (
+        await db.execute(
+            select(WorkBoardAttempt)
+            .where(
+                WorkBoardAttempt.task_id == task.task_id,
+            )
+            .order_by(WorkBoardAttempt.created_at.desc(), WorkBoardAttempt.attempt_id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    job_id = str(attempt.workflow_run_id or "").strip() if attempt is not None else ""
+    if attempt is None or not job_id or attempt.ended_at is None or str(attempt.outcome or "") != "verified":
+        return "blocked", "procedure_verified_readback_missing", "reconcile_admission_binding"
+
+    try:
+        from src.work_board.dispatcher import WorkBoardDispatcher
+        from src.workflows.job_runtime import UNCERTAIN_EXTERNAL_EFFECT_STATUSES, durable_job_repository
+
+        projection = await durable_job_repository.get_job(job_id)
+        if not isinstance(projection, Mapping):
+            return "blocked", "procedure_parent_missing", "reconcile_admission_binding"
+        owner = projection.get("owner") if isinstance(projection.get("owner"), Mapping) else {}
+        authority = (
+            projection.get("declared_authority")
+            if isinstance(projection.get("declared_authority"), Mapping)
+            else {}
+        )
+        idempotency = (
+            projection.get("idempotency")
+            if isinstance(projection.get("idempotency"), Mapping)
+            else {}
+        )
+        positive_int = lambda value: type(value) is int and value > 0
+        if (
+            str(projection.get("job_id") or projection.get("run_identity") or "") != job_id
+            or str(projection.get("root_run_identity") or "") != job_id
+            or projection.get("parent_run_identity") is not None
+            or projection.get("parent_job_id") is not None
+            or str(projection.get("job_kind") or "") != "guardian_routine_v2"
+            or str(projection.get("capability_version") or "") != "guardian-routine.v2"
+            or str(owner.get("kind") or "") != "user"
+            or str(owner.get("principal_id") or "") != task.owner_principal_id
+            or str(projection.get("session_id") or "") != task.owner_session_id
+            or str(projection.get("operator_session_id") or "") != task.owner_session_id
+            or str(projection.get("goal_id") or "") != task.goal_id
+            or not positive_int(projection.get("goal_revision"))
+            or int(projection.get("goal_revision")) != int(task.goal_revision)
+            or str(idempotency.get("scope") or "") != "work-board-attempt"
+            or str(idempotency.get("key") or "") != f"{task.task_id}:{attempt.attempt_id}"
+            or str(authority.get("principal") or "") != task.owner_principal_id
+            or str(authority.get("owner_kind") or "") != "user"
+            or str(authority.get("session_id") or "") != task.owner_session_id
+            or str(authority.get("operator_session_id") or "") != task.owner_session_id
+            or str(authority.get("goal_id") or "") != task.goal_id
+            or not positive_int(authority.get("goal_revision"))
+            or int(authority.get("goal_revision")) != int(task.goal_revision)
+            or str(authority.get("capability_id") or "") != "guardian-routine.v2"
+            or str(authority.get("board_task_id") or "") != task.task_id
+            or str(authority.get("board_attempt_id") or "") != attempt.attempt_id
+            or str(authority.get("input_artifact_id") or "") != artifact.artifact_id
+            or str(authority.get("input_artifact_digest") or "") != task.typed_input_digest
+            or not positive_int(authority.get("board_task_revision"))
+            or int(authority.get("board_task_revision")) > int(task.task_revision)
+            # claim_ready_task records the pre-transition revision on the
+            # attempt, then atomically advances the Board task to the
+            # running revision.  ProcedureV2 admits its native root from that
+            # running task, so its immutable authority must carry exactly the
+            # post-claim revision.  Do not widen this to a >= check: a later
+            # unrelated Board mutation must remain a binding failure.
+            or int(authority.get("board_task_revision")) != int(attempt.task_revision_at_claim) + 1
+            or not positive_int(authority.get("board_fencing_token"))
+            or int(authority.get("board_fencing_token")) != int(attempt.fencing_token)
+        ):
+            return "blocked", "procedure_parent_authority_mismatch", "reconcile_admission_binding"
+        projection_status = str(projection.get("status") or "")
+        effects = projection.get("effects") if isinstance(projection.get("effects"), list) else []
+        if projection_status in UNCERTAIN_EXTERNAL_EFFECT_STATUSES or any(
+            isinstance(effect, Mapping)
+            and str(effect.get("status") or "")
+            in {"unknown", "intent", "dispatched", "unknown_external_effect", "cost_liability"}
+            for effect in effects
+        ):
+            return None
+        if projection_status != "succeeded":
+            return "blocked", "procedure_parent_not_verified", "reconcile_admission_binding"
+        proof = WorkBoardDispatcher._workflow_readback(projection, job_id)
+        if proof is None:
+            return "blocked", "procedure_verified_readback_missing", "reconcile_admission_binding"
+    except Exception:
+        # A missing/corrupt proof must never become a successful occurrence.
+        return "blocked", "procedure_verified_readback_unavailable", "reconcile_admission_binding"
+    return "succeeded", None, None
 
 
 def action_spec(action_type: str) -> dict[str, Any]:
@@ -377,8 +544,7 @@ def _validate_control_response(
     if (
         response.get("binding_id") != binding_id
         or response.get("scheduled_job_id") != scheduled_job_id
-        or response.get("capability_id") != GOVERNED_ACTION
-        or response.get("action_type") != GOVERNED_ACTION
+        or not _action_pair_is_supported(response.get("action_type"), response.get("capability_id"))
         or response.get("state") != expected_state
         or type(response.get("goal_revision")) is not int
         or response.get("goal_revision") < 1
@@ -462,19 +628,14 @@ async def reserve_occurrence(
     ).scalar_one_or_none()
     if current is None:
         raise ValueError("governed schedule binding is unavailable")
-    current_action = str(current.action_type or "").strip()
-    try:
-        current_spec = action_spec(current_action)
-    except (KeyError, ValueError):
-        raise RuntimeError("governed_schedule_action_unavailable") from None
-    if str(current.capability_id or "") != str(current_spec.get("capability_id") or ""):
+    if not _action_pair_is_supported(current.action_type, current.capability_id):
         raise RuntimeError("governed_schedule_action_unavailable")
     if current.state != "active" or _utc(current.expires_at) <= now:
         raise ValueError("governed schedule binding is not active")
     job = (
         await db.execute(select(ScheduledJob).where(ScheduledJob.id == current.scheduled_job_id))
     ).scalar_one_or_none()
-    if job is None or job.action_type != current_action or job.trigger_type != "governed":
+    if job is None or job.trigger_type != "governed" or not _action_pair_is_supported(job.action_type, current.capability_id):
         raise RuntimeError("governed_schedule_binding_link_invalid")
     try:
         job_spec = json.loads(job.action_spec_json or "{}")
@@ -522,6 +683,39 @@ async def reserve_occurrence(
             .limit(1)
         )
     ).scalar_one_or_none()
+    if active is not None:
+        active_binding = await db.get(GovernedScheduleBinding, active.binding_id)
+        if (
+            active_binding is not None
+            and active_binding.action_type == PROCEDURE_ACTION
+            and active.work_board_task_id
+        ):
+            task = (
+                await db.execute(
+                    select(WorkBoardTask).where(
+                        WorkBoardTask.task_id == active.work_board_task_id
+                    )
+                )
+            ).scalar_one_or_none()
+            terminal = (
+                await _procedure_terminal_state(db, active, task)
+                if task is not None
+                else None
+            )
+            if terminal is not None:
+                terminal_state, failure_code, recovery_action = terminal
+                await settle_occurrence(
+                    db,
+                    active,
+                    state=terminal_state,
+                    task_id=active.work_board_task_id,
+                    job_id=active.durable_job_id,
+                    failure_code=failure_code,
+                    recovery_action=recovery_action,
+                    claim_token=active.claim_token,
+                    fencing_token=active.fencing_token,
+                )
+                active = None
     if active is not None:
         if active.state == "unknown":
             raise RuntimeError("governed_occurrence_requires_reconciliation")
@@ -833,7 +1027,7 @@ async def write_server_cleanup_proof(
     binding = await db.get(GovernedScheduleBinding, occurrence.binding_id)
     if binding is None:
         raise RuntimeError("governed_occurrence_cleanup_binding_missing")
-    if binding.action_type != GOVERNED_ACTION or binding.capability_id != GOVERNED_ACTION:
+    if not _action_pair_is_supported(binding.action_type, binding.capability_id):
         raise RuntimeError("governed_occurrence_cleanup_action_unavailable")
     if str(owner_principal_id) != str(binding.owner_principal_id):
         raise RuntimeError("governed_occurrence_cleanup_owner_mismatch")
@@ -842,13 +1036,13 @@ async def write_server_cleanup_proof(
     if occurrence.durable_job_id != run_key:
         raise RuntimeError("occurrence_cleanup_run_mismatch")
     job = await db.get(ScheduledJob, binding.scheduled_job_id)
-    if job is None or job.trigger_type != "governed" or job.action_type != GOVERNED_ACTION:
+    if job is None or job.trigger_type != "governed" or not _action_pair_is_supported(job.action_type, binding.capability_id):
         raise RuntimeError("governed_occurrence_cleanup_action_unavailable")
     run = await db.get(ScheduledJobRun, run_key)
     if (
         run is None
         or run.scheduled_job_id != binding.scheduled_job_id
-        or run.action_type != GOVERNED_ACTION
+        or run.action_type != binding.action_type
         or run.trigger_type != job.trigger_type
     ):
         raise RuntimeError("occurrence_cleanup_proof_unavailable")
@@ -1025,8 +1219,13 @@ async def create_binding(db: Any, owner: WorkBoardOwner, request: Mapping[str, A
     consent_id = str(request.get("consent_id") or request.get("read_consent_id") or "").strip()
     artifact_id = str(request.get("input_artifact_id") or "").strip()
     input_digest = str(request.get("input_digest") or "").strip()
-    if not goal_id or goal_revision < 1 or not consent_id or not artifact_id or not input_digest:
+    if not goal_id or goal_revision < 1 or not artifact_id or not input_digest:
         raise ValueError("governed schedule binding fields are incomplete")
+    if action == GOVERNED_ACTION and not consent_id:
+        raise ValueError("calendar governed schedule consent is required")
+    if action == PROCEDURE_ACTION:
+        # Goal-budget schedules deliberately carry no Calendar read consent.
+        consent_id = ""
     request_digest = str(request.get("schedule_request_digest") or "sha256:" + _digest(dict(request)))
     existing = (
         await db.execute(
@@ -1064,7 +1263,13 @@ async def create_binding(db: Any, owner: WorkBoardOwner, request: Mapping[str, A
         job = ScheduledJob(
             name=str(
                 request.get("name")
-                or ("Gmail metadata watch" if action == "gmail.scan_metadata.v1" else "Calendar observation")
+                or (
+                    "Gmail metadata watch"
+                    if action == "gmail.scan_metadata.v1"
+                    else "Calendar observation"
+                    if action == GOVERNED_ACTION
+                    else "Reviewed procedure"
+                )
             )[:200],
             enabled=True,
             trigger_type="governed",
@@ -1086,7 +1291,7 @@ async def create_binding(db: Any, owner: WorkBoardOwner, request: Mapping[str, A
         input_digest=input_digest,
         action_digest=str(request.get("action_digest") or "sha256:" + _digest({"action": action, "input": input_digest})),
         consent_kind=spec["consent_kind"],
-        read_consent_id=consent_id,
+        read_consent_id=consent_id or None,
         consent_revision=int(request.get("consent_revision") or 1),
         consent_digest=str(request.get("consent_digest") or ""),
         schedule_idempotency_key=key,
@@ -1371,6 +1576,7 @@ __all__ = [
     "ACTION_REGISTRY",
     "ALLOWED_CADENCES",
     "GOVERNED_ACTION",
+    "PROCEDURE_ACTION",
     "action_spec",
     "apply_control",
     "claim_occurrence",

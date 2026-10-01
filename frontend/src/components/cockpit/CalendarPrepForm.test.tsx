@@ -65,6 +65,7 @@ describe("CalendarPrepForm", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create finite consent and read events" }));
     await screen.findByText(/Consent consent-1/);
     await screen.findByRole("option", { name: /Planning/ });
+    expect(String(fetchMock.mock.calls[3]?.[0])).toContain("/api/calendar/connections/connection-1/events?consent_id=consent-1");
     fireEvent.change(screen.getByLabelText("Event binding"), { target: { value: "binding-1" } });
     fireEvent.click(screen.getByRole("button", { name: "Prepare meeting" }));
     await waitFor(() => expect(onCreated).toHaveBeenCalled());

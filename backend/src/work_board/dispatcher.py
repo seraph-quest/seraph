@@ -18,7 +18,8 @@ import logging
 import math
 from pathlib import Path
 import re
-from typing import Any, Literal, Mapping
+from types import MappingProxyType
+from typing import Any, Mapping
 import uuid
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -32,7 +33,10 @@ from src.db.engine import get_session
 from src.db.models import (
     CalendarPrepReceipt,
     Goal,
+    GuardianRoutine,
+    GuardianRoutineVersion,
     WorkBoardAttempt,
+    WorkBoardInputArtifact,
     WorkBoardLink,
     WorkBoardStatus,
     WorkBoardTask,
@@ -157,6 +161,107 @@ class TypedInputError(ValueError):
         super().__init__(message)
 
 
+@dataclass(frozen=True, slots=True)
+class ProcedureChildBinding:
+    """Server-built identity for one native v2 child root.
+
+    This is deliberately a typed, non-public seam.  Calendar root selection
+    must never be driven by a caller supplied string or an unchecked mapping;
+    the binding is constructed only after the procedure runtime has created
+    the canonical child task/attempt/artifact and is revalidated against those
+    rows before admission and again before effect/publication.
+    """
+
+    parent_job_id: str
+    parent_fencing_token: int
+    parent_goal_id: str
+    parent_goal_revision: int
+    parent_owner_principal_id: str
+    parent_owner_session_id: str
+    parent_plan_digest: str
+    parent_template_id: str
+    parent_routine_version: int
+    parent_board_task_id: str
+    parent_board_attempt_id: str
+    parent_board_task_revision: int
+    parent_board_fencing_token: int
+    step_id: str
+    child_job_id: str
+    child_task: WorkBoardTask
+    child_attempt: WorkBoardAttempt
+    child_admission_task_revision: int
+    child_goal_id: str
+    child_goal_revision: int
+    child_input_artifact_id: str
+    child_input_artifact_digest: str
+    child_owner_principal_id: str
+    child_owner_session_id: str
+    child_capability_id: str
+    child_capability_version: str
+    input: Mapping[str, Any]
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        parent: Mapping[str, Any],
+        step: Mapping[str, Any],
+        descriptor: Mapping[str, Any],
+        child_id: str,
+        child_task: WorkBoardTask,
+        child_attempt: WorkBoardAttempt,
+        input_payload: Mapping[str, Any],
+        child_admission_task_revision: int | None = None,
+    ) -> "ProcedureChildBinding":
+        parent_authority = (
+            parent.get("declared_authority")
+            if isinstance(parent.get("declared_authority"), Mapping)
+            else {}
+        )
+        parent_owner_row = parent.get("owner") if isinstance(parent.get("owner"), Mapping) else {}
+        lease = parent.get("lease") if isinstance(parent.get("lease"), Mapping) else {}
+        plan = descriptor.get("plan") if isinstance(descriptor.get("plan"), Mapping) else {}
+        plan_digest = _text(descriptor.get("plan_digest")) or _safe_digest(plan)
+        parent_id = _text(parent.get("job_id") or parent.get("run_identity"))
+        parent_fence = int(lease.get("fencing_token") or 0)
+        step_id = _text(step.get("step_id"))
+        child_capability = _text(step.get("capability_id"))
+        child_version = _text(step.get("capability_version"))
+        parent_goal_id = _text(parent.get("goal_id") or parent_authority.get("goal_id"))
+        parent_goal_revision = int(parent.get("goal_revision") or parent_authority.get("goal_revision") or 0)
+        parent_owner = _text(parent_authority.get("principal")) or _text(parent_owner_row.get("principal_id"))
+        parent_session = _text(parent_authority.get("session_id")) or _text(parent.get("operator_session_id") or parent.get("session_id"))
+        return cls(
+            parent_job_id=parent_id,
+            parent_fencing_token=parent_fence,
+            parent_goal_id=parent_goal_id,
+            parent_goal_revision=parent_goal_revision,
+            parent_owner_principal_id=parent_owner,
+            parent_owner_session_id=parent_session,
+            parent_plan_digest=plan_digest,
+            parent_template_id=_text(plan.get("template_id") or parent_authority.get("template_id")),
+            parent_routine_version=int(parent.get("routine_version") or parent_authority.get("routine_version") or 0),
+            parent_board_task_id=_text(parent_authority.get("board_task_id")),
+            parent_board_attempt_id=_text(parent_authority.get("board_attempt_id")),
+            parent_board_task_revision=int(parent_authority.get("board_task_revision") or 0),
+            parent_board_fencing_token=int(parent_authority.get("board_fencing_token") or 0),
+            step_id=step_id,
+            child_job_id=_text(child_id),
+            child_task=child_task,
+            child_attempt=child_attempt,
+            child_admission_task_revision=int(child_admission_task_revision or child_task.task_revision),
+            child_goal_id=_text(child_task.goal_id),
+            child_goal_revision=int(child_task.goal_revision),
+            child_input_artifact_id=_text(child_task.input_artifact_id),
+            child_input_artifact_digest=_text(child_task.typed_input_digest),
+            child_owner_principal_id=_text(child_task.owner_principal_id),
+            child_owner_session_id=_text(child_task.owner_session_id),
+            child_capability_id=child_capability,
+            child_capability_version=child_version,
+            input=MappingProxyType(dict(input_payload)),
+        )
+
+
 class _GoalSnapshotInput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -204,6 +309,20 @@ class _RoutineInput(BaseModel):
     expected_goal_revision: int = Field(ge=1)
     source_watch_id: str = Field(min_length=1, max_length=256)
     expected_watch_revision: int = Field(ge=1)
+
+
+class _RoutineV2Input(BaseModel):
+    """Strict invocation envelope for a fixed guardian-routine.v2 plan."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    routine_id: str = Field(min_length=1, max_length=256)
+    version: int = Field(ge=1)
+    expected_routine_revision: int = Field(ge=1)
+    goal_id: str = Field(min_length=1, max_length=256)
+    expected_goal_revision: int = Field(ge=1)
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    invocation_uuid: str = Field(min_length=1, max_length=256)
 
 
 class CalendarMeetingPrepInput(BaseModel):
@@ -283,6 +402,7 @@ _TYPED_INPUT_MODELS: dict[str, type[BaseModel]] = {
     "engineering.repo-change.v1": _RepoChangeInput,
     "work.github-followthrough.v1": _GitHubInput,
     "guardian-routine.v1": _RoutineInput,
+    "guardian-routine.v2": _RoutineV2Input,
     "calendar.meeting-prep.v1": CalendarMeetingPrepInput,
     "calendar.observe_due_events.v1": CalendarObservationInput,
     "gmail.scan_metadata.v1": MailWatchInput,
@@ -374,6 +494,12 @@ REGISTERED_CAPABILITIES: dict[str, CapabilitySpec] = {
     "guardian-routine.v1": CapabilitySpec(
         "guardian-routine.v1",
         "1",
+    ),
+    "guardian-routine.v2": CapabilitySpec(
+        "guardian-routine.v2",
+        "guardian-routine.v2",
+        input_category="task",
+        secret_like=False,
     ),
     "browser.public-task.v1": CapabilitySpec(
         "browser.public-task.v1",
@@ -879,7 +1005,7 @@ def _parse_typed_input(task: WorkBoardTask) -> dict[str, Any]:
     except ValidationError as exc:
         raise TypedInputError("typed_input_invalid", "typed input does not match the capability schema") from exc
     result = validated.model_dump(mode="json", exclude_none=True)
-    if capability_id == "guardian-routine.v1":
+    if capability_id in {"guardian-routine.v1", "guardian-routine.v2"}:
         if (
             result.get("goal_id") != _text(getattr(task, "goal_id", ""))
             or int(result.get("expected_goal_revision", 0))
@@ -944,6 +1070,1156 @@ class WorkBoardDispatcher:
         # handle so cancellation can stop that worker before the durable root
         # is reconciled; no client supplied identifier can reach this map.
         self._active_worker_tasks = _ACTIVE_WORKER_TASKS
+
+    async def _execute_v2_leaf_adapter(
+        self,
+        task: WorkBoardTask,
+        attempt: WorkBoardAttempt,
+        step: Mapping[str, Any],
+        descriptor: Mapping[str, Any],
+        child: Mapping[str, Any],
+        *,
+        runtime_seconds: int,
+    ) -> Mapping[str, Any]:
+        """Execute one v2 leaf through its existing capability owner."""
+
+        step_id = _text(step.get("step_id"))
+        values: Mapping[str, Any] = {}
+        executable = descriptor.get("executable_steps")
+        if isinstance(executable, Mapping):
+            candidate = executable.get(step_id)
+            if isinstance(candidate, Mapping):
+                values = candidate
+        elif executable is not None:
+            return {
+                "status": "blocked",
+                "reason_code": "procedure_descriptor_steps_invalid",
+                "recovery_action": "reconcile_admission_binding",
+                "memory_status": "no_learning",
+            }
+        if _text(step.get("capability_id")) == "guardian.research-watch.v1":
+            from src.guardian.source_watch import source_watch_service
+
+            watch_id = _text(values.get("watch_id"))
+            expected_value = values.get("expected_plan_revision")
+            if not watch_id or type(expected_value) is not int or expected_value < 1:
+                return {"status": "blocked", "reason_code": "watch_input_binding_invalid", "memory_status": "no_learning"}
+            expected_revision = expected_value
+            binding = child.get("_v2_watch_binding") if isinstance(child.get("_v2_watch_binding"), Mapping) else {}
+            child_authority = child.get("declared_authority") if isinstance(child.get("declared_authority"), Mapping) else {}
+            routine_parent_id = _text(binding.get("parent_job_id") or child_authority.get("routine_parent_job_id")) or None
+            routine_parent_fence = binding.get("parent_fencing_token")
+            if routine_parent_fence is None:
+                routine_parent_fence = child_authority.get("routine_parent_fencing_token")
+            routine_step_id = _text(binding.get("step_id") or child_authority.get("routine_step_id")) or None
+            routine_parent_deadline_at = None
+            if routine_parent_id:
+                parent_projection = await self.jobs.get_job(routine_parent_id)
+                if not isinstance(parent_projection, Mapping):
+                    return {
+                        "status": "blocked",
+                        "reason_code": "procedure_parent_missing",
+                        "memory_status": "no_learning",
+                    }
+                routine_parent_deadline_at = parent_projection.get("deadline_at")
+
+            async def routine_parent_guard() -> bool:
+                """Re-read the canonical parent Board fence before Watch I/O."""
+
+                authority = child.get("declared_authority") if isinstance(child.get("declared_authority"), Mapping) else {}
+                parent_job_id = _text(binding.get("parent_job_id") or authority.get("routine_parent_job_id"))
+                parent_fence = binding.get("parent_fencing_token")
+                if parent_fence is None:
+                    parent_fence = authority.get("routine_parent_fencing_token")
+                try:
+                    result = await self._browser_assert_current(
+                        task_id=task.task_id,
+                        attempt_id=attempt.attempt_id,
+                        owner_principal_id=task.owner_principal_id,
+                        owner_session_id=task.owner_session_id,
+                        board_task_revision=int(task.task_revision),
+                        board_fencing_token=int(attempt.fencing_token),
+                        input_artifact_id=task.input_artifact_id,
+                        durable_job_id=_text(child.get("job_id") or child.get("run_identity")),
+                        routine_parent_job_id=parent_job_id,
+                        routine_parent_fencing_token=int(parent_fence or 0),
+                        routine_step_id=step_id,
+                    )
+                except Exception:
+                    return False
+                return result is True
+
+            result = await source_watch_service.run_watch(
+                watch_id,
+                occurrence_id=_text(binding.get("occurrence_id"))
+                or _text((child.get("declared_authority") or {}).get("occurrence_id"))
+                or _text((child.get("inputs") or {}).get("occurrence_id"))
+                or _text(child.get("child_occurrence_id")),
+                expected_plan_revision=expected_revision,
+                expected_owner_session_id=task.owner_session_id,
+                routine_parent_job_id=routine_parent_id,
+                routine_parent_fencing_token=int(routine_parent_fence or 0) if routine_parent_id else None,
+                routine_step_id=routine_step_id,
+                routine_parent_deadline_at=routine_parent_deadline_at,
+                routine_parent_guard=routine_parent_guard,
+            )
+            return dict(result)
+        if _text(step.get("capability_id")) in {"browser.public-task.v1", "calendar.meeting-prep.v1"}:
+            binding = child.get("_procedure_binding")
+            if not isinstance(binding, ProcedureChildBinding):
+                return {
+                    "status": "blocked",
+                    "reason_code": "procedure_leaf_board_binding_unavailable",
+                    "recovery_action": "reconcile_admission_binding",
+                    "memory_status": "no_learning",
+                }
+            child_task = binding.child_task
+            child_attempt = binding.child_attempt
+            capability_id = _text(step.get("capability_id"))
+            if capability_id == "browser.public-task.v1":
+                return await self._execute_v2_browser_leaf(
+                    child_task,
+                    child_attempt,
+                    child,
+                    runtime_seconds=runtime_seconds,
+                )
+            return await self._execute_v2_calendar_leaf(
+                child_task,
+                child_attempt,
+                child,
+                runtime_seconds=runtime_seconds,
+            )
+        return {
+            "status": "blocked",
+            "reason_code": "procedure_leaf_board_binding_unavailable",
+            "recovery_action": "reconcile_admission_binding",
+            "memory_status": "no_learning",
+        }
+
+    @staticmethod
+    def _build_procedure_child_binding(
+        *,
+        parent: Mapping[str, Any],
+        step: Mapping[str, Any],
+        descriptor: Mapping[str, Any],
+        child_id: str,
+        child_task: WorkBoardTask,
+        child_attempt: WorkBoardAttempt,
+        input_payload: Mapping[str, Any],
+        child_admission_task_revision: int | None = None,
+    ) -> ProcedureChildBinding:
+        """Build the only server-side Calendar/Browser child-root selector."""
+
+        try:
+            binding = ProcedureChildBinding.build(
+                parent=parent,
+                step=step,
+                descriptor=descriptor,
+                child_id=child_id,
+                child_task=child_task,
+                child_attempt=child_attempt,
+                input_payload=input_payload,
+                child_admission_task_revision=child_admission_task_revision,
+            )
+        except (TypeError, ValueError, KeyError) as exc:
+            raise DurableJobError("procedure_child_binding_invalid") from exc
+        if (
+            binding.child_capability_id not in {"browser.public-task.v1", "calendar.meeting-prep.v1"}
+            or binding.child_capability_version != "1"
+            or not binding.parent_job_id
+            or binding.parent_fencing_token <= 0
+            or not binding.parent_plan_digest
+            or binding.parent_goal_revision < 1
+            or binding.parent_board_fencing_token <= 0
+            or not binding.child_job_id
+            or not binding.child_input_artifact_id
+            or not binding.child_input_artifact_digest
+            or binding.child_goal_revision < 1
+            or binding.child_admission_task_revision < 1
+        ):
+            raise DurableJobError("procedure_child_binding_invalid")
+        expected_step = {
+            "browser.public-task.v1": "public_browser_check",
+            "calendar.meeting-prep.v1": "selected_meeting_prep",
+        }[binding.child_capability_id]
+        if binding.step_id != expected_step:
+            raise DurableJobError("procedure_child_step_invalid")
+        return binding
+
+    async def _validate_v2_parent_board_binding(
+        self,
+        *,
+        parent: Mapping[str, Any],
+        parent_id: str,
+        parent_fencing_token: int,
+    ) -> None:
+        """Re-read the routine's canonical Board task/attempt before replay.
+
+        The durable routine projection is only a recovery hint.  A cancelled
+        or re-fenced parent Board attempt must stop adoption before a terminal
+        child result is projected onto the next procedure step.
+        """
+
+        authority = parent.get("declared_authority") if isinstance(parent.get("declared_authority"), Mapping) else {}
+        task_id = _text(authority.get("board_task_id"))
+        attempt_id = _text(authority.get("board_attempt_id"))
+        owner_id = _text(authority.get("principal"))
+        session_id = _text(authority.get("session_id"))
+        expected_revision = int(authority.get("board_task_revision") or 0)
+        expected_board_fence = int(authority.get("board_fencing_token") or 0)
+        goal_id = _text(parent.get("goal_id") or authority.get("goal_id"))
+        goal_revision = int(parent.get("goal_revision") or authority.get("goal_revision") or 0)
+        if (
+            not task_id
+            or not attempt_id
+            or not owner_id
+            or not session_id
+            or expected_revision < 1
+            or expected_board_fence < 1
+            or goal_revision < 1
+            or expected_board_fence <= 0
+        ):
+            raise DurableJobError("procedure_parent_board_binding_missing")
+        if _text(parent.get("job_id") or parent.get("run_identity")) != parent_id:
+            raise DurableJobError("procedure_parent_identity_stale")
+        parent_lease = parent.get("lease") if isinstance(parent.get("lease"), Mapping) else {}
+        if (
+            _text(parent.get("status")) != "running"
+            or int(parent_lease.get("fencing_token") or 0) != int(parent_fencing_token)
+            or int(parent_fencing_token) < 1
+        ):
+            raise DurableJobError("procedure_parent_authority_stale")
+        owner = WorkBoardOwner(principal_id=owner_id, session_id=session_id)
+        async with self.session_provider() as db:
+            task = await self.repository.get_task(db, owner, task_id)
+            attempt = (
+                await db.execute(
+                    select(WorkBoardAttempt).where(
+                        WorkBoardAttempt.task_id == task_id,
+                        WorkBoardAttempt.attempt_id == attempt_id,
+                    )
+                )
+            ).scalar_one_or_none()
+        observed_at = _utc_datetime(self.now())
+        if attempt is None or not (
+            task.status is WorkBoardStatus.running
+            and int(task.task_revision) >= expected_revision
+            and _text(task.owner_principal_id) == owner_id
+            and _text(task.owner_session_id) == session_id
+            and _text(task.goal_id) == goal_id
+            and int(task.goal_revision) == goal_revision
+            and int(attempt.fencing_token or 0) == expected_board_fence
+            and _text(attempt.lease_owner) == self.runner_id
+            and attempt.lease_expires_at is not None
+            and _utc_datetime(attempt.lease_expires_at) > observed_at
+            and attempt.ended_at is None
+            and attempt.cancel_requested_at is None
+            and _text(attempt.workflow_run_id) in {"", parent_id}
+        ):
+            raise DurableJobError("procedure_parent_board_binding_stale")
+
+    async def _validate_v2_replay_binding(
+        self,
+        *,
+        parent: Mapping[str, Any],
+        child: Mapping[str, Any],
+        checkpoint: Mapping[str, Any],
+        step: Mapping[str, Any],
+        expected_child_id: str,
+    ) -> Mapping[str, Any] | None:
+        """Validate a terminal native child without contacting its adapter."""
+
+        parent_id = _text(parent.get("job_id") or parent.get("run_identity"))
+        parent_lease = parent.get("lease") if isinstance(parent.get("lease"), Mapping) else {}
+        parent_fence = int(parent_lease.get("fencing_token") or 0)
+        # Replay adoption is a terminal write boundary.  Revalidate every
+        # mutable parent authority before inspecting any native proof so a
+        # stale Watch/Browser/Calendar receipt cannot be adopted after logout,
+        # Goal revision, routine, lease, or Board cancellation.
+        if not await self._validate_v2_parent_current(
+            routine_parent_job_id=parent_id,
+            routine_parent_fencing_token=parent_fence,
+        ):
+            raise DurableJobError("procedure_parent_authority_stale")
+        await self._validate_v2_parent_board_binding(
+            parent=parent,
+            parent_id=parent_id,
+            parent_fencing_token=parent_fence,
+        )
+        payload = checkpoint.get("payload") if isinstance(checkpoint.get("payload"), Mapping) else {}
+        capability_id = _text(step.get("capability_id"))
+        if capability_id == "guardian.research-watch.v1":
+            return {"verified": True, "parent_board_revalidated": True}
+        if capability_id not in {"browser.public-task.v1", "calendar.meeting-prep.v1"}:
+            raise DurableJobError("procedure_child_capability_invalid")
+        authority = parent.get("declared_authority") if isinstance(parent.get("declared_authority"), Mapping) else {}
+        owner_id = _text(authority.get("principal"))
+        session_id = _text(authority.get("session_id"))
+        child_task_id = _text(payload.get("child_task_id"))
+        child_attempt_id = _text(payload.get("child_attempt_id"))
+        artifact_id = _text(payload.get("child_input_artifact_id"))
+        if not child_task_id or not child_attempt_id or not artifact_id:
+            raise DurableJobError("procedure_child_binding_missing")
+        owner = WorkBoardOwner(principal_id=owner_id, session_id=session_id)
+        async with self.session_provider() as db:
+            child_task = await self.repository.get_task(db, owner, child_task_id)
+            child_attempt = (
+                await db.execute(
+                    select(WorkBoardAttempt).where(
+                        WorkBoardAttempt.task_id == child_task_id,
+                        WorkBoardAttempt.attempt_id == child_attempt_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            artifact = await db.get(WorkBoardInputArtifact, artifact_id)
+        if child_attempt is None or artifact is None:
+            raise DurableJobError("procedure_child_binding_missing")
+        if child_attempt.ended_at is None or _text(child_attempt.outcome) != "verified":
+            raise DurableJobError("procedure_child_terminal_unverified")
+        descriptor = parent.get("inputs") if isinstance(parent.get("inputs"), Mapping) else {}
+        binding = self._build_procedure_child_binding(
+            parent=parent,
+            step=step,
+            descriptor=descriptor,
+            child_id=expected_child_id,
+            child_task=child_task,
+            child_attempt=child_attempt,
+            input_payload=(
+                descriptor.get("executable_steps", {}).get(_text(step.get("step_id")), {})
+                if isinstance(descriptor.get("executable_steps"), Mapping)
+                else {}
+            ),
+            child_admission_task_revision=(
+                int(payload.get("child_admission_task_revision"))
+                if type(payload.get("child_admission_task_revision")) is int
+                else None
+            ),
+        )
+        await self._validate_procedure_child_binding(binding, projection=child)
+        return {"verified": True, "parent_board_revalidated": True, "child_board_revalidated": True}
+
+    async def _validate_v2_parent_current(self, **binding: Any) -> bool:
+        """Revalidate one managed procedure parent before coordinator writes.
+
+        The durable parent projection is only a recovery index.  Before a
+        procedure can publish a leaf result, re-read every mutable authority
+        that can revoke that result: the durable lease/deadline, the Board
+        task and attempt, the authenticated operator session, the current
+        Goal, and the reviewed routine/version selector.  This callback is a
+        server-only seam; its caller cannot supply replacement authority.
+        """
+
+        parent_id = _text(binding.get("routine_parent_job_id"))
+        if not parent_id:
+            return False
+        try:
+            parent_fence = int(binding.get("routine_parent_fencing_token") or 0)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        parent = await self.jobs.get_job(parent_id)
+        if not isinstance(parent, Mapping) or parent_fence < 1:
+            return False
+        if (
+            _text(parent.get("job_id") or parent.get("run_identity")) != parent_id
+            or _text(parent.get("status")) != "running"
+            or _text(parent.get("job_kind")) != "guardian_routine_v2"
+            or _text(parent.get("capability_version")) != "guardian-routine.v2"
+        ):
+            return False
+        parent_lease = parent.get("lease") if isinstance(parent.get("lease"), Mapping) else {}
+        lease_owner = _text(parent_lease.get("owner"))
+        persisted_fence = parent_lease.get("fencing_token")
+        if (
+            not lease_owner
+            or type(persisted_fence) is not int
+            or persisted_fence != parent_fence
+            or parent_fence < 1
+        ):
+            return False
+        # Re-read the canonical durable row through its lease CAS.  This
+        # catches a cancellation, fence rollover, or lease expiry between the
+        # projection read and this boundary.  Use the returned projection for
+        # all subsequent identity checks rather than the stale first read.
+        try:
+            parent = await self.jobs.assert_active_lease(
+                parent_id,
+                owner=lease_owner,
+                fencing_token=parent_fence,
+            )
+        except Exception:
+            return False
+        if not isinstance(parent, Mapping):
+            return False
+        deadline_raw = parent.get("deadline_at")
+        try:
+            if not isinstance(deadline_raw, str) or not deadline_raw.strip():
+                return False
+            deadline = datetime.fromisoformat(deadline_raw.replace("Z", "+00:00"))
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=timezone.utc)
+            if _utc_datetime(deadline) <= _utc_datetime(self.now()):
+                return False
+        except (TypeError, ValueError, OverflowError):
+            return False
+
+        authority = parent.get("declared_authority")
+        if not isinstance(authority, Mapping):
+            return False
+
+        def _positive_int(value: Any) -> int | None:
+            return value if type(value) is int and value > 0 else None
+
+        # The durable job projection intentionally omits its private input
+        # body.  The admission authority is the canonical server-created
+        # copy of the identity fields needed at this boundary.
+        routine_id = _text(authority.get("routine_id"))
+        routine_version = _positive_int(authority.get("routine_version"))
+        expected_routine_revision = _positive_int(authority.get("routine_revision"))
+        template_id = _text(authority.get("template_id"))
+        plan_digest = _text(authority.get("plan_digest"))
+        invocation_uuid = _text(authority.get("invocation_uuid"))
+        authority_routine_revision = _positive_int(authority.get("routine_revision"))
+        if (
+            not routine_id
+            or routine_version is None
+            or expected_routine_revision is None
+            or not template_id
+            or not plan_digest
+            or not invocation_uuid
+            or authority_routine_revision != expected_routine_revision
+            or _text(authority.get("capability_id")) != "guardian-routine.v2"
+        ):
+            return False
+
+        parent_goal_id = _text(parent.get("goal_id"))
+        parent_goal_revision = _positive_int(parent.get("goal_revision"))
+        authority_goal_id = _text(authority.get("goal_id"))
+        authority_goal_revision = _positive_int(authority.get("goal_revision"))
+        owner = parent.get("owner") if isinstance(parent.get("owner"), Mapping) else {}
+        owner_principal_id = _text(authority.get("principal"))
+        owner_session_id = _text(authority.get("session_id"))
+        if (
+            not parent_goal_id
+            or parent_goal_revision is None
+            or authority_goal_id != parent_goal_id
+            or authority_goal_revision != parent_goal_revision
+            or _text(owner.get("kind")) != "user"
+            or _text(owner.get("principal_id")) != owner_principal_id
+            or _text(parent.get("operator_session_id") or parent.get("session_id")) != owner_session_id
+            or _text(authority.get("operator_session_id") or authority.get("session_id")) != owner_session_id
+            or not owner_principal_id
+            or not owner_session_id
+        ):
+            return False
+
+        package_digest = _text(authority.get("package_digest"))
+        if not package_digest:
+            return False
+        try:
+            await self._validate_v2_parent_board_binding(
+                parent=parent,
+                parent_id=parent_id,
+                parent_fencing_token=parent_fence,
+            )
+        except DurableJobError:
+            return False
+
+        # The Board helper verifies the attempt fence and permits only its
+        # known monotonic task revision advance.  Re-read the task in the
+        # same current owner/goal binding and validate its Goal through the
+        # repository's canonical owner/revision/status helper.
+        task_id = _text(authority.get("board_task_id"))
+        expected_input_artifact = _text(authority.get("input_artifact_id"))
+        expected_input_digest = _text(authority.get("input_artifact_digest"))
+        try:
+            async with self.session_provider() as db:
+                task = await self.repository.get_task(
+                    db,
+                    WorkBoardOwner(
+                        principal_id=owner_principal_id,
+                        session_id=owner_session_id,
+                    ),
+                    task_id,
+                )
+                live_goal = await self.repository.validate_task_goal(
+                    db,
+                    WorkBoardOwner(
+                        principal_id=owner_principal_id,
+                        session_id=owner_session_id,
+                    ),
+                    task,
+                )
+                if (
+                    _text(task.capability_id) != "guardian-routine.v2"
+                    or _text(task.task_id) != task_id
+                    or int(task.goal_revision or 0) != parent_goal_revision
+                    or _text(task.goal_id) != parent_goal_id
+                    or _text(task.input_artifact_id) != expected_input_artifact
+                    or _text(task.typed_input_digest) != expected_input_digest
+                    or _text(live_goal.id) != parent_goal_id
+                    or int(live_goal.revision or 0) != parent_goal_revision
+                    or _text(live_goal.owner_principal_id) != owner_principal_id
+                    or _text(live_goal.owner_session_id) != owner_session_id
+                ):
+                    return False
+
+                # Re-read the owner-bound parent input bytes.  The durable
+                # authority digest and artifact pointer identify the expected
+                # source, while this decode proves the current immutable
+                # envelope still names the same routine/version/revision and
+                # invocation before terminal publication.
+                from src.work_board.input_artifacts import resolve_input_artifact_for_task
+
+                resolved_input = await resolve_input_artifact_for_task(
+                    db,
+                    WorkBoardOwner(
+                        principal_id=owner_principal_id,
+                        session_id=owner_session_id,
+                    ),
+                    artifact_id=expected_input_artifact,
+                    goal_id=parent_goal_id,
+                    goal_revision=parent_goal_revision,
+                    capability_id="guardian-routine.v2",
+                    expected_task_id=task.task_id,
+                )
+                parent_input = resolved_input.input
+                if (
+                    not isinstance(parent_input, Mapping)
+                    or _text(parent_input.get("routine_id")) != routine_id
+                    or type(parent_input.get("version")) is not int
+                    or int(parent_input.get("version")) != routine_version
+                    or type(parent_input.get("expected_routine_revision")) is not int
+                    or int(parent_input.get("expected_routine_revision")) != expected_routine_revision
+                    or _text(parent_input.get("invocation_uuid")) != invocation_uuid
+                ):
+                    return False
+
+                # Strictly authenticate the current session.  The explicit
+                # test-only bypass remains the same narrow fixture seam used
+                # by the existing native integration tests; production rows
+                # always take authenticate_session and never follow a legacy
+                # replacement alias.
+                try:
+                    operator = await authenticate_session(owner_session_id, touch=False)
+                except AuthFailure:
+                    if not (
+                        settings.deployment_environment == "test"
+                        and settings.operator_auth_allow_unauthenticated_tests
+                        and owner_session_id == "test-auth-bypass"
+                        and owner_principal_id == "operator:test-bypass"
+                    ):
+                        return False
+                else:
+                    if (
+                        _text(getattr(operator, "session_id", None)) != owner_session_id
+                        or _text(getattr(getattr(operator, "principal", None), "principal_id", None))
+                        != owner_principal_id
+                    ):
+                        return False
+
+                routine = (
+                    await db.execute(
+                        select(GuardianRoutine).where(
+                            GuardianRoutine.id == routine_id,
+                            GuardianRoutine.owner_principal_id == owner_principal_id,
+                            GuardianRoutine.owner_session_id == owner_session_id,
+                            GuardianRoutine.state == "active",
+                            GuardianRoutine.revision == authority_routine_revision,
+                            GuardianRoutine.current_version == routine_version,
+                        )
+                    )
+                ).scalar_one_or_none()
+                version = (
+                    await db.execute(
+                        select(GuardianRoutineVersion).where(
+                            GuardianRoutineVersion.routine_id == routine_id,
+                            GuardianRoutineVersion.version == routine_version,
+                            GuardianRoutineVersion.installed_package_digest == package_digest,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if routine is None or version is None:
+                    return False
+                # The database rows pin the routine/version identity, while
+                # the capability-pack lifecycle owns the mutable active,
+                # paused, and revoked package pointer.  Re-read that pointer
+                # through the existing owner-bound routine service before a
+                # terminal proof can be adopted; a routine row that remains
+                # active after package revocation is not executable proof.
+                from src.workflows.routines import routine_service
+
+                package_readback = routine_service._package_readback(
+                    owner_principal_id,
+                    owner_session_id,
+                    routine_id,
+                    routine_version,
+                    package_digest,
+                )
+                if (
+                    not isinstance(package_readback, Mapping)
+                    or _text(package_readback.get("status")) != "active"
+                    or _text(package_readback.get("digest")) != package_digest
+                ):
+                    return False
+
+                # Manual invocations retain their explicit operator path. A
+                # standing scheduled invocation must additionally satisfy the
+                # existing finite reviewed budget, proactivity, period, and
+                # quiet-hour gates.  No notification budget is consulted here:
+                # task execution and unsolicited delivery are separate policy
+                # decisions in the scheduler contract.
+                if invocation_uuid.startswith("schedule:"):
+                    from src.guardian.source_watch import _goal_admission
+                    from src.workflows.procedure_service import ProcedureV2Service
+
+                    try:
+                        ProcedureV2Service._validate_schedule_goal_budget(
+                            live_goal,
+                            owner_principal_id=owner_principal_id,
+                            owner_session_id=owner_session_id,
+                            expected_goal_revision=parent_goal_revision,
+                            now=self.now(),
+                        )
+                    except Exception:
+                        return False
+                    admitted, _reason, _budget = _goal_admission(live_goal)
+                    if not admitted:
+                        return False
+                elif getattr(live_goal, "admission_budget_json", None):
+                    # An explicitly invoked parent does not need standing
+                    # proactivity consent, but a present budget still bounds
+                    # the execution. A malformed current budget is fail-closed.
+                    budget = deserialize_admission_budget(live_goal)
+                    if budget is None or int(getattr(budget, "max_runtime_seconds", 0) or 0) < 1:
+                        return False
+                    remaining = (_utc_datetime(deadline) - _utc_datetime(self.now())).total_seconds()
+                    if remaining > int(budget.max_runtime_seconds):
+                        return False
+        except Exception:
+            return False
+        return True
+
+    async def _validate_procedure_child_binding(
+        self,
+        binding: ProcedureChildBinding,
+        *,
+        projection: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Revalidate parent, child board rows, artifact and native root identity.
+
+        This check is intentionally repeated at each native boundary.  The
+        dataclass is server-built, but its contents are still stale after a
+        restart, cancellation, revision change, or concurrent board writer.
+        """
+
+        from src.workflows.procedure_v2_runtime import deterministic_child_job_id
+
+        parent = await self.jobs.get_job(binding.parent_job_id)
+        if not isinstance(parent, Mapping) or _text(parent.get("status")) != "running":
+            raise DurableJobError("procedure_parent_authority_stale")
+        parent_lease = parent.get("lease") if isinstance(parent.get("lease"), Mapping) else {}
+        if int(parent_lease.get("fencing_token") or 0) != binding.parent_fencing_token:
+            raise DurableJobError("procedure_parent_fence_stale")
+        parent_authority = parent.get("declared_authority") if isinstance(parent.get("declared_authority"), Mapping) else {}
+        if (
+            _text(parent_authority.get("plan_digest")) != binding.parent_plan_digest
+            or _text(parent_authority.get("template_id")) != binding.parent_template_id
+            or int(parent_authority.get("routine_version") or 0) != binding.parent_routine_version
+            or _text(parent.get("goal_id")) != binding.parent_goal_id
+            or int(parent.get("goal_revision") or 0) != binding.parent_goal_revision
+            or _text(parent_authority.get("principal")) != binding.parent_owner_principal_id
+            or _text(parent_authority.get("session_id")) != binding.parent_owner_session_id
+        ):
+            raise DurableJobError("procedure_parent_authority_stale")
+        await self._validate_v2_parent_board_binding(
+            parent=parent,
+            parent_id=binding.parent_job_id,
+            parent_fencing_token=binding.parent_fencing_token,
+        )
+        expected_child_id = deterministic_child_job_id(
+            binding.parent_job_id,
+            binding.parent_template_id,
+            binding.parent_routine_version,
+            binding.step_id,
+        )
+        if expected_child_id != binding.child_job_id:
+            raise DurableJobError("procedure_child_identity_mismatch")
+
+        owner = WorkBoardOwner(
+            principal_id=binding.child_owner_principal_id,
+            session_id=binding.child_owner_session_id,
+        )
+        async with self.session_provider() as db:
+            current_task = await self.repository.get_task(db, owner, binding.child_task.task_id)
+            current_attempt = (
+                await db.execute(
+                    select(WorkBoardAttempt).where(
+                        WorkBoardAttempt.task_id == binding.child_task.task_id,
+                        WorkBoardAttempt.attempt_id == binding.child_attempt.attempt_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            artifact = await db.get(WorkBoardInputArtifact, binding.child_input_artifact_id)
+        if current_attempt is None or artifact is None:
+            raise DurableJobError("procedure_child_binding_missing")
+        if (
+            current_task.task_id != binding.child_task.task_id
+            or int(current_task.task_revision) != int(binding.child_task.task_revision)
+            or current_task.goal_id != binding.child_goal_id
+            or int(current_task.goal_revision) != binding.child_goal_revision
+            or current_task.owner_principal_id != binding.parent_owner_principal_id
+            or current_task.owner_session_id != binding.parent_owner_session_id
+            or current_task.owner_principal_id != binding.child_owner_principal_id
+            or current_task.owner_session_id != binding.child_owner_session_id
+            or current_task.capability_id != binding.child_capability_id
+            or _text(current_task.input_artifact_id) != binding.child_input_artifact_id
+            or _text(current_task.typed_input_digest) != binding.child_input_artifact_digest
+            or current_attempt.attempt_id != binding.child_attempt.attempt_id
+            or int(current_attempt.fencing_token) != int(binding.child_attempt.fencing_token)
+            or current_attempt.task_id != binding.child_task.task_id
+            or artifact.owner_principal_id != binding.child_owner_principal_id
+            or artifact.owner_session_id != binding.child_owner_session_id
+            or artifact.capability_id != binding.child_capability_id
+            or artifact.payload_sha256 != binding.child_input_artifact_digest
+            or artifact.bound_task_id != binding.child_task.task_id
+        ):
+            raise DurableJobError("procedure_child_binding_stale")
+        if projection is None:
+            return
+        authority = projection.get("declared_authority") if isinstance(projection.get("declared_authority"), Mapping) else {}
+        if (
+            _text(projection.get("job_id") or projection.get("run_identity")) != binding.child_job_id
+            or _text(projection.get("parent_job_id")) != binding.parent_job_id
+            or _text(projection.get("parent_run_identity")) != binding.parent_job_id
+            or _text(projection.get("root_run_identity")) != binding.parent_job_id
+            or int(projection.get("parent_fencing_token") or 0) != binding.parent_fencing_token
+            or _text(projection.get("goal_id")) != binding.child_goal_id
+            or int(projection.get("goal_revision") or 0) != binding.child_goal_revision
+            or _text(authority.get("routine_parent_job_id")) != binding.parent_job_id
+            or int(authority.get("routine_parent_fencing_token") or 0) != binding.parent_fencing_token
+            or _text(authority.get("routine_step_id")) != binding.step_id
+            or (
+                binding.child_capability_id == "browser.public-task.v1"
+                and int(authority.get("board_task_revision") or 0)
+                != binding.child_admission_task_revision
+            )
+            # Calendar's existing native root persists the full typed parent
+            # context.  BrowserTaskRunner predates v2 and persists the
+            # validated parent id/fence/step markers; the dispatcher still
+            # rechecks the live parent plan before every browser effect, so
+            # requiring an absent legacy authority field here would make a
+            # valid native Browser root unrecoverable after restart.
+            or (
+                binding.child_capability_id == "calendar.meeting-prep.v1"
+                and _text(authority.get("routine_parent_plan_digest")) != binding.parent_plan_digest
+            )
+        ):
+            raise DurableJobError("procedure_child_root_binding_stale")
+
+    async def _admit_v2_browser_leaf(
+        self,
+        *,
+        parent: Mapping[str, Any],
+        step: Mapping[str, Any],
+        descriptor: Mapping[str, Any],
+        child_id: str,
+        inputs: Mapping[str, Any],
+        binding: Mapping[str, Any] | None,
+    ) -> Mapping[str, Any]:
+        """Admit BrowserTaskRunner's native root and link the real child card."""
+
+        if not isinstance(binding, Mapping):
+            raise DurableJobError("browser procedure child binding is missing")
+        from src.browser.task_runner import BrowserTaskInput, BrowserTaskRunner
+
+        child_task = binding.get("task")
+        child_attempt = binding.get("attempt")
+        if not isinstance(child_task, WorkBoardTask) or not isinstance(child_attempt, WorkBoardAttempt):
+            raise DurableJobError("browser procedure child binding is invalid")
+        child_admission_task_revision = int(child_task.task_revision)
+        procedure_binding = self._build_procedure_child_binding(
+            parent=parent,
+            step=step,
+            descriptor=descriptor,
+            child_id=child_id,
+            child_task=child_task,
+            child_attempt=child_attempt,
+            input_payload=binding.get("input") if isinstance(binding.get("input"), Mapping) else {},
+        )
+        await self._validate_procedure_child_binding(procedure_binding)
+        browser_input = BrowserTaskInput.model_validate(binding.get("input") or {})
+        max_attempts, max_outstanding = await self._effective_browser_limits(child_task)
+        from src.workflows.procedure_v2_runtime import procedure_v2_runtime
+
+        parent_remaining_seconds = procedure_v2_runtime._remaining_seconds(parent)
+        native_runtime_seconds = max(
+            1,
+            min(int(await self._effective_runtime(child_task)), parent_remaining_seconds, 180),
+        )
+        runner = BrowserTaskRunner(
+            jobs=self.jobs,
+            runtime_controls=self._browser_assert_current,
+            workspace_root=settings.workspace_dir,
+        )
+        admission = await runner.run(
+            task_id=child_task.task_id,
+            attempt_id=child_attempt.attempt_id,
+            owner_principal_id=child_task.owner_principal_id,
+            owner_session_id=child_task.owner_session_id,
+            goal_id=child_task.goal_id,
+            goal_revision=child_task.goal_revision,
+            board_task_revision=child_task.task_revision,
+            board_fencing_token=child_attempt.fencing_token,
+            task_priority=int(child_task.priority),
+            input_artifact_id=_text(child_task.input_artifact_id),
+            input_artifact_digest=_text(child_task.typed_input_digest),
+            inputs=browser_input,
+            runtime_seconds=native_runtime_seconds,
+            effective_max_attempts=max_attempts,
+            effective_max_outstanding_jobs=max_outstanding,
+            admission_only=True,
+            durable_job_id=child_id,
+            routine_parent_job_id=procedure_binding.parent_job_id,
+            routine_parent_fencing_token=procedure_binding.parent_fencing_token,
+            routine_step_id=procedure_binding.step_id,
+        )
+        job_id = self._adapter_job_id(admission)
+        if _status(admission) != "admitted" or job_id != child_id:
+            raise DurableJobError(_text(admission.get("reason_code")) or "browser_leaf_admission_blocked")
+        projection = await self.jobs.get_job(child_id)
+        if not isinstance(projection, Mapping):
+            raise DurableJobError("browser_leaf_admission_projection_missing")
+        await self._validate_procedure_child_binding(procedure_binding, projection=projection)
+        expected = self._browser_expected_identity(
+            child_task,
+            child_attempt,
+            browser_input,
+            projection,
+            native_runtime_seconds,
+            max_attempts=max_attempts,
+            max_outstanding_jobs=max_outstanding,
+            durable_job_id=child_id,
+            routine_parent_job_id=_text(parent.get("job_id") or parent.get("run_identity")),
+            routine_parent_fencing_token=int((parent.get("lease") or {}).get("fencing_token") or 0),
+            routine_step_id=_text(step.get("step_id")),
+        )
+        async with self.session_provider() as db:
+            linked = await self.repository.link_attempt_workflow_run(
+                db,
+                child_task.task_id,
+                child_attempt.attempt_id,
+                workflow_run_id=child_id,
+                expected_revision=child_task.task_revision,
+                board_fence=child_attempt.fencing_token,
+                lease_owner=child_attempt.lease_owner or self.runner_id,
+                workflow_projection=projection,
+                expected_identity=expected,
+                actor_principal_id=self.runner_id,
+                actor_session_id=self.runner_session,
+            )
+        child_task = linked.task
+        child_attempt = linked.attempt
+        procedure_binding = self._build_procedure_child_binding(
+            parent=parent,
+            step=step,
+            descriptor=descriptor,
+            child_id=child_id,
+            child_task=child_task,
+            child_attempt=child_attempt,
+            input_payload=browser_input.model_dump(mode="json", exclude_none=True),
+            child_admission_task_revision=child_admission_task_revision,
+        )
+        await self._validate_procedure_child_binding(procedure_binding, projection=projection)
+        return {
+            **dict(projection),
+            "_procedure_binding": procedure_binding,
+        }
+
+    async def _admit_v2_calendar_leaf(
+        self,
+        *,
+        parent: Mapping[str, Any],
+        step: Mapping[str, Any],
+        descriptor: Mapping[str, Any],
+        child_id: str,
+        inputs: Mapping[str, Any],
+        binding: Mapping[str, Any] | None,
+    ) -> Mapping[str, Any]:
+        """Use the existing M5 Calendar adapter with a server-only child root."""
+
+        if not isinstance(binding, Mapping):
+            raise DurableJobError("calendar procedure child binding is missing")
+        child_task = binding.get("task")
+        child_attempt = binding.get("attempt")
+        if not isinstance(child_task, WorkBoardTask) or not isinstance(child_attempt, WorkBoardAttempt):
+            raise DurableJobError("calendar procedure child binding is invalid")
+        canonical = dict(binding.get("input") or {})
+        procedure_binding = self._build_procedure_child_binding(
+            parent=parent,
+            step=step,
+            descriptor=descriptor,
+            child_id=child_id,
+            child_task=child_task,
+            child_attempt=child_attempt,
+            input_payload=canonical,
+        )
+        await self._validate_procedure_child_binding(procedure_binding)
+        from src.workflows.procedure_v2_runtime import procedure_v2_runtime
+
+        parent_remaining_seconds = procedure_v2_runtime._remaining_seconds(parent)
+        native_runtime_seconds = max(
+            1,
+            min(int(await self._effective_runtime(child_task)), parent_remaining_seconds, 180),
+        )
+        response = await self._execute_direct_adapter(
+            child_task,
+            child_attempt,
+            canonical,
+            runtime_seconds=native_runtime_seconds,
+            admission_only=True,
+            procedure_binding=procedure_binding,
+        )
+        if self._adapter_job_id(response) != child_id:
+            raise DurableJobIdempotencyConflict("calendar procedure admission returned a different root")
+        projection = await self.jobs.get_job(child_id)
+        if not isinstance(projection, Mapping):
+            raise DurableJobError("calendar_leaf_admission_projection_missing")
+        await self._validate_procedure_child_binding(procedure_binding, projection=projection)
+        expected = self._canonical_identity_from_projection(
+            child_task,
+            child_attempt,
+            canonical,
+            projection,
+            procedure_binding=procedure_binding,
+        )
+        async with self.session_provider() as db:
+            linked = await self.repository.link_attempt_workflow_run(
+                db,
+                child_task.task_id,
+                child_attempt.attempt_id,
+                workflow_run_id=child_id,
+                expected_revision=child_task.task_revision,
+                board_fence=child_attempt.fencing_token,
+                lease_owner=child_attempt.lease_owner or self.runner_id,
+                workflow_projection=projection,
+                expected_identity=expected,
+                actor_principal_id=self.runner_id,
+                actor_session_id=self.runner_session,
+            )
+        child_task = linked.task
+        child_attempt = linked.attempt
+        procedure_binding = self._build_procedure_child_binding(
+            parent=parent,
+            step=step,
+            descriptor=descriptor,
+            child_id=child_id,
+            child_task=child_task,
+            child_attempt=child_attempt,
+            input_payload=canonical,
+        )
+        await self._validate_procedure_child_binding(procedure_binding, projection=projection)
+        return {
+            **dict(projection),
+            "_procedure_binding": procedure_binding,
+        }
+
+    async def _execute_v2_browser_leaf(
+        self,
+        child_task: WorkBoardTask,
+        child_attempt: WorkBoardAttempt,
+        child: Mapping[str, Any],
+        *,
+        runtime_seconds: int,
+    ) -> Mapping[str, Any]:
+        from src.browser.task_lane import try_acquire_browser_task_lane
+        from src.browser.task_runner import BrowserTaskInput, BrowserTaskRunner
+
+        lane = try_acquire_browser_task_lane(settings.workspace_dir)
+        if lane is None:
+            return {"status": "blocked", "reason_code": "browser_slot_busy", "memory_status": "no_learning"}
+        binding = child.get("_procedure_binding")
+        if not isinstance(binding, ProcedureChildBinding):
+            lane.release()
+            return {"status": "blocked", "reason_code": "procedure_child_binding_invalid", "memory_status": "no_learning"}
+        child_task = binding.child_task
+        child_attempt = binding.child_attempt
+        input_model = BrowserTaskInput.model_validate(dict(binding.input))
+        admission_revision = int(binding.child_admission_task_revision)
+        current_projection = await self.jobs.get_job(binding.child_job_id)
+        await self._validate_procedure_child_binding(binding, projection=current_projection if isinstance(current_projection, Mapping) else None)
+        runner = BrowserTaskRunner(
+            jobs=self.jobs,
+            runtime_controls=self._browser_assert_current,
+            workspace_root=settings.workspace_dir,
+        )
+        started = False
+        try:
+            result = await runner.run(
+                task_id=child_task.task_id,
+                attempt_id=child_attempt.attempt_id,
+                owner_principal_id=child_task.owner_principal_id,
+                owner_session_id=child_task.owner_session_id,
+                goal_id=child_task.goal_id,
+                goal_revision=child_task.goal_revision,
+                board_task_revision=child_task.task_revision,
+                admission_board_task_revision=admission_revision,
+                board_fencing_token=child_attempt.fencing_token,
+                task_priority=int(child_task.priority),
+                input_artifact_id=_text(child_task.input_artifact_id),
+                input_artifact_digest=_text(child_task.typed_input_digest),
+                inputs=input_model,
+                runtime_seconds=max(1, min(int(runtime_seconds), 180)),
+                effective_max_attempts=(await self._effective_browser_limits(child_task))[0],
+                effective_max_outstanding_jobs=(await self._effective_browser_limits(child_task))[1],
+                admission_only=False,
+                durable_job_id=binding.child_job_id,
+            )
+            started = True
+            latest = await self.jobs.get_job(binding.child_job_id)
+            cleanup = _text(result.get("cleanup_status")) in {"cleanup_verified", "not_needed"}
+            if _status(result) == "succeeded" and isinstance(latest, Mapping) and cleanup:
+                proof = self._direct_readback({"status": "succeeded"}, latest, binding.child_job_id)
+                if proof is not None:
+                    await self._consume_v2_leaf_artifact(child_task)
+                    await self._project_v2_child(child_task, child_attempt, latest, result, proof=proof)
+                    return dict(result)
+            await self._project_v2_child(child_task, child_attempt, latest or {}, result, proof=None)
+            return dict(result)
+        except Exception as exc:
+            try:
+                latest = await self.jobs.get_job(binding.child_job_id)
+            except Exception:
+                latest = None
+            await self._project_v2_child(child_task, child_attempt, latest or {}, {"status": "blocked", "reason_code": _safe_error_code(exc)}, proof=None)
+            return {"status": "blocked", "reason_code": _safe_error_code(exc), "memory_status": "no_learning"}
+        finally:
+            terminal_status: str | None = None
+            try:
+                terminal = await self.jobs.get_job(binding.child_job_id)
+                terminal_status = _text(terminal.get("status")) if isinstance(terminal, Mapping) else None
+            except Exception:
+                # A missing durable projection after the browser has started
+                # is itself uncertain. Keep the lane quarantined so a later
+                # pass cannot overlap an effect whose terminal state is not
+                # readable.
+                terminal_status = "unknown_external_effect" if started else None
+            if started and terminal_status in {"unknown_external_effect", "cost_liability"}:
+                lane.quarantine(binding.child_job_id)
+            else:
+                lane.release()
+
+    async def _execute_v2_calendar_leaf(
+        self,
+        child_task: WorkBoardTask,
+        child_attempt: WorkBoardAttempt,
+        child: Mapping[str, Any],
+        *,
+        runtime_seconds: int,
+    ) -> Mapping[str, Any]:
+        binding = child.get("_procedure_binding")
+        if not isinstance(binding, ProcedureChildBinding):
+            return {"status": "blocked", "reason_code": "procedure_child_binding_invalid", "memory_status": "no_learning"}
+        child_task = binding.child_task
+        child_attempt = binding.child_attempt
+        canonical = dict(binding.input)
+        job_id = binding.child_job_id
+        await self._validate_procedure_child_binding(binding, projection=await self.jobs.get_job(job_id))
+        queued = await self.jobs.queue_job(job_id, expected_revision=child.get("revision"))
+        claimed = await self.jobs.claim_job(
+            job_id,
+            owner=self.runner_id,
+            lease_seconds=max(1, min(int(runtime_seconds), 180)),
+            expected_state="queued",
+            expected_revision=queued.get("revision"),
+            expected_fencing_token=queued.get("fencing_token") or (queued.get("lease") or {}).get("fencing_token"),
+        )
+        result = await self._execute_direct_adapter(
+            child_task,
+            child_attempt,
+            canonical,
+            runtime_seconds=max(1, min(int(runtime_seconds), 180)),
+            admission_only=False,
+            procedure_binding=binding,
+        )
+        latest = await self.jobs.get_job(job_id)
+        await self._validate_procedure_child_binding(binding, projection=latest if isinstance(latest, Mapping) else None)
+        proof = self._direct_readback(result, latest or {}, job_id)
+        if proof is not None:
+            await self._consume_v2_leaf_artifact(child_task)
+        await self._project_v2_child(child_task, child_attempt, latest or {}, result, proof=proof)
+        return dict(result)
+
+    async def _consume_v2_leaf_artifact(self, task: WorkBoardTask) -> None:
+        """Consume a native procedure leaf input exactly once after proof."""
+
+        artifact_id = _text(task.input_artifact_id)
+        if not artifact_id:
+            raise BoardError("procedure_leaf_input_missing", "The native procedure leaf has no input artifact")
+        from src.work_board.input_artifacts import (
+            consume_input_artifact,
+            read_input_artifact_metadata,
+            resolve_input_artifact_for_task,
+        )
+
+        owner = WorkBoardOwner(
+            principal_id=task.owner_principal_id,
+            session_id=task.owner_session_id,
+        )
+        async with self.session_provider() as db:
+            metadata = await read_input_artifact_metadata(db, owner, artifact_id=artifact_id)
+            if metadata.state == "consumed":
+                return
+            resolved = await resolve_input_artifact_for_task(
+                db,
+                owner,
+                artifact_id=artifact_id,
+                goal_id=task.goal_id,
+                goal_revision=int(task.goal_revision),
+                capability_id=_text(task.capability_id),
+                expected_task_id=task.task_id,
+            )
+            if resolved.row.bound_task_revision is None:
+                raise BoardError("input_artifact_task_conflict", "The native procedure leaf input binding is incomplete")
+            await consume_input_artifact(
+                db,
+                owner,
+                task_id=task.task_id,
+                task_revision=int(resolved.row.bound_task_revision),
+                artifact_id=resolved.row.artifact_id,
+            )
+
+    async def _project_v2_child(
+        self,
+        task: WorkBoardTask,
+        attempt: WorkBoardAttempt,
+        projection: Mapping[str, Any],
+        result: Mapping[str, Any],
+        *,
+        proof: Mapping[str, Any] | None,
+    ) -> None:
+        status = _status(projection)
+        if proof is not None and status == "succeeded":
+            await self._project(
+                task,
+                attempt,
+                board_revision=int(task.task_revision),
+                status=WorkBoardStatus.done,
+                outcome="verified",
+                proof=proof,
+                result_refs=[{"job_id": _text(projection.get("job_id")), "workflow_run_id": _text(projection.get("job_id")), "status": "succeeded", "verified": True}],
+                artifact_refs=result.get("artifact_refs"),
+            )
+            return
+        await self._project(
+            task,
+            attempt,
+            board_revision=int(task.task_revision),
+            status=WorkBoardStatus.blocked,
+            outcome="unknown_effect" if status in UNCERTAIN_EXTERNAL_EFFECT_STATUSES else "capability",
+            block_kind="unknown_effect" if status in UNCERTAIN_EXTERNAL_EFFECT_STATUSES else "capability",
+            block_reason="reconcile_admission_binding" if status in UNCERTAIN_EXTERNAL_EFFECT_STATUSES else _text(result.get("reason_code")) or "leaf_blocked",
+            result_refs=[{"job_id": _text(projection.get("job_id")), "workflow_run_id": _text(projection.get("job_id")), "status": "unknown" if status in UNCERTAIN_EXTERNAL_EFFECT_STATUSES else "blocked", "reason_code": _text(result.get("reason_code")) or "leaf_blocked"}],
+        )
 
     async def _expire_review_windows(self, *, now: datetime, limit: int = 100) -> int:
         """Sweep a bounded set of expired reviews through the review kernel."""
@@ -1142,7 +2418,7 @@ class WorkBoardDispatcher:
                 # immediately before any durable job admission.  A revoked
                 # session or disabled lane must spend no durable effect.
                 try:
-                    post_claim_error, post_claim_reason = await self._readiness(claim.task)
+                    post_claim_error, post_claim_reason = await self._post_claim_readiness(claim)
                 except Exception as exc:
                     # A failed live recheck is itself a failed admission
                     # prerequisite.  Convert unexpected read failures into a
@@ -2082,8 +3358,39 @@ class WorkBoardDispatcher:
             ).scalar_one_or_none()
         return effective_browser_limits(goal)
 
-    async def _readiness(self, task: WorkBoardTask) -> tuple[str | None, str | None]:
-        """Check live owner/goal authority before a claim is made."""
+    async def _post_claim_readiness(
+        self,
+        claim: BoardDispatchClaim,
+    ) -> tuple[str | None, str | None]:
+        """Recheck authority while preserving the exact claimed attempt.
+
+        The ordinary readiness path intentionally counts every persisted
+        attempt because it runs before a new claim.  After the repository has
+        atomically created the current attempt, that same count would reject
+        the final allowed attempt against itself.  Run the normal check first
+        so all existing authority races keep their original behavior; only an
+        ``attempt_limit`` result may be reconsidered, and only after the
+        server-owned attempt binding is proved against the live database row.
+        """
+
+        error, reason = await self._readiness(claim.task)
+        if error != "attempt_limit":
+            return error, reason
+        return await self._readiness(claim.task, _claimed_attempt=claim.attempt)
+
+    async def _readiness(
+        self,
+        task: WorkBoardTask,
+        *,
+        _claimed_attempt: WorkBoardAttempt | None = None,
+    ) -> tuple[str | None, str | None]:
+        """Check live owner/goal authority before a claim is made.
+
+        ``_claimed_attempt`` is a private dispatcher-only proof used after an
+        atomic claim.  It can exempt exactly that current attempt from the
+        persisted attempt count; callers cannot provide this context through
+        an API input or a public retry request.
+        """
 
         try:
             operator = await authenticate_session(task.owner_session_id, touch=False)
@@ -2120,7 +3427,41 @@ class WorkBoardDispatcher:
                     )
                     or 0
                 )
-                if attempt_count >= max_attempts:
+                claimed_attempt_is_current = False
+                if _claimed_attempt is not None:
+                    current_task = await db.scalar(
+                        select(WorkBoardTask).where(
+                            WorkBoardTask.task_id == task.task_id,
+                            WorkBoardTask.owner_principal_id == task.owner_principal_id,
+                            WorkBoardTask.owner_session_id == task.owner_session_id,
+                        )
+                    )
+                    current_attempt = await db.scalar(
+                        select(WorkBoardAttempt).where(
+                            WorkBoardAttempt.attempt_id == _claimed_attempt.attempt_id,
+                            WorkBoardAttempt.task_id == task.task_id,
+                        )
+                    )
+                    now = _utc_datetime(self.now())
+                    claimed_attempt_is_current = bool(
+                        current_task is not None
+                        and current_task.status is WorkBoardStatus.running
+                        and int(current_task.task_revision) == int(task.task_revision)
+                        and int(current_task.task_revision)
+                        == int(_claimed_attempt.task_revision_at_claim) + 1
+                        and current_attempt is not None
+                        and current_attempt.task_id == task.task_id
+                        and current_attempt.task_revision_at_claim == _claimed_attempt.task_revision_at_claim
+                        and current_attempt.lease_owner == _claimed_attempt.lease_owner == self.runner_id
+                        and int(current_attempt.fencing_token or 0) == int(_claimed_attempt.fencing_token or 0)
+                        and int(current_attempt.fencing_token or 0) > 0
+                        and current_attempt.ended_at is None
+                        and current_attempt.cancel_requested_at is None
+                        and current_attempt.lease_expires_at is not None
+                        and _utc_datetime(current_attempt.lease_expires_at) > now
+                    )
+                effective_attempt_count = attempt_count - int(claimed_attempt_is_current)
+                if effective_attempt_count >= max_attempts:
                     return "attempt_limit", "The board attempt limit has been exhausted"
         if goal is None:
             return "goal_not_found_or_not_owned", "The task goal is missing or owned by another operator"
@@ -2491,6 +3832,28 @@ class WorkBoardDispatcher:
                     return "source_watch_not_active", "The procedure source watch is not currently active"
                 if int(watch.get("plan_revision") or 0) != int(inputs["expected_watch_revision"]):
                     return "watch_plan_revision_stale", "The procedure source watch revision changed"
+                return None, None
+
+            if capability == "guardian-routine.v2":
+                # The v2 resolver is read-only and owns package/source-proof,
+                # strict-template, current goal and owner/session checks.  A
+                # dispatcher preflight must not create a durable job or leaf.
+                from src.workflows.procedure_v2_runtime import ProcedureV2RuntimeError, procedure_v2_runtime
+
+                try:
+                    await procedure_v2_runtime._resolve_descriptor(
+                        None,
+                        routine_id=_text(inputs["routine_id"]),
+                        version=int(inputs["version"]),
+                        owner_principal_id=task.owner_principal_id,
+                        owner_session_id=task.owner_session_id,
+                        goal_id=task.goal_id,
+                        expected_goal_revision=int(inputs["expected_goal_revision"]),
+                        parameters=inputs.get("parameters") if isinstance(inputs.get("parameters"), Mapping) else inputs,
+                        invocation_uuid=_text(inputs["invocation_uuid"]),
+                    )
+                except ProcedureV2RuntimeError as exc:
+                    return exc.code, "The reviewed procedure is not currently executable"
                 return None, None
         except AuthFailure as exc:
             return exc.code, "The current capability authority is not valid"
@@ -2883,6 +4246,106 @@ class WorkBoardDispatcher:
                 ):
                     return False
 
+                # Procedure-v2 Browser leaves are native children of the
+                # running parent board attempt.  Recheck that parent at every
+                # transport boundary as well as the child lease: a durable
+                # parent row can still be stale relative to a cancelled or
+                # superseded Work Board attempt.
+                parent_job_id = _text(binding.get("routine_parent_job_id"))
+                parent_fence_value = binding.get("routine_parent_fencing_token")
+                child_projection = None
+                durable_job_id = _text(binding.get("durable_job_id"))
+                if durable_job_id:
+                    child_projection = await self.jobs.get_job(durable_job_id)
+                    child_authority = (
+                        child_projection.get("declared_authority")
+                        if isinstance(child_projection, Mapping)
+                        and isinstance(child_projection.get("declared_authority"), Mapping)
+                        else {}
+                    )
+                    if not parent_job_id:
+                        parent_job_id = _text(child_authority.get("routine_parent_job_id"))
+                    if parent_fence_value is None:
+                        parent_fence_value = child_authority.get("routine_parent_fencing_token")
+                if parent_job_id:
+                    try:
+                        parent_fence = int(parent_fence_value or 0)
+                    except (TypeError, ValueError, OverflowError):
+                        return False
+                    if parent_fence < 1:
+                        return False
+                    parent_projection = await self.jobs.get_job(parent_job_id)
+                    parent_authority = (
+                        parent_projection.get("declared_authority")
+                        if isinstance(parent_projection, Mapping)
+                        and isinstance(parent_projection.get("declared_authority"), Mapping)
+                        else {}
+                    )
+                    parent_lease = (
+                        parent_projection.get("lease")
+                        if isinstance(parent_projection, Mapping)
+                        and isinstance(parent_projection.get("lease"), Mapping)
+                        else {}
+                    )
+                    if not isinstance(parent_projection, Mapping):
+                        return False
+                    if (
+                        _text(parent_projection.get("status")) != "running"
+                        or int(parent_lease.get("fencing_token") or 0) != parent_fence
+                        or _text(parent_authority.get("board_task_id")) == ""
+                        or _text(parent_authority.get("board_attempt_id")) == ""
+                        or int(parent_authority.get("board_task_revision") or 0) < 1
+                        or int(parent_authority.get("board_fencing_token") or 0) < 1
+                    ):
+                        return False
+                    parent_owner_map = (
+                        parent_projection.get("owner")
+                        if isinstance(parent_projection.get("owner"), Mapping)
+                        else {}
+                    )
+                    parent_owner = WorkBoardOwner(
+                        principal_id=_text(parent_owner_map.get("principal_id")),
+                        session_id=_text(
+                            parent_projection.get("operator_session_id")
+                            or parent_projection.get("session_id")
+                        ),
+                    )
+                    if not parent_owner.principal_id or not parent_owner.session_id:
+                        return False
+                    parent_task = await self.repository.get_task(
+                        db,
+                        parent_owner,
+                        _text(parent_authority.get("board_task_id")),
+                    )
+                    parent_attempt = (
+                        await db.execute(
+                            select(WorkBoardAttempt).where(
+                                WorkBoardAttempt.task_id == _text(parent_authority.get("board_task_id")),
+                                WorkBoardAttempt.attempt_id == _text(parent_authority.get("board_attempt_id")),
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    parent_observed_at = _utc_datetime(self.now())
+                    if parent_attempt is None or not (
+                        parent_task.status is WorkBoardStatus.running
+                        # Linking the durable parent run is itself a fenced
+                        # board mutation and advances the task revision after
+                        # the parent authority snapshot was recorded.  The
+                        # live status, attempt fence, lease, and cancellation
+                        # checks below remain exact; accept only that known
+                        # monotonic revision advance here.
+                        and int(parent_task.task_revision) >= int(parent_authority.get("board_task_revision") or 0)
+                        and int(parent_attempt.fencing_token) == int(parent_authority.get("board_fencing_token") or 0)
+                        and _text(parent_attempt.lease_owner) == self.runner_id
+                        and parent_attempt.lease_expires_at is not None
+                        and _utc_datetime(parent_attempt.lease_expires_at) > parent_observed_at
+                        and parent_attempt.ended_at is None
+                        and parent_attempt.cancel_requested_at is None
+                        and _text(parent_task.goal_id) == _text(parent_projection.get("goal_id"))
+                        and int(parent_task.goal_revision) == int(parent_projection.get("goal_revision") or 0)
+                    ):
+                        return False
+
                 # A durable board lease is not sufficient authority by
                 # itself. Revalidate the authenticated operator session and
                 # principal binding at every browser transport boundary so a
@@ -2967,6 +4430,10 @@ class WorkBoardDispatcher:
         runtime_seconds: int,
         max_attempts: int = MAX_ATTEMPTS_PER_TASK,
         max_outstanding_jobs: int = 1,
+        durable_job_id: str | None = None,
+        routine_parent_job_id: str | None = None,
+        routine_parent_fencing_token: int | None = None,
+        routine_step_id: str | None = None,
     ) -> dict[str, Any]:
         """Derive the runner's immutable root identity from board state."""
 
@@ -2980,7 +4447,7 @@ class WorkBoardDispatcher:
         model = BrowserTaskInput.model_validate(dict(inputs))
         task_id = _text(task.task_id)
         attempt_id = _text(attempt.attempt_id)
-        job_id = f"browser-task:{task_id}:{attempt_id}"
+        job_id = _text(durable_job_id) or f"browser-task:{task_id}:{attempt_id}"
         model_json = model.model_dump(mode="json", exclude_none=True)
         input_envelope_digest, input_model_digest, action_consent_digest = _browser_input_digests(model)
         safe_inputs = {
@@ -3024,6 +4491,17 @@ class WorkBoardDispatcher:
                 "max_extract_bytes": 65_536,
             },
         }
+        if routine_parent_job_id:
+            authority["routine_parent_job_id"] = routine_parent_job_id
+            authority["routine_parent_fencing_token"] = int(routine_parent_fencing_token or 0)
+            authority["routine_step_id"] = routine_step_id
+            # These parent-owned fields make the native child admission
+            # budget exemption auditable and prevent a scalar parent marker
+            # from being reused across a different goal/session.
+            authority["routine_parent_goal_id"] = task.goal_id
+            authority["routine_parent_goal_revision"] = int(task.goal_revision)
+            authority["routine_parent_owner_principal_id"] = task.owner_principal_id
+            authority["routine_parent_owner_session_id"] = task.owner_session_id
         owner = projection.get("owner") if isinstance(projection.get("owner"), Mapping) else {}
         projected_authority = projection.get("declared_authority") if isinstance(projection.get("declared_authority"), Mapping) else {}
         if (
@@ -3410,6 +4888,10 @@ class WorkBoardDispatcher:
             # A binding lookup failure is not evidence that admission never
             # happened.  Keep the claim for typed reconciliation instead of
             # deleting an attempt that may own an external effect.
+            if claim is None:
+                if adapter_error is not None:
+                    raise adapter_error
+                raise DurableJobError("binding_lookup_failed")
             logger.info(
                 "work board direct adapter %s binding lookup requires reconciliation: %s",
                 task.task_id,
@@ -3815,6 +5297,7 @@ class WorkBoardDispatcher:
         *,
         runtime_seconds: int,
         admission_only: bool = False,
+        procedure_binding: ProcedureChildBinding | None = None,
     ) -> Mapping[str, Any]:
         capability_id = _text(task.capability_id)
         board_binding = f"{task.task_id}:{attempt.attempt_id}"
@@ -3828,6 +5311,81 @@ class WorkBoardDispatcher:
             if parent_handoffs
             else {}
         )
+        if capability_id == "guardian-routine.v2":
+            from src.workflows.procedure_v2_runtime import (
+                ProcedureV2RuntimeError,
+                procedure_v2_runtime,
+            )
+
+            # The singleton runtime is only an execution coordinator; the
+            # dispatcher supplies the current owner-bound board/session seam
+            # for this pass.  No public input can replace these server handles.
+            procedure_v2_runtime.board_repository = self.repository
+            procedure_v2_runtime.session_provider = self.session_provider
+            procedure_v2_runtime.board_lease_owner = self.runner_id
+            procedure_v2_runtime.runtime_controls = self._validate_v2_parent_current
+            procedure_v2_runtime.replay_binding_verifier = self._validate_v2_replay_binding
+            procedure_v2_runtime.leaf_admitters = {
+                "browser.public-task.v1": self._admit_v2_browser_leaf,
+                "calendar.meeting-prep.v1": self._admit_v2_calendar_leaf,
+            }
+
+            descriptor = await procedure_v2_runtime._resolve_descriptor(
+                None,
+                routine_id=_text(inputs["routine_id"]),
+                version=int(inputs["version"]),
+                owner_principal_id=task.owner_principal_id,
+                owner_session_id=task.owner_session_id,
+                goal_id=task.goal_id,
+                expected_goal_revision=int(inputs["expected_goal_revision"]),
+                parameters=inputs.get("parameters") if isinstance(inputs.get("parameters"), Mapping) else inputs,
+                invocation_uuid=_text(inputs["invocation_uuid"]),
+            )
+
+            parent_id, _ = procedure_v2_runtime._parent_identity(inputs, task.task_id, attempt.attempt_id)
+
+            async def execute_leaf(step: Mapping[str, Any], resolved: Mapping[str, Any], child: Mapping[str, Any]) -> Mapping[str, Any]:
+                current_parent = await procedure_v2_runtime.jobs.get_job(parent_id)
+                if not isinstance(current_parent, Mapping):
+                    raise ProcedureV2RuntimeError("procedure_parent_missing")
+                remaining_seconds = procedure_v2_runtime._remaining_seconds(current_parent)
+                return await self._execute_v2_leaf_adapter(
+                    task,
+                    attempt,
+                    step,
+                    resolved,
+                    child,
+                    runtime_seconds=min(int(runtime_seconds), remaining_seconds),
+                )
+
+            if admission_only:
+                return await procedure_v2_runtime.admit_parent(
+                    task=task,
+                    attempt=attempt,
+                    inputs=inputs,
+                    runtime_seconds=runtime_seconds,
+                    descriptor=descriptor,
+                )
+            projection = await self.jobs.get_job(parent_id)
+            if not isinstance(projection, Mapping):
+                return {
+                    "job_id": parent_id,
+                    "status": "blocked",
+                    "reason_code": "procedure_parent_missing",
+                    "recovery_action": "reconcile_admission_binding",
+                    "admission_only": False,
+                }
+            result = await procedure_v2_runtime.execute_parent(
+                parent_id,
+                descriptor=descriptor,
+                context={"task_id": task.task_id, "attempt_id": attempt.attempt_id},
+                leaf_executors={
+                    "guardian.research-watch.v1": execute_leaf,
+                    "browser.public-task.v1": execute_leaf,
+                    "calendar.meeting-prep.v1": execute_leaf,
+                },
+            )
+            return {**dict(result), "job_id": parent_id, "admission_only": False}
         if capability_id == "guardian.research-watch.v1":
             from src.guardian.source_watch import source_watch_service
 
@@ -4449,13 +6007,98 @@ class WorkBoardDispatcher:
                     reason_code="calendar_model_route_unavailable",
                     recovery_action="restore_prerequisite",
                 )
-            job_id, _owner, _kind, _service, binding_key = self._direct_job_identity(task, attempt, inputs)
+            job_id, _owner, _kind, _service, binding_key = self._direct_job_identity(
+                task,
+                attempt,
+                inputs,
+                procedure_binding=procedure_binding,
+            )
             handoff_binding = self._direct_handoff_binding(attempt)
             canonical_inputs = calendar_input_payload(inputs, parent_handoff=handoff_binding)
             input_digest = calendar_input_digest(inputs, parent_handoff=handoff_binding)
+            if procedure_binding is not None and not procedure_binding.step_id:
+                raise BoardError(
+                    "procedure_leaf_parent_context_missing",
+                    "The Calendar native leaf is missing its server-owned procedure step",
+                    status_code=409,
+                    reason_code="procedure_leaf_parent_context_missing",
+                    recovery_action="reconcile_admission_binding",
+                )
             authority = calendar_authority(task=task, attempt=attempt)
+            if procedure_binding is not None:
+                authority.update(
+                    {
+                        "routine_parent_job_id": procedure_binding.parent_job_id,
+                        "routine_parent_fencing_token": int(procedure_binding.parent_fencing_token),
+                        "routine_step_id": procedure_binding.step_id,
+                        "routine_parent_plan_digest": procedure_binding.parent_plan_digest,
+                        "routine_parent_goal_id": procedure_binding.parent_goal_id,
+                        "routine_parent_goal_revision": int(procedure_binding.parent_goal_revision),
+                        "routine_parent_owner_principal_id": procedure_binding.parent_owner_principal_id,
+                        "routine_parent_owner_session_id": procedure_binding.parent_owner_session_id,
+                        "goal_owner_principal_id": procedure_binding.parent_owner_principal_id,
+                        "goal_owner_session_id": procedure_binding.parent_owner_session_id,
+                        "routine_parent_board_task_id": procedure_binding.parent_board_task_id,
+                        "routine_parent_board_attempt_id": procedure_binding.parent_board_attempt_id,
+                        "routine_parent_board_task_revision": int(procedure_binding.parent_board_task_revision),
+                        "routine_parent_board_fencing_token": int(procedure_binding.parent_board_fencing_token),
+                    }
+                )
+            def expected_calendar_authority() -> dict[str, Any]:
+                expected = calendar_authority(task=task, attempt=attempt)
+                if procedure_binding is not None:
+                    expected.update(
+                        {
+                            "routine_parent_job_id": procedure_binding.parent_job_id,
+                            "routine_parent_fencing_token": int(procedure_binding.parent_fencing_token),
+                            "routine_step_id": procedure_binding.step_id,
+                            "routine_parent_plan_digest": procedure_binding.parent_plan_digest,
+                            "routine_parent_goal_id": procedure_binding.parent_goal_id,
+                            "routine_parent_goal_revision": int(procedure_binding.parent_goal_revision),
+                            "routine_parent_owner_principal_id": procedure_binding.parent_owner_principal_id,
+                            "routine_parent_owner_session_id": procedure_binding.parent_owner_session_id,
+                            "goal_owner_principal_id": procedure_binding.parent_owner_principal_id,
+                            "goal_owner_session_id": procedure_binding.parent_owner_session_id,
+                            "routine_parent_board_task_id": procedure_binding.parent_board_task_id,
+                            "routine_parent_board_attempt_id": procedure_binding.parent_board_attempt_id,
+                            "routine_parent_board_task_revision": int(procedure_binding.parent_board_task_revision),
+                            "routine_parent_board_fencing_token": int(procedure_binding.parent_board_fencing_token),
+                        }
+                    )
+                return expected
             authority_digest = _safe_digest(authority)
             if admission_only:
+                max_outstanding_jobs = 1
+                if procedure_binding is not None:
+                    async with get_session() as budget_db:
+                        current_goal = (
+                            await budget_db.execute(
+                                select(Goal).where(
+                                    Goal.id == procedure_binding.parent_goal_id,
+                                    Goal.owner_principal_id == procedure_binding.parent_owner_principal_id,
+                                    Goal.owner_session_id == procedure_binding.parent_owner_session_id,
+                                    Goal.revision == int(procedure_binding.parent_goal_revision),
+                                )
+                            )
+                        ).scalar_one_or_none()
+                    budget = deserialize_admission_budget(current_goal) if current_goal is not None else None
+                    if (
+                        current_goal is None
+                        or _text(getattr(current_goal.status, "value", current_goal.status)) != "active"
+                        or budget is None
+                    ):
+                        raise DurableJobLeaseError("procedure_goal_budget_unavailable")
+                    try:
+                        from src.workflows.procedure_service import goal_admission_budget_snapshot
+
+                        budget_snapshot = goal_admission_budget_snapshot(
+                            goal_id=procedure_binding.parent_goal_id,
+                            goal_revision=int(procedure_binding.parent_goal_revision),
+                            budget=budget,
+                        )
+                    except (TypeError, ValueError) as exc:
+                        raise DurableJobLeaseError("procedure_goal_budget_invalid") from exc
+                    max_outstanding_jobs = int(budget_snapshot.budget.max_outstanding_jobs)
                 spec = DurableJobSpec(
                     identity=DurableJobIdentity(
                         job_id=job_id,
@@ -4470,6 +6113,12 @@ class WorkBoardDispatcher:
                     session_id=task.owner_session_id,
                     conversation_id=task.owner_session_id,
                     operator_session_id=task.owner_session_id,
+                    parent_job_id=procedure_binding.parent_job_id if procedure_binding is not None else None,
+                    parent_fencing_token=(
+                        int(procedure_binding.parent_fencing_token)
+                        if procedure_binding is not None
+                        else None
+                    ),
                     goal_id=task.goal_id,
                     goal_revision=task.goal_revision,
                     priority=int(task.priority),
@@ -4477,7 +6126,7 @@ class WorkBoardDispatcher:
                     declared_authority=authority,
                     deadline_at=datetime.now(timezone.utc) + timedelta(seconds=max(1, min(int(runtime_seconds), 180))),
                     max_attempts=1,
-                    max_outstanding_jobs=1,
+                    max_outstanding_jobs=max_outstanding_jobs,
                     run_fingerprint=input_digest,
                     budget_microusd=int(ceiling),
                     budget_digest=_durable_digest({"budget_microusd": int(ceiling)}),
@@ -4593,10 +6242,36 @@ class WorkBoardDispatcher:
                 current_root = await self.jobs.get_job(job_id)
                 if not isinstance(current_root, Mapping):
                     raise_calendar_guard_error("The Calendar durable root is unavailable")
+                if procedure_binding is not None:
+                    # A Calendar child carries the parent's immutable fence,
+                    # but the root projection is only an index.  Re-read the
+                    # canonical procedure parent before every provider/model
+                    # boundary so cancellation, lease reclaim, Goal drift,
+                    # routine/package revocation, or deadline expiry cannot
+                    # be hidden by an otherwise unchanged child projection.
+                    if not await self._validate_v2_parent_current(
+                        routine_parent_job_id=procedure_binding.parent_job_id,
+                        routine_parent_fencing_token=int(procedure_binding.parent_fencing_token),
+                    ):
+                        raise_calendar_guard_error("The Calendar procedure parent authority changed")
                 root_owner = current_root.get("owner") if isinstance(current_root.get("owner"), Mapping) else {}
                 root_lease = current_root.get("lease") if isinstance(current_root.get("lease"), Mapping) else {}
                 root_authority = current_root.get("declared_authority") if isinstance(current_root.get("declared_authority"), Mapping) else {}
-                expected_authority = calendar_authority(task=task, attempt=attempt)
+                expected_authority = expected_calendar_authority()
+                root_lineage_ok = (
+                    (
+                        _text(current_root.get("root_run_identity")) == procedure_binding.parent_job_id
+                        and _text(current_root.get("parent_run_identity")) == procedure_binding.parent_job_id
+                        and _text(current_root.get("parent_job_id")) == procedure_binding.parent_job_id
+                        and int(current_root.get("parent_fencing_token") or 0) == procedure_binding.parent_fencing_token
+                    )
+                    if procedure_binding is not None
+                    else (
+                        _text(current_root.get("root_run_identity")) == job_id
+                        and not _text(current_root.get("parent_run_identity"))
+                        and not _text(current_root.get("parent_job_id"))
+                    )
+                )
                 root_identity_ok = (
                     _text(current_root.get("job_id") or current_root.get("run_identity")) == job_id
                     and _text(current_root.get("job_kind")) == "calendar_meeting_prep"
@@ -4611,6 +6286,7 @@ class WorkBoardDispatcher:
                     and _text(current_root.get("run_fingerprint")) == input_digest
                     and _text(current_root.get("authority_digest")) == authority_digest
                     and all(root_authority.get(key) == value for key, value in expected_authority.items())
+                    and root_lineage_ok
                     and _status(current_root) == "running"
                     and _text(root_lease.get("owner")) == _text(self.runner_id)
                     and int(root_lease.get("fencing_token") or 0) > 0
@@ -4626,7 +6302,6 @@ class WorkBoardDispatcher:
                     from src.db.models import (
                         CalendarEventBinding,
                         CalendarReadConsent,
-                        Goal,
                         GoogleServiceConnection,
                         OperatorSession,
                     )
@@ -5017,7 +6692,20 @@ class WorkBoardDispatcher:
             await assert_calendar_current()
             calendar_readback_id = f"calendar-readback:{uuid.uuid4().hex}"
             artifact_sha256 = hashlib.sha256(verified_bytes).hexdigest()
-            readback = await self.jobs.record_readback(job_id, target_path=artifact_relative, status="succeeded", effect_type="calendar_meeting_prep_result", content_sha256=artifact_sha256, readback_id=calendar_readback_id, verified_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), details={"verified": True, "memory_status": "no_learning"}, owner=lease_owner, fencing_token=fence, expected_revision=int(latest.get("revision") or 0))
+            readback = await self.jobs.record_readback(
+                job_id,
+                target_path=artifact_relative,
+                status="succeeded",
+                effect_type="calendar_meeting_prep_result",
+                target_digest=artifact_sha256,
+                content_sha256=artifact_sha256,
+                readback_id=calendar_readback_id,
+                verified_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                details={"verified": True, "memory_status": "no_learning"},
+                owner=lease_owner,
+                fencing_token=fence,
+                expected_revision=int(latest.get("revision") or 0),
+            )
             latest = readback
             await assert_calendar_current()
             artifact_refs = latest.get("artifacts", []) if isinstance(latest, Mapping) else []
@@ -5083,12 +6771,26 @@ class WorkBoardDispatcher:
 
                 now = datetime.now(timezone.utc)
                 root_authority = _load_json_mapping(getattr(terminal_run, "declared_authority_json", None))
-                expected_authority = calendar_authority(task=task, attempt=attempt)
+                expected_authority = expected_calendar_authority()
+                terminal_root_lineage_ok = (
+                    (
+                        _text(getattr(terminal_run, "root_run_identity", None)) == procedure_binding.parent_job_id
+                        and _text(getattr(terminal_run, "parent_run_identity", None)) == procedure_binding.parent_job_id
+                        and _text(getattr(terminal_run, "parent_job_id", None)) == procedure_binding.parent_job_id
+                        and int(getattr(terminal_run, "parent_fencing_token", 0) or 0) == procedure_binding.parent_fencing_token
+                    )
+                    if procedure_binding is not None
+                    else (
+                        _text(getattr(terminal_run, "root_run_identity", None)) == job_id
+                        and not _text(getattr(terminal_run, "parent_run_identity", None))
+                        and not _text(getattr(terminal_run, "parent_job_id", None))
+                    )
+                )
                 root_lease_expires = persisted_datetime(getattr(terminal_run, "lease_expires_at", None))
                 root_deadline = persisted_datetime(getattr(terminal_run, "deadline_at", None))
                 if not (
                     _text(getattr(terminal_run, "run_identity", None)) == job_id
-                    and _text(getattr(terminal_run, "root_run_identity", None)) == job_id
+                    and terminal_root_lineage_ok
                     and _text(getattr(terminal_run, "status", None)) == "running"
                     and _text(getattr(terminal_run, "owner_kind", None)) == "user"
                     and _text(getattr(terminal_run, "owner_principal_id", None)) == _text(task.owner_principal_id)
@@ -5112,7 +6814,6 @@ class WorkBoardDispatcher:
                 from src.db.models import (
                     CalendarEventBinding,
                     CalendarReadConsent,
-                    Goal,
                     GoogleServiceConnection,
                     OperatorSession,
                 )
@@ -5328,7 +7029,7 @@ class WorkBoardDispatcher:
             # pre-CAS guard alone cannot prove that the authority remained
             # current while the root transition committed.
             async with get_session() as receipt_db:
-                from src.db.models import Goal, OperatorSession, WorkflowRunState
+                from src.db.models import OperatorSession, WorkflowRunState
 
                 persisted = await receipt_db.get(CalendarPrepReceipt, receipt_id)
                 terminal_root = (
@@ -5446,6 +7147,20 @@ class WorkBoardDispatcher:
                     terminal_root is not None
                     and terminal_root.status == "succeeded"
                     and terminal_root.run_identity == job_id
+                    and (
+                        (
+                            terminal_root.root_run_identity == procedure_binding.parent_job_id
+                            and terminal_root.parent_job_id == procedure_binding.parent_job_id
+                            and terminal_root.parent_run_identity == procedure_binding.parent_job_id
+                            and int(terminal_root.parent_fencing_token or 0) == procedure_binding.parent_fencing_token
+                        )
+                        if procedure_binding is not None
+                        else (
+                            terminal_root.root_run_identity == job_id
+                            and terminal_root.parent_job_id is None
+                            and terminal_root.parent_run_identity is None
+                        )
+                    )
                     and terminal_root.owner_principal_id == task.owner_principal_id
                     and terminal_root.session_id == task.owner_session_id
                     and terminal_root.operator_session_id == task.owner_session_id
@@ -5498,6 +7213,8 @@ class WorkBoardDispatcher:
         task: WorkBoardTask,
         attempt: WorkBoardAttempt,
         inputs: Mapping[str, Any],
+        *,
+        procedure_binding: ProcedureChildBinding | None = None,
     ) -> tuple[str, str, str, str | None, str]:
         """Return the reviewed root/binding identity for one direct adapter.
 
@@ -5509,6 +7226,21 @@ class WorkBoardDispatcher:
 
         capability_id = _text(task.capability_id)
         binding_key = f"{task.task_id}:{attempt.attempt_id}"
+        if capability_id == "guardian-routine.v2":
+            from src.workflows.procedure_v2_runtime import procedure_v2_runtime
+
+            job_id, _invocation_uuid = procedure_v2_runtime._parent_identity(
+                inputs,
+                task.task_id,
+                attempt.attempt_id,
+            )
+            return (
+                job_id,
+                task.owner_principal_id,
+                "guardian_routine_v2",
+                None,
+                binding_key,
+            )
         if capability_id == "guardian.research-watch.v1":
             occurrence = _board_attempt_uuid(attempt.attempt_id, task.task_id).hex
             watch_id = _text(inputs.get("watch_id"))
@@ -5560,9 +7292,20 @@ class WorkBoardDispatcher:
             from src.integrations.google_calendar import calendar_job_id
 
             return (
-                calendar_job_id(task.owner_principal_id, task.task_id, attempt.attempt_id),
+                procedure_binding.child_job_id if procedure_binding is not None else None
+                or calendar_job_id(task.owner_principal_id, task.task_id, attempt.attempt_id),
                 task.owner_principal_id,
                 "calendar_meeting_prep",
+                None,
+                binding_key,
+            )
+        if capability_id == "work.mail-reply-draft.v1":
+            from src.workflows.mail_reply_draft import reply_job_id
+
+            return (
+                reply_job_id(task.owner_principal_id, task.task_id, attempt.attempt_id),
+                task.owner_principal_id,
+                "mail_reply_draft",
                 None,
                 binding_key,
             )
@@ -5588,6 +7331,19 @@ class WorkBoardDispatcher:
 
         capability_id = _text(task.capability_id)
         handoff_binding = WorkBoardDispatcher._direct_handoff_binding(attempt)
+        if capability_id == "guardian-routine.v2":
+            return _safe_digest(
+                {
+                    "routine_id": _text(inputs.get("routine_id")),
+                    "version": int(inputs.get("version") or 0),
+                    "expected_routine_revision": int(inputs.get("expected_routine_revision") or 0),
+                    "goal_id": _text(inputs.get("goal_id")),
+                    "expected_goal_revision": int(inputs.get("expected_goal_revision") or 0),
+                    "parameters": inputs.get("parameters") if isinstance(inputs.get("parameters"), Mapping) else {},
+                    "invocation_uuid": _text(inputs.get("invocation_uuid")),
+                    **handoff_binding,
+                }
+            )
         if capability_id == "guardian.research-watch.v1":
             occurrence = _board_attempt_uuid(attempt.attempt_id, task.task_id).hex
             return _safe_digest({"watch_id": _text(inputs.get("watch_id")), "occurrence_id": occurrence, **handoff_binding})
@@ -5685,11 +7441,14 @@ class WorkBoardDispatcher:
         attempt: WorkBoardAttempt,
         inputs: Mapping[str, Any],
         projection: Mapping[str, Any] | None = None,
+        *,
+        procedure_binding: ProcedureChildBinding | None = None,
     ) -> dict[str, Any]:
         expected_job_id, owner_principal_id, job_kind, service_id, binding_key = WorkBoardDispatcher._direct_job_identity(
             task,
             attempt,
             inputs,
+            procedure_binding=procedure_binding,
         )
         owner_kind = "service" if service_id else "user"
         capability_version = WorkBoardDispatcher._direct_capability_version(task)
@@ -5728,6 +7487,7 @@ class WorkBoardDispatcher:
             "engineering.repo-change.v1": "engineering.repo-change.v1",
             "work.github-followthrough.v1": "1",
             "guardian-routine.v1": "guardian-routine.v1",
+            "guardian-routine.v2": "guardian-routine.v2",
             "calendar.meeting-prep.v1": "1",
             "work.mail-reply-draft.v1": "1",
         }.get(capability, REGISTERED_CAPABILITIES[capability].version)
@@ -5777,6 +7537,8 @@ class WorkBoardDispatcher:
         attempt: WorkBoardAttempt,
         inputs: Mapping[str, Any],
         projection: Mapping[str, Any],
+        *,
+        procedure_binding: ProcedureChildBinding | None = None,
     ) -> dict[str, Any]:
         """Validate and return the identity emitted by the governed adapter.
 
@@ -5788,7 +7550,7 @@ class WorkBoardDispatcher:
         """
 
         expected_job_id, expected_owner, expected_kind, expected_service, binding_key = (
-            WorkBoardDispatcher._direct_job_identity(task, attempt, inputs)
+            WorkBoardDispatcher._direct_job_identity(task, attempt, inputs, procedure_binding=procedure_binding)
         )
         owner = projection.get("owner") if isinstance(projection.get("owner"), Mapping) else {}
         authority = (
@@ -5888,12 +7650,62 @@ class WorkBoardDispatcher:
         lookup = getattr(self.jobs, "get_by_idempotency_binding", None)
         if lookup is None:
             raise DurableJobError("admission_binding_lookup_unavailable")
+        procedure_binding: ProcedureChildBinding | None = None
+        if _text(task.capability_id) == "calendar.meeting-prep.v1" and _text(attempt.workflow_run_id):
+            # Recovery may re-enter this effect-free adapter after a process
+            # restart.  Rebuild the same server-owned typed binding from the
+            # persisted parent/root/board rows; never let persisted scalar
+            # strings select a different Calendar root.
+            existing_job_id = _text(attempt.workflow_run_id)
+            existing_root = await self.jobs.get_job(existing_job_id)
+            existing_authority = (
+                existing_root.get("declared_authority")
+                if isinstance(existing_root, Mapping) and isinstance(existing_root.get("declared_authority"), Mapping)
+                else {}
+            )
+            parent_job_id = _text(existing_authority.get("routine_parent_job_id"))
+            if parent_job_id:
+                parent = await self.jobs.get_job(parent_job_id)
+                step_id = _text(existing_authority.get("routine_step_id"))
+                parent_authority = (
+                    parent.get("declared_authority")
+                    if isinstance(parent, Mapping) and isinstance(parent.get("declared_authority"), Mapping)
+                    else {}
+                )
+                if not isinstance(parent, Mapping) or not step_id:
+                    raise DurableJobError("procedure_parent_authority_stale")
+                procedure_binding = self._build_procedure_child_binding(
+                    parent=parent,
+                    step={
+                        "step_id": step_id,
+                        "capability_id": task.capability_id,
+                        "capability_version": "1",
+                    },
+                    descriptor={
+                        "plan_digest": _text(parent_authority.get("plan_digest")),
+                        "plan": {"template_id": _text(parent_authority.get("template_id"))},
+                        "routine_version": int(parent_authority.get("routine_version") or 0),
+                    },
+                    child_id=existing_job_id,
+                    child_task=task,
+                    child_attempt=attempt,
+                    input_payload=inputs,
+                )
+                await self._validate_procedure_child_binding(procedure_binding, projection=existing_root)
+        adapter_kwargs: dict[str, Any] = {
+            "runtime_seconds": runtime_seconds,
+            "admission_only": True,
+        }
+        # The procedure binding is a server-built native-child authority.  Do
+        # not pass a None compatibility keyword to ordinary direct adapters;
+        # only a validated native binding may reach the adapter seam.
+        if procedure_binding is not None:
+            adapter_kwargs["procedure_binding"] = procedure_binding
         response = await self._execute_direct_adapter(
             task,
             attempt,
             inputs,
-            runtime_seconds=runtime_seconds,
-            admission_only=True,
+            **adapter_kwargs,
         )
         job_id = self._adapter_job_id(response)
         if not job_id:
@@ -5904,7 +7716,13 @@ class WorkBoardDispatcher:
             projection = candidate if isinstance(candidate, Mapping) else None
         if not isinstance(projection, Mapping):
             raise DurableJobError("durable_run_projection_missing")
-        expected = self._canonical_identity_from_projection(task, attempt, inputs, projection)
+        expected = self._canonical_identity_from_projection(
+            task,
+            attempt,
+            inputs,
+            projection,
+            procedure_binding=procedure_binding,
+        )
         found = await lookup(
             owner_principal_id=expected["owner_principal_id"],
             goal_id=expected["goal_id"],
@@ -5996,12 +7814,37 @@ class WorkBoardDispatcher:
         direct capability cannot reach Done from a generic summary.
         """
 
+        authority = projection.get("declared_authority") if isinstance(projection.get("declared_authority"), Mapping) else {}
+        procedure_parent_id = _text(authority.get("routine_parent_job_id"))
+        if procedure_parent_id:
+            try:
+                procedure_parent_fence = int(authority.get("routine_parent_fencing_token") or 0)
+                projected_parent_fence = int(projection.get("parent_fencing_token") or 0)
+            except (TypeError, ValueError):
+                return None
+            expected_step_id = {
+                "browser.public-task.v1": "public_browser_check",
+                "calendar.meeting-prep.v1": "selected_meeting_prep",
+            }.get(_text(authority.get("capability_id")))
+            lineage_ok = bool(
+                _text(projection.get("root_run_identity")) == procedure_parent_id
+                and _text(projection.get("parent_run_identity")) == procedure_parent_id
+                and _text(projection.get("parent_job_id")) == procedure_parent_id
+                and projected_parent_fence == procedure_parent_fence
+                and procedure_parent_fence > 0
+                and expected_step_id is not None
+                and _text(authority.get("routine_step_id")) == expected_step_id
+            )
+        else:
+            lineage_ok = bool(
+                _text(projection.get("root_run_identity")) == _text(job_id)
+                and not _text(projection.get("parent_run_identity"))
+                and not _text(projection.get("parent_job_id"))
+            )
         if (
             _status(projection) != "succeeded"
             or _status(result) not in {"succeeded", "completed"}
-            or _text(projection.get("root_run_identity")) != _text(job_id)
-            or _text(projection.get("parent_run_identity"))
-            or _text(projection.get("parent_job_id"))
+            or not lineage_ok
         ):
             return None
         return cls._workflow_readback(projection, job_id)

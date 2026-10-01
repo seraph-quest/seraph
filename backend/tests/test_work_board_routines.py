@@ -22,8 +22,10 @@ from sqlmodel import select
 
 from config.settings import settings
 from src.db.models import (
+    ApprovalRequest,
     GuardianRoutine,
     GuardianRoutineVersion,
+    ProcedureV2Binding,
     GuardianDecisionPacket,
     Goal,
     SQLModel,
@@ -33,8 +35,10 @@ from src.db.models import (
     WorkBoardEvent,
     WorkBoardTask,
     WorkBoardStatus,
+    Session,
 )
 from src.db import engine as db_engine
+import src.approval.repository as approval_repository_module
 from src.extensions.capability_pack import CapabilityPackLifecycle, parse_capability_pack_manifest
 from src.extensions.github_followthrough import _operation_id
 from src.workflows.routines import (
@@ -83,10 +87,13 @@ async def m6_db(monkeypatch, tmp_path):
         cursor.close()
 
     tables = [
+        Session.__table__,
+        ApprovalRequest.__table__,
         Goal.__table__,
         GuardianDecisionPacket.__table__,
         GuardianRoutine.__table__,
         GuardianRoutineVersion.__table__,
+        ProcedureV2Binding.__table__,
         WorkBoardRoutineBinding.__table__,
         WorkBoardTask.__table__,
         WorkBoardAttempt.__table__,
@@ -108,8 +115,134 @@ async def m6_db(monkeypatch, tmp_path):
                 raise
 
     monkeypatch.setattr(db_engine, "get_session", _get_session)
+    monkeypatch.setattr(approval_repository_module, "get_session", _get_session)
     yield _get_session
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_v2_routine_read_and_list_include_install_authority_metadata(m6_db, monkeypatch):
+    """The live detail/list projection must serialize v2 approval metadata."""
+
+    routine_id = "0123456789abcdef0123456789abcdef"
+    version_id = "fedcba9876543210fedcba9876543210"
+    install_job_id = f"routine-install:{routine_id}:v1"
+    provenance = {
+        "schema_version": 2,
+        "template_id": "selected-meeting-prep",
+        "plan_digest": "a" * 64,
+        "source_proof_digest": "b" * 64,
+        "source_refs": [],
+        "parameter_schema": [],
+    }
+    async with m6_db() as db:
+        db.add(Session(id=SESSION, owner_principal_id=OWNER))
+        await db.flush()
+        db.add(
+            GuardianRoutine(
+                id=routine_id,
+                owner_principal_id=OWNER,
+                owner_session_id=SESSION,
+                name="Prepared v2 routine",
+                state="prepared",
+                revision=3,
+                current_version=1,
+            )
+        )
+        db.add(
+            GuardianRoutineVersion(
+                id=version_id,
+                routine_id=routine_id,
+                version=1,
+                source_provenance_json=json.dumps(provenance, sort_keys=True),
+                installed_package_digest="c" * 64,
+            )
+        )
+        db.add(
+            ProcedureV2Binding(
+                binding_id="binding-v2-read",
+                owner_principal_id=OWNER,
+                owner_session_id=SESSION,
+                idempotency_key="idempotency-v2-read",
+                request_digest="d" * 64,
+                deterministic_routine_id=routine_id,
+                routine_name="Prepared v2 routine",
+                template_id="selected-meeting-prep",
+                version_id=version_id,
+                preview_digest="e" * 64,
+                preview_expires_at=datetime(2026, 10, 1, 12, 0),
+                state="prepared",
+                revision=2,
+            )
+        )
+        db.add(
+            ApprovalRequest(
+                id="approval-v2",
+                session_id=SESSION,
+                owner_principal_id=OWNER,
+                operator_session_id=SESSION,
+                tool_name=ROUTINE_INSTALL_TOOL,
+                status="pending",
+                fingerprint="fingerprint-v2",
+                summary="Install reviewed v2 routine",
+                expires_at=datetime(2026, 9, 30, 12, 0),
+                details_json=json.dumps(
+                    {
+                        "approval_id": "approval-v2",
+                        "durable_approval_id": "approval-v2",
+                        "durable_job_id": install_job_id,
+                        "durable_owner_kind": "user",
+                        "durable_owner_principal_id": OWNER,
+                        "approval_owner_operator_session_id": SESSION,
+                    },
+                    sort_keys=True,
+                ),
+            )
+        )
+
+    async def get_job(job_id: str):
+        assert job_id == install_job_id
+        return {
+            "job_id": install_job_id,
+            "declared_authority": {
+                "approval_id": " approval-v2 ",
+                "principal": OWNER,
+                "owner_kind": "user",
+                "session_id": SESSION,
+                "routine_id": routine_id,
+                "routine_version": 1,
+            },
+        }
+
+    monkeypatch.setattr(routines_module.durable_job_repository, "get_job", get_job)
+    service = RoutineService()
+    monkeypatch.setattr(
+        service,
+        "_package_readback",
+        lambda *_args: {"status": "prepared", "digest": "c" * 64, "review_id": "review-v2"},
+    )
+
+    detail = await service.read(
+        routine_id,
+        owner_principal_id=OWNER,
+        owner_session_id=SESSION,
+    )
+    listed = await service.list(owner_principal_id=OWNER, owner_session_id=SESSION)
+
+    for payload in (detail, listed[0]):
+        assert payload["id"] == routine_id
+        assert payload["versions"][0]["procedure_binding"] == {
+            "binding_id": "binding-v2-read",
+            "state": "prepared",
+            "revision": 2,
+            "preview_digest": "e" * 64,
+            "preview_expires_at": "2026-10-01T12:00:00Z",
+            "install_job_id": install_job_id,
+            "approval_id": "approval-v2",
+            "install_approval_status": "expired",
+            "install_approval_expires_at": "2026-09-30T12:00:00Z",
+            "install_recovery_action": "create_fresh_preview",
+        }
 
 
 def _resolved_journey() -> dict[str, object]:

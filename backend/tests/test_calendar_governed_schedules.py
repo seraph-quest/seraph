@@ -353,8 +353,12 @@ async def test_scheduler_run_summary_preserves_governed_cleanup_proof(async_db):
 
 def test_registry_and_cadence_are_closed_world() -> None:
     assert action_spec("calendar.observe_due_events.v1")["model"] is False
-    with pytest.raises(ValueError, match="unavailable"):
-        action_spec("guardian.run_procedure.v2")
+    assert action_spec("guardian.run_procedure.v2") == {
+        "capability_id": "guardian.run_procedure.v2",
+        "consent_kind": "goal_budget",
+        "model": False,
+        "enabled": True,
+    }
     with pytest.raises(ValueError):
         normalize_cadence({"kind": "cron", "timezone": "UTC", "daily_hour": None, "daily_minute": None})
     assert normalize_cadence(

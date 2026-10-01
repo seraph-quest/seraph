@@ -309,7 +309,7 @@ async def sync_scheduled_jobs() -> None:
         try:
             async def _run_scheduled_job(job_id: str = job["id"], job_record: dict[str, Any] = job) -> None:
                 slot_utc = None
-                if job_record.get("action_type") == "calendar.observe_due_events.v1":
+                if job_record.get("action_type") in {"calendar.observe_due_events.v1", "guardian.run_procedure.v2"}:
                     from src.scheduler.governed_schedules import latest_due_slot
 
                     slot_utc = latest_due_slot(job_record.get("trigger_spec") or {}, datetime.now(timezone.utc))

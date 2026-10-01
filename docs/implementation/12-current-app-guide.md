@@ -360,6 +360,94 @@ This section describes the Epic #864 M6 integration-branch target while its
 aggregate PR is under review. It does not claim full Hermes parity, autonomous
 execution, memory superiority, or production readiness.
 
+### Reviewed procedures v2 (M6 #889 branch-local target)
+
+The #889 branch-local target turns verified Work Board outcomes into reusable,
+owner-bound procedures. It has exactly three registered templates:
+
+- `public-browser-check`: one `browser.public-task.v1` leaf;
+- `watch-and-public-browser`: `guardian.research-watch.v1` followed by
+  `browser.public-task.v1`, with a current watch revision and material-change
+  gate; and
+- `selected-meeting-prep`: one `calendar.meeting-prep.v1` leaf using the
+  existing M5 calendar input contract.
+
+Every plan is schema v2, uses the registered step IDs, capability IDs and
+versions, verifies native leaf readbacks, and is limited to two steps and 300
+seconds. A preview records the selected task, attempt, job, artifact digest,
+readback, owner/session, goal revision, typed input reference and digest. The
+browser input needed for later execution is copied into the immutable
+server-owned version; routine list/detail responses expose only safe provenance
+and digests, never the copied input body.
+
+Preparation creates an exact routine parent, immutable version, install job,
+and owner/session-bound approval. The install approval expires after five
+minutes. Installation remains blocked until the server confirms that exact
+approval as current and approved. A pending approval routes the operator to
+the existing Pending approvals review surface; missing, expired, denied, or
+stale approval metadata asks for a fresh preview/rebind. A consumed approval
+keeps its exact receipt addressable for reconciliation. Package preview,
+operator review, activation approval and package activation remain explicit
+controls. Activating the package does not activate the procedure: the Library
+requires a separate **Activate procedure** action and a current server
+readback before enabling invocation or scheduling. A paused procedure uses
+**Resume procedure** under the same current package and version checks.
+Unconfirmed activation requires an authority refresh before another lifecycle
+mutation. Pause, revoke and selected-version rollback remain explicit controls.
+No arbitrary approval ID or automatic activation is accepted.
+
+Invocation is manual and requires a fresh active goal revision, current
+owner/session authority, current grants and budgets, exact template
+parameters, and a new task/input artifact. Public and watch procedures can
+also create a finite governed schedule; meeting preparation remains a manual
+selected-event invocation. A schedule is bounded by the seven-day procedure
+limit and the earlier reviewed goal-budget expiry, uses the existing governed
+schedule controls, and can be paused, resumed, or revoked explicitly. Quiet
+hours, proactive consent, finite period, outstanding-job, attempt, runtime,
+and notification budgets remain admission fences; a quiet-hours or budget
+refusal is visible as deferred or blocked work rather than a hidden retry.
+Each occurrence also checks its pinned procedure revision, version, plan and
+current package lifecycle before publishing a task. A paused, revoked or
+changed procedure requires explicit review; the scheduler does not silently
+rebind its accepted schedule to newer authority.
+
+All routine, approval, invocation, schedule, and recovery state is bound to
+the authenticated owner session. Changing owner/session clears the old
+selection and metadata state, and late responses cannot populate the new
+session. Unknown or ambiguous mutations retain their bounded exact key and
+body for explicit reconciliation/retry; they are never replayed automatically.
+Definitive pre-effect rejection can ask for a fresh preview. Native leaf
+readbacks are required before parent success, and every terminal result carries
+an explicit `no_learning` outcome. Failed, blocked, revoked, expired, and
+unknown cleanup states remain operator-visible and retain their recovery
+boundary.
+Calendar steps recheck the current procedure parent before each provider or
+model boundary. Parent cancellation, lease reclaim, expiry and package
+revocation cannot be replaced by a child's stored lineage fields.
+
+The v2 procedure surface is designed for the CPU-host contract. The cockpit,
+canonical state, artifact metadata, and fixed browser/calendar controls remain
+usable when optional local model, GPU, VLM, connector, or provider services are
+absent. Governed model work, where the selected meeting path requires it, still
+uses the active OpenRouter admission, consent, and budget checks; this branch
+has not performed a live provider or account canary.
+
+This is a branch-local target, not Shipped `develop` truth. On October 1, 2026,
+the managed CPU-host journey prepared, reviewed, installed and activated a
+public-browser procedure, then executed its native leaf and verified both the
+parent and leaf readbacks. The leaf artifact hash matched the stored file.
+Twelve native vertical tests additionally exercised actual SQLite, Chromium,
+package files and intercepted Calendar/model boundaries. These are mechanical
+execution receipts; Calendar account/model usefulness and production readiness
+remain unverified. Fresh independent reviews accepted preparation recovery,
+interface authority/recovery and the dispatcher compatibility corrections.
+After the managed backend restart, a new public-browser invocation completed
+with parent and leaf readbacks, a matching artifact hash and explicit
+`no_learning`. A separate live response-loss check retained the lifecycle
+recovery gate across reload, blocked fresh preparation, and cleared it only
+after an explicit exact authority refresh before resume. The implementation
+PR carries the branch-specific review and validation receipts.
+
 ### Bounded public browser tasks
 
 The integration target adds `browser.public-task.v1` through the existing Work

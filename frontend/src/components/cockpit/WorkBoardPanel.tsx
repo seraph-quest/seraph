@@ -125,6 +125,8 @@ export interface WorkBoardPanelProps {
   onFocusTaskHandled?: (taskId: string) => void;
   ownerPrincipalId?: string | null;
   ownerSessionId?: string | null;
+  /** Safe task metadata link for the Library's explicit procedure source picker. */
+  onSelectedTaskChange?: (task: WorkBoardTask | null) => void;
 }
 
 export interface WorkBoardArtifactInspectRequest {
@@ -763,6 +765,7 @@ function WorkBoardPanel({
   onFocusTaskHandled,
   ownerPrincipalId,
   ownerSessionId,
+  onSelectedTaskChange,
 }: WorkBoardPanelProps) {
   const pendingCreateScope = ownerPrincipalId && ownerSessionId
     ? `${ownerPrincipalId}\u0000${ownerSessionId}`
@@ -1684,13 +1687,14 @@ function WorkBoardPanel({
     setRoutineInvokeReceipt(null);
     setSourceWatchError(null);
     const openedTask = tasks.find((task) => task.task_id === taskId);
+    onSelectedTaskChange?.(openedTask ?? null);
     setRoutineName(openedTask?.status === "done" ? `${openedTask.title} procedure` : "");
     routineRequestKeyRef.current = makeIdempotencyKey();
     setCommentDraft("");
     setSelectedTaskId(taskId);
     setEditMode(false);
     setDetail(null);
-  }, [tasks]);
+  }, [onSelectedTaskChange, tasks]);
 
   useEffect(() => {
     if (!focusTaskId) return;
@@ -1701,11 +1705,12 @@ function WorkBoardPanel({
   const closeTask = useCallback(() => {
     selectedTaskIdRef.current = null;
     setSelectedTaskId(null);
+    onSelectedTaskChange?.(null);
     inboxOriginControllerRef.current?.abort();
     inboxOriginControllerRef.current = null;
     inboxOriginRequestKeyRef.current = null;
     setInboxOrigin(null);
-  }, []);
+  }, [onSelectedTaskChange]);
 
   const openCreateDialog = (event: MouseEvent<HTMLButtonElement>) => {
     createOpenerRef.current = event.currentTarget;

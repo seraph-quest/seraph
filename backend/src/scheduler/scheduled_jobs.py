@@ -8,10 +8,10 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apscheduler.triggers.cron import CronTrigger
-from sqlalchemy import and_, or_, select as sa_select
+from sqlalchemy import and_, func, or_, select as sa_select, update
 from sqlmodel import select, col
 
 from config.settings import settings
@@ -30,6 +30,8 @@ from src.db.models import (
     GovernedScheduleBinding,
     GovernedScheduleOccurrence,
     GuardianInboxDisposition,
+    GuardianRoutine,
+    GuardianRoutineVersion,
     MailLabelBinding,
     MailMessageBinding,
     MailReadConsent,
@@ -38,6 +40,8 @@ from src.db.models import (
     ScheduledJob,
     ScheduledJobRun,
     WorkBoardInputArtifact,
+    WorkBoardStatus,
+    WorkBoardTask,
 )
 from src.db.session_refs import ensure_sessions_exist
 from src.models.schemas import WSResponse
@@ -51,9 +55,10 @@ from src.work_board.input_artifacts import (
     _payload_path,
     _safe_file_bytes,
     prepare_input_artifact,
+    revoke_unpublished_input_artifact,
     revoke_input_artifact,
 )
-from src.work_board.repository import WorkBoardRepository
+from src.work_board.repository import BoardError, WorkBoardRepository
 from src.goals.repository import deserialize_admission_budget
 
 logger = logging.getLogger(__name__)
@@ -208,6 +213,383 @@ class _GovernedScheduleArtifactCleanupRequired(RuntimeError):
         super().__init__(self.safe_code)
         if cause is not None:
             self.__cause__ = cause
+
+
+class _ProcedureScheduleDeferred(RuntimeError):
+    """A reviewed procedure schedule is currently ineligible without contact."""
+
+    safe_code = "procedure_schedule_deferred"
+
+    def __init__(self, reason_code: str, recovery_action: str = "wait_for_next_slot") -> None:
+        self.reason_code = str(reason_code or self.safe_code)[:128]
+        self.recovery_action = str(recovery_action or "wait_for_next_slot")[:128]
+        super().__init__(self.reason_code)
+
+
+class _ProcedureScheduleAuthorityFailure(RuntimeError):
+    """A typed failure from the pre-publication authority callback."""
+
+    safe_code = "procedure_schedule_publication_authority_stale"
+
+
+class _ProcedureSchedulePublishedTaskInvalid(RuntimeError):
+    """A canonical task exists but cannot be safely adopted for this slot."""
+
+    safe_code = "procedure_schedule_published_task_invalid"
+
+
+def _procedure_quiet_now(budget: Any, now: datetime) -> bool:
+    start = getattr(budget, "quiet_hours_start", None)
+    end = getattr(budget, "quiet_hours_end", None)
+    if start is None or end is None:
+        return False
+    try:
+        local_hour = _utc(now).astimezone(ZoneInfo(str(getattr(budget, "timezone", "UTC")))).hour
+    except (TypeError, ValueError, ZoneInfoNotFoundError) as exc:
+        raise _ProcedureScheduleDeferred("procedure_goal_budget_timezone_invalid", "repair_goal_budget") from exc
+    return local_hour >= int(start) or local_hour < int(end) if int(start) > int(end) else int(start) <= local_hour < int(end)
+
+
+def _procedure_budget_timestamp(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return _utc(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            return _utc(datetime.fromisoformat(value.replace("Z", "+00:00")))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+async def _load_governed_procedure_authority(
+    db: Any,
+    job: dict[str, Any],
+    binding_id: str,
+    *,
+    now: datetime | None = None,
+    slot_utc: datetime | None = None,
+) -> tuple[GovernedScheduleBinding, Goal, WorkBoardInputArtifact, dict[str, Any], dict[str, Any]]:
+    """Re-read the pinned routine/goal/budget before a scheduled task claim.
+
+    This is the procedure counterpart to the existing Calendar authority
+    loader.  It intentionally performs no model/provider work and does not
+    reuse the strategist notification budget: a zero notification allowance
+    still permits a governed task, while delivery remains separately gated.
+    """
+
+    from src.scheduler.governed_schedules import PROCEDURE_ACTION, normalize_cadence
+    from src.goals.repository import deserialize_admission_budget
+    from src.workflows.procedure_service import goal_admission_budget_snapshot
+
+    observed = _utc(now or _utc_now())
+    canonical_job = await db.get(ScheduledJob, str(job.get("id") or ""), populate_existing=True)
+    if (
+        canonical_job is None
+        or not canonical_job.enabled
+        or canonical_job.trigger_type != "governed"
+        or canonical_job.action_type != PROCEDURE_ACTION
+    ):
+        raise RuntimeError("procedure_schedule_prerequisite_stale")
+    try:
+        action_spec = json.loads(canonical_job.action_spec_json or "{}")
+        trigger_spec = json.loads(canonical_job.trigger_spec_json or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError("procedure_schedule_binding_link_invalid") from exc
+    if not isinstance(action_spec, dict) or action_spec.get("binding_id") != binding_id:
+        raise RuntimeError("procedure_schedule_binding_link_invalid")
+    binding = (
+        await db.execute(
+            sa_select(GovernedScheduleBinding)
+            .where(
+                GovernedScheduleBinding.binding_id == binding_id,
+                GovernedScheduleBinding.scheduled_job_id == canonical_job.id,
+            )
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if (
+        binding is None
+        or binding.action_type != PROCEDURE_ACTION
+        or binding.capability_id != PROCEDURE_ACTION
+        or binding.read_consent_id is not None
+        or binding.consent_kind != "goal_budget"
+    ):
+        raise RuntimeError("procedure_schedule_binding_missing")
+    try:
+        cadence = normalize_cadence(trigger_spec)
+    except (TypeError, ValueError, ZoneInfoNotFoundError) as exc:
+        raise RuntimeError("procedure_schedule_trigger_invalid") from exc
+    if cadence != {
+        "kind": binding.cadence_kind,
+        "timezone": binding.timezone,
+        "daily_hour": binding.daily_hour,
+        "daily_minute": binding.daily_minute,
+    }:
+        raise RuntimeError("procedure_schedule_trigger_binding_mismatch")
+    if binding.state != "active" or _utc(binding.expires_at) <= observed:
+        raise _ProcedureScheduleDeferred("procedure_schedule_prerequisite_stale", "review_schedule")
+
+    goal = await db.get(Goal, binding.goal_id, populate_existing=True)
+    session = await db.get(OperatorSession, binding.owner_session_id, populate_existing=True)
+    goal_status = getattr(getattr(goal, "status", None), "value", getattr(goal, "status", None))
+    if (
+        goal is None
+        or session is None
+        or session.revoked_at is not None
+        or _utc(session.idle_expires_at) <= observed
+        or _utc(session.absolute_expires_at) <= observed
+        or goal.owner_principal_id != binding.owner_principal_id
+        or goal.owner_session_id != binding.owner_session_id
+        or goal_status != "active"
+        or int(goal.revision) != int(binding.goal_revision)
+        or not bool(getattr(goal, "proactive_enabled", False))
+    ):
+        raise _ProcedureScheduleDeferred("procedure_goal_authority_stale", "review_goal_authority")
+    budget = deserialize_admission_budget(goal)
+    if budget is None or not bool(budget.reviewed_grant) or not str(budget.grant_id or "").strip():
+        raise _ProcedureScheduleDeferred("procedure_goal_budget_missing_reviewed_grant", "review_goal_budget")
+    try:
+        snapshot = goal_admission_budget_snapshot(
+            goal_id=str(goal.id), goal_revision=int(goal.revision), budget=budget
+        )
+    except (TypeError, ValueError) as exc:
+        raise _ProcedureScheduleDeferred("procedure_goal_budget_invalid", "repair_goal_budget") from exc
+    period_expires = _utc(budget.period_expires_at) if budget.period_expires_at is not None else None
+    period_started = _utc(budget.period_started_at) if budget.period_started_at is not None else None
+    if period_expires is None:
+        raise _ProcedureScheduleDeferred("procedure_goal_budget_finite_expiry_required", "set_goal_budget_expiry")
+    if period_started is not None and period_started > observed:
+        raise _ProcedureScheduleDeferred("procedure_goal_budget_period_not_started", "wait_for_goal_budget_period")
+    if period_expires <= observed:
+        raise _ProcedureScheduleDeferred("procedure_goal_budget_period_expired", "review_goal_budget")
+    if _procedure_quiet_now(budget, observed):
+        raise _ProcedureScheduleDeferred("goal_quiet_hours", "wait_for_next_eligible_slot")
+
+    # These are the exact fields emitted by the API schedule-v2 contract.  Do
+    # not accept aliases or coerce JSON scalars: a string/bool here would make
+    # a malformed action spec look like a reviewed grant.
+    expected_budget = {
+        "goal_budget_digest": snapshot.digest,
+        "consent_digest": snapshot.digest,
+        "goal_budget_grant_id": str(budget.grant_id),
+        "goal_budget_max_outstanding_jobs": int(budget.max_outstanding_jobs),
+        "goal_budget_max_attempts": int(budget.max_attempts),
+        "goal_budget_max_runtime_seconds": int(budget.max_runtime_seconds),
+    }
+    for key, expected in expected_budget.items():
+        observed_value = action_spec.get(key)
+        if key in {
+            "goal_budget_max_outstanding_jobs",
+            "goal_budget_max_attempts",
+            "goal_budget_max_runtime_seconds",
+        }:
+            valid = type(observed_value) is int and observed_value == expected
+        else:
+            valid = type(observed_value) is str and observed_value == expected
+        if not valid:
+            raise _ProcedureScheduleDeferred("procedure_goal_budget_changed", "refresh_goal_budget")
+    action_period = _procedure_budget_timestamp(action_spec.get("goal_budget_period_expires_at"))
+    if action_period is None or action_period != period_expires or type(action_spec.get("goal_budget_period_expires_at")) is not str:
+        raise _ProcedureScheduleDeferred("procedure_goal_budget_changed", "refresh_goal_budget")
+    if (
+        str(action_spec.get("goal_id") or "") != str(binding.goal_id)
+        or type(action_spec.get("goal_revision")) is not int
+        or action_spec.get("goal_revision") < 1
+        or action_spec.get("goal_revision") != int(binding.goal_revision)
+        or str(action_spec.get("routine_id") or "") == ""
+        or type(action_spec.get("version")) is not int
+        or action_spec.get("version") < 1
+    ):
+        raise RuntimeError("procedure_schedule_action_binding_invalid")
+
+    # The schedule action is an immutable reviewed selector.  Re-read the
+    # owner-bound routine and version before reserving an occurrence so a
+    # paused routine, rollback, revision advance, or package replacement
+    # cannot silently execute under the old schedule key.  These checks use
+    # exact persisted scalars; the scheduler never accepts a caller alias or
+    # coerces a malformed JSON value into authority.
+    action_routine_revision = action_spec.get("routine_revision")
+    action_version_id = action_spec.get("version_id")
+    action_template_id = action_spec.get("template_id")
+    action_plan_digest = action_spec.get("plan_digest")
+    action_source_proof_digest = action_spec.get("source_proof_digest")
+    action_package_digest = action_spec.get("package_digest")
+    if (
+        type(action_routine_revision) is not int
+        or action_routine_revision < 1
+        or type(action_version_id) is not str
+        or not action_version_id.strip()
+        or type(action_template_id) is not str
+        or not action_template_id.strip()
+        or type(action_plan_digest) is not str
+        or not action_plan_digest.strip()
+        or type(action_source_proof_digest) is not str
+        or not action_source_proof_digest.strip()
+        or type(action_package_digest) is not str
+        or not action_package_digest.strip()
+    ):
+        raise _ProcedureScheduleDeferred("procedure_schedule_proof_missing", "review_procedure")
+
+    routine = (
+        await db.execute(
+            sa_select(GuardianRoutine)
+            .where(
+                GuardianRoutine.id == action_spec["routine_id"],
+                GuardianRoutine.owner_principal_id == binding.owner_principal_id,
+                GuardianRoutine.owner_session_id == binding.owner_session_id,
+            )
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    version_row = (
+        await db.execute(
+            sa_select(GuardianRoutineVersion)
+            .where(
+                GuardianRoutineVersion.routine_id == action_spec["routine_id"],
+                GuardianRoutineVersion.version == action_spec["version"],
+            )
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    provenance = _loads(getattr(version_row, "source_provenance_json", "{}")) if version_row is not None else {}
+    if (
+        routine is None
+        or version_row is None
+        or routine.state != "active"
+        or type(routine.revision) is not int
+        or routine.revision != action_routine_revision
+        or type(routine.current_version) is not int
+        or routine.current_version != action_spec["version"]
+        or str(version_row.id) != action_version_id
+        or str(version_row.installed_package_digest or "") != action_package_digest
+        or not isinstance(provenance, dict)
+        or provenance.get("schema_version") != 2
+        or provenance.get("template_id") != action_template_id
+        or provenance.get("plan_digest") != action_plan_digest
+        or provenance.get("source_proof_digest") != action_source_proof_digest
+    ):
+        raise _ProcedureScheduleDeferred("procedure_schedule_proof_stale", "review_procedure")
+    # The persisted version digest is necessary but not sufficient: package
+    # lifecycle state can be revoked or paused independently of the routine
+    # selector.  Reuse the existing owner-bound package readback rather than
+    # treating a matching database digest as executable authority.
+    try:
+        from src.workflows.routines import routine_service
+
+        package_readback = routine_service._package_readback(
+            binding.owner_principal_id,
+            binding.owner_session_id,
+            str(action_spec["routine_id"]),
+            int(action_spec["version"]),
+            action_package_digest,
+        )
+    except Exception as exc:
+        raise _ProcedureScheduleDeferred("procedure_package_readback_unavailable", "review_procedure") from exc
+    if (
+        not isinstance(package_readback, dict)
+        or package_readback.get("status") != "active"
+        or package_readback.get("digest") != action_package_digest
+    ):
+        raise _ProcedureScheduleDeferred("procedure_package_not_current", "review_procedure")
+
+    artifact = await db.get(WorkBoardInputArtifact, binding.input_artifact_id, populate_existing=True)
+    if (
+        artifact is None
+        or artifact.owner_principal_id != binding.owner_principal_id
+        or artifact.owner_session_id != binding.owner_session_id
+        or artifact.capability_id != "guardian-routine.v2"
+        or artifact.goal_id != binding.goal_id
+        or int(artifact.goal_revision) != int(binding.goal_revision)
+        or artifact.payload_sha256 != binding.input_digest.removeprefix("sha256:")
+        or artifact.bound_task_id is not None
+        or artifact.state not in {"pending", "bound"}
+        or artifact.expires_at is None
+        or _utc(artifact.expires_at) <= observed
+        or _utc(artifact.expires_at) < _utc(binding.expires_at)
+        or not artifact.metadata_digest
+    ):
+        raise RuntimeError("procedure_schedule_input_artifact_invalid")
+    try:
+        if _metadata_digest(artifact) != artifact.metadata_digest:
+            raise RuntimeError("artifact_metadata_digest_mismatch")
+        payload_bytes = _safe_file_bytes(
+            _payload_path(artifact), expected_digest=artifact.payload_sha256, expected_size=artifact.size_bytes
+        )
+        payload = _decode_and_validate_payload(artifact, payload_bytes)
+    except Exception as exc:
+        raise RuntimeError("procedure_schedule_input_artifact_invalid") from exc
+    payload_version = payload.get("version")
+    payload_goal_revision = payload.get("expected_goal_revision")
+    if (
+        payload.get("routine_id") != action_spec.get("routine_id")
+        or type(payload_version) is not int
+        or payload_version < 1
+        or payload_version != action_spec.get("version")
+        or payload.get("goal_id") != binding.goal_id
+        or type(payload_goal_revision) is not int
+        or payload_goal_revision < 1
+        or payload_goal_revision != binding.goal_revision
+        or payload.get("parameters") != (action_spec.get("parameters") or {})
+    ):
+        raise RuntimeError("procedure_schedule_input_binding_mismatch")
+
+    outstanding_states = (WorkBoardStatus.todo, WorkBoardStatus.ready, WorkBoardStatus.running, WorkBoardStatus.review)
+    outstanding_query = select(func.count(WorkBoardTask.task_id)).where(
+        WorkBoardTask.owner_principal_id == binding.owner_principal_id,
+        WorkBoardTask.owner_session_id == binding.owner_session_id,
+        WorkBoardTask.goal_id == binding.goal_id,
+        WorkBoardTask.goal_revision == binding.goal_revision,
+        WorkBoardTask.capability_id == "guardian-routine.v2",
+        WorkBoardTask.status.in_(outstanding_states),
+    )
+    # An exact same-slot replay is allowed to adopt its already-published
+    # task.  Other slots, including a new slot for this binding, still count
+    # every outstanding procedure task against the reviewed goal budget.
+    if slot_utc is not None:
+        normalized_slot = _utc(slot_utc)
+        try:
+            if getattr(db.get_bind().dialect, "name", "") == "sqlite":
+                normalized_slot = normalized_slot.replace(tzinfo=None)
+        except (AttributeError, RuntimeError):
+            pass
+        same_slot_task = (
+            await db.execute(
+                sa_select(GovernedScheduleOccurrence.work_board_task_id).where(
+                    GovernedScheduleOccurrence.binding_id == binding.binding_id,
+                    GovernedScheduleOccurrence.slot_utc == normalized_slot,
+                    GovernedScheduleOccurrence.state.in_(("reserved", "running", "unknown")),
+                    GovernedScheduleOccurrence.work_board_task_id.is_not(None),
+                )
+            )
+        ).scalar_one_or_none()
+        if same_slot_task is None:
+            # A writer may have committed the canonical task and then lost the
+            # result before linking it to the occurrence.  The occurrence is
+            # quarantined as unknown, but an exact same-slot task is still
+            # eligible for adoption; do not let the budget count it as a new
+            # outstanding job and mint a second artifact.
+            slot_key = normalized_slot.strftime("%Y%m%dT%H%M%SZ")
+            same_slot_task = (
+                await db.execute(
+                    sa_select(WorkBoardTask.task_id)
+                    .where(
+                        WorkBoardTask.owner_principal_id == binding.owner_principal_id,
+                        WorkBoardTask.owner_session_id == binding.owner_session_id,
+                        WorkBoardTask.goal_id == binding.goal_id,
+                        WorkBoardTask.goal_revision == binding.goal_revision,
+                        WorkBoardTask.capability_id == "guardian-routine.v2",
+                        WorkBoardTask.idempotency_scope == "guardian-routine-v2-schedule",
+                        WorkBoardTask.idempotency_key == f"{binding.binding_id}:{slot_key}",
+                    )
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+        if same_slot_task:
+            outstanding_query = outstanding_query.where(WorkBoardTask.task_id != str(same_slot_task))
+    outstanding = int((await db.execute(outstanding_query)).scalar_one() or 0)
+    if outstanding >= int(budget.max_outstanding_jobs):
+        raise _ProcedureScheduleDeferred("procedure_goal_outstanding_limit", "wait_for_outstanding_work")
+    return binding, goal, artifact, payload, action_spec
 
 
 def _reject_legacy_governed_mutation(action_type: str | None) -> None:
@@ -529,6 +911,7 @@ async def _run_governed_calendar_observation(
     occurrence_id: str | None = None
     claim_token: str | None = None
     claim_fence: int | None = None
+    occurrence_run_id: str | None = None
     owner_principal_id = ""
     owner_session_id = ""
     adapter: Any | None = None
@@ -958,426 +1341,449 @@ async def _run_governed_calendar_observation(
         raise
 
 
-async def _run_governed_mail_metadata_scan(
+async def _run_governed_procedure_schedule(
     job: dict[str, Any],
     *,
     scheduled_slot_utc: datetime | None,
     scheduled_run_id: str | None = None,
 ) -> dict[str, Any]:
-    """Run one bounded metadata-only Gmail watch occurrence.
+    """Admit one pinned v2 procedure occurrence into the existing Work Board.
 
-    The handler deliberately has no path to ``get_message_full`` or a model
-    fabric.  It persists message metadata and neutral inbox triage rows only
-    after the occurrence fence and current source authority are rechecked.
+    The scheduler owns the slot/lease and creates exactly one fresh parent task
+    artifact.  The normal Work Board dispatcher remains the execution owner;
+    no second queue or scheduler is introduced.  The occurrence stays
+    running until a later governed slot observes the task's terminal state,
+    which preserves the shared at-most-one-outstanding rule across restarts.
     """
 
-    from src.integrations.gmail_read import (
-        GmailMessageMetadata,
-        GmailReadError,
-        GoogleGmailReadonlyAdapter,
-        digest,
-        message_key,
-        thread_key,
+    from src.scheduler.governed_schedules import (
+        PROCEDURE_ACTION,
+        claim_occurrence,
+        reserve_occurrence,
+        settle_occurrence,
     )
-    from src.vault import decrypt, encrypt
-    from src.scheduler.governed_schedules import claim_occurrence, reserve_occurrence, settle_occurrence
 
     if scheduled_slot_utc is None:
         raise RuntimeError("governed_schedule_slot_unavailable")
     action_spec = job.get("action_spec") if isinstance(job.get("action_spec"), dict) else {}
     binding_id = str(action_spec.get("binding_id") or "").strip()
     if not binding_id:
-        raise RuntimeError("mail_watch_binding_missing")
-
+        raise RuntimeError("procedure_schedule_binding_missing")
     occurrence_id: str | None = None
     claim_token: str | None = None
     claim_fence: int | None = None
-    owner_principal_id = ""
-    owner_session_id = ""
-    adapter: Any | None = None
-    provider_contacted = False
+    occurrence_run_id: str | None = None
+    task_id: str | None = None
+    owner: WorkBoardOwner | None = None
+    fresh_artifact_id: str | None = None
+    fresh_artifact_revision: int | None = None
+    artifact_preparation_started = False
+    publication_started = False
 
-    def mark_contact() -> None:
-        nonlocal provider_contacted
-        provider_contacted = True
-
-    async def settle_failure(exc: BaseException) -> None:
+    async def _settle_failure(
+        exc: BaseException,
+        *,
+        state: str,
+        recovery_action: str,
+    ) -> None:
         if not occurrence_id or not claim_token or claim_fence is None:
             return
-        state = "unknown" if provider_contacted else "blocked"
-        code = _safe_error_label(exc) if isinstance(exc, Exception) else type(exc).__name__
         try:
             async with get_session() as recovery_db:
-                current = (
-                    await recovery_db.execute(
-                        sa_select(GovernedScheduleOccurrence).where(
-                            GovernedScheduleOccurrence.occurrence_id == occurrence_id,
-                            GovernedScheduleOccurrence.state == "running",
-                            GovernedScheduleOccurrence.claim_token == claim_token,
-                            GovernedScheduleOccurrence.fencing_token == claim_fence,
-                        )
-                    )
-                ).scalar_one_or_none()
-                if current is not None:
+                current = await recovery_db.get(GovernedScheduleOccurrence, occurrence_id, populate_existing=True)
+                if (
+                    current is not None
+                    and current.state == "running"
+                    and current.claim_token == claim_token
+                    and int(current.fencing_token) == int(claim_fence)
+                ):
                     await settle_occurrence(
                         recovery_db,
                         current,
                         state=state,
+                        task_id=task_id,
                         job_id=scheduled_run_id,
-                        failure_code=code,
-                        recovery_action="reconcile_external_effect" if state == "unknown" else "retry_next_occurrence",
+                        failure_code=_safe_error_label(exc) if isinstance(exc, Exception) else type(exc).__name__,
+                        recovery_action=recovery_action,
                         claim_token=claim_token,
                         fencing_token=claim_fence,
                     )
+                    if fresh_artifact_id:
+                        metadata = _loads(current.metadata_json or "{}")
+                        metadata["input_artifact_id"] = fresh_artifact_id
+                        current.metadata_json = _dumps(metadata)
+                        await recovery_db.flush()
         except Exception:
-            logger.exception("Could not persist Mail watch occurrence recovery receipt")
+            logger.exception("Could not settle governed procedure occurrence %s", occurrence_id)
+
+    async def _cleanup_unpublished_artifact() -> str:
+        """Revoke only when the exact artifact is still unbound and unpublished."""
+
+        if owner is None or not fresh_artifact_id or fresh_artifact_revision is None:
+            return "unknown"
+
+        async def publication_guard(cleanup_db: Any, _row: WorkBoardInputArtifact) -> bool:
+            task_ref = (
+                await cleanup_db.execute(
+                    sa_select(WorkBoardTask.task_id)
+                    .where(WorkBoardTask.input_artifact_id == fresh_artifact_id)
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            binding_ref = (
+                await cleanup_db.execute(
+                    sa_select(GovernedScheduleBinding.binding_id)
+                    .where(GovernedScheduleBinding.input_artifact_id == fresh_artifact_id)
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            occurrence_rows = (
+                await cleanup_db.execute(
+                    sa_select(GovernedScheduleOccurrence.metadata_json)
+                    .where(GovernedScheduleOccurrence.metadata_json.like(f"%{fresh_artifact_id}%"))
+                    .limit(8)
+                )
+            ).scalars().all()
+            occurrence_ref = False
+            for raw_metadata in occurrence_rows:
+                metadata = _loads(raw_metadata or "")
+                if metadata.get("input_artifact_id") == fresh_artifact_id:
+                    occurrence_ref = True
+                    break
+            return task_ref is None and binding_ref is None and not occurrence_ref
+
+        try:
+            async with get_session() as cleanup_db:
+                await revoke_unpublished_input_artifact(
+                    cleanup_db,
+                    owner,
+                    artifact_id=fresh_artifact_id,
+                    expected_revision=fresh_artifact_revision,
+                    publication_guard=publication_guard,
+                )
+            return "revoked"
+        except BoardError as exc:
+            if exc.code == "input_artifact_publication_protected":
+                return "protected"
+            return "unknown"
+        except Exception:
+            logger.exception("Could not reconcile unpublished procedure artifact %s", fresh_artifact_id)
+            return "unknown"
+
+    async def _adopt_persisted_task(
+        db: Any,
+        occurrence: GovernedScheduleOccurrence,
+        *,
+        occurrence_key: str,
+        occurrence_run_id_value: str | None,
+    ) -> bool:
+        """Adopt a task committed before an occurrence writer lost its result."""
+
+        nonlocal task_id, claim_token, claim_fence
+        candidate = (
+            await db.execute(
+                sa_select(WorkBoardTask)
+                .where(
+                    WorkBoardTask.owner_principal_id == owner.principal_id,
+                    WorkBoardTask.owner_session_id == owner.session_id,
+                    WorkBoardTask.goal_id == binding.goal_id,
+                    WorkBoardTask.goal_revision == int(binding.goal_revision),
+                    WorkBoardTask.capability_id == "guardian-routine.v2",
+                    WorkBoardTask.idempotency_scope == "guardian-routine-v2-schedule",
+                    WorkBoardTask.idempotency_key == occurrence_key,
+                )
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if candidate is None:
+            return False
+        candidate_artifact = await db.get(
+            WorkBoardInputArtifact,
+            candidate.input_artifact_id,
+            populate_existing=True,
+        ) if candidate.input_artifact_id else None
+        if (
+            candidate_artifact is None
+            or candidate_artifact.owner_principal_id != owner.principal_id
+            or candidate_artifact.owner_session_id != owner.session_id
+            or candidate_artifact.capability_id != "guardian-routine.v2"
+            or candidate_artifact.goal_id != binding.goal_id
+            or int(candidate_artifact.goal_revision) != int(binding.goal_revision)
+            or candidate_artifact.bound_task_id != candidate.task_id
+            or candidate_artifact.state not in {"bound", "consumed"}
+            or not candidate_artifact.metadata_digest
+        ):
+            raise _ProcedureSchedulePublishedTaskInvalid()
+        task_id = candidate.task_id
+        metadata = {
+            "status": "queued",
+            "task_id": candidate.task_id,
+            "capability_id": "guardian-routine.v2",
+            "routine_id": canonical_action.get("routine_id"),
+            "version": canonical_action.get("version"),
+            "input_artifact_id": candidate.input_artifact_id,
+            "memory_status": "no_learning",
+            "reconciled_publication": True,
+        }
+        if occurrence.state == "unknown":
+            # Unknown is a quarantine state.  A canonical task plus its bound
+            # artifact is the only proof that permits this exact slot to be
+            # reopened; advance the fence so the writer that lost its commit
+            # result cannot later mutate the recovered occurrence.
+            if not occurrence.claim_token:
+                raise _ProcedureSchedulePublishedTaskInvalid()
+            next_fence = int(occurrence.fencing_token) + 1
+            result = await db.execute(
+                update(GovernedScheduleOccurrence)
+                .where(
+                    GovernedScheduleOccurrence.occurrence_id == occurrence.occurrence_id,
+                    GovernedScheduleOccurrence.state == "unknown",
+                    GovernedScheduleOccurrence.claim_token == occurrence.claim_token,
+                    GovernedScheduleOccurrence.fencing_token == int(occurrence.fencing_token),
+                )
+                .values(
+                    state="running",
+                    work_board_task_id=candidate.task_id,
+                    durable_job_id=occurrence_run_id_value or occurrence.durable_job_id,
+                    fencing_token=next_fence,
+                    lease_expires_at=_utc_now() + timedelta(minutes=5),
+                    metadata_json=_dumps(metadata),
+                    updated_at=_utc_now(),
+                )
+            )
+            if int(result.rowcount or 0) != 1:
+                raise _ProcedureSchedulePublishedTaskInvalid()
+            await db.refresh(occurrence)
+            claim_token = occurrence.claim_token
+            claim_fence = occurrence.fencing_token
+        else:
+            occurrence.work_board_task_id = candidate.task_id
+            occurrence.metadata_json = _dumps(metadata)
+            await db.flush()
+        return True
 
     try:
         async with get_session() as db:
-            binding, watch_state, consent, connection, goal, artifact, typed = await _load_governed_mail_authority(db, job, binding_id)
+            binding, _goal, source_artifact, source_payload, canonical_action = await _load_governed_procedure_authority(
+                db, job, binding_id, slot_utc=scheduled_slot_utc
+            )
             occurrence, replay = await reserve_occurrence(db, binding, slot_utc=scheduled_slot_utc)
             occurrence_id = occurrence.occurrence_id
+            occurrence_run_id = occurrence.durable_job_id
             if replay:
                 if occurrence.state in {"succeeded", "blocked", "cancelled", "coalesced"}:
                     return {
                         "status": occurrence.state,
                         "occurrence_id": occurrence.occurrence_id,
+                        "task_id": occurrence.work_board_task_id,
                         "replayed": True,
-                        "new_count": 0,
-                        "notice_count": 0,
+                    }
+                if occurrence.state == "running":
+                    # A replay must adopt the exact fenced occurrence.  A
+                    # worker can crash after claiming and before publishing
+                    # its board task; claiming it again would either fail or
+                    # create a second authority path.
+                    claim_token = occurrence.claim_token
+                    claim_fence = occurrence.fencing_token
+                    occurrence_run_id = occurrence.durable_job_id
+                    if occurrence.work_board_task_id:
+                        return {
+                            "status": "queued",
+                            "occurrence_id": occurrence.occurrence_id,
+                            "task_id": occurrence.work_board_task_id,
+                            "replayed": True,
+                            "memory_status": "no_learning",
+                        }
+                elif occurrence.state == "unknown":
+                    # Keep the quarantine until an exact persisted task can
+                    # prove that publication committed.  The adoption helper
+                    # below advances the fence only after that proof.
+                    claim_token = occurrence.claim_token
+                    claim_fence = occurrence.fencing_token
+            if occurrence.state == "reserved":
+                await claim_occurrence(db, occurrence)
+                claim_token = occurrence.claim_token
+                claim_fence = occurrence.fencing_token
+            elif occurrence.state not in {"running", "unknown"}:
+                raise RuntimeError("governed_occurrence_not_claimable")
+            if not claim_token:
+                raise RuntimeError("procedure_schedule_claim_missing")
+            if scheduled_run_id:
+                if occurrence_run_id is None:
+                    occurrence.durable_job_id = scheduled_run_id
+                    occurrence_run_id = scheduled_run_id
+                if not replay:
+                    run_row = await db.get(ScheduledJobRun, scheduled_run_id)
+                    if run_row is None or run_row.scheduled_job_id != str(job.get("id") or ""):
+                        raise RuntimeError("governed_schedule_run_binding_invalid")
+                    run_metadata = _loads(run_row.metadata_json or "{}")
+                    run_metadata.update(
+                        {
+                            "governed_occurrence_id": occurrence.occurrence_id,
+                            "governed_binding_id": binding.binding_id,
+                            "governed_claim_fence": claim_fence,
+                        }
+                    )
+                    run_row.metadata_json = _dumps(run_metadata)
+            owner = WorkBoardOwner(
+                principal_id=binding.owner_principal_id,
+                session_id=binding.owner_session_id,
+            )
+            # The scheduled source artifact is immutable reviewed invocation
+            # data.  Each occurrence gets a fresh executable artifact and a
+            # deterministic occurrence UUID, so a consumed/expired prior task
+            # can never become authority for a later run.
+            slot_key = _utc(scheduled_slot_utc).strftime("%Y%m%dT%H%M%SZ")
+            occurrence_key = f"{binding.binding_id}:{slot_key}"
+            if replay and occurrence.state in {"running", "unknown"} and not occurrence.work_board_task_id:
+                adopted = await _adopt_persisted_task(
+                    db,
+                    occurrence,
+                    occurrence_key=occurrence_key,
+                    occurrence_run_id_value=occurrence_run_id,
+                )
+                if adopted:
+                    return {
+                        "status": "queued",
+                        "occurrence_id": occurrence.occurrence_id,
+                        "task_id": task_id,
+                        "replayed": True,
+                        "memory_status": "no_learning",
                     }
                 if occurrence.state == "unknown":
                     raise RuntimeError("governed_occurrence_requires_reconciliation")
-            await claim_occurrence(db, occurrence)
-            claim_token = occurrence.claim_token
-            claim_fence = occurrence.fencing_token
-            owner_principal_id = binding.owner_principal_id
-            owner_session_id = binding.owner_session_id
-            expected_binding_revision = int(binding.binding_revision)
-            expected_consent_revision = int(consent.source_revision)
-            expected_connection_revision = int(connection.revision)
-            if scheduled_run_id:
-                occurrence.durable_job_id = scheduled_run_id
-                run_row = await db.get(ScheduledJobRun, scheduled_run_id)
-                if run_row is None or run_row.scheduled_job_id != str(job.get("id") or ""):
-                    raise RuntimeError("mail_watch_run_binding_invalid")
-                run_metadata = _loads(run_row.metadata_json or "{}")
-                run_metadata.update({"governed_occurrence_id": occurrence.occurrence_id, "governed_binding_id": binding.binding_id, "governed_claim_fence": claim_fence})
-                run_row.metadata_json = _dumps(run_metadata)
-                await db.flush()
-            provider_label_refs = list(typed.get("label_ids") or [])
-            quiet_reason = _mail_watch_quiet_reason(goal)
-            if quiet_reason is not None:
-                await settle_occurrence(
-                    db,
-                    occurrence,
-                    state="blocked",
-                    job_id=scheduled_run_id,
-                    failure_code=quiet_reason,
-                    recovery_action="retry_next_occurrence",
-                    claim_token=claim_token,
-                    fencing_token=claim_fence,
-                )
-                return {
-                    "status": "blocked",
-                    "occurrence_id": occurrence.occurrence_id,
-                    "replayed": False,
-                    "new_count": 0,
-                    "notice_count": 0,
-                    "baseline_complete": bool(watch_state.baseline_complete),
-                    "provider_contact": False,
-                    "memory_status": "no_learning",
-                    "failure_code": quiet_reason,
-                    "recovery_action": "retry_next_occurrence",
-                }
+            occurrence_payload = dict(source_payload)
+            occurrence_payload["invocation_uuid"] = f"schedule:{occurrence_key}"
 
-        async def authority_check() -> None:
-            async with get_session() as check_db:
-                current_binding, current_state, current_consent, current_connection, _goal, _artifact, _typed = await _load_governed_mail_authority(check_db, job, binding_id)
-                if (
-                    current_binding.binding_id != binding_id
-                    or int(current_binding.binding_revision) != expected_binding_revision
-                    or int(current_consent.source_revision) != expected_consent_revision
-                    or int(current_connection.revision) != expected_connection_revision
-                    or current_state.binding_id != binding_id
-                ):
-                    raise RuntimeError("mail_watch_authority_fence_stale")
+            artifact_preparation_started = True
+        async with get_session() as artifact_db:
+            fresh = await prepare_input_artifact(
+                artifact_db,
+                owner,
+                WorkBoardInputArtifactCreate(
+                    schema_version=1,
+                    capability_id="guardian-routine.v2",
+                    goal_id=binding.goal_id,
+                    goal_revision=int(binding.goal_revision),
+                    input=occurrence_payload,
+                    idempotency_key=f"procedure-occurrence:{occurrence_key}",
+                ),
+            )
+            fresh_artifact_id = fresh.artifact_id
+            fresh_artifact_revision = int(fresh.revision)
+
+        repository = WorkBoardRepository()
+
+        async def publication_authority_check(check_db: Any) -> None:
+            try:
+                current_binding, _current_goal, _current_artifact, _current_payload, _current_action = (
+                    await _load_governed_procedure_authority(
+                        check_db, job, binding_id, slot_utc=scheduled_slot_utc
+                    )
+                )
+                if current_binding.binding_id != binding.binding_id or int(current_binding.binding_revision) != int(binding.binding_revision):
+                    raise RuntimeError("procedure_schedule_publication_fence_stale")
                 current_occurrence = (
                     await check_db.execute(
                         sa_select(GovernedScheduleOccurrence).where(
                             GovernedScheduleOccurrence.occurrence_id == occurrence_id,
-                            GovernedScheduleOccurrence.binding_id == binding_id,
-                            GovernedScheduleOccurrence.binding_revision == expected_binding_revision,
-                            GovernedScheduleOccurrence.durable_job_id == scheduled_run_id,
+                            GovernedScheduleOccurrence.binding_id == binding.binding_id,
+                            GovernedScheduleOccurrence.binding_revision == int(binding.binding_revision),
                             GovernedScheduleOccurrence.state == "running",
                             GovernedScheduleOccurrence.claim_token == claim_token,
                             GovernedScheduleOccurrence.fencing_token == claim_fence,
-                        ).execution_options(populate_existing=True)
+                            GovernedScheduleOccurrence.durable_job_id == occurrence_run_id,
+                        )
                     )
                 ).scalar_one_or_none()
                 if current_occurrence is None:
-                    raise RuntimeError("mail_watch_occurrence_fence_stale")
-
-        async with get_session() as label_db:
-            live_connection = await label_db.get(GoogleServiceConnection, connection.connection_id, populate_existing=True)
-            labels = (
-                await label_db.execute(
-                    sa_select(MailLabelBinding).where(
-                        MailLabelBinding.label_id.in_(provider_label_refs),
-                        MailLabelBinding.owner_principal_id == owner_principal_id,
-                        MailLabelBinding.owner_session_id == owner_session_id,
-                        MailLabelBinding.connection_id == connection.connection_id,
-                        MailLabelBinding.connection_revision == expected_connection_revision,
-                        MailLabelBinding.state == "active",
-                    )
-                )
-            ).scalars().all()
-            if live_connection is None or len(labels) != len(set(provider_label_refs)):
-                raise RuntimeError("mail_watch_labels_stale")
-            try:
-                provider_labels = [decrypt(row.provider_label_id_ciphertext) for row in labels]
+                    raise RuntimeError("procedure_schedule_occurrence_fence_stale")
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:
-                raise RuntimeError("mail_watch_labels_unavailable") from exc
+                raise _ProcedureScheduleAuthorityFailure() from exc
 
-        adapter = GoogleGmailReadonlyAdapter(
-            connection,
-            owner_principal_id=owner_principal_id,
-            authority_check=authority_check,
-            contact_observer=mark_contact,
-        )
-        window_end = _utc_now()
-        window_start = window_end - timedelta(days=7)
-        page = await adapter.list_message_ids(
-            provider_labels,
-            received_after=window_start,
-            max_messages=min(int(typed["max_messages"]), 10),
-        )
-        semaphore = asyncio.Semaphore(2)
-
-        async def read_metadata(provider_id: str) -> GmailMessageMetadata:
-            async with semaphore:
-                return await adapter.get_message_metadata(provider_id)
-
-        metadata_items = await asyncio.gather(*(read_metadata(provider_id) for provider_id in page.provider_ids))
+        publication_started = True
         async with get_session() as db:
-            current_binding, current_state, current_consent, current_connection, current_goal, _artifact, current_typed = await _load_governed_mail_authority(db, job, binding_id)
-            if (
-                int(current_binding.binding_revision) != expected_binding_revision
-                or int(current_consent.source_revision) != expected_consent_revision
-                or int(current_connection.revision) != expected_connection_revision
-            ):
-                raise RuntimeError("mail_watch_publication_fence_stale")
-            occurrence = (
-                await db.execute(
-                    sa_select(GovernedScheduleOccurrence).where(
-                        GovernedScheduleOccurrence.occurrence_id == occurrence_id,
-                        GovernedScheduleOccurrence.state == "running",
-                        GovernedScheduleOccurrence.claim_token == claim_token,
-                        GovernedScheduleOccurrence.fencing_token == claim_fence,
-                    ).execution_options(populate_existing=True)
-                )
-            ).scalar_one_or_none()
-            if occurrence is None:
-                raise RuntimeError("mail_watch_occurrence_fence_stale")
-            try:
-                seen = json.loads(current_state.seen_message_keys_json or "[]")
-            except (TypeError, ValueError, json.JSONDecodeError):
-                raise RuntimeError("mail_watch_seen_state_invalid")
-            if not isinstance(seen, list) or len(seen) > 512 or any(not isinstance(item, str) for item in seen):
-                raise RuntimeError("mail_watch_seen_state_invalid")
-            seen_set = set(seen)
-            observed_keys: list[str] = []
-            observed_metadata: list[tuple[GmailMessageMetadata, str]] = []
-            new_items: list[tuple[GmailMessageMetadata, str]] = []
-            for metadata in metadata_items[:10]:
-                if {"SPAM", "TRASH"}.intersection(metadata.label_ids):
-                    continue
-                key = message_key(owner_principal_id, current_connection.connection_id, metadata.provider_message_id)
-                observed_keys.append(key)
-                observed_metadata.append((metadata, key))
-                if key not in seen_set:
-                    new_items.append((metadata, key))
-
-            next_seen = list(dict.fromkeys(seen + observed_keys))
-            if len(next_seen) > 512:
-                current_state.state = "coverage_blocked"
-                current_state.skipped_coverage_reason = "mail_seen_cursor_capacity_exceeded"
-                current_state.list_fetched_at = _utc_now()
-                current_state.list_page_complete = False
-                current_state.last_observed_at = _utc_now()
-                current_state.last_completed_occurrence_id = occurrence_id
-                current_state.revision = int(current_state.revision) + 1
-                current_state.updated_at = _utc_now()
-                await settle_occurrence(
-                    db,
-                    occurrence,
-                    state="blocked",
-                    job_id=scheduled_run_id,
-                    failure_code="mail_seen_cursor_capacity_exceeded",
-                    recovery_action="create_narrower_mail_watch",
-                    claim_token=claim_token,
-                    fencing_token=claim_fence,
-                )
-                return {
-                    "status": "blocked",
-                    "occurrence_id": occurrence_id,
-                    "replayed": False,
-                    "observed_count": len(observed_keys),
-                    "new_count": len(new_items),
-                    "notice_count": 0,
-                    "baseline_complete": bool(current_state.baseline_complete),
-                    "coverage": {"list_page_complete": False, "more_available": True},
-                    "provider_contact": True,
-                    "memory_status": "no_learning",
-                    "failure_code": "mail_seen_cursor_capacity_exceeded",
-                    "recovery_action": "create_narrower_mail_watch",
-                }
-
-            for metadata, key in observed_metadata:
-                existing = (
-                    await db.execute(
-                        sa_select(MailMessageBinding).where(
-                            MailMessageBinding.owner_principal_id == owner_principal_id,
-                            MailMessageBinding.owner_session_id == owner_session_id,
-                            MailMessageBinding.connection_id == current_connection.connection_id,
-                            MailMessageBinding.message_key == key,
-                        ).execution_options(populate_existing=True)
-                    )
-                ).scalar_one_or_none()
-                row_kwargs = {
-                    "connection_revision": current_connection.revision,
-                    "source_consent_id": current_consent.consent_id,
-                    "source_consent_revision": current_consent.source_revision,
-                    "source_label_scope_digest": "sha256:" + digest({"namespace": "seraph.gmail.source-scope.v1", "connection_id": current_connection.connection_id, "connection_revision": current_connection.revision, "consent_id": current_consent.consent_id, "source_revision": current_consent.source_revision, "label_ids": sorted(provider_label_refs)}),
-                    "provider_message_id_ciphertext": encrypt(metadata.provider_message_id),
-                    "provider_thread_id_ciphertext": encrypt(metadata.provider_thread_id),
-                    "thread_key": thread_key(owner_principal_id, current_connection.connection_id, metadata.provider_thread_id),
-                    "message_revision": metadata.message_revision,
-                    "received_at": metadata.received_at,
-                    "fetched_at": _utc_now(),
-                    "status": "present",
-                    "revision": (int(existing.revision) + 1 if existing is not None else 1),
-                    "updated_at": _utc_now(),
-                }
-                if existing is None:
-                    db.add(
-                        MailMessageBinding(
-                            owner_principal_id=owner_principal_id,
-                            owner_session_id=owner_session_id,
-                            connection_id=current_connection.connection_id,
-                            message_key=key,
-                            **row_kwargs,
-                        )
-                    )
-                else:
-                    for field, value in row_kwargs.items():
-                        setattr(existing, field, value)
-
-            if not current_state.baseline_complete:
-                next_seen = list(dict.fromkeys(seen + observed_keys))
-                current_state.baseline_complete = True
-                current_state.state = "baseline_complete" if page.next_page_token is None else "coverage_blocked"
-                current_state.skipped_coverage_reason = None if page.next_page_token is None else "mail_list_page_truncated"
-                notice_items: list[tuple[GmailMessageMetadata, str]] = []
-            else:
-                next_seen = list(dict.fromkeys(seen + observed_keys))
-                notice_items = new_items
-                current_state.state = "active" if page.next_page_token is None else "coverage_blocked"
-                current_state.skipped_coverage_reason = None if page.next_page_token is None else "mail_list_page_truncated"
-
-            # A watch can create at most three neutral inbox items during the
-            # finite Goal notification period. Remaining keys stay in the
-            # bounded cursor; Inbox acceptance creates triage work explicitly.
-            budget = deserialize_admission_budget(current_goal)
-            notification_limit = int(getattr(budget, "notifications_per_day", 0) or 0) if budget is not None else 0
-            period_start = _utc(getattr(budget, "period_started_at", None)) if budget is not None and getattr(budget, "period_started_at", None) else _utc(current_goal.updated_at)
-            period_count = len(
-                (
-                    await db.execute(
-                        sa_select(GuardianInboxDisposition.id).where(
-                            GuardianInboxDisposition.owner_principal_id == owner_principal_id,
-                            GuardianInboxDisposition.owner_session_id == owner_session_id,
-                            GuardianInboxDisposition.source_kind == "mail_notice",
-                            GuardianInboxDisposition.goal_id == current_binding.goal_id,
-                            GuardianInboxDisposition.created_at >= period_start,
-                        )
-                    )
-                ).scalars().all()
-            )
-            available = max(0, min(3, notification_limit) - period_count)
-            notice_items = notice_items[: min(3, available)]
-            created_notices = 0
-            for metadata, key in notice_items:
-                source_id = f"mail-notice:{current_binding.binding_id}:{key}"
-                existing_notice = (
-                    await db.execute(
-                        sa_select(GuardianInboxDisposition).where(
-                            GuardianInboxDisposition.owner_principal_id == owner_principal_id,
-                            GuardianInboxDisposition.source_kind == "mail_notice",
-                            GuardianInboxDisposition.source_id == source_id,
-                        )
-                    )
-                ).scalar_one_or_none()
-                if existing_notice is not None:
-                    continue
-                notice_digest = "sha256:" + digest({"source_id": source_id, "message_key": key, "message_revision": metadata.message_revision, "watch_id": current_binding.binding_id, "goal_id": current_binding.goal_id, "goal_revision": current_binding.goal_revision})
-                db.add(
-                    GuardianInboxDisposition(
-                        owner_principal_id=owner_principal_id,
-                        owner_session_id=owner_session_id,
-                        source_kind="mail_notice",
-                        source_id=source_id,
-                        source_digest=notice_digest,
-                        goal_id=current_binding.goal_id,
-                        goal_revision=int(current_binding.goal_revision),
-                        watch_id=current_binding.binding_id,
-                        plan_revision=int(current_binding.binding_revision),
-                        state="pending",
-                        revision=1,
-                        expires_at=current_binding.expires_at,
-                    )
-                )
-                created_notices += 1
-
-            current_state.seen_message_keys_json = json.dumps(next_seen, separators=(",", ":"))
-            current_state.seen_message_keys_digest = "sha256:" + digest(next_seen)
-            current_state.window_start_utc = window_start
-            current_state.window_end_utc = window_end
-            current_state.list_fetched_at = _utc_now()
-            current_state.list_page_complete = page.next_page_token is None
-            current_state.last_observed_at = _utc_now()
-            current_state.last_completed_occurrence_id = occurrence_id
-            current_state.revision = int(current_state.revision) + 1
-            current_state.updated_at = _utc_now()
-            await settle_occurrence(
+            mutation = await repository.create_task(
                 db,
-                occurrence,
-                state="succeeded",
-                job_id=scheduled_run_id,
-                failure_code=None,
-                recovery_action=None,
-                claim_token=claim_token,
-                fencing_token=claim_fence,
+                owner,
+                WorkBoardTaskCreate(
+                    title=f"Scheduled procedure: {canonical_action.get('routine_id') or 'reviewed routine'}",
+                    body="A reviewed procedure occurrence is queued for the operator Work Board.",
+                    goal_id=binding.goal_id,
+                    goal_revision=int(binding.goal_revision),
+                    status=WorkBoardStatus.todo,
+                    capability_id="guardian-routine.v2",
+                    input_artifact_id=fresh_artifact_id,
+                    priority=60,
+                    idempotency_scope="guardian-routine-v2-schedule",
+                    idempotency_key=occurrence_key,
+                    origin_thread_id=binding.owner_session_id,
+                ),
+                origin_session_id=binding.owner_session_id,
+                publication_authority_check=publication_authority_check,
             )
-            return {
-                "status": "succeeded",
-                "occurrence_id": occurrence_id,
-                "replayed": False,
-                "observed_count": len(observed_keys),
-                "new_count": len(new_items),
-                "notice_count": created_notices,
-                "baseline_complete": bool(current_state.baseline_complete),
-                "coverage": {"list_page_complete": page.next_page_token is None, "more_available": page.next_page_token is not None},
-                "provider_contact": True,
-                "memory_status": "no_learning",
-            }
+            task_id = mutation.task.task_id
+            occurrence = await db.get(GovernedScheduleOccurrence, occurrence_id)
+            if occurrence is None:
+                raise RuntimeError("procedure_schedule_occurrence_missing")
+            occurrence.work_board_task_id = task_id
+            occurrence.metadata_json = _dumps(
+                {
+                    "status": "queued",
+                    "task_id": task_id,
+                    "capability_id": "guardian-routine.v2",
+                    "routine_id": canonical_action.get("routine_id"),
+                    "version": canonical_action.get("version"),
+                    "input_artifact_id": fresh_artifact_id,
+                    "memory_status": "no_learning",
+                }
+            )
+            await db.flush()
+        return {
+            "status": "queued",
+            "occurrence_id": occurrence_id,
+            "task_id": task_id,
+            "replayed": False,
+            "memory_status": "no_learning",
+        }
     except (Exception, asyncio.CancelledError) as exc:
-        await settle_failure(exc)
+        # Only a typed authority/Board rejection proves that publication did
+        # not cross the task writer boundary.  Its cleanup is still guarded by
+        # exact owner/revision and a fresh reference check.  A generic writer,
+        # flush, commit, or cancellation result is ambiguous: keep the exact
+        # artifact/idempotency key and quarantine the occurrence for explicit
+        # reconciliation instead of revoking or auto-replaying it.
+        cleanup_outcome: str | None = None
+        known_prepublication = isinstance(exc, (BoardError, _ProcedureScheduleAuthorityFailure))
+        if known_prepublication and fresh_artifact_id:
+            cleanup_outcome = await _cleanup_unpublished_artifact()
+        if cleanup_outcome == "revoked":
+            failure_state = "blocked"
+            recovery_action = "retry_after_prerequisite"
+        elif fresh_artifact_id or artifact_preparation_started or publication_started:
+            failure_state = "unknown"
+            recovery_action = "reconcile_existing_occurrence"
+        else:
+            # No artifact reservation or publication boundary was reached, so
+            # an authority/setup failure can safely block this occurrence.
+            failure_state = "blocked"
+            recovery_action = "retry_after_prerequisite"
+        await _settle_failure(
+            exc,
+            state=failure_state,
+            recovery_action=recovery_action,
+        )
         raise
 
 def build_cron_trigger(job: dict[str, Any]) -> CronTrigger:
     trigger_spec = job.get("trigger_spec") or {}
-    if str(job.get("action_type") or "") in {"calendar.observe_due_events.v1", "gmail.scan_metadata.v1"}:
+    if str(job.get("action_type") or "") in {
+        "calendar.observe_due_events.v1",
+        "guardian.run_procedure.v2",
+        "gmail.scan_metadata.v1",
+    }:
         from src.scheduler.governed_schedules import cron_for_cadence
 
         return cron_for_cadence(trigger_spec)
@@ -1776,7 +2182,11 @@ async def execute_scheduled_job(job_id: str, *, scheduled_slot_utc: datetime | N
     if job is None:
         return
     action_type = str(job.get("action_type") or "")
-    if action_type in {"calendar.observe_due_events.v1", "gmail.scan_metadata.v1"} and scheduled_slot_utc is None:
+    if action_type in {
+        "calendar.observe_due_events.v1",
+        "guardian.run_procedure.v2",
+        "gmail.scan_metadata.v1",
+    } and scheduled_slot_utc is None:
         # The public legacy/manual execution seam cannot mint a governed
         # occurrence.  Only the APScheduler wrapper may forward a canonical
         # slot to this handler.
@@ -1844,6 +2254,40 @@ async def execute_scheduled_job(job_id: str, *, scheduled_slot_utc: datetime | N
                     "scheduled_job_run_id": run["id"],
                     "action_type": action_type,
                     "occurrence_id": observation.get("occurrence_id"),
+                },
+            )
+            return
+        if action_type == "guardian.run_procedure.v2":
+            scheduled = await _run_governed_procedure_schedule(
+                job,
+                scheduled_slot_utc=scheduled_slot_utc,
+                scheduled_run_id=run["id"],
+            )
+            outcome = str(scheduled.get("status") or "blocked")
+            await scheduled_job_repository.record_run(
+                job_id,
+                outcome=outcome,
+            )
+            await scheduled_job_repository.finish_run(
+                run["id"],
+                outcome=outcome,
+                status="finished" if outcome in {"queued", "succeeded"} else outcome,
+                metadata={
+                    "occurrence_id": scheduled.get("occurrence_id"),
+                    "task_id": scheduled.get("task_id"),
+                    "replayed": bool(scheduled.get("replayed", False)),
+                    "memory_status": scheduled.get("memory_status", "no_learning"),
+                },
+            )
+            await log_scheduler_job_event(
+                job_name=f"user_cron:{job_id}",
+                outcome="succeeded" if outcome in {"queued", "succeeded"} else outcome,
+                details={
+                    "scheduled_job_id": job_id,
+                    "scheduled_job_run_id": run["id"],
+                    "action_type": action_type,
+                    "occurrence_id": scheduled.get("occurrence_id"),
+                    "task_id": scheduled.get("task_id"),
                 },
             )
             return
@@ -1985,6 +2429,54 @@ async def execute_scheduled_job(job_id: str, *, scheduled_slot_utc: datetime | N
             return
 
         raise RuntimeError(f"Unsupported scheduled action '{action_type}'.")
+    except _ProcedureScheduleDeferred as exc:
+        await scheduled_job_repository.record_run(
+            job_id,
+            outcome="deferred",
+            error=exc.reason_code,
+        )
+        await scheduled_job_repository.finish_run(
+            run["id"],
+            outcome="deferred",
+            status="deferred",
+            error=exc.reason_code,
+            metadata={"recovery_action": exc.recovery_action},
+        )
+        await log_scheduler_job_event(
+            job_name=f"user_cron:{job_id}",
+            outcome="deferred",
+            details={
+                "scheduled_job_id": job_id,
+                "scheduled_job_run_id": run["id"],
+                "action_type": action_type,
+                "reason_code": exc.reason_code,
+                "recovery_action": exc.recovery_action,
+            },
+        )
+    except _ProcedureScheduleAuthorityFailure as exc:
+        await scheduled_job_repository.record_run(
+            job_id,
+            outcome="blocked",
+            error=_safe_error_label(exc),
+        )
+        await scheduled_job_repository.finish_run(
+            run["id"],
+            outcome="blocked",
+            status="blocked",
+            error=_safe_error_label(exc),
+            metadata={"recovery_action": "retry_after_prerequisite"},
+        )
+        await log_scheduler_job_event(
+            job_name=f"user_cron:{job_id}",
+            outcome="blocked",
+            details={
+                "scheduled_job_id": job_id,
+                "scheduled_job_run_id": run["id"],
+                "action_type": action_type,
+                "reason_code": _safe_error_label(exc),
+                "recovery_action": "retry_after_prerequisite",
+            },
+        )
     except ApprovalRequired as exc:
         await scheduled_job_repository.record_run(
             job_id,

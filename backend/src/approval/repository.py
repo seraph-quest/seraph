@@ -1322,6 +1322,7 @@ class ApprovalRepository:
         self,
         *,
         session_id: str | None = None,
+        approval_id: str | None = None,
         limit: int = 20,
     ) -> list[dict]:
         limit = min(max(limit, 1), 100)
@@ -1334,6 +1335,8 @@ class ApprovalRepository:
             )
             if session_id is not None:
                 stmt = stmt.where(ApprovalRequest.session_id == session_id)
+            if approval_id is not None:
+                stmt = stmt.where(ApprovalRequest.id == approval_id)
 
             result = await db.execute(stmt)
             requests = result.scalars().all()

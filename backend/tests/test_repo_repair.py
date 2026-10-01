@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 from sqlmodel import select
 
-from config.settings import settings
+from config.settings import RepoSandboxSettings, settings
 from src.execution.repo_sandbox import RootlessDockerRepoSandbox
 from src.auth.service import create_session
 from src.db.models import (
@@ -52,7 +52,7 @@ from src.workflows.repo_repair import (
     RepoRepairModelOutput,
     _repair_approval_fingerprint,
 )
-from src.workflows.job_runtime import durable_job_repository
+from src.workflows.job_runtime import DurableJobTransitionError, durable_job_repository
 
 
 def _repair_input(**overrides):
@@ -260,6 +260,16 @@ async def test_repo_repair_real_input_producer_reaches_private_source_review(
     monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", False)
     monkeypatch.setattr(settings, "operator_auth_secret", "repo-repair-producer-auth-secret")
     monkeypatch.setattr(settings, "operator_auth_secret_hash", "")
+    sandbox_settings = RepoSandboxSettings(
+        enabled=True,
+        docker_socket="unix:///tmp/seraph-repo-repair-docker.sock",
+        worker_image_digest="ghcr.io/operator/seraph-repo-python-pytest@sha256:" + "a" * 64,
+    )
+    monkeypatch.setattr(settings, "repo_sandbox", sandbox_settings)
+    monkeypatch.setattr(
+        "src.execution.repo_sandbox._effective_repo_sandbox_settings",
+        lambda: sandbox_settings,
+    )
     token, operator = await create_session()
     owner = WorkBoardOwner(
         principal_id=operator.principal.principal_id,
@@ -293,6 +303,83 @@ async def test_repo_repair_real_input_producer_reaches_private_source_review(
             },
         ),
     )
+
+    model_calls = 0
+    sandbox_calls = 0
+
+    class _Model:
+        def __init__(self, **_kwargs):
+            pass
+
+        def generate(self, messages, **_kwargs):
+            nonlocal model_calls
+            model_calls += 1
+            prompt = json.loads(messages[1]["content"])
+            base_digest = prompt["source_packet"]["base_snapshot_sha256"]
+            return json.dumps(
+                {
+                    "summary": "Update the bounded repository value.",
+                    "base_snapshot_sha256": base_digest,
+                    "patch_unified_diff": (
+                        "--- a/src/app.py\n"
+                        "+++ b/src/app.py\n"
+                        "@@ -1 +1 @@\n"
+                        "-VALUE = 1\n"
+                        "+VALUE = 2\n"
+                    ),
+                    "allowed_paths": ["src/app.py", "tests/test_app.py"],
+                    "test_args": ["pytest", "tests/test_app.py"],
+                    "expected_outcome": "The focused test passes.",
+                },
+                sort_keys=True,
+            )
+
+    def execute_job(_sandbox, job, *, before_dispatch=None):
+        nonlocal sandbox_calls
+        sandbox_calls += 1
+        if before_dispatch is not None:
+            before_dispatch()
+        manifest = {
+            "schema_version": 1,
+            "job_id": job.job_id,
+            "status": "succeeded",
+            "base_digest": job.base_digest,
+            "authority_digest": job.authority_digest,
+        }
+        readback = {
+            "schema_version": 1,
+            "job_id": job.job_id,
+            "status": "succeeded",
+            "test_status": "passed",
+            "base_digest": job.base_digest,
+        }
+        return {
+            "status": "succeeded",
+            "manifest": manifest,
+            "readback": readback,
+            "outputs": {
+                "manifest.json": json.dumps(manifest, sort_keys=True).encode("utf-8"),
+                "readback.json": json.dumps(readback, sort_keys=True).encode("utf-8"),
+                "diff.patch": b"--- a/src/app.py\n+++ b/src/app.py\n",
+                "pytest.stdout": b"1 passed\n",
+                "pytest.stderr": b"",
+            },
+            "cleanup": {"status": "cleanup_verified"},
+            "checkpoint_phases": [
+                "snapshot_verified",
+                "input_loaded",
+                "tests_finished",
+                "output_exported",
+            ],
+            "learning": "no_learning",
+        }
+
+    monkeypatch.setattr("src.workflows.repo_repair.FallbackLiteLLMModel", _Model)
+    monkeypatch.setattr("src.workflows.repo_repair.build_model_kwargs", lambda **_kwargs: {
+        "runtime_profile": "openrouter",
+        "api_base": "https://openrouter.ai/api/v1",
+    })
+    monkeypatch.setattr(RootlessDockerRepoSandbox, "execute_job", execute_job)
 
     async with async_db() as db:
         db.add(
@@ -430,6 +517,103 @@ async def test_repo_repair_real_input_producer_reaches_private_source_review(
     assert consent_payload["job_id"] == attempt.workflow_run_id
     assert consent_payload["recovery_action"] == "dispatcher_will_resume_same_root"
     assert consent_payload["expires_at"]
+
+    # Resume the same linked root through the existing dispatcher.  The
+    # consent route only requeues the root; this pass performs exactly one
+    # governed model contact and leaves the exact proposal/approval pending.
+    resumed = await dispatcher.run_pass()
+    assert resumed["claimed"] == 0
+    assert model_calls == 1
+    assert sandbox_calls == 0
+    pending = await client.get(f"/api/workflows/repo-repair/{attempt.workflow_run_id}")
+    assert pending.status_code == 200, f"{pending.status_code}: {pending.text!r}"
+    pending_payload = pending.json()
+    proposal_payload = pending_payload["proposal"]
+    approval_payload = pending_payload["approval"]
+    assert pending_payload["status"] == "awaiting_approval"
+    assert proposal_payload["status"] == "awaiting_approval"
+    assert approval_payload["approval_id"] == proposal_payload["approval_id"]
+    assert pending_payload["memory_status"] == "no_learning"
+
+    approval_response = await client.post(
+        f"/api/approvals/{proposal_payload['approval_id']}/approve",
+        headers={"Origin": "http://localhost:3001"},
+    )
+    assert approval_response.status_code == 200, f"{approval_response.status_code}: {approval_response.text!r}"
+    assert approval_response.json()["status"] == "approved"
+    resume_request = {
+        "expected_job_revision": int(pending_payload["revision"]),
+        "expected_proposal_revision": int(proposal_payload["revision"]),
+        "proposal_id": proposal_payload["proposal_id"],
+        "approval_id": proposal_payload["approval_id"],
+        "idempotency_key": "producer-repair-resume",
+    }
+    resume_response = await client.post(
+        f"/api/workflows/repo-repair/{attempt.workflow_run_id}/resume",
+        json=resume_request,
+        headers={"Origin": "http://localhost:3001"},
+    )
+    assert resume_response.status_code == 200, f"{resume_response.status_code}: {resume_response.text!r}"
+    resumed_payload = resume_response.json()
+    assert resumed_payload["job_id"] == attempt.workflow_run_id
+    assert resumed_payload["status"] in {"queued", "running", "succeeded"}
+
+    # A restart pass consumes the exact approval_resume receipt and uses the
+    # same board attempt/root.  No second model request or sandbox dispatch is
+    # allowed while it writes the canonical output/readback receipts.
+    restarted = WorkBoardDispatcher(repository=repository, session_provider=async_db)
+    completed = await restarted.run_pass()
+    assert completed["claimed"] == 0
+    assert model_calls == 1
+    assert sandbox_calls == 1
+    final = await client.get(f"/api/workflows/repo-repair/{attempt.workflow_run_id}")
+    assert final.status_code == 200, f"{final.status_code}: {final.text!r}"
+    final_payload = final.json()
+    assert final_payload["status"] == "succeeded"
+    assert final_payload["memory_status"] == "no_learning"
+    execution = final_payload["execution"]
+    assert execution["readback"]["verified"] is True
+    assert execution["readback"]["readback_id"]
+    assert execution["artifacts"]
+    assert any(item["artifact_type"] == "repo_change_readback_json" for item in execution["artifacts"])
+    async with async_db() as db:
+        final_task = (await db.execute(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id))).scalar_one()
+        final_attempt = (
+            await db.execute(
+                select(WorkBoardAttempt)
+                .where(WorkBoardAttempt.task_id == task_id)
+                .order_by(WorkBoardAttempt.attempt_id.desc())
+            )
+        ).scalars().first()
+        final_proposal = (
+            await db.execute(
+                select(RepoRepairProposalRow).where(
+                    RepoRepairProposalRow.workflow_run_id == attempt.workflow_run_id
+                )
+            )
+        ).scalar_one()
+    assert final_task.status is WorkBoardStatus.done
+    assert final_attempt is not None and final_attempt.workflow_run_id == attempt.workflow_run_id
+    assert final_attempt.ended_at is not None
+    assert final_proposal.status == "consumed"
+    assert final_proposal.approval_id == proposal_payload["approval_id"]
+
+    # The exact consumed request is replay-safe: the canonical approval/root
+    # receipt is returned without a second execution side effect.
+    replay_payload = await client.get(f"/api/workflows/repo-repair/{attempt.workflow_run_id}")
+    assert replay_payload.status_code == 200
+    replay_resume = await client.post(
+        f"/api/workflows/repo-repair/{attempt.workflow_run_id}/resume",
+        json={
+            **resume_request,
+            "expected_job_revision": int(replay_payload.json()["revision"]),
+            "expected_proposal_revision": int(final_proposal.revision),
+        },
+        headers={"Origin": "http://localhost:3001"},
+    )
+    assert replay_resume.status_code == 200, f"{replay_resume.status_code}: {replay_resume.text!r}"
+    assert model_calls == 1
+    assert sandbox_calls == 1
 
 
 @pytest.mark.asyncio
@@ -636,6 +820,390 @@ def test_private_artifact_writer_rejects_existing_broad_permissions(tmp_path: Pa
     with pytest.raises(RepoRepairError) as blocked:
         service._write_private_artifact("artifacts/repo-repair/source/existing.json", b"{}")
     assert blocked.value.code == "private_artifact_permissions_invalid"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_known_unreferenced_private_artifact_is_exact_and_idempotent(async_db, tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    service = RepoRepairService(workspace_dir=str(workspace))
+    owner = WorkBoardOwner(principal_id="operator:single", session_id="session:cleanup")
+    run_id = "job:cleanup"
+    now = datetime.now(timezone.utc)
+    async with async_db() as db:
+        await _seed_canonical_repair(
+            db,
+            workspace,
+            _repair_input(),
+            owner=owner,
+            task_id="task:cleanup",
+            attempt_id="attempt:cleanup",
+            run_id=run_id,
+            goal_id="goal:cleanup",
+            now=now,
+        )
+        run = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == run_id))).scalar_one()
+        assert run is not None
+        run.status = "blocked"
+        run.failure_reason = "source_authority_changed"
+        run.lease_owner = None
+        run.lease_expires_at = None
+        await db.commit()
+    artifact_ref, artifact_digest = service._write_private_artifact(
+        "artifacts/repo-repair/source/orphan.json",
+        b"known local no-effect evidence",
+    )
+    projection = await durable_job_repository.get_job(run_id)
+    assert projection is not None
+    with pytest.raises(RepoRepairError) as unproven:
+        async with async_db() as cleanup_db:
+            await service.cleanup_known_unreferenced_artifact(
+                owner=owner,
+                workflow_run_id=run_id,
+                artifact_ref=artifact_ref,
+                artifact_sha256=artifact_digest,
+                expected_revision=int(projection["revision"]),
+                db=cleanup_db,
+            )
+    assert unproven.value.code == "private_artifact_publication_unproven"
+    assert (workspace / artifact_ref.removeprefix("workspace-json:")).is_file()
+
+    # A root-owned publication intent proves the deterministic identity, while
+    # the artifact remains unbound by any source/proposal/attempt receipt.
+    intent = await durable_job_repository.record_recovery_checkpoint(
+        run_id,
+        owner_kind="user",
+        owner_principal_id=owner.principal_id,
+        checkpoint_id=f"repo-repair-source-intent:{run_id}",
+        state={"kind": "repo_repair_source_packet_intent", "status": "publication_pending"},
+        checkpoint_payload={
+            "kind": "repo_repair_source_packet_intent",
+            "status": "publication_pending",
+            "workflow_run_id": run_id,
+            "attempt_id": "attempt:cleanup",
+            "owner_principal_id": owner.principal_id,
+            "owner_session_id": owner.session_id,
+            "artifact_ref": artifact_ref,
+            "artifact_sha256": artifact_digest,
+        },
+        expected_revision=int(projection["revision"]),
+    )
+    async with async_db() as cleanup_db:
+        deleted = await service.cleanup_known_unreferenced_artifact(
+            owner=owner,
+            workflow_run_id=run_id,
+            artifact_ref=artifact_ref,
+            artifact_sha256=artifact_digest,
+            expected_revision=int(intent["revision"]),
+            db=cleanup_db,
+        )
+    assert deleted["status"] == "deleted"
+    assert not (workspace / artifact_ref.removeprefix("workspace-json:")).exists()
+    final_projection = await durable_job_repository.get_job(run_id)
+    assert final_projection is not None
+    async with async_db() as cleanup_db:
+        replay = await service.cleanup_known_unreferenced_artifact(
+            owner=owner,
+            workflow_run_id=run_id,
+            artifact_ref=artifact_ref,
+            artifact_sha256=artifact_digest,
+            expected_revision=int(final_projection["revision"]),
+            db=cleanup_db,
+        )
+    assert replay["status"] == "already_absent"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_replays_exact_pending_receipt_after_unlink_before_terminal_commit(
+    async_db, tmp_path: Path, monkeypatch
+):
+    """A process loss after unlink must finish the same cleanup receipt."""
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    service = RepoRepairService(workspace_dir=str(workspace))
+    owner = WorkBoardOwner(principal_id="operator:single", session_id="session:cleanup-crash")
+    run_id = "job:cleanup-crash"
+    now = datetime.now(timezone.utc)
+    async with async_db() as db:
+        await _seed_canonical_repair(
+            db,
+            workspace,
+            _repair_input(),
+            owner=owner,
+            task_id="task:cleanup-crash",
+            attempt_id="attempt:cleanup-crash",
+            run_id=run_id,
+            goal_id="goal:cleanup-crash",
+            now=now,
+        )
+        run = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == run_id))).scalar_one()
+        run.status = "blocked"
+        run.lease_owner = None
+        run.lease_expires_at = None
+        await db.commit()
+
+    artifact_ref, artifact_digest = service._write_private_artifact(
+        "artifacts/repo-repair/source/crash-replay.json",
+        b"delete once, commit receipt on replay",
+    )
+    projection = await durable_job_repository.get_job(run_id)
+    assert projection is not None
+    intent = await durable_job_repository.record_recovery_checkpoint(
+        run_id,
+        owner_kind="user",
+        owner_principal_id=owner.principal_id,
+        checkpoint_id=f"repo-repair-source-intent:{run_id}",
+        state={"kind": "repo_repair_source_packet_intent", "status": "publication_pending"},
+        checkpoint_payload={
+            "kind": "repo_repair_source_packet_intent",
+            "status": "publication_pending",
+            "workflow_run_id": run_id,
+            "attempt_id": "attempt:cleanup-crash",
+            "owner_principal_id": owner.principal_id,
+            "owner_session_id": owner.session_id,
+            "artifact_ref": artifact_ref,
+            "artifact_sha256": artifact_digest,
+        },
+        expected_revision=int(projection["revision"]),
+    )
+
+    original_record = durable_job_repository.record_recovery_checkpoint
+    failed_terminal_commit = False
+
+    async def fail_terminal_commit(*args, **kwargs):
+        nonlocal failed_terminal_commit
+        payload = kwargs.get("checkpoint_payload")
+        if (
+            not failed_terminal_commit
+            and isinstance(payload, dict)
+            and payload.get("kind") == "repo_repair_artifact_cleanup"
+            and payload.get("status") == "deleted"
+        ):
+            failed_terminal_commit = True
+            raise RuntimeError("simulated process loss before terminal cleanup receipt")
+        return await original_record(*args, **kwargs)
+
+    monkeypatch.setattr(durable_job_repository, "record_recovery_checkpoint", fail_terminal_commit)
+    with pytest.raises(RuntimeError, match="process loss"):
+        async with async_db() as cleanup_db:
+            await service.cleanup_known_unreferenced_artifact(
+                owner=owner,
+                workflow_run_id=run_id,
+                artifact_ref=artifact_ref,
+                artifact_sha256=artifact_digest,
+                expected_revision=int(intent["revision"]),
+                db=cleanup_db,
+            )
+    assert failed_terminal_commit is True
+    assert not (workspace / artifact_ref.removeprefix("workspace-json:")).exists()
+
+    monkeypatch.setattr(durable_job_repository, "record_recovery_checkpoint", original_record)
+    pending = await durable_job_repository.get_job(run_id)
+    assert pending is not None
+    async with async_db() as cleanup_db:
+        replay = await service.cleanup_known_unreferenced_artifact(
+            owner=owner,
+            workflow_run_id=run_id,
+            artifact_ref=artifact_ref,
+            artifact_sha256=artifact_digest,
+            expected_revision=int(pending["revision"]),
+            db=cleanup_db,
+        )
+    assert replay["status"] == "already_absent"
+    final_projection = await durable_job_repository.get_job(run_id)
+    assert final_projection is not None
+    assert any(
+        isinstance(item, dict)
+        and item.get("checkpoint_id") == f"repo-repair-artifact-cleanup:{run_id}"
+        and isinstance(item.get("payload"), dict)
+        and item["payload"].get("status") == "deleted"
+        for item in final_projection.get("checkpoints", [])
+    )
+
+
+@pytest.mark.asyncio
+async def test_cleanup_private_artifact_retains_unknown_or_referenced_evidence(async_db, tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    service = RepoRepairService(workspace_dir=str(workspace))
+    owner = WorkBoardOwner(principal_id="operator:single", session_id="session:cleanup-unknown")
+    run_id = "job:cleanup-unknown"
+    now = datetime.now(timezone.utc)
+    async with async_db() as db:
+        await _seed_canonical_repair(
+            db,
+            workspace,
+            _repair_input(),
+            owner=owner,
+            task_id="task:cleanup-unknown",
+            attempt_id="attempt:cleanup-unknown",
+            run_id=run_id,
+            goal_id="goal:cleanup-unknown",
+            now=now,
+        )
+        run = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == run_id))).scalar_one()
+        assert run is not None
+        run.status = "unknown_external_effect"
+        run.lease_owner = None
+        run.lease_expires_at = None
+        await db.commit()
+    artifact_ref, artifact_digest = service._write_private_artifact(
+        "artifacts/repo-repair/model/orphan.json",
+        b"retain unknown evidence",
+    )
+    projection = await durable_job_repository.get_job(run_id)
+    assert projection is not None
+    with pytest.raises(RepoRepairError) as blocked:
+        async with async_db() as cleanup_db:
+            await service.cleanup_known_unreferenced_artifact(
+                owner=owner,
+                workflow_run_id=run_id,
+                artifact_ref=artifact_ref,
+                artifact_sha256=artifact_digest,
+                expected_revision=int(projection["revision"]),
+                db=cleanup_db,
+            )
+    assert blocked.value.code == "private_artifact_cleanup_authority_changed"
+    assert (workspace / artifact_ref.removeprefix("workspace-json:")).is_file()
+
+    referenced_ref, referenced_digest = service._write_private_artifact(
+        "artifacts/repo-repair/source/referenced.json",
+        b"durably referenced evidence",
+    )
+    async with async_db() as db:
+        run = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == run_id))).scalar_one()
+        run.status = "blocked"
+        db.add(
+            RepoRepairSourcePacketRow(
+                id="packet:cleanup-reference",
+                owner_principal_id=owner.principal_id,
+                owner_session_id=owner.session_id,
+                work_board_task_id="task:cleanup-unknown",
+                work_board_attempt_id="attempt:cleanup-unknown",
+                workflow_run_id=run_id,
+                goal_id="goal:cleanup-unknown",
+                goal_revision=1,
+                input_digest="a" * 64,
+                repository_ref="repo",
+                base_snapshot_digest="b" * 64,
+                source_manifest_digest="c" * 64,
+                artifact_id="referenced",
+                artifact_sha256=referenced_digest,
+                manifest_json="{}",
+                state="verified",
+            )
+        )
+        await db.commit()
+    referenced_projection = await durable_job_repository.get_job(run_id)
+    assert referenced_projection is not None
+    with pytest.raises(RepoRepairError) as still_referenced:
+        async with async_db() as cleanup_db:
+            await service.cleanup_known_unreferenced_artifact(
+                owner=owner,
+                workflow_run_id=run_id,
+                artifact_ref=referenced_ref,
+                artifact_sha256=referenced_digest,
+                expected_revision=int(referenced_projection["revision"]),
+                db=cleanup_db,
+            )
+    assert still_referenced.value.code == "private_artifact_still_referenced"
+    assert (workspace / referenced_ref.removeprefix("workspace-json:")).is_file()
+
+    task_ref, task_digest = service._write_private_artifact(
+        "artifacts/repo-repair/patch/task-referenced.diff",
+        b"task receipt keeps this evidence",
+    )
+    async with async_db() as db:
+        task = (
+            await db.execute(
+                select(WorkBoardTask).where(WorkBoardTask.task_id == "task:cleanup-unknown")
+            )
+        ).scalar_one()
+        task.artifact_refs_json = json.dumps(
+            [{"artifact_ref": task_ref, "artifact_sha256": task_digest}],
+            separators=(",", ":"),
+        )
+        await db.commit()
+    task_projection = await durable_job_repository.get_job(run_id)
+    assert task_projection is not None
+    with pytest.raises(RepoRepairError) as task_still_referenced:
+        async with async_db() as cleanup_db:
+            await service.cleanup_known_unreferenced_artifact(
+                owner=owner,
+                workflow_run_id=run_id,
+                artifact_ref=task_ref,
+                artifact_sha256=task_digest,
+                expected_revision=int(task_projection["revision"]),
+                db=cleanup_db,
+            )
+    assert task_still_referenced.value.code == "private_artifact_still_referenced"
+    assert (workspace / task_ref.removeprefix("workspace-json:")).is_file()
+
+
+@pytest.mark.asyncio
+async def test_pending_private_cleanup_reserves_blocked_or_failed_root_from_resume(async_db, tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    owner = WorkBoardOwner(principal_id="operator:single", session_id="session:cleanup-reserve")
+    run_id = "job:cleanup-reserve"
+    now = datetime.now(timezone.utc)
+    async with async_db() as db:
+        await _seed_canonical_repair(
+            db,
+            workspace,
+            _repair_input(),
+            owner=owner,
+            task_id="task:cleanup-reserve",
+            attempt_id="attempt:cleanup-reserve",
+            run_id=run_id,
+            goal_id="goal:cleanup-reserve",
+            now=now,
+        )
+        run = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == run_id))).scalar_one()
+        run.status = "failed"
+        run.lease_owner = None
+        run.lease_expires_at = None
+        await db.commit()
+    projection = await durable_job_repository.get_job(run_id)
+    assert projection is not None
+    intent = await durable_job_repository.record_recovery_checkpoint(
+        run_id,
+        owner_kind="user",
+        owner_principal_id=owner.principal_id,
+        checkpoint_id=f"repo-repair-artifact-cleanup:{run_id}",
+        state={"phase": "artifact_cleanup", "status": "deletion_pending"},
+        checkpoint_payload={
+            "kind": "repo_repair_artifact_cleanup",
+            "status": "deletion_pending",
+            "workflow_run_id": run_id,
+            "owner_principal_id": owner.principal_id,
+            "owner_session_id": owner.session_id,
+            "artifact_ref": "workspace-json:artifacts/repo-repair/source/example.json",
+            "artifact_sha256": "a" * 64,
+        },
+        expected_revision=int(projection["revision"]),
+    )
+    with pytest.raises(DurableJobTransitionError, match="private artifact cleanup is reserved"):
+        await durable_job_repository.transition_job(
+            run_id,
+            "queued",
+            expected_revision=int(intent["revision"]),
+        )
+    with pytest.raises(DurableJobTransitionError, match="private artifact cleanup is reserved"):
+        await durable_job_repository.retry_job(
+            run_id,
+            owner_kind="user",
+            owner_principal_id=owner.principal_id,
+            reconciliation_receipt={
+                "effect_id": f"job-failure:{run_id}",
+                "effect_type": "job_failure",
+                "target_path": f"job:{run_id}",
+                "status": "reconciled",
+                "outcome": "no_external_effect",
+            },
+            expected_revision=int(intent["revision"]),
+        )
 
 
 @pytest.mark.asyncio

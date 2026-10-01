@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import hashlib
-import io
 import json
+import io
 import os
 from pathlib import Path, PurePosixPath
 import shutil
@@ -20,6 +20,7 @@ import tarfile
 import tempfile
 import time
 from typing import Any, Callable, Iterable, Mapping
+import uuid
 from urllib.parse import urlparse
 
 from config.settings import RepoSandboxSettings, settings
@@ -30,11 +31,271 @@ IMAGE_DIGEST_RE = r"^[^@/\s]+(?:/[^@\s]+)+@sha256:[0-9a-f]{64}$"
 DEFAULT_TIMEOUT_SECONDS = 30
 MAX_NAME_BYTES = 96
 REQUIRED_RESOURCE_CONTROLLERS = ("cpu", "memory", "pids")
+MAX_PERSISTED_SETTINGS_BYTES = 16 * 1024
 RESOURCE_CONTROLLER_CAPABILITIES = {
     "cpu": ("CpuCfsQuota", "CpuCfsPeriod"),
     "memory": ("MemoryLimit", "SwapLimit"),
     "pids": ("PidsLimit",),
 }
+
+
+def _repo_sandbox_settings_path() -> Path:
+    workspace = Path(settings.workspace_dir).expanduser()
+    if not workspace.is_absolute():
+        workspace = Path.cwd() / workspace
+    return workspace / "artifacts" / "repo-sandbox" / "settings.json"
+
+
+def _blocked_repo_sandbox_settings() -> RepoSandboxSettings:
+    """Return a typed disabled profile for untrusted persisted state."""
+
+    return RepoSandboxSettings(
+        enabled=False,
+        docker_socket="",
+        worker_image_digest="",
+        profile=PROFILE,
+    )
+
+
+def _open_trusted_directory(path: Path, *, create: bool = False) -> int:
+    """Open a private directory chain without following any path symlink.
+
+    The descriptor walk starts at the filesystem root (or the current
+    directory for a relative path), so a replacement of an ancestor after a
+    lexical ``lstat`` cannot redirect the settings reader or writer.
+    """
+
+    candidate = Path(path).expanduser()
+    if candidate.is_absolute():
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        parent_fd = os.open(os.sep, directory_flags)
+        components = candidate.parts[1:]
+    else:
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        parent_fd = os.open(".", directory_flags)
+        components = candidate.parts
+    try:
+        component_count = len(components)
+        for index, component in enumerate(components):
+            if component in {"", "."}:
+                continue
+            if component == "..":
+                raise OSError("repository sandbox settings path contains ..")
+            try:
+                next_fd = os.open(component, directory_flags, dir_fd=parent_fd)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(component, 0o700, dir_fd=parent_fd)
+                next_fd = os.open(component, directory_flags, dir_fd=parent_fd)
+            os.close(parent_fd)
+            parent_fd = next_fd
+            metadata = os.fstat(parent_fd)
+            writable_ancestor = bool(metadata.st_mode & 0o022)
+            sticky_system_ancestor = bool(
+                index < component_count - 1
+                and metadata.st_mode & stat.S_ISVTX
+            )
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or (writable_ancestor and not sticky_system_ancestor)
+                or (metadata.st_uid not in {0, os.getuid()} and not sticky_system_ancestor)
+            ):
+                raise OSError("repository sandbox settings parent is untrusted")
+        return parent_fd
+    except BaseException:
+        try:
+            os.close(parent_fd)
+        except OSError:
+            pass
+        raise
+
+
+def load_persisted_repo_sandbox_settings() -> tuple[RepoSandboxSettings, str | None]:
+    """Load one trusted persisted selector file for API and runner callers.
+
+    Missing state means the environment-backed defaults remain authoritative.
+    A present file must be a private, owner-owned regular file with no symlink
+    in its existing parent chain and exactly the four selectors written by the
+    settings endpoint.  Any corruption or trust failure returns a disabled
+    typed profile so stale enabled process state cannot execute a repair.
+    """
+
+    path = _repo_sandbox_settings_path()
+    workspace = Path(settings.workspace_dir).expanduser()
+    if not workspace.is_absolute():
+        workspace = Path.cwd() / workspace
+    parent_fd = -1
+    try:
+        parent_fd = _open_trusted_directory(path.parent)
+    except FileNotFoundError:
+        return settings.repo_sandbox, None
+    except OSError:
+        return _blocked_repo_sandbox_settings(), "repo_sandbox_settings_parent_untrusted"
+    try:
+        settings_fd = -1
+        try:
+            settings_fd = os.open(
+                path.name,
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent_fd,
+            )
+            opened = os.fstat(settings_fd)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_mode & 0o077
+                or opened.st_uid != os.getuid()
+                or opened.st_nlink != 1
+                or opened.st_size > MAX_PERSISTED_SETTINGS_BYTES
+            ):
+                return _blocked_repo_sandbox_settings(), "repo_sandbox_settings_untrusted"
+            with os.fdopen(settings_fd, "rb") as handle:
+                settings_fd = -1
+                raw = handle.read(MAX_PERSISTED_SETTINGS_BYTES + 1)
+            if len(raw) > MAX_PERSISTED_SETTINGS_BYTES:
+                return _blocked_repo_sandbox_settings(), "repo_sandbox_settings_invalid"
+            payload = json.loads(raw.decode("utf-8"))
+        except FileNotFoundError:
+            return settings.repo_sandbox, None
+        except OSError as exc:
+            if exc.errno == getattr(os, "ELOOP", 40):
+                return _blocked_repo_sandbox_settings(), "repo_sandbox_settings_symlinked"
+            raise
+        finally:
+            if settings_fd >= 0:
+                os.close(settings_fd)
+        if not isinstance(payload, dict) or set(payload) != {
+            "enabled",
+            "docker_socket",
+            "worker_image_digest",
+            "profile",
+        }:
+            raise ValueError("settings selectors are not exact")
+        current = settings.repo_sandbox.model_dump(mode="json")
+        loaded = RepoSandboxSettings.model_validate(current | payload)
+    except (OSError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return _blocked_repo_sandbox_settings(), "repo_sandbox_settings_invalid"
+    finally:
+        if parent_fd >= 0:
+            try:
+                os.close(parent_fd)
+            except OSError:
+                pass
+    return loaded, None
+
+
+def persist_repo_sandbox_settings(value: RepoSandboxSettings) -> None:
+    """Atomically persist the four sandbox selectors through held dirfds.
+
+    The API and the runner must share one write/read contract.  In particular,
+    a lexical ``Path.replace`` is not enough here: a parent can be swapped
+    between validation and publication.  We open every ancestor with
+    ``O_NOFOLLOW``, create a private 0600 temporary file in that held
+    directory, and rename the directory entry only after the bytes are fsynced.
+    A symlink or foreign existing settings file is rejected rather than
+    overwritten.
+    """
+
+    path = _repo_sandbox_settings_path()
+    workspace = Path(settings.workspace_dir).expanduser()
+    if not workspace.is_absolute():
+        workspace = Path.cwd() / workspace
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    parent_fd = -1
+    temporary_name = f".{path.name}.{uuid.uuid4().hex}.tmp"
+    temporary_fd = -1
+    try:
+        parent_fd = _open_trusted_directory(workspace, create=True)
+        for component in ("artifacts", "repo-sandbox"):
+            try:
+                os.mkdir(component, 0o700, dir_fd=parent_fd)
+            except FileExistsError:
+                pass
+            next_fd = os.open(component, directory_flags, dir_fd=parent_fd)
+            os.close(parent_fd)
+            parent_fd = next_fd
+            metadata = os.fstat(parent_fd)
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or metadata.st_mode & 0o022
+                or metadata.st_uid not in {0, os.getuid()}
+            ):
+                raise OSError("repository sandbox settings parent is untrusted")
+
+        payload = json.dumps(
+            {
+                "enabled": value.enabled,
+                "docker_socket": value.docker_socket,
+                "worker_image_digest": value.worker_image_digest,
+                "profile": value.profile,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        temporary_fd = os.open(
+            temporary_name,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=parent_fd,
+        )
+        with os.fdopen(temporary_fd, "wb") as handle:
+            temporary_fd = -1
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        try:
+            existing = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None and (
+            stat.S_ISLNK(existing.st_mode)
+            or not stat.S_ISREG(existing.st_mode)
+            or existing.st_mode & 0o077
+            or existing.st_uid != os.getuid()
+            or existing.st_nlink != 1
+        ):
+            raise OSError("repository sandbox settings destination is untrusted")
+        os.replace(
+            temporary_name,
+            path.name,
+            src_dir_fd=parent_fd,
+            dst_dir_fd=parent_fd,
+        )
+        os.fsync(parent_fd)
+        temporary_name = ""
+    finally:
+        if temporary_fd >= 0:
+            try:
+                os.close(temporary_fd)
+            except OSError:
+                pass
+        if parent_fd >= 0:
+            try:
+                if temporary_name:
+                    os.unlink(temporary_name, dir_fd=parent_fd)
+            except OSError:
+                pass
+            try:
+                os.close(parent_fd)
+            except OSError:
+                pass
+
+
+def _effective_repo_sandbox_settings() -> RepoSandboxSettings:
+    """Load persisted selectors while failing closed on a present bad file."""
+
+    value, _error = load_persisted_repo_sandbox_settings()
+    return value
 
 
 def _resource_controller_snapshot(info: Mapping[str, Any]) -> dict[str, Any]:
@@ -474,7 +735,7 @@ class RootlessDockerRepoSandbox:
         docker_binary: str = "docker",
         popen: Callable[..., subprocess.Popen[bytes]] | None = None,
     ) -> None:
-        self.config = config or settings.repo_sandbox
+        self.config = config or _effective_repo_sandbox_settings()
         self.limits = RepoSandboxLimits.from_settings(self.config)
         self.docker_binary = docker_binary
         self._popen = popen or subprocess.Popen

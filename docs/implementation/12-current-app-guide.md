@@ -448,6 +448,30 @@ recovery gate across reload, blocked fresh preparation, and cleared it only
 after an explicit exact authority refresh before resume. The implementation
 PR carries the branch-specific review and validation receipts.
 
+### Governed repository repair (M4 #887 branch-local target)
+
+The M4 target adds a bounded repository-repair path to the existing Work Board
+execution boundary. An operator selects repository-relative source and patch
+paths, Seraph creates a typed owner-bound input, inspects a private snapshot,
+pauses for explicit code-egress consent, and asks the governed
+`strategist_agent` route for one strict patch proposal. The operator reviews
+the exact proposal and approval target before an isolated test/readback path
+can run.
+
+The repair path binds the source packet, model request and response, patch,
+approval, owner/session, Goal, attempt, and durable job by digest. It exposes
+blocked, stale, revoked, and unknown recovery states and records
+`memory_status=no_learning`. Tests run against the bounded snapshot and do
+not claim to modify the original repository. Source text, prompts, model
+responses, and credentials stay out of generic operator projections.
+
+This is **Partial** and branch-local. Intercepted model transport and sandbox
+mechanics prove request, authority, recovery, and readback contracts only. If
+rootless CPU, memory, pids, or the pinned image cannot be verified, the path
+blocks before model contact. No live provider/account canary, paid inference,
+kernel resource-enforcement receipt, or original-repository write is claimed;
+the capability is not Shipped `develop` truth.
+
 ### Bounded public browser tasks
 
 The integration target adds `browser.public-task.v1` through the existing Work

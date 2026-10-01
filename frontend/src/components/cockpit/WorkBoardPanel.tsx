@@ -10,6 +10,7 @@ import type { BrowserTaskSubmissionReceipt, PendingBrowserSubmission } from "./B
 import { CalendarPrepForm } from "./CalendarPrepForm";
 import type { PendingCalendarSubmission } from "./CalendarPrepForm";
 import { WorkBoardMemoryReview } from "./WorkBoardMemoryReview";
+import { RepoRepairInspector } from "./RepoRepairInspector";
 import { validateCalendarExecution } from "../../lib/calendar";
 import type {
   GoalInfo,
@@ -3334,6 +3335,15 @@ function WorkBoardPanel({
                   )}
                 </section>
               )}
+
+              {selectedTask.capability_id === "engineering.repo-repair.v1"
+                && currentAttempt?.workflow_run_id
+                && (
+                  <RepoRepairInspector
+                    jobId={currentAttempt.workflow_run_id}
+                    onOpenApprovals={onOpenApprovals}
+                  />
+                )}
 
               <section className="rounded border border-white/10 p-3">
                 <div className="font-semibold">Actions and recovery</div>

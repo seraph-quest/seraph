@@ -39,8 +39,10 @@ from src.db.models import (
     RepoRepairProposal as RepoRepairProposalRow,
     RepoRepairSourcePacket as RepoRepairSourcePacketRow,
     WorkBoardAttempt,
-    WorkBoardInputArtifact,
+    WorkBoardHandoff,
+    WorkBoardLink,
     WorkBoardTask,
+    WorkBoardInputArtifact,
     WorkflowRunState,
 )
 from src.goals.repository import deserialize_admission_budget
@@ -49,6 +51,7 @@ from src.execution.repo_sandbox import (
     RootlessDockerRepoSandbox,
     _patch_paths_from_diff,
     _worker_test_args,
+    limits_digest,
 )
 from src.llm_runtime import FallbackLiteLLMModel, build_model_kwargs
 from src.model_fabric import bind_remote_inference_receipt
@@ -79,6 +82,8 @@ REPO_REPAIR_MAX_PATCH_BYTES = 1024 * 1024
 REPO_REPAIR_MAX_OUTPUT_TOKENS = 4096
 REPO_REPAIR_MAX_CONSENT_TTL = timedelta(minutes=30)
 REPO_REPAIR_PROPOSAL_TTL = timedelta(minutes=30)
+_REPO_REPAIR_PRIVATE_ROOTS = frozenset({"source", "model", "patch"})
+_REPO_REPAIR_CLEANUP_STATUSES = frozenset({"blocked", "failed"})
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
 _SECRET_PARTS = frozenset(
@@ -192,6 +197,72 @@ def _safe_identifier(value: Any, *, field: str, max_bytes: int = 256) -> str:
     if not normalized or len(normalized.encode("utf-8")) > max_bytes or not _SAFE_ID.fullmatch(normalized):
         raise RepoRepairError("invalid_identity", f"The repair {field} is invalid", status_code=422)
     return normalized
+
+
+def _contains_exact_private_reference(value: Any, *, references: frozenset[str], digests: frozenset[str]) -> bool:
+    """Fail closed when a bounded receipt structure still names an artifact."""
+
+    if isinstance(value, str):
+        return value in references or value in digests
+    if isinstance(value, Mapping):
+        return any(
+            _contains_exact_private_reference(item, references=references, digests=digests)
+            for item in value.values()
+        )
+    if isinstance(value, (list, tuple)):
+        return any(
+            _contains_exact_private_reference(item, references=references, digests=digests)
+            for item in value
+        )
+    return False
+
+
+def _checkpoint_publishes_private_artifact(
+    payload: Any,
+    *,
+    workflow_run_id: str,
+    attempt_id: str | None = None,
+    owner_principal_id: str,
+    owner_session_id: str,
+    artifact_ref: str,
+    artifact_digest: str,
+) -> bool:
+    """Recognize only an exact durable publication intent.
+
+    An intent proves that the blocked root owned the deterministic artifact
+    identity before a database publication completed.  A final source,
+    proposal, attempt, or checkpoint receipt remains a live reference and is
+    therefore handled by cleanup as retained evidence below.
+    """
+
+    if not isinstance(payload, Mapping):
+        return False
+    kind = str(payload.get("kind") or "")
+    if not kind.endswith("_intent") or str(payload.get("status") or "") != "publication_pending":
+        return False
+    required_identity = (
+        "workflow_run_id",
+        "attempt_id",
+        "owner_principal_id",
+        "owner_session_id",
+    )
+    if any(not str(payload.get(key) or "") for key in required_identity):
+        return False
+    if str(payload.get("workflow_run_id") or "") != workflow_run_id:
+        return False
+    if attempt_id is not None and str(payload.get("attempt_id") or "") != str(attempt_id):
+        return False
+    if str(payload.get("artifact_ref") or payload.get("response_artifact_ref") or payload.get("patch_artifact_ref") or "") != artifact_ref:
+        return False
+    if str(payload.get("artifact_sha256") or payload.get("response_artifact_sha256") or payload.get("patch_sha256") or "") != artifact_digest:
+        return False
+    checkpoint_owner = payload.get("owner_principal_id")
+    checkpoint_session = payload.get("owner_session_id")
+    if str(checkpoint_owner) != owner_principal_id:
+        return False
+    if str(checkpoint_session) != owner_session_id:
+        return False
+    return True
 
 
 def _bounded_text(value: str, *, field: str, max_bytes: int) -> str:
@@ -392,6 +463,45 @@ def _mapping_value(value: Any, key: str, default: Any = None) -> Any:
     return getattr(value, key, default)
 
 
+def _sandbox_authority_payload(sandbox: RootlessDockerRepoSandbox) -> dict[str, str]:
+    """Return the fixed sandbox selectors bound to a reviewed proposal.
+
+    The socket itself is an operator-owned local route and is therefore kept
+    out of public projections.  Its digest still belongs to the approval
+    authority so a restart cannot silently move an approved repair to another
+    daemon.  The remaining values are the fixed profile/image/limits selectors
+    consumed by the trusted runner.
+    """
+
+    return {
+        "sandbox_profile": str(sandbox.config.profile),
+        "sandbox_image_digest": str(sandbox.config.worker_image_digest),
+        "sandbox_limits_digest": limits_digest(sandbox.limits),
+        "sandbox_socket_digest": _digest_bytes(str(sandbox.config.docker_socket).encode("utf-8")),
+    }
+
+
+def _proposal_sandbox_authority(row: RepoRepairProposalRow) -> dict[str, str]:
+    """Read the reviewed sandbox selectors from the bounded metadata JSON."""
+
+    try:
+        metadata = json.loads(row.safe_metadata_json or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RepoRepairError("proposal_authority_invalid", "The repair proposal metadata is unreadable", status_code=409) from exc
+    sandbox = metadata.get("sandbox") if isinstance(metadata, Mapping) else None
+    if not isinstance(sandbox, Mapping):
+        return {}
+    return {
+        key: str(sandbox.get(key) or "")
+        for key in (
+            "sandbox_profile",
+            "sandbox_image_digest",
+            "sandbox_limits_digest",
+            "sandbox_socket_digest",
+        )
+    }
+
+
 def _proposal_authority_payload(row: RepoRepairProposalRow) -> dict[str, Any]:
     """Rebuild the immutable proposal authority projection from durable fields."""
 
@@ -402,7 +512,7 @@ def _proposal_authority_payload(row: RepoRepairProposalRow) -> dict[str, Any]:
         raise RepoRepairError("proposal_authority_invalid", "The repair proposal authority projection is unreadable", status_code=409) from exc
     if not isinstance(allowed_paths, list) or not isinstance(test_args, list):
         raise RepoRepairError("proposal_authority_invalid", "The repair proposal authority projection is invalid", status_code=409)
-    return {
+    authority = {
         "owner_principal_id": row.owner_principal_id,
         "owner_session_id": row.owner_session_id,
         "work_board_task_id": row.work_board_task_id,
@@ -425,6 +535,8 @@ def _proposal_authority_payload(row: RepoRepairProposalRow) -> dict[str, Any]:
         "request_digest": row.request_digest,
         "operation_key": row.operation_key,
     }
+    authority.update(_proposal_sandbox_authority(row))
+    return authority
 
 
 def _repair_approval_fingerprint(row: RepoRepairProposalRow, expires_at: datetime) -> str:
@@ -447,6 +559,7 @@ def _repair_approval_fingerprint(row: RepoRepairProposalRow, expires_at: datetim
             "patch_artifact_id": row.patch_artifact_id,
             "patch_sha256": row.patch_sha256,
             "authority_digest": row.authority_digest,
+            **_proposal_sandbox_authority(row),
             "expires_at": _utc(expires_at).isoformat(),
         }
     )
@@ -520,48 +633,77 @@ class RepoRepairService:
         path = PurePosixPath(relative_path)
         if path.is_absolute() or ".." in path.parts or len(path.parts) < 2:
             raise RepoRepairError("private_artifact_path_invalid", "The private artifact path is invalid", status_code=422)
-        directory = self._artifact_directory(path.parent.as_posix())
-        target = directory / path.name
         digest = _digest_bytes(payload)
-        if target.exists() or target.is_symlink():
-            try:
-                existing_metadata = target.lstat()
-            except OSError as exc:
-                raise RepoRepairError("private_artifact_unavailable", "The existing private artifact cannot be inspected", status_code=409) from exc
-            if (
-                stat.S_ISLNK(existing_metadata.st_mode)
-                or not stat.S_ISREG(existing_metadata.st_mode)
-                or existing_metadata.st_mode & 0o077
-            ):
-                raise RepoRepairError(
-                    "private_artifact_permissions_invalid",
-                    "The existing private artifact is not a private regular file",
-                    status_code=409,
-                )
-            if target.is_symlink() or not target.is_file():
-                raise RepoRepairError("private_artifact_collision", "The private artifact path is unsafe", status_code=409)
-            try:
-                existing = target.read_bytes()
-            except OSError as exc:
-                raise RepoRepairError("private_artifact_unavailable", "The existing private artifact cannot be read", status_code=409) from exc
-            if existing != payload:
-                raise RepoRepairError("private_artifact_collision", "The private artifact identity is already bound to different bytes", status_code=409)
-            return f"workspace-json:{relative_path}", digest
+        # Hold every ancestor descriptor while publishing the final entry.
+        # O_EXCL makes the target immutable across concurrent publishers; a
+        # matching existing file is an idempotent replay, while any different
+        # or incomplete bytes remain a collision requiring reconciliation.
+        self._artifact_directory(path.parent.as_posix())
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        parent_fd = -1
         fd = -1
-        temporary = directory / f".{target.name}.{uuid.uuid4().hex}.tmp"
         try:
-            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            parent_fd = os.open(self._workspace(), directory_flags)
+            for component in path.parts[:-1]:
+                next_fd = os.open(component, directory_flags, dir_fd=parent_fd)
+                os.close(parent_fd)
+                parent_fd = next_fd
+                metadata = os.fstat(parent_fd)
+                if (
+                    not stat.S_ISDIR(metadata.st_mode)
+                    or metadata.st_mode & 0o077
+                    or metadata.st_uid != os.getuid()
+                ):
+                    raise RepoRepairError("private_artifact_permissions_invalid", "The private artifact directory is unsafe", status_code=409)
+            try:
+                fd = os.open(
+                    path.parts[-1],
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+                    0o600,
+                    dir_fd=parent_fd,
+                )
+            except FileExistsError:
+                existing_fd = os.open(
+                    path.parts[-1],
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+                    dir_fd=parent_fd,
+                )
+                try:
+                    metadata = os.fstat(existing_fd)
+                    if (
+                        stat.S_ISLNK(metadata.st_mode)
+                        or not stat.S_ISREG(metadata.st_mode)
+                        or metadata.st_mode & 0o077
+                        or metadata.st_uid != os.getuid()
+                        or metadata.st_nlink != 1
+                    ):
+                        raise RepoRepairError("private_artifact_permissions_invalid", "The existing private artifact is not a private regular file", status_code=409)
+                    with os.fdopen(existing_fd, "rb") as handle:
+                        existing_fd = -1
+                        existing = handle.read(REPO_REPAIR_MAX_PATCH_BYTES + 1)
+                    if len(existing) > REPO_REPAIR_MAX_PATCH_BYTES:
+                        raise RepoRepairError("private_artifact_collision", "The existing private artifact exceeds the fixed bound", status_code=409)
+                    if existing != payload:
+                        raise RepoRepairError("private_artifact_collision", "The private artifact identity is already bound to different bytes", status_code=409)
+                    return f"workspace-json:{relative_path}", digest
+                finally:
+                    if existing_fd >= 0:
+                        os.close(existing_fd)
             with os.fdopen(fd, "wb") as handle:
                 fd = -1
                 handle.write(payload)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temporary, target)
-            metadata = target.lstat()
-            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o077:
+            metadata = os.stat(path.parts[-1], dir_fd=parent_fd, follow_symlinks=False)
+            if (
+                stat.S_ISLNK(metadata.st_mode)
+                or not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_mode & 0o077
+                or metadata.st_uid != os.getuid()
+                or metadata.st_nlink != 1
+            ):
                 raise RepoRepairError("private_artifact_permissions_invalid", "The private artifact permissions are unsafe", status_code=409)
-            if _digest_bytes(target.read_bytes()) != digest:
-                raise RepoRepairError("private_artifact_readback_failed", "The private artifact readback failed", status_code=409)
+            os.fsync(parent_fd)
         except RepoRepairError:
             raise
         except OSError as exc:
@@ -572,11 +714,11 @@ class RepoRepairService:
                     os.close(fd)
                 except OSError:
                     pass
-            try:
-                if temporary.exists() or temporary.is_symlink():
-                    temporary.unlink()
-            except OSError:
-                pass
+            if parent_fd >= 0:
+                try:
+                    os.close(parent_fd)
+                except OSError:
+                    pass
         return f"workspace-json:{relative_path}", digest
 
     def _read_private_artifact(self, reference: str, *, expected_digest: str) -> bytes:
@@ -608,7 +750,13 @@ class RepoRepairService:
                     raise OSError("private artifact directory permissions are unsafe")
             resolved = current
             metadata = resolved.lstat()
-            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o077:
+            if (
+                stat.S_ISLNK(metadata.st_mode)
+                or not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_mode & 0o077
+                or metadata.st_uid != os.getuid()
+                or metadata.st_nlink != 1
+            ):
                 raise OSError("private artifact is not a private regular file")
             payload = resolved.read_bytes()
         except (OSError, ValueError) as exc:
@@ -616,6 +764,74 @@ class RepoRepairService:
         if _digest_bytes(payload) != _safe_digest(expected_digest, field="artifact"):
             raise RepoRepairError("private_artifact_digest_changed", "The private repair artifact digest changed", status_code=409)
         return payload
+
+    def _unlink_private_artifact_exact(self, reference: str, *, expected_digest: str) -> None:
+        """Unlink one exact private artifact through held no-follow descriptors.
+
+        This helper is intentionally narrower than workspace cleanup: callers
+        must first prove the durable owner/job/reference is unreferenced.  The
+        descriptor walk prevents a symlinked ancestor or target from turning a
+        governed cleanup request into an arbitrary workspace delete.
+        """
+
+        prefix = "workspace-json:"
+        relative = str(reference or "")
+        if not relative.startswith(prefix):
+            raise RepoRepairError("private_artifact_ref_invalid", "The private repair artifact reference is invalid", status_code=409)
+        path = PurePosixPath(relative[len(prefix) :])
+        if (
+            path.is_absolute()
+            or ".." in path.parts
+            or len(path.parts) != 4
+            or path.parts[:2] != ("artifacts", "repo-repair")
+            or path.parts[2] not in _REPO_REPAIR_PRIVATE_ROOTS
+            or not _SAFE_ID.fullmatch(path.parts[3].rsplit(".", 1)[0])
+            or path.parts[3].rsplit(".", 1)[-1] not in {"json", "diff"}
+        ):
+            raise RepoRepairError("private_artifact_ref_invalid", "The private repair artifact reference is invalid", status_code=409)
+        expected = _safe_digest(expected_digest, field="artifact")
+        root = self._workspace()
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        cloexec = getattr(os, "O_CLOEXEC", 0)
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow | cloexec
+        parent_fd = -1
+        target_fd = -1
+        try:
+            parent_fd = os.open(root, directory_flags)
+            for component in path.parts[:-1]:
+                next_fd = os.open(component, directory_flags, dir_fd=parent_fd)
+                os.close(parent_fd)
+                parent_fd = next_fd
+                metadata = os.fstat(parent_fd)
+                if not stat.S_ISDIR(metadata.st_mode) or metadata.st_mode & 0o077:
+                    raise RepoRepairError("private_artifact_permissions_invalid", "The private artifact directory is unsafe", status_code=409)
+            target_fd = os.open(path.parts[-1], os.O_RDONLY | nofollow | cloexec, dir_fd=parent_fd)
+            metadata = os.fstat(target_fd)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o077 or metadata.st_nlink != 1:
+                raise RepoRepairError("private_artifact_permissions_invalid", "The private artifact is not a private regular file", status_code=409)
+            with os.fdopen(target_fd, "rb") as handle:
+                target_fd = -1
+                payload = handle.read(REPO_REPAIR_MAX_PATCH_BYTES + 1)
+            if len(payload) > REPO_REPAIR_MAX_PATCH_BYTES or _digest_bytes(payload) != expected:
+                raise RepoRepairError("private_artifact_digest_changed", "The private repair artifact digest changed", status_code=409)
+            os.unlink(path.parts[-1], dir_fd=parent_fd)
+        except FileNotFoundError as exc:
+            raise RepoRepairError("private_artifact_unavailable", "The private repair artifact is unavailable", status_code=409) from exc
+        except RepoRepairError:
+            raise
+        except OSError as exc:
+            raise RepoRepairError("private_artifact_cleanup_failed", "The private repair artifact could not be removed", status_code=409) from exc
+        finally:
+            if target_fd >= 0:
+                try:
+                    os.close(target_fd)
+                except OSError:
+                    pass
+            if parent_fd >= 0:
+                try:
+                    os.close(parent_fd)
+                except OSError:
+                    pass
 
     def _read_bound_input(self, row: WorkBoardInputArtifact) -> RepoRepairInput:
         """Read and validate the server-owned typed input artifact.
@@ -1006,6 +1222,467 @@ class RepoRepairService:
             and isinstance(item.get("payload"), Mapping)
         ]
         return matches[-1] if matches else None
+
+    async def cleanup_known_unreferenced_artifact(
+        self,
+        *,
+        owner: WorkBoardOwner,
+        workflow_run_id: str,
+        artifact_ref: str,
+        artifact_sha256: str,
+        expected_revision: int,
+        db: Any | None = None,
+    ) -> dict[str, Any]:
+        """Delete one exact repair artifact after a durable no-effect decision.
+
+        This is an owner/job/digest/CAS operation, not a retention scan.  It
+        only accepts a blocked or failed, unleased repair root, proves that no
+        source packet/proposal/receipt still references the exact path or
+        digest, and records intent plus the verified result on that same root.
+        The no-effect decision is derived from the durable root's absence of
+        effect receipts and provider-boundary checkpoints; callers cannot
+        assert it with a request flag. Unknown or provider-contacted roots
+        remain retained for reconciliation.
+        """
+
+        owner_principal = _safe_identifier(owner.principal_id, field="owner_principal_id")
+        owner_session = _safe_identifier(owner.session_id, field="owner_session_id")
+        run_id = _safe_identifier(workflow_run_id, field="workflow_run_id")
+        artifact_digest = _safe_digest(artifact_sha256, field="artifact")
+        prefix = "workspace-json:"
+        relative = str(artifact_ref or "")
+        relative_path = relative[len(prefix) :] if relative.startswith(prefix) else ""
+        path = PurePosixPath(relative_path)
+        if (
+            not relative.startswith(prefix)
+            or path.is_absolute()
+            or ".." in path.parts
+            or len(path.parts) != 4
+            or path.parts[:2] != ("artifacts", "repo-repair")
+            or path.parts[2] not in _REPO_REPAIR_PRIVATE_ROOTS
+            or not _SAFE_ID.fullmatch(path.parts[3].rsplit(".", 1)[0])
+            or path.parts[3].rsplit(".", 1)[-1] not in {"json", "diff"}
+        ):
+            raise RepoRepairError("private_artifact_ref_invalid", "The private repair artifact reference is invalid", status_code=409)
+        projection = await durable_job_repository.get_job(run_id)
+        if not isinstance(projection, Mapping):
+            raise RepoRepairError("repair_durable_root_missing", "The repair durable root is unavailable", status_code=409)
+        projection_owner = projection.get("owner") if isinstance(projection.get("owner"), Mapping) else {}
+        if (
+            str(projection_owner.get("principal_id") or projection.get("owner_principal_id") or "") != owner_principal
+            or str(projection.get("operator_session_id") or "") != owner_session
+            or str(projection.get("status") or "") not in _REPO_REPAIR_CLEANUP_STATUSES
+            or bool(
+                isinstance(projection.get("lease"), Mapping)
+                and (
+                    projection["lease"].get("owner")
+                    or projection["lease"].get("expires_at")
+                )
+            )
+        ):
+            raise RepoRepairError(
+                "private_artifact_cleanup_authority_changed",
+                "The repair root is not in a fenced, unleased cleanup state",
+                status_code=409,
+            )
+        if int(projection.get("revision") or 0) != int(expected_revision):
+            raise RepoRepairError("private_artifact_cleanup_revision_stale", "The repair root revision is stale", status_code=409)
+
+        checkpoints = projection.get("checkpoints") if isinstance(projection.get("checkpoints"), list) else []
+        effects = projection.get("effects") if isinstance(projection.get("effects"), list) else []
+        if effects:
+            raise RepoRepairError(
+                "private_artifact_cleanup_requires_reconciliation",
+                "Private repair evidence is retained while a durable effect requires reconciliation",
+                status_code=409,
+            )
+        if any(
+            isinstance(item, Mapping)
+            and any(
+                marker in str(
+                    (item.get("payload") or {}).get("kind")
+                    if isinstance(item.get("payload"), Mapping)
+                    else item.get("checkpoint_id") or ""
+                )
+                for marker in ("model_response", "patch", "dispatch", "approval")
+            )
+            for item in checkpoints
+        ):
+            raise RepoRepairError(
+                "private_artifact_cleanup_requires_reconciliation",
+                "Private repair evidence is retained after a governed effect boundary",
+                status_code=409,
+            )
+        cleanup_verified = any(
+            isinstance(item, Mapping)
+            and str(item.get("checkpoint_id") or "") == f"repo-repair-artifact-cleanup:{run_id}"
+            and isinstance(item.get("payload"), Mapping)
+            and item["payload"].get("status") == "deleted"
+            and str(item["payload"].get("artifact_ref") or "") == relative
+            and str(item["payload"].get("artifact_sha256") or "") == artifact_digest
+            for item in checkpoints
+        )
+        if cleanup_verified:
+            candidate = self._workspace() / path
+            if not candidate.exists() and not candidate.is_symlink():
+                return {"status": "already_absent", "artifact_ref": relative, "artifact_sha256": artifact_digest}
+            raise RepoRepairError("private_artifact_cleanup_conflict", "The verified cleanup artifact reappeared", status_code=409)
+
+        cleanup_checkpoint_id = f"repo-repair-artifact-cleanup:{run_id}"
+        pending_cleanup = next(
+            (
+                item.get("payload")
+                for item in reversed(checkpoints)
+                if isinstance(item, Mapping)
+                and str(item.get("checkpoint_id") or "") == cleanup_checkpoint_id
+                and isinstance(item.get("payload"), Mapping)
+                and str(item["payload"].get("status") or "") in {"deletion_pending", "cleanup_required"}
+            ),
+            None,
+        )
+        if pending_cleanup is not None and (
+            str(pending_cleanup.get("kind") or "") != "repo_repair_artifact_cleanup"
+            or str(pending_cleanup.get("artifact_ref") or "") != relative
+            or str(pending_cleanup.get("artifact_sha256") or "") != artifact_digest
+            or str(pending_cleanup.get("workflow_run_id") or "") != run_id
+            or str(pending_cleanup.get("owner_principal_id") or "") != owner_principal
+            or str(pending_cleanup.get("owner_session_id") or "") != owner_session
+        ):
+            raise RepoRepairError(
+                "private_artifact_cleanup_authority_changed",
+                "The pending cleanup receipt is bound to different artifact authority",
+                status_code=409,
+            )
+
+        def is_exact_cleanup_reservation(item: Any, payload: Any) -> bool:
+            """Ignore only this root's exact pending cleanup checkpoint."""
+
+            return bool(
+                pending_cleanup is not None
+                and isinstance(item, Mapping)
+                and str(item.get("checkpoint_id") or "") == cleanup_checkpoint_id
+                and isinstance(payload, Mapping)
+                and str(payload.get("kind") or "") == "repo_repair_artifact_cleanup"
+                and str(payload.get("status") or "") in {"deletion_pending", "cleanup_required"}
+                and str(payload.get("workflow_run_id") or "") == run_id
+                and str(payload.get("owner_principal_id") or "") == owner_principal
+                and str(payload.get("owner_session_id") or "") == owner_session
+                and str(payload.get("artifact_ref") or "") == relative
+                and str(payload.get("artifact_sha256") or "") == artifact_digest
+            )
+
+        references = frozenset({relative, relative_path})
+        digests = frozenset({artifact_digest})
+        publication_proven = False
+        foreign_reference = False
+        async with self._db(db) as session:
+            # These are deliberately global queries.  A reference owned by a
+            # different repair root, task, handoff, or workflow run must
+            # retain the bytes even when the caller's root is otherwise in a
+            # no-effect state.  There is no second artifact ledger: cleanup
+            # consults the canonical stores that already publish receipt refs.
+            packet_rows = (
+                await session.execute(select(RepoRepairSourcePacketRow))
+            ).scalars().all()
+            proposal_rows = (
+                await session.execute(select(RepoRepairProposalRow))
+            ).scalars().all()
+            for row in packet_rows:
+                row_ref = f"workspace-json:{REPO_REPAIR_SOURCE_ROOT}/{row.artifact_id}.json"
+                if relative != row_ref or artifact_digest != str(row.artifact_sha256):
+                    continue
+                # A source/proposal row is a live durable reference even when
+                # it belongs to this root.  Cleanup may use the preceding
+                # publication intent as ownership proof, but must retain any
+                # artifact that has already been bound into a canonical row.
+                foreign_reference = True
+            for row in proposal_rows:
+                candidates = (
+                    (row.model_response_artifact_id, row.model_response_artifact_sha256),
+                    (row.patch_artifact_id, row.patch_sha256),
+                )
+                for row_ref_id, row_digest in candidates:
+                    row_ref = f"workspace-json:{row_ref_id}" if row_ref_id else ""
+                    if relative != row_ref or artifact_digest != str(row_digest or ""):
+                        continue
+                    foreign_reference = True
+            def decode_index(raw: Any, field: str, *, fallback: str = "[]") -> Any:
+                if raw is None:
+                    raise RepoRepairError(
+                        "private_artifact_cleanup_authority_changed",
+                        f"The canonical {field} receipt index is missing",
+                        status_code=409,
+                    )
+                try:
+                    value = json.loads(raw if isinstance(raw, str) else raw)
+                except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                    raise RepoRepairError(
+                        "private_artifact_cleanup_authority_changed",
+                        f"The canonical {field} receipt index is invalid",
+                        status_code=409,
+                    ) from exc
+                return fallback if value is None else value
+
+            # Work-board attempts are global because a stale root must not
+            # delete a receipt that another historical attempt still names.
+            attempt_rows = (await session.execute(select(WorkBoardAttempt))).scalars().all()
+            current_attempt_rows = [row for row in attempt_rows if str(row.workflow_run_id or "") == run_id]
+            if len(current_attempt_rows) != 1:
+                raise RepoRepairError(
+                    "private_artifact_cleanup_authority_changed",
+                    "The canonical repair attempt binding is missing or ambiguous",
+                    status_code=409,
+                )
+            expected_attempt_id = str(current_attempt_rows[0].attempt_id)
+            for attempt_row in attempt_rows:
+                receipt_refs = decode_index(attempt_row.receipt_refs_json, "attempt")
+                if _contains_exact_private_reference(receipt_refs, references=references, digests=digests):
+                    foreign_reference = True
+
+            # Task and handoff/link receipts are the canonical board evidence
+            # stores for artifacts and results.  Parse every row and fail
+            # closed on malformed indexes rather than guessing that a path is
+            # unreferenced.
+            for task_row in (await session.execute(select(WorkBoardTask))).scalars().all():
+                for field in ("artifact_refs_json", "result_refs_json"):
+                    refs = decode_index(getattr(task_row, field, None), f"task.{field}")
+                    if _contains_exact_private_reference(refs, references=references, digests=digests):
+                        foreign_reference = True
+            for handoff_row in (await session.execute(select(WorkBoardHandoff))).scalars().all():
+                for field in ("artifact_refs_json", "result_refs_json"):
+                    refs = decode_index(getattr(handoff_row, field, None), f"handoff.{field}")
+                    if _contains_exact_private_reference(refs, references=references, digests=digests):
+                        foreign_reference = True
+            for link_row in (await session.execute(select(WorkBoardLink))).scalars().all():
+                for field in ("artifact_refs_json", "result_refs_json"):
+                    refs = decode_index(getattr(link_row, field, None), f"link.{field}")
+                    if _contains_exact_private_reference(refs, references=references, digests=digests):
+                        foreign_reference = True
+
+            # WorkflowRunState carries the durable checkpoint, artifact, and
+            # effect ledgers.  A publication intent can prove deterministic
+            # ownership for this root; every other exact reference remains a
+            # live reference, including one owned by this same root.
+            workflow_rows = (await session.execute(select(WorkflowRunState))).scalars().all()
+            for workflow_row in workflow_rows:
+                row_run_id = str(workflow_row.run_identity or "")
+                checkpoint_values = decode_index(
+                    workflow_row.checkpoint_receipts_json,
+                    "workflow.checkpoint_receipts",
+                )
+                if not isinstance(checkpoint_values, list):
+                    raise RepoRepairError(
+                        "private_artifact_cleanup_authority_changed",
+                        "The canonical workflow checkpoint index is not a list",
+                        status_code=409,
+                    )
+                for item in checkpoint_values:
+                    if not isinstance(item, Mapping):
+                        continue
+                    payload = item.get("payload") if isinstance(item.get("payload"), Mapping) else {}
+                    if is_exact_cleanup_reservation(item, payload):
+                        continue
+                    checkpoint_publication = (
+                        row_run_id == run_id
+                        and _checkpoint_publishes_private_artifact(
+                            payload,
+                            workflow_run_id=run_id,
+                            attempt_id=expected_attempt_id,
+                            owner_principal_id=owner_principal,
+                            owner_session_id=owner_session,
+                            artifact_ref=relative,
+                            artifact_digest=artifact_digest,
+                        )
+                    )
+                    publication_proven = publication_proven or checkpoint_publication
+                    if not checkpoint_publication and _contains_exact_private_reference(
+                        payload,
+                        references=references,
+                        digests=digests,
+                    ):
+                        foreign_reference = True
+                for field in ("artifact_receipts_json", "effect_receipts_json"):
+                    refs = decode_index(getattr(workflow_row, field, None), f"workflow.{field}")
+                    if _contains_exact_private_reference(refs, references=references, digests=digests):
+                        foreign_reference = True
+                for field in ("declared_authority_json", "metadata_json"):
+                    raw = getattr(workflow_row, field, None)
+                    if raw is None:
+                        continue
+                    metadata = decode_index(raw, f"workflow.{field}", fallback="{}")
+                    if _contains_exact_private_reference(metadata, references=references, digests=digests):
+                        foreign_reference = True
+
+            # The serialized projection may include receipts from an older
+            # schema version; inspect it as well so a stale in-memory DTO can
+            # never weaken the global check.
+            if _contains_exact_private_reference(
+                projection.get("artifacts", []),
+                references=references,
+                digests=digests,
+            ):
+                foreign_reference = True
+            for item in checkpoints:
+                if not isinstance(item, Mapping):
+                    continue
+                payload = item.get("payload") if isinstance(item.get("payload"), Mapping) else {}
+                if is_exact_cleanup_reservation(item, payload):
+                    continue
+                checkpoint_publication = _checkpoint_publishes_private_artifact(
+                    payload,
+                    workflow_run_id=run_id,
+                    attempt_id=expected_attempt_id,
+                    owner_principal_id=owner_principal,
+                    owner_session_id=owner_session,
+                    artifact_ref=relative,
+                    artifact_digest=artifact_digest,
+                )
+                publication_proven = publication_proven or checkpoint_publication
+                if not checkpoint_publication and _contains_exact_private_reference(
+                    payload,
+                    references=references,
+                    digests=digests,
+                ):
+                    foreign_reference = True
+            if foreign_reference:
+                raise RepoRepairError(
+                    "private_artifact_still_referenced",
+                    "The private repair artifact is referenced by canonical durable evidence",
+                    status_code=409,
+                )
+            if not publication_proven:
+                raise RepoRepairError(
+                    "private_artifact_publication_unproven",
+                    "The private repair artifact has no exact durable publication receipt",
+                    status_code=409,
+                )
+
+        owner_kind = str(projection_owner.get("kind") or "user")
+        if pending_cleanup is None:
+            intent = await durable_job_repository.record_recovery_checkpoint(
+                run_id,
+                owner_kind=owner_kind,
+                owner_principal_id=owner_principal,
+                checkpoint_id=cleanup_checkpoint_id,
+                state={"phase": "artifact_cleanup", "status": "deletion_pending"},
+                checkpoint_payload={
+                    "kind": "repo_repair_artifact_cleanup",
+                    "status": "deletion_pending",
+                    "artifact_ref": relative,
+                    "artifact_sha256": artifact_digest,
+                    "owner_principal_id": owner_principal,
+                    "owner_session_id": owner_session,
+                    "workflow_run_id": run_id,
+                    "no_effect_provenance": "blocked_or_failed_root_without_effect_receipt",
+                },
+                expected_revision=int(expected_revision),
+            )
+            intent_revision = int(intent.get("revision") or 0)
+        else:
+            intent_revision = int(projection.get("revision") or expected_revision)
+        candidate = self._workspace() / path
+        if pending_cleanup is not None and not candidate.exists() and not candidate.is_symlink():
+            verified = await durable_job_repository.record_recovery_checkpoint(
+                run_id,
+                owner_kind=owner_kind,
+                owner_principal_id=owner_principal,
+                checkpoint_id=cleanup_checkpoint_id,
+                state={"phase": "artifact_cleanup", "status": "deleted"},
+                checkpoint_payload={
+                    "kind": "repo_repair_artifact_cleanup",
+                    "status": "deleted",
+                    "artifact_ref": relative,
+                    "artifact_sha256": artifact_digest,
+                    "owner_principal_id": owner_principal,
+                    "owner_session_id": owner_session,
+                    "workflow_run_id": run_id,
+                    "deletion_result": "already_absent_after_intent",
+                    "no_effect_provenance": "blocked_or_failed_root_without_effect_receipt",
+                },
+                expected_revision=intent_revision,
+            )
+            return {
+                "status": "already_absent",
+                "artifact_ref": relative,
+                "artifact_sha256": artifact_digest,
+                "revision": int(verified.get("revision") or 0),
+            }
+        try:
+            self._unlink_private_artifact_exact(relative, expected_digest=artifact_digest)
+        except RepoRepairError as exc:
+            if not candidate.exists() and not candidate.is_symlink():
+                verified = await durable_job_repository.record_recovery_checkpoint(
+                    run_id,
+                    owner_kind=owner_kind,
+                    owner_principal_id=owner_principal,
+                    checkpoint_id=cleanup_checkpoint_id,
+                    state={"phase": "artifact_cleanup", "status": "deleted"},
+                    checkpoint_payload={
+                        "kind": "repo_repair_artifact_cleanup",
+                        "status": "deleted",
+                        "artifact_ref": relative,
+                        "artifact_sha256": artifact_digest,
+                        "owner_principal_id": owner_principal,
+                        "owner_session_id": owner_session,
+                        "workflow_run_id": run_id,
+                        "deletion_result": "already_absent_after_intent",
+                        "no_effect_provenance": "blocked_or_failed_root_without_effect_receipt",
+                    },
+                    expected_revision=intent_revision,
+                )
+                return {
+                    "status": "already_absent",
+                    "artifact_ref": relative,
+                    "artifact_sha256": artifact_digest,
+                    "revision": int(verified.get("revision") or 0),
+                }
+            try:
+                await durable_job_repository.record_recovery_checkpoint(
+                    run_id,
+                    owner_kind=owner_kind,
+                    owner_principal_id=owner_principal,
+                    checkpoint_id=f"repo-repair-artifact-cleanup-failed:{run_id}",
+                    state={"phase": "artifact_cleanup", "status": "cleanup_required"},
+                    checkpoint_payload={
+                        "kind": "repo_repair_artifact_cleanup",
+                        "status": "cleanup_required",
+                        "artifact_ref": relative,
+                        "artifact_sha256": artifact_digest,
+                        "error_code": exc.code,
+                    },
+                    expected_revision=intent_revision,
+                )
+            except Exception:
+                pass
+            raise RepoRepairError(
+                "private_artifact_cleanup_required",
+                "The private repair artifact remains retained and requires operator reconciliation",
+                status_code=503,
+            ) from exc
+        verified = await durable_job_repository.record_recovery_checkpoint(
+            run_id,
+            owner_kind=owner_kind,
+            owner_principal_id=owner_principal,
+            checkpoint_id=cleanup_checkpoint_id,
+            state={"phase": "artifact_cleanup", "status": "deleted"},
+            checkpoint_payload={
+                "kind": "repo_repair_artifact_cleanup",
+                "status": "deleted",
+                "artifact_ref": relative,
+                "artifact_sha256": artifact_digest,
+                "owner_principal_id": owner_principal,
+                "owner_session_id": owner_session,
+                "workflow_run_id": run_id,
+                "no_effect_provenance": "blocked_or_failed_root_without_effect_receipt",
+            },
+            expected_revision=intent_revision,
+        )
+        return {
+            "status": "deleted",
+            "artifact_ref": relative,
+            "artifact_sha256": artifact_digest,
+            "revision": int(verified.get("revision") or 0),
+        }
 
     async def _load_response_checkpoint(
         self,
@@ -1420,12 +2097,19 @@ class RepoRepairService:
                 checkpoint_id=packet_intent_id,
             )
             if prior_packet_intent is not None:
+                # The packet identity is immutable across an operator pause,
+                # while the durable execution lease is deliberately rotated
+                # before the same root resumes.  Preserve the original
+                # owner/fence in the earlier checkpoint as provenance, but
+                # validate the current lease through _resolve_canonical_authority
+                # above instead of treating a legitimate continuation as a
+                # different packet publication.
                 if (
                     prior_packet_intent.get("kind") != "repo_repair_source_packet_intent"
                     or str(prior_packet_intent.get("workflow_run_id")) != run_id
                     or str(prior_packet_intent.get("attempt_id")) != attempt_id
-                    or str(prior_packet_intent.get("lease_owner")) != packet_lease_owner
-                    or int(prior_packet_intent.get("lease_fence", 0)) != packet_fence
+                    or not str(prior_packet_intent.get("lease_owner") or "")
+                    or int(prior_packet_intent.get("lease_fence", 0)) <= 0
                     or str(prior_packet_intent.get("packet_id")) != packet_id
                     or str(prior_packet_intent.get("artifact_ref")) != packet_artifact_ref
                     or str(prior_packet_intent.get("artifact_sha256")) != packet_artifact_digest
@@ -1912,6 +2596,7 @@ class RepoRepairService:
                 f"The repository repair sandbox is blocked: {reason}",
                 status_code=409,
             )
+        sandbox_authority = _sandbox_authority_payload(self.sandbox)
         try:
             model_kwargs: dict[str, Any] = build_model_kwargs(
                 temperature=0.2,
@@ -1954,6 +2639,8 @@ class RepoRepairService:
                     "kind": "repo_repair_model_response_intent",
                     "workflow_run_id": principal_job_id,
                     "attempt_id": packet.work_board_attempt_id,
+                    "owner_principal_id": owner.principal_id,
+                    "owner_session_id": owner.session_id,
                     "lease_owner": lease_owner,
                     "lease_fence": int(fencing_token),
                     "source_packet_id": packet.packet_id,
@@ -2081,6 +2768,8 @@ class RepoRepairService:
                 "kind": "repo_repair_model_response_intent",
                 "workflow_run_id": principal_job_id,
                 "attempt_id": packet.work_board_attempt_id,
+                "owner_principal_id": owner.principal_id,
+                "owner_session_id": owner.session_id,
                 "lease_owner": lease_owner,
                 "lease_fence": int(fencing_token),
                 "source_packet_id": packet.packet_id,
@@ -2196,6 +2885,7 @@ class RepoRepairService:
             "test_args": list(normalized_tests),
             "request_digest": request_digest,
             "operation_key": operation_key,
+            **sandbox_authority,
         }
         authority_digest = _authority_digest(authority)
         patch_intent_id = f"repo-repair-patch-intent:{principal_job_id}"
@@ -2242,6 +2932,8 @@ class RepoRepairService:
                 "kind": "repo_repair_patch_intent",
                 "workflow_run_id": principal_job_id,
                 "attempt_id": packet.work_board_attempt_id,
+                "owner_principal_id": owner.principal_id,
+                "owner_session_id": owner.session_id,
                 "lease_owner": lease_owner,
                 "lease_fence": int(fencing_token),
                 "source_packet_id": packet.packet_id,
@@ -2318,7 +3010,12 @@ class RepoRepairService:
                 authority_digest=authority_digest,
                 status="awaiting_approval",
                 safe_metadata_json=json.dumps(
-                    {"summary": output.summary, "expected_outcome": output.expected_outcome, "memory_status": "no_learning"},
+                    {
+                        "summary": output.summary,
+                        "expected_outcome": output.expected_outcome,
+                        "memory_status": "no_learning",
+                        "sandbox": sandbox_authority,
+                    },
                     ensure_ascii=True,
                     sort_keys=True,
                     separators=(",", ":"),
@@ -2580,9 +3277,22 @@ class RepoRepairService:
             if approval_id != str(row.approval_id):
                 raise RepoRepairError("approval_not_current", "The exact repair approval is not current", status_code=409)
             approval_row = await session.get(ApprovalRequest, str(row.approval_id))
+            approval_consumed_with_receipt = False
+            if approval_row is not None and approval_row.status == "consumed":
+                effects = durable_job.get("effects") if isinstance(durable_job, Mapping) else None
+                approval_consumed_with_receipt = any(
+                    isinstance(effect, Mapping)
+                    and effect.get("kind") == "approval_resume"
+                    and str(effect.get("approval_id") or "") == str(row.approval_id)
+                    and str(effect.get("approval_request_status") or "") == "consumed"
+                    and str(effect.get("authority_digest") or "")
+                    == str(durable_job.get("authority_digest") or "")
+                    for effect in (effects if isinstance(effects, list) else [])
+                )
             if (
                 approval_row is None
-                or approval_row.status != "approved"
+                or approval_row.status not in {"approved", "consumed"}
+                or (approval_row.status == "consumed" and not approval_consumed_with_receipt)
                 or str(approval_row.tool_name or "") != REPO_REPAIR_APPROVAL_TOOL
                 or str(approval_row.action or "") != REPO_REPAIR_APPROVAL_ACTION
                 or approval_row.owner_principal_id != owner_principal
@@ -2593,9 +3303,15 @@ class RepoRepairService:
                 or _utc(approval_row.expires_at) > _utc(row.expires_at)
             ):
                 raise RepoRepairError("approval_not_current", "The exact repair approval is not current", status_code=409)
-            expected_approval_fingerprint = _repair_approval_fingerprint(row, approval_row.expires_at)
+            # Approval identity is issued against the proposal revision that
+            # was shown to the operator.  Approving the proposal advances its
+            # mutable lifecycle revision, so recomputing from the post-approval
+            # row would reject the exact approval during same-root recovery.
+            # The server-owned proposal fingerprint is the immutable receipt
+            # for that reviewed revision.
+            expected_approval_fingerprint = str(row.approval_fingerprint or "")
             if (
-                not row.approval_fingerprint
+                not expected_approval_fingerprint
                 or str(row.approval_fingerprint) != expected_approval_fingerprint
                 or str(approval_row.fingerprint) != expected_approval_fingerprint
             ):

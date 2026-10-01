@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func, update
 from sqlmodel import col, select
 
-from config.settings import settings
+from config.settings import RepoSandboxSettings, settings
 from src.db.engine import get_session as get_db
 from src.db.models import MemoryEpisode, ScreenObservation, UserProfile
 from src.local_runtime_profile_verifier import (
@@ -29,6 +29,15 @@ from src.vlm_runtime import (
     effective_vlm_base_url,
     effective_vlm_chat_api_base,
     effective_vlm_status,
+)
+from src.execution.repo_sandbox import (
+    RepoSandboxError,
+    RepoSandboxLimits,
+    RootlessDockerRepoSandbox,
+    _repo_sandbox_settings_path as _shared_repo_sandbox_settings_path,
+    limits_digest,
+    load_persisted_repo_sandbox_settings,
+    persist_repo_sandbox_settings,
 )
 from src.observer.manager import context_manager
 from src.observer.screen_analysis_settings import (
@@ -90,6 +99,17 @@ class McpPolicyModeRequest(BaseModel):
     mode: str
 
 
+class RepoSandboxSettingsRequest(BaseModel):
+    """Bounded operator settings for the fixed repository worker profile."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool | None = None
+    docker_socket: str | None = None
+    worker_image_digest: str | None = None
+    profile: str | None = None
+
+
 # Active screenshot semantic analysis is OpenRouter-only. Retained settings
 # from the historical local/Apple routes are normalized away by the reader.
 _VALID_SCREEN_ANALYSIS_PROVIDERS = frozenset({"", "openrouter"})
@@ -103,6 +123,64 @@ _SCREENSHOT_FOLDER_SUMMARY_TIMEOUT_S = 0.25
 _SCREENSHOT_PIPELINE_SUMMARY_TIMEOUT_S = 0.25
 _REPORT_RECEIPT_SUMMARY_TIMEOUT_S = 0.25
 _LOCAL_RUNTIME_PROOF_SUMMARY_TIMEOUT_S = 0.25
+
+
+def _repo_sandbox_settings_path() -> Path:
+    return _shared_repo_sandbox_settings_path()
+
+
+def _load_persisted_repo_sandbox_settings() -> tuple[RepoSandboxSettings, str | None]:
+    return load_persisted_repo_sandbox_settings()
+
+
+def _persist_repo_sandbox_settings(value: RepoSandboxSettings) -> None:
+    persist_repo_sandbox_settings(value)
+
+
+def _repo_sandbox_settings_payload(
+    value: RepoSandboxSettings,
+    *,
+    configuration_error: str | None = None,
+) -> dict[str, object]:
+    try:
+        limits = RepoSandboxLimits.from_settings(value)
+        limits_payload = {
+            field_name: getattr(limits, field_name)
+            for field_name in limits.__dataclass_fields__
+        }
+        digest = limits_digest(limits)
+    except (TypeError, ValueError) as exc:
+        limits_payload = {}
+        digest = None
+        limit_error = str(exc)
+    else:
+        limit_error = None
+    try:
+        preflight = RootlessDockerRepoSandbox(value).preflight()
+        receipt = preflight.as_receipt()
+    except (TypeError, ValueError, OSError) as exc:
+        receipt = {"status": "blocked", "ok": False, "reason": "settings_invalid", "detail": type(exc).__name__}
+    if configuration_error:
+        receipt = {
+            "status": "blocked",
+            "ok": False,
+            "reason": configuration_error,
+            "operator_visible": True,
+        }
+    return {
+        "enabled": bool(value.enabled),
+        "docker_socket": value.docker_socket,
+        "worker_image_digest": value.worker_image_digest,
+        "profile": value.profile,
+        "limits": limits_payload,
+        "limits_digest": digest,
+        "limits_editable": False,
+        "preflight": receipt,
+        "settings_path": str(_repo_sandbox_settings_path()),
+        "status": "ready" if receipt.get("ok") is True else "blocked",
+        "configuration_error": configuration_error or limit_error,
+        "operator_visible": True,
+    }
 
 
 def _screen_archive_dir() -> tuple[Path, str]:
@@ -1083,6 +1161,59 @@ async def get_artifact_storage_settings():
             },
         },
     }
+
+
+@router.get("/settings/repo-sandbox")
+async def get_repo_sandbox_settings():
+    """Return the fixed repository worker profile and bounded readiness receipt."""
+
+    value, configuration_error = _load_persisted_repo_sandbox_settings()
+    payload = await asyncio.to_thread(
+        _repo_sandbox_settings_payload,
+        value,
+        configuration_error=configuration_error,
+    )
+    return payload
+
+
+@router.put("/settings/repo-sandbox")
+async def set_repo_sandbox_settings(body: RepoSandboxSettingsRequest, request: Request):
+    """Persist only the supported worker profile selectors.
+
+    Resource ceilings are compiled into the profile and intentionally cannot
+    be raised from this operator surface.  Host daemon provisioning remains a
+    separate administrative action; changing this form never starts Docker.
+    """
+
+    if not _is_local_request(request):
+        raise HTTPException(status_code=403, detail="Repository sandbox settings are localhost-only")
+    current, _configuration_error = _load_persisted_repo_sandbox_settings()
+    updates = body.model_dump(exclude_none=True)
+    try:
+        candidate = RepoSandboxSettings.model_validate(
+            current.model_dump(mode="json") | updates
+        )
+        if candidate.profile != "repo-python-pytest-v1":
+            raise ValueError("unsupported_profile")
+        # Disabled settings may be persisted before host provisioning supplies
+        # the socket/image selectors.  Keep readiness fail-closed while still
+        # allowing an operator to turn the profile off and save that intent.
+        if candidate.enabled or candidate.docker_socket.strip():
+            RootlessDockerRepoSandbox.validate_socket(candidate.docker_socket)
+        if candidate.enabled or candidate.worker_image_digest.strip():
+            RootlessDockerRepoSandbox.validate_image_digest(candidate.worker_image_digest)
+        RepoSandboxLimits.from_settings(candidate)
+    except (TypeError, ValueError, RepoSandboxError) as exc:
+        raise HTTPException(status_code=422, detail={"code": "repo_sandbox_settings_invalid", "reason": str(exc)}) from exc
+    try:
+        _persist_repo_sandbox_settings(candidate)
+    except OSError as exc:
+        raise HTTPException(status_code=503, detail={"code": "repo_sandbox_settings_persist_failed"}) from exc
+    # Publish only after the private file has been atomically replaced.  A
+    # failed write therefore cannot leave this process executing selectors it
+    # could not recover after restart.
+    settings.repo_sandbox = candidate
+    return await get_repo_sandbox_settings()
 
 
 @router.post("/settings/end-of-day-report/manual")

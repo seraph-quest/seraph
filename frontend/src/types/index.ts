@@ -511,6 +511,116 @@ export interface WorkBoardTaskDetail {
   revision: number;
 }
 
+/** Owner-bound, content-free status projection for engineering.repo-repair.v1. */
+export interface WorkBoardRepoRepairProjection {
+  job_id: string;
+  status: string;
+  owner_principal_id: string;
+  operator_session_id: string;
+  task_id: string | null;
+  attempt_id: string | null;
+  workflow_run_id: string;
+  goal_id: string | null;
+  goal_revision: number | null;
+  revision: number | null;
+  authority_digest: string | null;
+  input_digest: string | null;
+  run_fingerprint: string | null;
+  capability_id: "engineering.repo-repair.v1";
+  capability_version: string | null;
+  limits: Record<string, number>;
+  preflight: Record<string, unknown> | null;
+  source_packet: {
+    packet_id: string;
+    state: string;
+    repository_ref: string;
+    base_snapshot_sha256: string;
+    source_manifest_sha256: string;
+    artifact_sha256: string;
+    revision: number;
+  } | null;
+  egress: {
+    consent_id: string;
+    revision: number;
+    runtime_path: string;
+    effective_profile_id: string;
+    effective_upstream: string;
+    maximum_input_bytes: number;
+    maximum_output_tokens: number;
+    expires_at: string;
+    state: string;
+  } | null;
+  proposal: {
+    proposal_id: string;
+    status: string;
+    revision: number;
+    base_snapshot_digest: string;
+    source_digest: string;
+    model_profile_id: string;
+    patch_sha256: string;
+    approval_id: string | null;
+    expires_at: string;
+    safe_metadata: Record<string, unknown>;
+  } | null;
+  execution: {
+    artifacts: Array<{
+      artifact_id?: string;
+      file_path?: string;
+      artifact_type?: string;
+      content_sha256?: string;
+    }>;
+    readback: {
+      receipt_kind?: string;
+      status?: string;
+      readback_id?: string;
+      target_path?: string;
+      content_sha256?: string;
+      verified?: boolean;
+      verified_at?: string;
+    } | null;
+    memory_status: string;
+    provider_contacted: boolean;
+  };
+  approval: {
+    approval_id: string;
+    status: string;
+    tool_name: string;
+    action: string;
+    expires_at: string | null;
+  } | null;
+  approval_id: string | null;
+  memory_status: string;
+  recovery_action: string;
+  operator_visible: boolean;
+}
+
+export interface WorkBoardRepoRepairSourcePreview {
+  job_id: string;
+  status: string;
+  recovery_action: string;
+  source_packet: {
+    packet_id: string;
+    state: string;
+    repository_ref: string;
+    base_snapshot_sha256: string;
+    source_manifest_sha256: string;
+    artifact_sha256: string;
+    selected_files: Array<{ path: string; size_bytes: number; sha256: string; text: string }>;
+    omissions: string[];
+    revision: number;
+  };
+  egress: {
+    runtime_path: string;
+    effective_profile_id: string | null;
+    effective_upstream: string | null;
+    maximum_input_bytes: number;
+    maximum_output_tokens: number;
+    expires_at: string | null;
+  };
+  provider_contacted: boolean;
+  operator_visible: boolean;
+}
+
 export interface WorkBoardSafeParentHandoff {
   handoff_id: string;
   parent_task_id: string;

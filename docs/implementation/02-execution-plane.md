@@ -4,6 +4,7 @@
 
 - [x] M2 execution completion is implemented in this batch and awaiting merge back to `develop`.
 - [x] Branch-local #748 proof now runs an authenticated, offline inspect→plan→preview→approval→apply→test→diagnose→readback journey through a durable job and an isolated fixture worktree. It records source/patch/path/command/resource digests, job-owned artifacts and checkpoints, 300-second and two-attempt bounds, exact approval/session/authority checks, actual child-process exit/output, and process-group timeout/cancel cleanup plus replay dedupe. This remains a deterministic local fixture: arbitrary repository execution, host isolation, external provider transport, autonomous commit/push/merge, and production crash-proof semantics are outside the demonstrated boundary. The one-shot path computes its source digest locally; callers that omit `expected_source_digest` do not bind a separate inspect receipt to apply. Detached descendants remain operator-visible as unknown cleanup when process identity cannot be verified.
+- [ ] M4 #887 adds a branch-local governed repository-repair path from selected source inspection through explicit code-egress consent, one exact proposal approval, and isolated test/readback mechanics. It remains Partial: the original repository is not claimed changed, intercepted transport is not live provider proof, and missing or unverified rootless CPU/memory/pids/image prerequisites block before model contact.
 
 ## Paired Research
 

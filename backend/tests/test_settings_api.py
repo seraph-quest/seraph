@@ -106,6 +106,84 @@ async def test_get_reflects_put(client, async_db):
 
 
 @pytest.mark.asyncio
+async def test_repo_sandbox_settings_are_typed_bounded_and_fail_closed(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path / "workspace"))
+    monkeypatch.setattr(settings, "repo_sandbox", settings.repo_sandbox.model_copy(update={
+        "enabled": False,
+        "docker_socket": "",
+        "worker_image_digest": "",
+        "profile": "repo-python-pytest-v1",
+    }))
+
+    response = await client.get("/api/settings/repo-sandbox")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["profile"] == "repo-python-pytest-v1"
+    assert payload["limits_editable"] is False
+    assert payload["status"] == "blocked"
+    assert payload["preflight"]["ok"] is False
+    assert "max_cpu_seconds" in payload["limits"]
+
+    # Persisting an explicitly disabled profile is allowed before host
+    # provisioning; the readiness result remains blocked and no Docker call is
+    # implied by the settings write.
+    saved = await client.put(
+        "/api/settings/repo-sandbox",
+        json={"enabled": False},
+    )
+    assert saved.status_code == 200
+    assert saved.json()["enabled"] is False
+    assert (tmp_path / "workspace" / "artifacts" / "repo-sandbox" / "settings.json").stat().st_mode & 0o777 == 0o600
+
+    invalid = await client.put(
+        "/api/settings/repo-sandbox",
+        json={"enabled": True, "docker_socket": "tcp://127.0.0.1:2375"},
+    )
+    assert invalid.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_repo_sandbox_settings_loader_rejects_corruption_and_symlink(client, tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    settings_dir = workspace / "artifacts" / "repo-sandbox"
+    settings_dir.mkdir(mode=0o700, parents=True)
+    for directory in (workspace, workspace / "artifacts", settings_dir):
+        directory.chmod(0o700)
+    monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+    monkeypatch.setattr(settings, "repo_sandbox", settings.repo_sandbox.model_copy(update={
+        "enabled": True,
+        "docker_socket": "unix:///run/user/1000/docker.sock",
+        "worker_image_digest": "registry.example/worker@sha256:" + "a" * 64,
+        "profile": "repo-python-pytest-v1",
+    }))
+
+    persisted = settings_dir / "settings.json"
+    persisted.write_text("{not-json", encoding="utf-8")
+    persisted.chmod(0o600)
+    corrupt = await client.get("/api/settings/repo-sandbox")
+    assert corrupt.status_code == 200
+    assert corrupt.json()["enabled"] is False
+    assert corrupt.json()["configuration_error"] == "repo_sandbox_settings_invalid"
+    assert corrupt.json()["status"] == "blocked"
+
+    persisted.unlink()
+    target = settings_dir / "real-settings.json"
+    target.write_text(json.dumps({
+        "enabled": True,
+        "docker_socket": "unix:///run/user/1000/docker.sock",
+        "worker_image_digest": "registry.example/worker@sha256:" + "a" * 64,
+        "profile": "repo-python-pytest-v1",
+    }), encoding="utf-8")
+    target.chmod(0o600)
+    persisted.symlink_to(target.name)
+    linked = await client.get("/api/settings/repo-sandbox")
+    assert linked.status_code == 200
+    assert linked.json()["enabled"] is False
+    assert linked.json()["configuration_error"] == "repo_sandbox_settings_symlinked"
+    assert linked.json()["status"] == "blocked"
+
+
+@pytest.mark.asyncio
 async def test_artifact_storage_settings_exposes_safe_operator_posture(client, tmp_path, monkeypatch):
     with (
         patch.object(settings, "report_archive_dir", str(tmp_path / "reports")),

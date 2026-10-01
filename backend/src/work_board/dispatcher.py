@@ -5513,6 +5513,19 @@ class WorkBoardDispatcher:
                 ).scalars().first()
                 if consent is not None:
                     consent_db.expunge(consent)
+                existing_proposal = (
+                    await consent_db.execute(
+                        select(RepoRepairProposalRow).where(
+                            RepoRepairProposalRow.owner_principal_id == task.owner_principal_id,
+                            RepoRepairProposalRow.owner_session_id == task.owner_session_id,
+                            RepoRepairProposalRow.workflow_run_id == job_id,
+                            RepoRepairProposalRow.work_board_task_id == task.task_id,
+                            RepoRepairProposalRow.work_board_attempt_id == attempt.attempt_id,
+                        ).order_by(RepoRepairProposalRow.created_at.desc()).limit(1)
+                    )
+                ).scalar_one_or_none()
+                if existing_proposal is not None:
+                    consent_db.expunge(existing_proposal)
             if consent is None:
                 paused = await self.jobs.pause_job(
                     job_id,
@@ -5532,6 +5545,26 @@ class WorkBoardDispatcher:
                     "base_snapshot_sha256": packet.base_snapshot_sha256,
                     "preflight": preflight_receipt,
                     "job": paused,
+                    "admission_only": False,
+                }
+
+            # An exact approved proposal is a post-approval proof, not a new
+            # model request.  Resume the same durable root through the shared
+            # proof-discriminated sandbox/readback helper.  This branch is
+            # intentionally before ``generate_proposal`` so a restart cannot
+            # regenerate a model patch after approval.
+            if existing_proposal is not None and str(existing_proposal.status or "") == "approved":
+                from src.api.workflows import _resume_verified_repo_execution
+
+                execution = await _resume_verified_repo_execution(
+                    proof_kind="RepoRepairProposal",
+                    current=projection,
+                    claimed=projection,
+                    approval_id=str(existing_proposal.approval_id or ""),
+                )
+                return {
+                    **dict(execution),
+                    "job_id": job_id,
                     "admission_only": False,
                 }
 
@@ -5606,16 +5639,19 @@ class WorkBoardDispatcher:
                         "action": REPO_REPAIR_APPROVAL_ACTION,
                         "approval_owner_principal_id": task.owner_principal_id,
                         "approval_owner_operator_session_id": task.owner_session_id,
+                        "approval_operator_principal_id": task.owner_principal_id,
                         "approval_execution_owner_principal_id": task.owner_principal_id,
                         "approval_execution_session_id": task.owner_session_id,
                         "approval_conversation_id": task.owner_session_id,
                         "durable_job_id": job_id,
                         "durable_owner_kind": "user",
                         "durable_owner_principal_id": task.owner_principal_id,
+                        "durable_service_id": None,
                         "durable_authority_digest": projection.get("authority_digest"),
                         "durable_goal_id": task.goal_id,
                         "durable_goal_revision": int(task.goal_revision),
                         "durable_capability_version": "1",
+                        "durable_budget_digest": projection.get("budget_digest"),
                         "proposal_id": proposal.proposal_id,
                         "proposal_revision": int(proposal.revision),
                         "source_packet_id": packet.packet_id,
@@ -5645,6 +5681,29 @@ class WorkBoardDispatcher:
                 fencing_token=fencing_token,
                 expected_revision=projection.get("revision"),
             )
+            # Binding the approval id is part of the durable authority, so it
+            # advances the authority digest.  The approval row was created
+            # before that CAS; update its still-pending server-owned receipt
+            # before exposing the approval or allowing resume.  Otherwise a
+            # restart would hold a valid approval whose old digest can never
+            # satisfy the durable resume check.
+            bound_authority_digest = str(bound.get("authority_digest") or "")
+            if not bound_authority_digest:
+                raise DurableJobError("repo_repair_approval_authority_missing")
+            updated_approval = await approval_repository.update_pending_details(
+                approval_id,
+                owner_principal_id=task.owner_principal_id,
+                operator_session_id=task.owner_session_id,
+                updates={
+                    "authority_digest": bound_authority_digest,
+                    "durable_authority_digest": bound_authority_digest,
+                    "approval_expires_at": approval.expires_at.timestamp()
+                    if approval.expires_at
+                    else None,
+                },
+            )
+            if updated_approval is None:
+                raise DurableJobError("repo_repair_approval_binding_update_failed")
             held = await self.jobs.transition_job(
                 job_id,
                 "awaiting_approval",
@@ -7467,6 +7526,17 @@ class WorkBoardDispatcher:
         derive a different authority digest from a caller-selected timeout.
         """
 
+        from src.execution.repo_sandbox import RootlessDockerRepoSandbox, limits_digest
+
+        sandbox = RootlessDockerRepoSandbox()
+        sandbox_selectors = {
+            "sandbox_profile": str(sandbox.config.profile),
+            "sandbox_image_digest": str(sandbox.config.worker_image_digest),
+            "sandbox_limits_digest": limits_digest(sandbox.limits),
+            "sandbox_socket_digest": hashlib.sha256(
+                str(sandbox.config.docker_socket).encode("utf-8")
+            ).hexdigest(),
+        }
         return {
             "principal": task.owner_principal_id,
             "owner_kind": "user",
@@ -7488,6 +7558,8 @@ class WorkBoardDispatcher:
                 "runtime_seconds": MAX_RUNTIME_SECONDS,
                 "max_attempts": 1,
             },
+            "budget_microusd": 0,
+            **sandbox_selectors,
         }
 
     @staticmethod
@@ -7579,9 +7651,21 @@ class WorkBoardDispatcher:
                 "adapter admission projection is missing canonical immutable digests"
             )
         if _text(task.capability_id) == "engineering.repo-repair.v1":
+            expected_authority = WorkBoardDispatcher._repo_repair_authority_payload(
+                task,
+                attempt,
+                input_digest=WorkBoardDispatcher._direct_input_digest(task, attempt, inputs),
+            )
+            # Approval binding is a deliberate post-admission authority
+            # extension.  Recovery must validate the persisted approval id as
+            # part of that same authority digest rather than comparing the
+            # queued projection with the pre-approval admission envelope.
+            projected_approval_id = _text(authority.get("approval_id"))
+            if projected_approval_id:
+                expected_authority["approval_id"] = projected_approval_id
             expected_digests = {
                 "input_digest": WorkBoardDispatcher._direct_input_digest(task, attempt, inputs),
-                "authority_digest": WorkBoardDispatcher._direct_authority_digest(task, attempt, inputs),
+                "authority_digest": _safe_digest(expected_authority),
                 "run_fingerprint": WorkBoardDispatcher._direct_run_fingerprint(task, attempt, inputs),
             }
             if digests != expected_digests:
@@ -8563,13 +8647,14 @@ class WorkBoardDispatcher:
             expected_authority_digest = _safe_digest(spec.declared_authority)
             expected_run_fingerprint = spec.run_fingerprint
         else:
-            if capability_id == "guardian-routine.v1":
+            if capability_id in {"guardian-routine.v1", "engineering.repo-repair.v1"}:
                 # Routine invocation roots are already admitted and may be
                 # waiting on the operator approval boundary.  Re-entering
-                # RoutineService.invoke here would rebuild a fresh deadline
-                # and authority envelope, causing a false immutable-field
-                # conflict during recovery.  Inspect the deterministic root
-                # and validate its persisted projection instead.
+                # RoutineService.invoke here (or rebuilding a repair Durable
+                # JobSpec) would rebuild a fresh deadline and authority
+                # envelope, causing a false immutable-field conflict during
+                # recovery.  Inspect the deterministic root and validate its
+                # persisted projection instead.
                 expected_job_id, expected_owner, expected_kind, expected_service, binding_key = (
                     self._direct_job_identity(task, attempt, inputs)
                 )
@@ -8798,7 +8883,24 @@ class WorkBoardDispatcher:
                         recovered.append(job_id)
                         continue
 
-                if status in {"accepted", "queued"} and not effects:
+                # Approval/consent recovery may leave the same repair root in
+                # ``queued`` with one durable ``approval_resume`` receipt.
+                # That receipt is evidence of the already-approved root; it
+                # must not be mistaken for an external effect or cause a new
+                # admission.  Claim the exact queued root, then re-enter the
+                # existing proof-discriminated repair executor below.
+                repair_approval_resume = (
+                    _text(task.capability_id) == "engineering.repo-repair.v1"
+                    and status == "queued"
+                    and bool(effects)
+                    and all(
+                        isinstance(effect, Mapping)
+                        and _text(effect.get("kind")) == "approval_resume"
+                        and bool(_text(effect.get("approval_id")))
+                        for effect in effects
+                    )
+                )
+                if status in {"accepted", "queued"} and (not effects or repair_approval_resume):
                     # The root was admitted before the process stopped. Resume
                     # its durable state under the same binding. Only the local
                     # deterministic GoalSnapshot worker is resumed here; the
@@ -8832,6 +8934,36 @@ class WorkBoardDispatcher:
                             runtime_seconds=await self._effective_runtime(task),
                         )
                         await self._settle_parent(job_id, parent_owner, parent_fence, outcome)
+                        projection = await self.jobs.get_job(job_id) or projection
+                    elif _text(task.capability_id) == "engineering.repo-repair.v1":
+                        if status == "accepted":
+                            projection = await self.jobs.queue_job(
+                                job_id,
+                                expected_revision=projection.get("revision"),
+                            )
+                        if _status(projection) == "queued":
+                            projection = await self.jobs.claim_job(
+                                job_id,
+                                owner=self.runner_id,
+                                lease_seconds=await self._effective_runtime(task),
+                                expected_state="queued",
+                                expected_revision=projection.get("revision"),
+                                expected_fencing_token=(projection.get("lease") or {}).get("fencing_token"),
+                                continue_existing_attempt=int(projection.get("attempt_count") or 0) > 0,
+                            )
+                        if _status(projection) != "running":
+                            raise DurableJobError("repair_durable_job_not_running")
+                        adapter_result = await self._execute_direct_adapter(
+                            task,
+                            attempt,
+                            inputs,
+                            runtime_seconds=await self._effective_runtime(task),
+                        )
+                        returned_job_id = self._adapter_job_id(adapter_result)
+                        if returned_job_id and returned_job_id != job_id:
+                            raise DurableJobIdempotencyConflict(
+                                "repository repair recovery returned a different durable root"
+                            )
                         projection = await self.jobs.get_job(job_id) or projection
                     else:
                         # Direct adapters own their historical root, but each
@@ -8998,6 +9130,25 @@ class WorkBoardDispatcher:
                     if status == "awaiting_approval":
                         recovered.append(job_id)
                         continue
+
+                if (
+                    _text(task.capability_id) == "engineering.repo-repair.v1"
+                    and status == "awaiting_approval"
+                ):
+                    # Repair approval is an explicit operator wait on the
+                    # same open board attempt.  Keep the task recoverable with
+                    # the repair-specific reason; the generic blocked
+                    # projection would lose that recovery route behind a
+                    # broad ``needs_input`` card.
+                    if task.status is WorkBoardStatus.running:
+                        await self._pause_repo_repair_for_operator(
+                            task,
+                            attempt,
+                            projection,
+                            reason="review_repo_repair_proposal",
+                        )
+                    recovered.append(job_id)
+                    continue
 
                 if (
                     _text(task.capability_id) == "guardian-routine.v1"

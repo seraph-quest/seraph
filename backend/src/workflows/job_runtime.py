@@ -314,6 +314,23 @@ def _json_load(raw: str | None, fallback: Any) -> Any:
         return fallback
 
 
+def _cleanup_reservation_pending(run: WorkflowRunState) -> bool:
+    """Return whether an exact private cleanup is between intent and receipt."""
+
+    checkpoints = _json_load(getattr(run, "checkpoint_receipts_json", None), [])
+    if not isinstance(checkpoints, list):
+        return False
+    for item in reversed(checkpoints):
+        if not isinstance(item, dict):
+            continue
+        payload = item.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("kind") == "repo_repair_artifact_cleanup":
+            return payload.get("status") in {"deletion_pending", "cleanup_required"}
+    return False
+
+
 def _effect_ledger_or_raise(raw: str | None) -> list[dict[str, Any]]:
     """Load effect history without treating corruption as an empty ledger."""
     if raw is None or not str(raw).strip():
@@ -2779,6 +2796,10 @@ class DurableJobRepository:
             current_revision = _revision(run)
             if expected_revision is not None and int(expected_revision) != current_revision:
                 raise DurableJobLeaseError("durable job revision is stale")
+            if current in {"blocked", "failed"} and to_status == "queued" and _cleanup_reservation_pending(run):
+                raise DurableJobTransitionError(
+                    "private artifact cleanup is reserved; reconcile the exact cleanup receipt before resume"
+                )
             expected_fence = (
                 int(expected_fencing_token)
                 if expected_fencing_token is not None
@@ -3452,6 +3473,7 @@ class DurableJobRepository:
         expected_state: str = "queued",
         expected_revision: int | None = None,
         expected_fencing_token: int | None = None,
+        continue_existing_attempt: bool = False,
     ) -> dict[str, Any]:
         owner = _text(owner)
         if not owner:
@@ -3716,7 +3738,21 @@ class DurableJobRepository:
                         "operator_visible": True,
                     },
                 )
-            if run.attempt_count >= run.max_attempts:
+            if continue_existing_attempt:
+                # An operator-approved pause is a continuation of the same
+                # durable attempt.  It must reacquire a fresh execution lease
+                # and fence while preserving the attempt budget; otherwise a
+                # max_attempts=1 job would be consumed merely by crossing its
+                # explicit review boundary.  Callers must prove that an
+                # attempt already existed; a fresh queued row still uses the
+                # normal claim path below.
+                if int(run.attempt_count or 0) <= 0:
+                    raise DurableJobTransitionError(
+                        "existing-attempt continuation requires a prior claim"
+                    )
+                if int(run.attempt_count or 0) > int(run.max_attempts or 0):
+                    raise DurableJobTransitionError("existing-attempt continuation exceeds attempt budget")
+            elif run.attempt_count >= run.max_attempts:
                 raise DurableJobTransitionError("attempt budget exhausted")
             conditions = [
                 WorkflowRunState.run_identity == job_id,
@@ -3726,20 +3762,22 @@ class DurableJobRepository:
                 or_(WorkflowRunState.lease_expires_at.is_(None), WorkflowRunState.lease_expires_at <= now),
             ]
             _append_parent_fence_condition(conditions, run, now=now)
+            claim_values: dict[str, Any] = {
+                "status": "running",
+                "lease_owner": owner,
+                "lease_expires_at": expires,
+                "fencing_token": WorkflowRunState.fencing_token + 1,
+                "revision": WorkflowRunState.revision + 1,
+                "heartbeat_at": now,
+                "updated_at": now,
+            }
+            if not continue_existing_attempt:
+                claim_values["attempt_count"] = WorkflowRunState.attempt_count + 1
             result_update = await db.execute(
                 update(WorkflowRunState)
                 .execution_options(synchronize_session=False)
                 .where(*conditions)
-                .values(
-                    status="running",
-                    lease_owner=owner,
-                    lease_expires_at=expires,
-                    fencing_token=WorkflowRunState.fencing_token + 1,
-                    revision=WorkflowRunState.revision + 1,
-                    attempt_count=WorkflowRunState.attempt_count + 1,
-                    heartbeat_at=now,
-                    updated_at=now,
-                )
+                .values(**claim_values)
             )
             if not _rowcount_is_one(result_update):
                 raise DurableJobLeaseError("job is currently owned by another active runner")
@@ -5395,6 +5433,10 @@ class DurableJobRepository:
             current_revision = _revision(run)
             if expected_revision is not None and int(expected_revision) != current_revision:
                 raise DurableJobLeaseError("durable job revision is stale")
+            if _cleanup_reservation_pending(run):
+                raise DurableJobTransitionError(
+                    "private artifact cleanup is reserved; reconcile the exact cleanup receipt before retry"
+                )
             _validate_retry_actor(
                 run,
                 owner_kind=owner_kind,

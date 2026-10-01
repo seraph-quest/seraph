@@ -348,7 +348,7 @@ export function CalendarPrepForm({ goals, onCreated, onClose, onOpenSettings, in
     setEventsLoading(true);
     setEventsError(null);
     try {
-      const result = await boundedRequest((signal) => listCalendarEvents(connectionId, signal), requestController.signal);
+      const result = await boundedRequest((signal) => listCalendarEvents(connectionId, currentConsent.consent_id, signal), requestController.signal);
       if (!mountedRef.current || generation !== eventsGenerationRef.current || requestController.signal.aborted || selectedConnectionId !== connectionId || consentRef.current?.consent_id !== currentConsent.consent_id || consentRef.current?.revision !== currentConsent.revision) return;
       if (result.consent_id !== currentConsent.consent_id || result.consent_revision !== currentConsent.revision || result.connection_revision !== currentConsent.connection_revision) {
         setEventsError("The returned event list does not match the active consent revision. Refresh consent before selecting an event.");

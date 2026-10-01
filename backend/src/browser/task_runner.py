@@ -872,6 +872,9 @@ class BrowserTaskRunner:
         input_artifact_digest: str | None = None,
         effective_max_attempts: int | None = None,
         effective_max_outstanding_jobs: int | None = None,
+        routine_parent_job_id: str | None = None,
+        routine_parent_fencing_token: int | None = None,
+        routine_step_id: str | None = None,
     ) -> dict[str, Any]:
         task_id = _safe_identifier(task_id, field_name="task_id")
         attempt_id = _safe_identifier(attempt_id, field_name="attempt_id")
@@ -1036,6 +1039,8 @@ class BrowserTaskRunner:
                         goal_revision=goal_revision,
                         input_artifact_id=input_artifact_id,
                         input_artifact_digest=input_artifact_digest,
+                        routine_parent_job_id=routine_parent_job_id,
+                        routine_parent_fencing_token=routine_parent_fencing_token,
                     )
                     if inspect.isawaitable(current):
                         current = await current
@@ -1070,6 +1075,9 @@ class BrowserTaskRunner:
                     job_id=job_id,
                     max_attempts=max_attempts,
                     max_outstanding_jobs=max_outstanding_jobs,
+                    routine_parent_job_id=routine_parent_job_id,
+                    routine_parent_fencing_token=routine_parent_fencing_token,
+                    routine_step_id=routine_step_id,
                 )
             return await self._execute(
                 task_id=task_id,
@@ -1094,6 +1102,8 @@ class BrowserTaskRunner:
                 durable_fencing_token=durable_fencing_token,
                 max_attempts=max_attempts,
                 max_outstanding_jobs=max_outstanding_jobs,
+                routine_parent_job_id=routine_parent_job_id,
+                routine_parent_fencing_token=routine_parent_fencing_token,
             )
         except BrowserTaskError as exc:
             return await self._failure_receipt(
@@ -1203,6 +1213,9 @@ class BrowserTaskRunner:
         job_id: str,
         max_attempts: int,
         max_outstanding_jobs: int | None,
+        routine_parent_job_id: str | None = None,
+        routine_parent_fencing_token: int | None = None,
+        routine_step_id: str | None = None,
     ) -> dict[str, Any]:
         now = datetime.now(timezone.utc)
         safe_inputs = {
@@ -1252,6 +1265,18 @@ class BrowserTaskRunner:
                 "max_extract_bytes": BROWSER_MAX_EXTRACT_BYTES,
             },
         }
+        if routine_parent_job_id:
+            declared_authority["routine_parent_job_id"] = routine_parent_job_id
+            declared_authority["routine_parent_fencing_token"] = int(routine_parent_fencing_token or 0)
+            declared_authority["routine_step_id"] = routine_step_id
+            # These values are copied from the server-validated procedure
+            # child binding.  Durable admission compares them with the live
+            # parent row before applying the native-child root budget
+            # exemption; they are not caller-selectable browser inputs.
+            declared_authority["routine_parent_goal_id"] = goal_id
+            declared_authority["routine_parent_goal_revision"] = goal_revision
+            declared_authority["routine_parent_owner_principal_id"] = owner_principal_id
+            declared_authority["routine_parent_owner_session_id"] = owner_session_id
         if max_outstanding_jobs is not None:
             declared_authority["limits"]["max_outstanding_jobs"] = max_outstanding_jobs
         spec = DurableJobSpec(
@@ -1268,6 +1293,12 @@ class BrowserTaskRunner:
             session_id=owner_session_id,
             conversation_id=owner_session_id,
             operator_session_id=owner_session_id,
+            parent_job_id=routine_parent_job_id,
+            parent_fencing_token=(
+                int(routine_parent_fencing_token)
+                if routine_parent_job_id is not None and routine_parent_fencing_token is not None
+                else None
+            ),
             goal_id=goal_id,
             goal_revision=goal_revision,
             priority=task_priority,
@@ -1318,6 +1349,8 @@ class BrowserTaskRunner:
         durable_fencing_token: int | None,
         max_attempts: int,
         max_outstanding_jobs: int | None,
+        routine_parent_job_id: str | None = None,
+        routine_parent_fencing_token: int | None = None,
     ) -> dict[str, Any]:
         current = await self.jobs.get_job(job_id)
         if not isinstance(current, Mapping):
@@ -1326,6 +1359,7 @@ class BrowserTaskRunner:
             raise BrowserTaskError("durable root identity mismatch", code="durable_identity_mismatch")
         self._verify_durable_binding(
             current,
+            expected_job_id=job_id,
             task_id=task_id,
             attempt_id=attempt_id,
             owner_principal_id=owner_principal_id,
@@ -2189,6 +2223,7 @@ class BrowserTaskRunner:
         )
         self._verify_durable_binding(
             projection,
+            expected_job_id=state.job_id,
             task_id=state.task_id,
             attempt_id=state.attempt_id,
             owner_principal_id=state.owner_principal_id,
@@ -2223,6 +2258,7 @@ class BrowserTaskRunner:
                 goal_id=state.goal_id,
                 goal_revision=state.goal_revision,
                 input_artifact_id=state.input_artifact_id,
+                durable_job_id=state.job_id,
             )
             if inspect.isawaitable(result):
                 result = await result
@@ -2524,6 +2560,7 @@ class BrowserTaskRunner:
         self,
         projection: Mapping[str, Any],
         *,
+        expected_job_id: str | None = None,
         task_id: str,
         attempt_id: str,
         owner_principal_id: str,
@@ -2546,7 +2583,8 @@ class BrowserTaskRunner:
             raise BrowserTaskError("durable artifact binding is incomplete", code="durable_artifact_mismatch")
         if type(action_count) is not int or not 1 <= action_count <= BROWSER_MAX_ACTIONS:
             raise BrowserTaskError("durable action budget is incomplete", code="durable_action_count_invalid")
-        if _text(projection.get("job_id")) != f"browser-task:{task_id}:{attempt_id}":
+        bound_job_id = _text(expected_job_id) or f"browser-task:{task_id}:{attempt_id}"
+        if _text(projection.get("job_id")) != bound_job_id:
             raise BrowserTaskError("durable job identity is not bound to task attempt", code="durable_identity_mismatch")
         if _text(projection.get("session_id")) != owner_session_id:
             raise BrowserTaskError("durable session binding is stale", code="durable_session_mismatch")
@@ -2558,6 +2596,22 @@ class BrowserTaskRunner:
         owner = projection.get("owner")
         if not isinstance(authority, Mapping) or not isinstance(owner, Mapping):
             raise BrowserTaskError("durable authority binding is missing", code="durable_authority_missing")
+        routine_parent_id = _text(authority.get("routine_parent_job_id"))
+        if routine_parent_id:
+            try:
+                routine_parent_fence = int(authority.get("routine_parent_fencing_token") or 0)
+                projected_parent_fence = int(projection.get("parent_fencing_token") or 0)
+            except (TypeError, ValueError) as exc:
+                raise BrowserTaskError("durable procedure parent binding is malformed", code="durable_parent_binding_stale") from exc
+            if (
+                _text(projection.get("parent_job_id")) != routine_parent_id
+                or _text(projection.get("parent_run_identity")) != routine_parent_id
+                or _text(projection.get("root_run_identity")) != routine_parent_id
+                or projected_parent_fence != routine_parent_fence
+                or routine_parent_fence <= 0
+                or _text(authority.get("routine_step_id")) != "public_browser_check"
+            ):
+                raise BrowserTaskError("durable procedure parent binding is stale", code="durable_parent_binding_stale")
         if (
             _text(owner.get("kind")) != "service"
             or _text(owner.get("principal_id")) != BROWSER_TASK_OWNER_PRINCIPAL
@@ -2665,7 +2719,27 @@ class BrowserTaskRunner:
             return None
         if projection.get("run_identity") != job_id:
             return None
-        if projection.get("root_run_identity") != job_id:
+        authority = projection.get("declared_authority") if isinstance(projection.get("declared_authority"), Mapping) else {}
+        routine_parent_job_id = _text(authority.get("routine_parent_job_id"))
+        if routine_parent_job_id:
+            # Procedure v2 native Browser roots are durable children of the
+            # exact running parent.  Standalone browser jobs retain the
+            # historical root=self requirement.
+            try:
+                routine_parent_fence = int(authority.get("routine_parent_fencing_token") or 0)
+                projected_parent_fence = int(projection.get("parent_fencing_token") or 0)
+            except (TypeError, ValueError):
+                return None
+            if (
+                _text(projection.get("root_run_identity")) != routine_parent_job_id
+                or _text(projection.get("parent_run_identity")) != routine_parent_job_id
+                or _text(projection.get("parent_job_id")) != routine_parent_job_id
+                or projected_parent_fence != routine_parent_fence
+                or routine_parent_fence <= 0
+                or _text(authority.get("routine_step_id")) != "public_browser_check"
+            ):
+                return None
+        elif projection.get("root_run_identity") != job_id:
             return None
         if projection.get("job_kind") != BROWSER_TASK_JOB_KIND:
             return None

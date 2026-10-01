@@ -89,6 +89,7 @@ OPERATOR_REQUIRED_TABLES = (
     "guardian_routines",
     "guardian_routine_versions",
     "work_board_routine_bindings",
+    "procedure_v2_bindings",
     "memory_tombstones",
     "audio_ingress_jobs",
     "audio_consent_grants",
@@ -1408,6 +1409,50 @@ async def _ensure_work_board_routine_binding(conn) -> None:
         )
 
 
+async def _ensure_procedure_v2_binding(conn) -> None:
+    """Keep the v2 preparation fence additive on existing workspaces."""
+
+    result = await conn.exec_driver_sql("PRAGMA table_info(procedure_v2_bindings)")
+    existing = {row[1] for row in result.fetchall()}
+    additions = {
+        "request_digest": "VARCHAR DEFAULT ''",
+        "source_refs_json": "VARCHAR DEFAULT '{}'",
+        "routine_name": "VARCHAR DEFAULT ''",
+        "template_id": "VARCHAR DEFAULT ''",
+        "version_id": "VARCHAR",
+        "preview_digest": "VARCHAR DEFAULT ''",
+        "preview_expires_at": "DATETIME",
+        "state": "VARCHAR DEFAULT 'preparing'",
+        "recovery_reason": "VARCHAR",
+        "revision": "INTEGER DEFAULT 1",
+        "updated_at": "DATETIME",
+    }
+    for column, sql_type in additions.items():
+        if existing and column not in existing:
+            await conn.exec_driver_sql(
+                f"ALTER TABLE procedure_v2_bindings ADD COLUMN {column} {sql_type}"
+            )
+    if existing:
+        await conn.exec_driver_sql(
+            "UPDATE procedure_v2_bindings SET state = 'preparing' "
+            "WHERE state IS NULL OR state = ''"
+        )
+        await conn.exec_driver_sql(
+            "UPDATE procedure_v2_bindings SET revision = 1 "
+            "WHERE revision IS NULL OR revision < 1"
+        )
+        await conn.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS "
+            "ux_procedure_v2_bindings_idempotency ON procedure_v2_bindings "
+            "(owner_principal_id, owner_session_id, idempotency_key)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS "
+            "ux_procedure_v2_bindings_deterministic_routine "
+            "ON procedure_v2_bindings (deterministic_routine_id)"
+        )
+
+
 async def init_db() -> None:
     """Create all tables on startup."""
     # Keep SQLite bound to the same canonical workspace registry used by
@@ -1432,6 +1477,7 @@ async def init_db() -> None:
         # Existing routine-binding tables need their additive columns before
         # metadata creates the conditional indexes declared by SQLModel.
         await _ensure_work_board_routine_binding(conn)
+        await _ensure_procedure_v2_binding(conn)
         # Calendar additive columns and the consent partial unique index must
         # inspect legacy rows before ``create_all`` materializes model indexes.
         await _ensure_calendar_columns(conn)

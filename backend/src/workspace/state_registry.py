@@ -112,6 +112,7 @@ class WorkspaceStateClass(str, Enum):
 # workspace inventory boundary so backup/restore and production receipts can
 # name the exact SQLite object without exposing rows or procedure content.
 WORK_BOARD_ROUTINE_BINDING_TABLE = "work_board_routine_bindings"
+PROCEDURE_V2_BINDING_TABLE = "procedure_v2_bindings"
 WORK_BOARD_INPUT_ARTIFACT_TABLE = "work_board_input_artifacts"
 WORK_BOARD_INPUT_ARTIFACT_ROOT = "artifacts/work-board/inputs"
 CALENDAR_PREP_RECEIPT_TABLE = "calendar_prep_receipts"
@@ -126,6 +127,20 @@ def work_board_routine_binding_contract(*, present: bool | None) -> dict[str, An
         "table_name": WORK_BOARD_ROUTINE_BINDING_TABLE,
         "state_class": WorkspaceStateClass.CANONICAL.value,
         "backup_scope": "canonical_sqlite",
+        "present": None if present is None else bool(present),
+    }
+
+
+def procedure_v2_binding_contract(*, present: bool | None) -> dict[str, Any]:
+    """Return the redacted inventory contract for reviewed procedure fences."""
+
+    return {
+        "schema_version": "seraph.procedure-v2-binding.v1",
+        "table_name": PROCEDURE_V2_BINDING_TABLE,
+        "state_class": WorkspaceStateClass.CANONICAL.value,
+        "backup_scope": "canonical_sqlite",
+        "metadata_only": True,
+        "source_content_included": False,
         "present": None if present is None else bool(present),
     }
 
@@ -1270,6 +1285,12 @@ class WorkspaceStateRegistry:
                 "work_board_routine_binding": work_board_routine_binding_contract(
                     present=binding_present
                 ),
+                "procedure_v2_binding": procedure_v2_binding_contract(
+                    present=any(
+                        item.get("name") == PROCEDURE_V2_BINDING_TABLE
+                        for item in tables
+                    )
+                ),
                 "work_board_input_artifact": work_board_input_artifact_contract(
                     present=any(
                         item.get("name") == WORK_BOARD_INPUT_ARTIFACT_TABLE
@@ -1306,6 +1327,7 @@ __all__ = [
     "WorkspaceStateError",
     "WorkspaceStateRegistry",
     "WORK_BOARD_ROUTINE_BINDING_TABLE",
+    "PROCEDURE_V2_BINDING_TABLE",
     "WORK_BOARD_INPUT_ARTIFACT_TABLE",
     "WORK_BOARD_INPUT_ARTIFACT_ROOT",
     "DEFAULT_MAX_INVENTORY_ENTRIES",
@@ -1320,6 +1342,7 @@ __all__ = [
     "canonical_workspace_root_identity",
     "production_workspace_inventory",
     "work_board_routine_binding_contract",
+    "procedure_v2_binding_contract",
     "work_board_input_artifact_contract",
     "calendar_prep_receipt_contract",
 ]

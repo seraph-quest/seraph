@@ -1,12 +1,36 @@
 import "@testing-library/jest-dom/vitest";
 import { describe, expect, it, vi } from "vitest";
 
-import { createCalendarPrep, validateCalendarEventsResponse, validateCalendarPrepResponse, validateCalendarResultPreview } from "./calendar";
+import { createCalendarPrep, listCalendarEvents, validateCalendarEventsResponse, validateCalendarPrepResponse, validateCalendarResultPreview } from "./calendar";
 
 const digest = "a".repeat(64);
 const timestamp = "2026-09-30T10:00:00Z";
 
 describe("calendar wire validators", () => {
+  it("requires and encodes the owner consent when listing events", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        events: [],
+        consent_id: "consent /?&",
+        consent_revision: 2,
+        connection_revision: 3,
+        calendar_list_revision: digest,
+        fetched_at: timestamp,
+        pages_read: 1,
+        truncated: false,
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      await listCalendarEvents("connection/1", "consent /?&");
+      expect(String(fetchMock.mock.calls[0]?.[0])).toContain("/api/calendar/connections/connection%2F1/events?consent_id=consent+%2F%3F%26");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("accepts the frozen minimal prep artifact and task envelope without manufacturing fields", () => {
     const result = validateCalendarPrepResponse({
       input_artifact: { artifact_id: "artifact-1", typed_input_ref: "workspace-json:artifacts/work-board/inputs/artifact-1.json", typed_input_digest: digest, capability_id: "calendar.meeting-prep.v1", goal_id: "goal-1", goal_revision: 2, expires_at: timestamp },

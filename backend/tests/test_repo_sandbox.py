@@ -4,16 +4,19 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import stat
 
 import pytest
 
 from config.settings import RepoSandboxSettings, settings
+import src.execution.repo_sandbox as repo_sandbox
 from src.execution.repo_sandbox import (
     RepoSandboxError,
     RepoSandboxLimits,
     RepoSandboxJob,
     RootlessDockerRepoSandbox,
     SnapshotEntry,
+    persist_repo_sandbox_settings,
     _patch_paths_from_diff,
     _digest_entries,
     _open_source_regular_file as _open_sandbox_source_regular_file,
@@ -133,6 +136,112 @@ def test_disabled_preflight_does_not_probe_docker():
     result = runner.preflight()
     assert result.status == "blocked"
     assert result.reason == "repo_sandbox_disabled"
+
+
+def test_settings_write_repairs_owned_descendants_without_chmodding_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    workspace = tmp_path / "workspace"
+    artifacts = workspace / "artifacts"
+    settings_dir = artifacts / "repo-sandbox"
+    workspace.mkdir(mode=0o700)
+    artifacts.mkdir()
+    settings_dir.mkdir()
+    workspace.chmod(0o700)
+    artifacts.chmod(0o775)
+    settings_dir.chmod(0o775)
+    monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+
+    persist_repo_sandbox_settings(_settings(enabled=False, docker_socket="", worker_image_digest=""))
+
+    assert stat.S_IMODE(workspace.stat().st_mode) == 0o700
+    assert stat.S_IMODE(artifacts.stat().st_mode) == 0o700
+    assert stat.S_IMODE(settings_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE((settings_dir / "settings.json").stat().st_mode) == 0o600
+
+
+def test_settings_write_rejects_foreign_owned_held_descendant_before_repair(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    workspace = tmp_path / "workspace"
+    artifacts = workspace / "artifacts"
+    workspace.mkdir(mode=0o700)
+    artifacts.mkdir()
+    workspace.chmod(0o700)
+    artifacts.chmod(0o775)
+    monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+
+    real_open = repo_sandbox.os.open
+    real_fstat = repo_sandbox.os.fstat
+    real_fchmod = repo_sandbox.os.fchmod
+    foreign_fd: int | None = None
+    fchmod_calls: list[int] = []
+
+    def open_wrapper(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal foreign_fd
+        descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+        if path == "artifacts" and dir_fd is not None:
+            foreign_fd = descriptor
+        return descriptor
+
+    def fstat_wrapper(descriptor):
+        metadata = real_fstat(descriptor)
+        if descriptor != foreign_fd:
+            return metadata
+        return os.stat_result((*metadata[:4], metadata.st_uid + 1, *metadata[5:]))
+
+    def fchmod_wrapper(descriptor, mode):
+        fchmod_calls.append(descriptor)
+        return real_fchmod(descriptor, mode)
+
+    monkeypatch.setattr(repo_sandbox.os, "open", open_wrapper)
+    monkeypatch.setattr(repo_sandbox.os, "fstat", fstat_wrapper)
+    monkeypatch.setattr(repo_sandbox.os, "fchmod", fchmod_wrapper)
+
+    with pytest.raises(OSError, match="parent is untrusted"):
+        persist_repo_sandbox_settings(_settings(enabled=False, docker_socket="", worker_image_digest=""))
+
+    assert foreign_fd is not None
+    assert fchmod_calls == []
+    assert stat.S_IMODE(workspace.stat().st_mode) == 0o700
+    assert stat.S_IMODE(artifacts.stat().st_mode) == 0o775
+    assert not (artifacts / "repo-sandbox" / "settings.json").exists()
+
+
+def test_settings_write_rejects_broad_workspace_without_chmodding_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(mode=0o775)
+    workspace.chmod(0o775)
+    monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+
+    with pytest.raises(OSError, match="parent is untrusted"):
+        persist_repo_sandbox_settings(_settings(enabled=False, docker_socket="", worker_image_digest=""))
+
+    assert stat.S_IMODE(workspace.stat().st_mode) == 0o775
+
+
+def test_settings_write_rejects_symlinked_descendant_and_hardlinked_destination(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    workspace = tmp_path / "workspace"
+    artifacts = workspace / "artifacts"
+    settings_dir = artifacts / "repo-sandbox"
+    target = tmp_path / "target"
+    workspace.mkdir(mode=0o700)
+    artifacts.mkdir(mode=0o700)
+    target.mkdir(mode=0o700)
+    settings_dir.symlink_to(target, target_is_directory=True)
+    monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+
+    with pytest.raises(OSError):
+        persist_repo_sandbox_settings(_settings(enabled=False, docker_socket="", worker_image_digest=""))
+
+    settings_dir.unlink()
+    settings_dir.mkdir(mode=0o700)
+    persisted = settings_dir / "settings.json"
+    persisted.write_text("original", encoding="utf-8")
+    persisted.chmod(0o600)
+    hardlink = settings_dir / "settings-copy.json"
+    os.link(persisted, hardlink)
+
+    with pytest.raises(OSError, match="destination is untrusted"):
+        persist_repo_sandbox_settings(_settings(enabled=False, docker_socket="", worker_image_digest=""))
+
+    assert persisted.read_text(encoding="utf-8") == "original"
 
 
 def _rootless_info(**overrides):

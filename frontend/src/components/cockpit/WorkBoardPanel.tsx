@@ -9,6 +9,8 @@ import { BrowserTaskForm } from "./BrowserTaskForm";
 import type { BrowserTaskSubmissionReceipt, PendingBrowserSubmission } from "./BrowserTaskForm";
 import { CalendarPrepForm } from "./CalendarPrepForm";
 import type { PendingCalendarSubmission } from "./CalendarPrepForm";
+import { RepoRepairForm } from "./RepoRepairForm";
+import type { PendingRepoRepairSubmission, RepoRepairSubmissionReceipt } from "./RepoRepairForm";
 import { MailPanel } from "./MailPanel";
 import { WorkBoardMemoryReview } from "./WorkBoardMemoryReview";
 import { RepoRepairInspector } from "./RepoRepairInspector";
@@ -203,6 +205,9 @@ const pendingBrowserSubmissions = new Map<string, PendingBrowserSubmission>();
 const MAX_PENDING_CALENDAR_SUBMISSIONS = 32;
 const pendingCalendarSubmissions = new Map<string, PendingCalendarSubmission>();
 
+const MAX_PENDING_REPO_REPAIR_SUBMISSIONS = 32;
+const pendingRepoRepairSubmissions = new Map<string, PendingRepoRepairSubmission>();
+
 function rememberPendingBrowserSubmission(scope: string, pending: PendingBrowserSubmission): void {
   pendingBrowserSubmissions.delete(scope);
   pendingBrowserSubmissions.set(scope, pending);
@@ -220,6 +225,16 @@ function rememberPendingCalendarSubmission(scope: string, pending: PendingCalend
     const oldest = pendingCalendarSubmissions.keys().next().value;
     if (typeof oldest !== "string") break;
     pendingCalendarSubmissions.delete(oldest);
+  }
+}
+
+function rememberPendingRepoRepairSubmission(scope: string, pending: PendingRepoRepairSubmission): void {
+  pendingRepoRepairSubmissions.delete(scope);
+  pendingRepoRepairSubmissions.set(scope, pending);
+  while (pendingRepoRepairSubmissions.size > MAX_PENDING_REPO_REPAIR_SUBMISSIONS) {
+    const oldest = pendingRepoRepairSubmissions.keys().next().value;
+    if (typeof oldest !== "string") break;
+    pendingRepoRepairSubmissions.delete(oldest);
   }
 }
 
@@ -774,12 +789,14 @@ function WorkBoardPanel({
   const pendingCreateAtMount = pendingCreateScope ? pendingTaskCreates.get(pendingCreateScope) ?? null : null;
   const pendingBrowserAtMount = pendingCreateScope ? pendingBrowserSubmissions.get(pendingCreateScope) ?? null : null;
   const pendingCalendarAtMount = pendingCreateScope ? pendingCalendarSubmissions.get(pendingCreateScope) ?? null : null;
+  const pendingRepoRepairAtMount = pendingCreateScope ? pendingRepoRepairSubmissions.get(pendingCreateScope) ?? null : null;
   const previousBrowserScopeRef = useRef<string | null>(pendingCreateScope);
   useEffect(() => {
     const previousScope = previousBrowserScopeRef.current;
     if (previousScope && previousScope !== pendingCreateScope) {
       pendingBrowserSubmissions.delete(previousScope);
       pendingCalendarSubmissions.delete(previousScope);
+      pendingRepoRepairSubmissions.delete(previousScope);
     }
     previousBrowserScopeRef.current = pendingCreateScope;
   }, [pendingCreateScope]);
@@ -810,6 +827,8 @@ function WorkBoardPanel({
   const [browserTaskReceipt, setBrowserTaskReceipt] = useState<BrowserTaskSubmissionReceipt | null>(null);
   const [calendarPrepOpen, setCalendarPrepOpen] = useState(Boolean(pendingCalendarAtMount));
   const [calendarPrepReceipt, setCalendarPrepReceipt] = useState<CalendarPrepResponse | null>(null);
+  const [repoRepairOpen, setRepoRepairOpen] = useState(Boolean(pendingRepoRepairAtMount));
+  const [repoRepairReceipt, setRepoRepairReceipt] = useState<RepoRepairSubmissionReceipt | null>(null);
   const [createError, setCreateError] = useState<string | null>(pendingCreateAtMount
     ? "A previous create did not return a receipt. Retry the same request to reconcile it before editing or starting another task."
     : null);
@@ -3066,6 +3085,23 @@ function WorkBoardPanel({
     setCalendarPrepOpen(false);
   };
 
+  const setRepoRepairPending = (pending: PendingRepoRepairSubmission | null) => {
+    if (!pendingCreateScope) return;
+    if (pending) {
+      rememberPendingRepoRepairSubmission(pendingCreateScope, pending);
+      return;
+    }
+    pendingRepoRepairSubmissions.delete(pendingCreateScope);
+  };
+
+  const closeRepoRepair = () => {
+    if (pendingCreateScope && pendingRepoRepairSubmissions.has(pendingCreateScope)) {
+      setAnnouncement("The repository repair outcome is unconfirmed. Keep this form open and retry the exact request before closing it.");
+      return;
+    }
+    setRepoRepairOpen(false);
+  };
+
   return (
     <section className="cockpit-panel cockpit-panel--embedded min-w-0" aria-label="Work board">
       <div className="cockpit-operator-row flex-wrap">
@@ -3085,6 +3121,9 @@ function WorkBoardPanel({
           </button>
           <button type="button" className="cockpit-feedback-button" onClick={() => { setCalendarPrepReceipt(null); setCalendarPrepOpen(true); }}>
             Calendar meeting prep
+          </button>
+          <button type="button" className="cockpit-feedback-button" onClick={() => { setRepoRepairReceipt(null); setRepoRepairOpen(true); }}>
+            Repository repair
           </button>
           <button type="button" className="cockpit-feedback-button" onClick={() => void refreshSnapshot()} disabled={loading}>
             {loading ? "Refreshing…" : "Refresh board"}
@@ -3146,6 +3185,11 @@ function WorkBoardPanel({
       {calendarPrepReceipt && (
         <div className="mt-2 rounded border border-emerald-500/40 bg-emerald-950/20 p-2 text-sm" role="status">
           Calendar preparation task input artifact verified: <span className="font-mono break-all">{calendarPrepReceipt.input_artifact.artifact_id}</span> · SHA-256 <span className="font-mono break-all">{calendarPrepReceipt.input_artifact.typed_input_digest}</span>. The selected task is open below for durable progress and recovery.
+        </div>
+      )}
+      {repoRepairReceipt && (
+        <div className="mt-2 rounded border border-emerald-500/40 bg-emerald-950/20 p-2 text-sm" role="status">
+          Repository repair input artifact verified: <span className="font-mono break-all">{repoRepairReceipt.artifactId}</span> · SHA-256 <span className="font-mono break-all">{repoRepairReceipt.digest}</span>. The selected task is open below for durable progress and recovery.
         </div>
       )}
       <div className="sr-only" aria-live="polite">{announcement}</div>
@@ -4129,6 +4173,26 @@ function WorkBoardPanel({
             if (stoppedRef.current) return;
             openTask(task.task_id);
             setAnnouncement(`Calendar meeting preparation task ${task.title} was created with artifact ${receipt.input_artifact.artifact_id}.`);
+          }}
+        />
+      )}
+      {repoRepairOpen && (
+        <RepoRepairForm
+          key={pendingCreateScope ?? "anonymous"}
+          goals={allGoals}
+          initialPending={pendingRepoRepairAtMount}
+          onPendingChange={setRepoRepairPending}
+          ownerPrincipalId={ownerPrincipalId}
+          ownerSessionId={ownerSessionId}
+          onClose={closeRepoRepair}
+          onCreated={async (task, receipt) => {
+            if (pendingCreateScope) pendingRepoRepairSubmissions.delete(pendingCreateScope);
+            setRepoRepairReceipt(receipt);
+            setRepoRepairOpen(false);
+            await refreshSnapshot();
+            if (stoppedRef.current) return;
+            openTask(task.task_id);
+            setAnnouncement(`Repository repair task ${task.title} was created with input artifact ${receipt.artifactId}.`);
           }}
         />
       )}

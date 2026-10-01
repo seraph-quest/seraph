@@ -220,12 +220,18 @@ def persist_repo_sandbox_settings(value: RepoSandboxSettings) -> None:
             os.close(parent_fd)
             parent_fd = next_fd
             metadata = os.fstat(parent_fd)
-            if (
-                not stat.S_ISDIR(metadata.st_mode)
-                or metadata.st_mode & 0o022
-                or metadata.st_uid not in {0, os.getuid()}
-            ):
+            # Only a directory owned by the current operator may be repaired
+            # on this write path.  Keep the canonical workspace and all
+            # shared/foreign ancestors under the strict reader contract; a
+            # root-owned child must be replaced by an administrator instead
+            # of being chmod'ed by an unprivileged Seraph process.
+            if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid():
                 raise OSError("repository sandbox settings parent is untrusted")
+            if stat.S_IMODE(metadata.st_mode) != 0o700:
+                os.fchmod(parent_fd, 0o700)
+                metadata = os.fstat(parent_fd)
+                if stat.S_IMODE(metadata.st_mode) != 0o700:
+                    raise OSError("repository sandbox settings parent is untrusted")
 
         payload = json.dumps(
             {

@@ -451,19 +451,38 @@ PR carries the branch-specific review and validation receipts.
 ### Governed repository repair (M4 #887 branch-local target)
 
 The M4 target adds a bounded repository-repair path to the existing Work Board
-execution boundary. An operator selects repository-relative source and patch
-paths, Seraph creates a typed owner-bound input, inspects a private snapshot,
-pauses for explicit code-egress consent, and asks the governed
-`strategist_agent` route for one strict patch proposal. The operator reviews
-the exact proposal and approval target before an isolated test/readback path
-can run.
+execution boundary. In **Work → Repository repair**, an authenticated operator
+selects an owned active Goal and current revision, then supplies the strict
+repository-relative source and focused-test input. The form rejects protected
+paths, unsafe references, out-of-scope tests, and unbounded values before the
+server creates the typed owner/session-bound input artifact. Seraph then
+publishes a `Todo` task with the artifact ID; the artifact reservation and task
+publication use separate idempotency keys, and the task carries no caller-
+supplied typed reference or raw source path authority.
+
+The pending repair draft is private to the authenticated owner/session. An
+unknown artifact or task response retains the exact original keys and payload;
+the operator must reconcile or retry that exact request before another
+mutation is allowed. Artifact reads expose only safe identity, digest, expiry,
+and lifecycle metadata. The server then inspects a private snapshot, pauses
+for explicit code-egress consent, and asks the governed `strategist_agent`
+route for one strict patch proposal. The operator reviews the exact proposal
+and approval target before an isolated test/readback path can run.
 
 The repair path binds the source packet, model request and response, patch,
 approval, owner/session, Goal, attempt, and durable job by digest. It exposes
 blocked, stale, revoked, and unknown recovery states and records
 `memory_status=no_learning`. Tests run against the bounded snapshot and do
-not claim to modify the original repository. Source text, prompts, model
+not claim to modify the original checkout. Source text, prompts, model
 responses, and credentials stay out of generic operator projections.
+
+On a first managed local start, a newly created workspace is private (`0700`),
+settings descendants repaired on the current-owner write path are private,
+and the persisted selector file is `0600`. A pre-existing broad workspace or
+foreign-owned, symlinked, or otherwise untrusted settings path remains
+blocked. Use a private workspace beneath trusted ancestors and retry; Seraph
+does not automatically chmod an existing workspace root or shared ancestor.
+Saving selectors never starts Docker or changes host resource limits.
 
 This is **Partial** and branch-local. Intercepted model transport and sandbox
 mechanics prove request, authority, recovery, and readback contracts only. If

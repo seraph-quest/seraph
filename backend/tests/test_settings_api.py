@@ -160,6 +160,74 @@ async def test_repo_sandbox_settings_are_typed_bounded_and_fail_closed(client, t
 
 
 @pytest.mark.asyncio
+async def test_repo_sandbox_settings_write_repairs_owned_descendants_only(client, tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    artifacts = workspace / "artifacts"
+    settings_dir = artifacts / "repo-sandbox"
+    workspace.mkdir(mode=0o700)
+    artifacts.mkdir()
+    settings_dir.mkdir()
+    workspace.chmod(0o700)
+    artifacts.chmod(0o775)
+    settings_dir.chmod(0o775)
+    monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+    monkeypatch.setattr(settings, "repo_sandbox", settings.repo_sandbox.model_copy(update={
+        "enabled": False,
+        "docker_socket": "",
+        "worker_image_digest": "",
+        "profile": "repo-python-pytest-v1",
+    }))
+
+    saved = await client.put("/api/settings/repo-sandbox", json={"enabled": False})
+
+    assert saved.status_code == 200
+    assert stat.S_IMODE(workspace.stat().st_mode) == 0o700
+    assert stat.S_IMODE(artifacts.stat().st_mode) == 0o700
+    assert stat.S_IMODE(settings_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE((settings_dir / "settings.json").stat().st_mode) == 0o600
+
+
+@pytest.mark.asyncio
+async def test_repo_sandbox_settings_broad_workspace_returns_bounded_recovery_reason(client, tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(mode=0o775)
+    workspace.chmod(0o775)
+    monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+    monkeypatch.setattr(settings, "repo_sandbox", settings.repo_sandbox.model_copy(update={
+        "enabled": False,
+        "docker_socket": "",
+        "worker_image_digest": "",
+        "profile": "repo-python-pytest-v1",
+    }))
+
+    failed = await client.put("/api/settings/repo-sandbox", json={"enabled": False})
+
+    assert failed.status_code == 503
+    detail = failed.json()["detail"]
+    assert detail["code"] == "repo_sandbox_settings_persist_failed"
+    assert detail["reason"] == "Use a private canonical workspace owned by the current user with non-group-writable ancestors, then retry."
+    assert "OSError" not in str(detail)
+    assert stat.S_IMODE(workspace.stat().st_mode) == 0o775
+
+
+@pytest.mark.asyncio
+async def test_repo_sandbox_settings_persist_failure_reason_is_static_and_actionable(client, monkeypatch):
+    monkeypatch.setattr(
+        "src.api.settings._persist_repo_sandbox_settings",
+        lambda _value: (_ for _ in ()).throw(OSError("private path and secret details")),
+    )
+
+    failed = await client.put("/api/settings/repo-sandbox", json={"enabled": False})
+
+    assert failed.status_code == 503
+    detail = failed.json()["detail"]
+    assert detail == {
+        "code": "repo_sandbox_settings_persist_failed",
+        "reason": "Use a private canonical workspace owned by the current user with non-group-writable ancestors, then retry.",
+    }
+
+
+@pytest.mark.asyncio
 async def test_repo_sandbox_settings_loader_rejects_corruption_and_symlink(client, tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     settings_dir = workspace / "artifacts" / "repo-sandbox"

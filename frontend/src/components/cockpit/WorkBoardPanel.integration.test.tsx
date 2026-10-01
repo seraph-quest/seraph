@@ -503,4 +503,46 @@ describe("WorkBoardPanel integration", () => {
     expect(await screen.findByRole("region", { name: "Private Mail source review" })).toBeInTheDocument();
     expect(screen.getByText(/accepted task origin/i)).toBeInTheDocument();
   });
+
+  it("opens the repository repair producer from the live board without exposing raw artifact fields", async () => {
+    const currentTask = boardTask({
+      task_id: "task-repair-existing",
+      title: "Existing repair task",
+      capability_id: "engineering.repo-repair.v1",
+      status: "todo",
+      typed_input_ref: null,
+      typed_input_digest: null,
+    });
+    const goal = {
+      id: "goal-1",
+      parent_id: null,
+      path: "/goal-1",
+      level: "root",
+      title: "Repair project",
+      description: "A bounded engineering goal",
+      status: "active",
+      domain: "engineering",
+      start_date: null,
+      due_date: null,
+      sort_order: 0,
+      revision: 3,
+    };
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) return Promise.resolve(response(page(currentTask, 10)));
+      if (url.includes("/api/work-board/events?")) return Promise.resolve(response(emptyEvents(10)));
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([goal]));
+      if (url.endsWith("/api/work-board/tasks/task-repair-existing")) return Promise.resolve(response(detail(currentTask)));
+      if (url.includes("/api/work-board/goals/goal-1/execution-limits")) return Promise.resolve(response({ goal_id: "goal-1", goal_revision: 3, effective_max_runtime_seconds: 300, default_max_runtime_seconds: 300, hard_max_runtime_seconds: 900, attempt_limit: 2, limit_source: "default" }));
+      return Promise.resolve(response({}));
+    });
+    render(<WorkBoardPanel ownerPrincipalId="operator:one" ownerSessionId="operator-session-1" />);
+    await waitFor(() => expect(IntegrationBoardSocket.instances).toHaveLength(1));
+    act(() => IntegrationBoardSocket.instances[0]?.open());
+
+    fireEvent.click(await screen.findByRole("button", { name: "Repository repair" }));
+    expect(await screen.findByRole("dialog", { name: "Repository repair" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Repair goal")).toHaveDisplayValue(/Repair project/);
+    expect(screen.queryByLabelText("Typed input reference")).not.toBeInTheDocument();
+  });
 });

@@ -1208,7 +1208,13 @@ async def set_repo_sandbox_settings(body: RepoSandboxSettingsRequest, request: R
     try:
         _persist_repo_sandbox_settings(candidate)
     except OSError as exc:
-        raise HTTPException(status_code=503, detail={"code": "repo_sandbox_settings_persist_failed"}) from exc
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "repo_sandbox_settings_persist_failed",
+                "reason": "Use a private canonical workspace owned by the current user with non-group-writable ancestors, then retry.",
+            },
+        ) from exc
     # Publish only after the private file has been atomically replaced.  A
     # failed write therefore cannot leave this process executing selectors it
     # could not recover after restart.

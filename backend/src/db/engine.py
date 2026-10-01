@@ -105,6 +105,10 @@ OPERATOR_REQUIRED_TABLES = (
     "work_board_decision_receipts",
     "google_service_connections",
     "calendar_read_consents",
+    "mail_label_bindings",
+    "mail_read_consents",
+    "mail_message_bindings",
+    "mail_watch_states",
     "calendar_event_bindings",
     "calendar_prep_receipts",
     "governed_schedule_bindings",
@@ -937,11 +941,10 @@ async def _ensure_calendar_columns(conn) -> None:
         "PRAGMA table_info(google_service_connections)"
     )
     connection_columns = {row[1] for row in connection_result.fetchall()}
-    if connection_columns:
-        if "verified_setup_job_id" not in connection_columns:
-            await conn.exec_driver_sql(
-                "ALTER TABLE google_service_connections ADD COLUMN verified_setup_job_id VARCHAR"
-            )
+    if connection_columns and "verified_setup_job_id" not in connection_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE google_service_connections ADD COLUMN verified_setup_job_id VARCHAR"
+        )
         # Older development snapshots used a broader temporary index name;
         # remove it before materializing the SQLModel field's canonical index.
         await conn.exec_driver_sql(
@@ -950,6 +953,86 @@ async def _ensure_calendar_columns(conn) -> None:
         await conn.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_google_service_connections_verified_setup_job_id "
             "ON google_service_connections (verified_setup_job_id)"
+        )
+
+
+async def _ensure_mail_columns(conn) -> None:
+    """Install additive Mail columns independently from Calendar migrations.
+
+    Mail and Calendar share the connection table, but their migration helpers
+    must remain separately attributable so a legacy Calendar-only workspace
+    cannot accidentally depend on the Mail source rollout (and vice versa).
+    """
+
+    connection_result = await conn.exec_driver_sql(
+        "PRAGMA table_info(google_service_connections)"
+    )
+    connection_columns = {row[1] for row in connection_result.fetchall()}
+    if connection_columns:
+        for column_name, sql_type in {
+            "declared_scopes_json": "VARCHAR DEFAULT '[]'",
+            "provider_scopes_json": "VARCHAR DEFAULT '[]'",
+            "scope_status": "VARCHAR DEFAULT 'scope_unverified'",
+            "revoke_idempotency_key": "VARCHAR",
+            "revoke_request_digest": "VARCHAR",
+        }.items():
+            if column_name not in connection_columns:
+                await conn.exec_driver_sql(
+                    f"ALTER TABLE google_service_connections ADD COLUMN {column_name} {sql_type}"
+                )
+
+    consent_result = await conn.exec_driver_sql("PRAGMA table_info(mail_read_consents)")
+    consent_columns = {row[1] for row in consent_result.fetchall()}
+    if consent_columns:
+        for column_name, sql_type in {
+            "revoke_idempotency_key": "VARCHAR",
+            "revoke_request_digest": "VARCHAR",
+        }.items():
+            if column_name not in consent_columns:
+                await conn.exec_driver_sql(
+                    f"ALTER TABLE mail_read_consents ADD COLUMN {column_name} {sql_type}"
+                )
+
+    binding_result = await conn.exec_driver_sql("PRAGMA table_info(mail_message_bindings)")
+    binding_columns = {row[1] for row in binding_result.fetchall()}
+    if binding_columns:
+        for column_name, sql_type in {
+            "source_consent_id": "VARCHAR",
+            "source_consent_revision": "INTEGER",
+            "source_label_scope_digest": "VARCHAR",
+        }.items():
+            if column_name not in binding_columns:
+                await conn.exec_driver_sql(
+                    f"ALTER TABLE mail_message_bindings ADD COLUMN {column_name} {sql_type}"
+                )
+
+    # Indexes are intentionally additive and idempotent.  Existing rows may
+    # have NULL source bindings; those remain fail-closed until a new scan
+    # binds them to an explicit consent.  A legacy workspace can lack one or
+    # more Mail tables entirely, so never create an index against a table that
+    # ``create_all`` has not materialized yet.
+    if connection_columns:
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_google_service_connections_revoke_idempotency_key "
+            "ON google_service_connections (revoke_idempotency_key)"
+        )
+    if consent_columns:
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_mail_read_consents_revoke_idempotency_key "
+            "ON mail_read_consents (revoke_idempotency_key)"
+        )
+    if binding_columns:
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_mail_message_bindings_source_consent_id "
+            "ON mail_message_bindings (source_consent_id)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_mail_message_bindings_source_consent_revision "
+            "ON mail_message_bindings (source_consent_revision)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_mail_message_bindings_source_label_scope_digest "
+            "ON mail_message_bindings (source_label_scope_digest)"
         )
 
 
@@ -1435,6 +1518,7 @@ async def init_db() -> None:
         # Calendar additive columns and the consent partial unique index must
         # inspect legacy rows before ``create_all`` materializes model indexes.
         await _ensure_calendar_columns(conn)
+        await _ensure_mail_columns(conn)
         await conn.run_sync(SQLModel.metadata.create_all)
         await _ensure_guardian_inbox_columns(conn)
         await _ensure_m5_columns(conn)

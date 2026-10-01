@@ -8,6 +8,7 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import and_, or_, select as sa_select
@@ -28,6 +29,11 @@ from src.db.models import (
     GoogleServiceConnection,
     GovernedScheduleBinding,
     GovernedScheduleOccurrence,
+    GuardianInboxDisposition,
+    MailLabelBinding,
+    MailMessageBinding,
+    MailReadConsent,
+    MailWatchState,
     OperatorSession,
     ScheduledJob,
     ScheduledJobRun,
@@ -48,6 +54,7 @@ from src.work_board.input_artifacts import (
     revoke_input_artifact,
 )
 from src.work_board.repository import WorkBoardRepository
+from src.goals.repository import deserialize_admission_budget
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +85,23 @@ def _normalize_timezone(tz_name: str | None) -> str:
             return fallback
         except Exception:
             return "UTC"
+
+
+def _mail_watch_quiet_reason(goal: Goal, *, now: datetime | None = None) -> str | None:
+    """Return the existing Goal quiet-hours admission reason for Mail watches."""
+
+    budget = deserialize_admission_budget(goal)
+    if budget is None or budget.quiet_hours_start is None or budget.quiet_hours_end is None:
+        return None
+    current = _utc(now or _utc_now())
+    try:
+        local_hour = current.astimezone(ZoneInfo(str(budget.timezone))).hour
+    except Exception:
+        return "goal_budget_timezone_invalid"
+    start = int(budget.quiet_hours_start)
+    end = int(budget.quiet_hours_end)
+    quiet = local_hour >= start or local_hour < end if start > end else start <= local_hour < end
+    return "goal_quiet_hours" if quiet else None
 
 
 def _validate_cron_spec(cron: str, timezone_name: str) -> dict[str, Any]:
@@ -331,6 +355,153 @@ async def _load_governed_authority(db, job: dict[str, Any], binding_id: str):
     except Exception as exc:
         raise RuntimeError("governed_schedule_input_artifact_invalid") from exc
     return binding, consent, connection, goal, artifact
+
+
+async def _load_governed_mail_authority(db, job: dict[str, Any], binding_id: str):
+    """Load one Mail metadata-watch authority tuple before any provider read."""
+
+    from src.scheduler.governed_schedules import normalize_cadence
+
+    canonical_job = await db.get(ScheduledJob, str(job.get("id") or ""), populate_existing=True)
+    if (
+        canonical_job is None
+        or not canonical_job.enabled
+        or canonical_job.trigger_type != "governed"
+        or canonical_job.action_type != "gmail.scan_metadata.v1"
+    ):
+        raise RuntimeError("mail_watch_prerequisite_stale")
+    try:
+        action_spec = json.loads(canonical_job.action_spec_json or "{}")
+        trigger = normalize_cadence(json.loads(canonical_job.trigger_spec_json or "{}"))
+    except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        raise RuntimeError("mail_watch_binding_link_invalid") from exc
+    if not isinstance(action_spec, dict) or action_spec.get("binding_id") != binding_id:
+        raise RuntimeError("mail_watch_binding_link_invalid")
+    binding = (
+        await db.execute(
+            sa_select(GovernedScheduleBinding)
+            .where(
+                GovernedScheduleBinding.binding_id == binding_id,
+                GovernedScheduleBinding.scheduled_job_id == canonical_job.id,
+            )
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if (
+        binding is None
+        or binding.action_type != "gmail.scan_metadata.v1"
+        or binding.capability_id != "gmail.scan_metadata.v1"
+        or binding.cadence_kind not in {"hourly", "6h"}
+        or trigger != {
+            "kind": binding.cadence_kind,
+            "timezone": binding.timezone,
+            "daily_hour": binding.daily_hour,
+            "daily_minute": binding.daily_minute,
+        }
+    ):
+        raise RuntimeError("mail_watch_binding_invalid")
+    now = _utc_now()
+    if binding.state != "active" or _utc(binding.expires_at) <= now:
+        raise RuntimeError("mail_watch_prerequisite_stale")
+    state = await db.get(MailWatchState, binding.binding_id, populate_existing=True)
+    consent = (
+        await db.execute(
+            sa_select(MailReadConsent)
+            .where(
+                MailReadConsent.consent_id == binding.read_consent_id,
+                MailReadConsent.owner_principal_id == binding.owner_principal_id,
+                MailReadConsent.owner_session_id == binding.owner_session_id,
+            )
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    connection = (
+        await db.execute(
+            sa_select(GoogleServiceConnection)
+            .where(
+                GoogleServiceConnection.connection_id == (consent.connection_id if consent else ""),
+                GoogleServiceConnection.owner_principal_id == binding.owner_principal_id,
+                GoogleServiceConnection.owner_session_id == binding.owner_session_id,
+                GoogleServiceConnection.service == "gmail_readonly",
+            )
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none() if consent is not None else None
+    goal = await db.get(Goal, binding.goal_id, populate_existing=True)
+    artifact = await db.get(WorkBoardInputArtifact, binding.input_artifact_id, populate_existing=True)
+    session = await db.get(OperatorSession, binding.owner_session_id, populate_existing=True)
+    goal_status = getattr(getattr(goal, "status", None), "value", getattr(goal, "status", None))
+    budget = deserialize_admission_budget(goal) if goal is not None else None
+    if (
+        state is None
+        or state.binding_id != binding.binding_id
+        or state.owner_principal_id != binding.owner_principal_id
+        or state.owner_session_id != binding.owner_session_id
+        or consent is None
+        or connection is None
+        or goal is None
+        or artifact is None
+        or session is None
+        or session.revoked_at is not None
+        or _utc(session.idle_expires_at) <= now
+        or _utc(session.absolute_expires_at) <= now
+        or connection.state != "active"
+        or consent.state != "active"
+        or not bool(consent.source_read_allowed)
+        or _utc(consent.expires_at) <= now
+        or int(connection.revision) != int(consent.connection_revision)
+        or int(connection.revision) != int(state.connection_revision)
+        or int(consent.source_revision) != int(binding.consent_revision)
+        or int(consent.source_revision) != int(state.source_consent_revision)
+        or consent.connection_id != connection.connection_id
+        or consent.goal_id != binding.goal_id
+        or int(consent.goal_revision) != int(binding.goal_revision)
+        or goal.owner_principal_id != binding.owner_principal_id
+        or goal.owner_session_id != binding.owner_session_id
+        or goal_status != "active"
+        or int(goal.revision) != int(binding.goal_revision)
+        or not bool(goal.proactive_enabled)
+        or (
+            state.state == "coverage_blocked"
+            and state.skipped_coverage_reason == "mail_seen_cursor_capacity_exceeded"
+        )
+        or budget is None
+        or not bool(budget.reviewed_grant)
+        or not budget.grant_id
+        or budget.period_expires_at is not None and _utc(budget.period_expires_at) <= now
+        or artifact.owner_principal_id != binding.owner_principal_id
+        or artifact.owner_session_id != binding.owner_session_id
+        or artifact.capability_id != "gmail.scan_metadata.v1"
+        or artifact.goal_id != binding.goal_id
+        or int(artifact.goal_revision) != int(binding.goal_revision)
+        or artifact.payload_sha256 != binding.input_digest.removeprefix("sha256:")
+        or artifact.state != "pending"
+        or artifact.bound_task_id is not None
+        or artifact.expires_at is None
+        or _utc(artifact.expires_at) <= now
+        or not artifact.metadata_digest
+    ):
+        raise RuntimeError("mail_watch_prerequisite_stale")
+    try:
+        if _metadata_digest(artifact) != artifact.metadata_digest:
+            raise RuntimeError("mail_watch_artifact_metadata_mismatch")
+        payload = _safe_file_bytes(_payload_path(artifact), expected_digest=artifact.payload_sha256, expected_size=artifact.size_bytes)
+        typed = _decode_and_validate_payload(artifact, payload, allow_scheduler=True)
+        if (
+            typed.get("consent_id") != consent.consent_id
+            or typed.get("connection_id") != connection.connection_id
+            or typed.get("goal_id") != binding.goal_id
+            or int(typed.get("goal_revision") or 0) != int(binding.goal_revision)
+            or int(typed.get("source_consent_revision") or 0) != int(consent.source_revision)
+            or int(typed.get("window_days") or 0) != 7
+            or not isinstance(typed.get("label_ids"), list)
+            or not 1 <= len(typed.get("label_ids")) <= 3
+            or int(typed.get("max_messages") or 0) != min(int(typed.get("max_messages") or 0), int(consent.max_messages))
+        ):
+            raise RuntimeError("mail_watch_artifact_authority_mismatch")
+    except Exception as exc:
+        raise RuntimeError("mail_watch_input_artifact_invalid") from exc
+    return binding, state, consent, connection, goal, artifact, typed
 
 
 async def _run_governed_calendar_observation(
@@ -786,9 +957,427 @@ async def _run_governed_calendar_observation(
         await _persist_failure(exc)
         raise
 
+
+async def _run_governed_mail_metadata_scan(
+    job: dict[str, Any],
+    *,
+    scheduled_slot_utc: datetime | None,
+    scheduled_run_id: str | None = None,
+) -> dict[str, Any]:
+    """Run one bounded metadata-only Gmail watch occurrence.
+
+    The handler deliberately has no path to ``get_message_full`` or a model
+    fabric.  It persists message metadata and neutral inbox triage rows only
+    after the occurrence fence and current source authority are rechecked.
+    """
+
+    from src.integrations.gmail_read import (
+        GmailMessageMetadata,
+        GmailReadError,
+        GoogleGmailReadonlyAdapter,
+        digest,
+        message_key,
+        thread_key,
+    )
+    from src.vault import decrypt, encrypt
+    from src.scheduler.governed_schedules import claim_occurrence, reserve_occurrence, settle_occurrence
+
+    if scheduled_slot_utc is None:
+        raise RuntimeError("governed_schedule_slot_unavailable")
+    action_spec = job.get("action_spec") if isinstance(job.get("action_spec"), dict) else {}
+    binding_id = str(action_spec.get("binding_id") or "").strip()
+    if not binding_id:
+        raise RuntimeError("mail_watch_binding_missing")
+
+    occurrence_id: str | None = None
+    claim_token: str | None = None
+    claim_fence: int | None = None
+    owner_principal_id = ""
+    owner_session_id = ""
+    adapter: Any | None = None
+    provider_contacted = False
+
+    def mark_contact() -> None:
+        nonlocal provider_contacted
+        provider_contacted = True
+
+    async def settle_failure(exc: BaseException) -> None:
+        if not occurrence_id or not claim_token or claim_fence is None:
+            return
+        state = "unknown" if provider_contacted else "blocked"
+        code = _safe_error_label(exc) if isinstance(exc, Exception) else type(exc).__name__
+        try:
+            async with get_session() as recovery_db:
+                current = (
+                    await recovery_db.execute(
+                        sa_select(GovernedScheduleOccurrence).where(
+                            GovernedScheduleOccurrence.occurrence_id == occurrence_id,
+                            GovernedScheduleOccurrence.state == "running",
+                            GovernedScheduleOccurrence.claim_token == claim_token,
+                            GovernedScheduleOccurrence.fencing_token == claim_fence,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if current is not None:
+                    await settle_occurrence(
+                        recovery_db,
+                        current,
+                        state=state,
+                        job_id=scheduled_run_id,
+                        failure_code=code,
+                        recovery_action="reconcile_external_effect" if state == "unknown" else "retry_next_occurrence",
+                        claim_token=claim_token,
+                        fencing_token=claim_fence,
+                    )
+        except Exception:
+            logger.exception("Could not persist Mail watch occurrence recovery receipt")
+
+    try:
+        async with get_session() as db:
+            binding, watch_state, consent, connection, goal, artifact, typed = await _load_governed_mail_authority(db, job, binding_id)
+            occurrence, replay = await reserve_occurrence(db, binding, slot_utc=scheduled_slot_utc)
+            occurrence_id = occurrence.occurrence_id
+            if replay:
+                if occurrence.state in {"succeeded", "blocked", "cancelled", "coalesced"}:
+                    return {
+                        "status": occurrence.state,
+                        "occurrence_id": occurrence.occurrence_id,
+                        "replayed": True,
+                        "new_count": 0,
+                        "notice_count": 0,
+                    }
+                if occurrence.state == "unknown":
+                    raise RuntimeError("governed_occurrence_requires_reconciliation")
+            await claim_occurrence(db, occurrence)
+            claim_token = occurrence.claim_token
+            claim_fence = occurrence.fencing_token
+            owner_principal_id = binding.owner_principal_id
+            owner_session_id = binding.owner_session_id
+            expected_binding_revision = int(binding.binding_revision)
+            expected_consent_revision = int(consent.source_revision)
+            expected_connection_revision = int(connection.revision)
+            if scheduled_run_id:
+                occurrence.durable_job_id = scheduled_run_id
+                run_row = await db.get(ScheduledJobRun, scheduled_run_id)
+                if run_row is None or run_row.scheduled_job_id != str(job.get("id") or ""):
+                    raise RuntimeError("mail_watch_run_binding_invalid")
+                run_metadata = _loads(run_row.metadata_json or "{}")
+                run_metadata.update({"governed_occurrence_id": occurrence.occurrence_id, "governed_binding_id": binding.binding_id, "governed_claim_fence": claim_fence})
+                run_row.metadata_json = _dumps(run_metadata)
+                await db.flush()
+            provider_label_refs = list(typed.get("label_ids") or [])
+            quiet_reason = _mail_watch_quiet_reason(goal)
+            if quiet_reason is not None:
+                await settle_occurrence(
+                    db,
+                    occurrence,
+                    state="blocked",
+                    job_id=scheduled_run_id,
+                    failure_code=quiet_reason,
+                    recovery_action="retry_next_occurrence",
+                    claim_token=claim_token,
+                    fencing_token=claim_fence,
+                )
+                return {
+                    "status": "blocked",
+                    "occurrence_id": occurrence.occurrence_id,
+                    "replayed": False,
+                    "new_count": 0,
+                    "notice_count": 0,
+                    "baseline_complete": bool(watch_state.baseline_complete),
+                    "provider_contact": False,
+                    "memory_status": "no_learning",
+                    "failure_code": quiet_reason,
+                    "recovery_action": "retry_next_occurrence",
+                }
+
+        async def authority_check() -> None:
+            async with get_session() as check_db:
+                current_binding, current_state, current_consent, current_connection, _goal, _artifact, _typed = await _load_governed_mail_authority(check_db, job, binding_id)
+                if (
+                    current_binding.binding_id != binding_id
+                    or int(current_binding.binding_revision) != expected_binding_revision
+                    or int(current_consent.source_revision) != expected_consent_revision
+                    or int(current_connection.revision) != expected_connection_revision
+                    or current_state.binding_id != binding_id
+                ):
+                    raise RuntimeError("mail_watch_authority_fence_stale")
+                current_occurrence = (
+                    await check_db.execute(
+                        sa_select(GovernedScheduleOccurrence).where(
+                            GovernedScheduleOccurrence.occurrence_id == occurrence_id,
+                            GovernedScheduleOccurrence.binding_id == binding_id,
+                            GovernedScheduleOccurrence.binding_revision == expected_binding_revision,
+                            GovernedScheduleOccurrence.durable_job_id == scheduled_run_id,
+                            GovernedScheduleOccurrence.state == "running",
+                            GovernedScheduleOccurrence.claim_token == claim_token,
+                            GovernedScheduleOccurrence.fencing_token == claim_fence,
+                        ).execution_options(populate_existing=True)
+                    )
+                ).scalar_one_or_none()
+                if current_occurrence is None:
+                    raise RuntimeError("mail_watch_occurrence_fence_stale")
+
+        async with get_session() as label_db:
+            live_connection = await label_db.get(GoogleServiceConnection, connection.connection_id, populate_existing=True)
+            labels = (
+                await label_db.execute(
+                    sa_select(MailLabelBinding).where(
+                        MailLabelBinding.label_id.in_(provider_label_refs),
+                        MailLabelBinding.owner_principal_id == owner_principal_id,
+                        MailLabelBinding.owner_session_id == owner_session_id,
+                        MailLabelBinding.connection_id == connection.connection_id,
+                        MailLabelBinding.connection_revision == expected_connection_revision,
+                        MailLabelBinding.state == "active",
+                    )
+                )
+            ).scalars().all()
+            if live_connection is None or len(labels) != len(set(provider_label_refs)):
+                raise RuntimeError("mail_watch_labels_stale")
+            try:
+                provider_labels = [decrypt(row.provider_label_id_ciphertext) for row in labels]
+            except Exception as exc:
+                raise RuntimeError("mail_watch_labels_unavailable") from exc
+
+        adapter = GoogleGmailReadonlyAdapter(
+            connection,
+            owner_principal_id=owner_principal_id,
+            authority_check=authority_check,
+            contact_observer=mark_contact,
+        )
+        window_end = _utc_now()
+        window_start = window_end - timedelta(days=7)
+        page = await adapter.list_message_ids(
+            provider_labels,
+            received_after=window_start,
+            max_messages=min(int(typed["max_messages"]), 10),
+        )
+        semaphore = asyncio.Semaphore(2)
+
+        async def read_metadata(provider_id: str) -> GmailMessageMetadata:
+            async with semaphore:
+                return await adapter.get_message_metadata(provider_id)
+
+        metadata_items = await asyncio.gather(*(read_metadata(provider_id) for provider_id in page.provider_ids))
+        async with get_session() as db:
+            current_binding, current_state, current_consent, current_connection, current_goal, _artifact, current_typed = await _load_governed_mail_authority(db, job, binding_id)
+            if (
+                int(current_binding.binding_revision) != expected_binding_revision
+                or int(current_consent.source_revision) != expected_consent_revision
+                or int(current_connection.revision) != expected_connection_revision
+            ):
+                raise RuntimeError("mail_watch_publication_fence_stale")
+            occurrence = (
+                await db.execute(
+                    sa_select(GovernedScheduleOccurrence).where(
+                        GovernedScheduleOccurrence.occurrence_id == occurrence_id,
+                        GovernedScheduleOccurrence.state == "running",
+                        GovernedScheduleOccurrence.claim_token == claim_token,
+                        GovernedScheduleOccurrence.fencing_token == claim_fence,
+                    ).execution_options(populate_existing=True)
+                )
+            ).scalar_one_or_none()
+            if occurrence is None:
+                raise RuntimeError("mail_watch_occurrence_fence_stale")
+            try:
+                seen = json.loads(current_state.seen_message_keys_json or "[]")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                raise RuntimeError("mail_watch_seen_state_invalid")
+            if not isinstance(seen, list) or len(seen) > 512 or any(not isinstance(item, str) for item in seen):
+                raise RuntimeError("mail_watch_seen_state_invalid")
+            seen_set = set(seen)
+            observed_keys: list[str] = []
+            observed_metadata: list[tuple[GmailMessageMetadata, str]] = []
+            new_items: list[tuple[GmailMessageMetadata, str]] = []
+            for metadata in metadata_items[:10]:
+                if {"SPAM", "TRASH"}.intersection(metadata.label_ids):
+                    continue
+                key = message_key(owner_principal_id, current_connection.connection_id, metadata.provider_message_id)
+                observed_keys.append(key)
+                observed_metadata.append((metadata, key))
+                if key not in seen_set:
+                    new_items.append((metadata, key))
+
+            next_seen = list(dict.fromkeys(seen + observed_keys))
+            if len(next_seen) > 512:
+                current_state.state = "coverage_blocked"
+                current_state.skipped_coverage_reason = "mail_seen_cursor_capacity_exceeded"
+                current_state.list_fetched_at = _utc_now()
+                current_state.list_page_complete = False
+                current_state.last_observed_at = _utc_now()
+                current_state.last_completed_occurrence_id = occurrence_id
+                current_state.revision = int(current_state.revision) + 1
+                current_state.updated_at = _utc_now()
+                await settle_occurrence(
+                    db,
+                    occurrence,
+                    state="blocked",
+                    job_id=scheduled_run_id,
+                    failure_code="mail_seen_cursor_capacity_exceeded",
+                    recovery_action="create_narrower_mail_watch",
+                    claim_token=claim_token,
+                    fencing_token=claim_fence,
+                )
+                return {
+                    "status": "blocked",
+                    "occurrence_id": occurrence_id,
+                    "replayed": False,
+                    "observed_count": len(observed_keys),
+                    "new_count": len(new_items),
+                    "notice_count": 0,
+                    "baseline_complete": bool(current_state.baseline_complete),
+                    "coverage": {"list_page_complete": False, "more_available": True},
+                    "provider_contact": True,
+                    "memory_status": "no_learning",
+                    "failure_code": "mail_seen_cursor_capacity_exceeded",
+                    "recovery_action": "create_narrower_mail_watch",
+                }
+
+            for metadata, key in observed_metadata:
+                existing = (
+                    await db.execute(
+                        sa_select(MailMessageBinding).where(
+                            MailMessageBinding.owner_principal_id == owner_principal_id,
+                            MailMessageBinding.owner_session_id == owner_session_id,
+                            MailMessageBinding.connection_id == current_connection.connection_id,
+                            MailMessageBinding.message_key == key,
+                        ).execution_options(populate_existing=True)
+                    )
+                ).scalar_one_or_none()
+                row_kwargs = {
+                    "connection_revision": current_connection.revision,
+                    "source_consent_id": current_consent.consent_id,
+                    "source_consent_revision": current_consent.source_revision,
+                    "source_label_scope_digest": "sha256:" + digest({"namespace": "seraph.gmail.source-scope.v1", "connection_id": current_connection.connection_id, "connection_revision": current_connection.revision, "consent_id": current_consent.consent_id, "source_revision": current_consent.source_revision, "label_ids": sorted(provider_label_refs)}),
+                    "provider_message_id_ciphertext": encrypt(metadata.provider_message_id),
+                    "provider_thread_id_ciphertext": encrypt(metadata.provider_thread_id),
+                    "thread_key": thread_key(owner_principal_id, current_connection.connection_id, metadata.provider_thread_id),
+                    "message_revision": metadata.message_revision,
+                    "received_at": metadata.received_at,
+                    "fetched_at": _utc_now(),
+                    "status": "present",
+                    "revision": (int(existing.revision) + 1 if existing is not None else 1),
+                    "updated_at": _utc_now(),
+                }
+                if existing is None:
+                    db.add(
+                        MailMessageBinding(
+                            owner_principal_id=owner_principal_id,
+                            owner_session_id=owner_session_id,
+                            connection_id=current_connection.connection_id,
+                            message_key=key,
+                            **row_kwargs,
+                        )
+                    )
+                else:
+                    for field, value in row_kwargs.items():
+                        setattr(existing, field, value)
+
+            if not current_state.baseline_complete:
+                next_seen = list(dict.fromkeys(seen + observed_keys))
+                current_state.baseline_complete = True
+                current_state.state = "baseline_complete" if page.next_page_token is None else "coverage_blocked"
+                current_state.skipped_coverage_reason = None if page.next_page_token is None else "mail_list_page_truncated"
+                notice_items: list[tuple[GmailMessageMetadata, str]] = []
+            else:
+                next_seen = list(dict.fromkeys(seen + observed_keys))
+                notice_items = new_items
+                current_state.state = "active" if page.next_page_token is None else "coverage_blocked"
+                current_state.skipped_coverage_reason = None if page.next_page_token is None else "mail_list_page_truncated"
+
+            # A watch can create at most three neutral inbox items during the
+            # finite Goal notification period. Remaining keys stay in the
+            # bounded cursor; Inbox acceptance creates triage work explicitly.
+            budget = deserialize_admission_budget(current_goal)
+            notification_limit = int(getattr(budget, "notifications_per_day", 0) or 0) if budget is not None else 0
+            period_start = _utc(getattr(budget, "period_started_at", None)) if budget is not None and getattr(budget, "period_started_at", None) else _utc(current_goal.updated_at)
+            period_count = len(
+                (
+                    await db.execute(
+                        sa_select(GuardianInboxDisposition.id).where(
+                            GuardianInboxDisposition.owner_principal_id == owner_principal_id,
+                            GuardianInboxDisposition.owner_session_id == owner_session_id,
+                            GuardianInboxDisposition.source_kind == "mail_notice",
+                            GuardianInboxDisposition.goal_id == current_binding.goal_id,
+                            GuardianInboxDisposition.created_at >= period_start,
+                        )
+                    )
+                ).scalars().all()
+            )
+            available = max(0, min(3, notification_limit) - period_count)
+            notice_items = notice_items[: min(3, available)]
+            created_notices = 0
+            for metadata, key in notice_items:
+                source_id = f"mail-notice:{current_binding.binding_id}:{key}"
+                existing_notice = (
+                    await db.execute(
+                        sa_select(GuardianInboxDisposition).where(
+                            GuardianInboxDisposition.owner_principal_id == owner_principal_id,
+                            GuardianInboxDisposition.source_kind == "mail_notice",
+                            GuardianInboxDisposition.source_id == source_id,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if existing_notice is not None:
+                    continue
+                notice_digest = "sha256:" + digest({"source_id": source_id, "message_key": key, "message_revision": metadata.message_revision, "watch_id": current_binding.binding_id, "goal_id": current_binding.goal_id, "goal_revision": current_binding.goal_revision})
+                db.add(
+                    GuardianInboxDisposition(
+                        owner_principal_id=owner_principal_id,
+                        owner_session_id=owner_session_id,
+                        source_kind="mail_notice",
+                        source_id=source_id,
+                        source_digest=notice_digest,
+                        goal_id=current_binding.goal_id,
+                        goal_revision=int(current_binding.goal_revision),
+                        watch_id=current_binding.binding_id,
+                        plan_revision=int(current_binding.binding_revision),
+                        state="pending",
+                        revision=1,
+                        expires_at=current_binding.expires_at,
+                    )
+                )
+                created_notices += 1
+
+            current_state.seen_message_keys_json = json.dumps(next_seen, separators=(",", ":"))
+            current_state.seen_message_keys_digest = "sha256:" + digest(next_seen)
+            current_state.window_start_utc = window_start
+            current_state.window_end_utc = window_end
+            current_state.list_fetched_at = _utc_now()
+            current_state.list_page_complete = page.next_page_token is None
+            current_state.last_observed_at = _utc_now()
+            current_state.last_completed_occurrence_id = occurrence_id
+            current_state.revision = int(current_state.revision) + 1
+            current_state.updated_at = _utc_now()
+            await settle_occurrence(
+                db,
+                occurrence,
+                state="succeeded",
+                job_id=scheduled_run_id,
+                failure_code=None,
+                recovery_action=None,
+                claim_token=claim_token,
+                fencing_token=claim_fence,
+            )
+            return {
+                "status": "succeeded",
+                "occurrence_id": occurrence_id,
+                "replayed": False,
+                "observed_count": len(observed_keys),
+                "new_count": len(new_items),
+                "notice_count": created_notices,
+                "baseline_complete": bool(current_state.baseline_complete),
+                "coverage": {"list_page_complete": page.next_page_token is None, "more_available": page.next_page_token is not None},
+                "provider_contact": True,
+                "memory_status": "no_learning",
+            }
+    except (Exception, asyncio.CancelledError) as exc:
+        await settle_failure(exc)
+        raise
+
 def build_cron_trigger(job: dict[str, Any]) -> CronTrigger:
     trigger_spec = job.get("trigger_spec") or {}
-    if str(job.get("action_type") or "") == "calendar.observe_due_events.v1":
+    if str(job.get("action_type") or "") in {"calendar.observe_due_events.v1", "gmail.scan_metadata.v1"}:
         from src.scheduler.governed_schedules import cron_for_cadence
 
         return cron_for_cadence(trigger_spec)
@@ -1187,7 +1776,7 @@ async def execute_scheduled_job(job_id: str, *, scheduled_slot_utc: datetime | N
     if job is None:
         return
     action_type = str(job.get("action_type") or "")
-    if action_type == "calendar.observe_due_events.v1" and scheduled_slot_utc is None:
+    if action_type in {"calendar.observe_due_events.v1", "gmail.scan_metadata.v1"} and scheduled_slot_utc is None:
         # The public legacy/manual execution seam cannot mint a governed
         # occurrence.  Only the APScheduler wrapper may forward a canonical
         # slot to this handler.
@@ -1255,6 +1844,41 @@ async def execute_scheduled_job(job_id: str, *, scheduled_slot_utc: datetime | N
                     "scheduled_job_run_id": run["id"],
                     "action_type": action_type,
                     "occurrence_id": observation.get("occurrence_id"),
+                },
+            )
+            return
+        if action_type == "gmail.scan_metadata.v1":
+            observation = await _run_governed_mail_metadata_scan(
+                job,
+                scheduled_slot_utc=scheduled_slot_utc,
+                scheduled_run_id=run["id"],
+            )
+            outcome = str(observation.get("status") or "blocked")
+            await scheduled_job_repository.record_run(job_id, outcome=outcome)
+            await scheduled_job_repository.finish_run(
+                run["id"],
+                outcome=outcome,
+                status="finished" if outcome == "succeeded" else outcome,
+                metadata={
+                    "occurrence_id": observation.get("occurrence_id"),
+                    "observed_count": observation.get("observed_count", 0),
+                    "new_count": observation.get("new_count", 0),
+                    "notice_count": observation.get("notice_count", 0),
+                    "baseline_complete": bool(observation.get("baseline_complete", False)),
+                    "coverage": observation.get("coverage") or {},
+                    "memory_status": "no_learning",
+                },
+            )
+            await log_scheduler_job_event(
+                job_name=f"user_cron:{job_id}",
+                outcome="succeeded" if outcome == "succeeded" else outcome,
+                details={
+                    "scheduled_job_id": job_id,
+                    "scheduled_job_run_id": run["id"],
+                    "action_type": action_type,
+                    "occurrence_id": observation.get("occurrence_id"),
+                    "new_count": observation.get("new_count", 0),
+                    "notice_count": observation.get("notice_count", 0),
                 },
             )
             return

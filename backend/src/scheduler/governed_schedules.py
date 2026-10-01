@@ -24,6 +24,7 @@ from src.db.models import (
     CalendarReadConsent,
     GovernedScheduleBinding,
     GovernedScheduleOccurrence,
+    MailReadConsent,
     OperatorSession,
     ScheduledJob,
     ScheduledJobRun,
@@ -100,7 +101,7 @@ ACTION_REGISTRY: dict[str, dict[str, Any]] = {
         "capability_id": "gmail.scan_metadata.v1",
         "consent_kind": "mail_read",
         "model": False,
-        "enabled": False,
+        "enabled": True,
     },
 }
 
@@ -461,14 +462,19 @@ async def reserve_occurrence(
     ).scalar_one_or_none()
     if current is None:
         raise ValueError("governed schedule binding is unavailable")
-    if current.action_type != GOVERNED_ACTION or current.capability_id != GOVERNED_ACTION:
+    current_action = str(current.action_type or "").strip()
+    try:
+        current_spec = action_spec(current_action)
+    except (KeyError, ValueError):
+        raise RuntimeError("governed_schedule_action_unavailable") from None
+    if str(current.capability_id or "") != str(current_spec.get("capability_id") or ""):
         raise RuntimeError("governed_schedule_action_unavailable")
     if current.state != "active" or _utc(current.expires_at) <= now:
         raise ValueError("governed schedule binding is not active")
     job = (
         await db.execute(select(ScheduledJob).where(ScheduledJob.id == current.scheduled_job_id))
     ).scalar_one_or_none()
-    if job is None or job.action_type != GOVERNED_ACTION or job.trigger_type != "governed":
+    if job is None or job.action_type != current_action or job.trigger_type != "governed":
         raise RuntimeError("governed_schedule_binding_link_invalid")
     try:
         job_spec = json.loads(job.action_spec_json or "{}")
@@ -1056,7 +1062,10 @@ async def create_binding(db: Any, owner: WorkBoardOwner, request: Mapping[str, A
             raise ValueError("governed schedule job is unavailable")
     else:
         job = ScheduledJob(
-            name="Calendar observation",
+            name=str(
+                request.get("name")
+                or ("Gmail metadata watch" if action == "gmail.scan_metadata.v1" else "Calendar observation")
+            )[:200],
             enabled=True,
             trigger_type="governed",
             trigger_spec_json=json.dumps(cadence, separators=(",", ":")),
@@ -1318,6 +1327,46 @@ async def create_observation_input_artifact(
     return await prepare_input_artifact(db, owner, request, allow_scheduler=True)
 
 
+async def create_mail_watch_input_artifact(
+    db: Any,
+    owner: WorkBoardOwner,
+    *,
+    consent: MailReadConsent,
+    connection_id: str,
+    label_ids: list[str],
+    max_messages: int,
+    idempotency_key: str,
+):
+    """Create the immutable metadata-only input for one Mail watch.
+
+    Provider identities remain encrypted in the Mail connection/label rows;
+    this scheduler input carries only the reviewed opaque label references and
+    the source/Goal revisions that must match again before every scan.
+    """
+
+    payload = {
+        "schema_version": 1,
+        "consent_id": consent.consent_id,
+        "connection_id": connection_id,
+        "goal_id": consent.goal_id,
+        "goal_revision": int(consent.goal_revision),
+        "source_consent_revision": int(consent.source_revision),
+        "label_ids": list(label_ids),
+        "window_days": 7,
+        "max_messages": int(max_messages),
+    }
+    validate_capability_input("gmail.scan_metadata.v1", payload, allow_scheduler=True)
+    request = WorkBoardInputArtifactCreate(
+        schema_version=1,
+        capability_id="gmail.scan_metadata.v1",
+        goal_id=consent.goal_id,
+        goal_revision=int(consent.goal_revision),
+        input=payload,
+        idempotency_key=idempotency_key,
+    )
+    return await prepare_input_artifact(db, owner, request, allow_scheduler=True)
+
+
 __all__ = [
     "ACTION_REGISTRY",
     "ALLOWED_CADENCES",
@@ -1327,6 +1376,7 @@ __all__ = [
     "claim_occurrence",
     "create_binding",
     "create_observation_input_artifact",
+    "create_mail_watch_input_artifact",
     "cron_for_cadence",
     "is_governed_action",
     "latest_due_slot",

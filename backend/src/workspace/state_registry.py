@@ -116,6 +116,11 @@ WORK_BOARD_INPUT_ARTIFACT_TABLE = "work_board_input_artifacts"
 WORK_BOARD_INPUT_ARTIFACT_ROOT = "artifacts/work-board/inputs"
 CALENDAR_PREP_RECEIPT_TABLE = "calendar_prep_receipts"
 CALENDAR_RESULT_ARTIFACT_ROOT = "artifacts/work-board/calendar"
+MAIL_LABEL_BINDING_TABLE = "mail_label_bindings"
+MAIL_READ_CONSENT_TABLE = "mail_read_consents"
+MAIL_MESSAGE_BINDING_TABLE = "mail_message_bindings"
+MAIL_WATCH_STATE_TABLE = "mail_watch_states"
+MAIL_PRIVATE_ARTIFACT_ROOT = "artifacts/mail/private"
 
 
 def work_board_routine_binding_contract(*, present: bool | None) -> dict[str, Any]:
@@ -155,6 +160,27 @@ def calendar_prep_receipt_contract(*, present: bool | None) -> dict[str, Any]:
         "result_root": CALENDAR_RESULT_ARTIFACT_ROOT,
         "provider_identity_encrypted": True,
         "memory_status_required": "no_learning",
+        "present": None if present is None else bool(present),
+    }
+
+
+def mail_source_contract(*, present: bool | None) -> dict[str, Any]:
+    """Describe owner-private Mail source metadata without exporting content."""
+
+    return {
+        "schema_version": "seraph.mail-source.v1",
+        "tables": [
+            MAIL_LABEL_BINDING_TABLE,
+            MAIL_READ_CONSENT_TABLE,
+            MAIL_MESSAGE_BINDING_TABLE,
+            MAIL_WATCH_STATE_TABLE,
+        ],
+        "state_class": WorkspaceStateClass.CANONICAL.value,
+        "backup_scope": "canonical_sqlite",
+        "private_artifact_root": MAIL_PRIVATE_ARTIFACT_ROOT,
+        "provider_identity_encrypted": True,
+        "body_cache": False,
+        "generic_diagnostics_redact_content": True,
         "present": None if present is None else bool(present),
     }
 
@@ -1282,6 +1308,17 @@ class WorkspaceStateRegistry:
                         for item in tables
                     )
                 ),
+                "mail_source": mail_source_contract(
+                    present=all(
+                        any(item.get("name") == table_name for item in tables)
+                        for table_name in (
+                            MAIL_LABEL_BINDING_TABLE,
+                            MAIL_READ_CONSENT_TABLE,
+                            MAIL_MESSAGE_BINDING_TABLE,
+                            MAIL_WATCH_STATE_TABLE,
+                        )
+                    )
+                ),
             },
         }
 
@@ -1322,6 +1359,12 @@ __all__ = [
     "work_board_routine_binding_contract",
     "work_board_input_artifact_contract",
     "calendar_prep_receipt_contract",
+    "MAIL_LABEL_BINDING_TABLE",
+    "MAIL_READ_CONSENT_TABLE",
+    "MAIL_MESSAGE_BINDING_TABLE",
+    "MAIL_WATCH_STATE_TABLE",
+    "MAIL_PRIVATE_ARTIFACT_ROOT",
+    "mail_source_contract",
 ]
 
 

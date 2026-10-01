@@ -7,12 +7,17 @@ import { apiFetch } from "../../lib/api";
 import { fetchGuardianInboxItem } from "../../lib/guardianInbox";
 import { BrowserTaskForm } from "./BrowserTaskForm";
 import type { BrowserTaskSubmissionReceipt, PendingBrowserSubmission } from "./BrowserTaskForm";
+import { CalendarPrepForm } from "./CalendarPrepForm";
+import type { PendingCalendarSubmission } from "./CalendarPrepForm";
 import { WorkBoardMemoryReview } from "./WorkBoardMemoryReview";
+import { validateCalendarExecution } from "../../lib/calendar";
 import type {
   GoalInfo,
+  CalendarPrepResponse,
   GuardianInboxItem,
   WorkBoardAttempt,
   WorkBoardBrowserExecution,
+  CalendarExecutionProjection,
   WorkBoardActionRequest,
   WorkBoardComment,
   WorkBoardCommentCreateRequest,
@@ -191,6 +196,9 @@ const pendingTaskCreates = new Map<string, PendingTaskCreate>();
 const MAX_PENDING_BROWSER_SUBMISSIONS = 32;
 const pendingBrowserSubmissions = new Map<string, PendingBrowserSubmission>();
 
+const MAX_PENDING_CALENDAR_SUBMISSIONS = 32;
+const pendingCalendarSubmissions = new Map<string, PendingCalendarSubmission>();
+
 function rememberPendingBrowserSubmission(scope: string, pending: PendingBrowserSubmission): void {
   pendingBrowserSubmissions.delete(scope);
   pendingBrowserSubmissions.set(scope, pending);
@@ -198,6 +206,16 @@ function rememberPendingBrowserSubmission(scope: string, pending: PendingBrowser
     const oldest = pendingBrowserSubmissions.keys().next().value;
     if (typeof oldest !== "string") break;
     pendingBrowserSubmissions.delete(oldest);
+  }
+}
+
+function rememberPendingCalendarSubmission(scope: string, pending: PendingCalendarSubmission): void {
+  pendingCalendarSubmissions.delete(scope);
+  pendingCalendarSubmissions.set(scope, pending);
+  while (pendingCalendarSubmissions.size > MAX_PENDING_CALENDAR_SUBMISSIONS) {
+    const oldest = pendingCalendarSubmissions.keys().next().value;
+    if (typeof oldest !== "string") break;
+    pendingCalendarSubmissions.delete(oldest);
   }
 }
 
@@ -679,6 +697,35 @@ function browserExecutionReference(value: WorkBoardBrowserExecution): WorkBoardR
   return reference;
 }
 
+function safeCalendarExecution(value: unknown): CalendarExecutionProjection | null {
+  try {
+    return validateCalendarExecution(value);
+  } catch {
+    return null;
+  }
+}
+
+function calendarExecutionForAttempt(task: WorkBoardTask, attempt: WorkBoardAttempt): CalendarExecutionProjection | null {
+  const latest = task.latest_attempt;
+  if (latest?.attempt_id === attempt.attempt_id && Object.prototype.hasOwnProperty.call(latest, "calendar_execution")) {
+    return safeCalendarExecution(latest.calendar_execution);
+  }
+  return safeCalendarExecution(attempt.calendar_execution);
+}
+
+function calendarExecutionReference(value: CalendarExecutionProjection): WorkBoardReceiptReference | null {
+  if (!value.artifact_id || !value.file_path || !value.content_sha256 || !value.readback_id || !value.verified_at || !/^(?:sha256:)?[a-f0-9]{64}$/i.test(value.content_sha256)) return null;
+  return {
+    artifact_id: value.artifact_id,
+    file_path: value.file_path,
+    content_sha256: value.content_sha256.replace(/^sha256:/i, "").toLowerCase(),
+    readback_id: value.readback_id,
+    job_id: value.job_id,
+    verified: true,
+    artifact_type: "calendar_meeting_prep_result",
+  };
+}
+
 function proposalStatusLabel(proposal: WorkBoardProposal): string {
   return (proposal.status ?? "unknown").replace(/_/g, " ");
 }
@@ -721,11 +768,13 @@ function WorkBoardPanel({
     : null;
   const pendingCreateAtMount = pendingCreateScope ? pendingTaskCreates.get(pendingCreateScope) ?? null : null;
   const pendingBrowserAtMount = pendingCreateScope ? pendingBrowserSubmissions.get(pendingCreateScope) ?? null : null;
+  const pendingCalendarAtMount = pendingCreateScope ? pendingCalendarSubmissions.get(pendingCreateScope) ?? null : null;
   const previousBrowserScopeRef = useRef<string | null>(pendingCreateScope);
   useEffect(() => {
     const previousScope = previousBrowserScopeRef.current;
     if (previousScope && previousScope !== pendingCreateScope) {
       pendingBrowserSubmissions.delete(previousScope);
+      pendingCalendarSubmissions.delete(previousScope);
     }
     previousBrowserScopeRef.current = pendingCreateScope;
   }, [pendingCreateScope]);
@@ -754,6 +803,8 @@ function WorkBoardPanel({
   const [createOpen, setCreateOpen] = useState(Boolean(pendingCreateAtMount));
   const [browserTaskOpen, setBrowserTaskOpen] = useState(Boolean(pendingBrowserAtMount));
   const [browserTaskReceipt, setBrowserTaskReceipt] = useState<BrowserTaskSubmissionReceipt | null>(null);
+  const [calendarPrepOpen, setCalendarPrepOpen] = useState(Boolean(pendingCalendarAtMount));
+  const [calendarPrepReceipt, setCalendarPrepReceipt] = useState<CalendarPrepResponse | null>(null);
   const [createError, setCreateError] = useState<string | null>(pendingCreateAtMount
     ? "A previous create did not return a receipt. Retry the same request to reconcile it before editing or starting another task."
     : null);
@@ -1907,6 +1958,9 @@ function WorkBoardPanel({
   const currentAttempt = selectedTask?.latest_attempt
     ?? selectedDetail?.attempts[0]
     ?? null;
+  const currentCalendarExecution = selectedTask && currentAttempt
+    ? calendarExecutionForAttempt(selectedTask, currentAttempt)
+    : null;
   const currentOwnerSession = Boolean(
     selectedTask
     && ownerPrincipalId
@@ -2988,6 +3042,23 @@ function WorkBoardPanel({
     setBrowserTaskOpen(false);
   };
 
+  const setCalendarPending = (pending: PendingCalendarSubmission | null) => {
+    if (!pendingCreateScope) return;
+    if (pending) {
+      rememberPendingCalendarSubmission(pendingCreateScope, pending);
+      return;
+    }
+    pendingCalendarSubmissions.delete(pendingCreateScope);
+  };
+
+  const closeCalendarPrep = () => {
+    if (pendingCreateScope && pendingCalendarSubmissions.has(pendingCreateScope)) {
+      setAnnouncement("The calendar preparation outcome is unconfirmed. Keep the form open and retry the exact request before closing it.");
+      return;
+    }
+    setCalendarPrepOpen(false);
+  };
+
   return (
     <section className="cockpit-panel cockpit-panel--embedded min-w-0" aria-label="Work board">
       <div className="cockpit-operator-row flex-wrap">
@@ -3004,6 +3075,9 @@ function WorkBoardPanel({
           </button>
           <button type="button" className="cockpit-feedback-button" onClick={() => { setBrowserTaskReceipt(null); setBrowserTaskOpen(true); }}>
             Public browser task
+          </button>
+          <button type="button" className="cockpit-feedback-button" onClick={() => { setCalendarPrepReceipt(null); setCalendarPrepOpen(true); }}>
+            Calendar meeting prep
           </button>
           <button type="button" className="cockpit-feedback-button" onClick={() => void refreshSnapshot()} disabled={loading}>
             {loading ? "Refreshing…" : "Refresh board"}
@@ -3060,6 +3134,11 @@ function WorkBoardPanel({
       {browserTaskReceipt && (
         <div className="mt-2 rounded border border-emerald-500/40 bg-emerald-950/20 p-2 text-sm" role="status">
           Public browser task input artifact verified: <span className="font-mono break-all">{browserTaskReceipt.artifactId}</span> · {browserTaskReceipt.actionCount} action{browserTaskReceipt.actionCount === 1 ? "" : "s"} · SHA-256 <span className="font-mono break-all">{browserTaskReceipt.digest}</span>. The selected task is open below for durable progress and recovery.
+        </div>
+      )}
+      {calendarPrepReceipt && (
+        <div className="mt-2 rounded border border-emerald-500/40 bg-emerald-950/20 p-2 text-sm" role="status">
+          Calendar preparation task input artifact verified: <span className="font-mono break-all">{calendarPrepReceipt.input_artifact.artifact_id}</span> · SHA-256 <span className="font-mono break-all">{calendarPrepReceipt.input_artifact.typed_input_digest}</span>. The selected task is open below for durable progress and recovery.
         </div>
       )}
       <div className="sr-only" aria-live="polite">{announcement}</div>
@@ -3228,6 +3307,27 @@ function WorkBoardPanel({
                   <label>Scheduled at<input className="cockpit-input mt-1 w-full" type="datetime-local" value={editDraft.scheduledAt} onChange={(event) => setEditDraft({ ...editDraft, scheduledAt: event.currentTarget.value })} /></label>
                   <div className="flex gap-2"><button type="submit" className="cockpit-feedback-button" disabled={busyAction}>{busyAction ? "Saving…" : "Save with current revision"}</button><button type="button" className="cockpit-feedback-button" onClick={() => setEditMode(false)}>Cancel edit</button></div>
                 </form>
+              )}
+
+              {selectedTask.capability_id === "calendar.meeting-prep.v1" && (
+                <section className="rounded border border-cyan-400/30 bg-cyan-950/10 p-3" aria-label="Calendar meeting preparation execution">
+                  <div className="font-semibold">Calendar preparation execution</div>
+                  {!currentCalendarExecution ? (
+                    <div className="mt-1 text-amber-200">Execution receipt unavailable. The board will not infer provider, model, artifact, or readback success.</div>
+                  ) : (
+                    <div className="mt-2 grid gap-1">
+                      <div>Durable job <span className="font-mono break-all">{currentCalendarExecution.job_id}</span> · {currentCalendarExecution.durable_status}</div>
+                      <div>Read 1: {currentCalendarExecution.read_1?.status ?? "unavailable"} · Read 2: {currentCalendarExecution.read_2?.status ?? "unavailable"}</div>
+                      <div>Effective route: {currentCalendarExecution.effective_route ? `${currentCalendarExecution.effective_route.runtime_path} · ${currentCalendarExecution.effective_route.provider} · ${currentCalendarExecution.effective_route.model}` : "not confirmed"}</div>
+                      <div>Memory: {currentCalendarExecution.memory_status ?? "unavailable"} · verified {safeDateTime(currentCalendarExecution.verified_at)}</div>
+                      {currentCalendarExecution.failure_code && <div className="text-amber-200">Failure: {currentCalendarExecution.failure_code}{currentCalendarExecution.recovery_action ? ` · recovery ${currentCalendarExecution.recovery_action}` : ""}</div>}
+                      {(() => {
+                        const reference = calendarExecutionReference(currentCalendarExecution);
+                        return reference && onInspectArtifact ? <button type="button" className="cockpit-feedback-button mt-2 justify-self-start" onClick={() => onInspectArtifact({ reference, ownerSessionId: selectedTask.owner_session_id, workflowRunId: currentCalendarExecution.job_id, parentWorkflowRunId: currentAttempt?.workflow_run_id ?? null })}>Inspect verified calendar artifact</button> : <div className="text-amber-200">Verified artifact/readback is unavailable.</div>;
+                      })()}
+                    </div>
+                  )}
+                </section>
               )}
 
               <section className="rounded border border-white/10 p-3">
@@ -3971,6 +4071,25 @@ function WorkBoardPanel({
             if (stoppedRef.current) return;
             openTask(task.task_id);
             setAnnouncement(`Public browser task ${task.title} was created with input artifact ${receipt.artifactId}, ${receipt.actionCount} actions, digest ${receipt.digest}.`);
+          }}
+        />
+      )}
+      {calendarPrepOpen && (
+        <CalendarPrepForm
+          key={pendingCreateScope ?? "anonymous"}
+          goals={allGoals}
+          initialPending={pendingCalendarAtMount}
+          onPendingChange={setCalendarPending}
+          onClose={closeCalendarPrep}
+          onOpenSettings={() => setAnnouncement("Open Settings → Calendar to configure an active read-only connection.")}
+          onCreated={async (task, receipt) => {
+            if (pendingCreateScope) pendingCalendarSubmissions.delete(pendingCreateScope);
+            setCalendarPrepReceipt(receipt);
+            setCalendarPrepOpen(false);
+            await refreshSnapshot();
+            if (stoppedRef.current) return;
+            openTask(task.task_id);
+            setAnnouncement(`Calendar meeting preparation task ${task.title} was created with artifact ${receipt.input_artifact.artifact_id}.`);
           }}
         />
       )}

@@ -429,6 +429,7 @@ export interface WorkBoardAttempt {
   outcome: string | null;
   receipt_refs: WorkBoardReceiptReference[];
   browser_execution?: WorkBoardBrowserExecution | null;
+  calendar_execution?: CalendarExecutionProjection | null;
   readback_status: WorkBoardReadbackStatus;
   verification_status: WorkBoardVerificationStatus;
   created_at: string;
@@ -1096,4 +1097,286 @@ export interface DomainProgress {
 export interface ToolMeta {
   name: string;
   description: string;
+}
+
+export type CalendarConnectionState =
+  | "preparing"
+  | "active"
+  | "revoked"
+  | "expired"
+  | "blocked"
+  | "blocked_cleanup";
+
+export interface CalendarConnectionMetadata {
+  connection_id: string;
+  service: "calendar_readonly";
+  label: string;
+  credential_fingerprint: string;
+  state: CalendarConnectionState;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CalendarOption {
+  calendar_id: string;
+  summary: string;
+}
+
+export interface CalendarVerifyResponse {
+  connection: CalendarConnectionMetadata;
+  calendars: CalendarOption[];
+  calendar_list_revision: string;
+  pages_read: 1;
+  truncated: boolean;
+  provider_status: "verified";
+}
+
+export interface CreateCalendarConnectionRequest {
+  schema_version: 1;
+  service: "calendar_readonly";
+  label: string;
+  client_id: string;
+  client_secret?: string;
+  refresh_token: string;
+  idempotency_key: string;
+}
+
+export interface CalendarConnectionMutationRequest {
+  expected_revision: number;
+  idempotency_key: string;
+}
+
+export type CalendarAllowedField =
+  | "summary"
+  | "start"
+  | "end"
+  | "location"
+  | "description"
+  | "attendees";
+
+export type CalendarConsentState = "active" | "revoked" | "expired" | "consumed";
+
+export interface CalendarConsentMetadata {
+  consent_id: string;
+  connection_id: string;
+  connection_revision: number;
+  goal_id: string;
+  goal_revision: number;
+  allowed_fields: CalendarAllowedField[];
+  window_minutes: number;
+  max_events: number;
+  allow_remote_model: boolean;
+  expires_at: string;
+  state: CalendarConsentState;
+  revision: number;
+  consent_digest: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateCalendarReadConsentRequest {
+  schema_version: 1;
+  connection_id: string;
+  calendar_id: string;
+  goal_id: string;
+  goal_revision: number;
+  allowed_fields: CalendarAllowedField[];
+  window_minutes: number;
+  max_events: number;
+  allow_remote_model: boolean;
+  expires_at: string;
+  idempotency_key: string;
+}
+
+export interface CalendarEventOption {
+  event_binding_id: string;
+  event_binding_revision: number;
+  event_key: string;
+  event_revision: string;
+  calendar_list_revision: string;
+  summary: string;
+  start: string;
+  end: string;
+  location: string | null;
+  description: string | null;
+  attendees: string[] | null;
+}
+
+export interface CalendarEventListResponse {
+  events: CalendarEventOption[];
+  consent_id: string;
+  consent_revision: number;
+  connection_revision: number;
+  calendar_list_revision: string;
+  fetched_at: string;
+  pages_read: number;
+  truncated: boolean;
+}
+
+export interface CalendarMeetingPrepInput {
+  schema_version: 1;
+  consent_id: string;
+  event_binding_id: string;
+  expected_event_binding_revision: number;
+  expected_consent_revision: number;
+  expected_connection_revision: number;
+  event_revision: string;
+  calendar_list_revision: string;
+  goal_id: string;
+  goal_revision: number;
+  purpose: "bounded preparation request";
+}
+
+export interface CreateCalendarPrepRequest {
+  schema_version: 1;
+  input: CalendarMeetingPrepInput;
+  title: string;
+  idempotency_key: string;
+}
+
+export interface CalendarInputArtifactMetadata {
+  artifact_id: string;
+  typed_input_ref: string;
+  typed_input_digest: string;
+  capability_id: "calendar.meeting-prep.v1";
+  goal_id: string;
+  goal_revision: number;
+  expires_at: string;
+}
+
+export interface CalendarPrepResponse {
+  input_artifact: CalendarInputArtifactMetadata;
+  task: WorkBoardTask;
+  idempotent_replay: boolean;
+}
+
+export type CalendarCadenceKind = "5min" | "hourly" | "6h" | "daily";
+
+export interface CalendarCadence {
+  kind: CalendarCadenceKind;
+  timezone: string;
+  daily_hour: number | null;
+  daily_minute: number | null;
+}
+
+export interface CreateCalendarScheduleRequest {
+  schema_version: 1;
+  consent_id: string;
+  goal_id: string;
+  goal_revision: number;
+  calendar_id: string;
+  cadence: CalendarCadence;
+  expires_at: string;
+  idempotency_key: string;
+}
+
+export type GovernedScheduleState = "active" | "paused" | "revoked" | "expired" | "blocked";
+export type GovernedOccurrenceState =
+  | "reserved"
+  | "running"
+  | "coalesced"
+  | "succeeded"
+  | "blocked"
+  | "cancelled"
+  | "unknown";
+
+export interface CalendarLatestOccurrence {
+  occurrence_id: string;
+  binding_revision: number;
+  slot_utc: string;
+  state: GovernedOccurrenceState;
+  task_id: string | null;
+  job_id: string | null;
+  failure_code: string | null;
+  recovery_action: string | null;
+  updated_at: string;
+}
+
+export interface GovernedScheduleBinding {
+  binding_id: string;
+  scheduled_job_id: string;
+  capability_id: string;
+  action_type: string;
+  goal_id: string;
+  goal_revision: number;
+  input_artifact_id: string;
+  input_digest: string;
+  consent_kind: string;
+  consent_id: string;
+  consent_revision: number;
+  consent_digest: string;
+  cadence: CalendarCadence;
+  binding_revision: number;
+  expires_at: string;
+  state: GovernedScheduleState;
+  last_slot_utc: string | null;
+  created_at: string;
+  updated_at: string;
+  latest_occurrence: CalendarLatestOccurrence | null;
+}
+
+export interface CalendarReadReceipt {
+  status: "succeeded" | "blocked" | "unknown";
+  request_digest: string;
+  response_digest: string | null;
+  verified_at: string | null;
+}
+
+export interface CalendarEffectiveRoute {
+  runtime_path: "strategist_agent";
+  provider: "openrouter";
+  model: string;
+  upstream_provider: string;
+  profile_id: string;
+  admission_digest: string;
+  status: string;
+  cost_microusd: number | null;
+}
+
+export interface CalendarExecutionProjection {
+  capability_id: "calendar.meeting-prep.v1";
+  job_id: string;
+  durable_status: string;
+  connection_id: string | null;
+  connection_revision: number | null;
+  consent_id: string | null;
+  consent_revision: number | null;
+  event_binding_id: string | null;
+  event_key: string | null;
+  event_revision: string | null;
+  calendar_list_revision: string | null;
+  read_1: CalendarReadReceipt | null;
+  read_2: CalendarReadReceipt | null;
+  effective_route: CalendarEffectiveRoute | null;
+  artifact_id: string | null;
+  file_path: string | null;
+  content_sha256: string | null;
+  readback_id: string | null;
+  verified_at: string | null;
+  memory_status: "no_learning" | null;
+  failure_code: string | null;
+  recovery_action: string | null;
+}
+
+export interface CalendarResultPreview {
+  schema_version: 1;
+  capability_id: "calendar.meeting-prep.v1";
+  artifact_id: string;
+  readback_id: string;
+  file_path: string;
+  content_sha256: string;
+  event_key: string;
+  event_revision: string;
+  summary: string;
+  agenda: string[];
+  questions: string[];
+  risks: string[];
+  preparation_steps: string[];
+}
+
+export interface CalendarApiErrorDetail {
+  code: string;
+  message: string;
+  recovery_action: string | null;
 }

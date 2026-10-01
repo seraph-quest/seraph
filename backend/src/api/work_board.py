@@ -17,6 +17,7 @@ from src.auth.service import AuthenticatedOperator
 from src.approval.repository import approval_repository
 from src.db.engine import get_session
 from src.db.models import (
+    CalendarPrepReceipt,
     WorkBoardAttempt,
     WorkBoardComment,
     WorkBoardLink,
@@ -122,6 +123,13 @@ _BROWSER_EXECUTION_STATUSES = frozenset(
         "cost_liability",
     }
 )
+
+_CALENDAR_EXECUTION_STATUSES = _BROWSER_EXECUTION_STATUSES
+_CALENDAR_RESULT_PATH_RE = re.compile(
+    r"^artifacts/work-board/calendar/result-[0-9a-f]{32}\.json$"
+)
+_CALENDAR_SHA256_RE = re.compile(r"^(?:sha256:)?[0-9a-f]{64}$")
+_CALENDAR_READ_STATUSES = frozenset({"succeeded", "blocked", "unknown"})
 
 
 def _strict_bounded_int(value: Any, *, minimum: int, maximum: int) -> int | None:
@@ -396,6 +404,287 @@ async def _browser_execution_payload(
         "file_path": proof.get("file_path") if proof else None,
         "content_sha256": proof.get("content_sha256") if proof else None,
     }
+
+
+def _calendar_projection_text(value: Any, *, max_length: int = 256) -> str | None:
+    if not isinstance(value, str):
+        return None
+    bounded = value.strip()
+    if not bounded or len(bounded) > max_length or "\n" in bounded or "\r" in bounded:
+        return None
+    return bounded
+
+
+def _calendar_projection_digest(value: Any, *, prefixed: bool = False) -> str | None:
+    if not isinstance(value, str):
+        return None
+    bounded = value.strip().lower()
+    if not _CALENDAR_SHA256_RE.fullmatch(bounded):
+        return None
+    if prefixed and not bounded.startswith("sha256:"):
+        return None
+    return bounded
+
+
+def _calendar_load_json(value: Any, fallback: Any) -> Any:
+    if not isinstance(value, str) or len(value.encode("utf-8", errors="ignore")) > 128 * 1024:
+        return fallback
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError, UnicodeDecodeError):
+        return fallback
+
+
+def _calendar_read_projection(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    status = value.get("status")
+    if status not in _CALENDAR_READ_STATUSES:
+        return None
+    request_digest = _calendar_projection_digest(value.get("request_digest"), prefixed=True)
+    response_digest = value.get("response_digest")
+    if response_digest is not None:
+        response_digest = _calendar_projection_digest(response_digest, prefixed=True)
+        if response_digest is None:
+            return None
+    verified_at = _calendar_projection_text(value.get("verified_at"), max_length=64)
+    return {
+        "status": status,
+        "request_digest": request_digest,
+        "response_digest": response_digest,
+        "verified_at": verified_at,
+    }
+
+
+def _calendar_route_projection(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    required = {
+        "runtime_path",
+        "provider",
+        "model",
+        "upstream_provider",
+        "profile_id",
+        "admission_digest",
+        "status",
+        "cost_microusd",
+    }
+    if set(value) != required:
+        return None
+    bounded = {
+        key: _calendar_projection_text(value.get(key), max_length=256)
+        for key in ("runtime_path", "provider", "model", "upstream_provider", "profile_id", "status")
+    }
+    if any(item is None for item in bounded.values()):
+        return None
+    admission_digest = _calendar_projection_digest(value.get("admission_digest"), prefixed=True)
+    cost = value.get("cost_microusd")
+    if type(cost) is not int or cost < 0:
+        cost = None
+    return {
+        **bounded,
+        "admission_digest": admission_digest,
+        "cost_microusd": cost,
+    }
+
+
+def _calendar_receipt_artifact(
+    receipt: CalendarPrepReceipt,
+    projection: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    artifact_id = safe_board_identifier(receipt.artifact_id, max_length=512)
+    file_path = _calendar_projection_text(receipt.file_path, max_length=512)
+    content_sha256 = safe_sha256_digest(receipt.content_sha256)
+    readback_id = safe_board_identifier(receipt.readback_id, max_length=512)
+    if (
+        not artifact_id
+        or not file_path
+        or not _CALENDAR_RESULT_PATH_RE.fullmatch(file_path)
+        or not content_sha256
+        or not readback_id
+    ):
+        return None
+    artifacts = projection.get("artifacts")
+    effects = projection.get("effects")
+    if not isinstance(artifacts, list) or not isinstance(effects, list):
+        return None
+    artifact_match = any(
+        isinstance(item, Mapping)
+        and item.get("exists") is True
+        and item.get("artifact_type") == "calendar_meeting_prep_result"
+        and item.get("artifact_id") == artifact_id
+        and item.get("file_path") == file_path
+        and item.get("content_sha256") == content_sha256
+        for item in artifacts[-100:]
+    )
+    if not artifact_match:
+        return None
+    verified_at: str | None = None
+    for item in reversed(effects[-100:]):
+        if not isinstance(item, Mapping):
+            continue
+        details = item.get("details")
+        if (
+            item.get("receipt_kind") == "readback"
+            and item.get("effect_type") == "calendar_meeting_prep_result"
+            and item.get("status") in {"succeeded", "read_back", "reconciled"}
+            and item.get("readback_id") == readback_id
+            and item.get("target_path") == file_path
+            and item.get("target_digest") == content_sha256
+            and item.get("content_sha256") == content_sha256
+            and isinstance(details, Mapping)
+            and details.get("verified") is True
+            and details.get("memory_status") == "no_learning"
+        ):
+            verified_at = _calendar_projection_text(item.get("verified_at"), max_length=64)
+            break
+    if verified_at is None:
+        return None
+    return {
+        "artifact_id": artifact_id,
+        "file_path": file_path,
+        "content_sha256": content_sha256,
+        "readback_id": readback_id,
+        "verified_at": verified_at,
+    }
+
+
+async def _calendar_execution_payload(
+    task: WorkBoardTask,
+    attempt: WorkBoardAttempt,
+    *,
+    db: Any | None = None,
+    projection: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Project one owner-bound Calendar prep execution and its proof fields."""
+
+    if task.capability_id != "calendar.meeting-prep.v1":
+        return None
+    from src.integrations.google_calendar import calendar_job_id
+
+    task_id = safe_board_identifier(task.task_id, max_length=256)
+    attempt_id = safe_board_identifier(attempt.attempt_id, max_length=256)
+    workflow_run_id = safe_workflow_run_id(attempt.workflow_run_id)
+    if not task_id or not attempt_id or not workflow_run_id:
+        return None
+    expected_job_id = calendar_job_id(task.owner_principal_id, task_id, attempt_id)
+    if workflow_run_id != expected_job_id or attempt.task_id != task.task_id:
+        return None
+    if projection is None:
+        try:
+            projection = await durable_job_repository.get_job(expected_job_id)
+        except Exception:
+            return None
+    if not isinstance(projection, Mapping):
+        return None
+    status = projection.get("status")
+    if status not in _CALENDAR_EXECUTION_STATUSES:
+        return None
+    owner = projection.get("owner")
+    authority = projection.get("declared_authority")
+    identity = projection.get("idempotency")
+    if not isinstance(owner, Mapping) or not isinstance(authority, Mapping) or not isinstance(identity, Mapping):
+        return None
+    owner_principal = safe_board_identifier(task.owner_principal_id, max_length=256)
+    owner_session = safe_board_identifier(task.owner_session_id, max_length=512)
+    if not owner_principal or not owner_session:
+        return None
+    if (
+        projection.get("job_id") != expected_job_id
+        or projection.get("run_identity") != expected_job_id
+        or projection.get("job_kind") != "calendar_meeting_prep"
+        or projection.get("capability_version") != "1"
+        or owner.get("kind") != "user"
+        or owner.get("principal_id") != owner_principal
+        or owner.get("service_id") not in (None, "")
+        or projection.get("session_id") != owner_session
+        or projection.get("operator_session_id") != owner_session
+        or projection.get("goal_id") != task.goal_id
+        or projection.get("goal_revision") != task.goal_revision
+        or projection.get("root_run_identity") != expected_job_id
+        or projection.get("parent_run_identity") not in (None, "")
+        or projection.get("parent_job_id") not in (None, "")
+        or identity.get("scope") != "work-board-attempt"
+        or identity.get("key") != f"{task_id}:{attempt_id}"
+        or authority.get("principal") != owner_principal
+        or authority.get("owner_kind") != "user"
+        or authority.get("service_id") not in (None, "")
+        or authority.get("session_id") != owner_session
+        or authority.get("operator_session_id") != owner_session
+        or authority.get("goal_id") != task.goal_id
+        or authority.get("goal_revision") != task.goal_revision
+        or authority.get("capability_id") != "calendar.meeting-prep.v1"
+        or authority.get("capability_version") != "1"
+        or authority.get("attempt_id") != attempt_id
+        or authority.get("priority") != task.priority
+    ):
+        return None
+    result: dict[str, Any] = {
+        "capability_id": "calendar.meeting-prep.v1",
+        "job_id": expected_job_id,
+        "durable_status": status,
+        "connection_id": None,
+        "connection_revision": None,
+        "consent_id": None,
+        "consent_revision": None,
+        "event_binding_id": None,
+        "event_key": None,
+        "event_revision": None,
+        "calendar_list_revision": None,
+        "read_1": None,
+        "read_2": None,
+        "effective_route": None,
+        "artifact_id": None,
+        "file_path": None,
+        "content_sha256": None,
+        "readback_id": None,
+        "verified_at": None,
+        "memory_status": None,
+        "failure_code": _calendar_projection_text(projection.get("failure_reason"), max_length=128),
+        "recovery_action": None,
+    }
+    if db is None:
+        return result
+    receipt = (
+        await db.execute(
+            select(CalendarPrepReceipt).where(
+                CalendarPrepReceipt.owner_principal_id == owner_principal,
+                CalendarPrepReceipt.owner_session_id == owner_session,
+                CalendarPrepReceipt.task_id == task.task_id,
+                CalendarPrepReceipt.attempt_id == attempt.attempt_id,
+                CalendarPrepReceipt.durable_job_id == expected_job_id,
+                CalendarPrepReceipt.goal_id == task.goal_id,
+                CalendarPrepReceipt.goal_revision == task.goal_revision,
+            )
+        )
+    ).scalar_one_or_none()
+    if receipt is None:
+        return result
+    result.update(
+        connection_id=safe_board_identifier(receipt.connection_id, max_length=256),
+        connection_revision=int(receipt.connection_revision) if type(receipt.connection_revision) is int and receipt.connection_revision > 0 else None,
+        consent_id=safe_board_identifier(receipt.consent_id, max_length=256),
+        consent_revision=int(receipt.consent_revision) if type(receipt.consent_revision) is int and receipt.consent_revision > 0 else None,
+        event_binding_id=safe_board_identifier(receipt.event_binding_id, max_length=256),
+        event_key=_calendar_projection_text(receipt.event_key, max_length=256),
+        event_revision=_calendar_projection_text(receipt.event_revision_read_1, max_length=256),
+        calendar_list_revision=_calendar_projection_text(receipt.calendar_list_revision, max_length=256),
+        memory_status="no_learning" if receipt.memory_status == "no_learning" and receipt.status == "succeeded" else None,
+        failure_code=_calendar_projection_text(receipt.failure_code, max_length=128),
+        recovery_action=_calendar_projection_text(receipt.recovery_action, max_length=128),
+    )
+    read_1 = _calendar_read_projection(_calendar_load_json(receipt.read_1_json, {}))
+    read_2 = _calendar_read_projection(_calendar_load_json(receipt.read_2_json, {}))
+    result["read_1"] = read_1
+    result["read_2"] = read_2
+    result["effective_route"] = _calendar_route_projection(_calendar_load_json(receipt.effective_route_json, {}))
+    if receipt.status == "succeeded":
+        proof = _calendar_receipt_artifact(receipt, projection)
+        if proof is None:
+            result["memory_status"] = None
+        else:
+            result.update(proof)
+    return result
 
 
 def _browser_policy_rules(raw: Any) -> dict[str, Any]:
@@ -704,6 +993,12 @@ async def _safe_task_payload(
             task,
             latest_attempt,
             projection=browser_projection,
+        )
+    if task.capability_id == "calendar.meeting-prep.v1" and latest_attempt is not None:
+        payload["latest_attempt"]["calendar_execution"] = await _calendar_execution_payload(
+            task,
+            latest_attempt,
+            db=db,
         )
     for key in ("title", "body", "block_reason"):
         value = payload.get(key)
@@ -1638,6 +1933,12 @@ async def get_work_board_task(request: Request, task_id: str):
                     and "browser_execution" in latest_payload
                 ):
                     item_payload["browser_execution"] = latest_payload.get("browser_execution")
+                if (
+                    isinstance(latest_payload, dict)
+                    and item.attempt_id == latest_payload.get("attempt_id")
+                    and "calendar_execution" in latest_payload
+                ):
+                    item_payload["calendar_execution"] = latest_payload.get("calendar_execution")
                 attempts_payload.append(item_payload)
             return {
                 "task": task_payload,

@@ -114,6 +114,8 @@ class WorkspaceStateClass(str, Enum):
 WORK_BOARD_ROUTINE_BINDING_TABLE = "work_board_routine_bindings"
 WORK_BOARD_INPUT_ARTIFACT_TABLE = "work_board_input_artifacts"
 WORK_BOARD_INPUT_ARTIFACT_ROOT = "artifacts/work-board/inputs"
+CALENDAR_PREP_RECEIPT_TABLE = "calendar_prep_receipts"
+CALENDAR_RESULT_ARTIFACT_ROOT = "artifacts/work-board/calendar"
 
 
 def work_board_routine_binding_contract(*, present: bool | None) -> dict[str, Any]:
@@ -138,6 +140,21 @@ def work_board_input_artifact_contract(*, present: bool | None) -> dict[str, Any
         "backup_scope": "canonical_sqlite",
         "payload_root": WORK_BOARD_INPUT_ARTIFACT_ROOT,
         "secret_like_capabilities_rejected": True,
+        "present": None if present is None else bool(present),
+    }
+
+
+def calendar_prep_receipt_contract(*, present: bool | None) -> dict[str, Any]:
+    """Describe Calendar prep metadata without exporting provider content."""
+
+    return {
+        "schema_version": "seraph.calendar-prep-receipt.v1",
+        "table_name": CALENDAR_PREP_RECEIPT_TABLE,
+        "state_class": WorkspaceStateClass.CANONICAL.value,
+        "backup_scope": "canonical_sqlite",
+        "result_root": CALENDAR_RESULT_ARTIFACT_ROOT,
+        "provider_identity_encrypted": True,
+        "memory_status_required": "no_learning",
         "present": None if present is None else bool(present),
     }
 
@@ -1259,6 +1276,12 @@ class WorkspaceStateRegistry:
                         for item in tables
                     )
                 ),
+                "calendar_prep_receipt": calendar_prep_receipt_contract(
+                    present=any(
+                        item.get("name") == CALENDAR_PREP_RECEIPT_TABLE
+                        for item in tables
+                    )
+                ),
             },
         }
 
@@ -1298,6 +1321,7 @@ __all__ = [
     "production_workspace_inventory",
     "work_board_routine_binding_contract",
     "work_board_input_artifact_contract",
+    "calendar_prep_receipt_contract",
 ]
 
 

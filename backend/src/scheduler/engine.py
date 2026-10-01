@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
+from typing import Any
 from uuid import uuid4
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -306,9 +307,17 @@ async def sync_scheduled_jobs() -> None:
                     logger.exception("Failed to remove disabled scheduled job %s", job["id"])
             continue
         try:
+            async def _run_scheduled_job(job_id: str = job["id"], job_record: dict[str, Any] = job) -> None:
+                slot_utc = None
+                if job_record.get("action_type") == "calendar.observe_due_events.v1":
+                    from src.scheduler.governed_schedules import latest_due_slot
+
+                    slot_utc = latest_due_slot(job_record.get("trigger_spec") or {}, datetime.now(timezone.utc))
+                await execute_scheduled_job(job_id, scheduled_slot_utc=slot_utc)
+
             _scheduler.add_job(
                 _async_job_wrapper(
-                    lambda job_id=job["id"]: execute_scheduled_job(job_id),
+                    _run_scheduled_job,
                     _scheduler_loop,
                     job_id=apscheduler_id,
                 ),

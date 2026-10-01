@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from sqlmodel import select
+from sqlalchemy import insert
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import IntegrityError
 
 from src.db.models import Session
 
@@ -17,11 +20,33 @@ async def ensure_sessions_exist(db, session_ids: Iterable[str | None]) -> None:
     if not normalized_ids:
         return
 
-    existing_rows = await db.execute(select(Session.id).where(Session.id.in_(normalized_ids)))
-    existing_ids = {row[0] for row in existing_rows.all()}
-    inserted = False
-    for missing_id in normalized_ids - existing_ids:
-        db.add(Session(id=missing_id))
-        inserted = True
-    if inserted:
-        await db.flush()
+    values = [{"id": session_id} for session_id in sorted(normalized_ids)]
+    dialect_name = getattr(getattr(db, "bind", None), "dialect", None)
+    dialect_name = getattr(dialect_name, "name", "")
+    if dialect_name == "sqlite":
+        # Do not SELECT then INSERT: concurrent durable admissions can both
+        # observe a missing redacted placeholder.  Conflict-ignore changes
+        # only the synthetic row and preserves any existing Session fields.
+        await db.execute(
+            sqlite_insert(Session)
+            .values(values)
+            .on_conflict_do_nothing(index_elements=[Session.id])
+        )
+        return
+    if dialect_name == "postgresql":
+        await db.execute(
+            postgres_insert(Session)
+            .values(values)
+            .on_conflict_do_nothing(index_elements=[Session.id])
+        )
+        return
+
+    # Keep an atomic fallback for dialects without a public upsert builder.
+    # Each insert gets its own savepoint so a duplicate from a concurrent
+    # writer does not poison the caller's transaction.
+    for value in values:
+        try:
+            async with db.begin_nested():
+                await db.execute(insert(Session).values(value))
+        except IntegrityError:
+            continue

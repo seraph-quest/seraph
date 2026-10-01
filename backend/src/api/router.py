@@ -7,6 +7,7 @@ from src.api.approvals import router as approvals_router
 from src.api.audio import router as audio_router
 from src.api.automation import router as automation_router
 from src.api.browser import router as browser_router
+from src.api.calendar import router as calendar_router
 from src.api.canvas import router as canvas_router
 from src.api.catalog import router as catalog_router
 from src.api.capabilities import router as capabilities_router
@@ -43,6 +44,7 @@ api_router.include_router(approvals_router, prefix="/api", tags=["approvals"])
 api_router.include_router(audio_router, prefix="/api", tags=["audio"])
 api_router.include_router(automation_router, prefix="/api", tags=["automation"])
 api_router.include_router(browser_router, prefix="/api", tags=["browser"])
+api_router.include_router(calendar_router, prefix="/api", tags=["calendar"])
 api_router.include_router(canvas_router, prefix="/api", tags=["canvas"])
 api_router.include_router(catalog_router, prefix="/api", tags=["catalog"])
 api_router.include_router(capabilities_router, prefix="/api", tags=["capabilities"])

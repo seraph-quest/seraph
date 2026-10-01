@@ -363,6 +363,177 @@ function browserPreviewFixture(options: {
   };
 }
 
+function calendarPreviewFixture() {
+  const base = browserPreviewFixture();
+  const ownerSessionId = "operator-calendar-preview-session";
+  const taskId = "task-calendar-preview";
+  const workflowRunId = "calendar-task:task-calendar-preview:attempt-1";
+  const artifactId = "art_calendar_preview_1";
+  const readbackId = "readback-calendar-preview-1";
+  const contentSha256 = "1".repeat(64);
+  const filePath = `artifacts/work-board/calendar/result-${"2".repeat(32)}.json`;
+  const eventKey = "3".repeat(64);
+  const eventRevision = "4".repeat(64);
+  const preview = {
+    schema_version: 1,
+    capability_id: "calendar.meeting-prep.v1",
+    artifact_id: artifactId,
+    readback_id: readbackId,
+    file_path: filePath,
+    content_sha256: contentSha256,
+    event_key: eventKey,
+    event_revision: eventRevision,
+    summary: "Prepare a concise customer meeting brief.",
+    agenda: ["Review the open delivery risks."],
+    questions: ["Which decision is needed today?"],
+    risks: ["The launch date may move."],
+    preparation_steps: ["Read the latest project update."],
+  };
+  const reference = {
+    artifact_id: artifactId,
+    artifact_type: "calendar_meeting_prep_result",
+    file_path: filePath,
+    content_sha256: contentSha256,
+    readback_id: readbackId,
+    verified: true,
+    job_id: workflowRunId,
+  };
+  const execution = {
+    capability_id: "calendar.meeting-prep.v1",
+    job_id: workflowRunId,
+    durable_status: "succeeded",
+    connection_id: "connection-calendar-preview",
+    connection_revision: 1,
+    consent_id: "consent-calendar-preview",
+    consent_revision: 1,
+    event_binding_id: "binding-calendar-preview",
+    event_key: eventKey,
+    event_revision: eventRevision,
+    calendar_list_revision: "5".repeat(64),
+    read_1: null,
+    read_2: null,
+    effective_route: null,
+    artifact_id: artifactId,
+    file_path: filePath,
+    content_sha256: contentSha256,
+    readback_id: readbackId,
+    verified_at: "2026-09-30T10:00:02Z",
+    memory_status: "no_learning",
+    failure_code: null,
+    recovery_action: null,
+  };
+  const attempt = {
+    ...base.attempt,
+    task_id: taskId,
+    workflow_run_id: workflowRunId,
+    executor_id: "seraph-work-board:calendar.meeting-prep.v1",
+    calendar_execution: execution,
+    browser_execution: undefined,
+  };
+  const boardTask = {
+    ...base.boardTask,
+    task_id: taskId,
+    owner_principal_id: "operator:calendar-preview",
+    owner_session_id: ownerSessionId,
+    origin_session_id: ownerSessionId,
+    goal_id: "goal-calendar-preview",
+    title: "Calendar result preview",
+    body: "Inspect the verified calendar preparation.",
+    capability_id: "calendar.meeting-prep.v1",
+    typed_input_ref: "workspace-json:artifacts/work-board/calendar/input-calendar-preview.json",
+    executor_id: "seraph-work-board:calendar.meeting-prep.v1",
+    assignee_id: "operator:calendar-preview",
+    idempotency_key: "task-calendar-preview-key",
+    result_refs: [reference],
+    latest_attempt: attempt,
+  };
+  const boundJob = {
+    ...base.boundJob,
+    job_id: workflowRunId,
+    job_kind: "calendar_meeting_prep",
+    artifacts: [{
+      artifact_id: artifactId,
+      artifact_type: "calendar_meeting_prep_result",
+      file_path: filePath,
+      content_sha256: contentSha256,
+      readback_id: readbackId,
+      exists: true,
+      verified: true,
+      status: "succeeded",
+    }],
+    effects: [{
+      receipt_kind: "readback",
+      effect_type: "calendar_meeting_prep_result",
+      status: "succeeded",
+      artifact_id: artifactId,
+      readback_id: readbackId,
+      target_path: filePath,
+      content_sha256: contentSha256,
+      target_digest: contentSha256,
+      verified: true,
+    }],
+    calendar_result_status: "available",
+    calendar_result: preview,
+    browser_result_status: "unavailable",
+    browser_result: null,
+  };
+  return {
+    ...base,
+    ownerSessionId,
+    taskId,
+    workflowRunId,
+    artifactId,
+    readbackId,
+    contentSha256,
+    filePath,
+    boardTask,
+    attempt,
+    boundJob,
+  };
+}
+
+function renderCalendarPreviewFixture(
+  fetchMock: ReturnType<typeof vi.fn>,
+  fixture: ReturnType<typeof calendarPreviewFixture>,
+) {
+  mockCockpitBaselineFetch(fetchMock, {});
+  const baselineFetch = fetchMock.getMockImplementation() as
+    ((input: RequestInfo | URL, init?: RequestInit) => unknown) | undefined;
+  fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.endsWith("/api/auth/session")) {
+      return Promise.resolve(mockResponse({
+        authenticated: true,
+        principal_id: "operator:calendar-preview",
+        session_id: fixture.ownerSessionId,
+      }));
+    }
+    if (url.includes("/api/work-board/tasks?") && !url.includes("/api/work-board/tasks/")) {
+      return Promise.resolve(mockResponse({ tasks: [fixture.boardTask], next_after: null, last_event_id: 1 }));
+    }
+    if (url.includes("/api/work-board/events")) return Promise.resolve(mockResponse({ events: [], last_event_id: 1, gap: false }));
+    if (url.endsWith(`/api/work-board/tasks/${fixture.taskId}`)) {
+      return Promise.resolve(mockResponse({
+        task: fixture.boardTask,
+        attempts: [fixture.attempt],
+        parents: [],
+        children: [],
+        comments: [],
+        events: [],
+        revision: 2,
+      }));
+    }
+    if (url.includes(`/api/workflows/jobs/${encodeURIComponent(fixture.workflowRunId)}`)) {
+      return Promise.resolve(mockResponse({ job: fixture.boundJob }));
+    }
+    if (url.includes("/api/work-board/goals/goal-calendar-preview/execution-limits")) {
+      return Promise.resolve(mockResponse({ effective_max_runtime_seconds: 300, hard_max_runtime_seconds: 900, limit_source: "goal_default" }));
+    }
+    return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
+  });
+  renderLegacyCockpit(<CockpitView onSend={() => {}} />);
+}
+
 describe("CockpitView", () => {
   const fetchMock = vi.fn();
 
@@ -1041,6 +1212,102 @@ describe("CockpitView", () => {
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes(
       `/api/workflows/jobs/${encodeURIComponent(fixture.workflowRunId)}?include_browser_result=true`,
     ))).toBe(true);
+  });
+
+  it("fetches and renders an owner-bound calendar preparation result only after explicit artifact inspection", async () => {
+    const fixture = calendarPreviewFixture();
+    mockCockpitBaselineFetch(fetchMock, {});
+    const baselineFetch = fetchMock.getMockImplementation() as
+      ((input: RequestInfo | URL, init?: RequestInit) => unknown) | undefined;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/auth/session")) {
+        return Promise.resolve(mockResponse({
+          authenticated: true,
+          principal_id: "operator:calendar-preview",
+          session_id: fixture.ownerSessionId,
+        }));
+      }
+      if (url.includes("/api/work-board/tasks?") && !url.includes("/api/work-board/tasks/")) {
+        return Promise.resolve(mockResponse({ tasks: [fixture.boardTask], next_after: null, last_event_id: 1 }));
+      }
+      if (url.includes("/api/work-board/events")) return Promise.resolve(mockResponse({ events: [], last_event_id: 1, gap: false }));
+      if (url.endsWith(`/api/work-board/tasks/${fixture.taskId}`)) {
+        return Promise.resolve(mockResponse({
+          task: fixture.boardTask,
+          attempts: [fixture.attempt],
+          parents: [],
+          children: [],
+          comments: [],
+          events: [],
+          revision: 2,
+        }));
+      }
+      if (url.includes(`/api/workflows/jobs/${encodeURIComponent(fixture.workflowRunId)}`)) {
+        return Promise.resolve(mockResponse({ job: fixture.boundJob }));
+      }
+      if (url.includes("/api/work-board/goals/goal-calendar-preview/execution-limits")) {
+        return Promise.resolve(mockResponse({ effective_max_runtime_seconds: 300, hard_max_runtime_seconds: 900, limit_source: "goal_default" }));
+      }
+      return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
+    });
+
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/work-board/tasks?"))).toBe(true));
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/workflows/jobs/"))).toBe(false);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Calendar result preview" }));
+    const inspectButton = await screen.findByRole("button", {
+      name: `Inspect execution evidence ${fixture.filePath}`,
+    });
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/workflows/jobs/"))).toBe(false);
+    fireEvent.click(inspectButton);
+
+    expect(await screen.findByText("Prepare a concise customer meeting brief.", { selector: "pre", exact: true })).toBeInTheDocument();
+    expect(screen.getByText("Which decision is needed today?", { selector: "pre", exact: true })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Verified calendar preparation text" })).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes(
+      `/api/workflows/jobs/${encodeURIComponent(fixture.workflowRunId)}?include_calendar_result=true`,
+    ))).toBe(true);
+  });
+
+  it.each([
+    ["artifact binding", (fixture: ReturnType<typeof calendarPreviewFixture>) => {
+      (fixture.boundJob.calendar_result as Record<string, unknown>).artifact_id = "art_foreign_calendar_result";
+    }],
+    ["readback binding", (fixture: ReturnType<typeof calendarPreviewFixture>) => {
+      (fixture.boundJob.calendar_result as Record<string, unknown>).readback_id = "readback-foreign-calendar";
+    }],
+    ["path binding", (fixture: ReturnType<typeof calendarPreviewFixture>) => {
+      (fixture.boundJob.calendar_result as Record<string, unknown>).file_path = "artifacts/work-board/calendar/result-ffffffffffffffffffffffffffffffff.json";
+    }],
+    ["digest binding", (fixture: ReturnType<typeof calendarPreviewFixture>) => {
+      (fixture.boundJob.calendar_result as Record<string, unknown>).content_sha256 = "f".repeat(64);
+    }],
+    ["an available result with no body", (fixture: ReturnType<typeof calendarPreviewFixture>) => {
+      (fixture.boundJob as Record<string, unknown>).calendar_result = null;
+    }],
+    ["an unavailable result", (fixture: ReturnType<typeof calendarPreviewFixture>) => {
+      (fixture.boundJob as Record<string, unknown>).calendar_result_status = "unavailable";
+    }],
+    ["an unknown result status", (fixture: ReturnType<typeof calendarPreviewFixture>) => {
+      (fixture.boundJob as Record<string, unknown>).calendar_result_status = "unknown";
+    }],
+    ["a missing result status", (fixture: ReturnType<typeof calendarPreviewFixture>) => {
+      delete (fixture.boundJob as Record<string, unknown>).calendar_result_status;
+    }],
+  ] as const)("keeps calendar artifact metadata usable when preview has %s", async (_label, mutate) => {
+    const fixture = calendarPreviewFixture();
+    mutate(fixture);
+    renderCalendarPreviewFixture(fetchMock, fixture);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Calendar result preview" }));
+    fireEvent.click(await screen.findByRole("button", { name: `Inspect execution evidence ${fixture.filePath}` }));
+
+    await screen.findByText(fixture.filePath, { selector: ".cockpit-inspector-title" });
+    expect(await screen.findByRole("status", { name: /Calendar result preview unavailable/ })).toBeInTheDocument();
+    expect(screen.getByText(fixture.filePath, { selector: ".cockpit-inspector-title" })).toBeInTheDocument();
+    expect(screen.getByText(fixture.contentSha256)).toBeInTheDocument();
+    expect(screen.queryByText("Prepare a concise customer meeting brief.", { selector: "pre" })).not.toBeInTheDocument();
   });
 
   it.each([

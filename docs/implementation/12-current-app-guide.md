@@ -419,6 +419,68 @@ validation. Local fixture execution and production-network evidence must be
 identified separately; authenticated browsing and general computer use remain
 outside this capability.
 
+### Bounded calendar meeting preparation
+
+This is an intended post-epic contract, not Shipped `develop` behavior. The
+reviewed milestone and epic PRs own implementation validation. Provider-free
+tests establish local mechanics; a working Google account and live model
+usefulness remain explicitly external-unverified without an authorized canary.
+
+Calendar settings accept an operator-supplied OAuth client and refresh token as
+write-only fields stored in the encrypted vault. Explicit verification obtains
+a bounded calendar list. Saving setup does not grant event access or model
+egress, and reading verified setup metadata does not repeat a provider call.
+An interrupted setup retains its original key. Retries during the 30-second
+preparation window preserve the pending result; a later retry reconciles stale
+vault material without storing a second credential. Missing material becomes
+blocked; unverified cleanup remains visibly blocked for reconciliation.
+Event consent binds the authenticated owner/session, an active goal, one
+verified calendar, selected fields, a finite window, an event limit, and expiry.
+Remote preparation requires an explicit model-egress choice.
+
+Work offers a meeting-preparation form using verified calendars and redacted
+events. Selecting an event creates an immutable typed input and a Todo task;
+the existing task controls govern admission and execution. Preparation rereads
+the selected event, synthesizes one bounded brief through the governed
+strategist route, and rereads the event again. Changed or revoked authority
+blocks publication. Completion requires artifact readback and an explicit
+`no_learning` receipt. Work shows the actual route and outcome.
+
+An optional finite schedule observes the consented calendar without making a
+model call. It creates preparation tasks for operator review, coalesces missed
+slots, and deduplicates unchanged event revisions. Pause and revoke are explicit
+controls. The current schedule lasts at most 24 hours, with earlier consent,
+goal, or input expiry tightening that limit. The form shows the effective bound;
+requests beyond it are refused rather than failing later without explanation.
+An uncertain previous read holds the observation lane until server
+reconciliation; an expired lease alone cannot free it. A refreshed list has its
+own read digest, while an unchanged event retains the selection provenance
+pinned by its existing task.
+
+Settings shows the latest scan outcome separately from the schedule's state.
+The server can settle a failed scan as blocked after proving that its actual
+read transport has closed, without claiming that the scan succeeded. This
+cleanup can finish after consent or session revocation; another scan still
+requires current authority. A failed close or a crash without settlement proof
+keeps the lane quarantined. Calendar read cleanup cannot settle model charges
+or replay the old scan.
+Cancellation finishes the scheduler run receipt while preserving any unknown
+occurrence. Revocation during proposal publication prevents a new task and
+tombstones its unbound input; uncertain artifact cleanup requires recovery.
+
+Unknown request outcomes retain their exact key and body. Closing and reopening
+Settings preserves credential-free controls only for the same authenticated
+owner/session. Setup credentials stay in component memory and are cleared on
+unmount or authentication failure. A deliberate new attempt requires a
+confirmed stale refusal or a reconciled known result; refreshing metadata alone
+cannot authorize duplicate work.
+
+The existing artifact inspector renders a verified brief as plain text.
+Missing, altered, revoked, or expired evidence leaves metadata and recovery
+visible without exposing an unchecked brief. Routine metadata reads do not
+load provider event bodies or brief content. This capability does not modify
+calendar events, send communications, or learn preferences from meeting content.
+
 ### Reviewed source-change follow-up
 
 Goals expose their success criterion, finite proactive budget, quiet hours, and

@@ -87,6 +87,31 @@ def test_bypass_enabled() -> bool:
     )
 
 
+def _calendar_auth_failure(path: str, code: str) -> bool:
+    """Use the Calendar contract's safe error envelope at the auth edge.
+
+    Calendar setup/control callers need a recoverable, bounded response even
+    when the request is rejected before FastAPI reaches the route.  Keep this
+    narrow so existing API auth responses retain their established shape.
+    """
+    return path.startswith("/api/calendar") or path.startswith("/api/governed-schedules")
+
+
+def _auth_failure_response(path: str, code: str, *, status_code: int) -> JSONResponse:
+    if _calendar_auth_failure(path, code):
+        if code in {"auth_not_configured", "authentication_required", "invalid_token", "session_unavailable"}:
+            message = "Authentication is required"
+            recovery = "login"
+        else:
+            message = "The operator session is unavailable"
+            recovery = "login"
+        return JSONResponse(
+            {"detail": {"code": str(code)[:128], "message": message, "recovery_action": recovery}},
+            status_code=status_code,
+        )
+    return JSONResponse({"detail": {"code": str(code)[:128]}}, status_code=status_code)
+
+
 async def authenticate_websocket(websocket) -> AuthenticatedOperator:
     """Authenticate a WebSocket before accepting it.
 
@@ -116,7 +141,7 @@ class OperatorAuthMiddleware(BaseHTTPMiddleware):
                 request.state.operator = test_bypass_operator()
                 return await call_next(request)
             if request.url.path.startswith("/api"):
-                return JSONResponse({"detail": {"code": "auth_not_configured"}}, status_code=503)
+                return _auth_failure_response(request.url.path, "auth_not_configured", status_code=503)
             return await call_next(request)
         boundary_error = validate_request_boundary(
             host=request.headers.get("host", ""),
@@ -139,6 +164,6 @@ class OperatorAuthMiddleware(BaseHTTPMiddleware):
         try:
             operator = await authenticate_token(request.cookies.get(settings.operator_auth_cookie_name))
         except AuthFailure as exc:
-            return JSONResponse({"detail": {"code": exc.code}}, status_code=401)
+            return _auth_failure_response(request.url.path, exc.code, status_code=401)
         request.state.operator = operator
         return await call_next(request)

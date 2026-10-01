@@ -16,6 +16,7 @@ from config.settings import settings
 import src.db.engine as db_engine
 from src.db.engine import (
     _configure_sqlite_connection,
+    _ensure_calendar_columns,
     _ensure_legacy_columns,
     _ensure_guardian_inbox_columns,
     _ensure_m5_columns,
@@ -174,6 +175,115 @@ async def test_ensure_m5_columns_adds_m5_candidate_digests(tmp_path):
         assert "rollback_reason" in proposal_columns
         assert "candidate_set_digest" in receipt_columns
         assert "receipt_integrity_mac" in receipt_columns
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ensure_calendar_columns_precedes_metadata_indexes_and_is_idempotent(tmp_path):
+    db_path = tmp_path / "legacy-calendar.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    event.listen(engine.sync_engine, "connect", _configure_sqlite_connection)
+
+    try:
+        async with engine.begin() as conn:
+            await conn.exec_driver_sql(
+                """
+                CREATE TABLE calendar_read_consents (
+                    consent_id VARCHAR PRIMARY KEY,
+                    owner_principal_id VARCHAR NOT NULL,
+                    owner_session_id VARCHAR NOT NULL,
+                    creation_request_digest VARCHAR
+                )
+                """
+            )
+            await conn.exec_driver_sql(
+                """
+                CREATE TABLE google_service_connections (
+                    connection_id VARCHAR PRIMARY KEY,
+                    owner_principal_id VARCHAR NOT NULL,
+                    owner_session_id VARCHAR NOT NULL
+                )
+                """
+            )
+
+            await _ensure_calendar_columns(conn)
+            await _ensure_calendar_columns(conn)
+
+            consent_columns = {
+                row[1]
+                for row in (
+                    await conn.exec_driver_sql(
+                        "PRAGMA table_info(calendar_read_consents)"
+                    )
+                ).fetchall()
+            }
+            connection_columns = {
+                row[1]
+                for row in (
+                    await conn.exec_driver_sql(
+                        "PRAGMA table_info(google_service_connections)"
+                    )
+                ).fetchall()
+            }
+            consent_indexes = {
+                row[1]
+                for row in (
+                    await conn.exec_driver_sql(
+                        "PRAGMA index_list(calendar_read_consents)"
+                    )
+                ).fetchall()
+            }
+            connection_indexes = {
+                row[1]
+                for row in (
+                    await conn.exec_driver_sql(
+                        "PRAGMA index_list(google_service_connections)"
+                    )
+                ).fetchall()
+            }
+        assert {
+            "creation_idempotency_key",
+            "creation_request_digest",
+        }.issubset(consent_columns)
+        assert "verified_setup_job_id" in connection_columns
+        assert "ux_calendar_read_consents_creation_idempotency" in consent_indexes
+        assert "ix_google_service_connections_verified_setup_job_id" in connection_indexes
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ensure_calendar_columns_rejects_ambiguous_legacy_consent_keys(tmp_path):
+    db_path = tmp_path / "ambiguous-calendar.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    event.listen(engine.sync_engine, "connect", _configure_sqlite_connection)
+
+    try:
+        async with engine.begin() as conn:
+            await conn.exec_driver_sql(
+                """
+                CREATE TABLE calendar_read_consents (
+                    consent_id VARCHAR PRIMARY KEY,
+                    owner_principal_id VARCHAR NOT NULL,
+                    owner_session_id VARCHAR NOT NULL,
+                    creation_idempotency_key VARCHAR NOT NULL,
+                    creation_request_digest VARCHAR
+                )
+                """
+            )
+            await conn.exec_driver_sql(
+                """
+                INSERT INTO calendar_read_consents (
+                    consent_id, owner_principal_id, owner_session_id,
+                    creation_idempotency_key
+                ) VALUES
+                    ('consent-a', 'operator:legacy', 'session:legacy', 'same-key'),
+                    ('consent-b', 'operator:legacy', 'session:legacy', 'same-key')
+                """
+            )
+            with pytest.raises(RuntimeError, match="idempotency collision"):
+                await _ensure_calendar_columns(conn)
     finally:
         await engine.dispose()
 

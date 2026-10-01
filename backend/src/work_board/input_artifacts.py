@@ -227,14 +227,26 @@ async def _validate_request(
     db: AsyncSession,
     owner: WorkBoardOwner,
     request: WorkBoardInputArtifactCreate,
+    *,
+    allow_scheduler: bool = False,
 ) -> tuple[dict[str, Any], str, str]:
     try:
-        inputs = validate_capability_input(request.capability_id, request.input)
+        inputs = validate_capability_input(
+            request.capability_id,
+            request.input,
+            allow_scheduler=allow_scheduler,
+        )
     except TypedInputError as exc:
         raise _raise_input_error(exc) from exc
     spec = REGISTERED_CAPABILITIES.get(request.capability_id)
     if spec is None or spec.secret_like:
         raise BoardError("secret_like_capability_blocked", "This capability cannot use public typed input storage", status_code=422)
+    if spec.input_category == "scheduler" and not allow_scheduler:
+        raise BoardError(
+            "typed_input_category_invalid",
+            "Scheduler configuration artifacts cannot be used as task input",
+            status_code=422,
+        )
     try:
         await WorkBoardRepository._validate_goal(
             db,
@@ -258,6 +270,8 @@ async def _validate_request(
 def _decode_and_validate_payload(
     row: WorkBoardInputArtifact,
     payload: bytes,
+    *,
+    allow_scheduler: bool = False,
 ) -> dict[str, Any]:
     try:
         envelope = json.loads(payload.decode("utf-8"))
@@ -271,7 +285,11 @@ def _decode_and_validate_payload(
     if not isinstance(raw_input, Mapping):
         raise BoardError("input_artifact_input_invalid", "The input artifact input is invalid", status_code=409)
     try:
-        return validate_capability_input(row.capability_id, raw_input)
+        return validate_capability_input(
+            row.capability_id,
+            raw_input,
+            allow_scheduler=allow_scheduler,
+        )
     except TypedInputError as exc:
         raise _raise_input_error(exc) from exc
 
@@ -282,10 +300,15 @@ async def _finalize_pending(
     payload: bytes,
     *,
     inputs: Mapping[str, Any] | None = None,
+    allow_scheduler: bool = False,
 ) -> None:
     path = _payload_path(row)
     verified = _safe_file_bytes(path, expected_digest=row.payload_sha256, expected_size=row.size_bytes)
-    parsed = _decode_and_validate_payload(row, verified)
+    parsed = _decode_and_validate_payload(
+        row,
+        verified,
+        allow_scheduler=allow_scheduler,
+    )
     if inputs is not None and parsed != dict(inputs):
         raise BoardError("input_artifact_digest_mismatch", "The input artifact input changed", status_code=409)
     row.revision = max(int(row.revision), 1) + 1
@@ -339,11 +362,17 @@ async def prepare_input_artifact(
     request: WorkBoardInputArtifactCreate,
     *,
     now: datetime | None = None,
+    allow_scheduler: bool = False,
 ) -> InputArtifactMetadata:
     """Reserve, write, reread, and verify one deterministic input artifact."""
 
     observed_at = _utc(now or _now())
-    inputs, _payload_hex, payload_digest = await _validate_request(db, owner, request)
+    inputs, _payload_hex, payload_digest = await _validate_request(
+        db,
+        owner,
+        request,
+        allow_scheduler=allow_scheduler,
+    )
     envelope = {
         "schema_version": INPUT_ARTIFACT_SCHEMA_VERSION,
         "capability_id": request.capability_id,
@@ -384,7 +413,13 @@ async def prepare_input_artifact(
                 ).scalar_one_or_none()
                 if refreshed is None:
                     raise BoardError("input_artifact_missing", "The input artifact reservation disappeared", status_code=409)
-                await _finalize_pending(db, refreshed, payload, inputs=inputs)
+                await _finalize_pending(
+                    db,
+                    refreshed,
+                    payload,
+                    inputs=inputs,
+                    allow_scheduler=allow_scheduler,
+                )
                 return _metadata(refreshed)
         # An idempotent replay is only valid while the previously verified
         # canonical bytes are still present and structurally valid.  A stale
@@ -395,7 +430,11 @@ async def prepare_input_artifact(
             expected_digest=existing.payload_sha256,
             expected_size=existing.size_bytes,
         )
-        parsed = _decode_and_validate_payload(existing, verified)
+        parsed = _decode_and_validate_payload(
+            existing,
+            verified,
+            allow_scheduler=allow_scheduler,
+        )
         if parsed != inputs:
             raise BoardError(
                 "input_artifact_digest_mismatch",
@@ -433,7 +472,13 @@ async def prepare_input_artifact(
         ).scalar_one_or_none()
         if refreshed is None:
             raise BoardError("input_artifact_missing", "The input artifact reservation disappeared", status_code=409)
-        await _finalize_pending(db, refreshed, payload, inputs=inputs)
+        await _finalize_pending(
+            db,
+            refreshed,
+            payload,
+            inputs=inputs,
+            allow_scheduler=allow_scheduler,
+        )
         return _metadata(refreshed)
 
 
@@ -470,6 +515,12 @@ async def resolve_input_artifact_for_task(
     expected_version = REGISTERED_CAPABILITIES.get(capability_id)
     if expected_version is None or row.capability_version != expected_version.version:
         raise BoardError("input_artifact_capability_stale", "The input artifact capability version is stale", status_code=409)
+    if expected_version.input_category != "task":
+        raise BoardError(
+            "typed_input_category_invalid",
+            "Scheduler configuration artifacts cannot be executed as a WorkBoard task",
+            status_code=422,
+        )
     if expected_task_id is not None and row.bound_task_id not in {None, expected_task_id}:
         raise BoardError("input_artifact_task_conflict", "The input artifact is bound to another task", status_code=409)
     if _metadata_digest(row) != row.metadata_digest:

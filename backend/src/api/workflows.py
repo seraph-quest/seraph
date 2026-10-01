@@ -62,6 +62,9 @@ from src.db.models import (
     Goal,
     GuardianDecisionPacket,
     GuardianSourceWatch,
+    RepoRepairEgressConsent as RepoRepairEgressConsentRow,
+    RepoRepairProposal as RepoRepairProposalRow,
+    RepoRepairSourcePacket as RepoRepairSourcePacketRow,
     WorkBoardAttempt,
     WorkBoardTask,
     WorkflowRunState,
@@ -105,6 +108,7 @@ from src.workflows.job_runtime import (
 )
 from src.workflows.run_identity import build_workflow_run_identity, parse_workflow_run_identity
 from src.workspace import WorkspaceStateClass, canonical_workspace_registry
+from src.work_board.repository import BoardError, WorkBoardOwner, WorkBoardRepository, _utc_datetime
 from src.integrations.google_calendar import (
     MAX_CALENDAR_RESULT_BYTES,
     calendar_artifact_path_for_job,
@@ -1054,6 +1058,31 @@ class RepoChangeRetryRequest(BaseModel):
     model_config = {"extra": "forbid"}
 
     reconciliation_receipt: dict[str, Any]
+
+
+class RepoRepairEgressConsentRequest(BaseModel):
+    """Explicit acknowledgement for one private source packet."""
+
+    model_config = {"extra": "forbid", "strict": True}
+
+    expected_job_revision: int = Field(ge=1)
+    source_packet_digest: str = Field(min_length=64, max_length=64)
+    expected_source_manifest_digest: str = Field(min_length=64, max_length=64)
+    expected_profile_id: str = Field(min_length=1, max_length=128)
+    acknowledged_selected_source: bool
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class RepoRepairResumeRequest(BaseModel):
+    """Exact patch-approval resume binding for one repair root."""
+
+    model_config = {"extra": "forbid", "strict": True}
+
+    approval_id: str = Field(min_length=1, max_length=160)
+    proposal_id: str = Field(min_length=1, max_length=160)
+    expected_proposal_revision: int = Field(ge=1)
+    expected_job_revision: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
 
 
 _WORKFLOW_CONTROL_ACTIONS = frozenset(
@@ -6477,6 +6506,610 @@ async def _preview_repo_change_for_operator(
         return {"status": "awaiting_approval", "approval_id": approval.id, "base_digest": snapshot.digest, "patch_sha256": req.patch_sha256, "profile": str(sandbox.config.profile), "image_digest": image, "allowed_paths": list(allowed_paths), "test_args": list(test_args), "limits": {field: getattr(sandbox.limits, field) for field in sandbox.limits.__dataclass_fields__}, **held}
     except (DurableJobError, RepoSandboxError, ValueError) as exc:
         raise HTTPException(status_code=409, detail={"code": "repo_change_admission_blocked", "reason": str(exc)}) from exc
+
+
+def _repo_repair_error(exc: Exception) -> HTTPException:
+    """Map a repair service error without exposing private artifact content."""
+
+    from src.workflows.repo_repair import RepoRepairError
+
+    if isinstance(exc, RepoRepairError):
+        return HTTPException(
+            status_code=int(exc.status_code),
+            detail={"code": exc.code, "message": str(exc), "operator_visible": True},
+        )
+    if isinstance(exc, BoardError):
+        return HTTPException(
+            status_code=409,
+            detail={"code": getattr(exc, "code", "repair_board_recovery_blocked"), "operator_visible": True},
+        )
+    if isinstance(exc, (DurableJobError, DurableJobTransitionError, ValueError)):
+        return HTTPException(
+            status_code=409,
+            detail={"code": "repair_recovery_blocked", "reason": str(exc)[:256], "operator_visible": True},
+        )
+    return HTTPException(
+        status_code=503,
+        detail={"code": "repair_storage_unavailable", "operator_visible": True},
+    )
+
+
+async def _owned_repo_repair_job(
+    job_id: str,
+    operator: AuthenticatedOperator,
+) -> tuple[str, dict[str, Any]]:
+    safe_job_id = _safe_board_job_reference(job_id)
+    if not safe_job_id:
+        raise HTTPException(status_code=404, detail={"code": "repo_repair_job_not_found"})
+    job = await durable_job_repository.get_job(safe_job_id)
+    if job is None or str(job.get("job_kind") or "") != "engineering.repo-repair.v1":
+        raise HTTPException(status_code=404, detail={"code": "repo_repair_job_not_found"})
+    owner = job.get("owner") if isinstance(job.get("owner"), Mapping) else {}
+    authority = job.get("declared_authority") if isinstance(job.get("declared_authority"), Mapping) else {}
+    if str(owner.get("principal_id") or "") != str(operator.principal.principal_id):
+        raise HTTPException(status_code=403, detail={"code": "repo_repair_owner_mismatch"})
+    if str(job.get("session_id") or job.get("operator_session_id") or authority.get("session_id") or "") != str(operator.session_id):
+        raise HTTPException(status_code=403, detail={"code": "repo_repair_session_mismatch"})
+    return safe_job_id, job
+
+
+async def _repo_repair_rows(
+    job_id: str,
+    operator: AuthenticatedOperator,
+) -> tuple[RepoRepairSourcePacketRow | None, RepoRepairEgressConsentRow | None, RepoRepairProposalRow | None]:
+    async with get_session() as db:
+        packet = (
+            await db.execute(
+                select(RepoRepairSourcePacketRow)
+                .where(
+                    RepoRepairSourcePacketRow.workflow_run_id == job_id,
+                    RepoRepairSourcePacketRow.owner_principal_id == str(operator.principal.principal_id),
+                    RepoRepairSourcePacketRow.owner_session_id == str(operator.session_id),
+                )
+                .order_by(RepoRepairSourcePacketRow.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        consent = (
+            await db.execute(
+                select(RepoRepairEgressConsentRow)
+                .where(
+                    RepoRepairEgressConsentRow.workflow_run_id == job_id,
+                    RepoRepairEgressConsentRow.owner_principal_id == str(operator.principal.principal_id),
+                    RepoRepairEgressConsentRow.owner_session_id == str(operator.session_id),
+                )
+                .order_by(RepoRepairEgressConsentRow.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        proposal = (
+            await db.execute(
+                select(RepoRepairProposalRow)
+                .where(
+                    RepoRepairProposalRow.workflow_run_id == job_id,
+                    RepoRepairProposalRow.owner_principal_id == str(operator.principal.principal_id),
+                    RepoRepairProposalRow.owner_session_id == str(operator.session_id),
+                )
+                .order_by(RepoRepairProposalRow.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        for row in (packet, consent, proposal):
+            if row is not None:
+                db.expunge(row)
+        return packet, consent, proposal
+
+
+def _repo_repair_route_metadata() -> tuple[str | None, str | None]:
+    """Read the effective governed route without contacting a provider."""
+
+    try:
+        from src.llm_runtime import build_model_kwargs
+
+        kwargs = build_model_kwargs(
+            temperature=0.2,
+            max_tokens=4096,
+            runtime_path="strategist_agent",
+        )
+        profile = str(kwargs.get("runtime_profile") or "").strip() or None
+        base = str(kwargs.get("api_base") or "").strip().rstrip("/")
+        upstream = "openrouter" if "openrouter.ai/api/v1" in base else (base or None)
+        return profile, upstream
+    except Exception:
+        return None, None
+
+
+async def _resume_repo_repair_board_attempt(
+    job_id: str,
+    operator: AuthenticatedOperator,
+) -> None:
+    """Reacquire the same suspended WorkBoard attempt under its next fence."""
+
+    async with get_session() as db:
+        task = (
+            await db.execute(
+                select(WorkBoardTask).where(
+                    WorkBoardTask.capability_id == "engineering.repo-repair.v1",
+                    WorkBoardTask.owner_principal_id == str(operator.principal.principal_id),
+                    WorkBoardTask.owner_session_id == str(operator.session_id),
+                    WorkBoardTask.status == "blocked",
+                    WorkBoardTask.block_reason.in_(("repo_repair_code_egress_review", "review_repo_repair_proposal")),
+                )
+            )
+        ).scalars().all()
+        candidates: list[tuple[WorkBoardTask, WorkBoardAttempt]] = []
+        for candidate in task:
+            attempt = (
+                await db.execute(
+                    select(WorkBoardAttempt).where(
+                        WorkBoardAttempt.task_id == candidate.task_id,
+                        WorkBoardAttempt.workflow_run_id == job_id,
+                        WorkBoardAttempt.ended_at.is_(None),
+                    )
+                )
+            ).scalar_one_or_none()
+            if attempt is not None:
+                candidates.append((candidate, attempt))
+        if not candidates:
+            raise BoardError("repair_board_attempt_missing", "The repair board attempt is unavailable")
+        candidate, attempt = candidates[0]
+        if attempt.lease_owner is not None or attempt.lease_expires_at is not None:
+            return
+        repository = WorkBoardRepository()
+        await repository.resume_routine_attempt_for_operator_recovery(
+            db,
+            candidate.task_id,
+            attempt.attempt_id,
+            expected_revision=int(candidate.task_revision),
+            previous_fence=int(attempt.fencing_token),
+            next_fence=int(attempt.fencing_token) + 1,
+            lease_owner="service:work-board",
+            lease_seconds=300,
+            workflow_run_id=job_id,
+            actor_principal_id=str(operator.principal.principal_id),
+            actor_session_id=str(operator.session_id),
+            capability_id="engineering.repo-repair.v1",
+        )
+
+
+async def _safe_repo_repair_projection(
+    job_id: str,
+    job: Mapping[str, Any],
+    *,
+    operator: AuthenticatedOperator,
+    packet: RepoRepairSourcePacketRow | None = None,
+    consent: RepoRepairEgressConsentRow | None = None,
+    proposal: RepoRepairProposalRow | None = None,
+) -> dict[str, Any]:
+    authority = job.get("declared_authority") if isinstance(job.get("declared_authority"), Mapping) else {}
+    preflight = None
+    checkpoints = job.get("checkpoints") if isinstance(job.get("checkpoints"), list) else []
+    for item in checkpoints:
+        if isinstance(item, Mapping) and item.get("checkpoint_id") in {"repo-repair-preflight", f"repo-repair-preflight:{job_id}"}:
+            if isinstance(item.get("payload"), Mapping):
+                preflight = dict(item["payload"])
+    approval_id = str(getattr(proposal, "approval_id", None) or authority.get("approval_id") or "") or None
+    status = str(job.get("status") or "blocked")
+    reason = str(job.get("failure_reason") or "")
+    if reason == "repo_repair_code_egress_review":
+        recovery_action = "review_code_egress"
+    elif reason == "review_repo_repair_proposal" or status == "awaiting_approval":
+        recovery_action = "review_repo_repair_proposal"
+    elif status in {"unknown_external_effect", "cost_liability"}:
+        recovery_action = "reconcile_external_effect"
+    elif status == "blocked":
+        recovery_action = "restore_rootless_prerequisite"
+    else:
+        recovery_action = "dispatcher_will_resume_same_root"
+    return {
+        "job_id": job_id,
+        "status": status,
+        "owner_principal_id": str(operator.principal.principal_id),
+        "operator_session_id": str(operator.session_id),
+        "task_id": authority.get("task_id"),
+        "attempt_id": authority.get("attempt_id"),
+        "workflow_run_id": job_id,
+        "goal_id": job.get("goal_id"),
+        "goal_revision": job.get("goal_revision"),
+        "revision": job.get("revision"),
+        "authority_digest": job.get("authority_digest"),
+        "input_digest": job.get("input_digest"),
+        "run_fingerprint": job.get("run_fingerprint"),
+        "capability_id": "engineering.repo-repair.v1",
+        "capability_version": job.get("capability_version"),
+        "limits": authority.get("limits") if isinstance(authority.get("limits"), Mapping) else {},
+        "preflight": preflight,
+        "source_packet": (
+            {
+                "packet_id": packet.id,
+                "state": packet.state,
+                "repository_ref": packet.repository_ref,
+                "base_snapshot_sha256": packet.base_snapshot_digest,
+                "source_manifest_sha256": packet.source_manifest_digest,
+                "artifact_sha256": packet.artifact_sha256,
+                "revision": int(packet.revision),
+            }
+            if packet is not None
+            else None
+        ),
+        "egress": (
+            {
+                "consent_id": consent.id,
+                "revision": int(consent.revision),
+                "runtime_path": consent.runtime_path,
+                "effective_profile_id": consent.effective_profile_id,
+                "effective_upstream": consent.effective_upstream,
+                "maximum_input_bytes": int(consent.maximum_input_bytes),
+                "maximum_output_tokens": int(consent.maximum_output_tokens),
+                "expires_at": _utc_datetime(consent.expires_at).isoformat(),
+                "state": consent.state,
+            }
+            if consent is not None
+            else None
+        ),
+        "proposal": (
+            {
+                "proposal_id": proposal.proposal_id,
+                "status": proposal.status,
+                "revision": int(proposal.revision),
+                "base_snapshot_digest": proposal.base_snapshot_digest,
+                "source_digest": proposal.source_digest,
+                "model_profile_id": proposal.model_profile_id,
+                "patch_sha256": proposal.patch_sha256,
+                "approval_id": proposal.approval_id,
+                "expires_at": _utc_datetime(proposal.expires_at).isoformat(),
+                "safe_metadata": json.loads(proposal.safe_metadata_json or "{}"),
+            }
+            if proposal is not None
+            else None
+        ),
+        "approval_id": approval_id,
+        "memory_status": "no_learning",
+        "recovery_action": recovery_action,
+        "operator_visible": True,
+    }
+
+
+@router.get("/workflows/repo-repair/{job_id}/source-preview")
+async def get_repo_repair_source_preview(job_id: str, request: Request):
+    operator = _require_authenticated_capability_operator(request)
+    safe_job_id, job = await _owned_repo_repair_job(job_id, operator)
+    packet, consent, proposal = await _repo_repair_rows(safe_job_id, operator)
+    if packet is None:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "repair_source_packet_unavailable", "recovery_action": "reconcile_source_packet", "operator_visible": True},
+        )
+    from src.workflows.repo_repair import RepoRepairService
+
+    service = RepoRepairService()
+    packet_projection = service._packet_result(packet)
+    try:
+        raw = service._read_private_artifact(packet_projection.artifact_ref, expected_digest=packet_projection.artifact_sha256)
+        payload = json.loads(raw.decode("utf-8"))
+        if not isinstance(payload, Mapping) or str(payload.get("packet_id")) != str(packet.id):
+            raise ValueError("source packet identity changed")
+        files = payload.get("files")
+        if not isinstance(files, list):
+            raise ValueError("source packet file list is unavailable")
+        selected_files = []
+        for item in files:
+            if not isinstance(item, Mapping):
+                raise ValueError("source packet file metadata is invalid")
+            selected_files.append({
+                "path": str(item.get("path") or ""),
+                "size_bytes": int(item.get("size_bytes") or 0),
+                "sha256": str(item.get("sha256") or ""),
+                "text": str(item.get("text") or ""),
+            })
+    except Exception as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "repair_source_packet_unavailable", "recovery_action": "reconcile_source_packet", "operator_visible": True},
+        ) from exc
+    profile, upstream = _repo_repair_route_metadata()
+    return {
+        "job_id": safe_job_id,
+        "status": job.get("status"),
+        "recovery_action": "review_code_egress" if job.get("status") == "paused" else "review_repo_repair_proposal",
+        "source_packet": {
+            "packet_id": packet.id,
+            "state": packet.state,
+            "repository_ref": packet.repository_ref,
+            "base_snapshot_sha256": packet.base_snapshot_digest,
+            "source_manifest_sha256": packet.source_manifest_digest,
+            "artifact_sha256": packet.artifact_sha256,
+            "selected_files": selected_files,
+            "omissions": [],
+            "revision": int(packet.revision),
+        },
+        "egress": {
+            "runtime_path": "strategist_agent",
+            "effective_profile_id": consent.effective_profile_id if consent is not None else profile,
+            "effective_upstream": consent.effective_upstream if consent is not None else upstream,
+            "maximum_input_bytes": 64 * 1024,
+            "maximum_output_tokens": 4096,
+            "expires_at": consent.expires_at.isoformat() if consent is not None else None,
+        },
+        "provider_contacted": proposal is not None,
+        "operator_visible": True,
+    }
+
+
+@router.post("/workflows/repo-repair/{job_id}/code-egress-consent")
+async def grant_repo_repair_code_egress_consent(
+    job_id: str,
+    req: RepoRepairEgressConsentRequest,
+    request: Request,
+):
+    operator = _require_authenticated_capability_operator(request)
+    safe_job_id, job = await _owned_repo_repair_job(job_id, operator)
+    if req.acknowledged_selected_source is not True:
+        raise HTTPException(status_code=422, detail={"code": "repair_source_acknowledgement_required"})
+    for field_name, value in (
+        ("source_packet_digest", req.source_packet_digest),
+        ("expected_source_manifest_digest", req.expected_source_manifest_digest),
+    ):
+        if value.lower() != value or not _WORKFLOW_SAFE_ARTIFACT_DIGEST_RE.fullmatch(value):
+            raise HTTPException(status_code=422, detail={"code": f"{field_name}_invalid"})
+    try:
+        if int(req.expected_job_revision) != int(job.get("revision") or 0):
+            raise HTTPException(status_code=409, detail={"code": "repair_job_revision_stale", "recovery_action": "refresh_repair_status"})
+        if str(job.get("status") or "") not in {"paused", "queued", "running"}:
+            raise HTTPException(status_code=409, detail={"code": "repair_consent_state_invalid", "recovery_action": "refresh_repair_status"})
+        packet, existing_consent, _proposal = await _repo_repair_rows(safe_job_id, operator)
+        if packet is None:
+            raise HTTPException(status_code=409, detail={"code": "repair_source_packet_unavailable", "recovery_action": "reconcile_source_packet"})
+        if req.source_packet_digest != str(packet.artifact_sha256) or req.expected_source_manifest_digest != str(packet.source_manifest_digest):
+            raise HTTPException(status_code=409, detail={"code": "repair_source_packet_binding_changed", "recovery_action": "refresh_source_preview"})
+        from src.llm_runtime import build_model_kwargs
+        from src.workflows.repo_repair import (
+            REPO_REPAIR_MAX_CONSENT_TTL,
+            RepoRepairService,
+        )
+
+        route = build_model_kwargs(
+            temperature=0.2,
+            max_tokens=4096,
+            runtime_path="strategist_agent",
+            profile=req.expected_profile_id,
+        )
+        observed_profile = str(route.get("runtime_profile") or "").strip()
+        base = str(route.get("api_base") or "").strip().rstrip("/")
+        observed_upstream = "openrouter" if "openrouter.ai/api/v1" in base else base
+        if observed_profile != req.expected_profile_id or observed_upstream != "openrouter":
+            raise HTTPException(status_code=409, detail={"code": "repair_model_route_blocked", "recovery_action": "restore_openrouter_route"})
+        authority = job.get("declared_authority") if isinstance(job.get("declared_authority"), Mapping) else {}
+        task_id = str(authority.get("task_id") or "")
+        attempt_id = str(authority.get("attempt_id") or "")
+        goal_id = str(job.get("goal_id") or authority.get("goal_id") or "")
+        goal_revision = int(job.get("goal_revision") or authority.get("goal_revision") or 0)
+        expires_at = datetime.now(timezone.utc) + REPO_REPAIR_MAX_CONSENT_TTL
+        consent = await RepoRepairService().grant_egress_consent(
+            owner=WorkBoardOwner(principal_id=str(operator.principal.principal_id), session_id=str(operator.session_id)),
+            work_board_task_id=task_id,
+            work_board_attempt_id=attempt_id,
+            workflow_run_id=safe_job_id,
+            packet=RepoRepairService._packet_result(packet),
+            effective_profile_id=observed_profile,
+            effective_upstream=observed_upstream,
+            request_key=req.idempotency_key,
+            expires_at=expires_at,
+        )
+        current = await durable_job_repository.get_job(safe_job_id)
+        if current is None:
+            raise DurableJobError("repair_durable_root_missing")
+        if str(current.get("status") or "") == "paused":
+            current = await durable_job_repository.resume_job(
+                safe_job_id,
+                expected_revision=int(current.get("revision") or 0),
+                reason="repo_repair_code_egress_consented",
+            )
+        elif str(current.get("status") or "") not in {"queued", "running", "awaiting_approval"}:
+            raise DurableJobTransitionError("repair durable root is not resumable after consent")
+        try:
+            await _resume_repo_repair_board_attempt(safe_job_id, operator)
+        except BoardError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "repair_board_resume_required", "recovery_action": "retry_same_consent", "operator_visible": True},
+            ) from exc
+        current = await durable_job_repository.get_job(safe_job_id) or current
+        return {
+            "job_id": safe_job_id,
+            "status": current.get("status"),
+            "consent_id": consent.id,
+            "consent_revision": int(consent.revision),
+            "expires_at": consent.expires_at.isoformat(),
+            "recovery_action": "dispatcher_will_resume_same_root",
+            "operator_visible": True,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _repo_repair_error(exc) from exc
+
+
+@router.post("/workflows/repo-repair/{job_id}/resume")
+async def resume_repo_repair(
+    job_id: str,
+    req: RepoRepairResumeRequest,
+    request: Request,
+):
+    """Consume one exact repair approval and resume the same durable root."""
+
+    operator = _require_authenticated_capability_operator(request)
+    safe_job_id, job = await _owned_repo_repair_job(job_id, operator)
+    packet, consent, proposal = await _repo_repair_rows(safe_job_id, operator)
+    if proposal is None:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "repair_proposal_unavailable", "recovery_action": "refresh_repair_status", "operator_visible": True},
+        )
+    if str(proposal.proposal_id) != str(req.proposal_id) or str(proposal.workflow_run_id) != safe_job_id:
+        raise HTTPException(status_code=409, detail={"code": "repair_proposal_binding_changed", "recovery_action": "refresh_repair_status"})
+    if int(proposal.revision) != int(req.expected_proposal_revision):
+        raise HTTPException(status_code=409, detail={"code": "repair_proposal_revision_stale", "recovery_action": "refresh_repair_status"})
+    if str(proposal.approval_id or "") != str(req.approval_id):
+        raise HTTPException(status_code=409, detail={"code": "repair_approval_binding_changed", "recovery_action": "refresh_repair_status"})
+    if _utc_datetime(proposal.expires_at) <= _utc_datetime(datetime.now(timezone.utc)):
+        raise HTTPException(status_code=409, detail={"code": "repair_proposal_expired", "recovery_action": "create_fresh_repair"})
+    from src.workflows.repo_repair import (
+        REPO_REPAIR_APPROVAL_ACTION,
+        REPO_REPAIR_APPROVAL_TOOL,
+        _repair_approval_fingerprint,
+    )
+
+    approval = await approval_repository.get(req.approval_id)
+    if approval is None:
+        raise HTTPException(status_code=409, detail={"code": "approval_not_current", "recovery_action": "refresh_repair_status"})
+    if (
+        approval.owner_principal_id != str(operator.principal.principal_id)
+        or approval.operator_session_id != str(operator.session_id)
+        or approval.session_id not in {None, str(operator.session_id)}
+        or str(approval.tool_name or "") != REPO_REPAIR_APPROVAL_TOOL
+        or str(approval.action or "") != REPO_REPAIR_APPROVAL_ACTION
+        or approval.expires_at is None
+        or _utc_datetime(approval.expires_at) <= _utc_datetime(datetime.now(timezone.utc))
+        or _utc_datetime(approval.expires_at) > _utc_datetime(proposal.expires_at)
+    ):
+        raise HTTPException(status_code=409, detail={"code": "approval_not_current", "recovery_action": "refresh_repair_status"})
+    expected_fingerprint = _repair_approval_fingerprint(proposal, approval.expires_at)
+    if (
+        not proposal.approval_fingerprint
+        or str(proposal.approval_fingerprint) != expected_fingerprint
+        or str(approval.fingerprint or "") != expected_fingerprint
+    ):
+        raise HTTPException(status_code=409, detail={"code": "approval_not_current", "recovery_action": "refresh_repair_status"})
+
+    current = await durable_job_repository.get_job(safe_job_id)
+    if current is None:
+        raise HTTPException(status_code=404, detail={"code": "repo_repair_job_not_found"})
+    if int(current.get("revision") or 0) != int(req.expected_job_revision):
+        # A completed first request is replayable only when its exact durable
+        # approval receipt carries the same request key.  A caller may not use
+        # a stale revision to select another root or approval.
+        if str(current.get("status") or "") not in {"queued", "running", "succeeded", "failed", "blocked", "unknown_external_effect", "cost_liability"}:
+            raise HTTPException(status_code=409, detail={"code": "repair_job_revision_stale", "recovery_action": "refresh_repair_status"})
+
+    status = str(current.get("status") or "")
+    effects = current.get("effects") if isinstance(current.get("effects"), list) else []
+    resume_effect = next(
+        (
+            item for item in effects
+            if isinstance(item, Mapping)
+            and item.get("kind") == "approval_resume"
+            and str(item.get("approval_id") or "") == str(req.approval_id)
+        ),
+        None,
+    )
+    if status in {"queued", "running", "succeeded", "failed", "blocked", "unknown_external_effect", "cost_liability"}:
+        if not isinstance(resume_effect, Mapping):
+            raise HTTPException(status_code=409, detail={"code": "repair_resume_receipt_missing", "recovery_action": "reconcile_external_effect"})
+        stored_key = str(resume_effect.get("request_idempotency_key") or "")
+        if stored_key != str(req.idempotency_key):
+            raise HTTPException(status_code=409, detail={"code": "repair_resume_idempotency_conflict", "recovery_action": "refresh_repair_status"})
+        packet, consent, proposal = await _repo_repair_rows(safe_job_id, operator)
+        return await _safe_repo_repair_projection(
+            safe_job_id,
+            current,
+            operator=operator,
+            packet=packet,
+            consent=consent,
+            proposal=proposal,
+        )
+    if status != "awaiting_approval":
+        raise HTTPException(status_code=409, detail={"code": "repair_resume_state_invalid", "recovery_action": "refresh_repair_status"})
+    if str(approval.status or "") != "approved":
+        raise HTTPException(status_code=409, detail={"code": "approval_not_current", "recovery_action": "approve_exact_repair_proposal"})
+
+    owner_principal_id = str(operator.principal.principal_id)
+    operator_session_id = str(operator.session_id)
+    durable_owner = current.get("owner") if isinstance(current.get("owner"), Mapping) else {}
+    authority = current.get("declared_authority") if isinstance(current.get("declared_authority"), Mapping) else {}
+    expires_at = _utc_datetime(approval.expires_at).timestamp()
+    receipt = {
+        "status": "approved",
+        "authenticated": True,
+        "operator_principal_id": owner_principal_id,
+        "operator_session_id": operator_session_id,
+        "owner_kind": str(durable_owner.get("kind") or "user"),
+        "owner_principal_id": str(durable_owner.get("principal_id") or owner_principal_id),
+        "service_id": durable_owner.get("service_id"),
+        "approval_id": req.approval_id,
+        "authority_digest": current.get("authority_digest"),
+        "goal_id": current.get("goal_id"),
+        "goal_revision": current.get("goal_revision"),
+        "plan_revision": current.get("plan_revision"),
+        "capability_version": current.get("capability_version"),
+        "budget_microusd": 0,
+        "budget_digest": current.get("budget_digest"),
+        "expires_at": expires_at,
+        "request_idempotency_key": req.idempotency_key,
+    }
+    try:
+        resumed = await durable_job_repository.resume_approved_job(
+            safe_job_id,
+            approval_receipt=receipt,
+            approval_id=req.approval_id,
+            authority_digest=str(current.get("authority_digest") or ""),
+            goal_id=current.get("goal_id"),
+            goal_revision=current.get("goal_revision"),
+            plan_revision=current.get("plan_revision"),
+            capability_version=str(current.get("capability_version") or ""),
+            owner_kind=str(durable_owner.get("kind") or "user"),
+            owner_principal_id=str(durable_owner.get("principal_id") or owner_principal_id),
+            service_id=durable_owner.get("service_id"),
+            budget_microusd=0,
+            budget_digest=str(current.get("budget_digest") or ""),
+            operator_principal_id=owner_principal_id,
+            operator_session_id=operator_session_id,
+            expires_at=expires_at,
+            expected_revision=current.get("revision"),
+        )
+    except (DurableJobError, DurableJobTransitionError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail={"code": "approval_resume_blocked", "reason": str(exc)[:256], "operator_visible": True}) from exc
+
+    async with get_session() as db:
+        persisted = await db.get(RepoRepairProposalRow, req.proposal_id)
+        if persisted is None or persisted.owner_principal_id != owner_principal_id or persisted.owner_session_id != operator_session_id:
+            raise HTTPException(status_code=409, detail={"code": "repair_proposal_binding_changed"})
+        if int(persisted.revision) != int(req.expected_proposal_revision):
+            raise HTTPException(status_code=409, detail={"code": "repair_proposal_revision_stale"})
+        if persisted.status == "awaiting_approval":
+            persisted.status = "approved"
+            persisted.revision = int(persisted.revision) + 1
+            await db.flush()
+
+    try:
+        await _resume_repo_repair_board_attempt(safe_job_id, operator)
+    except BoardError as exc:
+        raise HTTPException(status_code=503, detail={"code": "repair_board_resume_required", "recovery_action": "retry_same_resume", "operator_visible": True}) from exc
+    latest = await durable_job_repository.get_job(safe_job_id) or resumed
+    packet, consent, proposal = await _repo_repair_rows(safe_job_id, operator)
+    return await _safe_repo_repair_projection(
+        safe_job_id,
+        latest,
+        operator=operator,
+        packet=packet,
+        consent=consent,
+        proposal=proposal,
+    )
+
+
+@router.get("/workflows/repo-repair/{job_id}")
+async def get_repo_repair(job_id: str, request: Request):
+    operator = _require_authenticated_capability_operator(request)
+    safe_job_id, job = await _owned_repo_repair_job(job_id, operator)
+    packet, consent, proposal = await _repo_repair_rows(safe_job_id, operator)
+    return await _safe_repo_repair_projection(
+        safe_job_id,
+        job,
+        operator=operator,
+        packet=packet,
+        consent=consent,
+        proposal=proposal,
+    )
 
 
 @router.post("/workflows/repo-change/preview")

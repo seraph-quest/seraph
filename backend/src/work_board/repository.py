@@ -3231,6 +3231,7 @@ class WorkBoardRepository:
         reason: str,
         actor_principal_id: str,
         actor_session_id: str,
+        capability_id: str = "guardian-routine.v1",
         now: datetime | None = None,
     ) -> BoardAttemptProjection:
         """Project a routine's explicit human wait as Blocked and release its lease.
@@ -3247,15 +3248,17 @@ class WorkBoardRepository:
             "awaiting_publication_approval",
             "external_mutation_grant_required",
         }
+        if capability_id == "engineering.repo-repair.v1":
+            safe_reasons = {"repo_repair_code_egress_review", "review_repo_repair_proposal"}
         if reason not in safe_reasons:
-            raise BoardError("routine_wait_reason_invalid", "The routine wait reason is not an operator recovery state")
+            raise BoardError("routine_wait_reason_invalid", "The governed wait reason is not an operator recovery state")
         observed_at = now or _now()
         await _begin_sqlite_immediate(db)
         task = await self._find_task(db, task_id)
         if task is None:
             raise BoardNotFound(task_id)
-        if task.capability_id != "guardian-routine.v1":
-            raise BoardError("routine_wait_not_supported", "Only governed routine attempts can pause for publication review")
+        if task.capability_id != capability_id:
+            raise BoardError("routine_wait_not_supported", "The capability does not support this operator wait")
         if task.task_revision != int(expected_revision):
             raise BoardRevisionConflict(task.task_id, int(expected_revision), task.task_revision)
         if task.status not in {WorkBoardStatus.running, WorkBoardStatus.blocked}:
@@ -3344,6 +3347,7 @@ class WorkBoardRepository:
         workflow_run_id: str,
         actor_principal_id: str,
         actor_session_id: str,
+        capability_id: str = "guardian-routine.v1",
         now: datetime | None = None,
     ) -> BoardAttemptProjection:
         """Reacquire the same suspended routine attempt after approval."""
@@ -3355,16 +3359,19 @@ class WorkBoardRepository:
         task = await self._find_task(db, task_id)
         if task is None:
             raise BoardNotFound(task_id)
-        if task.capability_id != "guardian-routine.v1":
-            raise BoardError("routine_wait_not_supported", "Only a governed routine can resume through publication recovery")
+        if task.capability_id != capability_id:
+            raise BoardError("routine_wait_not_supported", "The capability does not support this operator recovery")
         if task.status is not WorkBoardStatus.blocked or task.task_revision != int(expected_revision):
             raise BoardError("stale_revision", "The blocked routine card changed before recovery")
-        if task.block_reason not in {
+        allowed_reasons = {
             "awaiting_approval",
             "awaiting_publication_preview",
             "awaiting_publication_approval",
             "external_mutation_grant_required",
-        }:
+        }
+        if capability_id == "engineering.repo-repair.v1":
+            allowed_reasons = {"repo_repair_code_egress_review", "review_repo_repair_proposal"}
+        if task.block_reason not in allowed_reasons:
             raise BoardError("task_not_recoverable", "The routine card is not waiting for publication review")
         attempt = (
             await db.execute(

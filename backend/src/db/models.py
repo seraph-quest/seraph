@@ -1060,6 +1060,169 @@ class WorkBoardInputArtifact(SQLModel, table=True):
     metadata_digest: Optional[str] = Field(default=None, index=True)
 
 
+class RepoRepairSourcePacket(SQLModel, table=True):
+    """Immutable, owner-bound source evidence for one repository repair.
+
+    The selected source text lives in the private workspace artifact named by
+    ``artifact_id``.  This row is deliberately a metadata/provenance index;
+    generic board projections must never copy its source text.
+    """
+
+    __tablename__ = "repo_repair_source_packets"
+    __table_args__ = (
+        Index(
+            "ux_repo_repair_source_packets_job_input",
+            "workflow_run_id",
+            "input_digest",
+            unique=True,
+        ),
+        Index(
+            "ix_repo_repair_source_packets_owner_state",
+            "owner_principal_id",
+            "owner_session_id",
+            "state",
+            "created_at",
+        ),
+    )
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_principal_id: str = Field(index=True)
+    owner_session_id: str = Field(index=True)
+    work_board_task_id: str = Field(index=True)
+    work_board_attempt_id: str = Field(index=True)
+    workflow_run_id: str = Field(index=True)
+    goal_id: str = Field(index=True)
+    goal_revision: int = Field(default=1, index=True)
+    input_digest: str = Field(default="", index=True, max_length=128)
+    repository_ref: str = Field(default="", index=True, max_length=512)
+    base_snapshot_digest: str = Field(default="", index=True, max_length=128)
+    source_manifest_digest: str = Field(default="", index=True, max_length=128)
+    artifact_id: str = Field(default="", index=True, unique=True, max_length=256)
+    artifact_sha256: str = Field(default="", index=True, max_length=128)
+    manifest_json: str = Field(default="{}")
+    state: str = Field(default="inspected", index=True)
+    revision: int = Field(default=1, index=True)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+
+    @property
+    def source_packet_id(self) -> str:
+        """Compatibility alias used by the repair service and API DTOs."""
+
+        return self.id
+
+
+class RepoRepairProposal(SQLModel, table=True):
+    """Immutable model patch proposal awaiting a separate operator approval."""
+
+    __tablename__ = "repo_repair_proposals"
+    __table_args__ = (
+        Index(
+            "ux_repo_repair_proposals_owner_operation",
+            "owner_principal_id",
+            "owner_session_id",
+            "workflow_run_id",
+            "operation_key",
+            unique=True,
+        ),
+        Index(
+            "ix_repo_repair_proposals_owner_status",
+            "owner_principal_id",
+            "owner_session_id",
+            "status",
+            "expires_at",
+        ),
+    )
+
+    proposal_id: str = Field(default_factory=_uuid, primary_key=True)
+    operation_key: str = Field(default="", index=True, max_length=256)
+    owner_principal_id: str = Field(index=True)
+    owner_session_id: str = Field(index=True)
+    work_board_task_id: str = Field(index=True)
+    work_board_attempt_id: str = Field(index=True)
+    workflow_run_id: str = Field(index=True)
+    goal_id: str = Field(index=True)
+    goal_revision: int = Field(default=1, index=True)
+    repository_ref: str = Field(default="", index=True, max_length=512)
+    base_snapshot_digest: str = Field(default="", index=True, max_length=128)
+    source_packet_id: str = Field(default="", index=True, max_length=256)
+    source_digest: str = Field(default="", index=True, max_length=128)
+    model_runtime_path: str = Field(default="strategist_agent", index=True)
+    model_profile_id: str = Field(default="", index=True, max_length=256)
+    model_request_digest: str = Field(default="", index=True, max_length=128)
+    model_output_digest: str = Field(default="", index=True, max_length=128)
+    model_response_artifact_id: Optional[str] = Field(default=None, index=True, max_length=256)
+    model_response_artifact_sha256: Optional[str] = Field(default=None, index=True, max_length=128)
+    patch_artifact_id: str = Field(default="", index=True, max_length=256)
+    patch_sha256: str = Field(default="", index=True, max_length=128)
+    allowed_paths_json: str = Field(default="[]")
+    test_args_json: str = Field(default="[]")
+    request_digest: str = Field(default="", index=True, max_length=128)
+    authority_digest: str = Field(default="", index=True, max_length=128)
+    approval_id: Optional[str] = Field(default=None, index=True, max_length=256)
+    approval_fingerprint: Optional[str] = Field(default=None, index=True, max_length=128)
+    last_receipt_id: Optional[str] = Field(default=None, index=True, max_length=256)
+    status: str = Field(default="prepared", index=True)
+    safe_metadata_json: str = Field(default="{}")
+    expires_at: datetime = Field(index=True)
+    revision: int = Field(default=1, index=True)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+
+
+class RepoRepairEgressConsent(SQLModel, table=True):
+    """Explicit, finite consent to send one inspected source packet remotely."""
+
+    __tablename__ = "repo_repair_egress_consents"
+    __table_args__ = (
+        Index(
+            "ux_repo_repair_egress_consents_owner_request",
+            "owner_principal_id",
+            "owner_session_id",
+            "request_key",
+            unique=True,
+        ),
+        Index(
+            "ix_repo_repair_egress_consents_job_state",
+            "workflow_run_id",
+            "state",
+            "expires_at",
+        ),
+    )
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_principal_id: str = Field(index=True)
+    owner_session_id: str = Field(index=True)
+    work_board_task_id: str = Field(index=True)
+    work_board_attempt_id: str = Field(index=True)
+    workflow_run_id: str = Field(index=True)
+    source_packet_id: str = Field(index=True, max_length=256)
+    source_digest: str = Field(default="", index=True, max_length=128)
+    source_manifest_digest: str = Field(default="", index=True, max_length=128)
+    goal_id: str = Field(index=True)
+    goal_revision: int = Field(default=1, index=True)
+    input_digest: str = Field(default="", index=True, max_length=128)
+    runtime_path: str = Field(default="strategist_agent", index=True)
+    effective_profile_id: str = Field(default="", index=True, max_length=256)
+    effective_upstream: str = Field(default="", index=True, max_length=256)
+    maximum_input_bytes: int = Field(default=64 * 1024)
+    maximum_output_tokens: int = Field(default=4096)
+    expires_at: datetime = Field(index=True)
+    state: str = Field(default="active", index=True)
+    revision: int = Field(default=1, index=True)
+    consent_digest: str = Field(default="", index=True, max_length=128)
+    request_key: str = Field(default="", index=True, max_length=256)
+    request_digest: str = Field(default="", index=True, max_length=128)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+
+    @property
+    def consent_id(self) -> str:
+        """Compatibility alias for the API-facing opaque consent identity."""
+
+        return self.id
+
+
 class WorkBoardAttempt(SQLModel, table=True):
     """Historical execution attempt linked to at most one durable run."""
 

@@ -1477,6 +1477,11 @@ def _validate_approval_resume_receipt(
     ):
         raise DurableJobTransitionError("approval resume owner binding is stale")
     approval_id = _bounded_identifier(raw.get("approval_id"), field_name="approval_id")
+    request_idempotency_key = _bounded_identifier(
+        raw.get("request_idempotency_key"),
+        field_name="request_idempotency_key",
+        limit=160,
+    ) if raw.get("request_idempotency_key") is not None else None
     authority = _json_load(getattr(run, "declared_authority_json", None), {})
     expected_approval_id = _authority_approval_id(authority)
     if not approval_id or not expected_approval_id or approval_id != expected_approval_id:
@@ -1548,6 +1553,7 @@ def _validate_approval_resume_receipt(
         "budget_microusd": expected_budget,
         "budget_digest": expected_budget_digest,
         "expires_at": expires_at,
+        "request_idempotency_key": request_idempotency_key,
         "recorded_at": now.isoformat(),
     }
 

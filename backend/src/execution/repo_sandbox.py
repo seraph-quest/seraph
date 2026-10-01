@@ -29,6 +29,58 @@ PROFILE = "repo-python-pytest-v1"
 IMAGE_DIGEST_RE = r"^[^@/\s]+(?:/[^@\s]+)+@sha256:[0-9a-f]{64}$"
 DEFAULT_TIMEOUT_SECONDS = 30
 MAX_NAME_BYTES = 96
+REQUIRED_RESOURCE_CONTROLLERS = ("cpu", "memory", "pids")
+RESOURCE_CONTROLLER_CAPABILITIES = {
+    "cpu": ("CpuCfsQuota", "CpuCfsPeriod"),
+    "memory": ("MemoryLimit", "SwapLimit"),
+    "pids": ("PidsLimit",),
+}
+
+
+def _resource_controller_snapshot(info: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the sanitized typed resource evidence from ``docker info``.
+
+    These are the documented Docker ``types.SystemInfo`` capability fields.
+    A caller-supplied HostConfig or an ad-hoc controller-list field is not
+    accepted as enforcement evidence.
+    """
+
+    version = str(info.get("CgroupVersion") or info.get("cgroup_version") or "").strip()
+    driver = str(info.get("CgroupDriver") or info.get("cgroup_driver") or "").strip().lower()
+    daemon_reported = {
+        field: info.get(field) if type(info.get(field)) is bool else None
+        for fields in RESOURCE_CONTROLLER_CAPABILITIES.values()
+        for field in fields
+    }
+    warnings = info.get("Warnings") or info.get("warnings") or []
+    if isinstance(warnings, str):
+        warnings = [warnings]
+    normalized_warnings = tuple(
+        str(item).strip()
+        for item in warnings
+        if isinstance(item, str) and item.strip()
+    ) if isinstance(warnings, (list, tuple, set, frozenset)) else ()
+    return {
+        "cgroup_version": version or None,
+        "cgroup_driver": driver or None,
+        "daemon_reported": daemon_reported,
+        "support_confirmed": all(value is True for value in daemon_reported.values()),
+        "daemon_warnings": list(normalized_warnings),
+    }
+
+
+def _missing_resource_controller(snapshot: Mapping[str, Any]) -> str | None:
+    """Return the first required controller that is unavailable or unknown."""
+
+    if snapshot.get("cgroup_version") != "2" or snapshot.get("cgroup_driver") != "systemd":
+        return REQUIRED_RESOURCE_CONTROLLERS[0]
+    daemon_reported = snapshot.get("daemon_reported")
+    if not isinstance(daemon_reported, Mapping):
+        return REQUIRED_RESOURCE_CONTROLLERS[0]
+    for controller in REQUIRED_RESOURCE_CONTROLLERS:
+        if any(daemon_reported.get(field) is not True for field in RESOURCE_CONTROLLER_CAPABILITIES[controller]):
+            return controller
+    return None
 
 
 class RepoSandboxError(RuntimeError):
@@ -235,6 +287,10 @@ class RepoSandboxPreflight:
             "reason": self.reason,
             "rootless": self.info.get("rootless"),
             "image_digest": self.image.get("digest"),
+            "cgroup_version": self.info.get("cgroup_version"),
+            "cgroup_driver": self.info.get("cgroup_driver"),
+            "daemon_reported": dict(self.info.get("daemon_reported") or {}),
+            "support_confirmed": self.info.get("support_confirmed") is True,
             "operator_visible": True,
         }
 
@@ -1090,20 +1146,35 @@ class RootlessDockerRepoSandbox:
         )
         if str(info.get("OSType") or "").lower() != "linux" or not rootless:
             return RepoSandboxPreflight(False, "blocked", "docker_daemon_is_not_rootless_linux", info={"rootless": rootless, **info})
+        resource_snapshot = _resource_controller_snapshot(info)
+        missing_controller = _missing_resource_controller(resource_snapshot)
+        resource_info = {"rootless": True, **resource_snapshot}
+        if missing_controller is not None:
+            return RepoSandboxPreflight(
+                False,
+                "blocked",
+                f"resource_controller_unavailable:{missing_controller}",
+                info=resource_info,
+            )
         try:
             code, stdout, stderr = self._run_docker(["image", "inspect", "--format", "{{json .}}", image])
         except RepoSandboxError as exc:
-            return RepoSandboxPreflight(False, "blocked", f"pinned_image_unavailable:{exc}", info={"rootless": True})
+            return RepoSandboxPreflight(False, "blocked", f"pinned_image_unavailable:{exc}", info=resource_info)
         if code != 0:
-            return RepoSandboxPreflight(False, "blocked", "pinned_image_unavailable", info={"rootless": True})
+            return RepoSandboxPreflight(False, "blocked", "pinned_image_unavailable", info=resource_info)
         try:
             image_info = self._json_output(stdout, operation="image inspect")
         except RepoSandboxError as exc:
-            return RepoSandboxPreflight(False, "blocked", str(exc), info={"rootless": True})
+            return RepoSandboxPreflight(False, "blocked", str(exc), info=resource_info)
         repo_digests = image_info.get("RepoDigests") or []
         if image not in repo_digests and str(image_info.get("Id") or "") != f"sha256:{image.rsplit(':', 1)[-1]}":
-            return RepoSandboxPreflight(False, "blocked", "pinned_image_digest_mismatch", info={"rootless": True}, image=image_info)
-        return RepoSandboxPreflight(True, "ready", info={"rootless": True, "server_rootless": True}, image={"digest": image, **image_info})
+            return RepoSandboxPreflight(False, "blocked", "pinned_image_digest_mismatch", info=resource_info, image=image_info)
+        return RepoSandboxPreflight(
+            True,
+            "ready",
+            info={"server_rootless": True, **resource_info},
+            image={"digest": image, **image_info},
+        )
 
     def _profile_args(self, *, name: str, input_volume: str, input_readonly: bool) -> list[str]:
         if len(name.encode("utf-8")) > MAX_NAME_BYTES or not name.replace("-", "").replace("_", "").isalnum():

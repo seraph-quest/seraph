@@ -501,6 +501,7 @@ class ApprovalRepository:
         summary: str,
         fingerprint: str,
         details: dict[str, Any] | None = None,
+        request_id: str | None = None,
     ) -> ApprovalRequest:
         details = dict(details or {})
         canonical_session_id = str(session_id or "").strip() or None
@@ -613,28 +614,36 @@ class ApprovalRepository:
                     .values(status="expired", resolved_at=pending_now)
                 )
 
-            request = ApprovalRequest(
-                session_id=canonical_session_id,
-                conversation_id=identity.conversation_id or None,
-                thread_id=identity.thread_id or None,
-                owner_principal_id=supplied_owner,
-                operator_session_id=supplied_operator_session,
-                device_id=identity.device_id,
-                channel=identity.channel,
-                transport=identity.transport,
-                correlation_id=identity.correlation_id,
-                causation_id=identity.causation_id,
-                attachment_refs_json=json.dumps(safe_attachment_refs, sort_keys=True),
-                challenge=(str(details.get("challenge") or "").strip() or None),
-                action=(str(details.get("action") or "").strip() or None),
-                expires_at=pending_expires_at,
-                tool_name=tool_name,
-                risk_level=risk_level,
-                status="pending",
-                fingerprint=fingerprint,
-                summary=summary,
-                details_json=json.dumps(details) if details else None,
-            )
+            safe_request_id = str(request_id or "").strip() or None
+            if safe_request_id is not None and (
+                len(safe_request_id) > 256 or any(ord(character) < 32 for character in safe_request_id)
+            ):
+                raise ValueError("request_id is not a bounded approval identity")
+            request_fields = {
+                "session_id": canonical_session_id,
+                "conversation_id": identity.conversation_id or None,
+                "thread_id": identity.thread_id or None,
+                "owner_principal_id": supplied_owner,
+                "operator_session_id": supplied_operator_session,
+                "device_id": identity.device_id,
+                "channel": identity.channel,
+                "transport": identity.transport,
+                "correlation_id": identity.correlation_id,
+                "causation_id": identity.causation_id,
+                "attachment_refs_json": json.dumps(safe_attachment_refs, sort_keys=True),
+                "challenge": (str(details.get("challenge") or "").strip() or None),
+                "action": (str(details.get("action") or "").strip() or None),
+                "expires_at": pending_expires_at,
+                "tool_name": tool_name,
+                "risk_level": risk_level,
+                "status": "pending",
+                "fingerprint": fingerprint,
+                "summary": summary,
+                "details_json": json.dumps(details) if details else None,
+            }
+            if safe_request_id is not None:
+                request_fields["id"] = safe_request_id
+            request = ApprovalRequest(**request_fields)
             # The row id is part of the durable approval binding.  Persist it
             # in the server-owned details so a later resume can compare the
             # selected row with the job authority instead of trusting a

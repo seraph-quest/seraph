@@ -24,7 +24,7 @@ import uuid
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import func, select
 
-from src.approval.repository import approval_repository
+from src.approval.repository import approval_repository, fingerprint_tool_call
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.artifacts.registry import artifact_id_for
 from src.auth.service import AuthFailure, authenticate_session
@@ -67,6 +67,7 @@ from src.workflows.job_runtime import (
     DurableJobError,
     DurableJobIdempotencyConflict,
     DurableJobIdentity,
+    DurableJobLeaseError,
     DurableJobSpec,
     UNCERTAIN_EXTERNAL_EFFECT_STATUSES,
     durable_job_repository,
@@ -314,6 +315,15 @@ def _typed_input_model(capability_id: str) -> type[BaseModel] | None:
         except (ImportError, ModuleNotFoundError):
             return None
         return BrowserTaskInput
+    if capability_id == "engineering.repo-repair.v1":
+        # The repair workflow owns its strict intent model.  Resolve it lazily
+        # so the workflow module can import the board contracts without a
+        # dispatcher import cycle during application startup.
+        try:
+            from src.workflows.repo_repair import RepoRepairInput
+        except (ImportError, ModuleNotFoundError):
+            return None
+        return RepoRepairInput
     return None
 
 
@@ -329,6 +339,12 @@ REGISTERED_CAPABILITIES: dict[str, CapabilitySpec] = {
     "engineering.repo-change.v1": CapabilitySpec(
         "engineering.repo-change.v1",
         "1",
+    ),
+    "engineering.repo-repair.v1": CapabilitySpec(
+        "engineering.repo-repair.v1",
+        "1",
+        input_category="task",
+        secret_like=False,
     ),
     "work.github-followthrough.v1": CapabilitySpec(
         "work.github-followthrough.v1",
@@ -2356,6 +2372,26 @@ class WorkBoardDispatcher:
                 if int(watch.get("plan_revision") or 0) != int(inputs["expected_watch_revision"]):
                     return "watch_plan_revision_stale", "The procedure source watch revision changed"
                 return None, None
+
+            if capability == "engineering.repo-repair.v1":
+                # Repository repair is an optional execution capability.  Its
+                # provider-free gate must be visible during the public board
+                # admission pass, before a claim or durable root is created.
+                # The service performs the same preflight again after claim;
+                # this check only proves that the configured rootless profile
+                # can be admitted on this host.
+                from src.execution.repo_sandbox import RootlessDockerRepoSandbox
+
+                budget = deserialize_admission_budget(goal)
+                if budget is None or not bool(getattr(budget, "reviewed_grant", False)):
+                    return "goal_budget_not_reviewed", "Repository repair requires a reviewed finite goal budget"
+                preflight = RootlessDockerRepoSandbox().preflight()
+                if not preflight.ok:
+                    return (
+                        _stable_reason_code(_text(preflight.reason), fallback="isolation_unavailable"),
+                        "The repository isolation profile is not currently available",
+                    )
+                return None, None
         except AuthFailure as exc:
             return exc.code, "The current capability authority is not valid"
         except Exception as exc:
@@ -3322,19 +3358,34 @@ class WorkBoardDispatcher:
                 # The adapter has only admitted/prepared its canonical root.
                 # The immutable board link is now durable, so the second
                 # phase may enter the capability's existing execution path.
-                if _text(task.capability_id) == "calendar.meeting-prep.v1":
+                if _text(task.capability_id) in {
+                    "calendar.meeting-prep.v1",
+                    "engineering.repo-repair.v1",
+                }:
                     # Calendar is the first user-owned direct adapter.  Its
                     # root must explicitly cross the durable queue and claim
                     # boundaries before any provider/model contact.
                     queued = await self.jobs.queue_job(
                         job_id,
                         expected_revision=int(projection.get("revision") or 0),
-                        reason="calendar_board_linked",
+                        reason=(
+                            "calendar_board_linked"
+                            if _text(task.capability_id) == "calendar.meeting-prep.v1"
+                            else "repo_repair_board_linked"
+                        ),
                     )
                     projection = await self.jobs.claim_job(
                         job_id,
                         owner=self.runner_id,
-                        lease_seconds=max(1, min(int(runtime_seconds), 180)),
+                        lease_seconds=max(
+                            1,
+                            min(
+                                int(runtime_seconds),
+                                180
+                                if _text(task.capability_id) == "calendar.meeting-prep.v1"
+                                else MAX_RUNTIME_SECONDS,
+                            ),
+                        ),
                         expected_state="queued",
                         expected_revision=int(queued.get("revision") or 0),
                         expected_fencing_token=int(queued.get("fencing_token") or 0),
@@ -3392,6 +3443,24 @@ class WorkBoardDispatcher:
                     reason=safe_status,
                 )
                 result[safe_status] = True
+                return result
+            if _text(task.capability_id) == "engineering.repo-repair.v1" and safe_status == "paused":
+                await self._pause_repo_repair_for_operator(
+                    task,
+                    attempt,
+                    projection,
+                    reason=_text(adapter_result.get("reason_code")) or "repo_repair_code_egress_review",
+                )
+                result["paused"] = True
+                return result
+            if _text(task.capability_id) == "engineering.repo-repair.v1" and safe_status == "awaiting_approval":
+                await self._pause_repo_repair_for_operator(
+                    task,
+                    attempt,
+                    projection,
+                    reason="review_repo_repair_proposal",
+                )
+                result["awaiting_approval"] = True
                 return result
             # GitHub prepare creates the exact durable approval job but must
             # not publish while the operator is still deciding. Keep the
@@ -3706,6 +3775,325 @@ class WorkBoardDispatcher:
                 **handoff_kwargs,
                 admit_only=admission_only,
             )
+        if capability_id == "engineering.repo-repair.v1":
+            from src.execution.repo_sandbox import RootlessDockerRepoSandbox
+            from src.workflows.repo_repair import RepoRepairService
+            from src.workflows.job_runtime import _digest as _durable_digest
+
+            job_id, owner_principal, job_kind, service_id, binding_key = self._direct_job_identity(
+                task,
+                attempt,
+                inputs,
+            )
+            input_digest = self._direct_input_digest(task, attempt, inputs)
+            # Keep the declared authority and the board's independently
+            # reconstructed digest on one server-owned schema.  The execution
+            # deadline remains the requested finite runtime; ``limits`` is the
+            # capability's immutable hard cap and therefore does not change
+            # when a caller re-enters the same admission binding.
+            authority = self._repo_repair_authority_payload(
+                task,
+                attempt,
+                input_digest=input_digest,
+            )
+            canonical_inputs = {
+                "schema_version": 1,
+                "capability_id": capability_id,
+                "input": dict(inputs),
+            }
+            if admission_only:
+                spec = DurableJobSpec(
+                    identity=DurableJobIdentity(
+                        job_id=job_id,
+                        owner_kind="user",
+                        owner_principal_id=owner_principal,
+                        job_kind=job_kind,
+                        capability_version="1",
+                        idempotency_scope="work-board-attempt",
+                        idempotency_key=binding_key,
+                    ),
+                    inputs=canonical_inputs,
+                    session_id=task.owner_session_id,
+                    conversation_id=task.owner_session_id,
+                    operator_session_id=task.owner_session_id,
+                    goal_id=task.goal_id,
+                    goal_revision=int(task.goal_revision),
+                    priority=int(task.priority),
+                    resource_claims=("remote-inference",),
+                    declared_authority=authority,
+                    deadline_at=self.now() + timedelta(seconds=max(1, min(int(runtime_seconds), MAX_RUNTIME_SECONDS))),
+                    max_attempts=1,
+                    service_id=service_id,
+                    run_fingerprint=input_digest,
+                    budget_microusd=0,
+                    budget_digest=_durable_digest({"budget_microusd": 0}),
+                )
+                admitted = await self.jobs.admit_job(spec)
+                admitted_job = _text(admitted.get("job_id") or admitted.get("run_identity")) or job_id
+                if admitted_job != job_id:
+                    raise DurableJobIdempotencyConflict("Repository repair admission returned a different durable root")
+                if (
+                    _text(admitted.get("input_digest")) != input_digest
+                    or _text(admitted.get("run_fingerprint")) != input_digest
+                    or _text(admitted.get("authority_digest")) != _safe_digest(authority)
+                ):
+                    raise DurableJobIdempotencyConflict("Repository repair durable input or authority digest is inconsistent")
+                return {
+                    "job_id": job_id,
+                    "status": _status(admitted) or "accepted",
+                    "input_digest": input_digest,
+                    "authority_digest": _safe_digest(authority),
+                    "run_fingerprint": input_digest,
+                    "admission_only": True,
+                    **({"job": admitted} if isinstance(admitted, Mapping) else {}),
+                }
+
+            projection = await self.jobs.get_job(job_id)
+            if not isinstance(projection, Mapping) or _status(projection) != "running":
+                return {
+                    "job_id": job_id,
+                    "status": _status(projection) or "blocked",
+                    "reason_code": "repair_durable_job_not_running",
+                    "recovery_action": "reconcile_admission_binding",
+                    "admission_only": False,
+                }
+            sandbox = RootlessDockerRepoSandbox()
+            preflight = sandbox.preflight()
+            lease = projection.get("lease") if isinstance(projection.get("lease"), Mapping) else {}
+            lease_owner = _text(lease.get("owner"))
+            fencing_token = int(lease.get("fencing_token") or 0)
+            if not lease_owner or fencing_token <= 0:
+                raise DurableJobError("repair_durable_lease_missing")
+            preflight_receipt = preflight.as_receipt()
+            try:
+                await self.jobs.record_checkpoint(
+                    job_id,
+                    checkpoint_id="repo-repair-preflight",
+                    state={"phase": "preflight", "status": "ready" if preflight.ok else "blocked"},
+                    checkpoint_payload=preflight_receipt,
+                    owner=lease_owner,
+                    fencing_token=fencing_token,
+                    expected_revision=projection.get("revision"),
+                )
+            except Exception as exc:
+                raise DurableJobError("repair_preflight_checkpoint_unavailable") from exc
+            if not preflight.ok:
+                blocked = await self.jobs.transition_job(
+                    job_id,
+                    "blocked",
+                    owner=lease_owner,
+                    fencing_token=fencing_token,
+                    reason=_text(preflight.reason) or "repo_sandbox_preflight_blocked",
+                    expected_revision=int(projection.get("revision") or 0) + 1,
+                )
+                return {
+                    "job_id": job_id,
+                    "status": "blocked",
+                    "reason_code": _text(preflight.reason) or "repo_sandbox_preflight_blocked",
+                    "recovery_action": "restore_rootless_prerequisite",
+                    "preflight": preflight_receipt,
+                    "admission_only": False,
+                    "job": blocked,
+                }
+
+            repair_service = RepoRepairService(
+                sandbox=sandbox,
+                session_factory=self.session_provider,
+            )
+            packet = await repair_service.inspect_and_prepare(
+                inputs,
+                owner=WorkBoardOwner(
+                    principal_id=task.owner_principal_id,
+                    session_id=task.owner_session_id,
+                ),
+                work_board_task_id=task.task_id,
+                work_board_attempt_id=attempt.attempt_id,
+                workflow_run_id=job_id,
+                goal_id=task.goal_id,
+                goal_revision=int(task.goal_revision),
+                input_digest=input_digest,
+            )
+            # Source publication records two fenced checkpoints on the same
+            # durable root.  Refresh the root before a pause/approval CAS;
+            # the admission projection is intentionally stale after that
+            # private publication boundary.
+            projection = await self.jobs.get_job(job_id)
+            if not isinstance(projection, Mapping) or _status(projection) != "running":
+                raise DurableJobError("repair_durable_job_changed_after_source_inspection")
+            lease = projection.get("lease") if isinstance(projection.get("lease"), Mapping) else {}
+            if (
+                _text(lease.get("owner")) != lease_owner
+                or int(lease.get("fencing_token") or 0) != fencing_token
+            ):
+                raise DurableJobLeaseError("repair durable lease changed after source inspection")
+            # Source inspection is an explicit private-code boundary.  Once
+            # the operator has granted the exact packet/profile consent, the
+            # same durable root may advance to one governed strategist call.
+            # No second admission/root is created and no source text enters
+            # the generic job projection.
+            from src.db.models import RepoRepairEgressConsent as RepoRepairEgressConsentRow
+            from src.workflows.repo_repair import (
+                REPO_REPAIR_APPROVAL_ACTION,
+                REPO_REPAIR_APPROVAL_TOOL,
+                RepoRepairProposal as RepoRepairProposalRow,
+                _repair_approval_fingerprint,
+            )
+
+            async with self.session_provider() as consent_db:
+                consent = (
+                    await consent_db.execute(
+                        select(RepoRepairEgressConsentRow).where(
+                            RepoRepairEgressConsentRow.owner_principal_id == task.owner_principal_id,
+                            RepoRepairEgressConsentRow.owner_session_id == task.owner_session_id,
+                            RepoRepairEgressConsentRow.workflow_run_id == job_id,
+                            RepoRepairEgressConsentRow.work_board_task_id == task.task_id,
+                            RepoRepairEgressConsentRow.work_board_attempt_id == attempt.attempt_id,
+                            RepoRepairEgressConsentRow.source_packet_id == packet.packet_id,
+                            RepoRepairEgressConsentRow.state == "active",
+                        )
+                    )
+                ).scalars().first()
+                if consent is not None:
+                    consent_db.expunge(consent)
+            if consent is None:
+                paused = await self.jobs.pause_job(
+                    job_id,
+                    owner=lease_owner,
+                    fencing_token=fencing_token,
+                    reason="repo_repair_code_egress_review",
+                    expected_revision=int(projection.get("revision") or 0),
+                )
+                return {
+                    "job_id": job_id,
+                    "status": "paused",
+                    "reason_code": "repo_repair_code_egress_review",
+                    "recovery_action": "review_code_egress",
+                    "packet_id": packet.packet_id,
+                    "packet_revision": int(packet.revision),
+                    "source_manifest_sha256": packet.source_manifest_sha256,
+                    "base_snapshot_sha256": packet.base_snapshot_sha256,
+                    "preflight": preflight_receipt,
+                    "job": paused,
+                    "admission_only": False,
+                }
+
+            owner = WorkBoardOwner(
+                principal_id=task.owner_principal_id,
+                session_id=task.owner_session_id,
+            )
+            principal = TrustPrincipal(
+                principal_id=task.owner_principal_id,
+                principal_type=PrincipalType.OPERATOR,
+                authenticated=True,
+                revoked=False,
+                grants=(AuthorityGrant.MODEL_INFERENCE,),
+                session_id=task.owner_session_id,
+                operator_session_id=task.owner_session_id,
+                job_id=job_id,
+            )
+            proposal = await repair_service.generate_proposal(
+                packet,
+                inputs,
+                owner=owner,
+                principal=principal,
+                lease_owner=lease_owner,
+                fencing_token=fencing_token,
+                consent=consent,
+            )
+            # Approval identity is deterministic for this proposal, so a
+            # crash between approval creation and proposal binding replays the
+            # same row rather than creating a second approval or root.
+            approval_id = str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"seraph:repo-repair-approval:{job_id}:{proposal.proposal_id}",
+                )
+            )
+            if proposal.approval_id:
+                approval = await approval_repository.get(str(proposal.approval_id))
+                if approval is None:
+                    raise DurableJobError("repo_repair_approval_binding_missing")
+                approval_id = str(proposal.approval_id)
+                approval_fingerprint = str(proposal.approval_fingerprint or "")
+            else:
+                proposal.approval_id = approval_id
+                approval_expiry = min(
+                    proposal.expires_at,
+                    self.now() + timedelta(minutes=5),
+                )
+                approval_fingerprint = _repair_approval_fingerprint(proposal, approval_expiry)
+                approval = await approval_repository.get_or_create_pending(
+                    session_id=task.owner_session_id,
+                    tool_name=REPO_REPAIR_APPROVAL_TOOL,
+                    risk_level="high",
+                    summary=f"Review the bounded repository repair proposal for goal {task.goal_id}",
+                    fingerprint=approval_fingerprint,
+                    request_id=approval_id,
+                    details={
+                        "action": REPO_REPAIR_APPROVAL_ACTION,
+                        "approval_owner_principal_id": task.owner_principal_id,
+                        "approval_owner_operator_session_id": task.owner_session_id,
+                        "approval_execution_owner_principal_id": task.owner_principal_id,
+                        "approval_execution_session_id": task.owner_session_id,
+                        "approval_conversation_id": task.owner_session_id,
+                        "durable_job_id": job_id,
+                        "durable_owner_kind": "user",
+                        "durable_owner_principal_id": task.owner_principal_id,
+                        "durable_authority_digest": projection.get("authority_digest"),
+                        "durable_goal_id": task.goal_id,
+                        "durable_goal_revision": int(task.goal_revision),
+                        "durable_capability_version": "1",
+                        "proposal_id": proposal.proposal_id,
+                        "proposal_revision": int(proposal.revision),
+                        "source_packet_id": packet.packet_id,
+                        "source_manifest_digest": packet.source_manifest_sha256,
+                        "base_snapshot_digest": packet.base_snapshot_sha256,
+                        "model_profile_id": proposal.model_profile_id,
+                        "patch_sha256": proposal.patch_sha256,
+                        "expires_at": approval_expiry.timestamp(),
+                        "memory_status": "no_learning",
+                    },
+                )
+                if str(approval.id) != approval_id:
+                    raise DurableJobIdempotencyConflict("repo repair approval identity changed")
+                async with self.session_provider() as proposal_db:
+                    persisted_proposal = await proposal_db.get(RepoRepairProposalRow, proposal.proposal_id)
+                    if persisted_proposal is None:
+                        raise DurableJobError("repo_repair_proposal_missing")
+                    if persisted_proposal.approval_id not in {None, approval_id}:
+                        raise DurableJobIdempotencyConflict("repo repair proposal approval binding changed")
+                    persisted_proposal.approval_id = approval_id
+                    persisted_proposal.approval_fingerprint = approval_fingerprint
+                    await proposal_db.flush()
+            bound = await self.jobs.bind_approval_id(
+                job_id,
+                approval_id,
+                owner=lease_owner,
+                fencing_token=fencing_token,
+                expected_revision=projection.get("revision"),
+            )
+            held = await self.jobs.transition_job(
+                job_id,
+                "awaiting_approval",
+                owner=lease_owner,
+                fencing_token=fencing_token,
+                expected_revision=bound.get("revision"),
+                reason="repo_repair_approval_required",
+            )
+            return {
+                "job_id": job_id,
+                "status": "awaiting_approval",
+                "reason_code": "review_repo_repair_proposal",
+                "recovery_action": "review_repo_repair_proposal",
+                "packet_id": packet.packet_id,
+                "proposal_id": proposal.proposal_id,
+                "approval_id": approval_id,
+                "proposal_revision": int(proposal.revision),
+                "patch_sha256": proposal.patch_sha256,
+                "preflight": preflight_receipt,
+                "job": held,
+                "admission_only": False,
+            }
         if capability_id == "engineering.repo-change.v1":
             from src.api.workflows import (
                 RepoChangePreviewRequest,
@@ -5052,6 +5440,24 @@ class WorkBoardDispatcher:
                 None,
                 binding_key,
             )
+        if capability_id == "engineering.repo-repair.v1":
+            repair_job_id = "repo-repair-" + hashlib.sha256(
+                (
+                    "engineering.repo-repair.v1\0"
+                    + task.owner_principal_id
+                    + "\0"
+                    + task.task_id
+                    + "\0"
+                    + attempt.attempt_id
+                ).encode("utf-8")
+            ).hexdigest()[:32]
+            return (
+                repair_job_id,
+                task.owner_principal_id,
+                "engineering.repo-repair.v1",
+                None,
+                binding_key,
+            )
         if capability_id == "work.github-followthrough.v1":
             from src.extensions.github_followthrough import _operation_id
 
@@ -5117,6 +5523,14 @@ class WorkBoardDispatcher:
                     **handoff_binding,
                 }
             )
+        if capability_id == "engineering.repo-repair.v1":
+            # The typed input artifact is the immutable producer contract.  A
+            # digest of only the nested input would permit an envelope drift
+            # between task creation and execution.
+            digest = _text(getattr(task, "typed_input_digest", None)).lower()
+            if not _SHA256.fullmatch(digest):
+                raise TypedInputError("typed_input_digest_mismatch", "the repair task has no canonical input artifact digest")
+            return digest
         if capability_id == "work.github-followthrough.v1":
             attempt_uuid = uuid.uuid5(
                 uuid.NAMESPACE_URL,
@@ -5237,6 +5651,7 @@ class WorkBoardDispatcher:
             "engineering.repo-change.v1": "engineering.repo-change.v1",
             "work.github-followthrough.v1": "1",
             "guardian-routine.v1": "guardian-routine.v1",
+            "engineering.repo-repair.v1": "1",
             "calendar.meeting-prep.v1": "1",
         }.get(capability, REGISTERED_CAPABILITIES[capability].version)
 
@@ -5250,6 +5665,14 @@ class WorkBoardDispatcher:
             from src.integrations.google_calendar import calendar_authority_digest
 
             return calendar_authority_digest(task=task, attempt=attempt)
+        if _text(task.capability_id) == "engineering.repo-repair.v1":
+            return _safe_digest(
+                WorkBoardDispatcher._repo_repair_authority_payload(
+                    task,
+                    attempt,
+                    input_digest=WorkBoardDispatcher._direct_input_digest(task, attempt, inputs),
+                )
+            )
         return _safe_digest(
             {
                 "owner_principal_id": task.owner_principal_id,
@@ -5264,6 +5687,43 @@ class WorkBoardDispatcher:
                 "runtime_cap": MAX_RUNTIME_SECONDS,
             }
         )
+
+    @staticmethod
+    def _repo_repair_authority_payload(
+        task: WorkBoardTask,
+        attempt: WorkBoardAttempt,
+        *,
+        input_digest: str,
+    ) -> dict[str, Any]:
+        """Build the immutable repair authority used by admission and replay.
+
+        The requested job deadline is persisted separately on the durable root.
+        This payload carries the fixed capability ceiling so a replay cannot
+        derive a different authority digest from a caller-selected timeout.
+        """
+
+        return {
+            "principal": task.owner_principal_id,
+            "owner_kind": "user",
+            "session_id": task.owner_session_id,
+            "operator_session_id": task.owner_session_id,
+            "goal_owner_principal_id": task.owner_principal_id,
+            "goal_owner_session_id": task.owner_session_id,
+            "goal_id": task.goal_id,
+            "goal_revision": int(task.goal_revision),
+            "capability_id": task.capability_id,
+            "capability_version": "1",
+            "executor_id": registered_executor_id("engineering.repo-repair.v1"),
+            "attempt_id": attempt.attempt_id,
+            "task_id": task.task_id,
+            "input_artifact_id": _text(task.input_artifact_id),
+            "input_artifact_digest": input_digest,
+            "finite_authority": True,
+            "limits": {
+                "runtime_seconds": MAX_RUNTIME_SECONDS,
+                "max_attempts": 1,
+            },
+        }
 
     @staticmethod
     def _direct_run_fingerprint(
@@ -5351,6 +5811,16 @@ class WorkBoardDispatcher:
             raise DurableJobIdempotencyConflict(
                 "adapter admission projection is missing canonical immutable digests"
             )
+        if _text(task.capability_id) == "engineering.repo-repair.v1":
+            expected_digests = {
+                "input_digest": WorkBoardDispatcher._direct_input_digest(task, attempt, inputs),
+                "authority_digest": WorkBoardDispatcher._direct_authority_digest(task, attempt, inputs),
+                "run_fingerprint": WorkBoardDispatcher._direct_run_fingerprint(task, attempt, inputs),
+            }
+            if digests != expected_digests:
+                raise DurableJobIdempotencyConflict(
+                    "repository repair admission projection changed the task-bound digest contract"
+                )
         identity = {
             "owner_principal_id": expected_owner,
             "owner_kind": "service" if expected_service else "user",
@@ -5946,6 +6416,39 @@ class WorkBoardDispatcher:
                 reason=reason,
                 actor_principal_id=self.runner_id,
                 actor_session_id=self.runner_session,
+            )
+
+    async def _pause_repo_repair_for_operator(
+        self,
+        task: WorkBoardTask,
+        attempt: WorkBoardAttempt,
+        projection: Mapping[str, Any],
+        *,
+        reason: str,
+    ) -> BoardAttemptProjection:
+        """Release the board lease while private repair source awaits consent."""
+
+        if reason not in {"repo_repair_code_egress_review", "review_repo_repair_proposal"}:
+            raise BoardError("repo_repair_wait_reason_invalid", "The repository repair is not waiting for an operator decision")
+        lease = projection.get("lease") if isinstance(projection.get("lease"), Mapping) else {}
+        try:
+            durable_fence = int(lease.get("fencing_token") or projection.get("fencing_token") or attempt.fencing_token)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise BoardError("repo_repair_wait_fence_invalid", "The durable repair fence is malformed") from exc
+        async with self.session_provider() as db:
+            return await self.repository.pause_routine_attempt_for_operator(
+                db,
+                task.task_id,
+                attempt.attempt_id,
+                expected_revision=int(task.task_revision),
+                board_fence=int(attempt.fencing_token),
+                lease_owner=attempt.lease_owner,
+                workflow_run_id=str(attempt.workflow_run_id or ""),
+                durable_fence=durable_fence,
+                reason=reason,
+                actor_principal_id=self.runner_id,
+                actor_session_id=self.runner_session,
+                capability_id="engineering.repo-repair.v1",
             )
 
     async def resume_routine_attempt_for_operator_recovery(

@@ -109,6 +109,9 @@ OPERATOR_REQUIRED_TABLES = (
     "calendar_prep_receipts",
     "governed_schedule_bindings",
     "governed_schedule_occurrences",
+    "repo_repair_source_packets",
+    "repo_repair_proposals",
+    "repo_repair_egress_consents",
 )
 
 _LEGACY_WORKFLOW_STATUS_MAP = {
@@ -892,6 +895,131 @@ async def _ensure_m5_columns(conn) -> None:
         )
 
 
+async def _ensure_repo_repair_columns(conn) -> None:
+    """Install additive repository-repair provenance columns before ``create_all``.
+
+    The repair tables are new on current workspaces, but local Seraph
+    databases are upgraded in place.  Keep this migration additive and
+    fail-closed: existing rows receive only bounded metadata defaults; no
+    source or model content is synthesized during migration.
+    """
+
+    definitions = {
+        "repo_repair_source_packets": {
+            "owner_principal_id": "VARCHAR DEFAULT ''",
+            "owner_session_id": "VARCHAR DEFAULT ''",
+            "work_board_task_id": "VARCHAR DEFAULT ''",
+            "work_board_attempt_id": "VARCHAR DEFAULT ''",
+            "workflow_run_id": "VARCHAR DEFAULT ''",
+            "goal_id": "VARCHAR DEFAULT ''",
+            "goal_revision": "INTEGER DEFAULT 1",
+            "input_digest": "VARCHAR DEFAULT ''",
+            "repository_ref": "VARCHAR DEFAULT ''",
+            "base_snapshot_digest": "VARCHAR DEFAULT ''",
+            "source_manifest_digest": "VARCHAR DEFAULT ''",
+            "artifact_id": "VARCHAR DEFAULT ''",
+            "artifact_sha256": "VARCHAR DEFAULT ''",
+            "manifest_json": "VARCHAR DEFAULT '{}'",
+            "state": "VARCHAR DEFAULT 'inspected'",
+            "revision": "INTEGER DEFAULT 1",
+            "created_at": "DATETIME",
+            "updated_at": "DATETIME",
+        },
+        "repo_repair_proposals": {
+            "operation_key": "VARCHAR DEFAULT ''",
+            "owner_principal_id": "VARCHAR DEFAULT ''",
+            "owner_session_id": "VARCHAR DEFAULT ''",
+            "work_board_task_id": "VARCHAR DEFAULT ''",
+            "work_board_attempt_id": "VARCHAR DEFAULT ''",
+            "workflow_run_id": "VARCHAR DEFAULT ''",
+            "goal_id": "VARCHAR DEFAULT ''",
+            "goal_revision": "INTEGER DEFAULT 1",
+            "repository_ref": "VARCHAR DEFAULT ''",
+            "base_snapshot_digest": "VARCHAR DEFAULT ''",
+            "source_packet_id": "VARCHAR DEFAULT ''",
+            "source_digest": "VARCHAR DEFAULT ''",
+            "model_runtime_path": "VARCHAR DEFAULT 'strategist_agent'",
+            "model_profile_id": "VARCHAR DEFAULT ''",
+            "model_request_digest": "VARCHAR DEFAULT ''",
+            "model_output_digest": "VARCHAR DEFAULT ''",
+            "model_response_artifact_id": "VARCHAR",
+            "model_response_artifact_sha256": "VARCHAR",
+            "patch_artifact_id": "VARCHAR DEFAULT ''",
+            "patch_sha256": "VARCHAR DEFAULT ''",
+            "allowed_paths_json": "VARCHAR DEFAULT '[]'",
+            "test_args_json": "VARCHAR DEFAULT '[]'",
+            "request_digest": "VARCHAR DEFAULT ''",
+            "authority_digest": "VARCHAR DEFAULT ''",
+            "approval_id": "VARCHAR",
+            "approval_fingerprint": "VARCHAR",
+            "last_receipt_id": "VARCHAR",
+            "status": "VARCHAR DEFAULT 'prepared'",
+            "safe_metadata_json": "VARCHAR DEFAULT '{}'",
+            "expires_at": "DATETIME",
+            "revision": "INTEGER DEFAULT 1",
+            "created_at": "DATETIME",
+            "updated_at": "DATETIME",
+        },
+        "repo_repair_egress_consents": {
+            "owner_principal_id": "VARCHAR DEFAULT ''",
+            "owner_session_id": "VARCHAR DEFAULT ''",
+            "work_board_task_id": "VARCHAR DEFAULT ''",
+            "work_board_attempt_id": "VARCHAR DEFAULT ''",
+            "workflow_run_id": "VARCHAR DEFAULT ''",
+            "source_packet_id": "VARCHAR DEFAULT ''",
+            "source_digest": "VARCHAR DEFAULT ''",
+            "source_manifest_digest": "VARCHAR DEFAULT ''",
+            "goal_id": "VARCHAR DEFAULT ''",
+            "goal_revision": "INTEGER DEFAULT 1",
+            "input_digest": "VARCHAR DEFAULT ''",
+            "runtime_path": "VARCHAR DEFAULT 'strategist_agent'",
+            "effective_profile_id": "VARCHAR DEFAULT ''",
+            "effective_upstream": "VARCHAR DEFAULT ''",
+            "maximum_input_bytes": "INTEGER DEFAULT 65536",
+            "maximum_output_tokens": "INTEGER DEFAULT 4096",
+            "expires_at": "DATETIME",
+            "state": "VARCHAR DEFAULT 'active'",
+            "revision": "INTEGER DEFAULT 1",
+            "consent_digest": "VARCHAR DEFAULT ''",
+            "request_key": "VARCHAR DEFAULT ''",
+            "request_digest": "VARCHAR DEFAULT ''",
+            "created_at": "DATETIME",
+            "updated_at": "DATETIME",
+        },
+    }
+    for table_name, columns_to_add in definitions.items():
+        result = await conn.exec_driver_sql(f"PRAGMA table_info({table_name})")
+        existing = {row[1] for row in result.fetchall()}
+        if not existing:
+            continue
+        for column, sql_type in columns_to_add.items():
+            if column not in existing:
+                await conn.exec_driver_sql(
+                    f"ALTER TABLE {table_name} ADD COLUMN {column} {sql_type}"
+                )
+
+
+async def _ensure_repo_repair_indexes(conn) -> None:
+    """Reassert repair provenance indexes on an upgraded SQLite workspace."""
+
+    statements = (
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_repo_repair_source_packets_job_input "
+        "ON repo_repair_source_packets (workflow_run_id, input_digest)",
+        "CREATE INDEX IF NOT EXISTS ix_repo_repair_source_packets_owner_state "
+        "ON repo_repair_source_packets (owner_principal_id, owner_session_id, state, created_at)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_repo_repair_proposals_owner_operation "
+        "ON repo_repair_proposals (owner_principal_id, owner_session_id, workflow_run_id, operation_key)",
+        "CREATE INDEX IF NOT EXISTS ix_repo_repair_proposals_owner_status "
+        "ON repo_repair_proposals (owner_principal_id, owner_session_id, status, expires_at)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_repo_repair_egress_consents_owner_request "
+        "ON repo_repair_egress_consents (owner_principal_id, owner_session_id, request_key)",
+        "CREATE INDEX IF NOT EXISTS ix_repo_repair_egress_consents_job_state "
+        "ON repo_repair_egress_consents (workflow_run_id, state, expires_at)",
+    )
+    for statement in statements:
+        await conn.exec_driver_sql(statement)
+
+
 async def _ensure_calendar_columns(conn) -> None:
     """Install calendar columns and fences before metadata indexes are created.
 
@@ -1435,11 +1563,13 @@ async def init_db() -> None:
         # Calendar additive columns and the consent partial unique index must
         # inspect legacy rows before ``create_all`` materializes model indexes.
         await _ensure_calendar_columns(conn)
+        await _ensure_repo_repair_columns(conn)
         await conn.run_sync(SQLModel.metadata.create_all)
         await _ensure_guardian_inbox_columns(conn)
         await _ensure_m5_columns(conn)
         await _ensure_work_board_indexes(conn)
         await _ensure_m5_indexes(conn)
+        await _ensure_repo_repair_indexes(conn)
         await conn.exec_driver_sql(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS ux_work_board_attempts_workflow_run

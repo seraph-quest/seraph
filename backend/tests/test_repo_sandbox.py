@@ -135,6 +135,118 @@ def test_disabled_preflight_does_not_probe_docker():
     assert result.reason == "repo_sandbox_disabled"
 
 
+def _rootless_info(**overrides):
+    value = {
+        "OSType": "linux",
+        "ServerRootless": True,
+        "CgroupVersion": "2",
+        "CgroupDriver": "systemd",
+        "CpuCfsQuota": True,
+        "CpuCfsPeriod": True,
+        "MemoryLimit": True,
+        "SwapLimit": True,
+        "PidsLimit": True,
+        "Warnings": [],
+    }
+    value.update(overrides)
+    return value
+
+
+def _patch_preflight_docker(monkeypatch: pytest.MonkeyPatch, info: dict) -> list[list[str]]:
+    image = _settings().worker_image_digest
+    calls: list[list[str]] = []
+
+    def run(_runner, args, **_kwargs):
+        calls.append(list(args))
+        if args[:2] == ["info", "--format"]:
+            return 0, json.dumps(info).encode(), b""
+        if args[:3] == ["image", "inspect", "--format"]:
+            return 0, json.dumps({"RepoDigests": [image], "Id": image.rsplit("/", 1)[-1]}).encode(), b""
+        raise AssertionError(f"unexpected Docker call: {args}")
+
+    monkeypatch.setattr(RootlessDockerRepoSandbox, "_run_docker", run)
+    return calls
+
+
+@pytest.mark.parametrize(
+    ("info_overrides", "expected"),
+    (
+        ({"CpuCfsQuota": False}, "resource_controller_unavailable:cpu"),
+        ({"CpuCfsPeriod": False}, "resource_controller_unavailable:cpu"),
+        ({"MemoryLimit": False}, "resource_controller_unavailable:memory"),
+        ({"SwapLimit": False}, "resource_controller_unavailable:memory"),
+        ({"PidsLimit": False}, "resource_controller_unavailable:pids"),
+        ({"CpuCfsQuota": "true"}, "resource_controller_unavailable:cpu"),
+        ({"CpuCfsQuota": None}, "resource_controller_unavailable:cpu"),
+    ),
+)
+def test_preflight_blocks_when_effective_resource_controller_is_missing_or_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+    info_overrides: dict,
+    expected: str,
+):
+    calls = _patch_preflight_docker(monkeypatch, _rootless_info(**info_overrides))
+
+    result = RootlessDockerRepoSandbox(_settings()).preflight()
+
+    assert not result.ok
+    assert result.status == "blocked"
+    assert result.reason == expected
+    assert result.as_receipt()["reason"] == expected
+    assert result.as_receipt()["support_confirmed"] is False
+    assert calls == [["info", "--format", "{{json .}}"]]
+
+
+def test_preflight_requires_declared_cgroup_version_and_systemd_driver(monkeypatch: pytest.MonkeyPatch):
+    for overrides in ({"CgroupVersion": "1"}, {"CgroupDriver": "cgroupfs"}, {}):
+        info = _rootless_info(**overrides)
+        if not overrides:
+            info.pop("CpuCfsQuota")
+        calls = _patch_preflight_docker(monkeypatch, info)
+
+        result = RootlessDockerRepoSandbox(_settings()).preflight()
+
+        assert result.reason == "resource_controller_unavailable:cpu"
+        assert calls == [["info", "--format", "{{json .}}"]]
+
+
+def test_preflight_receipt_keeps_verified_resource_evidence_and_then_checks_image(monkeypatch: pytest.MonkeyPatch):
+    calls = _patch_preflight_docker(monkeypatch, _rootless_info())
+
+    result = RootlessDockerRepoSandbox(_settings()).preflight()
+
+    assert result.ok
+    assert result.status == "ready"
+    receipt = result.as_receipt()
+    assert receipt["cgroup_version"] == "2"
+    assert receipt["cgroup_driver"] == "systemd"
+    assert receipt["daemon_reported"] == {
+        "CpuCfsQuota": True,
+        "CpuCfsPeriod": True,
+        "MemoryLimit": True,
+        "SwapLimit": True,
+        "PidsLimit": True,
+    }
+    assert receipt["support_confirmed"] is True
+    assert calls == [
+        ["info", "--format", "{{json .}}"],
+        ["image", "inspect", "--format", "{{json .}}", _settings().worker_image_digest],
+    ]
+
+
+def test_preflight_warning_is_supplemental_when_typed_support_is_present(monkeypatch: pytest.MonkeyPatch):
+    calls = _patch_preflight_docker(
+        monkeypatch,
+        _rootless_info(Warnings=["WARNING: daemon warning with an unstable format"]),
+    )
+
+    result = RootlessDockerRepoSandbox(_settings()).preflight()
+
+    assert result.ok
+    assert result.as_receipt()["support_confirmed"] is True
+    assert calls[-1][0:2] == ["image", "inspect"]
+
+
 def test_exported_diff_paths_are_bounded_by_the_allowlist():
     assert _validate_changed_paths(b"tests/test_app.py\0", {"tests/test_app.py"}) == ["tests/test_app.py"]
     assert _validate_changed_paths(

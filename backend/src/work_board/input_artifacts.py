@@ -329,11 +329,27 @@ async def _finalize_pending(
 
 def _write_payload(path: Path, payload: bytes) -> None:
     parent = path.parent
-    parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    # The repair source reader treats every directory below the canonical
+    # workspace as private.  ``Path.mkdir(parents=True, mode=0o700)`` only
+    # applies the mode to the leaf on existing trees, so explicitly validate
+    # and tighten each newly-used ancestor before writing the file.  A symlink
+    # or non-directory ancestor fails closed instead of being followed.
+    root = Path(canonical_workspace_root(settings.workspace_dir)).resolve()
     try:
-        os.chmod(parent, 0o700)
-    except OSError:
-        pass
+        relative_parts = parent.resolve(strict=False).relative_to(root).parts
+    except (OSError, ValueError) as exc:
+        raise OSError("input artifact parent escapes the canonical workspace") from exc
+    current = root
+    for component in relative_parts:
+        current = current / component
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            current.mkdir(mode=0o700)
+            metadata = current.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise OSError("input artifact parent is not a private directory")
+        os.chmod(current, 0o700)
     fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=parent)
     temporary = Path(temporary_name)
     try:

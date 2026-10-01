@@ -48,10 +48,20 @@ from src.guardian.inbox import (
 )
 from src.work_board.repository import WorkBoardRepository
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
+from src.vault import crypto as vault_crypto
 
 
 OWNER = "operator:guardian-test"
 SESSION = "guardian-test-session"
+
+
+@pytest.fixture(autouse=True)
+def reset_vault_cipher_between_tests():
+    """Keep preview/action fixtures from leaking a Fernet key to later files."""
+
+    vault_crypto._fernet = None
+    yield
+    vault_crypto._fernet = None
 
 
 async def _seed_packet(

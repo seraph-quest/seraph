@@ -11,24 +11,30 @@ import {
   MailMessageMetadata,
   MailMessageReadResponse,
   MailWatchMetadata,
+  controlMailWatch,
   createMailConnection,
   createMailConsent,
   createMailWatch,
+  getMailConnectionRecovery,
+  getMailWatchRecovery,
+  getMailWatch,
+  listMailWatches,
   listMailConnections,
   listMailConsents,
   listMailLabels,
   makeMailIdempotencyKey,
   readMailMessage,
   refreshMailLabels,
+  revokeMailWatch,
   setMailModelConsent,
   scanMailMessages,
+  withMailDeadline as bounded,
   verifyMailConnection,
 } from "../../lib/mailApi";
 import type { GoalInfo } from "../../types";
 
 const GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly" as const;
 const BODY_FIELDS: MailBodyField[] = ["subject", "plainbody", "replyintent"];
-const REQUEST_TIMEOUT_MS = 15_000;
 
 export interface MailConnectionPanelProps {
   ownerPrincipalId?: string | null;
@@ -36,8 +42,122 @@ export interface MailConnectionPanelProps {
 }
 
 interface PendingSetup {
+  version: 1;
   idempotencyKey: string;
   label: string;
+}
+
+interface PendingWatch {
+  version: 1;
+  idempotencyKey: string;
+  action: "create" | "pause" | "resume" | "revoke";
+  watchId: string | null;
+  expectedBindingRevision: number | null;
+}
+
+interface MailSelectionSnapshot {
+  ownerScope: string | null;
+  connectionId: string | null;
+  connectionRevision: number | null;
+  goalId: string | null;
+  goalRevision: number | null;
+  consentId: string | null;
+  consentRevision: number | null;
+  sourceRevision: number | null;
+  labelIds: string[];
+}
+
+const PENDING_SETUP_STORAGE_PREFIX = "seraph:mail-setup-recovery:v1:";
+const PENDING_WATCH_STORAGE_PREFIX = "seraph:mail-watch-recovery:v1:";
+const SAFE_IDEMPOTENCY_KEY = /^[A-Za-z0-9_.:@+,\-]{1,256}$/;
+
+function pendingSetupStorageKey(ownerScope: string): string {
+  return `${PENDING_SETUP_STORAGE_PREFIX}${encodeURIComponent(ownerScope)}`;
+}
+
+function readPendingSetup(ownerScope: string | null): PendingSetup | null {
+  if (!ownerScope || typeof window === "undefined") return null;
+  try {
+    const raw = window.sessionStorage.getItem(pendingSetupStorageKey(ownerScope));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { version?: unknown; idempotencyKey?: unknown; label?: unknown };
+    return parsed.version === 1 && typeof parsed.idempotencyKey === "string" && SAFE_IDEMPOTENCY_KEY.test(parsed.idempotencyKey)
+      && typeof parsed.label === "string" && parsed.label.trim().length > 0 && parsed.label.length <= 200
+      ? { version: 1, idempotencyKey: parsed.idempotencyKey, label: parsed.label }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function writePendingSetup(ownerScope: string | null, pending: PendingSetup): boolean {
+  if (!ownerScope || typeof window === "undefined") return false;
+  try {
+    const key = pendingSetupStorageKey(ownerScope);
+    const serialized = JSON.stringify(pending);
+    window.sessionStorage.setItem(key, serialized);
+    return window.sessionStorage.getItem(key) === serialized;
+  } catch {
+    // Credentials are never persisted; the canonical server key remains the authority.
+    return false;
+  }
+}
+
+function clearPendingSetup(ownerScope: string | null): void {
+  if (!ownerScope || typeof window === "undefined") return;
+  try {
+    window.sessionStorage.removeItem(pendingSetupStorageKey(ownerScope));
+  } catch {
+    // A storage failure must not authorize a new credential import.
+  }
+}
+
+function pendingWatchStorageKey(ownerScope: string): string {
+  return `${PENDING_WATCH_STORAGE_PREFIX}${encodeURIComponent(ownerScope)}`;
+}
+
+function readPendingWatch(ownerScope: string | null): PendingWatch | null {
+  if (!ownerScope || typeof window === "undefined") return null;
+  try {
+    const raw = window.sessionStorage.getItem(pendingWatchStorageKey(ownerScope));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { version?: unknown; idempotencyKey?: unknown; action?: unknown; watchId?: unknown; expectedBindingRevision?: unknown };
+    const action = parsed.action === "create" || parsed.action === "pause" || parsed.action === "resume" || parsed.action === "revoke" ? parsed.action : "create";
+    const watchId = parsed.watchId === null || parsed.watchId === undefined ? null : typeof parsed.watchId === "string" && parsed.watchId.trim() ? parsed.watchId : null;
+    const expectedBindingRevision = parsed.expectedBindingRevision === null || parsed.expectedBindingRevision === undefined
+      ? null
+      : typeof parsed.expectedBindingRevision === "number" && Number.isSafeInteger(parsed.expectedBindingRevision) && parsed.expectedBindingRevision > 0
+        ? parsed.expectedBindingRevision
+        : null;
+    return typeof parsed.idempotencyKey === "string" && SAFE_IDEMPOTENCY_KEY.test(parsed.idempotencyKey)
+      && (action === "create" || (watchId !== null && expectedBindingRevision !== null))
+      ? { version: 1, idempotencyKey: parsed.idempotencyKey, action, watchId, expectedBindingRevision }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function writePendingWatch(ownerScope: string | null, pending: PendingWatch): boolean {
+  if (!ownerScope || typeof window === "undefined") return false;
+  try {
+    const key = pendingWatchStorageKey(ownerScope);
+    const serialized = JSON.stringify(pending);
+    window.sessionStorage.setItem(key, serialized);
+    return window.sessionStorage.getItem(key) === serialized;
+  } catch {
+    // Browser storage is only a recovery hint; the server remains authoritative.
+    return false;
+  }
+}
+
+function clearPendingWatch(ownerScope: string | null): void {
+  if (!ownerScope || typeof window === "undefined") return;
+  try {
+    window.sessionStorage.removeItem(pendingWatchStorageKey(ownerScope));
+  } catch {
+    // A storage failure must not turn a confirmed server result into a retry.
+  }
 }
 
 interface GoalOption {
@@ -83,25 +203,11 @@ function safeError(error: unknown): string {
 }
 
 function isUnknown(error: unknown): boolean {
-  return error instanceof MailApiError && (error.status === 0 || error.status >= 500);
+  return error instanceof MailApiError && (error.status === 0 || error.status >= 500 || error.status === 200);
 }
 
 function isAbort(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError";
-}
-
-async function bounded<T>(operation: (signal: AbortSignal) => Promise<T>, parentSignal?: AbortSignal): Promise<T> {
-  const controller = new AbortController();
-  const abort = () => controller.abort();
-  if (parentSignal?.aborted) controller.abort();
-  else parentSignal?.addEventListener("abort", abort, { once: true });
-  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  try {
-    return await operation(controller.signal);
-  } finally {
-    window.clearTimeout(timeout);
-    parentSignal?.removeEventListener("abort", abort);
-  }
 }
 
 function activeConsent(consent: MailConsentMetadata | null): boolean {
@@ -112,6 +218,8 @@ export function MailConnectionPanel({ ownerPrincipalId, ownerSessionId }: MailCo
   const ownerScope = ownerPrincipalId && ownerSessionId ? `${ownerPrincipalId}\u0000${ownerSessionId}` : null;
   const mountedRef = useRef(true);
   const generationRef = useRef(0);
+  const ownerScopeRef = useRef<string | null>(ownerScope);
+  ownerScopeRef.current = ownerScope;
   const requestControllerRef = useRef<AbortController | null>(null);
   const [connections, setConnections] = useState<MailConnectionMetadata[]>([]);
   const [connectionError, setConnectionError] = useState<string | null>(null);
@@ -154,15 +262,69 @@ export function MailConnectionPanel({ ownerPrincipalId, ownerSessionId }: MailCo
   const [watchBusy, setWatchBusy] = useState(false);
   const [watchError, setWatchError] = useState<string | null>(null);
   const [watch, setWatch] = useState<MailWatchMetadata | null>(null);
+  const [watches, setWatches] = useState<MailWatchMetadata[]>([]);
+  const [watchListError, setWatchListError] = useState<string | null>(null);
+  const [watchListStale, setWatchListStale] = useState(false);
+  const [pendingWatch, setPendingWatch] = useState<PendingWatch | null>(null);
   const [watchCadence, setWatchCadence] = useState<"hourly" | "6h">("hourly");
   const [watchTimezone, setWatchTimezone] = useState(() => Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC");
   const [watchExpiry, setWatchExpiry] = useState(() => localInput(new Date(Date.now() + 24 * 60 * 60 * 1000)));
+  const watchControllerRef = useRef<AbortController | null>(null);
 
   const selectedConnection = useMemo(() => connections.find((item) => item.connection_id === selectedConnectionId) ?? null, [connections, selectedConnectionId]);
   const selectedGoal = useMemo(() => goals.find((goal) => goal.id === selectedGoalId) ?? null, [goals, selectedGoalId]);
   const selectedLabels = useMemo(() => labels[selectedConnectionId] ?? [], [labels, selectedConnectionId]);
-  const selectedConsent = useMemo(() => consents.find((item) => item.connection_id === selectedConnectionId && item.goal_id === selectedGoalId && item.state === "active") ?? null, [consents, selectedConnectionId, selectedGoalId]);
+  const selectedConsent = useMemo(() => consents.find((item) => (
+    item.connection_id === selectedConnectionId
+    && item.connection_revision === selectedConnection?.revision
+    && item.goal_id === selectedGoalId
+    && item.goal_revision === selectedGoal?.revision
+    && item.state === "active"
+    && item.source_read_allowed
+    && Date.parse(item.expires_at) > Date.now()
+  )) ?? null, [consents, selectedConnectionId, selectedConnection?.revision, selectedGoalId, selectedGoal?.revision]);
   const selectedMessage = useMemo(() => scan?.messages.find((item) => item.source_binding_id === selectedMessageId) ?? null, [scan, selectedMessageId]);
+  const selectionRef = useRef<MailSelectionSnapshot>({
+    ownerScope,
+    connectionId: selectedConnection?.connection_id ?? null,
+    connectionRevision: selectedConnection?.revision ?? null,
+    goalId: selectedGoal?.id ?? null,
+    goalRevision: selectedGoal?.revision ?? null,
+    consentId: selectedConsent?.consent_id ?? null,
+    consentRevision: selectedConsent?.revision ?? null,
+    sourceRevision: selectedConsent?.source_revision ?? null,
+    labelIds: [...selectedLabelIds],
+  });
+  selectionRef.current = {
+    ownerScope,
+    connectionId: selectedConnection?.connection_id ?? null,
+    connectionRevision: selectedConnection?.revision ?? null,
+    goalId: selectedGoal?.id ?? null,
+    goalRevision: selectedGoal?.revision ?? null,
+    consentId: selectedConsent?.consent_id ?? null,
+    consentRevision: selectedConsent?.revision ?? null,
+    sourceRevision: selectedConsent?.source_revision ?? null,
+    labelIds: [...selectedLabelIds],
+  };
+
+  const isCurrentRequest = (generation: number, requestOwnerScope: string | null): boolean => (
+    mountedRef.current
+    && generation === generationRef.current
+    && ownerScopeRef.current === requestOwnerScope
+  );
+  const sameSelection = (snapshot: MailSelectionSnapshot): boolean => {
+    const current = selectionRef.current;
+    return current.ownerScope === snapshot.ownerScope
+      && current.connectionId === snapshot.connectionId
+      && current.connectionRevision === snapshot.connectionRevision
+      && current.goalId === snapshot.goalId
+      && current.goalRevision === snapshot.goalRevision
+      && current.consentId === snapshot.consentId
+      && current.consentRevision === snapshot.consentRevision
+      && current.sourceRevision === snapshot.sourceRevision
+      && current.labelIds.length === snapshot.labelIds.length
+      && current.labelIds.every((value, index) => value === snapshot.labelIds[index]);
+  };
 
   const clearPrivateState = useCallback(() => {
     setScan(null);
@@ -175,10 +337,40 @@ export function MailConnectionPanel({ ownerPrincipalId, ownerSessionId }: MailCo
     setWatch(null);
   }, []);
 
+  const loadWatches = useCallback(async () => {
+    if (!ownerScope) {
+      watchControllerRef.current?.abort();
+      setWatches([]);
+      setWatch(null);
+      setWatchListError(null);
+      setWatchListStale(false);
+      return;
+    }
+    const generation = generationRef.current;
+    watchControllerRef.current?.abort();
+    const controller = new AbortController();
+    watchControllerRef.current = controller;
+    try {
+      const result = await bounded((signal) => listMailWatches(signal), controller.signal);
+      if (!mountedRef.current || generation !== generationRef.current || controller.signal.aborted) return;
+      setWatches(result);
+      setWatch((current) => current ? result.find((item) => item.watch_id === current.watch_id) ?? null : null);
+      setWatchListError(null);
+      setWatchListStale(false);
+    } catch (error) {
+      if (mountedRef.current && generation === generationRef.current && !isAbort(error)) {
+        setWatchListStale(true);
+        setWatchListError("Saved Mail watches could not be reconciled; last confirmed watch state remains visible. Retry explicitly.");
+      }
+    }
+  }, [ownerScope]);
+
   const loadGoals = useCallback(async (generation: number, signal: AbortSignal) => {
     try {
-      const response = await bounded((innerSignal) => apiFetch(`${API_URL}/api/goals/tree`, { method: "GET", signal: innerSignal }), signal);
-      const payload = await response.json().catch(() => null);
+      const { response, payload } = await bounded(async (innerSignal) => {
+        const nextResponse = await apiFetch(`${API_URL}/api/goals/tree`, { method: "GET", signal: innerSignal });
+        return { response: nextResponse, payload: await nextResponse.json().catch(() => null) };
+      }, signal);
       if (!response.ok) throw new Error("goals_unavailable");
       const tree = Array.isArray(payload) ? payload : payload && typeof payload === "object" && Array.isArray((payload as { goals?: unknown }).goals) ? (payload as { goals: GoalInfo[] }).goals : [];
       if (!mountedRef.current || generation !== generationRef.current) return;
@@ -250,6 +442,21 @@ export function MailConnectionPanel({ ownerPrincipalId, ownerSessionId }: MailCo
   }, [loadMetadata]);
 
   useEffect(() => {
+    setPendingSetup(readPendingSetup(ownerScope));
+    setPendingWatch(readPendingWatch(ownerScope));
+    setWatchError(null);
+    if (!ownerScope) {
+      clearPrivateState();
+      setWatches([]);
+      setWatchListError(null);
+      setWatchListStale(false);
+      return;
+    }
+    void loadWatches();
+    return () => watchControllerRef.current?.abort();
+  }, [clearPrivateState, loadWatches, ownerScope]);
+
+  useEffect(() => {
     if (!selectedConnectionId || !ownerScope) return;
     const generation = generationRef.current;
     const controller = new AbortController();
@@ -267,13 +474,59 @@ export function MailConnectionPanel({ ownerPrincipalId, ownerSessionId }: MailCo
     return () => controller.abort();
   }, [ownerScope, selectedConnectionId]);
 
+  const reconcileSetup = async () => {
+    if (!ownerScope || !pendingSetup) {
+      setFormError("There is no owner-scoped Gmail setup request to reconcile.");
+      return;
+    }
+    const generation = generationRef.current;
+    const requestOwnerScope = ownerScope;
+    setFormError(null);
+    setSubmitting(true);
+    try {
+      const result = await bounded((signal) => getMailConnectionRecovery(pendingSetup.idempotencyKey, signal));
+      if (!isCurrentRequest(generation, requestOwnerScope)) return;
+      if (result.idempotency_key !== pendingSetup.idempotencyKey) throw new MailApiError(200, "setup_recovery_mismatch", "The setup recovery did not match the original key.", "refresh_mail_metadata");
+      if (result.status === "replayed" && result.connection && result.connection.state === "active") {
+        clearPendingSetup(requestOwnerScope);
+        setPendingSetup(null);
+        setConnections((current) => [result.connection as MailConnectionMetadata, ...current.filter((item) => item.connection_id !== result.connection?.connection_id)]);
+        setSelectedConnectionId(result.connection.connection_id);
+        setLabel("");
+        setFormError(null);
+      } else if (result.status === "blocked") {
+        setFormError("The original Gmail setup is canonically blocked. Refresh metadata and resolve that setup before importing credentials again.");
+      } else {
+        setFormError("The original Gmail setup has no confirmed terminal outcome. Its exact key is retained; refresh and reconcile it again.");
+      }
+    } catch {
+      if (isCurrentRequest(generation, requestOwnerScope)) setFormError("The original Gmail setup could not be confirmed. Its exact key is retained; no replacement credential import was created.");
+    } finally {
+      if (isCurrentRequest(generation, requestOwnerScope)) setSubmitting(false);
+    }
+  };
+
   const submitConnection = async (event: FormEvent) => {
     event.preventDefault();
     setFormError(null);
     if (!ownerScope) return setFormError("Sign in through the operator session before importing Gmail credentials.");
+    if (pendingSetup) {
+      await reconcileSetup();
+      return;
+    }
     const normalizedLabel = label.trim();
     if (!normalizedLabel || !clientId.trim() || !refreshToken.trim()) return setFormError("Label, client ID, and refresh token are required.");
-    const key = pendingSetup?.idempotencyKey ?? idempotencyKey("gmail-setup");
+    const key = idempotencyKey("gmail-setup");
+    const pending = { version: 1 as const, idempotencyKey: key, label: normalizedLabel };
+    if (!writePendingSetup(ownerScope, pending)) {
+      return setFormError("Browser recovery storage is unavailable. The Gmail credential import is blocked until this tab can retain its opaque request key.");
+    }
+    const generation = generationRef.current;
+    const requestOwnerScope = ownerScope;
+    // Keep the opaque recovery identity in component state before dispatch as
+    // well as in sessionStorage. A response can be delayed or become stale
+    // across an owner/session change.
+    setPendingSetup(pending);
     const request = {
       schema_version: 1 as const,
       service: "gmail_readonly" as const,
@@ -292,22 +545,25 @@ export function MailConnectionPanel({ ownerPrincipalId, ownerSessionId }: MailCo
     setSubmitting(true);
     try {
       const result = await bounded((signal) => createMailConnection(request, signal));
-      if (!mountedRef.current) return;
+      if (!isCurrentRequest(generation, requestOwnerScope)) return;
       setConnections((current) => [result, ...current.filter((item) => item.connection_id !== result.connection_id)]);
       setSelectedConnectionId(result.connection_id);
+      clearPendingSetup(requestOwnerScope);
       setPendingSetup(null);
       setLabel("");
       setFormError(null);
     } catch (error) {
-      if (!mountedRef.current || isAbort(error)) return;
+      if (!isCurrentRequest(generation, requestOwnerScope) || isAbort(error)) return;
       if (isUnknown(error)) {
-        setPendingSetup({ idempotencyKey: key, label: normalizedLabel });
+        setPendingSetup(pending);
         setFormError("The setup outcome is unknown. Credentials were cleared; refresh Mail metadata to reconcile the exact setup key before trying another import.");
       } else {
+        clearPendingSetup(requestOwnerScope);
+        setPendingSetup(null);
         setFormError(safeError(error));
       }
     } finally {
-      if (mountedRef.current) setSubmitting(false);
+      if (isCurrentRequest(generation, requestOwnerScope)) setSubmitting(false);
     }
   };
 
@@ -356,17 +612,26 @@ export function MailConnectionPanel({ ownerPrincipalId, ownerSessionId }: MailCo
     if (!expiry || Date.parse(expiry) <= Date.now() || Date.parse(expiry) > Date.now() + 7 * 24 * 60 * 60 * 1000) return setConsentError("Consent expiry must be in the future and within seven days.");
     if (!Number.isInteger(limit) || limit < 1 || limit > 10) return setConsentError("The source limit must be between one and ten messages.");
     if (!sourceAcknowledged) return setConsentError("Acknowledge the bounded source read before creating consent.");
+    const generation = generationRef.current;
+    const snapshot: MailSelectionSnapshot = {
+      ...selectionRef.current,
+      labelIds: [...selectedLabelIds],
+    };
+    const requestOwnerScope = snapshot.ownerScope;
     setConsentBusy(true);
     try {
       const result = await bounded((signal) => createMailConsent({ schema_version: 1, connection_id: selectedConnection.connection_id, expected_connection_revision: selectedConnection.revision, goal_id: selectedGoal.id, expected_goal_revision: selectedGoal.revision, label_ids: selectedLabelIds, expires_at: expiry, max_messages: limit, allowed_body_fields: BODY_FIELDS, acknowledge_source_read: true, idempotency_key: idempotencyKey("gmail-consent") }, signal));
-      if (!mountedRef.current) return;
+      if (!isCurrentRequest(generation, requestOwnerScope) || !sameSelection(snapshot)) return;
+      if (result.connection_id !== snapshot.connectionId || result.connection_revision !== snapshot.connectionRevision || result.goal_id !== snapshot.goalId || result.goal_revision !== snapshot.goalRevision || result.label_ids.length !== snapshot.labelIds.length || result.label_ids.some((id, index) => id !== snapshot.labelIds[index])) {
+        throw new MailApiError(200, "consent_selection_mismatch", "The source consent receipt did not match the selected connection, Goal, or labels.", "refresh_mail_metadata");
+      }
       setConsents((current) => [result, ...current.filter((item) => item.consent_id !== result.consent_id)]);
       setSourceAcknowledged(false);
       setConsentError(null);
     } catch (error) {
-      if (mountedRef.current && !isAbort(error)) setConsentError(safeError(error));
+      if (isCurrentRequest(generation, requestOwnerScope) && sameSelection(snapshot) && !isAbort(error)) setConsentError(safeError(error));
     } finally {
-      if (mountedRef.current) setConsentBusy(false);
+      if (isCurrentRequest(generation, requestOwnerScope) && sameSelection(snapshot)) setConsentBusy(false);
     }
   };
 
@@ -401,6 +666,18 @@ export function MailConnectionPanel({ ownerPrincipalId, ownerSessionId }: MailCo
     setReadBusy(true);
     try {
       const result = await bounded((signal) => readMailMessage(selectedMessage.source_binding_id, { connection_id: selectedConnection.connection_id, expected_connection_revision: selectedConnection.revision, mail_consent_id: selectedConsent.consent_id, expected_source_consent_revision: selectedConsent.source_revision, message_binding_id: selectedMessage.source_binding_id, expected_message_revision: selectedMessage.message_revision, acknowledge_selected_body_read: true, request_uuid: idempotencyKey("gmail-body") }, signal));
+      if (
+        result.source_binding_id !== selectedMessage.source_binding_id
+        || result.message_revision !== selectedMessage.message_revision
+        || result.provenance.connection_id !== selectedConnection.connection_id
+        || result.provenance.connection_revision !== selectedConnection.revision
+        || result.provenance.consent_id !== selectedConsent.consent_id
+        || result.provenance.source_consent_revision !== selectedConsent.source_revision
+        || result.provenance.egress !== "local_only"
+        || result.provenance.memory_status !== "no_learning"
+      ) {
+        throw new MailApiError(200, "mail_origin_mismatch", "The selected Mail readback did not match the current connection and consent.", "refresh_mail_context");
+      }
       if (!mountedRef.current || generation !== generationRef.current) return;
       setPrivateMessage(result);
       setBodyReadAcknowledged(false);
@@ -414,17 +691,24 @@ export function MailConnectionPanel({ ownerPrincipalId, ownerSessionId }: MailCo
   const changeModelConsent = async (allow: boolean) => {
     setModelError(null);
     if (!selectedConsent || !modelAcknowledged || selectedConsent.allowed_body_fields.join("|") !== BODY_FIELDS.join("|")) return setModelError("Acknowledge exactly subject, plainbody, and replyintent before changing model consent.");
+    const generation = generationRef.current;
+    const snapshot: MailSelectionSnapshot = { ...selectionRef.current, labelIds: [...selectionRef.current.labelIds] };
+    const requestOwnerScope = snapshot.ownerScope;
+    const consentSnapshot = selectedConsent;
     setModelBusy(true);
     try {
-      const result = await bounded((signal) => setMailModelConsent(selectedConsent.consent_id, { expected_revision: selectedConsent.revision, acknowledged_payload_fields: [...selectedConsent.allowed_body_fields], allow }, signal));
-      if (!mountedRef.current) return;
+      const result = await bounded((signal) => setMailModelConsent(consentSnapshot.consent_id, { expected_revision: consentSnapshot.revision, acknowledged_payload_fields: [...consentSnapshot.allowed_body_fields], allow }, signal));
+      if (!isCurrentRequest(generation, requestOwnerScope) || !sameSelection(snapshot)) return;
+      if (result.consent_id !== snapshot.consentId || result.connection_id !== snapshot.connectionId || result.connection_revision !== snapshot.connectionRevision || result.goal_id !== snapshot.goalId || result.goal_revision !== snapshot.goalRevision || result.source_revision !== snapshot.sourceRevision || result.revision <= consentSnapshot.revision) {
+        throw new MailApiError(200, "model_consent_selection_mismatch", "The model consent receipt did not match the selected connection, Goal, and consent revision.", "refresh_mail_metadata");
+      }
       setConsents((current) => current.map((item) => item.consent_id === result.consent_id ? result : item));
       setModelAllowed(result.model_egress_allowed);
       setModelAcknowledged(false);
     } catch (error) {
-      if (mountedRef.current && !isAbort(error)) setModelError(safeError(error));
+      if (isCurrentRequest(generation, requestOwnerScope) && sameSelection(snapshot) && !isAbort(error)) setModelError(safeError(error));
     } finally {
-      if (mountedRef.current) setModelBusy(false);
+      if (isCurrentRequest(generation, requestOwnerScope) && sameSelection(snapshot)) setModelBusy(false);
     }
   };
 
@@ -432,21 +716,174 @@ export function MailConnectionPanel({ ownerPrincipalId, ownerSessionId }: MailCo
     event.preventDefault();
     setWatchError(null);
     const expiry = toIso(watchExpiry);
+    if (pendingWatch) {
+      await reconcilePendingWatch();
+      return;
+    }
     if (!selectedConnection || !selectedConsent || !selectedGoal) return setWatchError("Choose an active connection, consent, and Goal revision first.");
     if (!activeConsent(selectedConsent)) return setWatchError("The source consent is not active or has expired.");
+    const limit = Number(maxMessages);
     if (!selectedLabelIds.length || !expiry || Date.parse(expiry) <= Date.now() || Date.parse(expiry) > Date.now() + 7 * 24 * 60 * 60 * 1000) return setWatchError("Choose current labels and a future expiry within seven days.");
+    if (!Number.isInteger(limit) || limit < 1 || limit > selectedConsent.max_messages) return setWatchError(`Choose between one and ${selectedConsent.max_messages} messages.`);
+    const key = idempotencyKey("gmail-watch");
+    const pending = { version: 1 as const, idempotencyKey: key, action: "create" as const, watchId: null, expectedBindingRevision: null };
+    const generation = generationRef.current;
+    // Persist only the opaque replay key before dispatch.  The request body,
+    // labels, Goal, message data, credentials, and intent remain transient.
+    if (!writePendingWatch(ownerScope, pending)) {
+      setWatchError("Browser recovery storage is unavailable. The watch mutation is blocked until its opaque request key can be retained.");
+      return;
+    }
+    setPendingWatch(pending);
     setWatchBusy(true);
     try {
-      const result = await bounded((signal) => createMailWatch({ schema_version: 1, connection_id: selectedConnection.connection_id, expected_connection_revision: selectedConnection.revision, mail_consent_id: selectedConsent.consent_id, expected_source_consent_revision: selectedConsent.source_revision, goal_id: selectedGoal.id, expected_goal_revision: selectedGoal.revision, label_ids: selectedLabelIds, cadence: watchCadence, timezone: watchTimezone.trim(), expires_at: expiry, max_messages: Number(maxMessages), idempotency_key: idempotencyKey("gmail-watch") }, signal));
-      if (mountedRef.current) setWatch(result);
+      const result = await bounded((signal) => createMailWatch({ schema_version: 1, connection_id: selectedConnection.connection_id, expected_connection_revision: selectedConnection.revision, mail_consent_id: selectedConsent.consent_id, expected_source_consent_revision: selectedConsent.source_revision, goal_id: selectedGoal.id, expected_goal_revision: selectedGoal.revision, label_ids: selectedLabelIds, cadence: { kind: watchCadence, timezone: watchTimezone.trim(), daily_hour: null, daily_minute: null }, expires_at: expiry, max_messages: limit, idempotency_key: key }, signal));
+      if (mountedRef.current && generation === generationRef.current) {
+        clearPendingWatch(ownerScope);
+        setPendingWatch(null);
+        setWatch(result);
+        setWatches((current) => [result, ...current.filter((item) => item.watch_id !== result.watch_id)]);
+        setWatchError(null);
+      }
     } catch (error) {
-      if (mountedRef.current && !isAbort(error)) setWatchError(isUnknown(error) ? "The watch outcome is unknown. Keep the exact key and reconcile explicitly; the UI will not create a replacement watch." : safeError(error));
+      if (mountedRef.current && generation === generationRef.current && !isAbort(error)) {
+        if (isUnknown(error)) {
+          setWatchError("The watch outcome is unknown. The original opaque key is retained; reconcile the exact server watch before creating another.");
+        } else {
+          clearPendingWatch(ownerScope);
+          setPendingWatch(null);
+          setWatchError(safeError(error));
+        }
+      }
     } finally {
-      if (mountedRef.current) setWatchBusy(false);
+      if (mountedRef.current && generation === generationRef.current) setWatchBusy(false);
+    }
+  };
+
+  const reconcilePendingWatch = async () => {
+    if (!pendingWatch || !ownerScope) {
+      setWatchError("There is no owner-scoped watch request to reconcile.");
+      return;
+    }
+    const generation = generationRef.current;
+    setWatchBusy(true);
+    setWatchError(null);
+    try {
+      if (pendingWatch.action === "create") {
+        const result = await bounded((signal) => getMailWatchRecovery(pendingWatch.idempotencyKey, signal));
+        if (!mountedRef.current || generation !== generationRef.current) return;
+        if (result.idempotency_key !== pendingWatch.idempotencyKey) throw new MailApiError(200, "watch_recovery_mismatch", "The watch recovery did not match the original request key.", "refresh_watch");
+        if (result.status === "replayed" && result.watch) {
+          clearPendingWatch(ownerScope);
+          setPendingWatch(null);
+          setWatch(result.watch);
+          setWatches((current) => [result.watch as MailWatchMetadata, ...current.filter((item) => item.watch_id !== result.watch?.watch_id)]);
+          setWatchError(null);
+        } else {
+          setWatchError("The original watch request is still unresolved. Its exact key is retained; no replacement watch was created.");
+        }
+      } else if (pendingWatch.watchId && pendingWatch.expectedBindingRevision !== null) {
+        // A plain watch GET is only a current projection; it cannot prove that
+        // this original control key committed. Explicitly retry the exact
+        // idempotent intent, then verify its CAS receipt and readback.
+        const expectedRevision = pendingWatch.expectedBindingRevision;
+        const receipt = pendingWatch.action === "revoke"
+          ? await bounded((signal) => revokeMailWatch(pendingWatch.watchId as string, { expected_binding_revision: expectedRevision, idempotency_key: pendingWatch.idempotencyKey, reason: "operator_requested" }, signal))
+          : await bounded((signal) => controlMailWatch(pendingWatch.watchId as string, { action: pendingWatch.action as "pause" | "resume", expected_binding_revision: expectedRevision, idempotency_key: pendingWatch.idempotencyKey }, signal));
+        const expectedState = pendingWatch.action === "pause" ? "paused" : pendingWatch.action === "resume" ? "active" : "revoked";
+        if (receipt.binding_id !== pendingWatch.watchId || receipt.binding_revision !== expectedRevision + 1 || receipt.state !== expectedState) {
+          throw new MailApiError(200, "watch_control_recovery_invalid", "The original watch control receipt could not be verified.", "refresh_watch");
+        }
+        const result = await bounded((signal) => getMailWatch(pendingWatch.watchId as string, signal));
+        if (!mountedRef.current || generation !== generationRef.current) return;
+        if (result.binding_revision === receipt.binding_revision && result.state === receipt.state) {
+          clearPendingWatch(ownerScope);
+          setPendingWatch(null);
+          setWatch(result);
+          setWatches((current) => current.map((item) => item.watch_id === result.watch_id ? result : item));
+          setWatchError(null);
+        } else {
+          setWatchError("The exact watch readback has not reached the requested state. The original control key is retained; no replacement control was sent.");
+        }
+      }
+    } catch {
+      if (mountedRef.current && generation === generationRef.current) setWatchError("The original watch request could not be confirmed. Its exact key is retained; retry reconciliation explicitly.");
+    } finally {
+      if (mountedRef.current && generation === generationRef.current) setWatchBusy(false);
+    }
+  };
+
+  const refreshWatch = async (watchId: string) => {
+    const generation = generationRef.current;
+    setWatchBusy(true);
+    setWatchError(null);
+    try {
+      const result = await bounded((signal) => getMailWatch(watchId, signal));
+      if (!mountedRef.current || generation !== generationRef.current) return;
+      setWatches((current) => current.map((item) => item.watch_id === result.watch_id ? result : item));
+      setWatch(result);
+      setWatchListError(null);
+      setWatchListStale(false);
+    } catch (error) {
+      if (mountedRef.current && generation === generationRef.current && !isAbort(error)) setWatchError(safeError(error));
+    } finally {
+      if (mountedRef.current && generation === generationRef.current) setWatchBusy(false);
+    }
+  };
+
+  const controlWatch = async (item: MailWatchMetadata, action: "pause" | "resume" | "revoke") => {
+    if (pendingWatch) {
+      setWatchError("The previous watch request has no confirmed outcome. Reconcile its exact key before sending another control.");
+      return;
+    }
+    const generation = generationRef.current;
+    setWatchBusy(true);
+    setWatchError(null);
+    const expectedRevision = item.binding_revision;
+    const key = idempotencyKey(`gmail-watch-${action}`);
+    const pending = { version: 1 as const, idempotencyKey: key, action, watchId: item.watch_id, expectedBindingRevision: expectedRevision };
+    if (!writePendingWatch(ownerScope, pending)) {
+      setWatchError("Browser recovery storage is unavailable. The watch control is blocked until its opaque request key can be retained.");
+      return;
+    }
+    setPendingWatch(pending);
+    try {
+      const receipt = action === "revoke"
+        ? await bounded((signal) => revokeMailWatch(item.watch_id, { expected_binding_revision: expectedRevision, idempotency_key: key, reason: "operator_requested" }, signal))
+        : await bounded((signal) => controlMailWatch(item.watch_id, { action, expected_binding_revision: expectedRevision, idempotency_key: key }, signal));
+      const expectedState = action === "pause" ? "paused" : action === "resume" ? "active" : "revoked";
+      if (receipt.binding_id !== item.watch_id || receipt.binding_revision !== expectedRevision + 1 || receipt.state !== expectedState) {
+        throw new MailApiError(200, "watch_control_receipt_invalid", "The Mail watch control receipt could not be verified.", "refresh_watch");
+      }
+      // The control receipt proves the CAS transition; the exact watch GET
+      // proves the redacted projection and occurrence state before rendering.
+      const result = await bounded((signal) => getMailWatch(item.watch_id, signal));
+      if (result.binding_revision !== receipt.binding_revision || result.state !== receipt.state) {
+        throw new MailApiError(200, "watch_control_readback_invalid", "The Mail watch state changed without a matching control readback.", "refresh_watch");
+      }
+      if (!mountedRef.current || generation !== generationRef.current) return;
+      clearPendingWatch(ownerScope);
+      setPendingWatch(null);
+      setWatches((current) => current.map((watchItem) => watchItem.watch_id === result.watch_id ? result : watchItem));
+      setWatch(result);
+      setWatchError(null);
+    } catch (error) {
+      if (mountedRef.current && generation === generationRef.current && !isAbort(error)) {
+        if (!isUnknown(error)) {
+          clearPendingWatch(ownerScope);
+          setPendingWatch(null);
+        }
+        setWatchError(isUnknown(error) ? "The watch control outcome is unknown. The original control key is retained; reconcile the exact watch before attempting another control." : safeError(error));
+      }
+    } finally {
+      if (mountedRef.current && generation === generationRef.current) setWatchBusy(false);
     }
   };
 
   const chooseConnection = (connectionId: string) => {
+    generationRef.current += 1;
+    setConsentBusy(false);
+    setModelBusy(false);
     setSelectedConnectionId(connectionId);
     setSelectedLabelIds([]);
     setConsents((current) => current.filter((item) => item.connection_id === connectionId));
@@ -464,13 +901,13 @@ export function MailConnectionPanel({ ownerPrincipalId, ownerSessionId }: MailCo
         <div className="text-[9px] uppercase tracking-wider text-retro-text/50 mb-2">Import connection</div>
         <form className="grid gap-2 sm:grid-cols-2" onSubmit={(event) => void submitConnection(event)}>
           <label className="text-[10px]">Label<input className="cockpit-input mt-1 w-full" maxLength={200} value={label} onChange={(event) => setLabel(event.currentTarget.value)} autoComplete="off" /></label>
-          <label className="text-[10px]">Client ID<input className="cockpit-input mt-1 w-full" maxLength={4096} value={clientId} onChange={(event) => setClientId(event.currentTarget.value)} autoComplete="off" /></label>
-          <label className="text-[10px]">Client secret (optional)<input className="cockpit-input mt-1 w-full" type="password" maxLength={4096} value={clientSecret} onChange={(event) => setClientSecret(event.currentTarget.value)} autoComplete="new-password" /></label>
-          <label className="text-[10px]">Refresh token<input className="cockpit-input mt-1 w-full" type="password" maxLength={8192} required value={refreshToken} onChange={(event) => setRefreshToken(event.currentTarget.value)} autoComplete="new-password" /></label>
+          <label className="text-[10px]">Client ID<input className="cockpit-input mt-1 w-full" maxLength={4096} value={clientId} onChange={(event) => setClientId(event.currentTarget.value)} autoComplete="off" disabled={Boolean(pendingSetup)} /></label>
+          <label className="text-[10px]">Client secret (optional)<input className="cockpit-input mt-1 w-full" type="password" maxLength={4096} value={clientSecret} onChange={(event) => setClientSecret(event.currentTarget.value)} autoComplete="new-password" disabled={Boolean(pendingSetup)} /></label>
+          <label className="text-[10px]">Refresh token<input className="cockpit-input mt-1 w-full" type="password" maxLength={8192} required={!pendingSetup} value={refreshToken} onChange={(event) => setRefreshToken(event.currentTarget.value)} autoComplete="new-password" disabled={Boolean(pendingSetup)} /></label>
           <div className="sm:col-span-2 text-[9px] text-retro-text/45">Declared scope: <code>{GMAIL_SCOPE}</code></div>
           {pendingSetup && <div className="sm:col-span-2 rounded border border-amber-500/40 p-2 text-[10px]" role="status">Setup key <span className="font-mono">{pendingSetup.idempotencyKey}</span> has no confirmed outcome. Refresh metadata to reconcile it; credentials were cleared.</div>}
           {formError && <div className="sm:col-span-2 rounded border border-amber-500/40 p-2 text-[10px]" role="alert">{formError}</div>}
-          <div className="sm:col-span-2 flex flex-wrap gap-2"><button type="submit" className="cockpit-feedback-button" disabled={submitting || !ownerScope}>{submitting ? "Saving…" : pendingSetup ? "Reconcile with metadata" : "Save connection"}</button><button type="button" className="cockpit-feedback-button" onClick={() => void loadMetadata()} disabled={loading}>{loading ? "Refreshing…" : "Refresh metadata"}</button></div>
+          <div className="sm:col-span-2 flex flex-wrap gap-2"><button type={pendingSetup ? "button" : "submit"} className="cockpit-feedback-button" onClick={pendingSetup ? () => void reconcileSetup() : undefined} disabled={submitting || !ownerScope}>{submitting ? "Saving…" : pendingSetup ? "Reconcile with metadata" : "Save connection"}</button><button type="button" className="cockpit-feedback-button" onClick={() => void loadMetadata()} disabled={loading}>{loading ? "Refreshing…" : "Refresh metadata"}</button></div>
         </form>
       </div>
 
@@ -491,13 +928,13 @@ export function MailConnectionPanel({ ownerPrincipalId, ownerSessionId }: MailCo
         <div className="mt-3 rounded border border-retro-text/10 p-2">
           <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-1">Cached account labels</div>
           <div className="text-[9px] text-retro-text/45 mb-2">Selecting labels is local. A refresh button above is the only path that contacts the provider.</div>
-          {selectedLabels.length === 0 ? <div className="text-[10px] text-retro-text/45">No current labels. Use explicit Refresh labels.</div> : <div className="grid gap-1 sm:grid-cols-2">{selectedLabels.filter((item) => item.state === "active").map((item) => <label key={item.label_id} className="flex items-center gap-2 text-[10px]"><input type="checkbox" checked={selectedLabelIds.includes(item.label_id)} onChange={(event) => { const checked = event.currentTarget.checked; setSelectedLabelIds((current) => checked ? [...current, item.label_id].slice(0, 3) : current.filter((id) => id !== item.label_id)); }} />{item.name}<span className="opacity-50">{item.type}</span></label>)}</div>}
+          {selectedLabels.length === 0 ? <div className="text-[10px] text-retro-text/45">No current labels. Use explicit Refresh labels.</div> : <div className="grid gap-1 sm:grid-cols-2">{selectedLabels.filter((item) => item.state === "active").map((item) => <label key={item.label_id} className="flex items-center gap-2 text-[10px]"><input type="checkbox" checked={selectedLabelIds.includes(item.label_id)} onChange={(event) => { const checked = event.currentTarget.checked; generationRef.current += 1; setConsentBusy(false); setModelBusy(false); setSelectedLabelIds((current) => checked ? [...current, item.label_id].slice(0, 3) : current.filter((id) => id !== item.label_id)); }} />{item.name}<span className="opacity-50">{item.type}</span></label>)}</div>}
         </div>
 
         <form className="mt-3 rounded border border-retro-text/10 p-2" onSubmit={(event) => void createConsentForSource(event)}>
           <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-1">Finite source consent</div>
           <div className="grid gap-2 sm:grid-cols-2">
-            <label className="text-[10px]">Goal<select className="cockpit-input mt-1 w-full" value={selectedGoalId} onChange={(event) => { setSelectedGoalId(event.currentTarget.value); clearPrivateState(); }}><option value="">Choose an active Goal</option>{goals.map((goal) => <option key={goal.id} value={goal.id}>{goal.title} · revision {goal.revision}</option>)}</select></label>
+            <label className="text-[10px]">Goal<select className="cockpit-input mt-1 w-full" value={selectedGoalId} onChange={(event) => { generationRef.current += 1; setConsentBusy(false); setModelBusy(false); setSelectedGoalId(event.currentTarget.value); clearPrivateState(); }}><option value="">Choose an active Goal</option>{goals.map((goal) => <option key={goal.id} value={goal.id}>{goal.title} · revision {goal.revision}</option>)}</select></label>
             <label className="text-[10px]">Expires<input className="cockpit-input mt-1 w-full" type="datetime-local" value={consentExpiry} onChange={(event) => setConsentExpiry(event.currentTarget.value)} /></label>
             <label className="text-[10px]">Maximum messages<input className="cockpit-input mt-1 w-full" type="number" min={1} max={10} value={maxMessages} onChange={(event) => setMaxMessages(event.currentTarget.value)} /></label>
             <div className="text-[10px]">Model egress<div className="mt-1 text-retro-text/50">Off until a separate exact-field acknowledgement below.</div></div>
@@ -524,12 +961,31 @@ export function MailConnectionPanel({ ownerPrincipalId, ownerSessionId }: MailCo
           {privateMessage && <article className="mt-2 rounded border border-emerald-500/30 p-2" aria-label="Private Mail message"><div className="font-semibold">{privateMessage.subject}</div><div className="mt-2 whitespace-pre-wrap break-words">{privateMessage.plain_text}</div>{privateMessage.truncated && <div className="mt-2 text-amber-300">The bounded body was truncated by the server.</div>}<div className="mt-2 text-[9px] text-retro-text/50">Local-only read · no learning · attachments and links were not fetched.</div></article>}
         </div>
 
+        <section className="mt-3 rounded border border-retro-text/10 p-2" aria-label="Saved Mail watches">
+          <div className="flex flex-wrap items-center justify-between gap-2"><div><div className="text-[10px] uppercase tracking-wider text-retro-border font-bold">Saved metadata watches</div><div className="text-[9px] text-retro-text/50">Goal-governed metadata only. A baseline creates no notice; later periods allow at most three neutral notices and never create a task automatically.</div></div><button type="button" className="cockpit-feedback-button" onClick={() => void loadWatches()} disabled={watchBusy}>{watchBusy ? "Refreshing…" : "Refresh watches"}</button></div>
+          {watchListError && <div className="mt-2 rounded border border-amber-500/40 p-2 text-[10px]" role="alert">{watchListError}{watchListStale ? " Last confirmed watch states remain visible." : ""}</div>}
+          {pendingWatch && <div className="mt-2 rounded border border-amber-500/40 p-2 text-[10px]" role="status">A watch {pendingWatch.action} request has an unconfirmed outcome. The original opaque request key is retained in this operator session; reconcile the exact server watch before another control.<button type="button" className="cockpit-feedback-button mt-2" onClick={() => void reconcilePendingWatch()} disabled={watchBusy}>{watchBusy ? "Reconciling…" : "Reconcile original watch request"}</button></div>}
+          {watches.length === 0 ? <div className="mt-2 text-[10px] text-retro-text/45">{watchListStale ? "Saved watch state is unavailable." : "No metadata watches have been created."}</div> : <div className="mt-2 grid gap-2">{watches.map((item) => {
+            const canPause = item.state === "active";
+            const canResume = item.state === "paused";
+            const canRevoke = canPause || canResume;
+            const latest = item.latest_occurrence;
+            return <article key={item.watch_id} className="rounded border border-retro-text/10 p-2 text-[10px]">
+              <div className="flex flex-wrap items-center justify-between gap-2"><strong>Watch {item.watch_id}</strong><span className="uppercase tracking-wider">{item.state} · binding revision {item.binding_revision}</span></div>
+              <div className="mt-1 text-retro-text/60">{item.cadence.kind} · {item.cadence.timezone} · Goal {item.goal_id} revision {item.goal_revision} · expires {new Date(item.expires_at).toLocaleString()}</div>
+              <div className="mt-1">Baseline: {item.baseline_complete ? "complete" : "pending"} · coverage: {item.watch_state}{item.skipped_coverage_reason ? ` · ${item.skipped_coverage_reason}` : ""}</div>
+              {latest && <div className="mt-1 text-retro-text/60">Latest occurrence: {latest.state}{latest.failure_code ? ` · ${latest.failure_code}` : ""}{latest.recovery_action ? ` · ${latest.recovery_action}` : ""}</div>}
+              <div className="mt-2 flex flex-wrap gap-2"><button type="button" className="cockpit-feedback-button" onClick={() => void refreshWatch(item.watch_id)} disabled={watchBusy}>Refresh exact watch</button>{canPause && <button type="button" className="cockpit-feedback-button" onClick={() => void controlWatch(item, "pause")} disabled={watchBusy}>Pause watch</button>}{canResume && <button type="button" className="cockpit-feedback-button" onClick={() => void controlWatch(item, "resume")} disabled={watchBusy}>Resume watch</button>}{canRevoke && <button type="button" className="cockpit-feedback-button" onClick={() => void controlWatch(item, "revoke")} disabled={watchBusy}>Revoke watch</button>}</div>
+            </article>;
+          })}</div>}
+          {watchError && <div className="mt-2 text-amber-300" role="alert">{watchError}</div>}
+        </section>
+
         <form className="mt-3 rounded border border-retro-text/10 p-2" onSubmit={(event) => void createWatch(event)}>
           <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-1">Finite metadata watch</div>
           <div className="grid gap-2 sm:grid-cols-2"><label className="text-[10px]">Cadence<select className="cockpit-input mt-1 w-full" value={watchCadence} onChange={(event) => setWatchCadence(event.currentTarget.value as "hourly" | "6h")}><option value="hourly">Hourly</option><option value="6h">Every 6 hours</option></select></label><label className="text-[10px]">Timezone<input className="cockpit-input mt-1 w-full" value={watchTimezone} maxLength={64} onChange={(event) => setWatchTimezone(event.currentTarget.value)} /></label><label className="text-[10px]">Expires<input className="cockpit-input mt-1 w-full" type="datetime-local" value={watchExpiry} onChange={(event) => setWatchExpiry(event.currentTarget.value)} /></label></div>
           <div className="mt-2 text-[9px] text-retro-text/50">The first scan establishes a baseline. Later notices are bounded and neutral; no body read or model call occurs per arrival. Quiet hours and Goal budget are enforced by the server.</div>
-          {watchError && <div className="mt-2 text-amber-300" role="alert">{watchError}</div>}
-          <button type="submit" className="cockpit-feedback-button mt-2" disabled={watchBusy || !activeConsent(selectedConsent) || !selectedGoal}>{watchBusy ? "Creating watch…" : "Create metadata watch"}</button>
+          <button type="submit" className="cockpit-feedback-button mt-2" disabled={watchBusy || Boolean(pendingWatch) || !activeConsent(selectedConsent) || !selectedGoal}>{watchBusy ? "Creating watch…" : pendingWatch ? "Reconcile existing watch" : "Create metadata watch"}</button>
           {watch && <div className="mt-2 rounded border border-emerald-500/30 p-2" role="status"><div>Watch {watch.watch_id} · {watch.state} · binding revision {watch.binding_revision}</div><div>State {watch.watch_state} · {watch.baseline_complete ? "baseline complete" : "baseline pending"} · expires {new Date(watch.expires_at).toLocaleString()}</div><div className="mt-1 text-[9px] text-retro-text/50">Pause, resume, and revoke remain governed schedule actions; this view never restarts an unknown occurrence automatically.</div></div>}
         </form>
       </>}

@@ -1541,6 +1541,7 @@ async def create_mail_watch_input_artifact(
     label_ids: list[str],
     max_messages: int,
     idempotency_key: str,
+    retention_deadline: datetime | None = None,
 ):
     """Create the immutable metadata-only input for one Mail watch.
 
@@ -1569,7 +1570,13 @@ async def create_mail_watch_input_artifact(
         input=payload,
         idempotency_key=idempotency_key,
     )
-    return await prepare_input_artifact(db, owner, request, allow_scheduler=True)
+    return await prepare_input_artifact(
+        db,
+        owner,
+        request,
+        allow_scheduler=True,
+        retention_deadline=retention_deadline,
+    )
 
 
 __all__ = [

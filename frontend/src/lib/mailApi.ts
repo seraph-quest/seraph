@@ -11,7 +11,13 @@ const BODY_FIELDS = ["subject", "plainbody", "replyintent"] as const;
 export type MailBodyField = (typeof BODY_FIELDS)[number];
 export type MailConnectionState = "preparing" | "active" | "revoked" | "expired" | "blocked" | "blocked_cleanup";
 export type MailConsentState = "active" | "revoked" | "expired";
-export type MailWatchCadence = "hourly" | "6h";
+export type MailWatchCadenceKind = "hourly" | "6h";
+export interface MailWatchCadence {
+  kind: MailWatchCadenceKind;
+  timezone: string;
+  daily_hour: null;
+  daily_minute: null;
+}
 export type MailWatchBindingState = "active" | "paused" | "revoked" | "expired" | "blocked";
 
 export interface MailConnectionMetadata {
@@ -141,6 +147,52 @@ export interface MailDraftResponse {
   saved_to_provider?: false;
 }
 
+export type MailReplyRecoveryStatus = "not_found" | "verified" | "unknown" | "blocked" | "running" | "pending";
+
+export interface MailReplyRecovery {
+  status: MailReplyRecoveryStatus;
+  idempotency_scope: "mail-reply-draft";
+  idempotency_key: string;
+  task_id: string | null;
+  attempt_id: string | null;
+  job_id: string | null;
+  input_artifact_id: string | null;
+  input_digest: string | null;
+  request_digest: string | null;
+  goal_id: string | null;
+  goal_revision: number | null;
+  memory_status: "no_learning";
+  recovery_action: string;
+}
+
+export interface MailWatchRecovery {
+  status: "not_found" | "replayed";
+  idempotency_scope: "mail-watch";
+  idempotency_key: string;
+  watch: MailWatchMetadata | null;
+  watch_id: string | null;
+  input_artifact_id: string | null;
+  input_digest: string | null;
+  request_digest: string | null;
+  goal_id: string | null;
+  goal_revision: number | null;
+  recovery_action: string | null;
+  memory_status: "no_learning";
+}
+
+export type MailConnectionRecoveryStatus = "not_found" | "replayed" | "pending" | "blocked" | "unknown";
+
+export interface MailConnectionRecovery {
+  status: MailConnectionRecoveryStatus;
+  idempotency_scope: "mail-connection-setup";
+  idempotency_key: string;
+  connection_id: string | null;
+  request_digest: string | null;
+  connection: MailConnectionMetadata | null;
+  memory_status: "no_learning";
+  recovery_action: string | null;
+}
+
 export interface MailWatchOccurrence {
   occurrence_id: string;
   state: string;
@@ -160,11 +212,11 @@ export interface MailWatchMetadata {
   goal_id: string;
   goal_revision: number;
   label_ids: string[];
-  cadence: { kind: MailWatchCadence; timezone: string; daily_hour: null; daily_minute: null };
+  cadence: MailWatchCadence;
   binding_revision: number;
   expires_at: string;
   state: MailWatchBindingState;
-  watch_state: "baseline_complete" | "coverage_blocked" | "not_started" | "unknown";
+  watch_state: "baseline_complete" | "coverage_blocked" | "not_started" | "active" | "unknown";
   baseline_complete: boolean;
   last_observed_at: string | null;
   last_completed_occurrence_id: string | null;
@@ -201,7 +253,6 @@ export interface MailWatchCreateRequest {
   expected_goal_revision: number;
   label_ids: string[];
   cadence: MailWatchCadence;
-  timezone: string;
   expires_at: string;
   max_messages: number;
   idempotency_key: string;
@@ -219,6 +270,55 @@ export class MailApiError extends Error {
     this.code = code;
     this.recovery = recovery;
   }
+}
+
+const MAIL_REQUEST_TIMEOUT_MS = 15_000;
+
+/**
+ * Bound the whole operation, including response parsing. AbortController is
+ * cooperative, so the deadline also settles the caller when a fetch adapter
+ * or Response.json implementation ignores the abort signal.
+ */
+export function withMailDeadline<T>(
+  operation: (signal: AbortSignal) => Promise<T>,
+  parentSignal?: AbortSignal,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const controller = new AbortController();
+    let settled = false;
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+
+    const cleanup = () => {
+      if (timeout !== null) clearTimeout(timeout);
+      parentSignal?.removeEventListener("abort", onAbort);
+    };
+    const finishResolve = (value: T) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(value);
+    };
+    const finishReject = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const onAbort = () => {
+      controller.abort();
+      finishReject(new MailApiError(0, "mail_transport_unavailable", "The Mail operation has no confirmed outcome. Keep the exact request for reconciliation.", "reconcile_existing_request"));
+    };
+
+    if (parentSignal?.aborted) {
+      onAbort();
+      return;
+    }
+    parentSignal?.addEventListener("abort", onAbort, { once: true });
+    timeout = setTimeout(onAbort, MAIL_REQUEST_TIMEOUT_MS);
+    void Promise.resolve()
+      .then(() => operation(controller.signal))
+      .then(finishResolve, finishReject);
+  });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -246,6 +346,18 @@ function safeString(value: unknown, field: string, max = 1024): string {
 
 function nullableString(value: unknown, field: string, max = 1024): string | null {
   return value === null ? null : safeString(value, field, max);
+}
+
+function nullableOpaqueId(value: unknown, field: string): string | null {
+  return value === null ? null : opaqueId(value, field);
+}
+
+function nullableDigest(value: unknown, field: string): string | null {
+  return value === null ? null : digest(value, field);
+}
+
+function nullablePositiveInteger(value: unknown, field: string): number | null {
+  return value === null ? null : positiveInteger(value, field);
 }
 
 function positiveInteger(value: unknown, field: string, max = Number.MAX_SAFE_INTEGER): number {
@@ -369,12 +481,18 @@ function errorDetail(payload: unknown): { code: string; message: string; recover
 
 async function mailRequest<T>(path: string, init: RequestInit, validate: (value: unknown) => T): Promise<T> {
   let response: Response;
+  let payload: unknown;
   try {
-    response = await apiFetch(`${API_URL}${path}`, init);
-  } catch {
+    ({ response, payload } = await withMailDeadline<{ response: Response; payload: unknown }>(async (signal) => {
+      const nextInit = { ...init, signal };
+      const nextResponse = await apiFetch(`${API_URL}${path}`, nextInit);
+      const nextPayload = await nextResponse.json().catch(() => null);
+      return { response: nextResponse, payload: nextPayload };
+    }, init.signal ?? undefined));
+  } catch (error) {
+    if (error instanceof MailApiError) throw error;
     throw new MailApiError(0, "mail_transport_unavailable", "The Mail operation has no confirmed outcome. Keep the exact request for reconciliation.", "reconcile_existing_request");
   }
-  const payload = await response.json().catch(() => null);
   if (!response.ok) {
     const detail = errorDetail(payload);
     throw new MailApiError(response.status, detail.code, detail.message, detail.recovery);
@@ -553,6 +671,79 @@ function draftResponse(value: unknown): MailDraftResponse {
   };
 }
 
+function replyRecoveryResponse(value: unknown): MailReplyRecovery {
+  if (!isRecord(value)) fail("The Mail reply recovery response was not an object.");
+  exactKeys(value, [
+    "status", "idempotency_scope", "idempotency_key", "task_id", "attempt_id", "job_id",
+    "input_artifact_id", "input_digest", "request_digest", "goal_id", "goal_revision",
+    "memory_status", "recovery_action",
+  ], "Mail reply recovery");
+  const status = value.status;
+  if (!["not_found", "verified", "unknown", "blocked", "running", "pending"].includes(String(status))) fail("The Mail reply recovery status is invalid.");
+  if (value.idempotency_scope !== "mail-reply-draft" || value.memory_status !== "no_learning") fail("The Mail reply recovery scope is invalid.");
+  return {
+    status: status as MailReplyRecoveryStatus,
+    idempotency_scope: "mail-reply-draft",
+    idempotency_key: opaqueId(value.idempotency_key, "reply idempotency key"),
+    task_id: nullableOpaqueId(value.task_id, "task ID"),
+    attempt_id: nullableOpaqueId(value.attempt_id, "attempt ID"),
+    job_id: nullableOpaqueId(value.job_id, "job ID"),
+    input_artifact_id: nullableOpaqueId(value.input_artifact_id, "input artifact ID"),
+    input_digest: nullableDigest(value.input_digest, "input digest"),
+    request_digest: nullableDigest(value.request_digest, "request digest"),
+    goal_id: nullableOpaqueId(value.goal_id, "Goal ID"),
+    goal_revision: nullablePositiveInteger(value.goal_revision, "Goal revision"),
+    memory_status: "no_learning",
+    recovery_action: safeString(value.recovery_action, "recovery action", 128),
+  };
+}
+
+function watchRecoveryResponse(value: unknown): MailWatchRecovery {
+  if (!isRecord(value)) fail("The Mail watch recovery response was not an object.");
+  exactKeys(value, [
+    "status", "idempotency_scope", "idempotency_key", "watch", "watch_id", "input_artifact_id",
+    "input_digest", "request_digest", "goal_id", "goal_revision", "recovery_action", "memory_status",
+  ], "Mail watch recovery");
+  if (value.status !== "not_found" && value.status !== "replayed") fail("The Mail watch recovery status is invalid.");
+  if (value.idempotency_scope !== "mail-watch" || value.memory_status !== "no_learning") fail("The Mail watch recovery scope is invalid.");
+  const parsedWatch = value.watch === null ? null : watch(value.watch);
+  if (value.status === "replayed" && !parsedWatch) fail("The replayed Mail watch recovery has no watch projection.");
+  if (parsedWatch && value.watch_id !== parsedWatch.watch_id) fail("The Mail watch recovery identity does not match its projection.");
+  return {
+    status: value.status,
+    idempotency_scope: "mail-watch",
+    idempotency_key: opaqueId(value.idempotency_key, "watch idempotency key"),
+    watch: parsedWatch,
+    watch_id: nullableOpaqueId(value.watch_id, "watch ID"),
+    input_artifact_id: nullableOpaqueId(value.input_artifact_id, "input artifact ID"),
+    input_digest: nullableDigest(value.input_digest, "input digest"),
+    request_digest: nullableDigest(value.request_digest, "request digest"),
+    goal_id: nullableOpaqueId(value.goal_id, "Goal ID"),
+    goal_revision: nullablePositiveInteger(value.goal_revision, "Goal revision"),
+    recovery_action: value.recovery_action === null ? null : safeString(value.recovery_action, "recovery action", 128),
+    memory_status: "no_learning",
+  };
+}
+
+function connectionRecoveryResponse(value: unknown): MailConnectionRecovery {
+  if (!isRecord(value)) fail("The Mail connection recovery response was not an object.");
+  exactKeys(value, ["status", "idempotency_scope", "idempotency_key", "connection_id", "request_digest", "connection", "memory_status", "recovery_action"], "Mail connection recovery");
+  if (!["not_found", "replayed", "pending", "blocked", "unknown"].includes(String(value.status))) fail("The Mail connection recovery status is invalid.");
+  if (value.idempotency_scope !== "mail-connection-setup" || value.memory_status !== "no_learning") fail("The Mail connection recovery scope is invalid.");
+  const parsedConnection = value.connection === null ? null : connection(value.connection);
+  if (parsedConnection && value.connection_id !== parsedConnection.connection_id) fail("The Mail connection recovery identity does not match its projection.");
+  return {
+    status: value.status as MailConnectionRecoveryStatus,
+    idempotency_scope: "mail-connection-setup",
+    idempotency_key: opaqueId(value.idempotency_key, "setup idempotency key"),
+    connection_id: nullableOpaqueId(value.connection_id, "connection ID"),
+    request_digest: nullableDigest(value.request_digest, "request digest"),
+    connection: parsedConnection,
+    memory_status: "no_learning",
+    recovery_action: value.recovery_action === null ? null : safeString(value.recovery_action, "recovery action", 128),
+  };
+}
+
 function watch(value: unknown): MailWatchMetadata {
   if (!isRecord(value)) fail("The Mail watch response was not an object.");
   exactKeys(value, ["watch_id", "scheduled_job_id", "capability_id", "connection_id", "connection_revision", "mail_consent_id", "source_consent_revision", "goal_id", "goal_revision", "label_ids", "cadence", "binding_revision", "expires_at", "state", "watch_state", "baseline_complete", "last_observed_at", "last_completed_occurrence_id", "skipped_coverage_reason", "list_page_complete", "latest_occurrence"], "Mail watch");
@@ -561,7 +752,7 @@ function watch(value: unknown): MailWatchMetadata {
   exactKeys(cadence, ["kind", "timezone", "daily_hour", "daily_minute"], "watch cadence");
   if (cadence.kind !== "hourly" && cadence.kind !== "6h" || cadence.daily_hour !== null || cadence.daily_minute !== null) fail("The Mail watch cadence is invalid.");
   const state = value.watch_state;
-  if (!["baseline_complete", "coverage_blocked", "not_started", "unknown"].includes(String(state))) fail("The Mail watch state is invalid.");
+  if (!["baseline_complete", "coverage_blocked", "not_started", "active", "unknown"].includes(String(state))) fail("The Mail watch state is invalid.");
   if (!["active", "paused", "revoked", "expired", "blocked"].includes(String(value.state))) fail("The Mail binding state is invalid.");
   let latest: MailWatchOccurrence | null = null;
   if (value.latest_occurrence !== null) {
@@ -670,6 +861,10 @@ export function createMailConnection(request: CreateMailConnectionRequest, signa
   return mailRequest(`${MAIL_BASE}/connections`, json("POST", request, signal), connectionEnvelope);
 }
 
+export function getMailConnectionRecovery(idempotencyKey: string, signal?: AbortSignal): Promise<MailConnectionRecovery> {
+  return mailRequest(`${MAIL_BASE}/connections/recovery/${id(idempotencyKey, "setup idempotency key")}`, { method: "GET", signal }, connectionRecoveryResponse);
+}
+
 export function verifyMailConnection(connectionId: string, request: { expected_revision: number; request_uuid: string }, signal?: AbortSignal): Promise<Record<string, unknown>> {
   return mailRequest(`${MAIL_BASE}/connections/${id(connectionId, "connection ID")}/verify`, json("POST", request, signal), (value) => operationMetadata(value) && value as Record<string, unknown>);
 }
@@ -733,6 +928,10 @@ export function getMailReplyDraft(taskId: string, signal?: AbortSignal): Promise
   return mailRequest(`${MAIL_BASE}/reply-tasks/${id(taskId, "task ID")}/draft`, { method: "GET", signal }, draftResponse);
 }
 
+export function getMailReplyRecovery(idempotencyKey: string, signal?: AbortSignal): Promise<MailReplyRecovery> {
+  return mailRequest(`${MAIL_BASE}/reply-tasks/recovery/${id(idempotencyKey, "reply idempotency key")}`, { method: "GET", signal }, replyRecoveryResponse);
+}
+
 export function createMailWatch(request: MailWatchCreateRequest, signal?: AbortSignal): Promise<MailWatchMetadata> {
   return mailRequest(`${MAIL_BASE}/watches`, json("POST", request, signal), watchEnvelope);
 }
@@ -743,6 +942,10 @@ export function listMailWatches(signal?: AbortSignal): Promise<MailWatchMetadata
 
 export function getMailWatch(watchId: string, signal?: AbortSignal): Promise<MailWatchMetadata> {
   return mailRequest(`${MAIL_BASE}/watches/${id(watchId, "watch ID")}`, { method: "GET", signal }, watchProjectionEnvelope);
+}
+
+export function getMailWatchRecovery(idempotencyKey: string, signal?: AbortSignal): Promise<MailWatchRecovery> {
+  return mailRequest(`${MAIL_BASE}/watches/recovery/${id(idempotencyKey, "watch idempotency key")}`, { method: "GET", signal }, watchRecoveryResponse);
 }
 
 export type MailWatchControlRequest =

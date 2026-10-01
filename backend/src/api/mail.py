@@ -36,7 +36,9 @@ from src.db.models import (
     OperatorSession,
     GovernedScheduleBinding,
     GovernedScheduleOccurrence,
+    WorkBoardAttempt,
     WorkBoardInputArtifact,
+    WorkBoardTask,
     WorkBoardStatus,
     WorkflowRunState,
 )
@@ -269,6 +271,30 @@ class ReplyTaskCreate(_Strict):
         return value
 
 
+class MailWatchCadence(_Strict):
+    """The canonical public cadence object shared by governed schedules.
+
+    Mail metadata watches intentionally expose only the two supported periodic
+    forms.  The explicit null daily fields keep the wire shape identical to
+    the scheduler's canonical cadence DTO and make future daily support an
+    additive contract rather than a scalar/string compatibility alias.
+    """
+
+    kind: Literal["hourly", "6h"]
+    timezone: str = Field(min_length=1, max_length=64)
+    daily_hour: Literal[None]
+    daily_minute: Literal[None]
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError("cadence timezone is not supported") from exc
+        return value
+
+
 class MailWatchCreate(_Strict):
     """Finite metadata-only Gmail watch admission."""
 
@@ -280,8 +306,7 @@ class MailWatchCreate(_Strict):
     goal_id: str = Field(min_length=1, max_length=256)
     expected_goal_revision: int = Field(ge=1)
     label_ids: list[str] = Field(min_length=1, max_length=3)
-    cadence: Literal["hourly", "6h"]
-    timezone: str = Field(min_length=1, max_length=64)
+    cadence: MailWatchCadence
     expires_at: datetime
     max_messages: int = Field(default=10, ge=1, le=10)
     idempotency_key: str = Field(min_length=1, max_length=256)
@@ -442,6 +467,57 @@ def _metadata(connection: GoogleServiceConnection) -> dict[str, Any]:
         "declared_scopes": [GMAIL_READONLY_SCOPE],
         "provider_scopes_verified": bool(connection.provider_scopes_json not in ("", "[]", None)),
         "verified_setup_job_id": connection.verified_setup_job_id,
+    }
+
+
+def _connection_recovery_payload(
+    connection: GoogleServiceConnection | None,
+    *,
+    idempotency_key: str,
+) -> dict[str, Any]:
+    """Return a redacted, owner-bound setup recovery projection.
+
+    The setup key is the only caller supplied lookup value.  Credential
+    material, the vault key, and the credential fingerprint remain private;
+    the existing metadata projection is the sole connection object exposed.
+    """
+
+    base = {
+        "idempotency_scope": "mail-connection-setup",
+        "idempotency_key": idempotency_key,
+        "connection_id": connection.connection_id if connection is not None else None,
+        "request_digest": connection.setup_request_digest if connection is not None else None,
+        "connection": _metadata(connection) if connection is not None else None,
+        "memory_status": "no_learning",
+    }
+    if connection is None:
+        return {
+            "status": "not_found",
+            **base,
+            "recovery_action": "retry_same_key",
+        }
+
+    state = str(connection.state or "")
+    if state == "active":
+        status = "replayed"
+        recovery_action = None
+    elif state == "preparing":
+        status = "pending"
+        recovery_action = "reconcile_existing_setup"
+    elif state in {"blocked", "blocked_cleanup"}:
+        status = "blocked"
+        recovery_action = "reconcile_existing_setup"
+    elif state == "revoked":
+        status = "blocked"
+        recovery_action = "use_new_idempotency_key"
+    else:
+        # Unknown persisted state is never treated as active or replayable.
+        status = "unknown"
+        recovery_action = "reconcile_existing_setup"
+    return {
+        "status": status,
+        **base,
+        "recovery_action": recovery_action,
     }
 
 
@@ -1245,6 +1321,38 @@ async def create_connection(request: Request) -> Any:
                 row.updated_at = _now()
             await db.flush()
             return JSONResponse(content={"connection": _metadata(row)}, status_code=201)
+
+
+@router.get("/capabilities/mail/connections/recovery/{idempotency_key}")
+async def recover_connection_setup(request: Request, idempotency_key: str) -> dict[str, Any]:
+    """Resolve a lost connection-setup response by its owner-bound key."""
+
+    operator = _operator(request)
+    owner = _owner(operator)
+    if not _SAFE_REQUEST.fullmatch(idempotency_key):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "mail_request_invalid",
+                "message": "The Mail request is invalid",
+                "recovery_action": "correct_request",
+            },
+        )
+    async with get_session() as db:
+        await _assert_live_session(db, owner)
+        connection = (
+            await db.execute(
+                select(GoogleServiceConnection)
+                .where(
+                    GoogleServiceConnection.owner_principal_id == owner.principal_id,
+                    GoogleServiceConnection.owner_session_id == owner.session_id,
+                    GoogleServiceConnection.service == GMAIL_SERVICE,
+                    GoogleServiceConnection.setup_idempotency_key == idempotency_key,
+                )
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        return _connection_recovery_payload(connection, idempotency_key=idempotency_key)
 
 
 @router.post("/capabilities/mail/connections/{connection_id}/verify")
@@ -2147,6 +2255,82 @@ def _reply_task_response(task: Any, metadata: Any, *, replay: bool) -> dict[str,
     }
 
 
+def _mail_reply_readback_verified(run: WorkflowRunState | None) -> bool:
+    """Return whether the durable Mail run contains its private readback pair."""
+
+    if run is None:
+        return False
+    artifacts = _json_list(run.artifact_receipts_json)
+    effects = _json_list(run.effect_receipts_json)
+    for artifact in reversed(artifacts):
+        if (
+            artifact.get("artifact_type") != "mail_reply_draft"
+            or artifact.get("exists") is not True
+            or not isinstance(artifact.get("file_path"), str)
+            or not artifact.get("content_sha256")
+        ):
+            continue
+        for effect in reversed(effects):
+            details = effect.get("details")
+            if (
+                effect.get("receipt_kind") == "readback"
+                and effect.get("effect_type") == "mail_reply_draft"
+                and effect.get("status") == "succeeded"
+                and isinstance(details, dict)
+                and details.get("verified") is True
+                and effect.get("target_path") == artifact.get("file_path")
+                and effect.get("target_digest") == artifact.get("content_sha256")
+                and effect.get("content_sha256") == artifact.get("content_sha256")
+            ):
+                return True
+    return False
+
+
+def _mail_reply_recovery_payload(
+    *,
+    idempotency_key: str,
+    task: WorkBoardTask | None,
+    attempt: WorkBoardAttempt | None,
+    run: WorkflowRunState | None,
+) -> dict[str, Any]:
+    """Build an owner-safe exact-key recovery projection without private bytes."""
+
+    base: dict[str, Any] = {
+        "idempotency_scope": "mail-reply-draft",
+        "idempotency_key": idempotency_key,
+        "task_id": task.task_id if task is not None else None,
+        "attempt_id": attempt.attempt_id if attempt is not None else None,
+        "job_id": attempt.workflow_run_id if attempt is not None else None,
+        "input_artifact_id": task.input_artifact_id if task is not None else None,
+        "input_digest": task.typed_input_digest if task is not None else None,
+        "request_digest": task.idempotency_payload_digest if task is not None else None,
+        "goal_id": task.goal_id if task is not None else None,
+        "goal_revision": int(task.goal_revision) if task is not None else None,
+        "memory_status": "no_learning",
+    }
+    if task is None:
+        return {"status": "not_found", **base, "recovery_action": "retry_same_key"}
+
+    task_status = str(getattr(task.status, "value", task.status) or "")
+    run_status = str(getattr(run, "status", "") or "")
+    if _mail_reply_readback_verified(run) and task_status in {"done", "review"}:
+        status = "verified"
+        recovery_action = "open_private_draft"
+    elif run_status in {"unknown", "unknown_external_effect", "cost_liability"}:
+        status = "unknown"
+        recovery_action = "reconcile_existing_reply"
+    elif task_status == "blocked" or run_status in {"failed", "cancelled"}:
+        status = "blocked"
+        recovery_action = "reconcile_existing_reply"
+    elif task_status == "running" or run_status in {"running", "accepted", "queued"}:
+        status = "running"
+        recovery_action = "wait_for_completion"
+    else:
+        status = "pending"
+        recovery_action = "wait_for_dispatch"
+    return {"status": status, **base, "recovery_action": recovery_action}
+
+
 def _watch_metadata(
     binding: GovernedScheduleBinding,
     state: MailWatchState | None,
@@ -2427,6 +2611,69 @@ async def create_reply_task(request: Request) -> Any:
         )
 
 
+@router.get("/capabilities/mail/reply-tasks/recovery/{idempotency_key}")
+async def recover_reply_task(request: Request, idempotency_key: str) -> dict[str, Any]:
+    """Resolve one lost reply response by its original owner-bound key."""
+
+    operator = _operator(request)
+    owner = _owner(operator)
+    if not _SAFE_REQUEST.fullmatch(idempotency_key):
+        raise HTTPException(status_code=422, detail={"code": "mail_request_invalid", "message": "The Mail request is invalid", "recovery_action": "correct_request"})
+    async with get_session() as db:
+        await _assert_live_session(db, owner)
+        task = (
+            await db.execute(
+                select(WorkBoardTask)
+                .where(
+                    WorkBoardTask.owner_principal_id == owner.principal_id,
+                    WorkBoardTask.owner_session_id == owner.session_id,
+                    WorkBoardTask.capability_id == "work.mail-reply-draft.v1",
+                    WorkBoardTask.idempotency_scope == "mail-reply-draft",
+                    WorkBoardTask.idempotency_key == idempotency_key,
+                )
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if task is None:
+            return _mail_reply_recovery_payload(
+                idempotency_key=idempotency_key,
+                task=None,
+                attempt=None,
+                run=None,
+            )
+        attempt = (
+            await db.execute(
+                select(WorkBoardAttempt)
+                .where(WorkBoardAttempt.task_id == task.task_id)
+                .order_by(WorkBoardAttempt.created_at.desc())
+                .limit(1)
+            )
+        ).scalars().first()
+        run = None
+        if attempt is not None and attempt.workflow_run_id:
+            run = (
+                await db.execute(
+                    select(WorkflowRunState)
+                    .where(
+                        WorkflowRunState.run_identity == attempt.workflow_run_id,
+                        WorkflowRunState.job_kind == "mail_reply_draft",
+                        WorkflowRunState.owner_kind == "user",
+                        WorkflowRunState.owner_principal_id == owner.principal_id,
+                        WorkflowRunState.operator_session_id == owner.session_id,
+                        WorkflowRunState.goal_id == task.goal_id,
+                        WorkflowRunState.goal_revision == int(task.goal_revision),
+                    )
+                    .execution_options(populate_existing=True)
+                )
+            ).scalar_one_or_none()
+        return _mail_reply_recovery_payload(
+            idempotency_key=idempotency_key,
+            task=task,
+            attempt=attempt,
+            run=run,
+        )
+
+
 @router.get("/capabilities/mail/reply-tasks/{task_id}/draft")
 async def get_reply_draft(request: Request, task_id: str) -> dict[str, Any]:
     """Return a private draft only through its owner-scoped Mail view."""
@@ -2440,19 +2687,70 @@ async def get_reply_draft(request: Request, task_id: str) -> dict[str, Any]:
         task = await repository.get_task(db, owner, task_id)
         if task.capability_id != "work.mail-reply-draft.v1":
             raise HTTPException(status_code=404, detail={"code": "mail_reply_not_found", "message": "The Mail reply draft is unavailable", "recovery_action": "reload_task"})
+        # Generic Work Board projections intentionally strip private path
+        # references.  Resolve the draft only through the exact owner-bound
+        # attempt and its durable run, where the private receipt remains
+        # available to this capability-specific route.
+        attempt = (
+            await db.execute(
+                select(WorkBoardAttempt)
+                .where(WorkBoardAttempt.task_id == task.task_id)
+                .order_by(WorkBoardAttempt.created_at.desc())
+            )
+        ).scalars().first()
+        run = None
+        if attempt is not None and attempt.workflow_run_id:
+            run = (
+                await db.execute(
+                    select(WorkflowRunState).where(
+                        WorkflowRunState.run_identity == attempt.workflow_run_id,
+                        WorkflowRunState.job_kind == "mail_reply_draft",
+                        WorkflowRunState.owner_kind == "user",
+                        WorkflowRunState.owner_principal_id == owner.principal_id,
+                        WorkflowRunState.operator_session_id == owner.session_id,
+                        WorkflowRunState.goal_id == task.goal_id,
+                        WorkflowRunState.goal_revision == int(task.goal_revision),
+                    )
+                )
+            ).scalar_one_or_none()
         try:
-            artifacts = json.loads(task.artifact_refs_json or "[]")
-        except (TypeError, ValueError):
-            artifacts = []
+            artifacts = json.loads(run.artifact_receipts_json or "[]") if run is not None else []
+            effects = json.loads(run.effect_receipts_json or "[]") if run is not None else []
+        except (TypeError, ValueError, json.JSONDecodeError):
+            artifacts, effects = [], []
         receipt = next(
             (
                 item
                 for item in reversed(artifacts if isinstance(artifacts, list) else [])
-                if isinstance(item, dict) and item.get("artifact_type") == "mail_reply_draft" and item.get("exists") is True
+                if (
+                    isinstance(item, dict)
+                    and item.get("artifact_type") == "mail_reply_draft"
+                    and item.get("exists") is True
+                    and isinstance(item.get("file_path"), str)
+                    and bool(item.get("content_sha256"))
+                )
             ),
             None,
         )
-        if receipt is None:
+        readback = next(
+            (
+                item
+                for item in reversed(effects if isinstance(effects, list) else [])
+                if (
+                    isinstance(item, dict)
+                    and item.get("receipt_kind") == "readback"
+                    and item.get("effect_type") == "mail_reply_draft"
+                    and item.get("status") == "succeeded"
+                    and isinstance(item.get("details"), dict)
+                    and item["details"].get("verified") is True
+                    and item.get("target_path") == (receipt or {}).get("file_path")
+                    and item.get("target_digest") == (receipt or {}).get("content_sha256")
+                    and item.get("content_sha256") == (receipt or {}).get("content_sha256")
+                )
+            ),
+            None,
+        )
+        if receipt is None or readback is None:
             return {
                 "status": "pending" if task.status not in {WorkBoardStatus.done, WorkBoardStatus.blocked} else "blocked",
                 "task_id": task.task_id,
@@ -2502,7 +2800,8 @@ async def create_mail_watch(request: Request) -> Any:
                 "recovery_action": "choose_bounded_expiry",
             },
         )
-    timezone_name = _validate_watch_timezone(body.timezone)
+    timezone_name = _validate_watch_timezone(body.cadence.timezone)
+    cadence = body.cadence.model_dump(mode="json")
     request_digest = "sha256:" + digest(
         {
             "schema_version": 1,
@@ -2513,7 +2812,7 @@ async def create_mail_watch(request: Request) -> Any:
             "goal_id": body.goal_id,
             "expected_goal_revision": body.expected_goal_revision,
             "label_ids": sorted(body.label_ids),
-            "cadence": {"kind": body.cadence, "timezone": timezone_name, "daily_hour": None, "daily_minute": None},
+            "cadence": cadence,
             "expires_at": expires_at.isoformat(),
             "max_messages": body.max_messages,
             "idempotency_key": body.idempotency_key,
@@ -2577,6 +2876,7 @@ async def create_mail_watch(request: Request) -> Any:
                 label_ids=body.label_ids,
                 max_messages=body.max_messages,
                 idempotency_key=f"mail-watch:{body.idempotency_key}",
+                retention_deadline=expires_at,
             )
             # The artifact helper performs filesystem publication between
             # transactions. Re-read all authority after that boundary before
@@ -2598,7 +2898,7 @@ async def create_mail_watch(request: Request) -> Any:
                     "consent_revision": current_consent.source_revision,
                     "consent_digest": current_consent.source_digest,
                     "input_digest": metadata.typed_input_digest,
-                    "cadence": {"kind": body.cadence, "timezone": timezone_name, "daily_hour": None, "daily_minute": None},
+                    "cadence": cadence,
                 }
             )
             binding = await create_binding(
@@ -2608,7 +2908,7 @@ async def create_mail_watch(request: Request) -> Any:
                     "name": "Gmail metadata watch",
                     "action_type": "gmail.scan_metadata.v1",
                     "capability_id": "gmail.scan_metadata.v1",
-                    "cadence": {"kind": body.cadence, "timezone": timezone_name, "daily_hour": None, "daily_minute": None},
+                    "cadence": cadence,
                     "expires_at": expires_at,
                     "idempotency_key": body.idempotency_key,
                     "goal_id": body.goal_id,
@@ -2659,6 +2959,69 @@ async def create_mail_watch(request: Request) -> Any:
             raise HTTPException(status_code=mapped[0], detail={"code": mapped[1], "message": "The Mail watch requires reconciliation", "recovery_action": mapped[2]}) from exc
         except (LookupError, ValueError) as exc:
             raise HTTPException(status_code=422, detail={"code": "mail_watch_invalid", "message": "The Mail watch is invalid", "recovery_action": "correct_watch"}) from exc
+
+
+@router.get("/capabilities/mail/watches/recovery/{idempotency_key}")
+async def recover_mail_watch(request: Request, idempotency_key: str) -> dict[str, Any]:
+    """Resolve one lost watch response by its original owner-bound key."""
+
+    operator = _operator(request)
+    owner = _owner(operator)
+    if not _SAFE_REQUEST.fullmatch(idempotency_key):
+        raise HTTPException(status_code=422, detail={"code": "mail_request_invalid", "message": "The Mail request is invalid", "recovery_action": "correct_request"})
+    async with get_session() as db:
+        await _assert_live_session(db, owner)
+        binding = (
+            await db.execute(
+                select(GovernedScheduleBinding)
+                .where(
+                    GovernedScheduleBinding.owner_principal_id == owner.principal_id,
+                    GovernedScheduleBinding.owner_session_id == owner.session_id,
+                    GovernedScheduleBinding.action_type == "gmail.scan_metadata.v1",
+                    GovernedScheduleBinding.schedule_idempotency_key == idempotency_key,
+                )
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if binding is None:
+            return {
+                "status": "not_found",
+                "idempotency_scope": "mail-watch",
+                "idempotency_key": idempotency_key,
+                "watch": None,
+                "watch_id": None,
+                "input_artifact_id": None,
+                "input_digest": None,
+                "request_digest": None,
+                "goal_id": None,
+                "goal_revision": None,
+                "recovery_action": "retry_same_key",
+                "memory_status": "no_learning",
+            }
+        state = await db.get(MailWatchState, binding.binding_id, populate_existing=True)
+        occurrence = (
+            await db.execute(
+                select(GovernedScheduleOccurrence)
+                .where(GovernedScheduleOccurrence.binding_id == binding.binding_id)
+                .order_by(GovernedScheduleOccurrence.updated_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        watch = _watch_metadata(binding, state, occurrence, label_ids=await _watch_label_ids(db, binding))
+        return {
+            "status": "replayed",
+            "idempotency_scope": "mail-watch",
+            "idempotency_key": idempotency_key,
+            "watch": watch,
+            "watch_id": binding.binding_id,
+            "input_artifact_id": binding.input_artifact_id,
+            "input_digest": binding.input_digest,
+            "request_digest": binding.schedule_request_digest,
+            "goal_id": binding.goal_id,
+            "goal_revision": int(binding.goal_revision),
+            "recovery_action": None,
+            "memory_status": "no_learning",
+        }
 
 
 @router.get("/capabilities/mail/watches")

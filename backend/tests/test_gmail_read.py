@@ -41,12 +41,23 @@ from src.integrations.gmail_controls import (
 from src.integrations import gmail_controls
 from src.integrations.gmail_read import (
     GMAIL_READONLY_SCOPE,
+    GMAIL_SERVICE,
     GmailReadError,
     GoogleGmailReadonlyAdapter,
 )
 from config.settings import settings as config_settings
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
+from src.vault import crypto as vault_crypto
 from src.vault import encrypt
+
+
+@pytest.fixture(autouse=True)
+def reset_vault_cipher_between_tests():
+    """Do not leak this file's Fernet cache into owner-private test fixtures."""
+
+    vault_crypto._fernet = None
+    yield
+    vault_crypto._fernet = None
 
 
 def _connection() -> GoogleServiceConnection:
@@ -562,6 +573,93 @@ async def test_authenticated_mail_metadata_get_is_offline_and_owner_bound(async_
     with pytest.raises(HTTPException) as foreign:
         await mail_api.list_labels(_request_with_body(b"", operator), "missing-for-owner")
     assert foreign.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_connection_setup_recovery_is_exact_owner_bound_and_redacted(async_db, monkeypatch):
+    monkeypatch.setattr(config_settings, "deployment_environment", "test")
+    monkeypatch.setattr(config_settings, "operator_auth_allow_unauthenticated_tests", True)
+    monkeypatch.setattr(mail_api, "get_session", async_db)
+    operator = _test_operator()
+    owner = mail_api._owner(operator)
+    request_digest = "sha256:" + "a" * 64
+    states = ("active", "preparing", "blocked", "blocked_cleanup", "revoked")
+    async with async_db() as db:
+        for state in states:
+            db.add(
+                GoogleServiceConnection(
+                    connection_id=f"connection-recovery-{state}",
+                    owner_principal_id=owner.principal_id,
+                    owner_session_id=owner.session_id,
+                    service=GMAIL_SERVICE,
+                    label=f"Recovery {state}",
+                    vault_secret_key=f"vault-private-{state}",
+                    credential_fingerprint=f"fingerprint-private-{state}",
+                    setup_idempotency_key=f"setup-recovery-{state}",
+                    setup_request_digest=request_digest,
+                    state=state,
+                    revision=2,
+                    verified_setup_job_id=f"setup-job-{state}",
+                )
+            )
+        db.add(
+            GoogleServiceConnection(
+                connection_id="connection-recovery-foreign",
+                owner_principal_id=owner.principal_id,
+                owner_session_id="foreign-session",
+                service=GMAIL_SERVICE,
+                label="Foreign",
+                vault_secret_key="vault-private-foreign",
+                setup_idempotency_key="setup-recovery-foreign",
+                setup_request_digest=request_digest,
+                state="active",
+            )
+        )
+
+    expected = {
+        "active": ("replayed", None),
+        "preparing": ("pending", "reconcile_existing_setup"),
+        "blocked": ("blocked", "reconcile_existing_setup"),
+        "blocked_cleanup": ("blocked", "reconcile_existing_setup"),
+        "revoked": ("blocked", "use_new_idempotency_key"),
+    }
+    for state in states:
+        key = f"setup-recovery-{state}"
+        payload = await mail_api.recover_connection_setup(_request_with_body(b"", operator), key)
+        assert payload["status"] == expected[state][0]
+        assert payload["recovery_action"] == expected[state][1]
+        assert payload["idempotency_scope"] == "mail-connection-setup"
+        assert payload["idempotency_key"] == key
+        assert payload["request_digest"] == request_digest
+        assert payload["connection"]["connection_id"] == f"connection-recovery-{state}"
+        assert payload["memory_status"] == "no_learning"
+        serialized = json.dumps(payload)
+        assert "vault-private" not in serialized
+        assert "fingerprint-private" not in serialized
+
+    missing = await mail_api.recover_connection_setup(_request_with_body(b"", operator), "setup-recovery-missing")
+    assert missing == {
+        "status": "not_found",
+        "idempotency_scope": "mail-connection-setup",
+        "idempotency_key": "setup-recovery-missing",
+        "connection_id": None,
+        "request_digest": None,
+        "connection": None,
+        "memory_status": "no_learning",
+        "recovery_action": "retry_same_key",
+    }
+
+    foreign = await mail_api.recover_connection_setup(
+        _request_with_body(b"", operator),
+        "setup-recovery-foreign",
+    )
+    assert foreign["status"] == "not_found"
+    assert foreign["connection_id"] is None
+    assert foreign["request_digest"] is None
+
+    with pytest.raises(HTTPException) as invalid:
+        await mail_api.recover_connection_setup(_request_with_body(b"", operator), "invalid/key")
+    assert invalid.value.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -1394,6 +1492,8 @@ async def test_authenticated_asgi_mail_journey_uses_one_owner_and_mock_provider(
     monkeypatch.setattr(config_settings, "operator_auth_secret", "auth-test-secret")
     monkeypatch.setattr(config_settings, "operator_auth_secret_hash", "")
     monkeypatch.setattr(config_settings, "operator_auth_allow_unauthenticated_tests", False)
+    monkeypatch.setattr(config_settings, "operator_auth_allowed_hosts", "test")
+    monkeypatch.setattr(config_settings, "operator_auth_allowed_origins", "http://localhost:3001")
     monkeypatch.setattr(config_settings, "workspace_dir", str(tmp_path))
     monkeypatch.setattr(mail_api, "get_session", async_db)
 

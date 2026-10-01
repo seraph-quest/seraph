@@ -784,12 +784,14 @@ def _mail_authority_projection(
         return False, "the watched goal is no longer active", "review_goal_and_watch"
     budget = deserialize_admission_budget(goal)
     period_expires_at = _utc(getattr(budget, "period_expires_at", None)) if budget is not None else None
+    period_started_at = _utc(getattr(budget, "period_started_at", None)) if budget is not None else None
     if (
         budget is None
         or not bool(getattr(budget, "reviewed_grant", False))
         or not str(getattr(budget, "grant_id", "") or "").strip()
         or period_expires_at is None
         or period_expires_at <= now
+        or period_started_at is not None and period_started_at > now
     ):
         return False, "the reviewed goal budget is unavailable or expired", "review_goal_and_watch"
     if (
@@ -1942,7 +1944,7 @@ async def _apply_mail_action(
                         select(WorkBoardTask).where(
                             WorkBoardTask.owner_principal_id == owner_principal_id,
                             WorkBoardTask.owner_session_id == owner_session_id,
-                            WorkBoardTask.idempotency_scope == "mail-notice",
+                            WorkBoardTask.idempotency_scope == f"guardian-inbox:{disposition.id}",
                             WorkBoardTask.idempotency_key == source_key,
                         )
                     )
@@ -1959,7 +1961,7 @@ async def _apply_mail_action(
                             goal_revision=disposition.goal_revision,
                             status=WorkBoardStatus.triage,
                             priority=55,
-                            idempotency_scope="mail-notice",
+                            idempotency_scope=f"guardian-inbox:{disposition.id}",
                             idempotency_key=source_key,
                         ),
                         origin_session_id=owner_session_id,

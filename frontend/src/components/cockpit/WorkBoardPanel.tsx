@@ -3344,6 +3344,17 @@ function WorkBoardPanel({
                 />
               )}
 
+              {selectedTask.capability_id !== "work.mail-reply-draft.v1" && selectedInboxOrigin?.mail && (
+                <MailPanel
+                  taskId={selectedTask.task_id}
+                  ownerPrincipalId={ownerPrincipalId}
+                  ownerSessionId={ownerSessionId}
+                  mailOrigin={selectedInboxOrigin.mail}
+                  goalId={selectedInboxOrigin.goal_id}
+                  goalRevision={selectedInboxOrigin.goal_revision}
+                />
+              )}
+
               <section className="rounded border border-white/10 p-3">
                 <div className="font-semibold">Actions and recovery</div>
                 <div className="mt-1">{selectedTask.status === "blocked" ? `Blocked: ${selectedTask.block_reason || "No safe reason was supplied."}` : `Current state: ${STATUS_LABELS[selectedTask.status]}`}</div>

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -25,6 +27,7 @@ from src.db.models import (
     OperatorSession,
     ScheduledJob,
     ScheduledJobRun,
+    WorkBoardInputArtifact,
     WorkBoardTask,
 )
 from src.goals.contracts import GoalAdmissionBudget
@@ -34,7 +37,15 @@ from src.scheduler import scheduled_jobs
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 from src.vault import crypto as vault_crypto
 from src.work_board.dispatcher import TypedInputError, validate_capability_input
-from src.workflows.mail_reply_draft import ReplyDraftOutput, parse_model_output
+from src.workflows.mail_reply_draft import (
+    ReplyDraftOutput,
+    artifact_path_for_job,
+    model_payload,
+    parse_model_output,
+    prepare_private_draft,
+    publish_private_draft,
+    read_private_draft,
+)
 from src.guardian import inbox as inbox_service
 
 
@@ -65,6 +76,25 @@ def _operator() -> AuthenticatedOperator:
             grants=(AuthorityGrant.INGRESS, AuthorityGrant.CAPABILITY_EXECUTE),
             session_id=SESSION,
             operator_session_id=SESSION,
+        ),
+        idle_expires_at=now + timedelta(hours=1),
+        absolute_expires_at=now + timedelta(hours=2),
+    )
+
+
+def _foreign_operator() -> AuthenticatedOperator:
+    now = datetime.now(timezone.utc)
+    session_id = "mail-watch-foreign-session"
+    return AuthenticatedOperator(
+        session_id=session_id,
+        principal=TrustPrincipal(
+            principal_id=OWNER,
+            principal_type=PrincipalType.OPERATOR,
+            authenticated=True,
+            revoked=False,
+            grants=(AuthorityGrant.INGRESS, AuthorityGrant.CAPABILITY_EXECUTE),
+            session_id=session_id,
+            operator_session_id=session_id,
         ),
         idle_expires_at=now + timedelta(hours=1),
         absolute_expires_at=now + timedelta(hours=2),
@@ -252,6 +282,17 @@ async def test_reply_task_admission_replay_is_owner_bound_and_body_free(async_db
     assert created_body["source_status"] == "ready"
     assert created_body["memory_status"] == "no_learning"
 
+    recovery = await mail_api.recover_reply_task(_request({}, _operator()), body["idempotency_key"])
+    assert recovery["status"] == "pending"
+    assert recovery["task_id"] == task_id
+    assert recovery["input_digest"] == created_body["input_digest"]
+    assert recovery["recovery_action"] == "wait_for_dispatch"
+    assert "reply_intent" not in json.dumps(recovery)
+
+    foreign = await mail_api.recover_reply_task(_request({}, _foreign_operator()), body["idempotency_key"])
+    assert foreign["status"] == "not_found"
+    assert foreign["task_id"] is None
+
     replay = await mail_api.create_reply_task(_request(body, _operator()))
     assert replay.status_code == 200
     replay_body = json.loads(replay.body)
@@ -283,7 +324,8 @@ async def test_reply_task_admission_replay_is_owner_bound_and_body_free(async_db
 
 
 @pytest.mark.asyncio
-async def test_watch_baseline_restart_deduplicates_metadata_notice(async_db, monkeypatch):
+@pytest.mark.parametrize("malformed_period", [None, "missing_expiry", "future_start"])
+async def test_watch_baseline_restart_deduplicates_metadata_notice(async_db, monkeypatch, malformed_period):
     await _seed(async_db, monkeypatch)
     operator = _operator()
     create_body = {
@@ -295,8 +337,7 @@ async def test_watch_baseline_restart_deduplicates_metadata_notice(async_db, mon
         "goal_id": GOAL,
         "expected_goal_revision": 1,
         "label_ids": [LABEL],
-        "cadence": "hourly",
-        "timezone": "UTC",
+        "cadence": {"kind": "hourly", "timezone": "UTC", "daily_hour": None, "daily_minute": None},
         "expires_at": (datetime.now(timezone.utc) + timedelta(hours=6)).isoformat(),
         "max_messages": 10,
         "idempotency_key": "watch-key",
@@ -305,6 +346,16 @@ async def test_watch_baseline_restart_deduplicates_metadata_notice(async_db, mon
     assert created.status_code == 201
     replay = await mail_api.create_mail_watch(_request(create_body, operator))
     assert replay["status"] == "replayed"
+
+    recovery = await mail_api.recover_mail_watch(_request({}, operator), create_body["idempotency_key"])
+    assert recovery["status"] == "replayed"
+    assert recovery["watch_id"] == replay["watch"]["watch_id"]
+    assert recovery["input_digest"]
+    assert recovery["goal_id"] == GOAL
+
+    foreign = await mail_api.recover_mail_watch(_request({}, _foreign_operator()), create_body["idempotency_key"])
+    assert foreign["status"] == "not_found"
+    assert foreign["watch_id"] is None
 
     async with async_db() as db:
         binding = (await db.execute(select(mail_api.GovernedScheduleBinding))).scalar_one()
@@ -425,6 +476,34 @@ async def test_watch_baseline_restart_deduplicates_metadata_notice(async_db, mon
     notice = page["items"][0]
     assert notice["source_kind"] == "mail_notice"
     assert notice["allowed_actions"] == ["accept_followup", "snooze", "dismiss"]
+    if malformed_period is not None:
+        async with async_db() as db:
+            goal = await db.get(Goal, GOAL)
+            original_budget = goal.admission_budget_json
+            malformed_budget = json.loads(original_budget)
+            if malformed_period == "missing_expiry":
+                malformed_budget["period_expires_at"] = None
+            else:
+                malformed_budget["period_started_at"] = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+            goal.admission_budget_json = json.dumps(malformed_budget)
+            await db.commit()
+        blocked_page = await inbox_service.list_owned_items(owner_principal_id=OWNER, owner_session_id=SESSION)
+        blocked_notice = next(item for item in blocked_page["items"] if item["id"] == notice["id"])
+        assert blocked_notice["allowed_actions"] == []
+        with pytest.raises(inbox_service.InboxError):
+            await inbox_service.apply_action(
+                owner_principal_id=OWNER,
+                owner_session_id=SESSION,
+                item_id=notice["id"],
+                action="accept_followup",
+                expected_revision=notice["revision"],
+                idempotency_key="mail-notice-invalid-period",
+            )
+        async with async_db() as db:
+            assert (await db.execute(select(WorkBoardTask))).scalars().all() == []
+            goal = await db.get(Goal, GOAL)
+            goal.admission_budget_json = original_budget
+            await db.commit()
     accepted = await inbox_service.apply_action(
         owner_principal_id=OWNER,
         owner_session_id=SESSION,
@@ -455,6 +534,8 @@ async def test_watch_baseline_restart_deduplicates_metadata_notice(async_db, mon
         ).scalars().all()
         assert len(tasks) == 1
         assert "private" not in tasks[0].title.casefold()
+        assert tasks[0].idempotency_scope == f"guardian-inbox:{notice['id']}"
+        assert tasks[0].idempotency_key == notice["source_id"]
 
     async with async_db() as db:
         run3 = ScheduledJobRun(
@@ -477,6 +558,78 @@ async def test_watch_baseline_restart_deduplicates_metadata_notice(async_db, mon
     )
     assert third["new_count"] == 2
     assert third["notice_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_watch_create_rejects_legacy_scalar_cadence_and_timezone_fields():
+    """The public watch contract has one strict canonical cadence object."""
+
+    with pytest.raises(HTTPException) as exc_info:
+        await mail_api.create_mail_watch(
+            _request(
+                {
+                    "schema_version": 1,
+                    "connection_id": CONNECTION,
+                    "expected_connection_revision": 1,
+                    "mail_consent_id": CONSENT,
+                    "expected_source_consent_revision": 1,
+                    "goal_id": GOAL,
+                    "expected_goal_revision": 1,
+                    "label_ids": [LABEL],
+                    "cadence": "hourly",
+                    "timezone": "UTC",
+                    "expires_at": (datetime.now(timezone.utc) + timedelta(hours=6)).isoformat(),
+                    "max_messages": 10,
+                    "idempotency_key": "watch-legacy-cadence-key",
+                },
+                _operator(),
+            )
+        )
+    assert exc_info.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_watch_seed_retention_binds_exact_reviewed_expiry(async_db, monkeypatch):
+    await _seed(async_db, monkeypatch)
+    async with async_db() as db:
+        consent = await db.get(MailReadConsent, CONSENT)
+        consent.expires_at = datetime.now(timezone.utc) + timedelta(days=3)
+        await db.flush()
+
+    reviewed_expiry = datetime.now(timezone.utc) + timedelta(hours=30)
+    body = {
+        "schema_version": 1,
+        "connection_id": CONNECTION,
+        "expected_connection_revision": 1,
+        "mail_consent_id": CONSENT,
+        "expected_source_consent_revision": 1,
+        "goal_id": GOAL,
+        "expected_goal_revision": 1,
+        "label_ids": [LABEL],
+        "cadence": {"kind": "hourly", "timezone": "UTC", "daily_hour": None, "daily_minute": None},
+        "expires_at": reviewed_expiry.isoformat(),
+        "max_messages": 10,
+        "idempotency_key": "watch-retention-key",
+    }
+    created = await mail_api.create_mail_watch(_request(body, _operator()))
+    assert created.status_code == 201
+    created_body = json.loads(created.body)
+    replay = await mail_api.create_mail_watch(_request(body, _operator()))
+    assert replay["status"] == "replayed"
+
+    async with async_db() as db:
+        binding = await db.get(mail_api.GovernedScheduleBinding, created_body["watch"]["watch_id"])
+        assert binding is not None
+        artifact = await db.get(WorkBoardInputArtifact, binding.input_artifact_id)
+        assert artifact is not None
+        stored_expiry = artifact.expires_at.replace(tzinfo=timezone.utc) if artifact.expires_at.tzinfo is None else artifact.expires_at
+        assert abs((stored_expiry - reviewed_expiry).total_seconds()) < 2
+
+    changed = {**body, "expires_at": (reviewed_expiry + timedelta(hours=1)).isoformat()}
+    with pytest.raises(HTTPException) as conflict:
+        await mail_api.create_mail_watch(_request(changed, _operator()))
+    assert conflict.value.status_code == 409
+    assert conflict.value.detail["code"] == "mail_watch_idempotency_conflict"
 
 
 @pytest.mark.asyncio
@@ -508,8 +661,7 @@ async def test_watch_zero_notification_budget_never_projects_notice(async_db, mo
         "goal_id": GOAL,
         "expected_goal_revision": 1,
         "label_ids": [LABEL],
-        "cadence": "hourly",
-        "timezone": "UTC",
+        "cadence": {"kind": "hourly", "timezone": "UTC", "daily_hour": None, "daily_minute": None},
         "expires_at": (now + timedelta(hours=6)).isoformat(),
         "max_messages": 10,
         "idempotency_key": "watch-zero-key",
@@ -635,8 +787,7 @@ async def test_watch_quiet_hours_blocks_before_provider_contact(async_db, monkey
         "goal_id": GOAL,
         "expected_goal_revision": 1,
         "label_ids": [LABEL],
-        "cadence": "hourly",
-        "timezone": "UTC",
+        "cadence": {"kind": "hourly", "timezone": "UTC", "daily_hour": None, "daily_minute": None},
         "expires_at": (now + timedelta(hours=6)).isoformat(),
         "max_messages": 10,
         "idempotency_key": "watch-quiet-key",
@@ -695,6 +846,61 @@ async def test_watch_quiet_hours_blocks_before_provider_contact(async_db, monkey
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("malformation", ["missing_expiry", "future_start"])
+async def test_watch_malformed_goal_period_blocks_before_adapter(async_db, monkeypatch, malformation):
+    await _seed(async_db, monkeypatch)
+    now = datetime.now(timezone.utc)
+    created = await mail_api.create_mail_watch(_request({
+        "schema_version": 1,
+        "connection_id": CONNECTION,
+        "expected_connection_revision": 1,
+        "mail_consent_id": CONSENT,
+        "expected_source_consent_revision": 1,
+        "goal_id": GOAL,
+        "expected_goal_revision": 1,
+        "label_ids": [LABEL],
+        "cadence": {"kind": "hourly", "timezone": "UTC", "daily_hour": None, "daily_minute": None},
+        "expires_at": (now + timedelta(hours=6)).isoformat(),
+        "max_messages": 10,
+        "idempotency_key": f"watch-malformed-{malformation}",
+    }, _operator()))
+    assert created.status_code == 201
+    async with async_db() as db:
+        binding = (await db.execute(select(mail_api.GovernedScheduleBinding))).scalar_one()
+        job = await db.get(ScheduledJob, binding.scheduled_job_id)
+        goal = await db.get(Goal, GOAL)
+        budget = json.loads(goal.admission_budget_json)
+        if malformation == "missing_expiry":
+            budget["period_expires_at"] = None
+        else:
+            budget["period_started_at"] = (now + timedelta(hours=1)).isoformat()
+        # Simulate malformed legacy persistence without changing the Goal CAS.
+        goal.admission_budget_json = json.dumps(budget)
+        await db.flush()
+        job_payload = {
+            "id": job.id,
+            "enabled": True,
+            "trigger_type": job.trigger_type,
+            "action_type": job.action_type,
+            "action_spec": json.loads(job.action_spec_json),
+            "trigger_spec": json.loads(job.trigger_spec_json),
+        }
+
+    def forbidden_adapter(*_args, **_kwargs):
+        raise AssertionError("malformed finite Goal periods must block before adapter construction")
+
+    monkeypatch.setattr("src.integrations.gmail_read.GoogleGmailReadonlyAdapter", forbidden_adapter)
+    with pytest.raises(RuntimeError, match="mail_watch_prerequisite_stale"):
+        await scheduled_jobs._run_governed_mail_metadata_scan(
+            job_payload, scheduled_slot_utc=now.replace(minute=0, second=0, microsecond=0),
+        )
+    async with async_db() as db:
+        assert (await db.execute(select(GuardianInboxDisposition))).scalars().all() == []
+        state = await db.get(MailWatchState, binding.binding_id)
+        assert state.baseline_complete is False
+
+
+@pytest.mark.asyncio
 async def test_watch_seen_cursor_overflow_blocks_without_eviction(async_db, monkeypatch):
     await _seed(async_db, monkeypatch)
     now = datetime.now(timezone.utc)
@@ -707,8 +913,7 @@ async def test_watch_seen_cursor_overflow_blocks_without_eviction(async_db, monk
         "goal_id": GOAL,
         "expected_goal_revision": 1,
         "label_ids": [LABEL],
-        "cadence": "hourly",
-        "timezone": "UTC",
+        "cadence": {"kind": "hourly", "timezone": "UTC", "daily_hour": None, "daily_minute": None},
         "expires_at": (now + timedelta(hours=6)).isoformat(),
         "max_messages": 10,
         "idempotency_key": "watch-overflow-key",
@@ -788,14 +993,98 @@ async def test_watch_seen_cursor_overflow_blocks_without_eviction(async_db, monk
         ).scalar_one_or_none() is None
 
 
-def test_reply_output_remains_bounded_and_revision_bound():
+def test_reply_output_remains_strict_and_bounded():
     output = parse_model_output(
-        {"schema_version": 1, "message_revision": "sha256:" + "a" * 64, "subject": "Reply", "plainbody": "Body", "caveats": []},
-        expected_message_revision="sha256:" + "a" * 64,
+        {"subject": "Reply", "body": "Body", "caveats": []},
     )
     assert isinstance(output, ReplyDraftOutput)
     with pytest.raises(ValueError):
         parse_model_output(
-            {"schema_version": 1, "message_revision": "sha256:" + "a" * 64, "subject": "Reply", "plainbody": "Body", "caveats": [], "send": True},
-            expected_message_revision="sha256:" + "a" * 64,
+            {"subject": "Reply", "body": "Body", "caveats": [], "message_revision": "sha256:" + "a" * 64},
         )
+    with pytest.raises(ValueError):
+        parse_model_output(
+            {"subject": "Reply", "body": "Body", "caveats": [], "send": True},
+        )
+
+
+def test_reply_model_payload_preserves_full_reviewed_source_byte_bound():
+    exact_source = "é" * 4096  # exactly 8 KiB in UTF-8, above the output bound
+    payload = model_payload(
+        metadata={"subject": "Subject"},
+        body=exact_source,
+        reply_intent="Keep the answer concise.",
+        style="brief",
+        allowed_body_fields=("subject", "plainbody", "replyintent"),
+    )
+    assert payload["plainbody"] == exact_source
+    assert len(str(payload["plainbody"]).encode("utf-8")) == 8 * 1024
+    with pytest.raises(ValueError, match="source body exceeds"):
+        model_payload(
+            metadata={"subject": "Subject"},
+            body="é" * 4097,
+            reply_intent="Keep the answer concise.",
+            style="brief",
+            allowed_body_fields=("subject", "plainbody", "replyintent"),
+        )
+
+
+def test_private_reply_artifact_is_descriptor_safe_and_exact_replayable(tmp_path, monkeypatch):
+    monkeypatch.setattr(mail_api.settings, "workspace_dir", str(tmp_path))
+    relative, expected_digest, encrypted = prepare_private_draft(
+        "mail-artifact-security",
+        {"schema_version": 1, "message_revision": "sha256:" + "a" * 64, "subject": "Private", "plainbody": "Draft", "caveats": []},
+    )
+    publish_private_draft(relative, encrypted)
+    target = tmp_path / relative
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert stat.S_IMODE(target.parent.stat().st_mode) == 0o700
+    assert read_private_draft(relative, expected_digest)["plainbody"] == "Draft"
+
+    # Repeated private readbacks must not accumulate descriptors.  Keep this
+    # bounded to the Linux workspace used by the backend tests; one transient
+    # descriptor for the directory listing itself is tolerated.
+    fd_count_before = len(os.listdir("/proc/self/fd"))
+    for _ in range(16):
+        assert read_private_draft(relative, expected_digest)["plainbody"] == "Draft"
+    fd_count_after = len(os.listdir("/proc/self/fd"))
+    assert fd_count_after <= fd_count_before + 1
+
+    # A lost response may replay the exact already-published bytes, but a
+    # different payload must never replace the winner.
+    publish_private_draft(relative, encrypted)
+    with pytest.raises(OSError, match="different bytes"):
+        publish_private_draft(relative, encrypted + b"different")
+
+    hardlink = tmp_path / "reply-hardlink.enc"
+    os.link(target, hardlink)
+    with pytest.raises(OSError, match="private regular file"):
+        read_private_draft(relative, expected_digest)
+    hardlink.unlink()
+
+    target.parent.chmod(0o755)
+    with pytest.raises(OSError, match="permissions are unsafe"):
+        read_private_draft(relative, expected_digest)
+    target.parent.chmod(0o700)
+
+    interrupted_relative = artifact_path_for_job("mail-artifact-interrupted")
+    interrupted_target = tmp_path / interrupted_relative
+    original_link = os.link
+
+    def interrupt_link(*_args, **_kwargs):
+        raise OSError("injected publication interruption")
+
+    monkeypatch.setattr(os, "link", interrupt_link)
+    with pytest.raises(OSError, match="injected publication interruption"):
+        publish_private_draft(interrupted_relative, encrypted)
+    assert not interrupted_target.exists()
+    assert list(interrupted_target.parent.glob(f".{interrupted_target.name}.*.tmp")) == []
+    monkeypatch.setattr(os, "link", original_link)
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / "artifacts").rename(tmp_path / "artifacts-real")
+    (tmp_path / "artifacts").symlink_to(outside, target_is_directory=True)
+    symlink_relative = artifact_path_for_job("mail-artifact-symlink")
+    with pytest.raises(OSError, match="symlink"):
+        publish_private_draft(symlink_relative, encrypted)

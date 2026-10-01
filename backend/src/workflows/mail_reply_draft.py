@@ -8,12 +8,14 @@ not grow another execution state machine.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
 import json
 import os
-from pathlib import Path
-import tempfile
+from pathlib import PurePosixPath
+import re
+import stat
 from typing import Any, Mapping, Sequence
 import uuid
 
@@ -28,21 +30,26 @@ CAPABILITY_ID = "work.mail-reply-draft.v1"
 CAPABILITY_VERSION = "1"
 MAX_RUNTIME_SECONDS = 120
 MAX_SUBJECT_CHARS = 200
+# Gmail source extraction is bounded by bytes.  Keep that input bound
+# separate from the smaller model-output bound below so an approved source
+# body is never silently shortened before inference.
+MAX_SOURCE_BODY_BYTES = 8 * 1024
 MAX_BODY_CHARS = 4000
 MAX_CAVEATS = 5
 MAX_CAVEAT_CHARS = 300
 ARTIFACT_ROOT = "artifacts/mail/private/reply-drafts"
+_PRIVATE_FILE_MODE = 0o600
+_PRIVATE_DIRECTORY_MODE = 0o700
+_PRIVATE_FILE_NAME = re.compile(r"^[0-9a-f]{32}\.enc$")
 
 
 class ReplyDraftOutput(BaseModel):
-    """Strict model output; arbitrary actions/tools cannot cross this seam."""
+    """Strict model output; server-owned provenance stays outside the model."""
 
     model_config = ConfigDict(extra="forbid", strict=True, str_strip_whitespace=True)
 
-    schema_version: int = Field(ge=1, le=1)
-    message_revision: str = Field(min_length=8, max_length=128)
     subject: str = Field(min_length=1, max_length=MAX_SUBJECT_CHARS)
-    plainbody: str = Field(min_length=1, max_length=MAX_BODY_CHARS)
+    body: str = Field(min_length=1, max_length=MAX_BODY_CHARS)
     caveats: list[str] = Field(default_factory=list, max_length=MAX_CAVEATS)
 
 
@@ -132,14 +139,17 @@ def model_payload(
     if "subject" in allowed:
         payload["subject"] = str(metadata.get("subject") or "")[:MAX_SUBJECT_CHARS]
     if "plainbody" in allowed:
-        payload["plainbody"] = str(body)[:MAX_BODY_CHARS]
+        body_text = str(body)
+        if len(body_text.encode("utf-8")) > MAX_SOURCE_BODY_BYTES:
+            raise ValueError("mail source body exceeds the reviewed input bound")
+        payload["plainbody"] = body_text
     if "replyintent" in allowed:
         payload["replyintent"] = reply_intent
     payload["style"] = style
     return payload
 
 
-def parse_model_output(raw: Any, *, expected_message_revision: str) -> ReplyDraftOutput:
+def parse_model_output(raw: Any) -> ReplyDraftOutput:
     if hasattr(raw, "choices"):
         try:
             raw = raw.choices[0].message.content
@@ -158,8 +168,6 @@ def parse_model_output(raw: Any, *, expected_message_revision: str) -> ReplyDraf
         parsed = ReplyDraftOutput.model_validate(dict(raw))
     except ValidationError as exc:
         raise ValueError("mail reply model output failed the strict schema") from exc
-    if parsed.message_revision != expected_message_revision:
-        raise ValueError("mail reply model output revision does not match the reviewed message")
     if any(len(item) > MAX_CAVEAT_CHARS for item in parsed.caveats):
         raise ValueError("mail reply model caveat is too long")
     return parsed
@@ -169,12 +177,155 @@ def artifact_path_for_job(job_id: str) -> str:
     return f"{ARTIFACT_ROOT}/{hashlib.sha256(str(job_id).encode('utf-8')).hexdigest()[:32]}.enc"
 
 
-def _path(relative_path: str) -> Path:
+def _private_relative_parts(relative_path: str) -> tuple[str, ...]:
+    relative = PurePosixPath(str(relative_path))
+    root_parts = PurePosixPath(ARTIFACT_ROOT).parts
+    parts = relative.parts
+    if (
+        relative.is_absolute()
+        or len(parts) != len(root_parts) + 1
+        or parts[: len(root_parts)] != root_parts
+        or not _PRIVATE_FILE_NAME.fullmatch(parts[-1])
+        or any(part in {"", ".", ".."} for part in parts)
+    ):
+        raise OSError("mail reply artifact path is invalid")
+    return parts
+
+
+@contextmanager
+def _open_private_parent(relative_path: str, *, create_parents: bool = False):
+    """Open the private artifact parent through no-follow descriptors."""
+
+    parts = _private_relative_parts(relative_path)
     root = canonical_workspace_root(settings.workspace_dir)
-    candidate = root / relative_path
-    resolved_parent = candidate.parent.resolve(strict=False)
-    resolved_parent.relative_to(root.resolve())
-    return candidate
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow | cloexec
+    getuid = getattr(os, "getuid", None)
+    if getuid is None:
+        raise OSError("mail reply artifact owner checks are unavailable")
+    owner_uid = int(getuid())
+    try:
+        root_fd = os.open(root, directory_flags)
+    except OSError as exc:
+        raise OSError("mail reply artifact workspace is unavailable") from exc
+    parent_fd = root_fd
+    try:
+        root_stat = os.fstat(root_fd)
+        if not stat.S_ISDIR(root_stat.st_mode) or root_stat.st_uid != owner_uid:
+            raise OSError("mail reply artifact workspace ownership is unsafe")
+        for index, part in enumerate(parts[:-1]):
+            created = False
+            next_fd: int | None = None
+            try:
+                next_fd = os.open(part, directory_flags, dir_fd=parent_fd)
+            except FileNotFoundError:
+                if not create_parents:
+                    raise
+                os.mkdir(part, _PRIVATE_DIRECTORY_MODE, dir_fd=parent_fd)
+                created = True
+                next_fd = os.open(part, directory_flags, dir_fd=parent_fd)
+            try:
+                directory_stat = os.fstat(next_fd)
+                if not stat.S_ISDIR(directory_stat.st_mode) or directory_stat.st_uid != owner_uid:
+                    raise OSError("mail reply artifact ancestor ownership is unsafe")
+                if created:
+                    os.fchmod(next_fd, _PRIVATE_DIRECTORY_MODE)
+                    directory_stat = os.fstat(next_fd)
+                # ``artifacts`` is shared with other owner-scoped artifact
+                # families and may have their broader directory mode.  The
+                # Mail private subtree itself remains strictly 0700.
+                if index > 0 and stat.S_IMODE(directory_stat.st_mode) != _PRIVATE_DIRECTORY_MODE:
+                    raise OSError("mail reply artifact ancestor permissions are unsafe")
+                previous_fd = parent_fd
+                parent_fd = next_fd
+                next_fd = None
+                if previous_fd != root_fd:
+                    os.close(previous_fd)
+            finally:
+                if next_fd is not None:
+                    try:
+                        os.close(next_fd)
+                    except OSError:
+                        pass
+        yield parent_fd, parts[-1], nofollow, cloexec, owner_uid
+    except OSError as exc:
+        if exc.errno in {
+            getattr(os, "ELOOP", 40),
+            getattr(os, "ENOTDIR", 20),
+        }:
+            raise OSError("mail reply artifact path contains a symlink") from exc
+        raise
+    finally:
+        if parent_fd != root_fd:
+            try:
+                os.close(parent_fd)
+            except OSError:
+                pass
+        try:
+            os.close(root_fd)
+        except OSError:
+            pass
+
+
+@contextmanager
+def _open_private_draft(
+    relative_path: str,
+    *,
+    flags: int,
+    create_parents: bool = False,
+):
+    """Open a private draft through no-follow directory descriptors."""
+
+    final_fd: int | None = None
+    with _open_private_parent(relative_path, create_parents=create_parents) as (
+        parent_fd,
+        filename,
+        nofollow,
+        cloexec,
+        owner_uid,
+    ):
+        try:
+            final_fd = os.open(
+                filename,
+                flags | nofollow | cloexec,
+                _PRIVATE_FILE_MODE,
+                dir_fd=parent_fd,
+            )
+            if flags & os.O_CREAT:
+                os.fchmod(final_fd, _PRIVATE_FILE_MODE)
+            file_stat = os.fstat(final_fd)
+            if (
+                not stat.S_ISREG(file_stat.st_mode)
+                or file_stat.st_nlink != 1
+                or file_stat.st_uid != owner_uid
+                or stat.S_IMODE(file_stat.st_mode) != _PRIVATE_FILE_MODE
+            ):
+                raise OSError("mail reply artifact is not a private regular file")
+            yield final_fd, parent_fd
+            final_fd = None
+        finally:
+            if final_fd is not None:
+                try:
+                    os.close(final_fd)
+                except OSError:
+                    pass
+
+
+def _read_private_ciphertext(relative_path: str) -> bytes:
+    with _open_private_draft(relative_path, flags=os.O_RDONLY) as (descriptor, _parent_fd):
+        # The descriptor is owned by this context until the yielded value is
+        # consumed.  Wrap it in a close-owning file object so every read path
+        # releases the descriptor even when fstat/read/decryption fails.
+        with os.fdopen(descriptor, "rb", closefd=True) as handle:
+            before = os.fstat(handle.fileno())
+            if before.st_size > 96 * 1024:
+                raise OSError("mail reply artifact exceeds bounded size")
+            encrypted = handle.read(96 * 1024 + 1)
+            after = os.fstat(handle.fileno())
+    if len(encrypted) > 96 * 1024 or before.st_size != after.st_size or len(encrypted) != before.st_size:
+        raise OSError("mail reply artifact changed while reading")
+    return encrypted
 
 
 def prepare_private_draft(job_id: str, payload: Mapping[str, Any]) -> tuple[str, str, bytes]:
@@ -194,39 +345,102 @@ def prepare_private_draft(job_id: str, payload: Mapping[str, Any]) -> tuple[str,
 
 
 def publish_private_draft(relative: str, encrypted: bytes) -> None:
-    """Atomically publish bytes prepared by :func:`prepare_private_draft`."""
+    """Publish one exact private file, preserving crash-safe replay identity."""
 
-    target = _path(relative)
-    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(target.parent, 0o700)
-    fd, temporary_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
-    temporary = Path(temporary_name)
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "wb", closefd=True) as handle:
-            handle.write(encrypted)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, target)
-        directory_fd = os.open(target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-    finally:
-        if temporary.exists():
+    if not isinstance(encrypted, bytes) or not encrypted or len(encrypted) > 96 * 1024:
+        raise OSError("mail reply artifact exceeds bounded size")
+    # Write to a unique sibling, fsync its complete contents, then hard-link
+    # it into the canonical name.  link(2) gives us no-clobber publication
+    # without the overwrite race inherent in a check-then-rename sequence.
+    # The temporary name is removed only after the canonical link exists; a
+    # crash before that point cannot leave a partial canonical artifact.
+    with _open_private_parent(relative, create_parents=True) as (
+        parent_fd,
+        filename,
+        nofollow,
+        cloexec,
+        owner_uid,
+    ):
+        temporary = f".{filename}.{uuid.uuid4().hex}.tmp"
+        temporary_fd: int | None = None
+        linked = False
+
+        def remove_temporary() -> None:
             try:
-                temporary.unlink()
-            except OSError:
+                os.unlink(temporary, dir_fd=parent_fd)
+            except FileNotFoundError:
                 pass
+            except OSError:
+                # The canonical result is never removed as part of uncertain
+                # cleanup.  A remaining temp is reconciled on a later retry.
+                pass
+
+        try:
+            temporary_fd = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow | cloexec,
+                _PRIVATE_FILE_MODE,
+                dir_fd=parent_fd,
+            )
+            os.fchmod(temporary_fd, _PRIVATE_FILE_MODE)
+            temporary_stat = os.fstat(temporary_fd)
+            if (
+                not stat.S_ISREG(temporary_stat.st_mode)
+                or temporary_stat.st_nlink != 1
+                or temporary_stat.st_uid != owner_uid
+                or stat.S_IMODE(temporary_stat.st_mode) != _PRIVATE_FILE_MODE
+            ):
+                raise OSError("mail reply temporary artifact is not private")
+            written = 0
+            while written < len(encrypted):
+                count = os.write(temporary_fd, encrypted[written:])
+                if count <= 0:
+                    raise OSError("mail reply artifact write made no progress")
+                written += count
+            os.fsync(temporary_fd)
+        finally:
+            if temporary_fd is not None:
+                try:
+                    os.close(temporary_fd)
+                except OSError:
+                    pass
+                temporary_fd = None
+
+        try:
+            try:
+                os.link(
+                    temporary,
+                    filename,
+                    src_dir_fd=parent_fd,
+                    dst_dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+                linked = True
+            except FileExistsError:
+                # A response-loss retry may find a file published by the
+                # original worker.  Reuse it only when exact checkpoint bytes
+                # match; a symlink, hardlink, partial file, or other mismatch
+                # remains an explicit unknown rather than being replaced.
+                remove_temporary()
+                if _read_private_ciphertext(relative) != encrypted:
+                    raise OSError("mail reply artifact already contains different bytes")
+                return
+
+            # The link is durable only after its directory entry is flushed.
+            # Remove the temporary hardlink after the canonical entry exists.
+            os.unlink(temporary, dir_fd=parent_fd)
+            temporary = ""
+            os.fsync(parent_fd)
+        except BaseException:
+            # If linking did not happen, cleanup is safe.  Once linked, retain
+            # the canonical winner and never delete it on an uncertain error.
+            if not linked and temporary:
+                remove_temporary()
+            raise
 
 
 def write_private_draft(job_id: str, payload: Mapping[str, Any]) -> tuple[str, str, bytes]:
-    """Encrypt and atomically publish one private draft, returning its hash.
-
-    This compatibility wrapper is used by small local callers.  The governed
-    dispatcher uses the explicit prepare/checkpoint/publish sequence above.
-    """
+    """Encrypt and publish one private draft, returning its hash."""
 
     relative, digest, encrypted = prepare_private_draft(job_id, payload)
     publish_private_draft(relative, encrypted)
@@ -234,21 +448,8 @@ def write_private_draft(job_id: str, payload: Mapping[str, Any]) -> tuple[str, s
 
 
 def read_private_draft(relative_path: str, expected_sha256: str) -> dict[str, Any]:
-    target = _path(relative_path)
-    descriptor = os.open(target, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-    try:
-        before = os.fstat(descriptor)
-        if not os.path.isfile(target) or before.st_nlink != 1 or before.st_size > 96 * 1024:
-            raise OSError("mail reply artifact is not a regular private file")
-        encrypted = os.read(descriptor, 96 * 1024 + 1)
-        after = os.fstat(descriptor)
-    finally:
-        os.close(descriptor)
-    if (
-        len(encrypted) > 96 * 1024
-        or before.st_size != after.st_size
-        or hashlib.sha256(encrypted).hexdigest() != expected_sha256
-    ):
+    encrypted = _read_private_ciphertext(relative_path)
+    if hashlib.sha256(encrypted).hexdigest() != expected_sha256:
         raise OSError("mail reply artifact digest mismatch")
     decoded = json.loads(decrypt(encrypted.decode("utf-8")))
     if not isinstance(decoded, dict):
@@ -261,6 +462,7 @@ __all__ = [
     "CAPABILITY_ID",
     "CAPABILITY_VERSION",
     "MAX_RUNTIME_SECONDS",
+    "MAX_SOURCE_BODY_BYTES",
     "ReplyDraftOutput",
     "artifact_path_for_job",
     "authority_payload",

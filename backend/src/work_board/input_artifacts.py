@@ -399,14 +399,23 @@ async def prepare_input_artifact(
     )
     if retention_deadline is not None:
         schedule_invocation = inputs.get("invocation_uuid") if isinstance(inputs, Mapping) else None
-        if (
-            request.capability_id != "guardian-routine.v2"
-            or not request.idempotency_key.startswith("schedule:")
-            or schedule_invocation != request.idempotency_key
-        ):
+        is_procedure_schedule_seed = (
+            request.capability_id == "guardian-routine.v2"
+            and request.idempotency_key.startswith("schedule:")
+            and schedule_invocation == request.idempotency_key
+        )
+        is_mail_watch_seed = (
+            request.capability_id == "gmail.scan_metadata.v1"
+            and request.idempotency_key.startswith("mail-watch:")
+            and isinstance(inputs, Mapping)
+            and inputs.get("schema_version") == 1
+            and inputs.get("connection_id")
+            and inputs.get("consent_id")
+        )
+        if not (is_procedure_schedule_seed or is_mail_watch_seed):
             raise BoardError(
                 "input_artifact_retention_invalid",
-                "Extended input retention is reserved for a reviewed schedule seed",
+                "Extended input retention is reserved for a reviewed schedule or Mail watch seed",
                 status_code=422,
             )
         requested_deadline = _utc(retention_deadline)

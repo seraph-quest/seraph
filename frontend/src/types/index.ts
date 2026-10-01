@@ -173,6 +173,19 @@ export interface GuardianInboxActionHistoryEntry {
   safe_reason: string | null;
 }
 
+/**
+ * Detail-only, owner-checked Mail selection metadata.  This deliberately
+ * carries no subject, preview, body, provider identity, or credentials.
+ */
+export interface GuardianInboxMailOrigin {
+  /** Exact source watch that produced this accepted candidate. */
+  watch_id: string;
+  message_binding_id: string;
+  message_revision: string;
+  status: string;
+  private: true;
+}
+
 /** Operator-safe projection of a durable, owner-scoped guardian intervention. */
 export interface GuardianInboxItem {
   id: string;
@@ -206,6 +219,7 @@ export interface GuardianInboxItem {
   evidence_url?: string | null;
   task_url?: string | null;
   watch_url?: string | null;
+  mail?: GuardianInboxMailOrigin | null;
   action_history?: GuardianInboxActionHistoryEntry[];
   action_history_truncated?: boolean;
 }

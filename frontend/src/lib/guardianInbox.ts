@@ -7,6 +7,7 @@ import type {
   GuardianInboxEvidenceRef,
   GuardianInboxEvidencePreview,
   GuardianInboxItem,
+  GuardianInboxMailOrigin,
   GuardianInboxJob,
   GuardianInboxReadback,
   GuardianInboxPage,
@@ -172,6 +173,23 @@ function normalizeActionHistory(value: unknown): GuardianInboxActionHistoryEntry
   });
 }
 
+function normalizeMailOrigin(value: unknown, fallbackWatchId: unknown = null): GuardianInboxMailOrigin | null {
+  if (!isRecord(value) || value.private !== true) return null;
+  const watchId = typeof value.watch_id === "string" && value.watch_id.trim()
+    ? value.watch_id
+    : typeof fallbackWatchId === "string" && fallbackWatchId.trim() ? fallbackWatchId : null;
+  if (!watchId) return null;
+  if (typeof value.message_binding_id !== "string" || !value.message_binding_id.trim()) return null;
+  if (typeof value.message_revision !== "string" || !value.message_revision.trim()) return null;
+  return {
+    watch_id: watchId,
+    message_binding_id: value.message_binding_id,
+    message_revision: value.message_revision,
+    status: typeof value.status === "string" ? value.status.slice(0, 64) : "unknown",
+    private: true,
+  };
+}
+
 const SUPPORTED_ACTIONS = new Set(["accept_followup", "snooze", "dismiss"]);
 const KNOWN_STATES = new Set(["pending", "snoozed", "accepted", "dismissed", "expired"]);
 
@@ -238,6 +256,7 @@ export function normalizeGuardianInboxItem(value: unknown): GuardianInboxItem | 
     watch_url: typeof value.watch_url === "string"
       ? value.watch_url
       : typeof links?.source_watch === "string" ? links.source_watch : null,
+    mail: normalizeMailOrigin(value.mail, value.watch_id),
     action_history: normalizeActionHistory(value.action_history),
     action_history_truncated: value.action_history_truncated === true,
   };

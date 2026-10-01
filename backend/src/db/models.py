@@ -382,6 +382,12 @@ class GoogleServiceConnection(SQLModel, table=True):
     label: str = Field(default="", max_length=200)
     vault_secret_key: str = Field(index=True, unique=True, max_length=256)
     credential_fingerprint: str = Field(default="", index=True, max_length=128)
+    # Mail connections retain scope declarations as configuration evidence only;
+    # they never establish provider privilege.  Calendar rows keep the empty
+    # defaults for backwards compatibility.
+    declared_scopes_json: str = Field(default="[]")
+    provider_scopes_json: str = Field(default="[]")
+    scope_status: str = Field(default="scope_unverified", index=True)
     setup_idempotency_key: str = Field(default="", max_length=256)
     setup_request_digest: str = Field(default="", index=True, max_length=128)
     state: str = Field(default="preparing", index=True)
@@ -390,6 +396,8 @@ class GoogleServiceConnection(SQLModel, table=True):
     # connection keeps only its opaque root identity for owner-bound lookup;
     # no idempotency key or response payload is cached on this row.
     verified_setup_job_id: Optional[str] = Field(default=None, index=True)
+    revoke_idempotency_key: Optional[str] = Field(default=None, index=True, max_length=256)
+    revoke_request_digest: Optional[str] = Field(default=None, index=True, max_length=128)
     created_at: datetime = Field(default_factory=_now, index=True)
     updated_at: datetime = Field(default_factory=_now, index=True)
 
@@ -435,6 +443,190 @@ class CalendarReadConsent(SQLModel, table=True):
     state: str = Field(default="active", index=True)
     revision: int = Field(default=1, index=True)
     consent_digest: str = Field(default="", index=True, max_length=128)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+
+
+class MailLabelBinding(SQLModel, table=True):
+    """Owner-private mapping from one opaque UI label key to a Gmail label.
+
+    Gmail label identifiers are provider identities.  They are encrypted at
+    rest and are only resolved by the mail adapter after the connection and
+    consent fences have been re-read.  ``label_id`` is the stable, opaque key
+    that the cockpit may carry between requests.
+    """
+
+    __tablename__ = "mail_label_bindings"
+    __table_args__ = (
+        Index(
+            "ix_mail_label_bindings_owner_connection",
+            "owner_principal_id",
+            "owner_session_id",
+            "connection_id",
+            "state",
+        ),
+        UniqueConstraint(
+            "owner_principal_id",
+            "owner_session_id",
+            "connection_id",
+            "provider_label_digest",
+            name="ux_mail_label_bindings_provider_identity",
+        ),
+    )
+
+    label_id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_principal_id: str = Field(index=True)
+    owner_session_id: str = Field(index=True)
+    connection_id: str = Field(index=True)
+    connection_revision: int = Field(default=1, index=True)
+    provider_label_id_ciphertext: str = Field(default="", sa_type=Text)
+    provider_label_digest: str = Field(default="", index=True, max_length=128)
+    label_name: str = Field(default="", max_length=200)
+    label_type: str = Field(default="user", max_length=32)
+    state: str = Field(default="active", index=True)
+    revision: int = Field(default=1, index=True)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+
+
+class MailReadConsent(SQLModel, table=True):
+    """Finite, independent source-read and cloud-text consent for Gmail."""
+
+    __tablename__ = "mail_read_consents"
+    __table_args__ = (
+        Index(
+            "ix_mail_read_consents_owner_state",
+            "owner_principal_id",
+            "owner_session_id",
+            "state",
+        ),
+        Index("ix_mail_read_consents_connection", "connection_id", "state"),
+        Index(
+            "ux_mail_read_consents_creation_idempotency",
+            "owner_principal_id",
+            "owner_session_id",
+            "creation_idempotency_key",
+            unique=True,
+            sqlite_where=text("creation_idempotency_key <> ''"),
+            postgresql_where=text("creation_idempotency_key <> ''"),
+        ),
+    )
+
+    consent_id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_principal_id: str = Field(index=True)
+    owner_session_id: str = Field(index=True)
+    connection_id: str = Field(index=True)
+    connection_revision: int = Field(default=1, index=True)
+    creation_idempotency_key: str = Field(default="", max_length=256)
+    creation_request_digest: str = Field(default="", index=True, max_length=128)
+    goal_id: str = Field(index=True)
+    goal_revision: int = Field(default=1, index=True)
+    label_ids_json: str = Field(default="[]")
+    window_days: int = Field(default=7, index=True)
+    max_messages: int = Field(default=10, index=True)
+    source_read_allowed: bool = Field(default=True, index=True)
+    source_revision: int = Field(default=1, index=True)
+    source_digest: str = Field(default="", index=True, max_length=128)
+    source_reviewed_at: datetime = Field(default_factory=_now, index=True)
+    model_egress_allowed: bool = Field(default=False, index=True)
+    model_revision: int = Field(default=1, index=True)
+    model_digest: str = Field(default="", index=True, max_length=128)
+    model_reviewed_at: Optional[datetime] = Field(default=None, index=True)
+    allowed_body_fields_json: str = Field(default="[]")
+    revoke_idempotency_key: Optional[str] = Field(default=None, index=True, max_length=256)
+    revoke_request_digest: Optional[str] = Field(default=None, index=True, max_length=128)
+    expires_at: datetime = Field(index=True)
+    state: str = Field(default="active", index=True)
+    revision: int = Field(default=1, index=True)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+
+
+class MailMessageBinding(SQLModel, table=True):
+    """Owner-private metadata identity for one bounded Gmail message read."""
+
+    __tablename__ = "mail_message_bindings"
+    __table_args__ = (
+        Index(
+            "ix_mail_message_bindings_owner_state",
+            "owner_principal_id",
+            "owner_session_id",
+            "status",
+        ),
+        UniqueConstraint(
+            "owner_principal_id",
+            "owner_session_id",
+            "connection_id",
+            "message_key",
+            name="ux_mail_message_bindings_identity",
+        ),
+    )
+
+    message_binding_id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_principal_id: str = Field(index=True)
+    owner_session_id: str = Field(index=True)
+    connection_id: str = Field(index=True)
+    connection_revision: int = Field(default=1, index=True)
+    # The binding is created under a specific source consent and selected
+    # label scope.  A later consent on the same connection must never be able
+    # to reinterpret this provider identity.
+    source_consent_id: Optional[str] = Field(default=None, index=True)
+    source_consent_revision: Optional[int] = Field(default=None, index=True)
+    source_label_scope_digest: Optional[str] = Field(default=None, index=True, max_length=128)
+    provider_message_id_ciphertext: str = Field(default="", sa_type=Text)
+    provider_thread_id_ciphertext: str = Field(default="", sa_type=Text)
+    message_key: str = Field(default="", index=True, max_length=128)
+    thread_key: str = Field(default="", index=True, max_length=128)
+    message_revision: str = Field(default="", index=True, max_length=128)
+    received_at: Optional[datetime] = Field(default=None, index=True)
+    fetched_at: datetime = Field(default_factory=_now, index=True)
+    status: str = Field(default="present", index=True)
+    revision: int = Field(default=1, index=True)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+
+
+class MailWatchState(SQLModel, table=True):
+    """Bounded metadata cursor for one finite, owner-scoped Gmail watch.
+
+    The scheduler binding and occurrence remain the authority for admission
+    and execution.  This row only records the watch's metadata-only coverage
+    tuple and a bounded set of opaque message keys so a restart cannot emit a
+    second notice for the same observed message.
+    """
+
+    __tablename__ = "mail_watch_states"
+    __table_args__ = (
+        UniqueConstraint("binding_id", name="ux_mail_watch_states_binding"),
+        Index(
+            "ix_mail_watch_states_owner_state",
+            "owner_principal_id",
+            "owner_session_id",
+            "state",
+        ),
+    )
+
+    binding_id: str = Field(primary_key=True)
+    owner_principal_id: str = Field(index=True)
+    owner_session_id: str = Field(index=True)
+    connection_id: str = Field(index=True)
+    connection_revision: int = Field(default=1, index=True)
+    consent_id: str = Field(index=True)
+    source_consent_revision: int = Field(default=1, index=True)
+    goal_id: str = Field(index=True)
+    goal_revision: int = Field(default=1, index=True)
+    revision: int = Field(default=1, index=True)
+    state: str = Field(default="not_started", index=True)
+    baseline_complete: bool = Field(default=False, index=True)
+    seen_message_keys_json: str = Field(default="[]")
+    seen_message_keys_digest: str = Field(default="", index=True, max_length=128)
+    window_start_utc: Optional[datetime] = Field(default=None, index=True)
+    window_end_utc: Optional[datetime] = Field(default=None, index=True)
+    list_fetched_at: Optional[datetime] = Field(default=None, index=True)
+    list_page_complete: bool = Field(default=False, index=True)
+    last_observed_at: Optional[datetime] = Field(default=None, index=True)
+    last_completed_occurrence_id: Optional[str] = Field(default=None, index=True)
+    skipped_coverage_reason: Optional[str] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=_now, index=True)
     updated_at: datetime = Field(default_factory=_now, index=True)
 

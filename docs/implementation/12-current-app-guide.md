@@ -607,6 +607,40 @@ visible without exposing an unchecked brief. Routine metadata reads do not
 load provider event bodies or brief content. This capability does not modify
 calendar events, send communications, or learn preferences from meeting content.
 
+### Bounded Gmail source, watch, and reply drafting (M7 #890 branch-local target)
+
+The branch adds an owner- and session-bound Gmail readonly path with encrypted
+credentials, explicit source and model consent, opaque local message bindings,
+bounded metadata watches, and private reply drafts. A watch uses the existing
+governed scheduler with the exact `hourly` or `6h` cadence shape, starts in
+`not_started`, and may create at most three neutral inbox notices during the
+finite Goal notification period. The 512-key seen cursor fails closed with
+`coverage_blocked` rather than forgetting older messages. Inbox acceptance is
+the explicit human-triage step; scanning never creates an executable reply or
+contacts a model per message.
+
+Reply drafting reads the selected message twice around one governed
+OpenRouter inference admission. The reviewed source is passed in full up to
+8 KiB, model output is exactly `{subject, body, caveats}`, and the server
+attaches the message revision before writing a 0600 encrypted private draft.
+The private artifact has durable checkpoint, hash, readback, exact-key replay,
+and unknown-recovery states. Generic Work Board, inbox, notifications, and
+browser storage do not expose the private body or operator intent. The bounded
+reply intent is a local 0600 typed-input artifact and remains a plaintext
+residual within the local-workspace trust boundary; the source body and draft
+remain encrypted private artifacts. Lost setup, reply, and watch responses can
+be resolved by their original opaque key under the current authenticated
+owner/session. Watch notices obey the Goal's finite quiet-hours and
+notification allowance across the whole period; uncertain or over-capacity
+coverage stays visibly blocked for reconciliation.
+
+This remains **Partial** and branch-local until the reviewed milestone is
+integrated. Focused SQLite and intercepted-transport tests prove the bounded
+mechanics; CPU-only/keyless OpenRouter operation, a real Google account, live
+Gmail usefulness, send operation, and paid model canary remain
+**external-unverified**. See the M7 mail wire contract in issue #890 for the
+exact request, recovery, privacy, and readback boundaries.
+
 ### Reviewed source-change follow-up
 
 Goals expose their success criterion, finite proactive budget, quiet hours, and

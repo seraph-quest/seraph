@@ -104,6 +104,12 @@ function detailMatchesListItem(listItem: GuardianInboxItem, detail: GuardianInbo
   ) {
     return false;
   }
+  // The list projection intentionally omits private Mail selection metadata;
+  // detail may enrich it. If a list ever advertises an origin, require the
+  // detail projection to preserve that exact opaque binding and revision.
+  if (listItem.mail && (!detail.mail || detail.mail.private !== true
+    || listItem.mail.message_binding_id !== detail.mail.message_binding_id
+    || listItem.mail.message_revision !== detail.mail.message_revision)) return false;
   const listEvidence = evidenceBinding(listItem);
   if (listEvidence && evidenceBinding(detail) !== listEvidence) return false;
   const listOwners = ownerBinding(listItem);
@@ -120,6 +126,7 @@ function mergeCachedDetail(listItem: GuardianInboxItem, detail: GuardianInboxIte
     evidence_refs: detail.evidence_refs.length > 0 ? detail.evidence_refs : listItem.evidence_refs,
     evidence_previews: detail.evidence_previews,
     job: detail.job,
+    mail: detail.mail ?? listItem.mail,
     task_id: listItem.task_id ?? detail.task_id,
     task_url: listItem.task_url ?? detail.task_url,
     recovery_action: listItem.recovery_action ?? detail.recovery_action,

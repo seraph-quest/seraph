@@ -21,11 +21,16 @@ from sqlalchemy.exc import IntegrityError
 from src.artifacts.registry import artifact_id_for
 from src.db import engine as db_engine
 from src.db.models import (
+    GoogleServiceConnection,
     Goal,
     GuardianDecisionPacket,
     GuardianInboxAction,
     GuardianInboxDisposition,
     GuardianSourceWatch,
+    GovernedScheduleBinding,
+    MailMessageBinding,
+    MailReadConsent,
+    MailWatchState,
     WorkflowRunState,
     WorkBoardTask,
     WorkBoardStatus,
@@ -41,6 +46,7 @@ from src.work_board.repository import (
 
 
 SOURCE_KIND = "source_packet"
+MAIL_SOURCE_KIND = "mail_notice"
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_KEY = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
 _MAX_CURSOR_BYTES = 512
@@ -573,6 +579,341 @@ def _job_detail_projection(
     }
 
 
+def _mail_notice_message_key(disposition: GuardianInboxDisposition) -> str | None:
+    """Extract the opaque message key from a mail notice identity."""
+
+    prefix = f"mail-notice:{str(disposition.watch_id or '').strip()}:"
+    source_id = str(disposition.source_id or "")
+    if not source_id.startswith(prefix):
+        return None
+    key = source_id[len(prefix) :]
+    return key if _safe_id(key, max_length=128) is not None else None
+
+
+def _mail_notice_digest(
+    *,
+    source_id: str,
+    message: MailMessageBinding,
+    binding: GovernedScheduleBinding,
+) -> str:
+    """Recreate the metadata-only notice digest used by the scheduler."""
+
+    prefix = f"mail-notice:{str(binding.binding_id)}:"
+    key = source_id[len(prefix) :] if source_id.startswith(prefix) else ""
+    return "sha256:" + _digest(
+        _json(
+            {
+                "source_id": source_id,
+                "message_key": key,
+                "message_revision": str(message.message_revision or ""),
+                "watch_id": str(binding.binding_id),
+                "goal_id": str(binding.goal_id),
+                "goal_revision": int(binding.goal_revision or 0),
+            }
+        )
+    )
+
+
+async def _load_mail_projection_row(
+    db: Any,
+    *,
+    item_id: str,
+    owner_principal_id: str,
+    owner_session_id: str,
+) -> tuple[
+    GuardianInboxDisposition,
+    GovernedScheduleBinding | None,
+    MailWatchState | None,
+    Goal | None,
+    MailReadConsent | None,
+    GoogleServiceConnection | None,
+    MailMessageBinding | None,
+] | None:
+    """Load one owner-bound metadata notice and its authority graph."""
+
+    disposition = (
+        await db.execute(
+            select(GuardianInboxDisposition).where(
+                GuardianInboxDisposition.id == item_id,
+                GuardianInboxDisposition.owner_principal_id == owner_principal_id,
+                GuardianInboxDisposition.owner_session_id == owner_session_id,
+                GuardianInboxDisposition.source_kind == MAIL_SOURCE_KIND,
+            )
+        )
+    ).scalar_one_or_none()
+    if disposition is None:
+        return None
+    message_key = _mail_notice_message_key(disposition)
+    query = (
+        select(
+            GuardianInboxDisposition,
+            GovernedScheduleBinding,
+            MailWatchState,
+            Goal,
+            MailReadConsent,
+            GoogleServiceConnection,
+            MailMessageBinding,
+        )
+        .outerjoin(
+            GovernedScheduleBinding,
+            GovernedScheduleBinding.binding_id == GuardianInboxDisposition.watch_id,
+        )
+        .outerjoin(MailWatchState, MailWatchState.binding_id == GuardianInboxDisposition.watch_id)
+        .outerjoin(Goal, Goal.id == GuardianInboxDisposition.goal_id)
+        .outerjoin(MailReadConsent, MailReadConsent.consent_id == MailWatchState.consent_id)
+        .outerjoin(
+            GoogleServiceConnection,
+            GoogleServiceConnection.connection_id == MailWatchState.connection_id,
+        )
+        .outerjoin(
+            MailMessageBinding,
+            and_(
+                MailMessageBinding.owner_principal_id == owner_principal_id,
+                MailMessageBinding.owner_session_id == owner_session_id,
+                MailMessageBinding.connection_id == MailWatchState.connection_id,
+                MailMessageBinding.message_key == (message_key or "\0"),
+            ),
+        )
+        .where(
+            GuardianInboxDisposition.id == item_id,
+            GuardianInboxDisposition.owner_principal_id == owner_principal_id,
+            GuardianInboxDisposition.owner_session_id == owner_session_id,
+            GuardianInboxDisposition.source_kind == MAIL_SOURCE_KIND,
+        )
+    )
+    row = (await db.execute(query)).first()
+    if row is None:
+        return None
+    result = tuple(row)
+    if not _mail_projection_owner_safe(
+        *result,
+        owner_principal_id=owner_principal_id,
+        owner_session_id=owner_session_id,
+    ):
+        return None
+    return result  # type: ignore[return-value]
+
+
+def _mail_projection_owner_safe(
+    disposition: GuardianInboxDisposition,
+    binding: GovernedScheduleBinding | None,
+    state: MailWatchState | None,
+    goal: Goal | None,
+    consent: MailReadConsent | None,
+    connection: GoogleServiceConnection | None,
+    message: MailMessageBinding | None,
+    *,
+    owner_principal_id: str,
+    owner_session_id: str,
+) -> bool:
+    """Fail closed when any existing mail authority row belongs elsewhere."""
+
+    for row in (binding, state, goal, consent, connection, message):
+        if row is None:
+            continue
+        if (
+            str(getattr(row, "owner_principal_id", "") or "") != owner_principal_id
+            or str(getattr(row, "owner_session_id", "") or "") != owner_session_id
+        ):
+            return False
+    if binding is not None and (
+        str(binding.binding_id) != str(disposition.watch_id)
+        or str(binding.goal_id) != str(disposition.goal_id)
+    ):
+        return False
+    if state is not None and (
+        str(state.binding_id) != str(disposition.watch_id)
+        or str(state.goal_id) != str(disposition.goal_id)
+    ):
+        return False
+    if goal is not None and str(goal.id) != str(disposition.goal_id):
+        return False
+    if consent is not None and state is not None and (
+        str(consent.consent_id) != str(state.consent_id)
+        or str(consent.connection_id) != str(state.connection_id)
+    ):
+        return False
+    if connection is not None and state is not None and str(connection.connection_id) != str(state.connection_id):
+        return False
+    if message is not None and state is not None and str(message.connection_id) != str(state.connection_id):
+        return False
+    return True
+
+
+def _mail_authority_projection(
+    disposition: GuardianInboxDisposition,
+    binding: GovernedScheduleBinding | None,
+    state: MailWatchState | None,
+    goal: Goal | None,
+    consent: MailReadConsent | None,
+    connection: GoogleServiceConnection | None,
+    message: MailMessageBinding | None,
+    *,
+    now: datetime,
+) -> tuple[bool, str | None, str | None]:
+    """Validate the exact mail watch/message/goal chain before an action."""
+
+    if any(row is None for row in (binding, state, goal, consent, connection, message)):
+        return False, "the watched Mail metadata is unavailable; refresh the watch", "refresh_mail_watch"
+    assert binding is not None and state is not None and goal is not None
+    assert consent is not None and connection is not None and message is not None
+    key = _mail_notice_message_key(disposition)
+    if key is None or message.message_key != key:
+        return False, "the watched message binding is unavailable; rescan Mail", "rescan_mail_messages"
+    if (
+        binding.action_type != "gmail.scan_metadata.v1"
+        or binding.capability_id != "gmail.scan_metadata.v1"
+        or binding.state != "active"
+        or _utc(binding.expires_at) <= now
+        or state.binding_id != binding.binding_id
+        or state.owner_principal_id != disposition.owner_principal_id
+        or state.owner_session_id != disposition.owner_session_id
+        or state.goal_id != disposition.goal_id
+        or int(state.goal_revision or 0) != int(disposition.goal_revision or 0)
+        or int(binding.goal_revision or 0) != int(disposition.goal_revision or 0)
+        or not bool(state.baseline_complete)
+        or state.state not in {"active", "coverage_blocked", "baseline_complete"}
+    ):
+        return False, "the Mail watch authority changed; review the current watch", "refresh_mail_watch"
+    if (
+        goal.id != disposition.goal_id
+        or int(goal.revision or 0) != int(disposition.goal_revision or 0)
+        or str(getattr(goal.status, "value", goal.status) or "") != "active"
+        or not bool(getattr(goal, "proactive_enabled", False))
+    ):
+        return False, "the watched goal is no longer active", "review_goal_and_watch"
+    budget = deserialize_admission_budget(goal)
+    period_expires_at = _utc(getattr(budget, "period_expires_at", None)) if budget is not None else None
+    period_started_at = _utc(getattr(budget, "period_started_at", None)) if budget is not None else None
+    if (
+        budget is None
+        or not bool(getattr(budget, "reviewed_grant", False))
+        or not str(getattr(budget, "grant_id", "") or "").strip()
+        or period_expires_at is None
+        or period_expires_at <= now
+        or period_started_at is not None and period_started_at > now
+    ):
+        return False, "the reviewed goal budget is unavailable or expired", "review_goal_and_watch"
+    if (
+        consent.consent_id != state.consent_id
+        or consent.connection_id != connection.connection_id
+        or int(consent.connection_revision or 0) != int(connection.revision or 0)
+        or int(consent.source_revision or 0) != int(state.source_consent_revision or 0)
+        or consent.state != "active"
+        or not bool(consent.source_read_allowed)
+        or _utc(consent.expires_at) <= now
+        or connection.state != "active"
+        or int(message.connection_revision or 0) != int(connection.revision or 0)
+        or message.source_consent_id != consent.consent_id
+        or int(message.source_consent_revision or 0) != int(consent.source_revision or 0)
+        or message.status != "present"
+        or disposition.source_digest != _mail_notice_digest(
+            source_id=disposition.source_id,
+            message=message,
+            binding=binding,
+        )
+    ):
+        return False, "the Mail source or connection authority changed", "rescan_mail_messages"
+    return True, None, None
+
+
+def _project_mail_item(
+    disposition: GuardianInboxDisposition,
+    binding: GovernedScheduleBinding | None,
+    state: MailWatchState | None,
+    goal: Goal | None,
+    consent: MailReadConsent | None,
+    connection: GoogleServiceConnection | None,
+    message: MailMessageBinding | None,
+    *,
+    now: datetime,
+    detail: bool = False,
+    action_history: list[dict[str, Any]] | None = None,
+    action_history_truncated: bool = False,
+) -> dict[str, Any]:
+    effective_state = disposition.state
+    if effective_state in {"pending", "snoozed"} and _utc(disposition.expires_at) <= now:
+        effective_state = "expired"
+    authority_ok, authority_reason, authority_recovery = _mail_authority_projection(
+        disposition,
+        binding,
+        state,
+        goal,
+        consent,
+        connection,
+        message,
+        now=now,
+    )
+    if authority_ok:
+        source_status = str(state.state if state is not None else "observed")
+        policy_reason = "New Mail metadata is available; accepting creates a neutral triage task only"
+    else:
+        source_status = "stale_authority"
+        policy_reason = authority_reason or "Mail watch authority requires recovery"
+    allowed_actions: list[str] = []
+    if authority_ok and effective_state in {"pending", "snoozed"} and (
+        effective_state == "pending"
+        or _utc(disposition.snoozed_until) is None
+        or _utc(disposition.snoozed_until) <= now
+    ):
+        allowed_actions = ["accept_followup", "snooze", "dismiss"]
+    item: dict[str, Any] = {
+        "id": disposition.id,
+        "revision": disposition.revision,
+        "state": effective_state,
+        "source_kind": MAIL_SOURCE_KIND,
+        "source_id": disposition.source_id,
+        "source_digest": disposition.source_digest,
+        "title": "New message in watched mailbox",
+        "summary": "A new message was observed. Open the private Mail view to inspect it.",
+        "why_now": "A metadata-only Mail watch observed a new message for the selected goal.",
+        "goal_id": disposition.goal_id,
+        "goal_revision": disposition.goal_revision,
+        "watch_id": disposition.watch_id,
+        "plan_revision": disposition.plan_revision,
+        "task_id": disposition.task_id,
+        "expires_at": _iso(disposition.expires_at),
+        "snoozed_until": _iso(disposition.snoozed_until),
+        "created_at": _iso(disposition.created_at),
+        "updated_at": _iso(disposition.updated_at),
+        "evidence": {"status": "metadata_only", "memory_status": "no_learning"},
+        "evidence_refs": [],
+        "evidence_status": "metadata_verified" if authority_ok else "blocked",
+        "last_verified_at": _iso(message.updated_at if message is not None else None),
+        "source": {
+            "status": source_status,
+            "observed_at": _iso(message.updated_at if message is not None else disposition.updated_at),
+        },
+        "verification_status": "metadata_verified" if message is not None else "blocked",
+        "memory_status": "no_learning",
+        "policy_reason": policy_reason,
+        "allowed_actions": allowed_actions,
+    }
+    if authority_recovery:
+        item["recovery_action"] = authority_recovery
+    if detail:
+        item["links"] = {
+            "mail_watch": f"/api/capabilities/mail/watches/{disposition.watch_id}",
+            "board_task": f"/api/work-board/tasks/{disposition.task_id}" if disposition.task_id else None,
+            "mail_message_read": (
+                f"/api/capabilities/mail/messages/{message.message_binding_id}/read"
+                if message is not None
+                else None
+            ),
+        }
+        item["mail"] = {
+            "message_binding_id": message.message_binding_id if message is not None else None,
+            "message_revision": message.message_revision if message is not None else None,
+            "received_at": _iso(message.received_at if message is not None else None),
+            "status": message.status if message is not None else "unavailable",
+            "private": True,
+        }
+        item["goal"] = {"id": disposition.goal_id, "revision": disposition.goal_revision}
+        item["action_history"] = action_history or []
+        item["action_history_truncated"] = bool(action_history_truncated)
+    return item
+
+
 async def _load_projection_row(
     db: Any,
     *,
@@ -985,9 +1326,109 @@ async def list_owned_items(
                     run=run,
                 )
             )
+        mail_query = (
+            select(
+                GuardianInboxDisposition,
+                GovernedScheduleBinding,
+                MailWatchState,
+                Goal,
+                MailReadConsent,
+                GoogleServiceConnection,
+            )
+            .outerjoin(
+                GovernedScheduleBinding,
+                GovernedScheduleBinding.binding_id == GuardianInboxDisposition.watch_id,
+            )
+            .outerjoin(MailWatchState, MailWatchState.binding_id == GuardianInboxDisposition.watch_id)
+            .outerjoin(Goal, Goal.id == GuardianInboxDisposition.goal_id)
+            .outerjoin(MailReadConsent, MailReadConsent.consent_id == MailWatchState.consent_id)
+            .outerjoin(
+                GoogleServiceConnection,
+                GoogleServiceConnection.connection_id == MailWatchState.connection_id,
+            )
+            .where(
+                GuardianInboxDisposition.owner_principal_id == owner_principal_id,
+                GuardianInboxDisposition.owner_session_id == owner_session_id,
+                GuardianInboxDisposition.source_kind == MAIL_SOURCE_KIND,
+            )
+            .order_by(GuardianInboxDisposition.created_at.asc(), GuardianInboxDisposition.id.asc())
+            .limit(limit + 1)
+        )
+        if cursor_value is not None:
+            cursor_at, cursor_id = cursor_value
+            mail_query = mail_query.where(
+                or_(
+                    GuardianInboxDisposition.created_at > cursor_at,
+                    and_(
+                        GuardianInboxDisposition.created_at == cursor_at,
+                        GuardianInboxDisposition.id > cursor_id,
+                    ),
+                )
+            )
+        mail_rows = list((await db.execute(mail_query)).all())
+        for mail_row in mail_rows[:limit]:
+            (
+                disposition,
+                binding,
+                state,
+                goal,
+                consent,
+                connection,
+            ) = mail_row
+            message = None
+            if connection is not None:
+                message_key = _mail_notice_message_key(disposition)
+                if message_key is not None:
+                    message = (
+                        await db.execute(
+                            select(MailMessageBinding).where(
+                                MailMessageBinding.owner_principal_id == owner_principal_id,
+                                MailMessageBinding.owner_session_id == owner_session_id,
+                                MailMessageBinding.connection_id == connection.connection_id,
+                                MailMessageBinding.message_key == message_key,
+                            )
+                        )
+                    ).scalar_one_or_none()
+            if not _mail_projection_owner_safe(
+                disposition,
+                binding,
+                state,
+                goal,
+                consent,
+                connection,
+                message,
+                owner_principal_id=owner_principal_id,
+                owner_session_id=owner_session_id,
+            ):
+                continue
+            items.append(
+                _project_mail_item(
+                    disposition,
+                    binding,
+                    state,
+                    goal,
+                    consent,
+                    connection,
+                    message,
+                    now=now,
+                )
+            )
+        items.sort(
+            key=lambda item: (
+                _utc(datetime.fromisoformat(str(item.get("created_at"))))
+                if item.get("created_at")
+                else datetime.min.replace(tzinfo=timezone.utc),
+                str(item.get("id") or ""),
+            )
+        )
+        has_more = len(rows) > limit or len(mail_rows) > limit
+        page_items = items[:limit]
         next_cursor = None
-        if len(rows) > limit and rows_for_page:
-            next_cursor = _encode_cursor(rows_for_page[-1][0].created_at, rows_for_page[-1][0].id)
+        if has_more and page_items:
+            last_created = _utc(datetime.fromisoformat(str(page_items[-1]["created_at"])))
+            if last_created is not None:
+                next_cursor = _encode_cursor(last_created, str(page_items[-1]["id"]))
+        items = page_items
     return {"items": items, "next_cursor": next_cursor, "last_confirmed_at": now.isoformat()}
 
 
@@ -995,6 +1436,44 @@ async def get_owned_item(
     *, owner_principal_id: str, owner_session_id: str, item_id: str, detail: bool = True
 ) -> dict[str, Any]:
     async with db_engine.get_session() as db:
+        mail_row = await _load_mail_projection_row(
+            db,
+            item_id=item_id,
+            owner_principal_id=owner_principal_id,
+            owner_session_id=owner_session_id,
+        )
+        if mail_row is not None:
+            (
+                disposition,
+                binding,
+                state,
+                goal,
+                consent,
+                connection,
+                message,
+            ) = mail_row
+            if detail:
+                action_history, action_history_truncated = await _load_action_history(
+                    db,
+                    owner_principal_id=owner_principal_id,
+                    owner_session_id=owner_session_id,
+                    item_id=disposition.id,
+                )
+            else:
+                action_history, action_history_truncated = [], False
+            return _project_mail_item(
+                disposition,
+                binding,
+                state,
+                goal,
+                consent,
+                connection,
+                message,
+                now=_now(),
+                detail=detail,
+                action_history=action_history,
+                action_history_truncated=action_history_truncated,
+            )
         row = await _load_projection_row(
             db,
             item_id=item_id,
@@ -1307,6 +1786,226 @@ async def _verify_accept_artifacts(
         )
 
 
+async def _apply_mail_action(
+    *,
+    owner_principal_id: str,
+    owner_session_id: str,
+    item_id: str,
+    action: str,
+    expected_revision: int,
+    idempotency_key: str,
+    until: datetime | None = None,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """Apply an existing inbox action to a metadata-only Mail notice.
+
+    Mail notices have no source dossier to accept and no model action to
+    authorize.  Acceptance therefore only confirms the already-created (or
+    creates one) neutral triage task and records the normal inbox receipt.
+    """
+
+    normalized_until = _utc(until)
+    normalized_reason = _safe_action_reason(reason)
+    payload_digest = _digest(
+        _json(
+            {
+                "action": action,
+                "expected_revision": expected_revision,
+                "idempotency_key": idempotency_key,
+                "item_id": item_id,
+                "reason": normalized_reason,
+                "until": _iso(normalized_until),
+            }
+        )
+    )
+    safe_reason = normalized_reason
+    if safe_reason:
+        safe_reason = await vault_redaction.redact_secrets_in_text(
+            safe_reason,
+            fail_closed=True,
+        )
+        safe_reason = str(safe_reason)[:500]
+    owner = WorkBoardOwner(principal_id=owner_principal_id, session_id=owner_session_id)
+    async with db_engine.get_session() as db:
+        await _begin_sqlite_immediate(db)
+        replay = (
+            await db.execute(
+                select(GuardianInboxAction).where(
+                    GuardianInboxAction.owner_principal_id == owner_principal_id,
+                    GuardianInboxAction.owner_session_id == owner_session_id,
+                    GuardianInboxAction.idempotency_key == idempotency_key,
+                )
+            )
+        ).scalars().first()
+        if replay is not None:
+            if replay.item_id != item_id or replay.payload_digest != payload_digest:
+                raise InboxError("idempotency_conflict", "The idempotency key was used with another payload")
+            return json.loads(replay.safe_result_json or "{}")
+        row = await _load_mail_projection_row(
+            db,
+            item_id=item_id,
+            owner_principal_id=owner_principal_id,
+            owner_session_id=owner_session_id,
+        )
+        if row is None:
+            raise InboxError("inbox_item_not_found", "The inbox item does not exist", status_code=404)
+        disposition, binding, state, goal, consent, connection, message = row
+        now = _now()
+        if disposition.revision != expected_revision:
+            raise InboxError(
+                "stale_revision",
+                "The inbox item changed before this action was applied",
+                current_revision=disposition.revision,
+                state=disposition.state,
+                recovery_action="refresh_inbox",
+            )
+        if disposition.state in {"pending", "snoozed"} and _utc(disposition.expires_at) <= now:
+            disposition.state = "expired"
+            disposition.revision += 1
+            disposition.updated_at = now
+            db.add(disposition)
+            await db.flush()
+            await db.commit()
+            raise InboxError(
+                "expired",
+                "The inbox item's authority has expired",
+                recovery_action="configure_new_watch",
+                state="expired",
+                current_revision=disposition.revision,
+            )
+        if action == "snooze":
+            if normalized_until is None:
+                raise InboxError("snooze_until_required", "Snooze requires until", status_code=422)
+            if normalized_until < now + timedelta(minutes=15) or normalized_until > now + timedelta(days=7):
+                raise InboxError("invalid_snooze_window", "Snooze must be between 15 minutes and 7 days", status_code=422)
+        if disposition.state == "snoozed":
+            snoozed_until = _utc(disposition.snoozed_until)
+            if snoozed_until is None or snoozed_until > now:
+                raise InboxError(
+                    "snoozed",
+                    "The inbox item is snoozed until its next review time",
+                    recovery_action="wait_for_snooze",
+                    state="snoozed",
+                    current_revision=disposition.revision,
+                )
+        if disposition.state not in {"pending", "snoozed"}:
+            raise InboxError(
+                "inbox_item_unavailable",
+                "The inbox item has already been resolved",
+                state=disposition.state,
+                recovery_action="open_task" if disposition.task_id else "refresh_inbox",
+                current_revision=disposition.revision,
+            )
+        authority_ok, authority_reason, authority_recovery = _mail_authority_projection(
+            disposition,
+            binding,
+            state,
+            goal,
+            consent,
+            connection,
+            message,
+            now=now,
+        )
+        if not authority_ok:
+            raise InboxError(
+                "stale_authority",
+                authority_reason or "The Mail watch authority changed",
+                recovery_action=authority_recovery or "refresh_mail_watch",
+                state="blocked",
+            )
+        if action == "snooze":
+            assert normalized_until is not None
+            if normalized_until > _utc(disposition.expires_at):
+                raise InboxError(
+                    "snooze_exceeds_expiry",
+                    "Snooze cannot outlive the inbox authority",
+                    recovery_action="configure_new_watch",
+                )
+            result_state = "snoozed"
+            task_id = disposition.task_id
+        elif action == "dismiss":
+            result_state = "dismissed"
+            task_id = disposition.task_id
+        else:
+            source_key = str(disposition.source_id)
+            existing_task = None
+            if disposition.task_id:
+                existing_task = await db.get(WorkBoardTask, disposition.task_id)
+                if existing_task is not None and (
+                    existing_task.owner_principal_id != owner_principal_id
+                    or existing_task.owner_session_id != owner_session_id
+                    or existing_task.goal_id != disposition.goal_id
+                    or existing_task.capability_id is not None
+                ):
+                    existing_task = None
+            if existing_task is None:
+                existing_task = (
+                    await db.execute(
+                        select(WorkBoardTask).where(
+                            WorkBoardTask.owner_principal_id == owner_principal_id,
+                            WorkBoardTask.owner_session_id == owner_session_id,
+                            WorkBoardTask.idempotency_scope == f"guardian-inbox:{disposition.id}",
+                            WorkBoardTask.idempotency_key == source_key,
+                        )
+                    )
+                ).scalars().first()
+            if existing_task is None:
+                try:
+                    mutation = await WorkBoardRepository().create_task(
+                        db,
+                        owner,
+                        WorkBoardTaskCreate(
+                            title="New message in watched mailbox",
+                            body="A new message is available in the private Mail view.",
+                            goal_id=disposition.goal_id,
+                            goal_revision=disposition.goal_revision,
+                            status=WorkBoardStatus.triage,
+                            priority=55,
+                            idempotency_scope=f"guardian-inbox:{disposition.id}",
+                            idempotency_key=source_key,
+                        ),
+                        origin_session_id=owner_session_id,
+                    )
+                except BoardError as exc:
+                    raise InboxError(exc.code, exc.message, status_code=exc.status_code) from exc
+                existing_task = mutation.task
+            task_id = existing_task.task_id
+            result_state = "accepted"
+        result_revision = int(disposition.revision) + 1
+        receipt = GuardianInboxAction(
+            owner_principal_id=owner_principal_id,
+            owner_session_id=owner_session_id,
+            item_id=disposition.id,
+            idempotency_key=idempotency_key,
+            payload_digest=payload_digest,
+            action=action,
+            prior_revision=disposition.revision,
+            result_revision=result_revision,
+            task_id=task_id,
+            safe_result_json="{}",
+            safe_reason=safe_reason,
+        )
+        result = {
+            "id": disposition.id,
+            "revision": result_revision,
+            "state": result_state,
+            "task_id": task_id,
+            "receipt_id": receipt.id,
+            "recovery_action": "open_task" if task_id else None,
+        }
+        receipt.safe_result_json = _json(result)
+        disposition.state = result_state
+        disposition.revision = result_revision
+        disposition.snoozed_until = normalized_until if action == "snooze" else None
+        disposition.task_id = task_id or disposition.task_id
+        disposition.last_action_receipt_id = receipt.id
+        disposition.updated_at = now
+        db.add(receipt)
+        db.add(disposition)
+        await db.flush()
+        return result
+
+
 async def apply_action(
     *,
     owner_principal_id: str,
@@ -1332,6 +2031,27 @@ async def apply_action(
         )
     normalized_until = _utc(until)
     normalized_reason = _safe_action_reason(reason)
+    async with db_engine.get_session() as lookup_db:
+        source_kind = (
+            await lookup_db.execute(
+                select(GuardianInboxDisposition.source_kind).where(
+                    GuardianInboxDisposition.id == item_id,
+                    GuardianInboxDisposition.owner_principal_id == owner_principal_id,
+                    GuardianInboxDisposition.owner_session_id == owner_session_id,
+                )
+            )
+        ).scalar_one_or_none()
+    if source_kind == MAIL_SOURCE_KIND:
+        return await _apply_mail_action(
+            owner_principal_id=owner_principal_id,
+            owner_session_id=owner_session_id,
+            item_id=item_id,
+            action=action,
+            expected_revision=expected_revision,
+            idempotency_key=idempotency_key,
+            until=until,
+            reason=reason,
+        )
     payload_digest = _digest(
         _json(
             {

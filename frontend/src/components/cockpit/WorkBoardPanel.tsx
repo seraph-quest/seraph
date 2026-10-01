@@ -9,6 +9,7 @@ import { BrowserTaskForm } from "./BrowserTaskForm";
 import type { BrowserTaskSubmissionReceipt, PendingBrowserSubmission } from "./BrowserTaskForm";
 import { CalendarPrepForm } from "./CalendarPrepForm";
 import type { PendingCalendarSubmission } from "./CalendarPrepForm";
+import { MailPanel } from "./MailPanel";
 import { WorkBoardMemoryReview } from "./WorkBoardMemoryReview";
 import { RepoRepairInspector } from "./RepoRepairInspector";
 import { validateCalendarExecution } from "../../lib/calendar";
@@ -3344,6 +3345,25 @@ function WorkBoardPanel({
                     onOpenApprovals={onOpenApprovals}
                   />
                 )}
+
+              {selectedTask.capability_id === "work.mail-reply-draft.v1" && (
+                <MailPanel
+                  taskId={selectedTask.task_id}
+                  ownerPrincipalId={ownerPrincipalId}
+                  ownerSessionId={ownerSessionId}
+                />
+              )}
+
+              {selectedTask.capability_id !== "work.mail-reply-draft.v1" && selectedInboxOrigin?.mail && (
+                <MailPanel
+                  taskId={selectedTask.task_id}
+                  ownerPrincipalId={ownerPrincipalId}
+                  ownerSessionId={ownerSessionId}
+                  mailOrigin={selectedInboxOrigin.mail}
+                  goalId={selectedInboxOrigin.goal_id}
+                  goalRevision={selectedInboxOrigin.goal_revision}
+                />
+              )}
 
               <section className="rounded border border-white/10 p-3">
                 <div className="font-semibold">Actions and recovery</div>

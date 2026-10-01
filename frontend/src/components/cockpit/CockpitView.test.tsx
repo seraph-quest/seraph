@@ -899,7 +899,8 @@ describe("CockpitView", () => {
     expect(within(pane).getByText("last confirmed · follow-through 0 · alerts 0 · bundled 0")).toBeInTheDocument();
     expect(within(pane).getByText("last confirmed · reach ready")).toBeInTheDocument();
     expect(screen.getByText("bundle 0 queued · last confirmed")).toBeInTheDocument();
-    expect(screen.getByText("presence last confirmed · offline · bundle last confirmed 0 · recent last confirmed 0")).toBeInTheDocument();
+    expect(screen.getByText("desktop last confirmed")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /presence continuity/i })).toBeEnabled();
   });
 
   it("loads the capability inventory only when Library opens its existing terminal", async () => {

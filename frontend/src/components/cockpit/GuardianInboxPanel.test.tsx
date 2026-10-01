@@ -514,6 +514,30 @@ describe("GuardianInboxPanel", () => {
     expect(screen.getByText(/readback-second · succeeded/)).toBeInTheDocument();
   });
 
+  it("accepts detail-only Mail origin metadata when the safe list omits it", async () => {
+    const onSelectItem = vi.fn();
+    const detail = {
+      ...item,
+      mail: {
+        watch_id: "watch-1",
+        message_binding_id: "message-binding-1",
+        message_revision: "sha256:" + "a".repeat(64),
+        status: "present",
+        private: true,
+      },
+    };
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/guardian/inbox?") && !url.endsWith("/inbox/inbox-1")) return Promise.resolve(response({ items: [item], next_cursor: null }));
+      if (url.endsWith("/api/guardian/inbox/inbox-1")) return Promise.resolve(response(detail));
+      return Promise.resolve(response({}));
+    });
+    render(<GuardianInboxPanel pollIntervalMs={0} onSelectItem={onSelectItem} />);
+    fireEvent.click(await screen.findByRole("button", { name: "View evidence and task" }));
+    await waitFor(() => expect(onSelectItem.mock.calls.some(([value]) => value?.mail?.message_binding_id === "message-binding-1")).toBe(true));
+    expect(onSelectItem.mock.calls[onSelectItem.mock.calls.length - 1]?.[0]).toMatchObject({ mail: { private: true, message_revision: "sha256:" + "a".repeat(64) } });
+  });
+
   it("degrades missing or unknown server state without exposing actions", async () => {
     fetchMock.mockResolvedValueOnce(response({
       items: [

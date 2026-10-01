@@ -46,6 +46,7 @@ from src.workspace import canonical_workspace_root
 INPUT_ARTIFACT_SCHEMA_VERSION = 1
 INPUT_ARTIFACT_MAX_BYTES = 64 * 1024
 INPUT_ARTIFACT_TTL = timedelta(hours=24)
+SCHEDULE_INPUT_ARTIFACT_MAX_RETENTION = timedelta(days=7)
 INPUT_ARTIFACT_ROOT = "artifacts/work-board/inputs"
 _ARTIFACT_NAMESPACE = uuid.UUID("2b5b3f8d-6d2f-5b4f-91f3-3dcb22bc7697")
 _ALLOWED_STATES = frozenset({"pending", "bound", "consumed", "expired", "revoked", "deleted"})
@@ -364,8 +365,14 @@ async def prepare_input_artifact(
     *,
     now: datetime | None = None,
     allow_scheduler: bool = False,
+    retention_deadline: datetime | None = None,
 ) -> InputArtifactMetadata:
-    """Reserve, write, reread, and verify one deterministic input artifact."""
+    """Reserve, write, reread, and verify one deterministic input artifact.
+
+    ``retention_deadline`` is a server-only extension for the v2 schedule seed.
+    Ordinary callers retain the fixed 24-hour lifetime; the narrow shape check
+    below prevents a public task artifact from selecting the longer retention.
+    """
 
     observed_at = _utc(now or _now())
     inputs, _payload_hex, payload_digest = await _validate_request(
@@ -374,6 +381,28 @@ async def prepare_input_artifact(
         request,
         allow_scheduler=allow_scheduler,
     )
+    if retention_deadline is not None:
+        schedule_invocation = inputs.get("invocation_uuid") if isinstance(inputs, Mapping) else None
+        if (
+            request.capability_id != "guardian-routine.v2"
+            or not request.idempotency_key.startswith("schedule:")
+            or schedule_invocation != request.idempotency_key
+        ):
+            raise BoardError(
+                "input_artifact_retention_invalid",
+                "Extended input retention is reserved for a reviewed schedule seed",
+                status_code=422,
+            )
+        requested_deadline = _utc(retention_deadline)
+        maximum_deadline = observed_at + SCHEDULE_INPUT_ARTIFACT_MAX_RETENTION
+        if requested_deadline <= observed_at or requested_deadline > maximum_deadline:
+            raise BoardError(
+                "input_artifact_retention_invalid",
+                "The reviewed schedule seed retention is outside the bounded window",
+                status_code=422,
+            )
+    else:
+        requested_deadline = None
     envelope = {
         "schema_version": INPUT_ARTIFACT_SCHEMA_VERSION,
         "capability_id": request.capability_id,
@@ -381,7 +410,7 @@ async def prepare_input_artifact(
     }
     payload = _canonical_json(envelope)
     artifact_id = _artifact_id(owner, request)
-    expires_at = observed_at + INPUT_ARTIFACT_TTL
+    expires_at = requested_deadline or (observed_at + INPUT_ARTIFACT_TTL)
     typed_input_ref = f"workspace-json:{INPUT_ARTIFACT_ROOT}/{artifact_id}-{payload_digest}.json"
 
     await _begin_immediate(db)
@@ -400,6 +429,12 @@ async def prepare_input_artifact(
     if existing is not None:
         if existing.payload_sha256 != payload_digest:
             raise BoardError("input_artifact_idempotency_conflict", "The idempotency key is bound to another input", status_code=409)
+        if requested_deadline is not None and _utc(existing.expires_at) != requested_deadline:
+            raise BoardError(
+                "input_artifact_idempotency_conflict",
+                "The idempotency key is bound to another schedule retention",
+                status_code=409,
+            )
         if existing.state in {"expired", "revoked", "deleted"}:
             return _metadata(existing)
         if existing.metadata_digest is None:
@@ -1015,6 +1050,7 @@ async def expire_input_artifacts(
 __all__ = [
     "INPUT_ARTIFACT_MAX_BYTES",
     "INPUT_ARTIFACT_ROOT",
+    "SCHEDULE_INPUT_ARTIFACT_MAX_RETENTION",
     "InputArtifactMetadata",
     "ResolvedInputArtifact",
     "bind_input_artifact",

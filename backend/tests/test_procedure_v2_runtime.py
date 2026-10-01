@@ -28,17 +28,25 @@ from src.browser.pinned_transport import (
     PinnedBrowserResponse,
     PinnedBrowserTransport,
 )
-from src.browser.task_runner import browser_artifact_path_for_job
+from src.browser.task_runner import (
+    BrowserTaskInput,
+    _browser_input_digests,
+    browser_artifact_path_for_job,
+)
 from src.db.models import (
     Goal,
+    GuardianRoutine,
+    GuardianRoutineVersion,
     GuardianDecisionPacket,
     GuardianSourceBaseline,
     GuardianSourceWatch,
+    OperatorSession,
     Session,
     WorkBoardAttempt,
     WorkBoardInputArtifact,
     WorkBoardStatus,
     WorkBoardTask,
+    WorkflowRunState,
 )
 from src.goals.contracts import GoalAdmissionBudget
 from src.goals.repository import serialize_admission_budget
@@ -97,15 +105,45 @@ def _replay_digest(value: Any) -> str:
     ).hexdigest()
 
 
-def _descriptor(*, source_ref: str, source_digest: str, goal_id: str, invocation_uuid: str) -> dict[str, Any]:
+def _copied_browser_step(
+    browser_input: Mapping[str, Any],
+    *,
+    typed_input_ref: str,
+    typed_input_digest: str,
+) -> dict[str, Any]:
+    model = BrowserTaskInput.model_validate(browser_input)
+    envelope_digest, model_digest, consent_digest = _browser_input_digests(model)
+    return {
+        "typed_input_ref": typed_input_ref,
+        "typed_input_digest": typed_input_digest,
+        "browser_input": model.model_dump(mode="json", exclude_none=True),
+        "browser_input_digest": model_digest,
+        "input_envelope_digest": envelope_digest,
+        "action_consent_digest": consent_digest,
+    }
+
+
+def _descriptor(
+    *,
+    source_ref: str,
+    source_digest: str,
+    goal_id: str,
+    invocation_uuid: str,
+    browser_input: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    step_input = {
+        "typed_input_ref": source_ref,
+        "typed_input_digest": source_digest,
+    }
+    if browser_input is not None:
+        step_input = _copied_browser_step(
+            browser_input,
+            typed_input_ref=source_ref,
+            typed_input_digest=source_digest,
+        )
     plan = build_procedure_plan(
         "public-browser-check",
-        step_inputs={
-            "public_browser_check": {
-                "typed_input_ref": source_ref,
-                "typed_input_digest": source_digest,
-            }
-        },
+        step_inputs={"public_browser_check": step_input},
     ).model_dump(mode="json")
     return {
         "routine_id": "routine-browser-proof-v2",
@@ -121,12 +159,41 @@ def _descriptor(*, source_ref: str, source_digest: str, goal_id: str, invocation
         "plan": plan,
         "plan_digest": plan_digest(plan),
         "executable_steps": {
-            "public_browser_check": {
-                "typed_input_ref": source_ref,
-                "typed_input_digest": source_digest,
-            }
+            "public_browser_check": step_input,
         },
     }
+
+
+async def _seed_v2_routine_lifecycle(
+    async_db: Any,
+    *,
+    routine_id: str,
+    owner_principal_id: str,
+    owner_session_id: str,
+    package_digest: str = "b" * 64,
+) -> None:
+    """Seed only the canonical lifecycle rows used by the dispatcher guard."""
+
+    async with async_db() as db:
+        db.add(
+            GuardianRoutine(
+                id=routine_id,
+                owner_principal_id=owner_principal_id,
+                owner_session_id=owner_session_id,
+                name="runtime guard fixture",
+                state="active",
+                revision=1,
+                current_version=1,
+            )
+        )
+        db.add(
+            GuardianRoutineVersion(
+                id=f"{routine_id}-version-1",
+                routine_id=routine_id,
+                version=1,
+                installed_package_digest=package_digest,
+            )
+        )
 
 
 def _browser_replay_projection(*, workspace_root: Path) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str, str]:
@@ -419,6 +486,24 @@ async def test_real_parent_to_native_browser_leaf_uses_durable_child_and_readbac
         source_digest=source.typed_input_digest,
         goal_id=goal_id,
         invocation_uuid=parent_input["invocation_uuid"],
+        browser_input=_input(),
+    )
+    await _seed_v2_routine_lifecycle(
+        async_db,
+        routine_id=descriptor["routine_id"],
+        owner_principal_id=owner.principal_id,
+        owner_session_id=owner.session_id,
+    )
+    from src.workflows.routines import routine_service
+
+    # This opt-in dispatcher fixture uses a synthetic routine id.  Keep the
+    # production package lifecycle guard enabled, while explicitly supplying
+    # the owner-bound package readback that the synthetic fixture does not
+    # materialize.  Materialized native-package tests remain unchanged.
+    monkeypatch.setattr(
+        routine_service,
+        "_package_readback",
+        lambda *_args, **_kwargs: {"status": "active", "digest": "b" * 64},
     )
 
     import src.browser.task_runner as task_runner_module
@@ -863,6 +948,15 @@ async def test_browser_replay_revalidates_real_sqlite_board_rows_and_cancel_befo
         jobs=Jobs(),
         runner_id="browser-replay-runner",
     )
+
+    # This fixture intentionally isolates the Board-row replay validator.  A
+    # separate SQLite lifecycle test below exercises the canonical parent
+    # authority callback; keep this older Board-focused fixture from needing
+    # a second durable parent projection.
+    async def current_parent_authority(**_kwargs: Any) -> bool:
+        return True
+
+    monkeypatch.setattr(dispatcher, "_validate_v2_parent_current", current_parent_authority)
     valid = await dispatcher._validate_v2_replay_binding(
         parent=parent,
         child=child,
@@ -2427,8 +2521,11 @@ async def test_real_dispatcher_procedure_watch_persists_native_watch_and_parent_
                 "typed_input_digest": "c" * 64,
             },
             "public_browser_check": {
-                "typed_input_ref": browser_source.typed_input_ref,
-                "typed_input_digest": browser_source.typed_input_digest,
+                **_copied_browser_step(
+                    browser_input,
+                    typed_input_ref=browser_source.typed_input_ref,
+                    typed_input_digest=browser_source.typed_input_digest,
+                ),
             },
         },
     ).model_dump(mode="json")
@@ -2455,7 +2552,11 @@ async def test_real_dispatcher_procedure_watch_persists_native_watch_and_parent_
                 "watch_id": watch_id,
                 "expected_plan_revision": 1,
             },
-            "public_browser_check": browser_input,
+            "public_browser_check": _copied_browser_step(
+                browser_input,
+                typed_input_ref=browser_source.typed_input_ref,
+                typed_input_digest=browser_source.typed_input_digest,
+            ),
         },
     }
     parent_input = {
@@ -2467,6 +2568,22 @@ async def test_real_dispatcher_procedure_watch_persists_native_watch_and_parent_
         "parameters": descriptor["parameters"],
         "invocation_uuid": descriptor["invocation_uuid"],
     }
+    await _seed_v2_routine_lifecycle(
+        async_db,
+        routine_id=descriptor["routine_id"],
+        owner_principal_id=owner,
+        owner_session_id=session,
+    )
+    from src.workflows.routines import routine_service
+
+    # This opt-in Watch/Browser fixture uses a synthetic routine id.  The
+    # production package lifecycle guard stays active; this explicit
+    # owner-bound readback represents the reviewed synthetic package boundary.
+    monkeypatch.setattr(
+        routine_service,
+        "_package_readback",
+        lambda *_args, **_kwargs: {"status": "active", "digest": "b" * 64},
+    )
 
     async with async_db() as db:
         parent_artifact = await prepare_input_artifact(
@@ -2676,8 +2793,11 @@ async def test_real_dispatcher_watch_no_change_skips_browser_leaf(
                 "typed_input_digest": "c" * 64,
             },
             "public_browser_check": {
-                "typed_input_ref": browser_source.typed_input_ref,
-                "typed_input_digest": browser_source.typed_input_digest,
+                **_copied_browser_step(
+                    browser_input,
+                    typed_input_ref=browser_source.typed_input_ref,
+                    typed_input_digest=browser_source.typed_input_digest,
+                ),
             },
         },
     ).model_dump(mode="json")
@@ -2701,7 +2821,11 @@ async def test_real_dispatcher_watch_no_change_skips_browser_leaf(
         "plan_digest": plan_digest(plan),
         "executable_steps": {
             "source_watch": {"watch_id": watch_id, "expected_plan_revision": 1},
-            "public_browser_check": browser_input,
+            "public_browser_check": _copied_browser_step(
+                browser_input,
+                typed_input_ref=browser_source.typed_input_ref,
+                typed_input_digest=browser_source.typed_input_digest,
+            ),
         },
     }
     parent_input = {
@@ -2713,6 +2837,22 @@ async def test_real_dispatcher_watch_no_change_skips_browser_leaf(
         "parameters": descriptor["parameters"],
         "invocation_uuid": descriptor["invocation_uuid"],
     }
+    await _seed_v2_routine_lifecycle(
+        async_db,
+        routine_id=descriptor["routine_id"],
+        owner_principal_id=owner,
+        owner_session_id=session,
+    )
+    from src.workflows.routines import routine_service
+
+    # This dispatcher integration fixture exercises Board/session/Goal
+    # authority with a synthetic routine id; the package lifecycle boundary is
+    # explicitly mocked here.  Native producer tests use a materialized pack.
+    monkeypatch.setattr(
+        routine_service,
+        "_package_readback",
+        lambda *_args, **_kwargs: {"status": "active", "digest": "b" * 64},
+    )
     async with async_db() as db:
         parent_artifact = await prepare_input_artifact(
             db,
@@ -2795,3 +2935,352 @@ async def test_real_dispatcher_watch_no_change_skips_browser_leaf(
             ).scalars().all()
         )
     assert [task.capability_id for task in tasks] == ["guardian-routine.v2"]
+
+
+async def test_dispatcher_parent_boundary_rejects_revoked_goal_cancel_and_expired_authority(
+    async_db: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every mutable owner fence blocks the terminal path before a write."""
+
+    from src.workflows import procedure_v2_runtime as runtime_module
+
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    owner_principal = "operator:single"
+    owner_session = "terminal-guard-session"
+    goal_id = "goal-terminal-guard"
+    routine_id = "routine-terminal-guard-v2"
+    descriptor = _descriptor(
+        source_ref="workspace-json:artifacts/work-board/inputs/terminal-guard.json",
+        source_digest="a" * 64,
+        goal_id=goal_id,
+        invocation_uuid="terminal-guard-invocation",
+    )
+    descriptor["routine_id"] = routine_id
+    parent_input = {
+        "routine_id": routine_id,
+        "version": 1,
+        "expected_routine_revision": 1,
+        "goal_id": goal_id,
+        "expected_goal_revision": 1,
+        "parameters": {"goal_id": goal_id, "expected_goal_revision": 1},
+        "invocation_uuid": descriptor["invocation_uuid"],
+    }
+    now = datetime.now(timezone.utc)
+    async with async_db() as db:
+        db.add(
+            OperatorSession(
+                id=owner_session,
+                token_hash="terminal-guard-token-hash",
+                idle_expires_at=now + timedelta(hours=1),
+                absolute_expires_at=now + timedelta(hours=2),
+                is_bearer_tombstone=False,
+            )
+        )
+        db.add(
+            Goal(
+                id=goal_id,
+                title="Terminal guard goal",
+                status="active",
+                revision=1,
+                owner_principal_id=owner_principal,
+                owner_session_id=owner_session,
+                admission_budget_json=serialize_admission_budget(
+                    GoalAdmissionBudget(
+                        max_outstanding_jobs=1,
+                        max_attempts=1,
+                        max_runtime_seconds=180,
+                    )
+                ),
+            )
+        )
+        await db.flush()
+    await _seed_v2_routine_lifecycle(
+        async_db,
+        routine_id=routine_id,
+        owner_principal_id=owner_principal,
+        owner_session_id=owner_session,
+    )
+    from src.workflows.routines import routine_service
+
+    package_revoked = False
+
+    def package_readback(*_args: Any, **_kwargs: Any) -> Mapping[str, Any]:
+        return {
+            "status": "revoked" if package_revoked else "active",
+            "digest": "b" * 64,
+        }
+
+    # This terminal-boundary test uses a synthetic routine id, so it mocks the
+    # owner-bound pack readback while changing that lifecycle boundary below.
+    # Native producer tests exercise the materialized package itself.
+    monkeypatch.setattr(routine_service, "_package_readback", package_readback)
+
+    owner = WorkBoardOwner(principal_id=owner_principal, session_id=owner_session)
+    async with async_db() as db:
+        parent_artifact = await prepare_input_artifact(
+            db,
+            owner,
+            WorkBoardInputArtifactCreate(
+                schema_version=1,
+                capability_id="guardian-routine.v2",
+                goal_id=goal_id,
+                goal_revision=1,
+                input=parent_input,
+                idempotency_key="terminal-guard-parent-input",
+            ),
+        )
+
+    dispatcher = WorkBoardDispatcher(session_provider=async_db, runner_id="terminal-guard-dispatcher")
+    claim = await _create_parent_claim(
+        async_db=async_db,
+        repository=dispatcher.repository,
+        owner=owner,
+        goal_id=goal_id,
+        parent_input=parent_input,
+        parent_artifact_id=parent_artifact.artifact_id,
+        dispatcher=dispatcher,
+    )
+
+    async def resolve_descriptor(*_args: Any, **_kwargs: Any) -> Mapping[str, Any]:
+        return descriptor
+
+    monkeypatch.setattr(runtime_module.procedure_v2_runtime, "resolver", resolve_descriptor)
+    _response, projection, expected = await dispatcher._canonical_direct_admission(
+        claim.task,
+        claim.attempt,
+        parent_input,
+        runtime_seconds=180,
+    )
+    parent_job_id = str(expected["job_id"])
+    async with async_db() as db:
+        linked = await dispatcher.repository.link_attempt_workflow_run(
+            db,
+            claim.task.task_id,
+            claim.attempt.attempt_id,
+            workflow_run_id=parent_job_id,
+            expected_revision=claim.task.task_revision,
+            board_fence=claim.attempt.fencing_token,
+            lease_owner=dispatcher.runner_id,
+            workflow_projection=projection,
+            expected_identity=expected,
+            actor_principal_id=dispatcher.runner_id,
+            actor_session_id=dispatcher.runner_session,
+        )
+    queued = await dispatcher.jobs.queue_job(
+        parent_job_id,
+        expected_revision=int(projection["revision"]),
+        reason="terminal_guard_test",
+    )
+    parent = await dispatcher.jobs.claim_job(
+        parent_job_id,
+        owner=f"guardian-routine:{parent_job_id}",
+        lease_seconds=180,
+        expected_state="queued",
+        expected_revision=int(queued["revision"]),
+        expected_fencing_token=int(
+            (queued.get("lease") or {}).get("fencing_token", queued.get("fencing_token") or 0)
+        ),
+    )
+    parent_fence = int(parent["lease"]["fencing_token"])
+
+    # The native Watch checkpoint is already terminal and carries only the
+    # server-projected identities. The runtime must revalidate mutable SQLite
+    # authorities before it asks the Watch adapter to read back proof.
+    watch_id = "watch-terminal-boundary"
+    occurrence_id = "occurrence-terminal-boundary"
+    watch_child_id = f"source-watch:{watch_id}:{occurrence_id}"
+    watch_step = {
+        "step_id": "source_watch",
+        "capability_id": "guardian.research-watch.v1",
+        "capability_version": "1",
+    }
+    watch_child = {
+        "job_id": watch_child_id,
+        "run_identity": watch_child_id,
+        "root_run_identity": parent_job_id,
+        "parent_run_identity": parent_job_id,
+        "parent_job_id": parent_job_id,
+        "parent_fencing_token": parent_fence,
+        "status": "succeeded",
+        "job_kind": "guardian_source_watch",
+        "capability_version": "1",
+        "plan_revision": 1,
+        "goal_id": goal_id,
+        "goal_revision": 1,
+        "inputs": {"watch_id": watch_id, "occurrence_id": occurrence_id},
+        "declared_authority": {
+            "capability_id": "guardian.research-watch.v1",
+            "capability_version": "1",
+            "watch_id": watch_id,
+            "occurrence_id": occurrence_id,
+            "goal_id": goal_id,
+            "goal_revision": 1,
+            "goal_owner_principal_id": owner_principal,
+            "goal_owner_session_id": owner_session,
+            "routine_parent_job_id": parent_job_id,
+            "routine_parent_fencing_token": parent_fence,
+            "routine_step_id": "source_watch",
+        },
+    }
+    watch_checkpoint = {
+        "checkpoint_id": "procedure-v2:step:source_watch:settled",
+        "safe": True,
+        "payload": _watch_child_refs(
+            {
+                **watch_child,
+                "_v2_watch_binding": {
+                    "parent_job_id": parent_job_id,
+                    "parent_fencing_token": parent_fence,
+                    "step_id": "source_watch",
+                    "occurrence_id": occurrence_id,
+                },
+            },
+            {"status": "succeeded", "packet_id": "packet-terminal-boundary"},
+        ),
+    }
+    from src.guardian.source_watch import source_watch_service
+
+    source_readbacks = 0
+
+    async def verify_watch_replay(**_kwargs: Any) -> Mapping[str, Any]:
+        nonlocal source_readbacks
+        source_readbacks += 1
+        return {"status": "succeeded", "packet_id": "packet-terminal-boundary", "verified": True}
+
+    monkeypatch.setattr(source_watch_service, "verify_procedure_replay", verify_watch_replay)
+    replay_runtime = ProcedureV2Runtime(jobs=dispatcher.jobs)
+    replay_runtime.replay_binding_verifier = dispatcher._validate_v2_replay_binding
+    assert await replay_runtime._native_terminal_replay_proof(
+        parent=parent,
+        child=watch_child,
+        checkpoint=watch_checkpoint,
+        step=watch_step,
+        expected_child_id=watch_child_id,
+    ) == {"status": "succeeded", "packet_id": "packet-terminal-boundary", "verified": True}
+    assert source_readbacks == 1
+
+    terminal_writes = 0
+
+    async def current_boundary_write() -> bool:
+        nonlocal terminal_writes
+        allowed = await dispatcher._validate_v2_parent_current(
+            routine_parent_job_id=parent_job_id,
+            routine_parent_fencing_token=parent_fence,
+        )
+        # This boolean stands for the terminal artifact/readback write.  The
+        # test makes a failed guard observable without contacting a Browser or
+        # fabricating a native success receipt.
+        if allowed is True:
+            terminal_writes += 1
+            return True
+        return False
+
+    assert await current_boundary_write() is True
+
+    async with async_db() as db:
+        session_row = await db.get(OperatorSession, owner_session)
+        assert session_row is not None
+        session_row.revoked_at = datetime.now(timezone.utc)
+    assert await current_boundary_write() is False
+    assert await replay_runtime._native_terminal_replay_proof(
+        parent=parent,
+        child=watch_child,
+        checkpoint=watch_checkpoint,
+        step=watch_step,
+        expected_child_id=watch_child_id,
+    ) is None
+    assert source_readbacks == 1
+    async with async_db() as db:
+        session_row = await db.get(OperatorSession, owner_session)
+        assert session_row is not None
+        session_row.revoked_at = None
+
+    async with async_db() as db:
+        goal = await db.get(Goal, goal_id)
+        assert goal is not None
+        goal.revision = 2
+    assert await current_boundary_write() is False
+    assert await replay_runtime._native_terminal_replay_proof(
+        parent=parent,
+        child=watch_child,
+        checkpoint=watch_checkpoint,
+        step=watch_step,
+        expected_child_id=watch_child_id,
+    ) is None
+    assert source_readbacks == 1
+    async with async_db() as db:
+        goal = await db.get(Goal, goal_id)
+        assert goal is not None
+        goal.revision = 1
+        goal.status = "active"
+
+    async with async_db() as db:
+        goal = await db.get(Goal, goal_id)
+        assert goal is not None
+        goal.status = "paused"
+    assert await current_boundary_write() is False
+    async with async_db() as db:
+        goal = await db.get(Goal, goal_id)
+        assert goal is not None
+        goal.status = "active"
+
+    async with async_db() as db:
+        routine = await db.get(GuardianRoutine, routine_id)
+        assert routine is not None
+        routine.state = "paused"
+    assert await current_boundary_write() is False
+    assert await replay_runtime._native_terminal_replay_proof(
+        parent=parent,
+        child=watch_child,
+        checkpoint=watch_checkpoint,
+        step=watch_step,
+        expected_child_id=watch_child_id,
+    ) is None
+    assert source_readbacks == 1
+    async with async_db() as db:
+        routine = await db.get(GuardianRoutine, routine_id)
+        assert routine is not None
+        routine.state = "active"
+
+    package_revoked = True
+    assert await current_boundary_write() is False
+    assert await replay_runtime._native_terminal_replay_proof(
+        parent=parent,
+        child=watch_child,
+        checkpoint=watch_checkpoint,
+        step=watch_step,
+        expected_child_id=watch_child_id,
+    ) is None
+    assert source_readbacks == 1
+    package_revoked = False
+
+    async with async_db() as db:
+        attempt = (
+            await db.execute(
+                select(WorkBoardAttempt).where(WorkBoardAttempt.attempt_id == linked.attempt.attempt_id)
+            )
+        ).scalar_one()
+        attempt.cancel_requested_at = datetime.now(timezone.utc)
+    assert await current_boundary_write() is False
+    async with async_db() as db:
+        attempt = (
+            await db.execute(
+                select(WorkBoardAttempt).where(WorkBoardAttempt.attempt_id == linked.attempt.attempt_id)
+            )
+        ).scalar_one()
+        attempt.cancel_requested_at = None
+        attempt.lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    assert await current_boundary_write() is False
+
+    async with async_db() as db:
+        run = (
+            await db.execute(
+                select(WorkflowRunState).where(WorkflowRunState.run_identity == parent_job_id)
+            )
+        ).scalar_one_or_none()
+        assert run is not None
+        run.deadline_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    assert await current_boundary_write() is False
+    assert terminal_writes == 1

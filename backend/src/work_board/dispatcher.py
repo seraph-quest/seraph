@@ -33,6 +33,8 @@ from src.db.engine import get_session
 from src.db.models import (
     CalendarPrepReceipt,
     Goal,
+    GuardianRoutine,
+    GuardianRoutineVersion,
     WorkBoardAttempt,
     WorkBoardInputArtifact,
     WorkBoardLink,
@@ -1259,6 +1261,15 @@ class WorkBoardDispatcher:
         parent_id = _text(parent.get("job_id") or parent.get("run_identity"))
         parent_lease = parent.get("lease") if isinstance(parent.get("lease"), Mapping) else {}
         parent_fence = int(parent_lease.get("fencing_token") or 0)
+        # Replay adoption is a terminal write boundary.  Revalidate every
+        # mutable parent authority before inspecting any native proof so a
+        # stale Watch/Browser/Calendar receipt cannot be adopted after logout,
+        # Goal revision, routine, lease, or Board cancellation.
+        if not await self._validate_v2_parent_current(
+            routine_parent_job_id=parent_id,
+            routine_parent_fencing_token=parent_fence,
+        ):
+            raise DurableJobError("procedure_parent_authority_stale")
         await self._validate_v2_parent_board_binding(
             parent=parent,
             parent_id=parent_id,
@@ -1317,7 +1328,15 @@ class WorkBoardDispatcher:
         return {"verified": True, "parent_board_revalidated": True, "child_board_revalidated": True}
 
     async def _validate_v2_parent_current(self, **binding: Any) -> bool:
-        """Revalidate one managed procedure parent before coordinator writes."""
+        """Revalidate one managed procedure parent before coordinator writes.
+
+        The durable parent projection is only a recovery index.  Before a
+        procedure can publish a leaf result, re-read every mutable authority
+        that can revoke that result: the durable lease/deadline, the Board
+        task and attempt, the authenticated operator session, the current
+        Goal, and the reviewed routine/version selector.  This callback is a
+        server-only seam; its caller cannot supply replacement authority.
+        """
 
         parent_id = _text(binding.get("routine_parent_job_id"))
         if not parent_id:
@@ -1329,6 +1348,102 @@ class WorkBoardDispatcher:
         parent = await self.jobs.get_job(parent_id)
         if not isinstance(parent, Mapping) or parent_fence < 1:
             return False
+        if (
+            _text(parent.get("job_id") or parent.get("run_identity")) != parent_id
+            or _text(parent.get("status")) != "running"
+            or _text(parent.get("job_kind")) != "guardian_routine_v2"
+            or _text(parent.get("capability_version")) != "guardian-routine.v2"
+        ):
+            return False
+        parent_lease = parent.get("lease") if isinstance(parent.get("lease"), Mapping) else {}
+        lease_owner = _text(parent_lease.get("owner"))
+        persisted_fence = parent_lease.get("fencing_token")
+        if (
+            not lease_owner
+            or type(persisted_fence) is not int
+            or persisted_fence != parent_fence
+            or parent_fence < 1
+        ):
+            return False
+        # Re-read the canonical durable row through its lease CAS.  This
+        # catches a cancellation, fence rollover, or lease expiry between the
+        # projection read and this boundary.  Use the returned projection for
+        # all subsequent identity checks rather than the stale first read.
+        try:
+            parent = await self.jobs.assert_active_lease(
+                parent_id,
+                owner=lease_owner,
+                fencing_token=parent_fence,
+            )
+        except Exception:
+            return False
+        if not isinstance(parent, Mapping):
+            return False
+        deadline_raw = parent.get("deadline_at")
+        try:
+            if not isinstance(deadline_raw, str) or not deadline_raw.strip():
+                return False
+            deadline = datetime.fromisoformat(deadline_raw.replace("Z", "+00:00"))
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=timezone.utc)
+            if _utc_datetime(deadline) <= _utc_datetime(self.now()):
+                return False
+        except (TypeError, ValueError, OverflowError):
+            return False
+
+        authority = parent.get("declared_authority")
+        if not isinstance(authority, Mapping):
+            return False
+
+        def _positive_int(value: Any) -> int | None:
+            return value if type(value) is int and value > 0 else None
+
+        # The durable job projection intentionally omits its private input
+        # body.  The admission authority is the canonical server-created
+        # copy of the identity fields needed at this boundary.
+        routine_id = _text(authority.get("routine_id"))
+        routine_version = _positive_int(authority.get("routine_version"))
+        expected_routine_revision = _positive_int(authority.get("routine_revision"))
+        template_id = _text(authority.get("template_id"))
+        plan_digest = _text(authority.get("plan_digest"))
+        invocation_uuid = _text(authority.get("invocation_uuid"))
+        authority_routine_revision = _positive_int(authority.get("routine_revision"))
+        if (
+            not routine_id
+            or routine_version is None
+            or expected_routine_revision is None
+            or not template_id
+            or not plan_digest
+            or not invocation_uuid
+            or authority_routine_revision != expected_routine_revision
+            or _text(authority.get("capability_id")) != "guardian-routine.v2"
+        ):
+            return False
+
+        parent_goal_id = _text(parent.get("goal_id"))
+        parent_goal_revision = _positive_int(parent.get("goal_revision"))
+        authority_goal_id = _text(authority.get("goal_id"))
+        authority_goal_revision = _positive_int(authority.get("goal_revision"))
+        owner = parent.get("owner") if isinstance(parent.get("owner"), Mapping) else {}
+        owner_principal_id = _text(authority.get("principal"))
+        owner_session_id = _text(authority.get("session_id"))
+        if (
+            not parent_goal_id
+            or parent_goal_revision is None
+            or authority_goal_id != parent_goal_id
+            or authority_goal_revision != parent_goal_revision
+            or _text(owner.get("kind")) != "user"
+            or _text(owner.get("principal_id")) != owner_principal_id
+            or _text(parent.get("operator_session_id") or parent.get("session_id")) != owner_session_id
+            or _text(authority.get("operator_session_id") or authority.get("session_id")) != owner_session_id
+            or not owner_principal_id
+            or not owner_session_id
+        ):
+            return False
+
+        package_digest = _text(authority.get("package_digest"))
+        if not package_digest:
+            return False
         try:
             await self._validate_v2_parent_board_binding(
                 parent=parent,
@@ -1336,6 +1451,180 @@ class WorkBoardDispatcher:
                 parent_fencing_token=parent_fence,
             )
         except DurableJobError:
+            return False
+
+        # The Board helper verifies the attempt fence and permits only its
+        # known monotonic task revision advance.  Re-read the task in the
+        # same current owner/goal binding and validate its Goal through the
+        # repository's canonical owner/revision/status helper.
+        task_id = _text(authority.get("board_task_id"))
+        expected_input_artifact = _text(authority.get("input_artifact_id"))
+        expected_input_digest = _text(authority.get("input_artifact_digest"))
+        try:
+            async with self.session_provider() as db:
+                task = await self.repository.get_task(
+                    db,
+                    WorkBoardOwner(
+                        principal_id=owner_principal_id,
+                        session_id=owner_session_id,
+                    ),
+                    task_id,
+                )
+                live_goal = await self.repository.validate_task_goal(
+                    db,
+                    WorkBoardOwner(
+                        principal_id=owner_principal_id,
+                        session_id=owner_session_id,
+                    ),
+                    task,
+                )
+                if (
+                    _text(task.capability_id) != "guardian-routine.v2"
+                    or _text(task.task_id) != task_id
+                    or int(task.goal_revision or 0) != parent_goal_revision
+                    or _text(task.goal_id) != parent_goal_id
+                    or _text(task.input_artifact_id) != expected_input_artifact
+                    or _text(task.typed_input_digest) != expected_input_digest
+                    or _text(live_goal.id) != parent_goal_id
+                    or int(live_goal.revision or 0) != parent_goal_revision
+                    or _text(live_goal.owner_principal_id) != owner_principal_id
+                    or _text(live_goal.owner_session_id) != owner_session_id
+                ):
+                    return False
+
+                # Re-read the owner-bound parent input bytes.  The durable
+                # authority digest and artifact pointer identify the expected
+                # source, while this decode proves the current immutable
+                # envelope still names the same routine/version/revision and
+                # invocation before terminal publication.
+                from src.work_board.input_artifacts import resolve_input_artifact_for_task
+
+                resolved_input = await resolve_input_artifact_for_task(
+                    db,
+                    WorkBoardOwner(
+                        principal_id=owner_principal_id,
+                        session_id=owner_session_id,
+                    ),
+                    artifact_id=expected_input_artifact,
+                    goal_id=parent_goal_id,
+                    goal_revision=parent_goal_revision,
+                    capability_id="guardian-routine.v2",
+                    expected_task_id=task.task_id,
+                )
+                parent_input = resolved_input.input
+                if (
+                    not isinstance(parent_input, Mapping)
+                    or _text(parent_input.get("routine_id")) != routine_id
+                    or type(parent_input.get("version")) is not int
+                    or int(parent_input.get("version")) != routine_version
+                    or type(parent_input.get("expected_routine_revision")) is not int
+                    or int(parent_input.get("expected_routine_revision")) != expected_routine_revision
+                    or _text(parent_input.get("invocation_uuid")) != invocation_uuid
+                ):
+                    return False
+
+                # Strictly authenticate the current session.  The explicit
+                # test-only bypass remains the same narrow fixture seam used
+                # by the existing native integration tests; production rows
+                # always take authenticate_session and never follow a legacy
+                # replacement alias.
+                try:
+                    operator = await authenticate_session(owner_session_id, touch=False)
+                except AuthFailure:
+                    if not (
+                        settings.deployment_environment == "test"
+                        and settings.operator_auth_allow_unauthenticated_tests
+                        and owner_session_id == "test-auth-bypass"
+                        and owner_principal_id == "operator:test-bypass"
+                    ):
+                        return False
+                else:
+                    if (
+                        _text(getattr(operator, "session_id", None)) != owner_session_id
+                        or _text(getattr(getattr(operator, "principal", None), "principal_id", None))
+                        != owner_principal_id
+                    ):
+                        return False
+
+                routine = (
+                    await db.execute(
+                        select(GuardianRoutine).where(
+                            GuardianRoutine.id == routine_id,
+                            GuardianRoutine.owner_principal_id == owner_principal_id,
+                            GuardianRoutine.owner_session_id == owner_session_id,
+                            GuardianRoutine.state == "active",
+                            GuardianRoutine.revision == authority_routine_revision,
+                            GuardianRoutine.current_version == routine_version,
+                        )
+                    )
+                ).scalar_one_or_none()
+                version = (
+                    await db.execute(
+                        select(GuardianRoutineVersion).where(
+                            GuardianRoutineVersion.routine_id == routine_id,
+                            GuardianRoutineVersion.version == routine_version,
+                            GuardianRoutineVersion.installed_package_digest == package_digest,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if routine is None or version is None:
+                    return False
+                # The database rows pin the routine/version identity, while
+                # the capability-pack lifecycle owns the mutable active,
+                # paused, and revoked package pointer.  Re-read that pointer
+                # through the existing owner-bound routine service before a
+                # terminal proof can be adopted; a routine row that remains
+                # active after package revocation is not executable proof.
+                from src.workflows.routines import routine_service
+
+                package_readback = routine_service._package_readback(
+                    owner_principal_id,
+                    owner_session_id,
+                    routine_id,
+                    routine_version,
+                    package_digest,
+                )
+                if (
+                    not isinstance(package_readback, Mapping)
+                    or _text(package_readback.get("status")) != "active"
+                    or _text(package_readback.get("digest")) != package_digest
+                ):
+                    return False
+
+                # Manual invocations retain their explicit operator path. A
+                # standing scheduled invocation must additionally satisfy the
+                # existing finite reviewed budget, proactivity, period, and
+                # quiet-hour gates.  No notification budget is consulted here:
+                # task execution and unsolicited delivery are separate policy
+                # decisions in the scheduler contract.
+                if invocation_uuid.startswith("schedule:"):
+                    from src.guardian.source_watch import _goal_admission
+                    from src.workflows.procedure_service import ProcedureV2Service
+
+                    try:
+                        ProcedureV2Service._validate_schedule_goal_budget(
+                            live_goal,
+                            owner_principal_id=owner_principal_id,
+                            owner_session_id=owner_session_id,
+                            expected_goal_revision=parent_goal_revision,
+                            now=self.now(),
+                        )
+                    except Exception:
+                        return False
+                    admitted, _reason, _budget = _goal_admission(live_goal)
+                    if not admitted:
+                        return False
+                elif getattr(live_goal, "admission_budget_json", None):
+                    # An explicitly invoked parent does not need standing
+                    # proactivity consent, but a present budget still bounds
+                    # the execution. A malformed current budget is fail-closed.
+                    budget = deserialize_admission_budget(live_goal)
+                    if budget is None or int(getattr(budget, "max_runtime_seconds", 0) or 0) < 1:
+                        return False
+                    remaining = (_utc_datetime(deadline) - _utc_datetime(self.now())).total_seconds()
+                    if remaining > int(budget.max_runtime_seconds):
+                        return False
+        except Exception:
             return False
         return True
 
@@ -4463,6 +4752,10 @@ class WorkBoardDispatcher:
             # A binding lookup failure is not evidence that admission never
             # happened.  Keep the claim for typed reconciliation instead of
             # deleting an attempt that may own an external effect.
+            if claim is None:
+                if adapter_error is not None:
+                    raise adapter_error
+                raise DurableJobError("binding_lookup_failed")
             logger.info(
                 "work board direct adapter %s binding lookup requires reconciliation: %s",
                 task.task_id,
@@ -5266,6 +5559,8 @@ class WorkBoardDispatcher:
                         "routine_parent_goal_revision": int(procedure_binding.parent_goal_revision),
                         "routine_parent_owner_principal_id": procedure_binding.parent_owner_principal_id,
                         "routine_parent_owner_session_id": procedure_binding.parent_owner_session_id,
+                        "goal_owner_principal_id": procedure_binding.parent_owner_principal_id,
+                        "goal_owner_session_id": procedure_binding.parent_owner_session_id,
                         "routine_parent_board_task_id": procedure_binding.parent_board_task_id,
                         "routine_parent_board_attempt_id": procedure_binding.parent_board_attempt_id,
                         "routine_parent_board_task_revision": int(procedure_binding.parent_board_task_revision),
@@ -5285,6 +5580,8 @@ class WorkBoardDispatcher:
                             "routine_parent_goal_revision": int(procedure_binding.parent_goal_revision),
                             "routine_parent_owner_principal_id": procedure_binding.parent_owner_principal_id,
                             "routine_parent_owner_session_id": procedure_binding.parent_owner_session_id,
+                            "goal_owner_principal_id": procedure_binding.parent_owner_principal_id,
+                            "goal_owner_session_id": procedure_binding.parent_owner_session_id,
                             "routine_parent_board_task_id": procedure_binding.parent_board_task_id,
                             "routine_parent_board_attempt_id": procedure_binding.parent_board_attempt_id,
                             "routine_parent_board_task_revision": int(procedure_binding.parent_board_task_revision),
@@ -5294,6 +5591,37 @@ class WorkBoardDispatcher:
                 return expected
             authority_digest = _safe_digest(authority)
             if admission_only:
+                max_outstanding_jobs = 1
+                if procedure_binding is not None:
+                    async with get_session() as budget_db:
+                        current_goal = (
+                            await budget_db.execute(
+                                select(Goal).where(
+                                    Goal.id == procedure_binding.parent_goal_id,
+                                    Goal.owner_principal_id == procedure_binding.parent_owner_principal_id,
+                                    Goal.owner_session_id == procedure_binding.parent_owner_session_id,
+                                    Goal.revision == int(procedure_binding.parent_goal_revision),
+                                )
+                            )
+                        ).scalar_one_or_none()
+                    budget = deserialize_admission_budget(current_goal) if current_goal is not None else None
+                    if (
+                        current_goal is None
+                        or _text(getattr(current_goal.status, "value", current_goal.status)) != "active"
+                        or budget is None
+                    ):
+                        raise DurableJobLeaseError("procedure_goal_budget_unavailable")
+                    try:
+                        from src.workflows.procedure_service import goal_admission_budget_snapshot
+
+                        budget_snapshot = goal_admission_budget_snapshot(
+                            goal_id=procedure_binding.parent_goal_id,
+                            goal_revision=int(procedure_binding.parent_goal_revision),
+                            budget=budget,
+                        )
+                    except (TypeError, ValueError) as exc:
+                        raise DurableJobLeaseError("procedure_goal_budget_invalid") from exc
+                    max_outstanding_jobs = int(budget_snapshot.budget.max_outstanding_jobs)
                 spec = DurableJobSpec(
                     identity=DurableJobIdentity(
                         job_id=job_id,
@@ -5321,7 +5649,7 @@ class WorkBoardDispatcher:
                     declared_authority=authority,
                     deadline_at=datetime.now(timezone.utc) + timedelta(seconds=max(1, min(int(runtime_seconds), 180))),
                     max_attempts=1,
-                    max_outstanding_jobs=1,
+                    max_outstanding_jobs=max_outstanding_jobs,
                     run_fingerprint=input_digest,
                     budget_microusd=int(ceiling),
                     budget_digest=_durable_digest({"budget_microusd": int(ceiling)}),
@@ -5437,6 +5765,18 @@ class WorkBoardDispatcher:
                 current_root = await self.jobs.get_job(job_id)
                 if not isinstance(current_root, Mapping):
                     raise_calendar_guard_error("The Calendar durable root is unavailable")
+                if procedure_binding is not None:
+                    # A Calendar child carries the parent's immutable fence,
+                    # but the root projection is only an index.  Re-read the
+                    # canonical procedure parent before every provider/model
+                    # boundary so cancellation, lease reclaim, Goal drift,
+                    # routine/package revocation, or deadline expiry cannot
+                    # be hidden by an otherwise unchanged child projection.
+                    if not await self._validate_v2_parent_current(
+                        routine_parent_job_id=procedure_binding.parent_job_id,
+                        routine_parent_fencing_token=int(procedure_binding.parent_fencing_token),
+                    ):
+                        raise_calendar_guard_error("The Calendar procedure parent authority changed")
                 root_owner = current_root.get("owner") if isinstance(current_root.get("owner"), Mapping) else {}
                 root_lease = current_root.get("lease") if isinstance(current_root.get("lease"), Mapping) else {}
                 root_authority = current_root.get("declared_authority") if isinstance(current_root.get("declared_authority"), Mapping) else {}
@@ -5485,7 +5825,6 @@ class WorkBoardDispatcher:
                     from src.db.models import (
                         CalendarEventBinding,
                         CalendarReadConsent,
-                        Goal,
                         GoogleServiceConnection,
                         OperatorSession,
                     )
@@ -5876,7 +6215,20 @@ class WorkBoardDispatcher:
             await assert_calendar_current()
             calendar_readback_id = f"calendar-readback:{uuid.uuid4().hex}"
             artifact_sha256 = hashlib.sha256(verified_bytes).hexdigest()
-            readback = await self.jobs.record_readback(job_id, target_path=artifact_relative, status="succeeded", effect_type="calendar_meeting_prep_result", content_sha256=artifact_sha256, readback_id=calendar_readback_id, verified_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), details={"verified": True, "memory_status": "no_learning"}, owner=lease_owner, fencing_token=fence, expected_revision=int(latest.get("revision") or 0))
+            readback = await self.jobs.record_readback(
+                job_id,
+                target_path=artifact_relative,
+                status="succeeded",
+                effect_type="calendar_meeting_prep_result",
+                target_digest=artifact_sha256,
+                content_sha256=artifact_sha256,
+                readback_id=calendar_readback_id,
+                verified_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                details={"verified": True, "memory_status": "no_learning"},
+                owner=lease_owner,
+                fencing_token=fence,
+                expected_revision=int(latest.get("revision") or 0),
+            )
             latest = readback
             await assert_calendar_current()
             artifact_refs = latest.get("artifacts", []) if isinstance(latest, Mapping) else []
@@ -5985,7 +6337,6 @@ class WorkBoardDispatcher:
                 from src.db.models import (
                     CalendarEventBinding,
                     CalendarReadConsent,
-                    Goal,
                     GoogleServiceConnection,
                     OperatorSession,
                 )
@@ -6201,7 +6552,7 @@ class WorkBoardDispatcher:
             # pre-CAS guard alone cannot prove that the authority remained
             # current while the root transition committed.
             async with get_session() as receipt_db:
-                from src.db.models import Goal, OperatorSession, WorkflowRunState
+                from src.db.models import OperatorSession, WorkflowRunState
 
                 persisted = await receipt_db.get(CalendarPrepReceipt, receipt_id)
                 terminal_root = (
@@ -6835,13 +7186,20 @@ class WorkBoardDispatcher:
                     input_payload=inputs,
                 )
                 await self._validate_procedure_child_binding(procedure_binding, projection=existing_root)
+        adapter_kwargs: dict[str, Any] = {
+            "runtime_seconds": runtime_seconds,
+            "admission_only": True,
+        }
+        # The procedure binding is a server-built native-child authority.  Do
+        # not pass a None compatibility keyword to ordinary direct adapters;
+        # only a validated native binding may reach the adapter seam.
+        if procedure_binding is not None:
+            adapter_kwargs["procedure_binding"] = procedure_binding
         response = await self._execute_direct_adapter(
             task,
             attempt,
             inputs,
-            runtime_seconds=runtime_seconds,
-            admission_only=True,
-            procedure_binding=procedure_binding,
+            **adapter_kwargs,
         )
         job_id = self._adapter_job_id(response)
         if not job_id:

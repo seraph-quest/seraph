@@ -11,7 +11,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apscheduler.triggers.cron import CronTrigger
-from sqlalchemy import and_, func, or_, select as sa_select
+from sqlalchemy import and_, func, or_, select as sa_select, update
 from sqlmodel import select, col
 
 from config.settings import settings
@@ -29,6 +29,8 @@ from src.db.models import (
     GoogleServiceConnection,
     GovernedScheduleBinding,
     GovernedScheduleOccurrence,
+    GuardianRoutine,
+    GuardianRoutineVersion,
     OperatorSession,
     ScheduledJob,
     ScheduledJobRun,
@@ -48,9 +50,10 @@ from src.work_board.input_artifacts import (
     _payload_path,
     _safe_file_bytes,
     prepare_input_artifact,
+    revoke_unpublished_input_artifact,
     revoke_input_artifact,
 )
-from src.work_board.repository import WorkBoardRepository
+from src.work_board.repository import BoardError, WorkBoardRepository
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +201,18 @@ class _ProcedureScheduleDeferred(RuntimeError):
         self.reason_code = str(reason_code or self.safe_code)[:128]
         self.recovery_action = str(recovery_action or "wait_for_next_slot")[:128]
         super().__init__(self.reason_code)
+
+
+class _ProcedureScheduleAuthorityFailure(RuntimeError):
+    """A typed failure from the pre-publication authority callback."""
+
+    safe_code = "procedure_schedule_publication_authority_stale"
+
+
+class _ProcedureSchedulePublishedTaskInvalid(RuntimeError):
+    """A canonical task exists but cannot be safely adopted for this slot."""
+
+    safe_code = "procedure_schedule_published_task_invalid"
 
 
 def _procedure_quiet_now(budget: Any, now: datetime) -> bool:
@@ -355,11 +370,104 @@ async def _load_governed_procedure_authority(
         raise _ProcedureScheduleDeferred("procedure_goal_budget_changed", "refresh_goal_budget")
     if (
         str(action_spec.get("goal_id") or "") != str(binding.goal_id)
-        or int(action_spec.get("goal_revision") or 0) != int(binding.goal_revision)
+        or type(action_spec.get("goal_revision")) is not int
+        or action_spec.get("goal_revision") < 1
+        or action_spec.get("goal_revision") != int(binding.goal_revision)
         or str(action_spec.get("routine_id") or "") == ""
-        or int(action_spec.get("version") or 0) < 1
+        or type(action_spec.get("version")) is not int
+        or action_spec.get("version") < 1
     ):
         raise RuntimeError("procedure_schedule_action_binding_invalid")
+
+    # The schedule action is an immutable reviewed selector.  Re-read the
+    # owner-bound routine and version before reserving an occurrence so a
+    # paused routine, rollback, revision advance, or package replacement
+    # cannot silently execute under the old schedule key.  These checks use
+    # exact persisted scalars; the scheduler never accepts a caller alias or
+    # coerces a malformed JSON value into authority.
+    action_routine_revision = action_spec.get("routine_revision")
+    action_version_id = action_spec.get("version_id")
+    action_template_id = action_spec.get("template_id")
+    action_plan_digest = action_spec.get("plan_digest")
+    action_source_proof_digest = action_spec.get("source_proof_digest")
+    action_package_digest = action_spec.get("package_digest")
+    if (
+        type(action_routine_revision) is not int
+        or action_routine_revision < 1
+        or type(action_version_id) is not str
+        or not action_version_id.strip()
+        or type(action_template_id) is not str
+        or not action_template_id.strip()
+        or type(action_plan_digest) is not str
+        or not action_plan_digest.strip()
+        or type(action_source_proof_digest) is not str
+        or not action_source_proof_digest.strip()
+        or type(action_package_digest) is not str
+        or not action_package_digest.strip()
+    ):
+        raise _ProcedureScheduleDeferred("procedure_schedule_proof_missing", "review_procedure")
+
+    routine = (
+        await db.execute(
+            sa_select(GuardianRoutine)
+            .where(
+                GuardianRoutine.id == action_spec["routine_id"],
+                GuardianRoutine.owner_principal_id == binding.owner_principal_id,
+                GuardianRoutine.owner_session_id == binding.owner_session_id,
+            )
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    version_row = (
+        await db.execute(
+            sa_select(GuardianRoutineVersion)
+            .where(
+                GuardianRoutineVersion.routine_id == action_spec["routine_id"],
+                GuardianRoutineVersion.version == action_spec["version"],
+            )
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    provenance = _loads(getattr(version_row, "source_provenance_json", "{}")) if version_row is not None else {}
+    if (
+        routine is None
+        or version_row is None
+        or routine.state != "active"
+        or type(routine.revision) is not int
+        or routine.revision != action_routine_revision
+        or type(routine.current_version) is not int
+        or routine.current_version != action_spec["version"]
+        or str(version_row.id) != action_version_id
+        or str(version_row.installed_package_digest or "") != action_package_digest
+        or not isinstance(provenance, dict)
+        or provenance.get("schema_version") != 2
+        or provenance.get("template_id") != action_template_id
+        or provenance.get("plan_digest") != action_plan_digest
+        or provenance.get("source_proof_digest") != action_source_proof_digest
+    ):
+        raise _ProcedureScheduleDeferred("procedure_schedule_proof_stale", "review_procedure")
+    # The persisted version digest is necessary but not sufficient: package
+    # lifecycle state can be revoked or paused independently of the routine
+    # selector.  Reuse the existing owner-bound package readback rather than
+    # treating a matching database digest as executable authority.
+    try:
+        from src.workflows.routines import routine_service
+
+        package_readback = routine_service._package_readback(
+            binding.owner_principal_id,
+            binding.owner_session_id,
+            str(action_spec["routine_id"]),
+            int(action_spec["version"]),
+            action_package_digest,
+        )
+    except Exception as exc:
+        raise _ProcedureScheduleDeferred("procedure_package_readback_unavailable", "review_procedure") from exc
+    if (
+        not isinstance(package_readback, dict)
+        or package_readback.get("status") != "active"
+        or package_readback.get("digest") != action_package_digest
+    ):
+        raise _ProcedureScheduleDeferred("procedure_package_not_current", "review_procedure")
 
     artifact = await db.get(WorkBoardInputArtifact, binding.input_artifact_id, populate_existing=True)
     if (
@@ -372,6 +480,9 @@ async def _load_governed_procedure_authority(
         or artifact.payload_sha256 != binding.input_digest.removeprefix("sha256:")
         or artifact.bound_task_id is not None
         or artifact.state not in {"pending", "bound"}
+        or artifact.expires_at is None
+        or _utc(artifact.expires_at) <= observed
+        or _utc(artifact.expires_at) < _utc(binding.expires_at)
         or not artifact.metadata_digest
     ):
         raise RuntimeError("procedure_schedule_input_artifact_invalid")
@@ -384,11 +495,17 @@ async def _load_governed_procedure_authority(
         payload = _decode_and_validate_payload(artifact, payload_bytes)
     except Exception as exc:
         raise RuntimeError("procedure_schedule_input_artifact_invalid") from exc
+    payload_version = payload.get("version")
+    payload_goal_revision = payload.get("expected_goal_revision")
     if (
         payload.get("routine_id") != action_spec.get("routine_id")
-        or int(payload.get("version") or 0) != int(action_spec.get("version") or 0)
+        or type(payload_version) is not int
+        or payload_version < 1
+        or payload_version != action_spec.get("version")
         or payload.get("goal_id") != binding.goal_id
-        or int(payload.get("expected_goal_revision") or 0) != int(binding.goal_revision)
+        or type(payload_goal_revision) is not int
+        or payload_goal_revision < 1
+        or payload_goal_revision != binding.goal_revision
         or payload.get("parameters") != (action_spec.get("parameters") or {})
     ):
         raise RuntimeError("procedure_schedule_input_binding_mismatch")
@@ -417,11 +534,33 @@ async def _load_governed_procedure_authority(
                 sa_select(GovernedScheduleOccurrence.work_board_task_id).where(
                     GovernedScheduleOccurrence.binding_id == binding.binding_id,
                     GovernedScheduleOccurrence.slot_utc == normalized_slot,
-                    GovernedScheduleOccurrence.state.in_(("reserved", "running")),
+                    GovernedScheduleOccurrence.state.in_(("reserved", "running", "unknown")),
                     GovernedScheduleOccurrence.work_board_task_id.is_not(None),
                 )
             )
         ).scalar_one_or_none()
+        if same_slot_task is None:
+            # A writer may have committed the canonical task and then lost the
+            # result before linking it to the occurrence.  The occurrence is
+            # quarantined as unknown, but an exact same-slot task is still
+            # eligible for adoption; do not let the budget count it as a new
+            # outstanding job and mint a second artifact.
+            slot_key = normalized_slot.strftime("%Y%m%dT%H%M%SZ")
+            same_slot_task = (
+                await db.execute(
+                    sa_select(WorkBoardTask.task_id)
+                    .where(
+                        WorkBoardTask.owner_principal_id == binding.owner_principal_id,
+                        WorkBoardTask.owner_session_id == binding.owner_session_id,
+                        WorkBoardTask.goal_id == binding.goal_id,
+                        WorkBoardTask.goal_revision == binding.goal_revision,
+                        WorkBoardTask.capability_id == "guardian-routine.v2",
+                        WorkBoardTask.idempotency_scope == "guardian-routine-v2-schedule",
+                        WorkBoardTask.idempotency_key == f"{binding.binding_id}:{slot_key}",
+                    )
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
         if same_slot_task:
             outstanding_query = outstanding_query.where(WorkBoardTask.task_id != str(same_slot_task))
     outstanding = int((await db.execute(outstanding_query)).scalar_one() or 0)
@@ -1067,13 +1206,21 @@ async def _run_governed_procedure_schedule(
     task_id: str | None = None
     owner: WorkBoardOwner | None = None
     fresh_artifact_id: str | None = None
+    fresh_artifact_revision: int | None = None
+    artifact_preparation_started = False
+    publication_started = False
 
-    async def _settle_failure(exc: BaseException) -> None:
+    async def _settle_failure(
+        exc: BaseException,
+        *,
+        state: str,
+        recovery_action: str,
+    ) -> None:
         if not occurrence_id or not claim_token or claim_fence is None:
             return
         try:
             async with get_session() as recovery_db:
-                current = await recovery_db.get(GovernedScheduleOccurrence, occurrence_id)
+                current = await recovery_db.get(GovernedScheduleOccurrence, occurrence_id, populate_existing=True)
                 if (
                     current is not None
                     and current.state == "running"
@@ -1083,26 +1230,167 @@ async def _run_governed_procedure_schedule(
                     await settle_occurrence(
                         recovery_db,
                         current,
-                        state="blocked",
+                        state=state,
                         task_id=task_id,
                         job_id=scheduled_run_id,
-                        failure_code=(
-                            getattr(exc, "reason_code", None)
-                            or _safe_error_label(exc)
-                            if isinstance(exc, Exception)
-                            else type(exc).__name__
-                        ),
-                        recovery_action=(
-                            getattr(exc, "recovery_action", None)
-                            or "retry_after_prerequisite"
-                            if isinstance(exc, Exception)
-                            else "reconcile_admission_binding"
-                        ),
+                        failure_code=_safe_error_label(exc) if isinstance(exc, Exception) else type(exc).__name__,
+                        recovery_action=recovery_action,
                         claim_token=claim_token,
                         fencing_token=claim_fence,
                     )
+                    if fresh_artifact_id:
+                        metadata = _loads(current.metadata_json or "{}")
+                        metadata["input_artifact_id"] = fresh_artifact_id
+                        current.metadata_json = _dumps(metadata)
+                        await recovery_db.flush()
         except Exception:
             logger.exception("Could not settle governed procedure occurrence %s", occurrence_id)
+
+    async def _cleanup_unpublished_artifact() -> str:
+        """Revoke only when the exact artifact is still unbound and unpublished."""
+
+        if owner is None or not fresh_artifact_id or fresh_artifact_revision is None:
+            return "unknown"
+
+        async def publication_guard(cleanup_db: Any, _row: WorkBoardInputArtifact) -> bool:
+            task_ref = (
+                await cleanup_db.execute(
+                    sa_select(WorkBoardTask.task_id)
+                    .where(WorkBoardTask.input_artifact_id == fresh_artifact_id)
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            binding_ref = (
+                await cleanup_db.execute(
+                    sa_select(GovernedScheduleBinding.binding_id)
+                    .where(GovernedScheduleBinding.input_artifact_id == fresh_artifact_id)
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            occurrence_rows = (
+                await cleanup_db.execute(
+                    sa_select(GovernedScheduleOccurrence.metadata_json)
+                    .where(GovernedScheduleOccurrence.metadata_json.like(f"%{fresh_artifact_id}%"))
+                    .limit(8)
+                )
+            ).scalars().all()
+            occurrence_ref = False
+            for raw_metadata in occurrence_rows:
+                metadata = _loads(raw_metadata or "")
+                if metadata.get("input_artifact_id") == fresh_artifact_id:
+                    occurrence_ref = True
+                    break
+            return task_ref is None and binding_ref is None and not occurrence_ref
+
+        try:
+            async with get_session() as cleanup_db:
+                await revoke_unpublished_input_artifact(
+                    cleanup_db,
+                    owner,
+                    artifact_id=fresh_artifact_id,
+                    expected_revision=fresh_artifact_revision,
+                    publication_guard=publication_guard,
+                )
+            return "revoked"
+        except BoardError as exc:
+            if exc.code == "input_artifact_publication_protected":
+                return "protected"
+            return "unknown"
+        except Exception:
+            logger.exception("Could not reconcile unpublished procedure artifact %s", fresh_artifact_id)
+            return "unknown"
+
+    async def _adopt_persisted_task(
+        db: Any,
+        occurrence: GovernedScheduleOccurrence,
+        *,
+        occurrence_key: str,
+        occurrence_run_id_value: str | None,
+    ) -> bool:
+        """Adopt a task committed before an occurrence writer lost its result."""
+
+        nonlocal task_id, claim_token, claim_fence
+        candidate = (
+            await db.execute(
+                sa_select(WorkBoardTask)
+                .where(
+                    WorkBoardTask.owner_principal_id == owner.principal_id,
+                    WorkBoardTask.owner_session_id == owner.session_id,
+                    WorkBoardTask.goal_id == binding.goal_id,
+                    WorkBoardTask.goal_revision == int(binding.goal_revision),
+                    WorkBoardTask.capability_id == "guardian-routine.v2",
+                    WorkBoardTask.idempotency_scope == "guardian-routine-v2-schedule",
+                    WorkBoardTask.idempotency_key == occurrence_key,
+                )
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if candidate is None:
+            return False
+        candidate_artifact = await db.get(
+            WorkBoardInputArtifact,
+            candidate.input_artifact_id,
+            populate_existing=True,
+        ) if candidate.input_artifact_id else None
+        if (
+            candidate_artifact is None
+            or candidate_artifact.owner_principal_id != owner.principal_id
+            or candidate_artifact.owner_session_id != owner.session_id
+            or candidate_artifact.capability_id != "guardian-routine.v2"
+            or candidate_artifact.goal_id != binding.goal_id
+            or int(candidate_artifact.goal_revision) != int(binding.goal_revision)
+            or candidate_artifact.bound_task_id != candidate.task_id
+            or candidate_artifact.state not in {"bound", "consumed"}
+            or not candidate_artifact.metadata_digest
+        ):
+            raise _ProcedureSchedulePublishedTaskInvalid()
+        task_id = candidate.task_id
+        metadata = {
+            "status": "queued",
+            "task_id": candidate.task_id,
+            "capability_id": "guardian-routine.v2",
+            "routine_id": canonical_action.get("routine_id"),
+            "version": canonical_action.get("version"),
+            "input_artifact_id": candidate.input_artifact_id,
+            "memory_status": "no_learning",
+            "reconciled_publication": True,
+        }
+        if occurrence.state == "unknown":
+            # Unknown is a quarantine state.  A canonical task plus its bound
+            # artifact is the only proof that permits this exact slot to be
+            # reopened; advance the fence so the writer that lost its commit
+            # result cannot later mutate the recovered occurrence.
+            if not occurrence.claim_token:
+                raise _ProcedureSchedulePublishedTaskInvalid()
+            next_fence = int(occurrence.fencing_token) + 1
+            result = await db.execute(
+                update(GovernedScheduleOccurrence)
+                .where(
+                    GovernedScheduleOccurrence.occurrence_id == occurrence.occurrence_id,
+                    GovernedScheduleOccurrence.state == "unknown",
+                    GovernedScheduleOccurrence.claim_token == occurrence.claim_token,
+                    GovernedScheduleOccurrence.fencing_token == int(occurrence.fencing_token),
+                )
+                .values(
+                    state="running",
+                    work_board_task_id=candidate.task_id,
+                    durable_job_id=occurrence_run_id_value or occurrence.durable_job_id,
+                    fencing_token=next_fence,
+                    lease_expires_at=_utc_now() + timedelta(minutes=5),
+                    metadata_json=_dumps(metadata),
+                    updated_at=_utc_now(),
+                )
+            )
+            if int(result.rowcount or 0) != 1:
+                raise _ProcedureSchedulePublishedTaskInvalid()
+            await db.refresh(occurrence)
+            claim_token = occurrence.claim_token
+            claim_fence = occurrence.fencing_token
+        else:
+            occurrence.work_board_task_id = candidate.task_id
+            occurrence.metadata_json = _dumps(metadata)
+            await db.flush()
+        return True
 
     try:
         async with get_session() as db:
@@ -1120,8 +1408,6 @@ async def _run_governed_procedure_schedule(
                         "task_id": occurrence.work_board_task_id,
                         "replayed": True,
                     }
-                if occurrence.state == "unknown":
-                    raise RuntimeError("governed_occurrence_requires_reconciliation")
                 if occurrence.state == "running":
                     # A replay must adopt the exact fenced occurrence.  A
                     # worker can crash after claiming and before publishing
@@ -1138,11 +1424,17 @@ async def _run_governed_procedure_schedule(
                             "replayed": True,
                             "memory_status": "no_learning",
                         }
+                elif occurrence.state == "unknown":
+                    # Keep the quarantine until an exact persisted task can
+                    # prove that publication committed.  The adoption helper
+                    # below advances the fence only after that proof.
+                    claim_token = occurrence.claim_token
+                    claim_fence = occurrence.fencing_token
             if occurrence.state == "reserved":
                 await claim_occurrence(db, occurrence)
                 claim_token = occurrence.claim_token
                 claim_fence = occurrence.fencing_token
-            elif occurrence.state != "running":
+            elif occurrence.state not in {"running", "unknown"}:
                 raise RuntimeError("governed_occurrence_not_claimable")
             if not claim_token:
                 raise RuntimeError("procedure_schedule_claim_missing")
@@ -1173,9 +1465,27 @@ async def _run_governed_procedure_schedule(
             # can never become authority for a later run.
             slot_key = _utc(scheduled_slot_utc).strftime("%Y%m%dT%H%M%SZ")
             occurrence_key = f"{binding.binding_id}:{slot_key}"
+            if replay and occurrence.state in {"running", "unknown"} and not occurrence.work_board_task_id:
+                adopted = await _adopt_persisted_task(
+                    db,
+                    occurrence,
+                    occurrence_key=occurrence_key,
+                    occurrence_run_id_value=occurrence_run_id,
+                )
+                if adopted:
+                    return {
+                        "status": "queued",
+                        "occurrence_id": occurrence.occurrence_id,
+                        "task_id": task_id,
+                        "replayed": True,
+                        "memory_status": "no_learning",
+                    }
+                if occurrence.state == "unknown":
+                    raise RuntimeError("governed_occurrence_requires_reconciliation")
             occurrence_payload = dict(source_payload)
             occurrence_payload["invocation_uuid"] = f"schedule:{occurrence_key}"
 
+            artifact_preparation_started = True
         async with get_session() as artifact_db:
             fresh = await prepare_input_artifact(
                 artifact_db,
@@ -1190,33 +1500,40 @@ async def _run_governed_procedure_schedule(
                 ),
             )
             fresh_artifact_id = fresh.artifact_id
+            fresh_artifact_revision = int(fresh.revision)
 
         repository = WorkBoardRepository()
 
         async def publication_authority_check(check_db: Any) -> None:
-            current_binding, _current_goal, _current_artifact, _current_payload, _current_action = (
-                await _load_governed_procedure_authority(
-                    check_db, job, binding_id, slot_utc=scheduled_slot_utc
-                )
-            )
-            if current_binding.binding_id != binding.binding_id or int(current_binding.binding_revision) != int(binding.binding_revision):
-                raise RuntimeError("procedure_schedule_publication_fence_stale")
-            current_occurrence = (
-                await check_db.execute(
-                    sa_select(GovernedScheduleOccurrence).where(
-                        GovernedScheduleOccurrence.occurrence_id == occurrence_id,
-                        GovernedScheduleOccurrence.binding_id == binding.binding_id,
-                        GovernedScheduleOccurrence.binding_revision == int(binding.binding_revision),
-                        GovernedScheduleOccurrence.state == "running",
-                        GovernedScheduleOccurrence.claim_token == claim_token,
-                        GovernedScheduleOccurrence.fencing_token == claim_fence,
-                        GovernedScheduleOccurrence.durable_job_id == occurrence_run_id,
+            try:
+                current_binding, _current_goal, _current_artifact, _current_payload, _current_action = (
+                    await _load_governed_procedure_authority(
+                        check_db, job, binding_id, slot_utc=scheduled_slot_utc
                     )
                 )
-            ).scalar_one_or_none()
-            if current_occurrence is None:
-                raise RuntimeError("procedure_schedule_occurrence_fence_stale")
+                if current_binding.binding_id != binding.binding_id or int(current_binding.binding_revision) != int(binding.binding_revision):
+                    raise RuntimeError("procedure_schedule_publication_fence_stale")
+                current_occurrence = (
+                    await check_db.execute(
+                        sa_select(GovernedScheduleOccurrence).where(
+                            GovernedScheduleOccurrence.occurrence_id == occurrence_id,
+                            GovernedScheduleOccurrence.binding_id == binding.binding_id,
+                            GovernedScheduleOccurrence.binding_revision == int(binding.binding_revision),
+                            GovernedScheduleOccurrence.state == "running",
+                            GovernedScheduleOccurrence.claim_token == claim_token,
+                            GovernedScheduleOccurrence.fencing_token == claim_fence,
+                            GovernedScheduleOccurrence.durable_job_id == occurrence_run_id,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if current_occurrence is None:
+                    raise RuntimeError("procedure_schedule_occurrence_fence_stale")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                raise _ProcedureScheduleAuthorityFailure() from exc
 
+        publication_started = True
         async with get_session() as db:
             mutation = await repository.create_task(
                 db,
@@ -1262,15 +1579,32 @@ async def _run_governed_procedure_schedule(
             "memory_status": "no_learning",
         }
     except (Exception, asyncio.CancelledError) as exc:
-        # A cancellation before provider contact is a durable blocked
-        # occurrence; preserve the original signal after cleanup.
-        if fresh_artifact_id and owner is not None and task_id is None:
-            try:
-                async with get_session() as cleanup_db:
-                    await revoke_input_artifact(cleanup_db, owner, artifact_id=fresh_artifact_id)
-            except Exception:
-                logger.exception("Could not revoke orphan procedure artifact %s", fresh_artifact_id)
-        await _settle_failure(exc)
+        # Only a typed authority/Board rejection proves that publication did
+        # not cross the task writer boundary.  Its cleanup is still guarded by
+        # exact owner/revision and a fresh reference check.  A generic writer,
+        # flush, commit, or cancellation result is ambiguous: keep the exact
+        # artifact/idempotency key and quarantine the occurrence for explicit
+        # reconciliation instead of revoking or auto-replaying it.
+        cleanup_outcome: str | None = None
+        known_prepublication = isinstance(exc, (BoardError, _ProcedureScheduleAuthorityFailure))
+        if known_prepublication and fresh_artifact_id:
+            cleanup_outcome = await _cleanup_unpublished_artifact()
+        if cleanup_outcome == "revoked":
+            failure_state = "blocked"
+            recovery_action = "retry_after_prerequisite"
+        elif fresh_artifact_id or artifact_preparation_started or publication_started:
+            failure_state = "unknown"
+            recovery_action = "reconcile_existing_occurrence"
+        else:
+            # No artifact reservation or publication boundary was reached, so
+            # an authority/setup failure can safely block this occurrence.
+            failure_state = "blocked"
+            recovery_action = "retry_after_prerequisite"
+        await _settle_failure(
+            exc,
+            state=failure_state,
+            recovery_action=recovery_action,
+        )
         raise
 
 def build_cron_trigger(job: dict[str, Any]) -> CronTrigger:
@@ -1907,6 +2241,30 @@ async def execute_scheduled_job(job_id: str, *, scheduled_slot_utc: datetime | N
                 "action_type": action_type,
                 "reason_code": exc.reason_code,
                 "recovery_action": exc.recovery_action,
+            },
+        )
+    except _ProcedureScheduleAuthorityFailure as exc:
+        await scheduled_job_repository.record_run(
+            job_id,
+            outcome="blocked",
+            error=_safe_error_label(exc),
+        )
+        await scheduled_job_repository.finish_run(
+            run["id"],
+            outcome="blocked",
+            status="blocked",
+            error=_safe_error_label(exc),
+            metadata={"recovery_action": "retry_after_prerequisite"},
+        )
+        await log_scheduler_job_event(
+            job_name=f"user_cron:{job_id}",
+            outcome="blocked",
+            details={
+                "scheduled_job_id": job_id,
+                "scheduled_job_run_id": run["id"],
+                "action_type": action_type,
+                "reason_code": _safe_error_label(exc),
+                "recovery_action": "retry_after_prerequisite",
             },
         )
     except ApprovalRequired as exc:

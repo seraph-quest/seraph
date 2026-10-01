@@ -28,6 +28,7 @@ from src.db.models import (
     ScheduledJob,
     ScheduledJobRun,
     WorkBoardAttempt,
+    WorkBoardInputArtifact,
     WorkBoardStatus,
     WorkBoardTask,
 )
@@ -168,21 +169,56 @@ async def _procedure_terminal_state(
     if task_state != WorkBoardStatus.done.value:
         return None
 
-    job_id = str(occurrence.durable_job_id or "").strip()
-    if not job_id:
-        return "blocked", "procedure_parent_binding_missing", "reconcile_admission_binding"
+    binding = await db.get(GovernedScheduleBinding, occurrence.binding_id)
+    if (
+        binding is None
+        or binding.action_type != PROCEDURE_ACTION
+        or binding.capability_id != PROCEDURE_ACTION
+        or task.capability_id != "guardian-routine.v2"
+        or task.owner_principal_id != binding.owner_principal_id
+        or task.owner_session_id != binding.owner_session_id
+        or task.goal_id != binding.goal_id
+        or int(task.goal_revision or 0) != int(binding.goal_revision or 0)
+        or task.idempotency_scope != "guardian-routine-v2-schedule"
+        or task.idempotency_key
+        != f"{binding.binding_id}:{_utc(occurrence.slot_utc).strftime('%Y%m%dT%H%M%SZ')}"
+    ):
+        return "blocked", "procedure_parent_binding_mismatch", "reconcile_admission_binding"
+
+    # The occurrence durable_job_id is the scheduler wrapper/run identity and
+    # must remain unchanged for occurrence idempotency and cleanup.  The native
+    # procedure root is server-derived from the exact terminal Board attempt.
+    artifact_id = str(task.input_artifact_id or "").strip()
+    artifact = await db.get(WorkBoardInputArtifact, artifact_id) if artifact_id else None
+    if (
+        artifact is None
+        or artifact.owner_principal_id != task.owner_principal_id
+        or artifact.owner_session_id != task.owner_session_id
+        or artifact.goal_id != task.goal_id
+        or int(artifact.goal_revision or 0) != int(task.goal_revision or 0)
+        or artifact.capability_id != "guardian-routine.v2"
+        or artifact.bound_task_id != task.task_id
+        or artifact.state not in {"bound", "consumed"}
+        or not artifact.typed_input_ref
+        or not task.typed_input_ref
+        or artifact.typed_input_ref != task.typed_input_ref
+        or not task.typed_input_digest
+        or artifact.payload_sha256 != task.typed_input_digest
+    ):
+        return "blocked", "procedure_input_binding_missing", "reconcile_admission_binding"
+
     attempt = (
         await db.execute(
             select(WorkBoardAttempt)
             .where(
                 WorkBoardAttempt.task_id == task.task_id,
-                WorkBoardAttempt.workflow_run_id == job_id,
             )
-            .order_by(WorkBoardAttempt.created_at.desc())
+            .order_by(WorkBoardAttempt.created_at.desc(), WorkBoardAttempt.attempt_id.desc())
             .limit(1)
         )
     ).scalar_one_or_none()
-    if attempt is None or attempt.ended_at is None or str(attempt.outcome or "") != "verified":
+    job_id = str(attempt.workflow_run_id or "").strip() if attempt is not None else ""
+    if attempt is None or not job_id or attempt.ended_at is None or str(attempt.outcome or "") != "verified":
         return "blocked", "procedure_verified_readback_missing", "reconcile_admission_binding"
 
     try:
@@ -192,6 +228,59 @@ async def _procedure_terminal_state(
         projection = await durable_job_repository.get_job(job_id)
         if not isinstance(projection, Mapping):
             return "blocked", "procedure_parent_missing", "reconcile_admission_binding"
+        owner = projection.get("owner") if isinstance(projection.get("owner"), Mapping) else {}
+        authority = (
+            projection.get("declared_authority")
+            if isinstance(projection.get("declared_authority"), Mapping)
+            else {}
+        )
+        idempotency = (
+            projection.get("idempotency")
+            if isinstance(projection.get("idempotency"), Mapping)
+            else {}
+        )
+        positive_int = lambda value: type(value) is int and value > 0
+        if (
+            str(projection.get("job_id") or projection.get("run_identity") or "") != job_id
+            or str(projection.get("root_run_identity") or "") != job_id
+            or projection.get("parent_run_identity") is not None
+            or projection.get("parent_job_id") is not None
+            or str(projection.get("job_kind") or "") != "guardian_routine_v2"
+            or str(projection.get("capability_version") or "") != "guardian-routine.v2"
+            or str(owner.get("kind") or "") != "user"
+            or str(owner.get("principal_id") or "") != task.owner_principal_id
+            or str(projection.get("session_id") or "") != task.owner_session_id
+            or str(projection.get("operator_session_id") or "") != task.owner_session_id
+            or str(projection.get("goal_id") or "") != task.goal_id
+            or not positive_int(projection.get("goal_revision"))
+            or int(projection.get("goal_revision")) != int(task.goal_revision)
+            or str(idempotency.get("scope") or "") != "work-board-attempt"
+            or str(idempotency.get("key") or "") != f"{task.task_id}:{attempt.attempt_id}"
+            or str(authority.get("principal") or "") != task.owner_principal_id
+            or str(authority.get("owner_kind") or "") != "user"
+            or str(authority.get("session_id") or "") != task.owner_session_id
+            or str(authority.get("operator_session_id") or "") != task.owner_session_id
+            or str(authority.get("goal_id") or "") != task.goal_id
+            or not positive_int(authority.get("goal_revision"))
+            or int(authority.get("goal_revision")) != int(task.goal_revision)
+            or str(authority.get("capability_id") or "") != "guardian-routine.v2"
+            or str(authority.get("board_task_id") or "") != task.task_id
+            or str(authority.get("board_attempt_id") or "") != attempt.attempt_id
+            or str(authority.get("input_artifact_id") or "") != artifact.artifact_id
+            or str(authority.get("input_artifact_digest") or "") != task.typed_input_digest
+            or not positive_int(authority.get("board_task_revision"))
+            or int(authority.get("board_task_revision")) > int(task.task_revision)
+            # claim_ready_task records the pre-transition revision on the
+            # attempt, then atomically advances the Board task to the
+            # running revision.  ProcedureV2 admits its native root from that
+            # running task, so its immutable authority must carry exactly the
+            # post-claim revision.  Do not widen this to a >= check: a later
+            # unrelated Board mutation must remain a binding failure.
+            or int(authority.get("board_task_revision")) != int(attempt.task_revision_at_claim) + 1
+            or not positive_int(authority.get("board_fencing_token"))
+            or int(authority.get("board_fencing_token")) != int(attempt.fencing_token)
+        ):
+            return "blocked", "procedure_parent_authority_mismatch", "reconcile_admission_binding"
         projection_status = str(projection.get("status") or "")
         effects = projection.get("effects") if isinstance(projection.get("effects"), list) else []
         if projection_status in UNCERTAIN_EXTERNAL_EFFECT_STATUSES or any(

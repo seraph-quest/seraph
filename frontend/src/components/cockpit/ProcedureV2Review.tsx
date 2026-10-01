@@ -95,6 +95,39 @@ interface PreparedProcedure {
   installApprovalStatus?: string | null;
   installApprovalExpiresAt?: string | null;
   installRecoveryAction?: string | null;
+  /** Same owner/session recovery gate for a package mutation with an unknown outcome. */
+  packageActivationRecovery?: PackageActivationRecovery | null;
+  /** Same owner/session recovery gate for every routine lifecycle mutation. */
+  lifecycleRecovery?: LifecycleRecovery | null;
+}
+
+interface PackageActivationRecovery {
+  schema_version: 1;
+  routineId: string;
+  versionId: string;
+  version: number;
+  digest: string;
+  expectedRevision: number;
+  approvalId: string;
+}
+
+type LifecycleAction = "install" | "activate" | "pause" | "revoke" | "rollback";
+
+interface LifecycleRecovery {
+  schema_version: 1;
+  action: LifecycleAction;
+  ownerPrincipalId: string;
+  ownerSessionId: string;
+  routineId: string;
+  versionId: string;
+  version: number;
+  requestRevision: number;
+  expectedState: "installed" | "active" | "paused" | "revoked";
+  approvalId: string | null;
+  installJobId: string | null;
+  targetVersionId: string | null;
+  targetVersion: number | null;
+  packageDigest: string | null;
 }
 
 interface OwnerRequestScope {
@@ -106,6 +139,10 @@ const PENDING_STORAGE_PREFIX = "seraph.procedure-v2.pending";
 const PREPARED_STORAGE_PREFIX = "seraph.procedure-v2.prepared";
 const DEFAULT_MEETING_PURPOSE = "bounded preparation request";
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
 function pendingStorageKey(principalId: string | null | undefined, sessionId: string | null | undefined): string | null {
   if (!principalId || !sessionId) return null;
   return `${PENDING_STORAGE_PREFIX}:${encodeURIComponent(principalId)}:${encodeURIComponent(sessionId)}`;
@@ -116,7 +153,97 @@ function preparedStorageKey(principalId: string | null | undefined, sessionId: s
   return `${PREPARED_STORAGE_PREFIX}:${encodeURIComponent(principalId)}:${encodeURIComponent(sessionId)}`;
 }
 
-function readPrepared(key: string | null): PreparedProcedure | null {
+function readLifecycleRecovery(
+  value: unknown,
+  ownerPrincipalId?: string | null,
+  ownerSessionId?: string | null,
+): LifecycleRecovery | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (!isRecord(value)
+    || value.schema_version !== 1
+    || (value.action !== "install" && value.action !== "activate" && value.action !== "pause" && value.action !== "revoke" && value.action !== "rollback")
+    || typeof value.ownerPrincipalId !== "string" || !value.ownerPrincipalId
+    || typeof value.ownerSessionId !== "string" || !value.ownerSessionId
+    || typeof value.routineId !== "string" || !value.routineId
+    || typeof value.versionId !== "string" || !value.versionId
+    || typeof value.version !== "number" || !Number.isSafeInteger(value.version) || value.version < 1
+    || typeof value.requestRevision !== "number" || !Number.isSafeInteger(value.requestRevision) || value.requestRevision < 1
+    || (value.expectedState !== "installed" && value.expectedState !== "active" && value.expectedState !== "paused" && value.expectedState !== "revoked")
+    || (value.approvalId !== null && (typeof value.approvalId !== "string" || !value.approvalId))
+    || (value.installJobId !== null && (typeof value.installJobId !== "string" || !value.installJobId))
+    || (value.targetVersionId !== null && (typeof value.targetVersionId !== "string" || !value.targetVersionId))
+    || (value.targetVersion !== null && (typeof value.targetVersion !== "number" || !Number.isSafeInteger(value.targetVersion) || value.targetVersion < 1))
+    || (value.packageDigest !== null && (typeof value.packageDigest !== "string" || !value.packageDigest))) {
+    throw new Error("The retained procedure lifecycle recovery receipt is invalid.");
+  }
+  if ((ownerPrincipalId && value.ownerPrincipalId !== ownerPrincipalId)
+    || (ownerSessionId && value.ownerSessionId !== ownerSessionId)) {
+    throw new Error("The retained procedure lifecycle recovery receipt belongs to another operator session.");
+  }
+  if ((value.action === "install" && (value.expectedState !== "installed" || !value.approvalId || value.targetVersionId !== null || value.targetVersion !== null))
+    || (value.action === "activate" && (value.expectedState !== "active" || value.approvalId !== null || value.targetVersionId !== null || value.targetVersion !== null))
+    || (value.action === "pause" && (value.expectedState !== "paused" || value.approvalId !== null || value.targetVersionId !== null || value.targetVersion !== null))
+    || (value.action === "revoke" && (value.expectedState !== "revoked" || value.approvalId !== null || value.targetVersionId !== null || value.targetVersion !== null))
+    || (value.action === "rollback" && (value.expectedState === "revoked" || value.approvalId !== null))) {
+    throw new Error("The retained procedure lifecycle recovery receipt has an invalid action state binding.");
+  }
+  if (value.action === "install" && (!value.installJobId || !value.packageDigest)) {
+    throw new Error("The retained procedure install recovery receipt is missing its exact job or package digest.");
+  }
+  if (value.action !== "install" && value.installJobId !== null) {
+    throw new Error("The retained procedure lifecycle recovery receipt has an unexpected install job.");
+  }
+  if ((value.targetVersionId === null) !== (value.targetVersion === null)) {
+    throw new Error("The retained procedure lifecycle recovery receipt has an incomplete target version.");
+  }
+  if (value.action === "rollback" && (!value.targetVersionId || value.targetVersion === null
+    || value.targetVersionId !== value.versionId || value.targetVersion !== value.version)) {
+    throw new Error("The retained rollback recovery receipt is missing its exact target version.");
+  }
+  return {
+    schema_version: 1,
+    action: value.action,
+    ownerPrincipalId: value.ownerPrincipalId,
+    ownerSessionId: value.ownerSessionId,
+    routineId: value.routineId,
+    versionId: value.versionId,
+    version: value.version,
+    requestRevision: value.requestRevision,
+    expectedState: value.expectedState,
+    approvalId: value.approvalId,
+    installJobId: value.installJobId,
+    targetVersionId: value.targetVersionId,
+    targetVersion: value.targetVersion,
+    packageDigest: value.packageDigest,
+  };
+}
+
+function readPackageActivationRecovery(value: unknown): PackageActivationRecovery | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (!isRecord(value)
+    || value.schema_version !== 1
+    || typeof value.routineId !== "string" || !value.routineId
+    || typeof value.versionId !== "string" || !value.versionId
+    || typeof value.version !== "number" || !Number.isSafeInteger(value.version) || value.version < 1
+    || typeof value.digest !== "string" || !value.digest
+    || typeof value.expectedRevision !== "number" || !Number.isSafeInteger(value.expectedRevision) || value.expectedRevision < 1
+    || typeof value.approvalId !== "string" || !value.approvalId) {
+    throw new Error("The retained package activation recovery receipt is invalid.");
+  }
+  return {
+    schema_version: 1,
+    routineId: value.routineId,
+    versionId: value.versionId,
+    version: value.version,
+    digest: value.digest,
+    expectedRevision: value.expectedRevision,
+    approvalId: value.approvalId,
+  };
+}
+
+function readPrepared(key: string | null, ownerPrincipalId?: string | null, ownerSessionId?: string | null): PreparedProcedure | null {
   if (!key || typeof window === "undefined") return null;
   try {
     const raw = window.sessionStorage.getItem(key);
@@ -127,11 +254,14 @@ function readPrepared(key: string | null): PreparedProcedure | null {
       || typeof value.bindingId !== "string" || !value.bindingId
       || typeof value.revision !== "number" || !Number.isSafeInteger(value.revision) || value.revision < 1
       || typeof value.version !== "number" || !Number.isSafeInteger(value.version) || value.version < 1
+      || (value.versionId !== undefined && value.versionId !== null && (typeof value.versionId !== "string" || !value.versionId))
       || (value.installJobId !== null && (typeof value.installJobId !== "string" || !value.installJobId))
       || (value.approvalId !== null && (typeof value.approvalId !== "string" || !value.approvalId))
       || (value.installApprovalStatus !== undefined && value.installApprovalStatus !== null && typeof value.installApprovalStatus !== "string")
       || (value.installApprovalExpiresAt !== undefined && value.installApprovalExpiresAt !== null && typeof value.installApprovalExpiresAt !== "string")
       || (value.installRecoveryAction !== undefined && value.installRecoveryAction !== null && typeof value.installRecoveryAction !== "string")) return null;
+    const packageActivationRecovery = readPackageActivationRecovery(value.packageActivationRecovery);
+    const lifecycleRecovery = readLifecycleRecovery(value.lifecycleRecovery, ownerPrincipalId, ownerSessionId);
     return {
       schema_version: 1,
       routineId: value.routineId,
@@ -144,6 +274,8 @@ function readPrepared(key: string | null): PreparedProcedure | null {
       installApprovalStatus: value.installApprovalStatus,
       installApprovalExpiresAt: value.installApprovalExpiresAt,
       installRecoveryAction: value.installRecoveryAction,
+      packageActivationRecovery,
+      lifecycleRecovery: lifecycleRecovery ?? null,
     };
   } catch {
     return null;
@@ -289,16 +421,8 @@ function isConfirmedScheduleStatus(status: string): boolean {
   return status === "scheduled";
 }
 
-function isCurrentInstallApproval(prepared: PreparedProcedure | null, fallbackStatus?: string): boolean {
-  if (!prepared?.approvalId) return false;
-  // Old locally mocked responses do not carry the additive server status. The
-  // live API emits it; when absent, the exact approval id (or the exact
-  // approval summary supplied by the current owner session) remains the only
-  // compatible proof available to this pre-extension client.
-  const status = prepared.installApprovalStatus !== undefined ? prepared.installApprovalStatus : fallbackStatus;
-  if (prepared.installApprovalStatus !== undefined && prepared.installApprovalStatus !== "approved") return false;
-  if (prepared.installApprovalStatus === undefined && fallbackStatus !== undefined && fallbackStatus !== "approved") return false;
-  if (!prepared.installApprovalExpiresAt) return status === undefined || status === "approved";
+function isCurrentInstallApproval(prepared: PreparedProcedure | null): boolean {
+  if (!prepared?.approvalId || prepared.installApprovalStatus !== "approved" || !prepared.installApprovalExpiresAt) return false;
   const expiry = new Date(prepared.installApprovalExpiresAt).getTime();
   return Number.isFinite(expiry) && expiry > Date.now();
 }
@@ -317,9 +441,11 @@ function installApprovalNeedsFreshRebind(
 
 function preparedFromRoutine(routine: ProcedureV2Routine, current: PreparedProcedure | null, requestedVersion?: number): PreparedProcedure | null {
   const versionNumber = requestedVersion ?? current?.version ?? routine.current_version ?? routine.versions[0]?.version;
-  const version = routine.versions.find((candidate) => candidate.version === versionNumber)
-    ?? routine.versions.find((candidate) => candidate.version === routine.current_version)
-    ?? routine.versions[0];
+  const version = current?.versionId
+    ? routine.versions.find((candidate) => candidate.id === current.versionId && candidate.version === versionNumber)
+    : routine.versions.find((candidate) => candidate.version === versionNumber)
+      ?? routine.versions.find((candidate) => candidate.version === routine.current_version)
+      ?? routine.versions[0];
   const binding = version?.procedure_binding;
   if (!version?.template_id || !binding?.binding_id || !binding.revision) return null;
   return {
@@ -334,6 +460,12 @@ function preparedFromRoutine(routine: ProcedureV2Routine, current: PreparedProce
     installApprovalStatus: binding.install_approval_status,
     installApprovalExpiresAt: binding.install_approval_expires_at,
     installRecoveryAction: binding.install_recovery_action,
+    packageActivationRecovery: current?.routineId === routine.id && current.versionId === version.id
+      ? current.packageActivationRecovery
+      : null,
+    lifecycleRecovery: current?.routineId === routine.id && current.versionId === version.id
+      ? current.lifecycleRecovery
+      : null,
   };
 }
 
@@ -366,12 +498,107 @@ function sourceLabel(task: ProcedureV2SourceTask): string {
   return `${task.title} · ${task.capability_id ?? "capability unavailable"} · ${task.task_id.slice(0, 16)} · revision ${task.task_revision}`;
 }
 
-function isRoutineActive(routine: ProcedureV2Routine | null, packagePreview: WorkBoardRoutinePackagePreview | null): boolean {
+function isRoutineActive(routine: ProcedureV2Routine | null, packagePreview: WorkBoardRoutinePackagePreview | null, versionId?: string | null): boolean {
   if (!routine || routine.state !== "active" || routine.package?.status !== "active") return false;
   const currentVersion = routine.current_version ?? routine.versions[0]?.version;
   const version = routine.versions.find((candidate) => candidate.version === currentVersion);
-  return Boolean(version?.installed_package_digest && routine.package.digest === version.installed_package_digest)
+  return Boolean(version?.installed_package_digest
+    && (!versionId || version.id === versionId)
+    && routine.package.digest === version.installed_package_digest)
     && (!packagePreview || (packagePreview.status === "active" && packagePreview.digest === packagePreview.installed_package_digest));
+}
+
+function routinePackageMatchesVersion(routine: ProcedureV2Routine | null, versionNumber: number, versionId?: string | null): boolean {
+  if (!routine || routine.package?.status !== "active") return false;
+  const version = routine.versions.find((candidate) => candidate.version === versionNumber);
+  return Boolean(version?.installed_package_digest
+    && (!versionId || version.id === versionId)
+    && routine.package.digest === version.installed_package_digest);
+}
+
+function lifecycleReadbackBelongsToOwner(
+  routine: ProcedureV2Routine,
+  routineId: string,
+  principalId: string | null | undefined,
+  sessionId: string | null | undefined,
+): boolean {
+  if (!routineBelongsToOwner(routine, routineId, principalId)) return false;
+  // The current routine DTO is owner-principal scoped.  If a future additive
+  // response includes the operator session, accept it only when it matches the
+  // session that issued this request; never treat a returned session as a
+  // substitute for the authenticated request scope.
+  const returnedSessionId = (routine as ProcedureV2Routine & { owner_session_id?: string | null }).owner_session_id;
+  return returnedSessionId === undefined || returnedSessionId === sessionId;
+}
+
+function lifecycleMutationReadbackIsCurrent(
+  routine: ProcedureV2Routine,
+  recovery: LifecycleRecovery,
+  principalId: string | null | undefined,
+  sessionId: string | null | undefined,
+): boolean {
+  if (recovery.ownerPrincipalId !== principalId || recovery.ownerSessionId !== sessionId) return false;
+  if (!lifecycleReadbackBelongsToOwner(routine, recovery.routineId, principalId, sessionId)
+    || routine.revision <= recovery.requestRevision
+    || routine.current_version !== recovery.version
+    || routine.state !== recovery.expectedState) return false;
+  const version = routine.versions.find((candidate) => candidate.id === recovery.versionId && candidate.version === recovery.version);
+  if (!version) return false;
+  if (recovery.action === "install") {
+    const binding = version.procedure_binding;
+    return Boolean(recovery.approvalId
+      && recovery.installJobId
+      && recovery.packageDigest
+      && binding
+      && binding.approval_id === recovery.approvalId
+      && binding.install_job_id === recovery.installJobId
+      && version.installed_package_digest === recovery.packageDigest);
+  }
+  if (recovery.action === "activate" || recovery.action === "rollback") {
+    return routinePackageMatchesVersion(routine, recovery.version, recovery.versionId)
+      && (!recovery.packageDigest || routine.package?.digest === recovery.packageDigest);
+  }
+  return true;
+}
+
+function packageActivationReadbackIsCurrent(
+  routine: ProcedureV2Routine,
+  context: PackageActivationRecovery,
+  principalId: string | null | undefined,
+  sessionId: string | null | undefined,
+): boolean {
+  const result = lifecycleReadbackBelongsToOwner(routine, context.routineId, principalId, sessionId)
+    && routine.current_version === context.version
+    // Package activation changes the external package pointer; the routine
+    // row itself is not the lifecycle activation mutation. Keep the exact
+    // revision captured for the guarded package request.
+    && routine.revision === context.expectedRevision
+    && routine.package?.status === "active"
+    && routine.package.digest === context.digest
+    && routinePackageMatchesVersion(routine, context.version, context.versionId);
+  return result;
+}
+
+const DEFINITIVE_LIFECYCLE_PRE_EFFECT_CODES = new Set([
+  "routine_not_found",
+  "routine_owner_session_mismatch",
+  "routine_revision_stale",
+  "routine_revision_or_version_invalid",
+  "routine_revoked_terminal",
+  "routine_version_not_found",
+  "routine_version_not_installed",
+  "routine_version_not_current",
+  "routine_install_job_missing",
+  "routine_install_not_awaiting_approval",
+  "routine_install_revision_stale",
+  "package_review_required",
+]);
+
+function isDefinitiveLifecyclePreEffectFailure(error: unknown): error is ProcedureV2ApiError {
+  return error instanceof ProcedureV2ApiError
+    && !error.retryable
+    && error.status < 500
+    && DEFINITIVE_LIFECYCLE_PRE_EFFECT_CODES.has(error.code);
 }
 
 function revisionForGoal(goal: GoalInfo | undefined): number | null {
@@ -394,6 +621,7 @@ export function ProcedureV2Review({
   const [sourceTaskId, setSourceTaskId] = useState("");
   const [secondSourceTaskId, setSecondSourceTaskId] = useState("");
   const [existingRoutines, setExistingRoutines] = useState<ProcedureV2Routine[]>([]);
+  const routineListGenerationRef = useRef(0);
   const [existingRoutineId, setExistingRoutineId] = useState("");
   const [existingVersionNumber, setExistingVersionNumber] = useState<number | null>(null);
   const [existingRoutineLoading, setExistingRoutineLoading] = useState(false);
@@ -402,9 +630,10 @@ export function ProcedureV2Review({
   const [previewRequestKey, setPreviewRequestKey] = useState(() => newProcedureRequestKey("procedure-preview"));
   const [preview, setPreview] = useState<ProcedureV2Preview | null>(null);
   const preparedKey = useMemo(() => preparedStorageKey(ownerPrincipalId, ownerSessionId), [ownerPrincipalId, ownerSessionId]);
-  const [prepared, setPrepared] = useState<PreparedProcedure | null>(() => readPrepared(preparedKey));
+  const [prepared, setPrepared] = useState<PreparedProcedure | null>(() => readPrepared(preparedKey, ownerPrincipalId, ownerSessionId));
   const preparedKeyRef = useRef(preparedKey);
   const ownerGenerationRef = useRef(0);
+  const mountedRef = useRef(false);
   const preparedResetKeyRef = useRef(preparedKey);
   // Advance the owner generation during render so a promise settling between
   // render and effects cannot publish old-owner metadata into the new view.
@@ -413,7 +642,13 @@ export function ProcedureV2Review({
     ownerGenerationRef.current += 1;
   }
   const captureOwnerScope = (): OwnerRequestScope => ({ key: preparedKey, generation: ownerGenerationRef.current });
-  const ownerRequestIsCurrent = (scope: OwnerRequestScope): boolean => preparedKeyRef.current === scope.key && ownerGenerationRef.current === scope.generation;
+  const ownerRequestIsCurrent = (scope: OwnerRequestScope): boolean => mountedRef.current
+    && preparedKeyRef.current === scope.key
+    && ownerGenerationRef.current === scope.generation;
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
   const [routine, setRoutine] = useState<ProcedureV2Routine | null>(null);
   const [packagePreview, setPackagePreview] = useState<WorkBoardRoutinePackagePreview | null>(null);
   const [packageApproval, setPackageApproval] = useState<WorkBoardRoutinePackageApproval | null>(null);
@@ -443,6 +678,30 @@ export function ProcedureV2Review({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [lifecycleReconcileRequired, setLifecycleReconcileRequired] = useState(() => Boolean(readPrepared(preparedKey, ownerPrincipalId, ownerSessionId)?.lifecycleRecovery));
+  const [lifecycleActivationRecovery, setLifecycleActivationRecovery] = useState<LifecycleRecovery | null>(() => readPrepared(preparedKey, ownerPrincipalId, ownerSessionId)?.lifecycleRecovery ?? null);
+  const [packageActivationRecovery, setPackageActivationRecovery] = useState<PackageActivationRecovery | null>(() => readPrepared(preparedKey, ownerPrincipalId, ownerSessionId)?.packageActivationRecovery ?? null);
+
+  const retainPackageActivationRecovery = (recovery: PackageActivationRecovery | null, basePrepared: PreparedProcedure | null = prepared): string | null => {
+    setPackageActivationRecovery(recovery);
+    if (!basePrepared) return "The prepared procedure is unavailable, so the package outcome cannot be retained safely.";
+    const nextPrepared = { ...basePrepared, packageActivationRecovery: recovery };
+    const retentionError = persistPrepared(preparedKey, nextPrepared);
+    setPrepared(nextPrepared);
+    if (retentionError) setNotice(`${retentionError} Keep this owner session open while reconciling the package outcome.`);
+    return retentionError;
+  };
+
+  const retainLifecycleRecovery = (recovery: LifecycleRecovery | null, basePrepared: PreparedProcedure | null = prepared): string | null => {
+    setLifecycleActivationRecovery(recovery);
+    setLifecycleReconcileRequired(Boolean(recovery));
+    if (!basePrepared) return "The prepared procedure is unavailable, so the lifecycle outcome cannot be retained safely.";
+    const nextPrepared = { ...basePrepared, lifecycleRecovery: recovery };
+    const retentionError = persistPrepared(preparedKey, nextPrepared);
+    setPrepared(nextPrepared);
+    if (retentionError) setNotice(`${retentionError} Keep this owner session open while reconciling the lifecycle outcome.`);
+    return retentionError;
+  };
 
   const pendingKey = useMemo(() => pendingStorageKey(ownerPrincipalId, ownerSessionId), [ownerPrincipalId, ownerSessionId]);
   const activeGoals = useMemo(() => goals.filter((goal) => goal.status.toLowerCase() === "active"), [goals]);
@@ -469,8 +728,11 @@ export function ProcedureV2Review({
     ? existingVersionNumber
     : routine?.current_version ?? routine?.versions[0]?.version ?? prepared?.version ?? 1;
   const routineCurrentVersion = routine?.current_version ?? routine?.versions[0]?.version ?? null;
-  const routineActive = isRoutineActive(routine, packagePreview)
+  const routineActive = isRoutineActive(routine, packagePreview, prepared?.versionId)
+    && !lifecycleReconcileRequired
+    && !packageActivationRecovery
     && (!existingRoutineId || !routineCurrentVersion || currentVersion === routineCurrentVersion);
+  const unresolvedRecovery = Boolean(lifecycleReconcileRequired || packageActivationRecovery);
 
   const loadTasks = useCallback(async () => {
     const requestOwnerScope = captureOwnerScope();
@@ -492,6 +754,10 @@ export function ProcedureV2Review({
   const loadExistingRoutine = async (routineId: string, requestedVersion?: number) => {
     if (pending) {
       setExistingRoutineError("Reconcile the retained exact request before selecting another procedure.");
+      return;
+    }
+    if (packageActivationRecovery) {
+      setExistingRoutineError("Refresh authority to reconcile the retained package activation before selecting another procedure.");
       return;
     }
     const requestOwnerScope = captureOwnerScope();
@@ -528,6 +794,12 @@ export function ProcedureV2Review({
         installApprovalStatus: binding.install_approval_status,
         installApprovalExpiresAt: binding.install_approval_expires_at,
         installRecoveryAction: binding.install_recovery_action,
+        packageActivationRecovery: prepared?.routineId === nextRoutine.id && prepared.versionId === selectedVersion.id
+          ? prepared.packageActivationRecovery
+          : null,
+        lifecycleRecovery: prepared?.routineId === nextRoutine.id && prepared.versionId === selectedVersion.id
+          ? prepared.lifecycleRecovery
+          : null,
       };
       setRoutine(nextRoutine);
       setPrepared(preparedProcedure);
@@ -540,6 +812,9 @@ export function ProcedureV2Review({
       setSchedule(null);
       setInvokeReceipt(null);
       const retentionError = persistPrepared(requestOwnerScope.key, preparedProcedure);
+      setLifecycleActivationRecovery(preparedProcedure.lifecycleRecovery ?? null);
+      setLifecycleReconcileRequired(Boolean(preparedProcedure.lifecycleRecovery));
+      setPackageActivationRecovery(preparedProcedure.packageActivationRecovery ?? null);
       setNotice(retentionError
         ? `${retentionError} Keep this owner session open while using the loaded procedure.`
         : `Loaded the server-owned procedure ${nextRoutine.name}, version ${selectedVersion.version}, binding ${binding.binding_id}. No mutation was sent.`);
@@ -559,13 +834,14 @@ export function ProcedureV2Review({
     if (!active || !ownerPrincipalId || !ownerSessionId) return;
     let cancelled = false;
     const requestOwnerScope = captureOwnerScope();
+    const listGeneration = ++routineListGenerationRef.current;
     setExistingRoutines([]);
     setExistingRoutineLoading(true);
     setExistingRoutineError(null);
     void procedureV2Api.listRoutines()
-      .then((values) => { if (!cancelled && ownerRequestIsCurrent(requestOwnerScope)) setExistingRoutines(values); })
-      .catch((cause) => { if (!cancelled && ownerRequestIsCurrent(requestOwnerScope)) setExistingRoutineError(errorMessage(cause)); })
-      .finally(() => { if (!cancelled && ownerRequestIsCurrent(requestOwnerScope)) setExistingRoutineLoading(false); });
+      .then((values) => { if (!cancelled && listGeneration === routineListGenerationRef.current && ownerRequestIsCurrent(requestOwnerScope)) setExistingRoutines(values); })
+      .catch((cause) => { if (!cancelled && listGeneration === routineListGenerationRef.current && ownerRequestIsCurrent(requestOwnerScope)) setExistingRoutineError(errorMessage(cause)); })
+      .finally(() => { if (!cancelled && listGeneration === routineListGenerationRef.current && ownerRequestIsCurrent(requestOwnerScope)) setExistingRoutineLoading(false); });
     return () => { cancelled = true; };
   }, [active, ownerPrincipalId, ownerSessionId]);
 
@@ -587,7 +863,8 @@ export function ProcedureV2Review({
   useEffect(() => {
     if (preparedResetKeyRef.current === preparedKey) return;
     preparedResetKeyRef.current = preparedKey;
-    setPrepared(readPrepared(preparedKey));
+    const restoredPrepared = readPrepared(preparedKey, ownerPrincipalId, ownerSessionId);
+    setPrepared(restoredPrepared);
     setTasks([]);
     setTaskLoadError(null);
     setSourceTaskId("");
@@ -630,7 +907,11 @@ export function ProcedureV2Review({
     setBusy(false);
     setError(null);
     setNotice(null);
-  }, [pendingKey, preparedKey]);
+    setLifecycleReconcileRequired(false);
+    setLifecycleActivationRecovery(restoredPrepared?.lifecycleRecovery ?? null);
+    setPackageActivationRecovery(restoredPrepared?.packageActivationRecovery ?? null);
+    setLifecycleReconcileRequired(Boolean(restoredPrepared?.lifecycleRecovery));
+  }, [ownerPrincipalId, ownerSessionId, pendingKey, preparedKey]);
 
   useEffect(() => {
     const pendingRoutineId = pending && "routineId" in pending ? pending.routineId : null;
@@ -650,6 +931,9 @@ export function ProcedureV2Review({
         const refreshedPrepared = preparedFromRoutine(nextRoutine, prepared, version);
         if (refreshedPrepared) {
           setPrepared(refreshedPrepared);
+          setLifecycleActivationRecovery(refreshedPrepared.lifecycleRecovery ?? null);
+          setLifecycleReconcileRequired(Boolean(refreshedPrepared.lifecycleRecovery));
+          setPackageActivationRecovery(refreshedPrepared.packageActivationRecovery ?? null);
           persistPrepared(requestOwnerScope.key, refreshedPrepared);
         } else {
           setPrepared((current) => current ?? {
@@ -744,6 +1028,9 @@ export function ProcedureV2Review({
     setPackageApproval(null);
     setSchedule(null);
     setInvokeReceipt(null as never);
+    setLifecycleReconcileRequired(false);
+    setLifecycleActivationRecovery(null);
+    setPackageActivationRecovery(null);
   };
 
   const handlePendingFailure = (kind: PendingProcedureAction["kind"], cause: unknown, requestOwnerScope: OwnerRequestScope, pendingStorageKey: string | null) => {
@@ -865,6 +1152,10 @@ export function ProcedureV2Review({
   };
 
   const previewProcedure = async () => {
+    if (unresolvedRecovery) {
+      setError("Refresh authority to reconcile the retained procedure outcome before preparing another procedure.");
+      return;
+    }
     if (pending) {
       setError("An exact governed request is awaiting reconciliation. Retry it before preparing another procedure.");
       return;
@@ -901,7 +1192,9 @@ export function ProcedureV2Review({
       setError(`Preparation was blocked by the server.${next.recovery_action ? ` Recovery: ${next.recovery_action}.` : ""}`);
       return;
     }
-    if (!next.routine_id || !next.install_job_id || !next.approval_id || !next.version) {
+    if (!next.routine_id || !next.install_job_id || !next.approval_id || !next.version || !next.version_id
+      || typeof next.install_approval_status !== "string" || !next.install_approval_status
+      || typeof next.install_approval_expires_at !== "string" || !next.install_approval_expires_at) {
       throw new Error("The server did not return the exact install job approval for this prepared procedure.");
     }
     const preparedProcedure: PreparedProcedure = {
@@ -916,6 +1209,8 @@ export function ProcedureV2Review({
       installApprovalStatus: next.install_approval_status,
       installApprovalExpiresAt: next.install_approval_expires_at,
       installRecoveryAction: next.install_recovery_action,
+      packageActivationRecovery: null,
+      lifecycleRecovery: null,
     };
     const retentionError = persistPrepared(requestOwnerScope.key, preparedProcedure);
     if (retentionError) throw new Error(retentionError);
@@ -925,11 +1220,20 @@ export function ProcedureV2Review({
       throw new Error("The prepared routine readback is not bound to the current operator.");
     }
     const readbackVersion = nextRoutine.versions.find((candidate) => candidate.version === preparedProcedure.version);
-    if (nextRoutine.id !== preparedProcedure.routineId || !readbackVersion || readbackVersion.routine_id !== preparedProcedure.routineId) {
+    if (nextRoutine.id !== preparedProcedure.routineId
+      || !readbackVersion
+      || readbackVersion.routine_id !== preparedProcedure.routineId
+      || readbackVersion.id !== preparedProcedure.versionId
+      || readbackVersion.version !== preparedProcedure.version) {
       throw new Error("The prepared routine readback did not contain the exact server-owned version. The request remains retained for reconciliation.");
     }
     setPrepared(preparedProcedure);
     setRoutine(nextRoutine);
+    // An older list snapshot must not erase this exact mutation readback.
+    routineListGenerationRef.current += 1;
+    setExistingRoutineLoading(false);
+    setExistingRoutineError(null);
+    setExistingRoutines((current) => [nextRoutine, ...current.filter((candidate) => candidate.id !== nextRoutine.id)]);
     // Keep the exact request until both the receipt and its server-owned
     // routine binding are durable and readable. A lost GET therefore leaves a
     // safe same-key reconciliation path instead of silently losing recovery.
@@ -940,6 +1244,10 @@ export function ProcedureV2Review({
 
   const prepareProcedure = async () => {
     if (!preview) return;
+    if (unresolvedRecovery) {
+      setError("Refresh authority to reconcile the retained procedure outcome before preparing another procedure.");
+      return;
+    }
     const source_tasks = sourceRefsForRequest();
     if (!source_tasks) return;
     setBusy(true);
@@ -969,19 +1277,59 @@ export function ProcedureV2Review({
   const refreshRoutine = async () => {
     if (!prepared?.routineId) return;
     const requestOwnerScope = captureOwnerScope();
+    const expectedPrepared = prepared;
+    const expectedPackageRecovery = packageActivationRecovery;
+    const expectedLifecycleRecovery = lifecycleActivationRecovery;
     try {
-      const nextRoutine = await procedureV2Api.getRoutine(prepared.routineId);
-      if (!routineBelongsToOwner(nextRoutine, prepared.routineId, ownerPrincipalId)) {
+      const nextRoutine = await procedureV2Api.getRoutine(expectedPrepared.routineId);
+      if (!ownerRequestIsCurrent(requestOwnerScope)) return;
+      if (!routineBelongsToOwner(nextRoutine, expectedPrepared.routineId, ownerPrincipalId)) {
         throw new Error("The returned routine is not bound to the current operator.");
       }
-      if (ownerRequestIsCurrent(requestOwnerScope)) setRoutine(nextRoutine);
-      if (ownerRequestIsCurrent(requestOwnerScope)) {
-        const refreshedPrepared = preparedFromRoutine(nextRoutine, prepared, prepared.version);
-        if (refreshedPrepared) {
-          setPrepared(refreshedPrepared);
-          const retentionError = persistPrepared(requestOwnerScope.key, refreshedPrepared);
-          if (retentionError) setNotice(`${retentionError} Keep this owner session open while using the refreshed approval.`);
-        }
+      const refreshedPrepared = preparedFromRoutine(nextRoutine, expectedPrepared, expectedPrepared.version);
+      if (!refreshedPrepared || (expectedPrepared.versionId && refreshedPrepared.versionId !== expectedPrepared.versionId)) {
+        throw new Error("Refresh authority did not return the exact prepared routine version. No lifecycle outcome was accepted.");
+      }
+      if (expectedPackageRecovery && !packageActivationReadbackIsCurrent(nextRoutine, expectedPackageRecovery, ownerPrincipalId, ownerSessionId)) {
+        setRoutine(nextRoutine);
+        setPrepared(refreshedPrepared);
+        const retentionError = persistPrepared(requestOwnerScope.key, refreshedPrepared);
+        if (retentionError) setNotice(`${retentionError} Keep this owner session open while using the refreshed approval.`);
+        setError("Refresh authority did not prove the reviewed package activation for the exact approval, digest, version, and expected revision. No repeat activation was sent.");
+        return;
+      }
+      if (expectedLifecycleRecovery && !lifecycleMutationReadbackIsCurrent(nextRoutine, expectedLifecycleRecovery, ownerPrincipalId, ownerSessionId)) {
+        setRoutine(nextRoutine);
+        setPrepared(refreshedPrepared);
+        const retentionError = persistPrepared(requestOwnerScope.key, refreshedPrepared);
+        if (retentionError) setNotice(`${retentionError} Keep this owner session open while using the refreshed approval.`);
+        setError(`Refresh authority did not prove the requested procedure ${expectedLifecycleRecovery.action} at a newer server revision. No repeat lifecycle mutation was sent.`);
+        return;
+      }
+      setRoutine(nextRoutine);
+      const reconciledPrepared = {
+        ...refreshedPrepared,
+        packageActivationRecovery: expectedPackageRecovery ? null : refreshedPrepared.packageActivationRecovery,
+        lifecycleRecovery: expectedLifecycleRecovery ? null : refreshedPrepared.lifecycleRecovery,
+      };
+      setPrepared(reconciledPrepared);
+      const retentionError = persistPrepared(requestOwnerScope.key, reconciledPrepared);
+      if (retentionError) setNotice(`${retentionError} Keep this owner session open while using the refreshed approval.`);
+      if (expectedPackageRecovery) {
+        setPackagePreview((current) => current && current.digest === expectedPackageRecovery.digest
+          ? { ...current, status: "active", installed_package_digest: expectedPackageRecovery.digest }
+          : current);
+        setPackageApproval((current) => current?.approval_id === expectedPackageRecovery.approvalId
+          ? { ...current, status: "consumed" }
+          : current);
+        setPackageActivationRecovery(null);
+        setNotice("The reviewed package activation is confirmed by the current owner-scoped routine readback.");
+      }
+      if (expectedLifecycleRecovery) {
+        setLifecycleReconcileRequired(false);
+        setLifecycleActivationRecovery(null);
+      } else if (!expectedPackageRecovery) {
+        setLifecycleReconcileRequired(false);
       }
     } catch (cause) {
       if (ownerRequestIsCurrent(requestOwnerScope)) setError(errorMessage(cause));
@@ -993,10 +1341,32 @@ export function ProcedureV2Review({
       setError("Prepare a fixed procedure before reviewing its package.");
       return null;
     }
-    return { routineId: prepared.routineId, version: currentVersion, revision: routine.revision };
+    const selectedVersion = routine.versions.find((candidate) => candidate.version === currentVersion);
+    if (!prepared.versionId || !selectedVersion || selectedVersion.id !== prepared.versionId || selectedVersion.version !== prepared.version) {
+      setError("The selected procedure version identity is unavailable or stale. Refresh authority before sending a package mutation.");
+      return null;
+    }
+    const reviewedPackagePreview = packagePreview
+      && packagePreview.routine_id === prepared.routineId
+      && packagePreview.version === selectedVersion.version
+      ? packagePreview
+      : null;
+    return {
+      routineId: prepared.routineId,
+      versionId: selectedVersion.id,
+      version: selectedVersion.version,
+      revision: routine.revision,
+      packageDigest: selectedVersion.installed_package_digest ?? reviewedPackagePreview?.digest ?? null,
+    };
   };
 
   const previewPackage = async () => {
+    if (packageActivationRecovery || lifecycleReconcileRequired) {
+      setError(packageActivationRecovery
+        ? "The previous package activation outcome is unverified. Refresh authority before sending another package request."
+        : "The previous procedure lifecycle outcome is unverified. Refresh authority before sending another package request.");
+      return;
+    }
     const context = packageContext();
     if (!context) return;
     setBusy(true);
@@ -1012,6 +1382,12 @@ export function ProcedureV2Review({
   };
 
   const reviewPackage = async () => {
+    if (packageActivationRecovery || lifecycleReconcileRequired) {
+      setError(packageActivationRecovery
+        ? "The previous package activation outcome is unverified. Refresh authority before sending another package request."
+        : "The previous procedure lifecycle outcome is unverified. Refresh authority before sending another package request.");
+      return;
+    }
     const context = packageContext();
     if (!context || !packagePreview || packagePreview.digest !== packagePreview.installed_package_digest) {
       setError("The package preview must match the installed digest before review.");
@@ -1031,6 +1407,12 @@ export function ProcedureV2Review({
   };
 
   const prepareApproval = async () => {
+    if (packageActivationRecovery || lifecycleReconcileRequired) {
+      setError(packageActivationRecovery
+        ? "The previous package activation outcome is unverified. Refresh authority before sending another package request."
+        : "The previous procedure lifecycle outcome is unverified. Refresh authority before sending another package request.");
+      return;
+    }
     const context = packageContext();
     if (!context || !packagePreview?.review_id) return;
     setBusy(true);
@@ -1046,6 +1428,12 @@ export function ProcedureV2Review({
   };
 
   const decideApproval = async (decision: "approved" | "denied") => {
+    if (packageActivationRecovery || lifecycleReconcileRequired) {
+      setError(packageActivationRecovery
+        ? "The previous package activation outcome is unverified. Refresh authority before sending another package request."
+        : "The previous procedure lifecycle outcome is unverified. Refresh authority before sending another package request.");
+      return;
+    }
     const context = packageContext();
     if (!context || !packageApproval) return;
     setBusy(true);
@@ -1061,31 +1449,95 @@ export function ProcedureV2Review({
   };
 
   const activatePackage = async () => {
+    if (packageActivationRecovery || lifecycleReconcileRequired) {
+      setError(packageActivationRecovery
+        ? "The previous package activation outcome is unverified. Refresh authority before sending another package request."
+        : "The previous procedure lifecycle outcome is unverified. Refresh authority before sending another package request.");
+      return;
+    }
     const context = packageContext();
     if (!context || !packagePreview?.review_id || packageApproval?.status !== "approved") return;
+    if (packagePreview.routine_id !== context.routineId || packagePreview.version !== context.version
+      || !packagePreview.digest
+      || packageApproval.digest !== packagePreview.digest
+      || packageApproval.pack_id !== packagePreview.pack_id
+      || packageApproval.version !== String(context.version)) {
+      setError("Package activation is blocked until the reviewed approval, exact version, and package digest match the current routine readback.");
+      return;
+    }
+    const recoveryContext: PackageActivationRecovery = {
+      schema_version: 1,
+      routineId: context.routineId,
+      versionId: context.versionId,
+      version: context.version,
+      digest: packagePreview.digest,
+      expectedRevision: context.revision,
+      approvalId: packageApproval.approval_id,
+    };
     setBusy(true);
     setError(null);
     const requestOwnerScope = captureOwnerScope();
+    const retentionError = retainPackageActivationRecovery(recoveryContext);
+    if (retentionError) {
+      setError(`${retentionError} No package activation request was sent.`);
+      if (ownerRequestIsCurrent(requestOwnerScope)) setBusy(false);
+      return;
+    }
     try {
       const result = await procedureV2Api.activatePackage(context.routineId, context.version, context.revision, packageApproval.approval_id);
       if (!ownerRequestIsCurrent(requestOwnerScope)) return;
-      if (result.digest !== packagePreview.digest || result.status !== "active") throw new Error("Package activation could not be verified against the reviewed digest.");
-      setPackagePreview({ ...packagePreview, status: "active" });
-      setPackageApproval({ ...packageApproval, status: "consumed" });
-      await refreshRoutine();
+      if (result.digest !== recoveryContext.digest || result.status !== "active") throw new Error("Package activation returned an unverified receipt. Refresh authority before retrying.");
+      const nextRoutine = await procedureV2Api.getRoutine(context.routineId);
       if (!ownerRequestIsCurrent(requestOwnerScope)) return;
-      setNotice("The reviewed package is active. Invocation still requires a fresh goal and parameters.");
-    } catch (cause) { if (ownerRequestIsCurrent(requestOwnerScope)) setError(errorMessage(cause)); }
+      if (!packageActivationReadbackIsCurrent(nextRoutine, recoveryContext, ownerPrincipalId, ownerSessionId)) {
+        throw new Error("Package activation was accepted, but the current routine readback did not prove the exact package at a newer revision.");
+      }
+      const refreshedPrepared = preparedFromRoutine(nextRoutine, prepared, context.version);
+      if (refreshedPrepared && refreshedPrepared.versionId !== recoveryContext.versionId) {
+        throw new Error("Package activation readback returned a different prepared version. Refresh authority before retrying.");
+      }
+      setRoutine(nextRoutine);
+      if (refreshedPrepared) {
+        const reconciledPrepared = { ...refreshedPrepared, packageActivationRecovery: null };
+        setPrepared(reconciledPrepared);
+        const retentionError = persistPrepared(requestOwnerScope.key, reconciledPrepared);
+        if (retentionError) setNotice(`${retentionError} Keep this owner session open while using the refreshed approval.`);
+      }
+      setPackagePreview({ ...packagePreview, status: "active", installed_package_digest: recoveryContext.digest });
+      setPackageApproval({ ...packageApproval, status: "consumed" });
+      setPackageActivationRecovery(null);
+      setNotice("The reviewed package is active. Activate the procedure explicitly before invoking it.");
+    } catch (cause) {
+      if (ownerRequestIsCurrent(requestOwnerScope)) {
+        retainPackageActivationRecovery(recoveryContext);
+        setError("The package activation outcome could not be verified. Refresh authority before sending another activation request.");
+      }
+    }
     finally { if (ownerRequestIsCurrent(requestOwnerScope)) setBusy(false); }
   };
 
-  const runLifecycle = async (action: "install" | "pause" | "revoke" | "rollback") => {
+  const runLifecycle = async (action: LifecycleAction) => {
+    if (packageActivationRecovery) {
+      setError("The package activation outcome is unverified. Refresh authority before sending another lifecycle mutation.");
+      return;
+    }
     const context = packageContext();
     if (!context) return;
-    const exactApproval = pendingApprovals.find((approval) => approval.id === prepared?.approvalId);
-    if (action === "install" && !isCurrentInstallApproval(prepared, exactApproval?.status)) {
+    if (!ownerPrincipalId || !ownerSessionId) {
+      setError("The authenticated owner session is unavailable. No lifecycle mutation was sent.");
+      return;
+    }
+    if (lifecycleReconcileRequired) {
+      setError("The last procedure lifecycle mutation was not confirmed. Refresh authority and read back the current procedure before sending another lifecycle request.");
+      return;
+    }
+    if (action === "install" && !isCurrentInstallApproval(prepared)) {
       const recovery = prepared?.installRecoveryAction ? ` Recovery: ${prepared.installRecoveryAction}.` : " Refresh the procedure to obtain a current approval.";
       setError(`Installation is blocked until the server confirms a current approved receipt.${recovery}`);
+      return;
+    }
+    if (action === "install" && !context.packageDigest) {
+      setError("Preview the reviewed package before installing so the exact package digest can be retained for recovery.");
       return;
     }
     if (action === "revoke" && !window.confirm("Revoke this procedure permanently?")) return;
@@ -1094,24 +1546,89 @@ export function ProcedureV2Review({
       return;
     }
     if (action === "rollback" && !window.confirm(`Rollback future invocations to version ${currentVersion}?`)) return;
+    if (action === "activate" && (!routine || (routine.state !== "installed" && routine.state !== "paused") || !routinePackageMatchesVersion(routine, context.version, context.versionId))) {
+      setError("Activation is blocked until the requested version is installed, active, and matches the current server package digest. Refresh authority before retrying.");
+      return;
+    }
+    const rollbackState: LifecycleRecovery["expectedState"] | null = action === "rollback"
+      ? routine?.state === "installed" || routine?.state === "active" || routine?.state === "paused" ? routine.state : null
+      : null;
+    if (action === "rollback" && !rollbackState) {
+      setError("Rollback is blocked until the current routine state is read back as installed, active, or paused.");
+      return;
+    }
+    const lifecycleRecovery: LifecycleRecovery = {
+      schema_version: 1,
+      action,
+      ownerPrincipalId,
+      ownerSessionId,
+      routineId: context.routineId,
+      versionId: context.versionId,
+      version: context.version,
+      requestRevision: context.revision,
+      expectedState: action === "install" ? "installed" : action === "activate" ? "active" : action === "pause" ? "paused" : action === "revoke" ? "revoked" : rollbackState!,
+      approvalId: action === "install" ? prepared?.approvalId ?? null : null,
+      installJobId: action === "install" ? prepared?.installJobId ?? null : null,
+      targetVersionId: action === "rollback" ? context.versionId : null,
+      targetVersion: action === "rollback" ? context.version : null,
+      packageDigest: context.packageDigest,
+    };
     setBusy(true);
     setError(null);
     const requestOwnerScope = captureOwnerScope();
+    const retentionError = retainLifecycleRecovery(lifecycleRecovery);
+    if (retentionError) {
+      setError(`${retentionError} No lifecycle mutation was sent.`);
+      if (ownerRequestIsCurrent(requestOwnerScope)) setBusy(false);
+      return;
+    }
     try {
       const approvalId = prepared?.approvalId;
       const body = action === "install"
         ? { version: context.version, expected_routine_revision: context.revision, approval_id: approvalId! }
+        : action === "activate"
+          ? { version: context.version, expected_routine_revision: context.revision }
         : action === "rollback"
           ? { target_version: context.version, expected_routine_revision: context.revision, reason: `Operator requested rollback to version ${context.version}.` }
           : { expected_routine_revision: context.revision, reason: `Operator requested ${action}.` };
       const nextRoutine = await procedureV2Api.lifecycle(context.routineId, action, body);
       if (!ownerRequestIsCurrent(requestOwnerScope)) return;
-      if (!routineBelongsToOwner(nextRoutine, context.routineId, ownerPrincipalId)) {
+      if (!lifecycleReadbackBelongsToOwner(nextRoutine, context.routineId, ownerPrincipalId, ownerSessionId)) {
         throw new Error("The lifecycle response is not bound to the current operator.");
       }
+      if (!lifecycleMutationReadbackIsCurrent(nextRoutine, lifecycleRecovery, ownerPrincipalId, ownerSessionId)) {
+        throw new Error(`The ${action} response did not prove the requested procedure state at a newer server revision.`);
+      }
+      const refreshedPrepared = preparedFromRoutine(nextRoutine, prepared, context.version);
+      if (!refreshedPrepared || refreshedPrepared.versionId !== context.versionId) {
+        throw new Error(`The ${action} response did not include the exact server-owned procedure version.`);
+      }
+      const reconciledPrepared = { ...refreshedPrepared, lifecycleRecovery: null };
+      const clearError = persistPrepared(requestOwnerScope.key, reconciledPrepared);
       setRoutine(nextRoutine);
+      if (clearError) {
+        setPrepared({ ...reconciledPrepared, lifecycleRecovery });
+        setLifecycleReconcileRequired(true);
+        setLifecycleActivationRecovery(lifecycleRecovery);
+        setError(`${clearError} The ${action} readback was verified, but local recovery could not be cleared. Refresh authority before another mutation.`);
+        return;
+      }
+      setPrepared(reconciledPrepared);
+      setLifecycleReconcileRequired(false);
+      setLifecycleActivationRecovery(null);
       setNotice(`Procedure ${action} completed with a current server revision.`);
-    } catch (cause) { if (ownerRequestIsCurrent(requestOwnerScope)) setError(errorMessage(cause)); }
+    } catch (cause) {
+      if (ownerRequestIsCurrent(requestOwnerScope)) {
+        if (isDefinitiveLifecyclePreEffectFailure(cause)) {
+          retainLifecycleRecovery(null);
+          setError(`${errorMessage(cause)} No governed lifecycle effect was committed. Refresh authority before retrying.`);
+        } else {
+          retainLifecycleRecovery(lifecycleRecovery);
+          const label = action === "activate" ? "activation" : action;
+          setError(`The procedure ${label} outcome could not be verified. Refresh authority before sending another lifecycle mutation.`);
+        }
+      }
+    }
     finally { if (ownerRequestIsCurrent(requestOwnerScope)) setBusy(false); }
   };
 
@@ -1342,6 +1859,10 @@ export function ProcedureV2Review({
   };
 
   const startFreshProcedureRebind = () => {
+    if (unresolvedRecovery) {
+      setError("Refresh authority to reconcile the retained procedure outcome before starting a fresh preview.");
+      return;
+    }
     if (pending) {
       setError("Reconcile the retained exact request before starting a fresh rebind.");
       return;
@@ -1356,10 +1877,8 @@ export function ProcedureV2Review({
   const sourceOptions = templateId === "selected-meeting-prep" ? meetingTasks : templateId === "watch-and-public-browser" ? watchTasks : browserTasks;
   const secondOptions = templateId === "watch-and-public-browser" ? watchTasks : [];
   const exactApproval = pendingApprovals.find((approval) => approval.id === prepared?.approvalId);
-  const installApprovalStatus = prepared?.installApprovalStatus !== undefined
-    ? prepared.installApprovalStatus ?? "missing"
-    : exactApproval?.status ?? (prepared?.approvalId ? "legacy receipt" : "missing");
-  const installApprovalCurrent = isCurrentInstallApproval(prepared, exactApproval?.status);
+  const installApprovalStatus = prepared?.installApprovalStatus ?? "missing";
+  const installApprovalCurrent = isCurrentInstallApproval(prepared);
   const installApprovalNeedsFresh = installApprovalNeedsFreshRebind(prepared, installApprovalStatus, installApprovalCurrent);
 
   if (!active) return null;
@@ -1379,13 +1898,13 @@ export function ProcedureV2Review({
         <div className="font-semibold">Existing reviewed procedures</div>
         <p className="text-xs opacity-75">Load an owner/session-bound routine and its server metadata before invoking it. Selection performs read-only GETs; no install, activation, or execution is automatic.</p>
         <label>Existing reviewed procedure
-          <select aria-label="Existing reviewed procedure" className="cockpit-input mt-1 w-full" value={existingRoutineId} disabled={busy || existingRoutineLoading || Boolean(pending)} onChange={(event) => { const id = event.currentTarget.value; if (id) void loadExistingRoutine(id); else { setExistingRoutineId(""); setExistingVersionNumber(null); } }}>
+          <select aria-label="Existing reviewed procedure" className="cockpit-input mt-1 w-full" value={existingRoutineId} disabled={busy || existingRoutineLoading || Boolean(pending) || Boolean(packageActivationRecovery) || Boolean(lifecycleReconcileRequired)} onChange={(event) => { const id = event.currentTarget.value; if (id) void loadExistingRoutine(id); else { setExistingRoutineId(""); setExistingVersionNumber(null); } }}>
             <option value="">Choose an existing v2 procedure</option>
             {existingRoutineOptions.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name} · {candidate.state} · {candidate.current_version ? `current v${candidate.current_version}` : "prepared"}</option>)}
           </select>
         </label>
         {existingRoutineId && routine && existingVersionNumber !== null ? <label>Procedure version
-          <select aria-label="Existing procedure version" className="cockpit-input mt-1 w-full" value={String(existingVersionNumber)} disabled={busy || existingRoutineLoading || Boolean(pending)} onChange={(event) => void loadExistingRoutine(existingRoutineId, Number(event.currentTarget.value))}>
+          <select aria-label="Existing procedure version" className="cockpit-input mt-1 w-full" value={String(existingVersionNumber)} disabled={busy || existingRoutineLoading || Boolean(pending) || Boolean(packageActivationRecovery) || Boolean(lifecycleReconcileRequired)} onChange={(event) => void loadExistingRoutine(existingRoutineId, Number(event.currentTarget.value))}>
             {routine.versions.filter((version) => version.template_id && version.procedure_binding?.binding_id).sort((left, right) => right.version - left.version).map((version) => <option key={version.version} value={version.version}>v{version.version}{version.version === routine.current_version ? " · current" : " · available earlier version"} · {version.template_id}</option>)}
           </select>
         </label> : null}
@@ -1422,7 +1941,7 @@ export function ProcedureV2Review({
           </select>
         </label> : null}
         {eligibleTasks.length === 0 ? <div className="text-xs opacity-75">No eligible verified task is currently visible for this template. Complete the leaf and its independent readback first.</div> : null}
-        <button type="button" className="cockpit-feedback-button justify-self-start" disabled={busy || Boolean(pending) || !ownerPrincipalId || !ownerSessionId} onClick={() => void previewProcedure()}>{busy && !preview ? "Preparing preview…" : "Preview fixed procedure"}</button>
+        <button type="button" className="cockpit-feedback-button justify-self-start" disabled={busy || Boolean(pending) || unresolvedRecovery || !ownerPrincipalId || !ownerSessionId} onClick={() => void previewProcedure()}>{busy && !preview ? "Preparing preview…" : "Preview fixed procedure"}</button>
         {preview ? <div className="rounded border border-white/10 bg-black/20 p-3 text-xs" role="region" aria-label="Procedure preview">
           <div className="font-semibold">{procedureTemplateLabel(preview.template_id)} · preview</div>
           <div className="mt-1 break-all font-mono">Digest: {preview.preview_digest}</div>
@@ -1430,7 +1949,7 @@ export function ProcedureV2Review({
           <div>Fixed limits: {preview.plan.limits.max_steps} steps · {preview.plan.limits.max_total_seconds}s · verifier {preview.plan.verifier}</div>
           <div className="mt-2">Steps: {preview.plan.steps.map((step) => `${step.step_id} (${step.capability_id})`).join(" → ")}</div>
           <div>Source proof: {preview.source_refs.map((source) => `${source.task_id} rev ${source.task_revision}`).join(" · ") || "unavailable"}</div>
-          <div className="mt-2 flex flex-wrap gap-2"><button type="button" className="cockpit-feedback-button" disabled={busy || Boolean(pending)} onClick={() => void prepareProcedure()}>Prepare this reviewed version</button><button type="button" className="cockpit-feedback-button" disabled={busy} onClick={() => { setPreview(null); setPreviewRequestKey(newProcedureRequestKey("procedure-preview")); }}>Discard preview</button></div>
+          <div className="mt-2 flex flex-wrap gap-2"><button type="button" className="cockpit-feedback-button" disabled={busy || Boolean(pending) || unresolvedRecovery} onClick={() => void prepareProcedure()}>Prepare this reviewed version</button><button type="button" className="cockpit-feedback-button" disabled={busy || unresolvedRecovery} onClick={() => { setPreview(null); setPreviewRequestKey(newProcedureRequestKey("procedure-preview")); }}>Discard preview</button></div>
         </div> : null}
       </div>
 
@@ -1439,13 +1958,18 @@ export function ProcedureV2Review({
         <div className="text-xs">Binding <span className="font-mono">{prepared.bindingId}</span> · routine <span className="font-mono">{prepared.routineId}</span> · revision {routine.revision} · state {routine.state} · package {routine.package?.status ?? "unknown"}</div>
         {routine.state === "revoked" ? <div className="rounded border border-red-500/40 p-2" role="alert">This procedure is revoked permanently. Prepare a new version from a fresh verified source.</div> : null}
         <div className="flex flex-wrap gap-2">
-          <button type="button" className="cockpit-feedback-button" disabled={busy || routine.state === "revoked"} onClick={() => void previewPackage()}>Preview reviewed package</button>
-          {routine.state === "prepared" ? <button type="button" className="cockpit-feedback-button" disabled={busy || !installApprovalCurrent} onClick={() => void runLifecycle("install")}>Install with exact approval</button> : null}
-          {routine.state !== "revoked" ? <button type="button" className="cockpit-feedback-button" disabled={busy} onClick={() => void runLifecycle("pause")}>Pause future invocations</button> : null}
-          {routine.state !== "revoked" ? <button type="button" className="cockpit-feedback-button" disabled={busy} onClick={() => void runLifecycle("revoke")}>Revoke permanently</button> : null}
-          {existingRoutineId && routine.state !== "revoked" && existingVersionNumber !== null && routineCurrentVersion !== null && existingVersionNumber !== routineCurrentVersion ? <button type="button" className="cockpit-feedback-button" disabled={busy} onClick={() => void runLifecycle("rollback")}>Rollback future invocations to version {existingVersionNumber}</button> : null}
+          <button type="button" className="cockpit-feedback-button" disabled={busy || routine.state === "revoked" || Boolean(packageActivationRecovery) || lifecycleReconcileRequired} onClick={() => void previewPackage()}>Preview reviewed package</button>
+          {routine.state === "prepared" ? <button type="button" className="cockpit-feedback-button" disabled={busy || !installApprovalCurrent || lifecycleReconcileRequired || Boolean(packageActivationRecovery)} onClick={() => void runLifecycle("install")}>Install with exact approval</button> : null}
+          {(routine.state === "installed" || routine.state === "paused") && routinePackageMatchesVersion(routine, currentVersion, prepared?.versionId) ? <button type="button" className="cockpit-feedback-button" disabled={busy || lifecycleReconcileRequired || Boolean(packageActivationRecovery)} onClick={() => void runLifecycle("activate")}>{routine.state === "paused" ? "Resume procedure" : "Activate procedure"}</button> : null}
+          {routine.state !== "revoked" ? <button type="button" className="cockpit-feedback-button" disabled={busy || lifecycleReconcileRequired || Boolean(packageActivationRecovery)} onClick={() => void runLifecycle("pause")}>Pause future invocations</button> : null}
+          {routine.state !== "revoked" ? <button type="button" className="cockpit-feedback-button" disabled={busy || lifecycleReconcileRequired || Boolean(packageActivationRecovery)} onClick={() => void runLifecycle("revoke")}>Revoke permanently</button> : null}
+          {existingRoutineId && routine.state !== "revoked" && existingVersionNumber !== null && routineCurrentVersion !== null && existingVersionNumber !== routineCurrentVersion ? <button type="button" className="cockpit-feedback-button" disabled={busy || lifecycleReconcileRequired || Boolean(packageActivationRecovery)} onClick={() => void runLifecycle("rollback")}>Rollback future invocations to version {existingVersionNumber}</button> : null}
           <button type="button" className="cockpit-feedback-button" disabled={busy} onClick={() => void refreshRoutine()}>Refresh authority</button>
         </div>
+        {lifecycleReconcileRequired ? <div className="rounded border border-amber-500/40 p-2 text-xs" role="alert">The last lifecycle request may have reached the server, but its readback was unavailable. Refresh authority before trying another lifecycle action; the client will not send an automatic duplicate.</div> : null}
+        {lifecycleActivationRecovery ? <div className="rounded border border-amber-500/40 p-2 text-xs" role="alert">Procedure {lifecycleActivationRecovery.action} is unverified for version <span className="font-mono">{lifecycleActivationRecovery.versionId}</span> at request revision {lifecycleActivationRecovery.requestRevision}. Refresh authority before trying another lifecycle action.</div> : null}
+        {packageActivationRecovery ? <div className="rounded border border-amber-500/40 p-2 text-xs" role="alert">Package activation is unverified. Approval <span className="font-mono">{packageActivationRecovery.approvalId}</span>, version <span className="font-mono">{packageActivationRecovery.versionId}</span>, digest <span className="font-mono">{packageActivationRecovery.digest}</span>, and expected revision {packageActivationRecovery.expectedRevision} are retained. Refresh authority before any repeat mutation.</div> : null}
+        {(routine.state === "installed" || routine.state === "paused") && routine.package?.status === "active" && !routinePackageMatchesVersion(routine, currentVersion, prepared?.versionId) ? <div className="rounded border border-amber-500/40 p-2 text-xs" role="alert">Activation is blocked because the current routine package digest does not match the requested installed version. Refresh authority before retrying.</div> : null}
         {routine.state === "prepared" ? <div className="grid gap-2 rounded border border-amber-500/40 p-2 text-xs">
           <div>Installation is bound to the server-created job and approval returned with this preparation. The global Pending approvals list is only a review surface; this card never accepts an arbitrary approval ID.</div>
           <div role="status">Install job <span className="font-mono">{prepared.installJobId}</span> · exact approval <span className="font-mono">{prepared.approvalId}</span> · server status {installApprovalStatus} {prepared.installApprovalExpiresAt ? `· expires ${formatTime(prepared.installApprovalExpiresAt)}` : ""}{exactApproval ? ` · pending-list status ${exactApproval.status}` : " · retained for this owner session; it may no longer appear in the global pending list"}</div>
@@ -1463,12 +1987,13 @@ export function ProcedureV2Review({
           <div>Authority: {packagePreview.manifest.authority.tools.length} tool(s), {packagePreview.manifest.authority.filesystem.length} filesystem path(s), network {packagePreview.manifest.authority.network ? "enabled" : "disabled"}, {packagePreview.manifest.authority.secrets.length} secret(s)</div>
           <div>Package status: {packagePreview.status}{packagePreview.review_id ? ` · review ${packagePreview.review_id}` : ""}</div>
           <div className="mt-2 flex flex-wrap gap-2">
-            {packagePreview.digest === packagePreview.installed_package_digest && !packagePreview.review_id ? <button type="button" className="cockpit-feedback-button" disabled={busy} onClick={() => void reviewPackage()}>Record package review</button> : null}
-            {packagePreview.review_id && !packageApproval ? <button type="button" className="cockpit-feedback-button" disabled={busy} onClick={() => void prepareApproval()}>Prepare activation approval</button> : null}
-            {packageApproval?.status === "pending" ? <><button type="button" className="cockpit-feedback-button" disabled={busy} onClick={() => void decideApproval("approved")}>Approve activation</button><button type="button" className="cockpit-feedback-button" disabled={busy} onClick={() => void decideApproval("denied")}>Deny activation</button></> : null}
-            {packageApproval?.status === "approved" ? <button type="button" className="cockpit-feedback-button" disabled={busy} onClick={() => void activatePackage()}>Activate reviewed package</button> : null}
+            {packagePreview.digest === packagePreview.installed_package_digest && !packagePreview.review_id ? <button type="button" className="cockpit-feedback-button" disabled={busy || Boolean(packageActivationRecovery) || lifecycleReconcileRequired} onClick={() => void reviewPackage()}>Record package review</button> : null}
+            {packagePreview.review_id && !packageApproval ? <button type="button" className="cockpit-feedback-button" disabled={busy || Boolean(packageActivationRecovery) || lifecycleReconcileRequired} onClick={() => void prepareApproval()}>Prepare activation approval</button> : null}
+            {packageApproval?.status === "pending" ? <><button type="button" className="cockpit-feedback-button" disabled={busy || Boolean(packageActivationRecovery) || lifecycleReconcileRequired} onClick={() => void decideApproval("approved")}>Approve activation</button><button type="button" className="cockpit-feedback-button" disabled={busy || Boolean(packageActivationRecovery) || lifecycleReconcileRequired} onClick={() => void decideApproval("denied")}>Deny activation</button></> : null}
+            {packageApproval?.status === "approved" ? <button type="button" className="cockpit-feedback-button" disabled={busy || Boolean(packageActivationRecovery) || lifecycleReconcileRequired} onClick={() => void activatePackage()}>Activate reviewed package</button> : null}
           </div>
           {packageApproval ? <div className="mt-2 rounded bg-black/20 p-2" role="status">Activation approval {packageApproval.status}: <span className="font-mono">{packageApproval.approval_id}</span></div> : null}
+          {routine.state === "installed" && packagePreview.status === "active" ? <div className="mt-2 rounded border border-amber-500/40 p-2" role="status">The package is active, but the procedure is still installed. Activate the procedure above before invoking or scheduling it.</div> : null}
           {packagePreview.digest !== packagePreview.installed_package_digest ? <div className="mt-2 rounded border border-amber-500/40 p-2" role="alert">Package digest drifted. Refresh the routine before reviewing or activating.</div> : null}
         </div> : null}
       </div> : null}

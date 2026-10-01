@@ -105,6 +105,10 @@ from src.workflows.procedure_service import (
     ProcedureV2PreviewRequest,
     ProcedureV2ScheduleRequest,
     ProcedureV2Service,
+    V2InvocationDescriptor,
+    _proof_digest,
+    _plan_step_input_digests,
+    _validated_immutable_step_inputs,
 )
 
 
@@ -1808,6 +1812,29 @@ class RoutineService:
             owner_session_id=owner_session_id,
         )
 
+    async def validate_v2_invocation_authority(
+        self,
+        routine_id: str,
+        version_number: int,
+        *,
+        owner_principal_id: str,
+        owner_session_id: str,
+        goal_id: str,
+        expected_goal_revision: int,
+        parameters: Mapping[str, Any],
+        invocation_uuid: str,
+    ) -> V2InvocationDescriptor:
+        return await self._procedure_v2().validate_v2_invocation_authority(
+            routine_id,
+            version_number,
+            owner_principal_id=owner_principal_id,
+            owner_session_id=owner_session_id,
+            goal_id=goal_id,
+            expected_goal_revision=expected_goal_revision,
+            parameters=parameters,
+            invocation_uuid=invocation_uuid,
+        )
+
     async def _routine(self, routine_id: str, owner_principal_id: str) -> GuardianRoutine:
         async with db_engine.get_session() as db:
             row = (
@@ -2282,7 +2309,20 @@ class RoutineService:
     ) -> dict[str, Any]:
         """Revalidate source goal/provenance before a package review mutation."""
 
-        provenance = _safe_routine_provenance(_load(version.source_provenance_json, {}))
+        raw_provenance = _load(version.source_provenance_json, {})
+        if (
+            isinstance(raw_provenance, Mapping)
+            and type(raw_provenance.get("schema_version")) is int
+            and raw_provenance.get("schema_version") == 2
+        ):
+            return await self._assert_v2_routine_source_current(
+                version,
+                raw_provenance,
+                owner_principal_id=owner_principal_id,
+                owner_session_id=owner_session_id,
+            )
+
+        provenance = _safe_routine_provenance(raw_provenance if isinstance(raw_provenance, Mapping) else {})
         goal_id = str(provenance.get("goal_id") or "").strip()
         try:
             goal_revision = int(provenance.get("goal_revision") or 0)
@@ -2358,6 +2398,110 @@ class RoutineService:
                 or int(watch.get("plan_revision") or 0) != plan_revision
             ):
                 raise RoutineError("routine_source_watch_stale")
+        return provenance
+
+    async def _assert_v2_routine_source_current(
+        self,
+        version: GuardianRoutineVersion,
+        raw_provenance: Mapping[str, Any],
+        *,
+        owner_principal_id: str,
+        owner_session_id: str,
+    ) -> dict[str, Any]:
+        """Revalidate immutable v2 source proof without applying the v1 shape.
+
+        A v2 version has no legacy ``plan_revision`` or top-level source task
+        fields.  Re-resolve its persisted source references through the native
+        procedure verifier, then check the exact persisted plan/proof digests
+        before deriving the current goal lineage for the package lifecycle.
+        """
+
+        template_id = raw_provenance.get("template_id")
+        source_refs = raw_provenance.get("source_refs")
+        if not isinstance(template_id, str) or not template_id.strip() or not isinstance(source_refs, list):
+            raise RoutineError("routine_source_proof_stale")
+        if not source_refs or len(source_refs) > 2 or any(not isinstance(item, Mapping) for item in source_refs):
+            raise RoutineError("routine_source_proof_stale")
+
+        try:
+            source_tasks = [
+                {
+                    "task_id": str(item["task_id"]),
+                    "expected_revision": item["task_revision"],
+                }
+                for item in source_refs
+            ]
+            request = ProcedureV2PreviewRequest.model_validate(
+                {
+                    "template_id": template_id,
+                    "source_tasks": source_tasks,
+                    "name": "routine-source-revalidation",
+                    "idempotency_key": f"routine-source-revalidation:{version.id}",
+                }
+            )
+            resolved = await self._procedure_v2()._resolve_sources(
+                request,
+                owner_principal_id=owner_principal_id,
+                owner_session_id=owner_session_id,
+                copy_browser_inputs=False,
+            )
+            plan = validate_procedure_plan(raw_provenance.get("plan") or {})
+            _validated_immutable_step_inputs(
+                raw_provenance.get("immutable_step_inputs"),
+                resolved["spec"],
+                expected_step_input_digests=_plan_step_input_digests(plan),
+            )
+            expected_plan_digest = plan_digest(plan)
+            if str(raw_provenance.get("plan_digest") or "").lower() != expected_plan_digest:
+                raise RoutineError("routine_source_proof_stale")
+            if plan_digest(resolved["plan"]) != expected_plan_digest:
+                raise RoutineError("routine_source_proof_stale")
+            if str(resolved["spec"].template_id) != template_id:
+                raise RoutineError("routine_source_proof_stale")
+            if _dump(resolved["source_refs"]) != _dump(source_refs):
+                raise RoutineError("routine_source_proof_stale")
+            if str(raw_provenance.get("source_proof_digest") or "").lower() != _proof_digest(
+                resolved["source_refs"], plan
+            ):
+                raise RoutineError("routine_source_proof_stale")
+            expected_capability_versions = [
+                step.capability_version for step in resolved["spec"].steps
+            ]
+            if raw_provenance.get("capability_versions") != expected_capability_versions:
+                raise RoutineError("routine_source_proof_stale")
+        except RoutineError:
+            raise
+        except Exception as exc:
+            raise RoutineError("routine_source_proof_stale") from exc
+
+        goal_id = str(resolved.get("goal_id") or "").strip()
+        try:
+            goal_revision = int(resolved.get("goal_revision") or 0)
+        except (TypeError, ValueError, OverflowError):
+            goal_revision = 0
+        if not goal_id or goal_revision < 1:
+            raise RoutineError("routine_source_goal_stale")
+        async with db_engine.get_session() as db:
+            goal = (
+                await db.execute(
+                    select(Goal).where(
+                        Goal.id == goal_id,
+                        Goal.owner_principal_id == owner_principal_id,
+                        Goal.owner_session_id == owner_session_id,
+                    )
+                )
+            ).scalars().first()
+            if (
+                goal is None
+                or int(goal.revision or 0) != goal_revision
+                or str(getattr(goal.status, "value", goal.status) or "") != "active"
+            ):
+                raise RoutineError("routine_source_goal_stale")
+
+        provenance = _safe_routine_provenance(raw_provenance)
+        provenance["schema_version"] = 2
+        provenance["goal_id"] = goal_id
+        provenance["goal_revision"] = goal_revision
         return provenance
 
     @staticmethod

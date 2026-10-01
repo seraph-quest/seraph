@@ -90,8 +90,11 @@ High-risk strategic wording in this status page remains governed by [19. Strateg
   fences, exact unknown-request retry, native readbacks, explicit
   `no_learning`, quiet-hours and finite goal-budget admission, and CPU-host
   optional-dependency behavior are part of the target. This remains a
-  branch-labelled target: focused tests/builds do not establish native leaf,
-  managed runtime, live provider/account, or production proof. See [Current
+  branch-labelled target: October 1 managed CPU-host public-browser execution
+  and twelve native vertical tests establish bounded mechanical execution,
+  and live response-loss recovery passed independent review and focused
+  validation. Live Calendar/model usefulness and production proof remain
+  unverified. See [Current
   App Guide](./12-current-app-guide.md#reviewed-procedures-v2-m6-889-branch-local-target).
 - [ ] Bounded calendar meeting preparation adds write-only encrypted setup, verified calendar selection, finite event/model consent, a goal-linked Todo task, governed brief synthesis with two fresh event reads, and verified plaintext artifact inspection. Finite observation schedules propose deduplicated tasks for review without calling a model. This is intended post-epic behavior; reviewed PRs own implementation evidence, and live Google/model usefulness remains external-unverified without an authorized canary. See [Current App Guide](./12-current-app-guide.md#bounded-calendar-meeting-preparation).
 - [ ] Bounded public browser tasks add typed input creation, finite HTTPS navigation/extraction, a single browser-task context lane, durable action and readback receipts, and explicit no-learning outcomes through Work. Current goal budgets narrow the fixed request, action, output, and runtime limits. Local browser mechanics and production transport have separate validation receipts; authenticated browsing and general computer use remain excluded from this capability. Open milestone/epic PRs own validation until integration; see [Current App Guide](./12-current-app-guide.md#bounded-public-browser-tasks).

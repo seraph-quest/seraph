@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -33,6 +34,7 @@ from src.workflows.procedure_service import (
     _procedure_create_request_digest,
     _cleanup_unpublished_procedure_artifact,
     _preview_expiry,
+    PREPARATION_IN_FLIGHT_WINDOW,
     goal_admission_budget_snapshot,
 )
 from src.goals.contracts import GoalAdmissionBudget
@@ -42,6 +44,7 @@ from src.db import engine as db_engine
 from src.db.models import (
     Goal,
     GovernedScheduleBinding,
+    GuardianRoutine,
     GuardianRoutineVersion,
     ProcedureV2Binding,
     Session,
@@ -49,6 +52,7 @@ from src.db.models import (
     WorkBoardInputArtifact,
     WorkBoardStatus,
     WorkBoardTask,
+    WorkflowRunState,
 )
 from src.work_board.contracts import WorkBoardInputArtifactCreate, WorkBoardOwner
 from src.work_board.input_artifacts import prepare_input_artifact
@@ -338,6 +342,122 @@ async def _prepare_repository_v2_install(
     }
 
 
+async def _installed_v2_for_source_revalidation(async_db, monkeypatch, tmp_path, *, idempotency_key: str):
+    from src.approval.repository import approval_repository
+
+    prepared = await _prepare_repository_v2_install(
+        async_db,
+        monkeypatch,
+        tmp_path,
+        idempotency_key=idempotency_key,
+    )
+    approval = await approval_repository.resolve(prepared["payload"]["approval_id"], "approved")
+    assert approval is not None and approval.status == "approved"
+    installed = await prepared["routine_service"].install(
+        prepared["payload"]["routine_id"],
+        RoutineInstallRequest(
+            version=1,
+            expected_routine_revision=1,
+            approval_id=prepared["payload"]["approval_id"],
+        ),
+        owner_principal_id=prepared["owner"],
+        owner_session_id=prepared["session_id"],
+    )
+    assert installed["state"] == "installed"
+    version = await prepared["routine_service"]._version(prepared["payload"]["routine_id"], 1)
+    raw = json.loads(version.source_provenance_json)
+    resolved = {
+        "spec": get_procedure_template(raw["template_id"]),
+        "plan": validate_procedure_plan(raw["plan"]),
+        "source_refs": raw["source_refs"],
+        "goal_id": prepared["goal_id"],
+        "goal_revision": 1,
+    }
+    monkeypatch.setattr(
+        "src.workflows.procedure_service.ProcedureV2Service._resolve_sources",
+        AsyncMock(return_value=resolved),
+    )
+    return prepared, version, raw
+
+
+@pytest.mark.asyncio
+async def test_v2_package_source_revalidation_accepts_immutable_provenance(
+    async_db, monkeypatch, tmp_path
+):
+    prepared, version, _raw = await _installed_v2_for_source_revalidation(
+        async_db,
+        monkeypatch,
+        tmp_path,
+        idempotency_key="source-revalidation-positive",
+    )
+
+    observed = await prepared["routine_service"]._assert_routine_source_current(
+        version,
+        owner_principal_id=prepared["owner"],
+        owner_session_id=prepared["session_id"],
+    )
+    assert observed["schema_version"] == 2
+    assert observed["goal_id"] == prepared["goal_id"]
+    assert observed["goal_revision"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mutation",
+    ["missing_plan_digest", "tampered_source_refs", "missing_source_proof", "deleted_source_artifact"],
+)
+async def test_v2_package_source_revalidation_rejects_tampered_proof(
+    async_db, monkeypatch, tmp_path, mutation
+):
+    prepared, version, raw = await _installed_v2_for_source_revalidation(
+        async_db,
+        monkeypatch,
+        tmp_path,
+        idempotency_key=f"source-revalidation-{mutation}",
+    )
+    if mutation == "missing_plan_digest":
+        raw.pop("plan_digest", None)
+    elif mutation == "tampered_source_refs":
+        raw["source_refs"][0]["task_revision"] = int(raw["source_refs"][0]["task_revision"]) + 1
+    elif mutation == "missing_source_proof":
+        raw.pop("source_proof_digest", None)
+    else:
+        raw["source_refs"][0]["artifact_ids_and_hashes"] = []
+    version.source_provenance_json = json.dumps(raw, sort_keys=True, separators=(",", ":"))
+
+    with pytest.raises(RoutineError, match="routine_source_proof_stale"):
+        await prepared["routine_service"]._assert_routine_source_current(
+            version,
+            owner_principal_id=prepared["owner"],
+            owner_session_id=prepared["session_id"],
+        )
+
+
+@pytest.mark.asyncio
+async def test_v2_package_source_revalidation_rejects_stale_goal(
+    async_db, monkeypatch, tmp_path
+):
+    prepared, version, _raw = await _installed_v2_for_source_revalidation(
+        async_db,
+        monkeypatch,
+        tmp_path,
+        idempotency_key="source-revalidation-stale-goal",
+    )
+    async with db_engine.get_session() as db:
+        goal = (
+            await db.execute(select(Goal).where(Goal.id == prepared["goal_id"]))
+        ).scalar_one()
+        goal.revision = 2
+        await db.commit()
+
+    with pytest.raises(RoutineError, match="routine_source_goal_stale"):
+        await prepared["routine_service"]._assert_routine_source_current(
+            version,
+            owner_principal_id=prepared["owner"],
+            owner_session_id=prepared["session_id"],
+        )
+
+
 @pytest.mark.asyncio
 async def test_v2_repository_prepare_approve_install_uses_raw_provenance_digest(
     async_db,
@@ -518,6 +638,588 @@ async def test_committed_preparation_rejects_same_key_request_drift_without_reso
         )
 
     assert exc_info.value.code == "procedure_binding_conflict"
+    service._resolve_sources.assert_not_awaited()
+
+
+async def _make_preparing_v2_recovery_fixture(
+    async_db,
+    monkeypatch,
+    tmp_path,
+    *,
+    idempotency_key: str,
+    stale: bool = True,
+):
+    prepared = await _prepare_repository_v2_install(
+        async_db,
+        monkeypatch,
+        tmp_path,
+        idempotency_key=idempotency_key,
+    )
+    async with db_engine.get_session() as db:
+        binding = (
+            await db.execute(
+                select(ProcedureV2Binding).where(
+                    ProcedureV2Binding.idempotency_key == idempotency_key,
+                    ProcedureV2Binding.owner_principal_id == prepared["owner"],
+                    ProcedureV2Binding.owner_session_id == prepared["session_id"],
+                )
+            )
+        ).scalar_one()
+        binding.state = "preparing"
+        binding.version_id = None
+        binding.recovery_reason = None
+        if stale:
+            binding.created_at = datetime.now(timezone.utc) - PREPARATION_IN_FLIGHT_WINDOW - timedelta(seconds=1)
+    return prepared
+
+
+@pytest.mark.asyncio
+async def test_preparing_crash_reconciles_durable_routine_after_source_expiry(
+    async_db, monkeypatch, tmp_path
+):
+    prepared = await _make_preparing_v2_recovery_fixture(
+        async_db,
+        monkeypatch,
+        tmp_path,
+        idempotency_key="preparing-crash-recovery",
+    )
+    service = prepared["routine_service"]
+    service._resolve_sources = AsyncMock(
+        side_effect=ProcedureV2Error(
+            "procedure_source_task_not_found",
+            "expired source fixture",
+        )
+    )
+
+    replay, status_code = await service.create_from_tasks(
+        prepared["request"],
+        owner_principal_id=prepared["owner"],
+        owner_session_id=prepared["session_id"],
+    )
+
+    assert status_code == 200
+    assert replay["status"] == "prepared"
+    assert replay["routine_id"] == prepared["payload"]["routine_id"]
+    assert replay["version_id"] == prepared["payload"]["version_id"]
+    assert replay["install_job_id"] == prepared["payload"]["install_job_id"]
+    service._resolve_sources.assert_not_awaited()
+    async with db_engine.get_session() as db:
+        binding = (
+            await db.execute(
+                select(ProcedureV2Binding).where(
+                    ProcedureV2Binding.idempotency_key == prepared["request"].idempotency_key,
+                    ProcedureV2Binding.owner_principal_id == prepared["owner"],
+                    ProcedureV2Binding.owner_session_id == prepared["session_id"],
+                )
+            )
+        ).scalar_one()
+        routines = (
+            await db.execute(
+                select(GuardianRoutine).where(GuardianRoutine.id == prepared["payload"]["routine_id"])
+            )
+        ).scalars().all()
+        versions = (
+            await db.execute(
+                select(GuardianRoutineVersion).where(
+                    GuardianRoutineVersion.routine_id == prepared["payload"]["routine_id"]
+                )
+            )
+        ).scalars().all()
+    assert binding.state == "prepared"
+    assert binding.version_id == prepared["payload"]["version_id"]
+    assert len(routines) == 1
+    assert len(versions) == 1
+
+
+@pytest.mark.asyncio
+async def test_preparing_same_key_input_drift_conflicts_without_resolution(
+    async_db, monkeypatch, tmp_path
+):
+    prepared = await _make_preparing_v2_recovery_fixture(
+        async_db,
+        monkeypatch,
+        tmp_path,
+        idempotency_key="preparing-input-drift",
+    )
+    service = prepared["routine_service"]
+    service._resolve_sources = AsyncMock(side_effect=AssertionError("drift resolved source"))
+    drifted = prepared["request"].model_copy(update={"name": "Different procedure"})
+
+    with pytest.raises(ProcedureV2Error) as exc_info:
+        await service.create_from_tasks(
+            drifted,
+            owner_principal_id=prepared["owner"],
+            owner_session_id=prepared["session_id"],
+        )
+
+    assert exc_info.value.code == "procedure_binding_conflict"
+    service._resolve_sources.assert_not_awaited()
+    async with db_engine.get_session() as db:
+        binding = (
+            await db.execute(
+                select(ProcedureV2Binding).where(
+                    ProcedureV2Binding.idempotency_key == prepared["request"].idempotency_key,
+                    ProcedureV2Binding.owner_principal_id == prepared["owner"],
+                    ProcedureV2Binding.owner_session_id == prepared["session_id"],
+                )
+            )
+        ).scalar_one()
+    assert binding.state == "preparing"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mutation",
+    ["provenance", "workflow_hash", "owner", "input", "install_authority", "approval"],
+)
+async def test_preparing_crash_missing_or_mismatched_proof_blocks_without_resolution(
+    async_db, monkeypatch, tmp_path, mutation
+):
+    prepared = await _make_preparing_v2_recovery_fixture(
+        async_db,
+        monkeypatch,
+        tmp_path,
+        idempotency_key=f"preparing-proof-{mutation}",
+    )
+    async with db_engine.get_session() as db:
+        version = (
+            await db.execute(
+                select(GuardianRoutineVersion).where(
+                    GuardianRoutineVersion.routine_id == prepared["payload"]["routine_id"],
+                    GuardianRoutineVersion.version == 1,
+                )
+            )
+        ).scalar_one()
+        if mutation == "provenance":
+            version.source_provenance_json = "{}"
+        elif mutation == "workflow_hash":
+            version.workflow_sha256 = "0" * 64
+        elif mutation == "owner":
+            routine = (
+                await db.execute(
+                    select(GuardianRoutine).where(
+                        GuardianRoutine.id == prepared["payload"]["routine_id"]
+                    )
+                )
+            ).scalar_one()
+            routine.owner_session_id = "foreign-session"
+        elif mutation == "input":
+            provenance = json.loads(version.source_provenance_json)
+            provenance["plan"]["steps"][0]["typed_input_digest"] = "0" * 64
+            version.source_provenance_json = json.dumps(
+                provenance,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        elif mutation == "install_authority":
+            job = (
+                await db.execute(
+                    select(WorkflowRunState).where(
+                        WorkflowRunState.run_identity == prepared["payload"]["install_job_id"]
+                    )
+                )
+            ).scalar_one()
+            authority = json.loads(job.declared_authority_json)
+            authority["source_proof_digest"] = "0" * 64
+            job.declared_authority_json = json.dumps(authority, sort_keys=True, separators=(",", ":"))
+        else:
+            job = (
+                await db.execute(
+                    select(WorkflowRunState).where(
+                        WorkflowRunState.run_identity == prepared["payload"]["install_job_id"]
+                    )
+                )
+            ).scalar_one()
+            authority = json.loads(job.declared_authority_json)
+            authority["approval_id"] = "foreign-approval"
+            job.declared_authority_json = json.dumps(authority, sort_keys=True, separators=(",", ":"))
+
+    service = prepared["routine_service"]
+    service._resolve_sources = AsyncMock(side_effect=AssertionError("expired source was resolved"))
+    with pytest.raises(ProcedureV2Error) as exc_info:
+        await service.create_from_tasks(
+            prepared["request"],
+            owner_principal_id=prepared["owner"],
+            owner_session_id=prepared["session_id"],
+        )
+    assert exc_info.value.code == "procedure_binding_blocked"
+    service._resolve_sources.assert_not_awaited()
+    async with db_engine.get_session() as db:
+        binding = (
+            await db.execute(
+                select(ProcedureV2Binding).where(
+                    ProcedureV2Binding.idempotency_key == prepared["request"].idempotency_key,
+                    ProcedureV2Binding.owner_principal_id == prepared["owner"],
+                    ProcedureV2Binding.owner_session_id == prepared["session_id"],
+                )
+            )
+        ).scalar_one()
+    assert binding.state == "blocked"
+    assert binding.recovery_reason in {
+        "procedure_preparation_proof_missing",
+        "procedure_preparation_proof_mismatch",
+        "procedure_preparation_install_mismatch",
+        "procedure_preparation_install_missing",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing_kind", ["routine", "version", "install"])
+@pytest.mark.parametrize("stale", [False, True])
+async def test_preparing_missing_install_is_bounded_before_blocking(
+    async_db,
+    monkeypatch,
+    tmp_path,
+    missing_kind,
+    stale,
+):
+    """A retry cannot block a live writer, but stale absence is terminal."""
+
+    prepared = await _make_preparing_v2_recovery_fixture(
+        async_db,
+        monkeypatch,
+        tmp_path,
+        idempotency_key=f"preparing-missing-{missing_kind}-{stale}",
+        stale=stale,
+    )
+    async with db_engine.get_session() as db:
+        if missing_kind == "install":
+            missing = (
+                await db.execute(
+                    select(WorkflowRunState).where(
+                        WorkflowRunState.run_identity == prepared["payload"]["install_job_id"]
+                    )
+                )
+            ).scalar_one()
+        elif missing_kind == "version":
+            missing = (
+                await db.execute(
+                    select(GuardianRoutineVersion).where(
+                        GuardianRoutineVersion.routine_id == prepared["payload"]["routine_id"],
+                        GuardianRoutineVersion.version == 1,
+                    )
+                )
+            ).scalar_one()
+        else:
+            missing = (
+                await db.execute(
+                    select(GuardianRoutine).where(
+                        GuardianRoutine.id == prepared["payload"]["routine_id"]
+                    )
+                )
+            ).scalar_one()
+        await db.delete(missing)
+
+    service = prepared["routine_service"]
+    service._resolve_sources = AsyncMock(side_effect=AssertionError("preparing recovery resolved source"))
+    with pytest.raises(ProcedureV2Error) as exc_info:
+        await service.create_from_tasks(
+            prepared["request"],
+            owner_principal_id=prepared["owner"],
+            owner_session_id=prepared["session_id"],
+        )
+    if stale:
+        assert exc_info.value.code == "procedure_binding_blocked"
+        assert exc_info.value.retryable is False
+    else:
+        assert exc_info.value.code == "procedure_preparation_in_progress"
+        assert exc_info.value.retryable is True
+    service._resolve_sources.assert_not_awaited()
+    async with db_engine.get_session() as db:
+        binding = (
+            await db.execute(
+                select(ProcedureV2Binding).where(
+                    ProcedureV2Binding.idempotency_key == prepared["request"].idempotency_key,
+                    ProcedureV2Binding.owner_principal_id == prepared["owner"],
+                    ProcedureV2Binding.owner_session_id == prepared["session_id"],
+                )
+            )
+        ).scalar_one()
+    assert binding.state == ("blocked" if stale else "preparing")
+
+
+@pytest.mark.asyncio
+async def test_preparing_foreign_routine_owner_blocks_immediately(
+    async_db,
+    monkeypatch,
+    tmp_path,
+):
+    """A foreign deterministic routine is a mismatch, not a live write gap."""
+
+    prepared = await _make_preparing_v2_recovery_fixture(
+        async_db,
+        monkeypatch,
+        tmp_path,
+        idempotency_key="preparing-foreign-routine-owner",
+        stale=False,
+    )
+    async with db_engine.get_session() as db:
+        routine = (
+            await db.execute(
+                select(GuardianRoutine).where(GuardianRoutine.id == prepared["payload"]["routine_id"])
+            )
+        ).scalar_one()
+        routine.owner_session_id = "foreign-session"
+
+    service = prepared["routine_service"]
+    service._resolve_sources = AsyncMock(side_effect=AssertionError("owner mismatch resolved source"))
+    with pytest.raises(ProcedureV2Error) as exc_info:
+        await service.create_from_tasks(
+            prepared["request"],
+            owner_principal_id=prepared["owner"],
+            owner_session_id=prepared["session_id"],
+        )
+    assert exc_info.value.code == "procedure_binding_blocked"
+    service._resolve_sources.assert_not_awaited()
+    async with db_engine.get_session() as db:
+        binding = (
+            await db.execute(
+                select(ProcedureV2Binding).where(
+                    ProcedureV2Binding.idempotency_key == prepared["request"].idempotency_key,
+                    ProcedureV2Binding.owner_principal_id == prepared["owner"],
+                    ProcedureV2Binding.owner_session_id == prepared["session_id"],
+                )
+            )
+        ).scalar_one()
+    assert binding.state == "blocked"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_kind", ["job", "approval"])
+async def test_preparing_unknown_durable_read_preserves_key_until_recovery(
+    async_db,
+    monkeypatch,
+    tmp_path,
+    failure_kind,
+):
+    """Transient durable reads stay preparing and a later exact replay wins."""
+
+    prepared = await _make_preparing_v2_recovery_fixture(
+        async_db,
+        monkeypatch,
+        tmp_path,
+        idempotency_key=f"preparing-unknown-{failure_kind}",
+        stale=False,
+    )
+    service = prepared["routine_service"]
+    service._resolve_sources = AsyncMock(side_effect=AssertionError("unknown recovery resolved source"))
+    original_get_job = durable_job_repository.get_job
+    original_projection = service._v2_install_approval_projection
+    if failure_kind == "job":
+        monkeypatch.setattr(
+            durable_job_repository,
+            "get_job",
+            AsyncMock(side_effect=RuntimeError("temporary durable read failure")),
+        )
+    else:
+        service._v2_install_approval_projection = AsyncMock(
+            side_effect=RuntimeError("temporary approval read failure")
+        )
+
+    with pytest.raises(ProcedureV2Error) as exc_info:
+        await service.create_from_tasks(
+            prepared["request"],
+            owner_principal_id=prepared["owner"],
+            owner_session_id=prepared["session_id"],
+        )
+    assert exc_info.value.code == "procedure_preparation_reconciliation_unavailable"
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.retryable is True
+    service._resolve_sources.assert_not_awaited()
+
+    monkeypatch.setattr(durable_job_repository, "get_job", original_get_job)
+    service._v2_install_approval_projection = original_projection
+    replay, status_code = await service.create_from_tasks(
+        prepared["request"],
+        owner_principal_id=prepared["owner"],
+        owner_session_id=prepared["session_id"],
+    )
+    assert status_code == 200
+    assert replay["status"] == "prepared"
+    assert replay["routine_id"] == prepared["payload"]["routine_id"]
+    assert replay["version_id"] == prepared["payload"]["version_id"]
+    async with db_engine.get_session() as db:
+        binding = (
+            await db.execute(
+                select(ProcedureV2Binding).where(
+                    ProcedureV2Binding.idempotency_key == prepared["request"].idempotency_key,
+                    ProcedureV2Binding.owner_principal_id == prepared["owner"],
+                    ProcedureV2Binding.owner_session_id == prepared["session_id"],
+                )
+            )
+        ).scalar_one()
+        routines = (
+            await db.execute(
+                select(GuardianRoutine).where(GuardianRoutine.id == prepared["payload"]["routine_id"])
+            )
+        ).scalars().all()
+        versions = (
+            await db.execute(
+                select(GuardianRoutineVersion).where(
+                    GuardianRoutineVersion.routine_id == prepared["payload"]["routine_id"]
+                )
+            )
+        ).scalars().all()
+    assert binding.state == "prepared"
+    assert len(routines) == 1
+    assert len(versions) == 1
+
+
+@pytest.mark.asyncio
+async def test_preparing_same_key_writer_gap_reconciles_one_durable_winner(
+    async_db,
+    monkeypatch,
+    tmp_path,
+):
+    """A response-lost writer can finish its install while a retry is reading."""
+
+    prepared = await _make_preparing_v2_recovery_fixture(
+        async_db,
+        monkeypatch,
+        tmp_path,
+        idempotency_key="preparing-writer-gap",
+        stale=False,
+    )
+    async with db_engine.get_session() as db:
+        job = (
+            await db.execute(
+                select(WorkflowRunState).where(
+                    WorkflowRunState.run_identity == prepared["payload"]["install_job_id"]
+                )
+            )
+        ).scalar_one()
+        job_values = job.model_dump()
+        await db.delete(job)
+
+    service = prepared["routine_service"]
+    service._resolve_sources = AsyncMock(side_effect=AssertionError("writer-gap recovery resolved source"))
+    original_get_job = durable_job_repository.get_job
+    observed_missing_read = asyncio.Event()
+    release_writer = asyncio.Event()
+    inserted = False
+
+    async def writer_barrier(job_id: str):
+        nonlocal inserted
+        observed_missing_read.set()
+        await release_writer.wait()
+        if not inserted:
+            async with db_engine.get_session() as db:
+                db.add(WorkflowRunState.model_validate(job_values))
+            inserted = True
+        return await original_get_job(job_id)
+
+    monkeypatch.setattr(durable_job_repository, "get_job", writer_barrier)
+    retry_task = asyncio.create_task(
+        service.create_from_tasks(
+            prepared["request"],
+            owner_principal_id=prepared["owner"],
+            owner_session_id=prepared["session_id"],
+        )
+    )
+    await asyncio.wait_for(observed_missing_read.wait(), timeout=2)
+    async with db_engine.get_session() as db:
+        pending = (
+            await db.execute(
+                select(ProcedureV2Binding).where(
+                    ProcedureV2Binding.idempotency_key == prepared["request"].idempotency_key,
+                    ProcedureV2Binding.owner_principal_id == prepared["owner"],
+                    ProcedureV2Binding.owner_session_id == prepared["session_id"],
+                )
+            )
+        ).scalar_one()
+    assert pending.state == "preparing"
+    release_writer.set()
+    replay, status_code = await asyncio.wait_for(retry_task, timeout=5)
+    assert status_code == 200
+    assert replay["status"] == "prepared"
+    service._resolve_sources.assert_not_awaited()
+
+    monkeypatch.setattr(durable_job_repository, "get_job", original_get_job)
+    replay_again, status_code_again = await service.create_from_tasks(
+        prepared["request"],
+        owner_principal_id=prepared["owner"],
+        owner_session_id=prepared["session_id"],
+    )
+    assert status_code_again == 200
+    assert replay_again["routine_id"] == replay["routine_id"]
+    async with db_engine.get_session() as db:
+        routines = (
+            await db.execute(
+                select(GuardianRoutine).where(GuardianRoutine.id == prepared["payload"]["routine_id"])
+            )
+        ).scalars().all()
+        versions = (
+            await db.execute(
+                select(GuardianRoutineVersion).where(
+                    GuardianRoutineVersion.routine_id == prepared["payload"]["routine_id"]
+                )
+            )
+        ).scalars().all()
+        jobs = (
+            await db.execute(
+                select(WorkflowRunState).where(
+                    WorkflowRunState.run_identity == prepared["payload"]["install_job_id"]
+                )
+            )
+        ).scalars().all()
+    assert len(routines) == len(versions) == len(jobs) == 1
+
+
+@pytest.mark.asyncio
+async def test_preparing_retry_does_not_extend_created_at_deadline(
+    async_db,
+    monkeypatch,
+    tmp_path,
+):
+    """Updating a reservation cannot turn its finite recovery window into a lease."""
+
+    prepared = await _make_preparing_v2_recovery_fixture(
+        async_db,
+        monkeypatch,
+        tmp_path,
+        idempotency_key="preparing-deadline-not-extended",
+        stale=False,
+    )
+    async with db_engine.get_session() as db:
+        job = (
+            await db.execute(
+                select(WorkflowRunState).where(
+                    WorkflowRunState.run_identity == prepared["payload"]["install_job_id"]
+                )
+            )
+        ).scalar_one()
+        await db.delete(job)
+
+    service = prepared["routine_service"]
+    service._resolve_sources = AsyncMock(side_effect=AssertionError("deadline recovery resolved source"))
+    with pytest.raises(ProcedureV2Error) as first_error:
+        await service.create_from_tasks(
+            prepared["request"],
+            owner_principal_id=prepared["owner"],
+            owner_session_id=prepared["session_id"],
+        )
+    assert first_error.value.code == "procedure_preparation_in_progress"
+
+    async with db_engine.get_session() as db:
+        binding = (
+            await db.execute(
+                select(ProcedureV2Binding).where(
+                    ProcedureV2Binding.idempotency_key == prepared["request"].idempotency_key,
+                    ProcedureV2Binding.owner_principal_id == prepared["owner"],
+                    ProcedureV2Binding.owner_session_id == prepared["session_id"],
+                )
+            )
+        ).scalar_one()
+        binding.created_at = datetime.now(timezone.utc) - PREPARATION_IN_FLIGHT_WINDOW - timedelta(seconds=1)
+        binding.updated_at = datetime.now(timezone.utc)
+
+    with pytest.raises(ProcedureV2Error) as second_error:
+        await service.create_from_tasks(
+            prepared["request"],
+            owner_principal_id=prepared["owner"],
+            owner_session_id=prepared["session_id"],
+        )
+    assert second_error.value.code == "procedure_binding_blocked"
     service._resolve_sources.assert_not_awaited()
 
 
@@ -1092,6 +1794,9 @@ async def test_schedule_pins_goal_budget_digest_and_null_source_consent(async_db
             routine_id="routine-1",
             version=1,
             routine_revision=1,
+            plan_digest="plan-digest",
+            source_proof_digest="source-proof-digest",
+            installed_package_digest="package-digest",
         )
     )
     service = ProcedureV2Service(SimpleNamespace())
@@ -1115,6 +1820,7 @@ async def test_schedule_pins_goal_budget_digest_and_null_source_consent(async_db
             "idempotency_key": "schedule-pinned-budget",
         }
     )
+    service._prepare_schedule_artifact.return_value.expires_at = request.expires_at
 
     payload, status_code = await service.schedule_v2(
         "routine-1",
@@ -1128,6 +1834,8 @@ async def test_schedule_pins_goal_budget_digest_and_null_source_consent(async_db
     assert payload["goal_id"] == "goal-schedule-budget"
     assert payload["goal_revision"] == 4
     assert payload["schedule_idempotency_key"] == request.idempotency_key
+    service._prepare_schedule_artifact.assert_awaited_once()
+    assert service._prepare_schedule_artifact.await_args.kwargs["retention_deadline"] == request.expires_at
     expected_digest = goal_admission_budget_snapshot(
         goal_id="goal-schedule-budget",
         goal_revision=4,
@@ -1139,6 +1847,10 @@ async def test_schedule_pins_goal_budget_digest_and_null_source_consent(async_db
         assert job is not None and binding is not None
         action_spec = json.loads(job.action_spec_json)
         assert action_spec["consent_id"] is None
+        assert action_spec["routine_revision"] == 1
+        assert action_spec["plan_digest"] == "plan-digest"
+        assert action_spec["source_proof_digest"] == "source-proof-digest"
+        assert action_spec["package_digest"] == "package-digest"
         assert action_spec["goal_budget_digest"] == expected_digest
         assert action_spec["goal_budget_max_outstanding_jobs"] == 2
         assert action_spec["goal_budget_max_attempts"] == 2
@@ -1229,6 +1941,9 @@ async def test_schedule_known_final_authority_failure_revokes_unpublished_artifa
             routine_id="routine:schedule-publication",
             version=1,
             routine_revision=1,
+            plan_digest="plan-digest",
+            source_proof_digest="source-proof-digest",
+            installed_package_digest="package-digest",
         ),
         goal_id=goal_id,
         goal_revision=4,

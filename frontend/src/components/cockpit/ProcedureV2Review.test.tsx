@@ -1,8 +1,8 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { GoalInfo, WorkBoardTask } from "../../types";
+import type { GoalInfo, WorkBoardRoutinePackagePreview, WorkBoardTask } from "../../types";
 import * as calendarApi from "../../lib/calendar";
 import {
   procedureV2Api,
@@ -99,7 +99,7 @@ const existingRoutine = {
       installed_at: "2026-10-01T12:00:00Z",
       schema_version: 2,
       template_id: "public-browser-check",
-      procedure_binding: { binding_id: "binding-existing-1", state: "active", revision: 3, preview_digest: digest, preview_expires_at: "2026-10-01T12:15:00Z", install_job_id: "routine-install:routine-existing:v1", approval_id: null },
+      procedure_binding: { binding_id: "binding-existing-1", state: "active", revision: 3, preview_digest: digest, preview_expires_at: "2026-10-01T12:15:00Z", install_job_id: "routine-install:routine-existing:v1", approval_id: "approval-existing-1", install_approval_status: "consumed", install_approval_expires_at: "2026-10-02T12:15:00Z" },
     },
     {
       id: "version-existing-2",
@@ -116,7 +116,7 @@ const existingRoutine = {
       installed_at: "2026-10-01T12:10:00Z",
       schema_version: 2,
       template_id: "public-browser-check",
-      procedure_binding: { binding_id: "binding-existing-2", state: "active", revision: 4, preview_digest: digest, preview_expires_at: "2026-10-01T12:15:00Z", install_job_id: "routine-install:routine-existing:v2", approval_id: null },
+      procedure_binding: { binding_id: "binding-existing-2", state: "active", revision: 4, preview_digest: digest, preview_expires_at: "2026-10-01T12:15:00Z", install_job_id: "routine-install:routine-existing:v2", approval_id: "approval-existing-2", install_approval_status: "consumed", install_approval_expires_at: "2026-10-02T12:15:00Z" },
     },
   ],
   package: { status: "active", digest, review_id: "review-existing" },
@@ -389,6 +389,74 @@ describe("ProcedureV2Review", () => {
     expect(onOpenApprovals).toHaveBeenCalledWith("approval-pending");
   });
 
+  it("does not let a pending-list approval override the server approval status", async () => {
+    const serverPendingRoutine = {
+      ...existingRoutine,
+      state: "prepared",
+      revision: 6,
+      current_version: 1,
+      package: { status: "not_installed", digest: null, review_id: null },
+      versions: existingRoutine.versions.map((version) => version.version === 1
+        ? {
+          ...version,
+          installed_package_digest: null,
+          installed_at: null,
+          procedure_binding: {
+            ...version.procedure_binding,
+            state: "prepared",
+            revision: 6,
+            approval_id: "approval-server",
+            install_approval_status: "pending",
+            install_approval_expires_at: "2026-10-02T12:15:00Z",
+          },
+        }
+        : version),
+    } as ProcedureV2Routine;
+    const lifecycle = vi.spyOn(procedureV2Api, "lifecycle");
+    vi.spyOn(procedureV2Api, "listRoutines").mockResolvedValue([serverPendingRoutine]);
+    vi.spyOn(procedureV2Api, "getRoutine").mockResolvedValue(serverPendingRoutine);
+
+    render(<ProcedureV2Review ownerPrincipalId="operator:one" ownerSessionId="session-1" goals={[goal]} pendingApprovals={[{ id: "approval-server", status: "approved", tool_name: "guardian:routine-install", summary: "Stale list approval" }]} />);
+    fireEvent.change(await screen.findByLabelText("Existing reviewed procedure"), { target: { value: serverPendingRoutine.id } });
+    expect(await screen.findByText(/pending-list status approved/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Install with exact approval" })).toBeDisabled();
+    expect(lifecycle).not.toHaveBeenCalled();
+  });
+
+  it("keeps the fresh-procedure gate and retained recovery when preview is unresolved", async () => {
+    const installedRoutine = { ...existingRoutine, state: "installed", revision: 7, current_version: 2 } as ProcedureV2Routine;
+    const recovery = {
+      schema_version: 1,
+      routineId: installedRoutine.id,
+      versionId: "version-existing-2",
+      version: 2,
+      digest,
+      expectedRevision: 7,
+      approvalId: "package-approval-2",
+    };
+    const previewCall = vi.spyOn(procedureV2Api, "previewFromTasks");
+    vi.spyOn(procedureV2Api, "listRoutines").mockResolvedValue([installedRoutine]);
+    vi.spyOn(procedureV2Api, "getRoutine").mockResolvedValue(installedRoutine);
+    window.sessionStorage.setItem("seraph.procedure-v2.prepared:operator%3Aone:session-1", JSON.stringify({
+      schema_version: 1,
+      routineId: installedRoutine.id,
+      bindingId: "binding-existing-2",
+      revision: 4,
+      version: 2,
+      versionId: "version-existing-2",
+      installJobId: "install-2",
+      approvalId: "approval-install-2",
+      packageActivationRecovery: recovery,
+    }));
+
+    render(<ProcedureV2Review ownerPrincipalId="operator:one" ownerSessionId="session-1" goals={[goal]} />);
+    await screen.findByText(/Package activation is unverified/);
+    const previewButton = screen.getByRole("button", { name: "Preview fixed procedure" });
+    expect(previewButton).toBeDisabled();
+    expect(JSON.parse(window.sessionStorage.getItem("seraph.procedure-v2.prepared:operator%3Aone:session-1") ?? "null")).toMatchObject({ packageActivationRecovery: recovery });
+    expect(previewCall).not.toHaveBeenCalled();
+  });
+
   it("retains an unknown preparation body by owner session and retries the exact key after remount", async () => {
     vi.spyOn(procedureV2Api, "listSourceTasks").mockResolvedValue([{
       task_id: sourceTask.task_id,
@@ -416,6 +484,8 @@ describe("ProcedureV2Review", () => {
       preview_expires_at: preview.expires_at,
       install_job_id: "routine-install:routine-1:v1",
       approval_id: "approval-install-1",
+      install_approval_status: "pending",
+      install_approval_expires_at: "2026-10-02T12:15:00Z",
     };
     const prepareCall = vi.spyOn(procedureV2Api, "prepareFromTasks")
       .mockRejectedValueOnce(new ProcedureV2ApiError(503, { code: "procedure_preparation_unknown", message: "Preparation outcome is unknown", recovery_action: "reconcile_preparation", retryable: true, binding_id: "binding-1", audit_receipt_id: null }))
@@ -473,6 +543,8 @@ describe("ProcedureV2Review", () => {
       preview_expires_at: preview.expires_at,
       install_job_id: "install-readback",
       approval_id: "approval-readback",
+      install_approval_status: "pending",
+      install_approval_expires_at: "2026-10-02T12:15:00Z",
     };
     const preparedRoutine = {
       id: "routine-readback",
@@ -545,6 +617,40 @@ describe("ProcedureV2Review", () => {
     expect(window.sessionStorage.getItem("seraph.procedure-v2.prepared:operator%3Aone:session-1")).not.toBeNull();
   });
 
+  it("does not correlate preparation by numeric version when the server returns a different version id", async () => {
+    vi.spyOn(procedureV2Api, "listSourceTasks").mockResolvedValue([{
+      task_id: sourceTask.task_id,
+      title: sourceTask.title,
+      status: sourceTask.status,
+      capability_id: sourceTask.capability_id,
+      goal_id: sourceTask.goal_id,
+      goal_revision: sourceTask.goal_revision,
+      task_revision: sourceTask.task_revision,
+      readback_status: sourceTask.readback_status,
+      verification_status: sourceTask.verification_status,
+    }]);
+    vi.spyOn(procedureV2Api, "previewFromTasks").mockResolvedValue(preview);
+    vi.spyOn(procedureV2Api, "prepareFromTasks").mockResolvedValue({
+      status: "prepared", binding_id: "binding-exact", routine_id: "routine-exact", version_id: "version-requested", version: 1,
+      schema_version: 2, template_id: "public-browser-check", revision: 1, request_digest: digest, preview_digest: digest,
+      preview_expires_at: preview.expires_at, install_job_id: "install-exact", approval_id: "approval-exact", install_approval_status: "pending", install_approval_expires_at: "2026-10-02T12:15:00Z",
+    });
+    vi.spyOn(procedureV2Api, "getRoutine").mockResolvedValue({
+      id: "routine-exact", owner_principal_id: "operator:one", state: "prepared", revision: 1, current_version: 1, name: "Exact identity",
+      versions: [{ id: "version-other", routine_id: "routine-exact", version: 1, workflow_sha256: digest, runbook_sha256: digest, installed_package_digest: null, source_provenance: {}, source_repository: null, source_action: null, source_issue_number: null, created_at: preview.expires_at, installed_at: null }],
+      package: { status: "not_installed", digest: null, review_id: null },
+    } as ProcedureV2Routine);
+
+    render(<ProcedureV2Review ownerPrincipalId="operator:one" ownerSessionId="session-1" selectedSourceTask={sourceTask} goals={[goal]} />);
+    fireEvent.change(screen.getByLabelText("Procedure name"), { target: { value: "Exact identity" } });
+    fireEvent.click(screen.getByRole("button", { name: "Preview fixed procedure" }));
+    await screen.findByRole("region", { name: "Procedure preview" });
+    fireEvent.click(screen.getByRole("button", { name: "Prepare this reviewed version" }));
+    expect(await screen.findByText(/prepared routine readback did not contain the exact server-owned version/i)).toBeInTheDocument();
+    expect(window.sessionStorage.getItem("seraph.procedure-v2.pending:operator%3Aone:session-1")).not.toBeNull();
+    expect(screen.queryByText("Exact identity · prepared · current v1")).not.toBeInTheDocument();
+  });
+
   it("does not apply a delayed preparation response after the owner session changes", async () => {
     vi.spyOn(procedureV2Api, "listSourceTasks").mockResolvedValue([{
       task_id: sourceTask.task_id,
@@ -568,7 +674,7 @@ describe("ProcedureV2Review", () => {
     fireEvent.click(screen.getByRole("button", { name: "Prepare this reviewed version" }));
     view.rerender(<ProcedureV2Review ownerPrincipalId="operator:one" ownerSessionId="session-2" selectedSourceTask={sourceTask} goals={[goal]} />);
     await waitFor(() => expect(screen.queryByText(/unconfirmed prepare request/)).not.toBeInTheDocument());
-    resolvePrepare({ status: "prepared", binding_id: "binding-1", routine_id: "routine-1", version_id: "version-1", version: 1, schema_version: 2, template_id: "public-browser-check", revision: 1, request_digest: digest, preview_digest: digest, preview_expires_at: preview.expires_at, install_job_id: "install-1", approval_id: "approval-1" });
+    resolvePrepare({ status: "prepared", binding_id: "binding-1", routine_id: "routine-1", version_id: "version-1", version: 1, schema_version: 2, template_id: "public-browser-check", revision: 1, request_digest: digest, preview_digest: digest, preview_expires_at: preview.expires_at, install_job_id: "install-1", approval_id: "approval-1", install_approval_status: "pending", install_approval_expires_at: "2026-10-02T12:15:00Z" });
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(screen.queryByText("binding-1")).not.toBeInTheDocument();
   });
@@ -648,6 +754,8 @@ describe("ProcedureV2Review", () => {
       preview_expires_at: preview.expires_at,
       install_job_id: "install-1",
       approval_id: "approval-1",
+      install_approval_status: "pending",
+      install_approval_expires_at: "2026-10-02T12:15:00Z",
     });
     const activeRoutine = {
       id: "routine-1",
@@ -791,6 +899,8 @@ describe("ProcedureV2Review", () => {
   });
 
   it("walks the public procedure through package governance, invocation, and finite schedule controls", async () => {
+    let resolveInitialList!: (values: ProcedureV2Routine[]) => void;
+    vi.mocked(procedureV2Api.listRoutines).mockReturnValueOnce(new Promise((resolve) => { resolveInitialList = resolve; }));
     vi.spyOn(procedureV2Api, "listSourceTasks").mockResolvedValue([{
       task_id: sourceTask.task_id,
       title: sourceTask.title,
@@ -817,6 +927,8 @@ describe("ProcedureV2Review", () => {
       preview_expires_at: preview.expires_at,
       install_job_id: "routine-install:routine-1:v1",
       approval_id: "approval-install-1",
+      install_approval_status: "approved",
+      install_approval_expires_at: "2026-10-02T12:15:00Z",
     });
     const preparedRoutine = {
       id: "routine-1",
@@ -828,15 +940,40 @@ describe("ProcedureV2Review", () => {
       versions: [{ id: "version-1", routine_id: "routine-1", version: 1, workflow_sha256: digest, runbook_sha256: digest, installed_package_digest: null, source_provenance: {}, source_repository: null, source_action: null, source_issue_number: null, created_at: preview.expires_at, installed_at: null }],
       package: { status: "not_installed", digest: null, review_id: null },
     } as ProcedureV2Routine;
-    const activeRoutine = {
+    preparedRoutine.versions[0].template_id = "public-browser-check";
+    preparedRoutine.versions[0].procedure_binding = {
+      binding_id: "binding-1",
+      revision: 1,
+      install_job_id: "routine-install:routine-1:v1",
+      approval_id: "approval-install-1",
+      install_approval_status: "approved",
+      install_approval_expires_at: "2026-10-02T12:15:00Z",
+    } as NonNullable<ProcedureV2Routine["versions"][number]["procedure_binding"]>;
+    const installedRoutine = {
       ...preparedRoutine,
-      state: "active",
-      revision: 4,
+      state: "installed",
+      revision: 2,
+      package: { status: "not_installed", digest: null, review_id: null },
+      versions: [{ ...preparedRoutine.versions[0], installed_package_digest: digest, installed_at: preview.expires_at }],
+    } as ProcedureV2Routine;
+    const packageReadyRoutine = {
+      ...preparedRoutine,
+      state: "installed",
+      // Package activation changes the external package pointer; the routine
+      // row revision remains the guarded install revision.
+      revision: 2,
       package: { status: "active", digest, review_id: "review-1" },
       versions: [{ ...preparedRoutine.versions[0], installed_package_digest: digest, installed_at: preview.expires_at }],
     } as ProcedureV2Routine;
-    vi.spyOn(procedureV2Api, "getRoutine").mockResolvedValueOnce(preparedRoutine).mockResolvedValueOnce(preparedRoutine).mockResolvedValue(activeRoutine);
-    vi.spyOn(procedureV2Api, "lifecycle").mockResolvedValue({ ...preparedRoutine, state: "installed", revision: 2, package: { status: "not_installed", digest: null, review_id: null } });
+    const activeRoutine = {
+      ...preparedRoutine,
+      state: "active",
+      revision: 3,
+      package: { status: "active", digest, review_id: "review-1" },
+      versions: [{ ...preparedRoutine.versions[0], installed_package_digest: digest, installed_at: preview.expires_at }],
+    } as ProcedureV2Routine;
+    vi.spyOn(procedureV2Api, "getRoutine").mockResolvedValueOnce(preparedRoutine).mockResolvedValueOnce(preparedRoutine).mockResolvedValue(packageReadyRoutine);
+    const lifecycle = vi.spyOn(procedureV2Api, "lifecycle").mockImplementation(async (_routineId, action) => action === "activate" ? activeRoutine : installedRoutine);
     vi.spyOn(procedureV2Api, "packagePreview").mockResolvedValue({
       routine_id: "routine-1", version: 1, pack_id: "pack-1", digest, installed_package_digest: digest, review_id: null, status: "reviewed",
       manifest: { display_name: "Public status package", summary: "Fixed browser procedure", version: "1", authority: { tools: ["browser.public-task.v1"], filesystem: [], network: false, secrets: [], approval: "operator" }, resources: { max_runtime_seconds: 300, max_artifact_bytes: 1000, max_inference_cost_microusd: 0, inference_priority: "normal" }, data_policy: { classes: ["public"], egress: ["none"] } },
@@ -860,19 +997,29 @@ describe("ProcedureV2Review", () => {
     await screen.findByRole("region", { name: "Procedure preview" });
     fireEvent.click(screen.getByRole("button", { name: "Prepare this reviewed version" }));
     await screen.findByText("binding-1");
+    expect(screen.getByRole("option", { name: "Public status check · prepared · current v1" })).toHaveValue("routine-1");
+    expect(procedureV2Api.listRoutines).toHaveBeenCalledTimes(1);
+    await act(async () => { resolveInitialList([]); });
+    expect(screen.getByRole("option", { name: "Public status check · prepared · current v1" })).toHaveValue("routine-1");
     view.unmount();
     view = render(<ProcedureV2Review ownerPrincipalId="operator:one" ownerSessionId="session-1" selectedSourceTask={sourceTask} goals={[goal]} pendingApprovals={[]} />);
     await screen.findByText("binding-1");
     expect(screen.getByText("approval-install-1")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Install with exact approval" }));
-    await waitFor(() => expect(procedureV2Api.lifecycle).toHaveBeenCalledWith("routine-1", "install", expect.objectContaining({ approval_id: "approval-install-1" })));
     fireEvent.click(screen.getByRole("button", { name: "Preview reviewed package" }));
     await screen.findByRole("region", { name: "Procedure package preview" });
+    fireEvent.click(screen.getByRole("button", { name: "Install with exact approval" }));
+    await waitFor(() => expect(procedureV2Api.lifecycle).toHaveBeenCalledWith("routine-1", "install", expect.objectContaining({ approval_id: "approval-install-1" })));
     fireEvent.click(screen.getByRole("button", { name: "Record package review" }));
     fireEvent.click(await screen.findByRole("button", { name: "Prepare activation approval" }));
     fireEvent.click(await screen.findByRole("button", { name: "Approve activation" }));
     fireEvent.click(await screen.findByRole("button", { name: "Activate reviewed package" }));
     await waitFor(() => expect(screen.getByText(/The reviewed package is active/)).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Invoke for this goal" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Activate procedure" }));
+    await waitFor(() => expect(lifecycle).toHaveBeenCalledWith("routine-1", "activate", {
+      version: 1,
+      expected_routine_revision: 2,
+    }));
     fireEvent.click(screen.getByRole("button", { name: "Invoke for this goal" }));
     await waitFor(() => expect(invokeCall).toHaveBeenCalledWith("routine-1", expect.objectContaining({ parameters: { goal_id: "goal-1", expected_goal_revision: 4 } })));
     fireEvent.change(screen.getByLabelText("Schedule expiry"), { target: { value: "2026-10-05T09:00" } });
@@ -892,6 +1039,497 @@ describe("ProcedureV2Review", () => {
     await waitFor(() => expect(scheduleControl).toHaveBeenCalledWith("schedule-binding-1", expect.objectContaining({ action: "pause", expected_binding_revision: 1 })));
   });
 
+  it("requires an explicit resume for a paused procedure and reconciles an unverified activation response", async () => {
+    const pausedRoutine = { ...existingRoutine, state: "paused" } as ProcedureV2Routine;
+    const getRoutine = vi.spyOn(procedureV2Api, "getRoutine").mockResolvedValue(pausedRoutine);
+    vi.spyOn(procedureV2Api, "listRoutines").mockResolvedValue([pausedRoutine]);
+    const lifecycle = vi.spyOn(procedureV2Api, "lifecycle").mockResolvedValue({
+      ...pausedRoutine,
+      state: "active",
+      current_version: 1,
+      revision: pausedRoutine.revision + 1,
+    });
+
+    render(<ProcedureV2Review ownerPrincipalId="operator:one" ownerSessionId="session-1" goals={[goal]} />);
+    const selector = await screen.findByLabelText("Existing reviewed procedure");
+    fireEvent.change(selector, { target: { value: pausedRoutine.id } });
+    await waitFor(() => expect(getRoutine).toHaveBeenCalledWith(pausedRoutine.id));
+    expect(await screen.findByRole("button", { name: "Resume procedure" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Invoke for this goal" })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Resume procedure" }));
+    await waitFor(() => expect(lifecycle).toHaveBeenCalledWith(pausedRoutine.id, "activate", {
+      version: 2,
+      expected_routine_revision: pausedRoutine.revision,
+    }));
+    expect(lifecycle).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText(/activation outcome could not be verified/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Resume procedure" })).toBeDisabled();
+
+    getRoutine.mockResolvedValueOnce({ ...pausedRoutine, state: "active", current_version: 2, revision: pausedRoutine.revision + 1 });
+    fireEvent.click(screen.getByRole("button", { name: "Refresh authority" }));
+    await waitFor(() => expect(getRoutine).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole("button", { name: "Resume procedure" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Invoke for this goal" })).not.toBeDisabled();
+  });
+
+  it("holds invocation after an unknown pause until an exact paused readback", async () => {
+    const activeRoutine = { ...existingRoutine, state: "active" } as ProcedureV2Routine;
+    const pausedReadback = { ...activeRoutine, state: "paused", revision: activeRoutine.revision + 1 } as ProcedureV2Routine;
+    const getRoutine = vi.spyOn(procedureV2Api, "getRoutine").mockResolvedValue(activeRoutine);
+    vi.spyOn(procedureV2Api, "listRoutines").mockResolvedValue([activeRoutine]);
+    const lifecycle = vi.spyOn(procedureV2Api, "lifecycle").mockRejectedValue(new ProcedureV2ApiError(503, {
+      code: "procedure_outcome_unknown",
+      message: "The pause receipt was lost",
+      recovery_action: "refresh_procedure",
+      retryable: true,
+      binding_id: null,
+      audit_receipt_id: null,
+    }));
+
+    render(<ProcedureV2Review ownerPrincipalId="operator:one" ownerSessionId="session-1" goals={[goal]} />);
+    fireEvent.change(await screen.findByLabelText("Existing reviewed procedure"), { target: { value: activeRoutine.id } });
+    await screen.findByRole("button", { name: "Pause future invocations" });
+    expect(screen.getByRole("button", { name: "Invoke for this goal" })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Pause future invocations" }));
+    await screen.findByText(/pause outcome could not be verified/i);
+    expect(lifecycle).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Pause future invocations" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Invoke for this goal" })).toBeDisabled();
+
+    getRoutine.mockResolvedValueOnce(pausedReadback);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh authority" }));
+    await waitFor(() => expect(getRoutine).toHaveBeenCalledTimes(2));
+    expect(await screen.findByRole("button", { name: "Resume procedure" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText(/last lifecycle request may have reached/i)).not.toBeInTheDocument());
+    expect(lifecycle).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["install", "prepared", "installed", 1, 1],
+    ["activate", "installed", "active", 2, 2],
+    ["pause", "active", "paused", 2, 2],
+    ["revoke", "active", "revoked", 2, 2],
+    ["rollback", "active", "active", 1, 2],
+  ] as const)("retains an unknown %s across a same-owner remount and reconciles only its exact readback", async (action, beforeState, afterState, targetVersion, beforeCurrentVersion) => {
+    const targetVersionId = targetVersion === 1 ? "version-existing-1" : "version-existing-2";
+    const beforeVersions = existingRoutine.versions.map((version) => version.version === 1 && action === "install"
+      ? {
+        ...version,
+        installed_package_digest: null,
+        installed_at: null,
+        procedure_binding: {
+          ...version.procedure_binding,
+          approval_id: "approval-install-1",
+          install_job_id: `install-${targetVersion}`,
+          install_approval_status: "approved",
+          install_approval_expires_at: "2026-10-02T12:15:00Z",
+        },
+      }
+      : { ...version });
+    const beforeRoutine = {
+      ...existingRoutine,
+      state: beforeState,
+      revision: 5,
+      current_version: beforeCurrentVersion,
+      versions: beforeVersions,
+      package: action === "install" ? { status: "not_installed", digest: null, review_id: null } : existingRoutine.package,
+    } as ProcedureV2Routine;
+    const afterRoutine = {
+      ...beforeRoutine,
+      state: afterState,
+      revision: 6,
+      current_version: targetVersion,
+      versions: beforeVersions.map((version) => version.id === targetVersionId
+        ? { ...version, installed_package_digest: digest, installed_at: "2026-10-01T12:20:00Z" }
+        : version),
+      package: action === "install" ? { status: "not_installed", digest: null, review_id: null } : existingRoutine.package,
+    } as ProcedureV2Routine;
+    const getRoutine = vi.spyOn(procedureV2Api, "getRoutine").mockResolvedValue(beforeRoutine);
+    vi.spyOn(procedureV2Api, "listRoutines").mockResolvedValue([beforeRoutine]);
+    const lifecycle = vi.spyOn(procedureV2Api, "lifecycle");
+    const lifecycleRecovery = {
+      schema_version: 1,
+      action,
+      ownerPrincipalId: "operator:one",
+      ownerSessionId: "session-1",
+      routineId: existingRoutine.id,
+      versionId: targetVersionId,
+      version: targetVersion,
+      requestRevision: 5,
+      expectedState: afterState,
+      approvalId: action === "install" ? "approval-install-1" : null,
+      installJobId: action === "install" ? `install-${targetVersion}` : null,
+      targetVersionId: action === "rollback" ? targetVersionId : null,
+      targetVersion: action === "rollback" ? targetVersion : null,
+      packageDigest: digest,
+    };
+    window.sessionStorage.setItem("seraph.procedure-v2.prepared:operator%3Aone:session-1", JSON.stringify({
+      schema_version: 1,
+      routineId: existingRoutine.id,
+      bindingId: targetVersionId === "version-existing-1" ? "binding-existing-1" : "binding-existing-2",
+      revision: 5,
+      version: targetVersion,
+      versionId: targetVersionId,
+      installJobId: `install-${targetVersion}`,
+      approvalId: "approval-install-1",
+      lifecycleRecovery,
+    }));
+
+    const first = render(<ProcedureV2Review ownerPrincipalId="operator:one" ownerSessionId="session-1" goals={[goal]} />);
+    await screen.findByText(new RegExp(`Procedure ${action} is unverified`));
+    expect(lifecycle).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Refresh authority" })).toBeEnabled();
+    first.unmount();
+
+    const second = render(<ProcedureV2Review ownerPrincipalId="operator:one" ownerSessionId="session-1" goals={[goal]} />);
+    await screen.findByText(new RegExp(`Procedure ${action} is unverified`));
+    expect(lifecycle).not.toHaveBeenCalled();
+    getRoutine.mockResolvedValueOnce(afterRoutine);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh authority" }));
+    await waitFor(() => expect(getRoutine).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(screen.queryByText(new RegExp(`Procedure ${action} is unverified`))).not.toBeInTheDocument());
+    expect(JSON.parse(window.sessionStorage.getItem("seraph.procedure-v2.prepared:operator%3Aone:session-1") ?? "null")).toMatchObject({ lifecycleRecovery: null });
+    expect(lifecycle).not.toHaveBeenCalled();
+    second.unmount();
+  });
+
+  it("does not clear install recovery when the readback changes its exact binding", async () => {
+    const beforeRoutine = {
+      ...existingRoutine,
+      state: "prepared",
+      revision: 5,
+      current_version: 1,
+      package: { status: "not_installed", digest: null, review_id: null },
+      versions: existingRoutine.versions.map((version) => version.version === 1
+        ? {
+          ...version,
+          installed_package_digest: null,
+          installed_at: null,
+          procedure_binding: {
+            ...version.procedure_binding,
+            state: "prepared",
+            revision: 5,
+            install_job_id: "install-exact",
+            approval_id: "approval-exact",
+            install_approval_status: "approved",
+            install_approval_expires_at: "2026-10-02T12:15:00Z",
+          },
+        }
+        : version),
+    } as ProcedureV2Routine;
+    const forgedReadback = {
+      ...beforeRoutine,
+      state: "installed",
+      revision: 6,
+      versions: beforeRoutine.versions.map((version) => version.version === 1
+        ? {
+          ...version,
+          installed_package_digest: digest,
+          installed_at: "2026-10-01T12:30:00Z",
+          procedure_binding: { ...version.procedure_binding, install_job_id: "install-forged" },
+        }
+        : version),
+    } as ProcedureV2Routine;
+    const getRoutine = vi.spyOn(procedureV2Api, "getRoutine").mockResolvedValueOnce(beforeRoutine).mockResolvedValueOnce(forgedReadback);
+    vi.spyOn(procedureV2Api, "listRoutines").mockResolvedValue([beforeRoutine]);
+    const lifecycle = vi.spyOn(procedureV2Api, "lifecycle");
+    const recovery = {
+      schema_version: 1,
+      action: "install",
+      ownerPrincipalId: "operator:one",
+      ownerSessionId: "session-1",
+      routineId: beforeRoutine.id,
+      versionId: "version-existing-1",
+      version: 1,
+      requestRevision: 5,
+      expectedState: "installed",
+      approvalId: "approval-exact",
+      installJobId: "install-exact",
+      targetVersionId: null,
+      targetVersion: null,
+      packageDigest: digest,
+    };
+    window.sessionStorage.setItem("seraph.procedure-v2.prepared:operator%3Aone:session-1", JSON.stringify({
+      schema_version: 1,
+      routineId: beforeRoutine.id,
+      bindingId: "binding-existing-1",
+      revision: 5,
+      version: 1,
+      versionId: "version-existing-1",
+      installJobId: "install-exact",
+      approvalId: "approval-exact",
+      lifecycleRecovery: recovery,
+    }));
+
+    render(<ProcedureV2Review ownerPrincipalId="operator:one" ownerSessionId="session-1" goals={[goal]} />);
+    await screen.findByText(/Procedure install is unverified/);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh authority" }));
+    await screen.findByText(/did not prove the requested procedure install/i);
+    expect(getRoutine).toHaveBeenCalledTimes(2);
+    expect(lifecycle).not.toHaveBeenCalled();
+    expect(JSON.parse(window.sessionStorage.getItem("seraph.procedure-v2.prepared:operator%3Aone:session-1") ?? "null")).toMatchObject({ lifecycleRecovery: recovery });
+  });
+
+  it("persists lifecycle recovery before dispatch and keeps it after an unmounted response", async () => {
+    const preparedRoutine = {
+      ...existingRoutine,
+      state: "prepared",
+      revision: 5,
+      current_version: 1,
+      package: { status: "not_installed", digest: null, review_id: null },
+      versions: existingRoutine.versions.map((version) => version.version === 1
+        ? { ...version, installed_package_digest: null, installed_at: null, procedure_binding: { ...version.procedure_binding, approval_id: "approval-install-1", install_job_id: "routine-install:routine-existing:v1", install_approval_status: "approved", install_approval_expires_at: "2026-10-02T12:15:00Z" } }
+        : version),
+    } as ProcedureV2Routine;
+    vi.spyOn(procedureV2Api, "listRoutines").mockResolvedValue([preparedRoutine]);
+    vi.spyOn(procedureV2Api, "getRoutine").mockResolvedValue(preparedRoutine);
+    vi.spyOn(procedureV2Api, "packagePreview").mockResolvedValue({
+      routine_id: preparedRoutine.id,
+      version: 1,
+      pack_id: "pack-install",
+      digest,
+      installed_package_digest: null,
+      review_id: null,
+      status: "not_reviewed",
+      manifest: { display_name: "Install package", summary: "Fixed browser procedure", version: "1", authority: { tools: ["browser.public-task.v1"], filesystem: [], network: false, secrets: [], approval: "operator" }, resources: { max_runtime_seconds: 300, max_artifact_bytes: 1000, max_inference_cost_microusd: 0, inference_priority: "normal" }, data_policy: { classes: ["public"], egress: ["none"] } },
+      runbook: { title: "Public status", summary: "Fixed", procedure: { capability_id: "guardian-routine.v2", steps: [{ id: "public_browser_check", capability: "browser.public-task.v1", tool: "browser" }] }, bindings: { workflow_sha256: digest, legacy_runbook_sha256: digest, source_provenance_sha256: digest } },
+    });
+    let resolveLifecycle!: (routine: ProcedureV2Routine) => void;
+    const lifecycle = vi.spyOn(procedureV2Api, "lifecycle").mockReturnValue(new Promise((resolve) => { resolveLifecycle = resolve; }));
+    window.sessionStorage.setItem("seraph.procedure-v2.prepared:operator%3Aone:session-1", JSON.stringify({
+      schema_version: 1,
+      routineId: preparedRoutine.id,
+      bindingId: "binding-existing-1",
+      revision: 5,
+      version: 1,
+      versionId: "version-existing-1",
+      installJobId: "routine-install:routine-existing:v1",
+      approvalId: "approval-install-1",
+    }));
+
+    const view = render(<ProcedureV2Review ownerPrincipalId="operator:one" ownerSessionId="session-1" goals={[goal]} />);
+    await screen.findByText(preparedRoutine.id);
+    fireEvent.click(await screen.findByRole("button", { name: "Preview reviewed package" }));
+    await screen.findByRole("region", { name: "Procedure package preview" });
+    fireEvent.click(await screen.findByRole("button", { name: "Install with exact approval" }));
+    await waitFor(() => expect(lifecycle).toHaveBeenCalledTimes(1));
+    expect(JSON.parse(window.sessionStorage.getItem("seraph.procedure-v2.prepared:operator%3Aone:session-1") ?? "null")).toMatchObject({
+      lifecycleRecovery: {
+        schema_version: 1,
+        action: "install",
+        routineId: preparedRoutine.id,
+        versionId: "version-existing-1",
+        requestRevision: 5,
+        expectedState: "installed",
+      },
+    });
+    view.unmount();
+    await act(async () => {
+      resolveLifecycle({
+        ...preparedRoutine,
+        state: "installed",
+        revision: 6,
+        versions: preparedRoutine.versions.map((version) => version.version === 1 ? { ...version, installed_package_digest: digest, installed_at: "2026-10-01T12:30:00Z" } : version),
+      });
+    });
+    expect(JSON.parse(window.sessionStorage.getItem("seraph.procedure-v2.prepared:operator%3Aone:session-1") ?? "null")).toMatchObject({ lifecycleRecovery: { action: "install" } });
+  });
+
+  it.each([
+    ["a different version id", (routine: ProcedureV2Routine) => ({
+      ...routine,
+      versions: routine.versions.map((version) => version.version === 2 ? { ...version, id: "version-forged" } : version),
+    })],
+    ["the same revision", (routine: ProcedureV2Routine) => ({ ...routine, revision: routine.revision })],
+    ["an older revision", (routine: ProcedureV2Routine) => ({ ...routine, revision: routine.revision - 1 })],
+  ] as const)("does not accept activation readback with %s", async (_caseName, mutate) => {
+    const pausedRoutine = { ...existingRoutine, state: "paused" } as ProcedureV2Routine;
+    vi.spyOn(procedureV2Api, "getRoutine").mockResolvedValue(pausedRoutine);
+    vi.spyOn(procedureV2Api, "listRoutines").mockResolvedValue([pausedRoutine]);
+    const lifecycle = vi.spyOn(procedureV2Api, "lifecycle").mockResolvedValue({
+      ...mutate(pausedRoutine),
+      state: "active",
+      current_version: 2,
+    });
+
+    render(<ProcedureV2Review ownerPrincipalId="operator:one" ownerSessionId="session-1" goals={[goal]} />);
+    fireEvent.change(await screen.findByLabelText("Existing reviewed procedure"), { target: { value: pausedRoutine.id } });
+    const resume = await screen.findByRole("button", { name: "Resume procedure" });
+    fireEvent.click(resume);
+    await waitFor(() => expect(lifecycle).toHaveBeenCalledWith(pausedRoutine.id, "activate", {
+      version: 2,
+      expected_routine_revision: pausedRoutine.revision,
+    }));
+    expect(await screen.findByText(/activation outcome could not be verified/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Resume procedure" })).toBeDisabled();
+  });
+
+  it("retains exact package activation context across same-owner remount and accepts only a newer active readback", async () => {
+    const installedRoutine = {
+      ...existingRoutine,
+      state: "installed",
+      revision: 7,
+      current_version: 2,
+      package: { status: "active", digest, review_id: "review-package" },
+    } as ProcedureV2Routine;
+    const activePackageReadback = { ...installedRoutine, revision: 7 } as ProcedureV2Routine;
+    const getRoutine = vi.spyOn(procedureV2Api, "getRoutine").mockResolvedValue(installedRoutine);
+    vi.spyOn(procedureV2Api, "listRoutines").mockResolvedValue([installedRoutine]);
+    const packagePreview = {
+      routine_id: installedRoutine.id,
+      version: 2,
+      pack_id: "pack-2",
+      digest,
+      installed_package_digest: digest,
+      review_id: "review-package",
+      status: "reviewed",
+      manifest: { display_name: "Public status package", summary: "Fixed browser procedure", version: "2", authority: { tools: ["browser.public-task.v1"], filesystem: [], network: false, secrets: [], approval: "operator" }, resources: { max_runtime_seconds: 300, max_artifact_bytes: 1000, max_inference_cost_microusd: 0, inference_priority: "normal" }, data_policy: { classes: ["public"], egress: ["none"] } },
+      runbook: { title: "Public status", summary: "Fixed", procedure: { capability_id: "guardian-routine.v2", steps: [{ id: "public_browser_check", capability: "browser.public-task.v1", tool: "browser" }] }, bindings: { workflow_sha256: digest, legacy_runbook_sha256: digest, source_provenance_sha256: digest } },
+    } as WorkBoardRoutinePackagePreview;
+    vi.spyOn(procedureV2Api, "packagePreview").mockResolvedValue(packagePreview);
+    vi.spyOn(procedureV2Api, "preparePackageApproval").mockResolvedValue({ digest, approval: { approval_id: "package-approval-2", status: "pending", action: "activate", pack_id: "pack-2", version: "2", digest, goal_id: "goal-1" } });
+    vi.spyOn(procedureV2Api, "decidePackageApproval").mockResolvedValue({ digest, approval: { approval_id: "package-approval-2", status: "approved", action: "activate", pack_id: "pack-2", version: "2", digest, goal_id: "goal-1" } });
+    let rejectActivation!: (cause: unknown) => void;
+    const activatePackage = vi.spyOn(procedureV2Api, "activatePackage").mockImplementation(() => new Promise((_, reject) => { rejectActivation = reject; }));
+    window.sessionStorage.setItem("seraph.procedure-v2.prepared:operator%3Aone:session-1", JSON.stringify({ schema_version: 1, routineId: installedRoutine.id, bindingId: "binding-existing-2", revision: 4, version: 2, versionId: "version-existing-2", installJobId: "install-2", approvalId: "install-approval-2" }));
+
+    const firstOwnerView = render(<ProcedureV2Review ownerPrincipalId="operator:one" ownerSessionId="session-1" goals={[goal]} />);
+    await screen.findByText(installedRoutine.id);
+    fireEvent.click(await screen.findByRole("button", { name: "Preview reviewed package" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Prepare activation approval" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Approve activation" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Activate reviewed package" }));
+    await waitFor(() => expect(activatePackage).toHaveBeenCalledTimes(1));
+    expect(JSON.parse(window.sessionStorage.getItem("seraph.procedure-v2.prepared:operator%3Aone:session-1") ?? "null")).toMatchObject({
+      packageActivationRecovery: {
+        schema_version: 1,
+        routineId: installedRoutine.id,
+        versionId: "version-existing-2",
+        version: 2,
+        digest,
+        expectedRevision: 7,
+        approvalId: "package-approval-2",
+      },
+    });
+    rejectActivation(new ProcedureV2ApiError(503, { code: "procedure_outcome_unknown", message: "The package receipt was lost", recovery_action: "reconcile_existing_effect", retryable: false, binding_id: null, audit_receipt_id: null }));
+    await screen.findByText(/package activation outcome could not be verified/i);
+    expect(screen.getAllByText(/package-approval-2/).length).toBeGreaterThan(0);
+    expect(screen.getByText(/expected revision 7/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Activate reviewed package" })).toBeDisabled();
+    expect(JSON.parse(window.sessionStorage.getItem("seraph.procedure-v2.prepared:operator%3Aone:session-1") ?? "null")).toMatchObject({
+      packageActivationRecovery: {
+        schema_version: 1,
+        routineId: installedRoutine.id,
+        versionId: "version-existing-2",
+        version: 2,
+        digest,
+        expectedRevision: 7,
+        approvalId: "package-approval-2",
+      },
+    });
+
+    expect(screen.getByRole("button", { name: "Refresh authority" })).toBeEnabled();
+    firstOwnerView.unmount();
+    const view = render(<ProcedureV2Review ownerPrincipalId="operator:one" ownerSessionId="session-1" goals={[goal]} />);
+    await screen.findByText(/Package activation is unverified/);
+    expect(screen.getByText(/package-approval-2/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Preview reviewed package" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Activate procedure" })).toBeDisabled();
+
+    getRoutine.mockResolvedValueOnce(activePackageReadback);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh authority" }));
+    await screen.findByText(/reviewed package activation is confirmed/i);
+    expect(screen.queryByRole("button", { name: "Activate reviewed package" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Activate procedure" })).toBeEnabled();
+    expect(getRoutine).toHaveBeenCalledTimes(3);
+    view.unmount();
+  });
+
+  it("keeps package activation recovery blocked when readback is inactive", async () => {
+    const installedRoutine = { ...existingRoutine, state: "installed", revision: 7, current_version: 2 } as ProcedureV2Routine;
+    const inactiveReadback = { ...installedRoutine, package: { status: "not_installed", digest: null, review_id: null } } as ProcedureV2Routine;
+    const recovery = {
+      schema_version: 1,
+      routineId: installedRoutine.id,
+      versionId: "version-existing-2",
+      version: 2,
+      digest,
+      expectedRevision: 7,
+      approvalId: "package-approval-2",
+    };
+    const getRoutine = vi.spyOn(procedureV2Api, "getRoutine").mockResolvedValueOnce(installedRoutine).mockResolvedValueOnce(inactiveReadback);
+    vi.spyOn(procedureV2Api, "listRoutines").mockResolvedValue([installedRoutine]);
+    window.sessionStorage.setItem("seraph.procedure-v2.prepared:operator%3Aone:session-1", JSON.stringify({
+      schema_version: 1,
+      routineId: installedRoutine.id,
+      bindingId: "binding-existing-2",
+      revision: 4,
+      version: 2,
+      versionId: "version-existing-2",
+      installJobId: "install-2",
+      approvalId: "install-approval-2",
+      packageActivationRecovery: recovery,
+    }));
+
+    render(<ProcedureV2Review ownerPrincipalId="operator:one" ownerSessionId="session-1" goals={[goal]} />);
+    await screen.findByText(/Package activation is unverified/);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh authority" }));
+    await screen.findByText(/did not prove the reviewed package activation/i);
+    expect(screen.getByRole("button", { name: "Pause future invocations" })).toBeDisabled();
+    expect(JSON.parse(window.sessionStorage.getItem("seraph.procedure-v2.prepared:operator%3Aone:session-1") ?? "null")).toMatchObject({ packageActivationRecovery: recovery });
+    expect(getRoutine).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not hydrate package activation recovery into another owner session", async () => {
+    const installedRoutine = { ...existingRoutine, state: "installed", revision: 7, current_version: 2 } as ProcedureV2Routine;
+    const recovery = {
+      schema_version: 1,
+      routineId: installedRoutine.id,
+      versionId: "version-existing-2",
+      version: 2,
+      digest,
+      expectedRevision: 7,
+      approvalId: "package-approval-2",
+    };
+    vi.spyOn(procedureV2Api, "listRoutines").mockResolvedValue([installedRoutine]);
+    vi.spyOn(procedureV2Api, "getRoutine").mockResolvedValue(installedRoutine);
+    window.sessionStorage.setItem("seraph.procedure-v2.prepared:operator%3Aone:session-1", JSON.stringify({
+      schema_version: 1,
+      routineId: installedRoutine.id,
+      bindingId: "binding-existing-2",
+      revision: 4,
+      version: 2,
+      versionId: "version-existing-2",
+      installJobId: "install-2",
+      approvalId: "install-approval-2",
+      packageActivationRecovery: recovery,
+    }));
+
+    render(<ProcedureV2Review ownerPrincipalId="operator:one" ownerSessionId="session-2" goals={[goal]} />);
+    await screen.findByText(/No existing reviewed v2 procedures are available|Choose an existing v2 procedure/);
+    expect(screen.queryByText(/Package activation is unverified/)).not.toBeInTheDocument();
+    expect(window.sessionStorage.getItem("seraph.procedure-v2.prepared:operator%3Aone:session-2")).toBeNull();
+  });
+
+  it("does not publish a delayed activation readback after the owner session changes", async () => {
+    const pausedRoutine = { ...existingRoutine, state: "paused" } as ProcedureV2Routine;
+    vi.spyOn(procedureV2Api, "listRoutines").mockResolvedValue([pausedRoutine]);
+    vi.spyOn(procedureV2Api, "getRoutine").mockResolvedValue(pausedRoutine);
+    let resolveActivation!: (value: ProcedureV2Routine) => void;
+    const lifecycle = vi.spyOn(procedureV2Api, "lifecycle").mockReturnValue(new Promise((resolve) => { resolveActivation = resolve; }));
+
+    const view = render(<ProcedureV2Review ownerPrincipalId="operator:one" ownerSessionId="session-1" goals={[goal]} />);
+    fireEvent.change(await screen.findByLabelText("Existing reviewed procedure"), { target: { value: pausedRoutine.id } });
+    fireEvent.click(await screen.findByRole("button", { name: "Resume procedure" }));
+    view.rerender(<ProcedureV2Review ownerPrincipalId="operator:one" ownerSessionId="session-2" goals={[goal]} />);
+    await act(async () => { resolveActivation({ ...pausedRoutine, state: "active", current_version: 2, revision: pausedRoutine.revision + 1 }); });
+
+    expect(lifecycle).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("Procedure activate completed with a current server revision.")).not.toBeInTheDocument();
+  });
+
   it("retains an unknown invocation request and retries it with its captured version after routine readback failure", async () => {
     vi.spyOn(procedureV2Api, "listSourceTasks").mockResolvedValue([{
       task_id: sourceTask.task_id,
@@ -905,7 +1543,7 @@ describe("ProcedureV2Review", () => {
       verification_status: sourceTask.verification_status,
     }]);
     vi.spyOn(procedureV2Api, "previewFromTasks").mockResolvedValue(preview);
-    vi.spyOn(procedureV2Api, "prepareFromTasks").mockResolvedValue({ status: "prepared", binding_id: "binding-1", routine_id: "routine-1", version_id: "version-1", version: 1, schema_version: 2, template_id: "public-browser-check", revision: 1, request_digest: digest, preview_digest: digest, preview_expires_at: preview.expires_at, install_job_id: "routine-install:routine-1:v1", approval_id: "approval-install-1" });
+    vi.spyOn(procedureV2Api, "prepareFromTasks").mockResolvedValue({ status: "prepared", binding_id: "binding-1", routine_id: "routine-1", version_id: "version-1", version: 1, schema_version: 2, template_id: "public-browser-check", revision: 1, request_digest: digest, preview_digest: digest, preview_expires_at: preview.expires_at, install_job_id: "routine-install:routine-1:v1", approval_id: "approval-install-1", install_approval_status: "approved", install_approval_expires_at: "2026-10-02T12:15:00Z" });
     const activeRoutine = {
       id: "routine-1", owner_principal_id: "operator:one", state: "active", revision: 4, current_version: 1, name: "Public status check",
       versions: [{ id: "version-1", routine_id: "routine-1", version: 1, workflow_sha256: digest, runbook_sha256: digest, installed_package_digest: digest, source_provenance: {}, source_repository: null, source_action: null, source_issue_number: null, created_at: preview.expires_at, installed_at: preview.expires_at }],

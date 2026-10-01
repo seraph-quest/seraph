@@ -527,6 +527,80 @@ describe("procedureV2Api", () => {
     }
   });
 
+  it("rejects a prepared response that omits canonical approval status and expiry", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(response({
+      status: "prepared",
+      binding_id: "binding-1",
+      routine_id: "routine-1",
+      version_id: "version-1",
+      version: 1,
+      schema_version: 2,
+      template_id: "public-browser-check",
+      revision: 1,
+      request_digest: digest,
+      preview_digest: digest,
+      preview_expires_at: "2026-10-01T12:15:00Z",
+      install_job_id: "routine-install:routine-1:v1",
+      approval_id: "approval-1",
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      await expect(procedureV2Api.prepareFromTasks({
+        template_id: "public-browser-check",
+        source_tasks: [{ task_id: "task-1", expected_revision: 3 }],
+        name: "Public check",
+        idempotency_key: "prepare-missing-approval-state",
+        preview_digest: digest,
+      })).rejects.toMatchObject({ code: "procedure_response_invalid" });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("rejects a routine readback with statusless install approval metadata", async () => {
+    const routine = {
+      id: "routine-statusless",
+      owner_principal_id: "operator:one",
+      state: "prepared",
+      revision: 1,
+      current_version: 1,
+      name: "Statusless approval",
+      versions: [{
+        id: "version-statusless",
+        routine_id: "routine-statusless",
+        version: 1,
+        workflow_sha256: digest,
+        runbook_sha256: digest,
+        installed_package_digest: null,
+        source_provenance: {},
+        source_repository: null,
+        source_action: null,
+        source_issue_number: null,
+        created_at: "2026-10-01T12:00:00Z",
+        installed_at: null,
+        schema_version: 2,
+        template_id: "public-browser-check",
+        procedure_binding: {
+          binding_id: "binding-statusless",
+          state: "prepared",
+          revision: 1,
+          preview_digest: digest,
+          preview_expires_at: "2026-10-01T12:15:00Z",
+          install_job_id: "install-statusless",
+          approval_id: "approval-statusless",
+        },
+      }],
+      package: { status: "not_installed", digest: null, review_id: null },
+    };
+    const fetchMock = vi.fn().mockResolvedValue(response(routine));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      await expect(procedureV2Api.getRoutine("routine-statusless")).rejects.toMatchObject({ code: "procedure_response_invalid" });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("retains the server-owned install approval lifecycle metadata", async () => {
     const routine = {
       id: "routine-approval",
@@ -661,9 +735,33 @@ describe("procedureV2Api", () => {
       runbook: { title: "Public check", summary: "Fixed", procedure: { schema_version: 1, capability_id: "guardian-routine.v1", steps: [{ id: "guardian_watch_run", capability: "guardian_watch_run", tool: "guardian_watch_run" }] }, bindings: { workflow_sha256: digest, legacy_runbook_sha256: digest, source_provenance_sha256: digest } },
     };
     const schedule = { status: "scheduled", scheduled_job_id: "schedule-1", binding_id: "binding-1", revision: 1, action_type: "guardian.run_procedure.v2", routine_id: "routine-1", version: 1, template_id: "public-browser-check", goal_id: "goal-1", goal_revision: 4, schedule_idempotency_key: "schedule-1", input_digest: digest, next_run: "2026-10-02T09:00:00Z", expires_at: "2026-10-05T09:00:00Z", state: "active", pause_route: "/api/governed-schedules/binding-1", recovery_action: null };
+    const activeRoutine = {
+      id: "routine-1",
+      owner_principal_id: "operator:one",
+      state: "active",
+      revision: 4,
+      current_version: 1,
+      name: "Public check",
+      versions: [{
+        id: "version-1",
+        routine_id: "routine-1",
+        version: 1,
+        workflow_sha256: digest,
+        runbook_sha256: digest,
+        installed_package_digest: digest,
+        source_provenance: {},
+        source_repository: null,
+        source_action: null,
+        source_issue_number: null,
+        created_at: "2026-10-01T12:00:00Z",
+        installed_at: "2026-10-01T12:00:00Z",
+      }],
+      package: { status: "active", digest, review_id: "review-1" },
+    };
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(response(packagePreview))
       .mockResolvedValueOnce(response({ digest, status: "active" }))
+      .mockResolvedValueOnce(response(activeRoutine))
       .mockResolvedValueOnce(response(schedule))
       .mockResolvedValueOnce(response({ ...schedule, status: "paused", state: "paused", revision: 2 }))
       .mockResolvedValueOnce(response({ ...schedule, status: "revoked", state: "revoked", revision: 3 }));
@@ -671,6 +769,7 @@ describe("procedureV2Api", () => {
     try {
       await procedureV2Api.packagePreview("routine-1", 1, 3);
       await procedureV2Api.activatePackage("routine-1", 1, 3, "approval-1");
+      await procedureV2Api.lifecycle("routine-1", "activate", { version: 1, expected_routine_revision: 3 });
       await procedureV2Api.schedule("routine-1", {
         version: 1,
         expected_routine_revision: 3,
@@ -687,11 +786,60 @@ describe("procedureV2Api", () => {
         expect.stringContaining("POST http"),
         expect.stringContaining("POST http"),
         expect.stringContaining("POST http"),
+        expect.stringContaining("POST http"),
         expect.stringContaining("PATCH http"),
         expect.stringContaining("POST http"),
       ]);
-      expect(fetchMock.mock.calls[3][1].body).toContain('"action":"pause"');
-      expect(fetchMock.mock.calls[4][1].body).toContain('"reason":"operator requested revoke"');
+      expect(String(fetchMock.mock.calls[2][0])).toContain("/api/capabilities/routines/routine-1/activate");
+      expect(fetchMock.mock.calls[2][1].body).toBe(JSON.stringify({ version: 1, expected_routine_revision: 3 }));
+      expect(fetchMock.mock.calls[4][1].body).toContain('"action":"pause"');
+      expect(fetchMock.mock.calls[5][1].body).toContain('"reason":"operator requested revoke"');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("reads back the canonical routine after a committed pause or revoke receipt", async () => {
+    const routine = {
+      id: "routine-lifecycle",
+      owner_principal_id: "operator:single",
+      state: "paused",
+      revision: 4,
+      current_version: 1,
+      name: "Stable lifecycle routine",
+      versions: [{
+        id: "version-lifecycle",
+        routine_id: "routine-lifecycle",
+        version: 1,
+        workflow_sha256: digest,
+        runbook_sha256: digest,
+        installed_package_digest: digest,
+        source_provenance: {},
+        source_repository: null,
+        source_action: null,
+        source_issue_number: null,
+        created_at: "2026-10-01T12:00:00Z",
+        installed_at: "2026-10-01T12:00:00Z",
+      }],
+      package: { status: "active", digest, review_id: "review-lifecycle" },
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(response({ status: "paused", routine_id: routine.id, reason: "operator requested pause" }))
+      .mockResolvedValueOnce(response(routine))
+      .mockResolvedValueOnce(response({ status: "revoked", routine_id: routine.id, reason: "operator requested revoke" }))
+      .mockResolvedValueOnce(response({ ...routine, state: "revoked", revision: 5 }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const paused = await procedureV2Api.lifecycle(routine.id, "pause", { expected_routine_revision: 3, reason: "operator requested pause" });
+      expect(paused.state).toBe("paused");
+      const revoked = await procedureV2Api.lifecycle(routine.id, "revoke", { expected_routine_revision: 4, reason: "operator requested revoke" });
+      expect(revoked.state).toBe("revoked");
+      expect(fetchMock.mock.calls.map((call) => `${call[1]?.method ?? "GET"} ${String(call[0])}`)).toEqual([
+        expect.stringContaining("POST http://localhost:8004/api/capabilities/routines/routine-lifecycle/pause"),
+        expect.stringContaining("GET http://localhost:8004/api/capabilities/routines/routine-lifecycle"),
+        expect.stringContaining("POST http://localhost:8004/api/capabilities/routines/routine-lifecycle/revoke"),
+        expect.stringContaining("GET http://localhost:8004/api/capabilities/routines/routine-lifecycle"),
+      ]);
     } finally {
       vi.unstubAllGlobals();
     }

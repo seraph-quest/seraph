@@ -69,6 +69,14 @@ if TYPE_CHECKING:  # pragma: no cover
 
 PREVIEW_TTL = timedelta(minutes=15)
 SCHEDULE_TTL = timedelta(days=7)
+# A preparing binding is a durable reservation, but the routine/version and
+# install rows are intentionally written after that reservation.  Keep the
+# reservation recoverable for one bounded server-side in-flight window so a
+# second request cannot mistake the first writer's normal gap for a permanent
+# proof failure.  The window is anchored to ``ProcedureV2Binding.created_at``
+# and is never extended by retries; the reviewed preview expiry is an upper
+# bound as well.
+PREPARATION_IN_FLIGHT_WINDOW = timedelta(seconds=120)
 INVOCATION_SCOPE_PREFIX = "procedure-v2:"
 ROUTINE_ID_NAMESPACE = UUID("4a2e6e75-1a7c-5cf6-ae1a-d8a7227e6d8f")
 
@@ -361,6 +369,24 @@ def _utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _preparation_in_flight(binding: ProcedureV2Binding, *, now: datetime | None = None) -> bool:
+    """Return whether a preparing row is still inside its one-shot writer window.
+
+    ``updated_at`` is deliberately excluded.  A retry or a partial CAS must
+    never keep a broken preparation alive indefinitely.  SQLite commonly
+    returns naive timestamps, so both stored values use the same UTC
+    normalization as the rest of this service.
+    """
+
+    try:
+        created_at = _utc(binding.created_at)
+        preview_expires_at = _utc(binding.preview_expires_at)
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return False
+    deadline = min(created_at + PREPARATION_IN_FLIGHT_WINDOW, preview_expires_at)
+    return _utc(now or _now()) < deadline
 
 
 def _status(value: Any) -> str:
@@ -669,7 +695,12 @@ def _job_readback_file(job: Mapping[str, Any], *, job_id: str) -> tuple[str, str
     return None
 
 
-def _validated_immutable_step_inputs(value: Any, spec: Any) -> dict[str, dict[str, Any]]:
+def _validated_immutable_step_inputs(
+    value: Any,
+    spec: Any,
+    *,
+    expected_step_input_digests: Mapping[str, str] | None = None,
+) -> dict[str, dict[str, Any]]:
     """Validate the private, copied executable inputs in a v2 version."""
 
     raw = value if isinstance(value, Mapping) else {}
@@ -702,6 +733,14 @@ def _validated_immutable_step_inputs(value: Any, spec: Any) -> dict[str, dict[st
             or _text(entry.get("action_consent_digest")) != consent_digest
         ):
             raise ValueError("immutable browser input digest is invalid")
+        if expected_step_input_digests is not None:
+            expected_digest = expected_step_input_digests.get(step_id)
+            if (
+                type(expected_digest) is not str
+                or expected_digest.lower() != envelope_digest
+                or envelope_digest != _text(entry.get("input_envelope_digest"))
+            ):
+                raise ValueError("immutable browser input is not bound to the reviewed plan")
         validated[step_id] = {
             "browser_input": model.model_dump(mode="json", exclude_none=True),
             "browser_input_digest": model_digest,
@@ -709,6 +748,25 @@ def _validated_immutable_step_inputs(value: Any, spec: Any) -> dict[str, dict[st
             "action_consent_digest": consent_digest,
         }
     return validated
+
+
+def _plan_step_input_digests(plan: Any) -> dict[str, str]:
+    """Return the immutable typed-input digest for each reviewed plan step."""
+
+    raw_steps = plan.get("steps") if isinstance(plan, Mapping) else getattr(plan, "steps", None)
+    if raw_steps is None:
+        return {}
+    result: dict[str, str] = {}
+    for raw_step in raw_steps:
+        if isinstance(raw_step, Mapping):
+            step_id = _text(raw_step.get("step_id"))
+            digest = raw_step.get("typed_input_digest")
+        else:
+            step_id = _text(getattr(raw_step, "step_id", None))
+            digest = getattr(raw_step, "typed_input_digest", None)
+        if step_id and type(digest) is str:
+            result[step_id] = digest.lower()
+    return result
 
 
 def _material_change(job: Mapping[str, Any]) -> bool:
@@ -942,6 +1000,24 @@ class ProcedureV2Service:
             if immutable_input is not None:
                 immutable_step_inputs[step.step_id] = immutable_input
         plan = build_procedure_plan(req.template_id, step_inputs=step_inputs)
+        if copy_browser_inputs:
+            try:
+                immutable_step_inputs = _validated_immutable_step_inputs(
+                    immutable_step_inputs,
+                    spec,
+                    expected_step_input_digests=_plan_step_input_digests(plan),
+                )
+            except Exception as exc:
+                raise ProcedureV2Error(
+                    "procedure_source_input_binding_invalid",
+                    "The copied browser input is not bound to the reviewed plan",
+                    recovery_action="select_verified_task",
+                ) from exc
+        else:
+            # Source revalidation checks current output/readback authority;
+            # executable Browser bytes come only from the immutable reviewed
+            # version and are validated by the caller against this plan.
+            immutable_step_inputs = {}
         plan_payload = plan.model_dump(mode="json")
         return {
             "spec": spec,
@@ -1147,9 +1223,529 @@ class ProcedureV2Service:
             return _validated_immutable_step_inputs(
                 provenance.get("immutable_step_inputs") if isinstance(provenance, Mapping) else None,
                 spec,
+                expected_step_input_digests=_plan_step_input_digests(descriptor.plan),
             )
         except Exception as exc:
             raise ProcedureV2Error("procedure_version_proof_invalid", "The reviewed executable input is invalid", recovery_action="recreate_procedure") from exc
+
+    @staticmethod
+    def _strict_source_refs(
+        value: Any,
+        *,
+        require_proof: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Decode the server-owned source proof list without coercion.
+
+        The lightweight form is also used by the idempotency conflict path for
+        old/prepared fixture rows.  Recovery itself requests the full proof
+        shape so a partially persisted source reference cannot become an
+        execution or install receipt.
+        """
+
+        if not isinstance(value, list) or not value:
+            raise ValueError("source references are missing")
+        refs: list[dict[str, Any]] = []
+        for item in value:
+            if not isinstance(item, Mapping):
+                raise ValueError("source reference shape is invalid")
+            task_id = item.get("task_id")
+            task_revision = item.get("task_revision")
+            if (
+                not isinstance(task_id, str)
+                or not task_id.strip()
+                or type(task_revision) is not int
+                or task_revision < 1
+            ):
+                raise ValueError("source reference identity is invalid")
+            if require_proof:
+                required = (
+                    "attempt_id",
+                    "job_id",
+                    "artifact_ids_and_hashes",
+                    "capability_id",
+                    "capability_version",
+                    "goal_id",
+                    "goal_revision",
+                )
+                if any(
+                    not isinstance(item.get(key), str) or not item.get(key).strip()
+                    for key in required
+                    if key not in {"artifact_ids_and_hashes", "goal_revision"}
+                ):
+                    raise ValueError("source reference proof identity is invalid")
+                if type(item.get("goal_revision")) is not int or item["goal_revision"] < 1:
+                    raise ValueError("source reference goal revision is invalid")
+                artifacts = item.get("artifact_ids_and_hashes")
+                if not isinstance(artifacts, list) or not artifacts:
+                    raise ValueError("source reference artifacts are missing")
+                for artifact in artifacts:
+                    if not isinstance(artifact, Mapping):
+                        raise ValueError("source reference artifact shape is invalid")
+                    artifact_id = artifact.get("artifact_id")
+                    digest = artifact.get("sha256")
+                    if (
+                        not isinstance(artifact_id, str)
+                        or not artifact_id.strip()
+                        or not isinstance(digest, str)
+                        or len(digest) != 64
+                        or any(char not in "0123456789abcdef" for char in digest.lower())
+                        or not isinstance(artifact.get("receipt_kind"), str)
+                        or not artifact.get("receipt_kind").strip()
+                        or not isinstance(artifact.get("status"), str)
+                        or not artifact.get("status").strip()
+                        or not isinstance(artifact.get("workflow_run_id"), str)
+                        or not artifact.get("workflow_run_id").strip()
+                    ):
+                        raise ValueError("source reference artifact is invalid")
+            refs.append(dict(item))
+        return refs
+
+    async def _block_preparing_binding(
+        self,
+        binding: ProcedureV2Binding,
+        *,
+        owner_principal_id: str,
+        owner_session_id: str,
+        reason: str,
+    ) -> ProcedureV2Binding:
+        """Turn one failed preparation proof into a durable bounded block.
+
+        The revision and owner/session predicates make this a CAS.  If another
+        worker completed the binding first, its prepared row wins and is
+        returned for normal replay; a stale recovery pass never downgrades it.
+        """
+
+        safe_reason = str(reason or "procedure_preparation_proof_invalid")[:128]
+        async with db_engine.get_session() as db:
+            result = await db.execute(
+                update(ProcedureV2Binding)
+                .where(
+                    ProcedureV2Binding.binding_id == binding.binding_id,
+                    ProcedureV2Binding.owner_principal_id == owner_principal_id,
+                    ProcedureV2Binding.owner_session_id == owner_session_id,
+                    ProcedureV2Binding.state == "preparing",
+                    ProcedureV2Binding.revision == int(binding.revision),
+                )
+                .values(
+                    state="blocked",
+                    recovery_reason=safe_reason,
+                    revision=ProcedureV2Binding.revision + 1,
+                    updated_at=_now(),
+                )
+            )
+            if int(result.rowcount or 0) == 0:
+                current = (
+                    await db.execute(
+                        select(ProcedureV2Binding).where(
+                            ProcedureV2Binding.binding_id == binding.binding_id,
+                            ProcedureV2Binding.owner_principal_id == owner_principal_id,
+                            ProcedureV2Binding.owner_session_id == owner_session_id,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if current is None:
+                    raise ProcedureV2Error(
+                        "procedure_binding_not_found",
+                        "The procedure preparation is unavailable",
+                        status_code=404,
+                        recovery_action="recreate_procedure",
+                        binding_id=binding.binding_id,
+                    )
+                db.expunge(current)
+                return current
+            updated = (
+                await db.execute(
+                    select(ProcedureV2Binding).where(
+                        ProcedureV2Binding.binding_id == binding.binding_id,
+                        ProcedureV2Binding.owner_principal_id == owner_principal_id,
+                        ProcedureV2Binding.owner_session_id == owner_session_id,
+                    )
+                )
+            ).scalar_one()
+            db.expunge(updated)
+            return updated
+
+    async def _reconcile_preparing_binding(
+        self,
+        binding: ProcedureV2Binding,
+        req: ProcedureV2CreateRequest,
+        *,
+        owner_principal_id: str,
+        owner_session_id: str,
+        request_digest: str,
+        requested_refs: list[tuple[str, int]],
+    ) -> ProcedureV2Binding:
+        """Reconcile a stale preparation from durable rows only.
+
+        This path deliberately does not call ``_resolve_sources``.  A routine
+        and its install receipt may have committed while the response was lost,
+        and the short-lived source tasks may no longer exist.  The immutable
+        routine version, its exact provenance, and the owner-bound install job
+        are the recovery proof.  Any missing or mismatched proof is converted
+        to a durable blocked binding under the same idempotency/CAS fence.
+        """
+
+        expected_routine_id = self._routine_id(owner_principal_id, owner_session_id, req.idempotency_key)
+        expected_version_id = str(
+            uuid5(NAMESPACE_URL, f"seraph:procedure-v2-version:{expected_routine_id}:1")
+        )
+        install_job_id = f"routine-install:{expected_routine_id}:v1"
+
+        def unavailable(reason: str) -> ProcedureV2Error:
+            """Keep the exact reservation when a durable read is uncertain."""
+
+            return ProcedureV2Error(
+                "procedure_preparation_reconciliation_unavailable",
+                "The procedure preparation could not be verified; retry the same request to reconcile it.",
+                status_code=503,
+                recovery_action="reconcile_preparation",
+                retryable=True,
+                binding_id=binding.binding_id,
+            )
+
+        def in_progress(reason: str) -> ProcedureV2Error:
+            """Report a bounded writer gap without changing the reservation."""
+
+            return ProcedureV2Error(
+                "procedure_preparation_in_progress",
+                "The procedure preparation is still in progress; retry the same request.",
+                status_code=409,
+                recovery_action="reconcile_preparation",
+                retryable=True,
+                binding_id=binding.binding_id,
+            )
+
+        async def fail(reason: str) -> ProcedureV2Binding:
+            blocked = await self._block_preparing_binding(
+                binding,
+                owner_principal_id=owner_principal_id,
+                owner_session_id=owner_session_id,
+                reason=reason,
+            )
+            if blocked.state == "prepared":
+                return blocked
+            if blocked.state == "blocked":
+                raise ProcedureV2Error(
+                    "procedure_binding_blocked",
+                    "The prepared procedure requires reconciliation",
+                    recovery_action="recreate_procedure",
+                    binding_id=blocked.binding_id,
+                )
+            raise ProcedureV2Error(
+                "procedure_binding_recovery_race",
+                "The procedure preparation changed concurrently",
+                recovery_action="reconcile_preparation",
+                binding_id=blocked.binding_id,
+            )
+
+        async def incomplete_or_block(reason: str) -> ProcedureV2Binding:
+            # The reservation commit precedes the deterministic routine,
+            # version, install-job, and approval writes.  Do not convert that
+            # normal bounded gap into a permanent block.  The deadline is
+            # anchored to the original binding timestamp and cannot be
+            # extended by a retry.
+            if _preparation_in_flight(binding):
+                raise in_progress(reason)
+            return await fail(reason)
+
+        if (
+            str(binding.deterministic_routine_id or "") != expected_routine_id
+            or str(binding.request_digest or "") != request_digest
+            or str(binding.routine_name or "") != str(req.name)
+            or str(binding.version_id or "") not in {"", expected_version_id}
+        ):
+            return await fail("procedure_preparation_proof_mismatch")
+
+        try:
+            stored_refs_raw = json.loads(binding.source_refs_json or "")
+            stored_refs = self._strict_source_refs(stored_refs_raw, require_proof=True)
+            if [
+                (str(item["task_id"]), int(item["task_revision"]))
+                for item in stored_refs
+            ] != requested_refs:
+                return await fail("procedure_preparation_proof_mismatch")
+        except ProcedureV2Error:
+            raise
+        except Exception:
+            return await incomplete_or_block("procedure_preparation_proof_missing")
+
+        try:
+            async with db_engine.get_session() as db:
+                routine = (
+                    await db.execute(
+                        select(GuardianRoutine).where(
+                            GuardianRoutine.id == expected_routine_id,
+                        )
+                    )
+                ).scalar_one_or_none()
+                version = (
+                    await db.execute(
+                        select(GuardianRoutineVersion).where(
+                            GuardianRoutineVersion.id == expected_version_id,
+                            GuardianRoutineVersion.routine_id == expected_routine_id,
+                            GuardianRoutineVersion.version == 1,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if routine is not None:
+                    db.expunge(routine)
+                if version is not None:
+                    db.expunge(version)
+        except Exception as exc:
+            raise unavailable("routine_or_version_read_failed") from exc
+
+        if routine is None or version is None:
+            return await incomplete_or_block("procedure_preparation_proof_missing")
+        if (
+            str(routine.id) != expected_routine_id
+            or str(routine.owner_principal_id) != str(owner_principal_id)
+            or str(routine.owner_session_id) != str(owner_session_id)
+            or str(routine.name or "") != str(req.name)
+            or str(routine.state or "") != "prepared"
+            or type(routine.revision) is not int
+            or routine.revision != 1
+            or routine.current_version is not None
+            or str(version.id) != expected_version_id
+            or str(version.routine_id) != expected_routine_id
+            or type(version.version) is not int
+            or version.version != 1
+            or _raw_digest(version.workflow_bytes) != str(version.workflow_sha256 or "")
+            or _raw_digest(version.runbook_bytes) != str(version.runbook_sha256 or "")
+        ):
+            return await fail("procedure_preparation_proof_mismatch")
+
+        try:
+            provenance = json.loads(version.source_provenance_json or "")
+            if not isinstance(provenance, Mapping):
+                raise ValueError("provenance shape is invalid")
+            if type(provenance.get("schema_version")) is not int or provenance["schema_version"] != 2:
+                raise ValueError("provenance schema is invalid")
+            if str(provenance.get("template_id") or "") != str(binding.template_id):
+                raise ValueError("provenance template is invalid")
+            if str(provenance.get("deterministic_routine_id") or "") != expected_routine_id:
+                raise ValueError("provenance routine is invalid")
+            if str(provenance.get("preview_digest") or "") != str(binding.preview_digest):
+                raise ValueError("provenance preview is invalid")
+            persisted_provenance_refs = self._strict_source_refs(
+                provenance.get("source_refs"),
+                require_proof=True,
+            )
+            if _canonical(persisted_provenance_refs) != _canonical(stored_refs):
+                raise ValueError("provenance source refs differ")
+            if provenance.get("source_task_ids") != [item["task_id"] for item in stored_refs]:
+                raise ValueError("provenance task IDs differ")
+            if provenance.get("source_attempt_ids") != [item.get("attempt_id") for item in stored_refs]:
+                raise ValueError("provenance attempt IDs differ")
+            if provenance.get("source_job_ids") != [item.get("job_id") for item in stored_refs]:
+                raise ValueError("provenance job IDs differ")
+            expected_artifacts = [
+                artifact
+                for item in stored_refs
+                for artifact in (item.get("artifact_ids_and_hashes") if isinstance(item.get("artifact_ids_and_hashes"), list) else [])
+            ]
+            if provenance.get("verified_artifact_ids_and_hashes") != expected_artifacts:
+                raise ValueError("provenance artifacts differ")
+
+            spec = get_procedure_template(str(binding.template_id))
+            plan = validate_procedure_plan(provenance.get("plan"))
+            if plan.template_id != str(binding.template_id):
+                raise ValueError("provenance plan template differs")
+            if str(provenance.get("plan_digest") or "") != plan_digest(plan):
+                raise ValueError("provenance plan digest differs")
+            if str(provenance.get("source_proof_digest") or "") != _proof_digest(persisted_provenance_refs, plan):
+                raise ValueError("provenance source proof differs")
+            if provenance.get("capability_versions") != [step.capability_version for step in spec.steps]:
+                raise ValueError("provenance capability versions differ")
+            expected_parameters = [
+                {"name": name, "kind": kind, "required": required}
+                for name, kind, required in spec.parameters
+            ]
+            if provenance.get("parameter_schema") != expected_parameters:
+                raise ValueError("provenance parameter schema differs")
+            _validated_immutable_step_inputs(
+                provenance.get("immutable_step_inputs"),
+                spec,
+                expected_step_input_digests=_plan_step_input_digests(plan),
+            )
+            expires_raw = provenance.get("preview_expires_at")
+            if not isinstance(expires_raw, str):
+                raise ValueError("provenance expiry is missing")
+            expires_at = _utc(datetime.fromisoformat(expires_raw.replace("Z", "+00:00")))
+            if _utc(binding.preview_expires_at) != expires_at:
+                raise ValueError("provenance expiry differs")
+            replay_req = ProcedureV2PreviewRequest.model_validate(req.model_dump(exclude={"preview_digest"}))
+            expected_preview = self._preview_payload(
+                {
+                    "spec": spec,
+                    "plan_payload": plan.model_dump(mode="json"),
+                    "source_refs": persisted_provenance_refs,
+                },
+                replay_req,
+                owner_principal_id=owner_principal_id,
+                owner_session_id=owner_session_id,
+                expires_at=expires_at,
+            )["preview_digest"]
+            if expected_preview != str(binding.preview_digest):
+                raise ValueError("persisted preview digest differs")
+        except Exception:
+            # An empty provenance can be observed while the deterministic
+            # version row is being written.  A non-empty but altered payload
+            # is a definitive proof mismatch and must block after the same
+            # owner/CAS fence.
+            if not _text(version.source_provenance_json):
+                return await incomplete_or_block("procedure_preparation_proof_missing")
+            return await fail("procedure_preparation_proof_mismatch")
+
+        try:
+            try:
+                install_job = await durable_job_repository.get_job(install_job_id)
+            except Exception as exc:
+                # A transient durable-store read is not evidence that the
+                # install job is absent.  Preserve the preparing row and let
+                # the exact-key retry reconcile once the store is readable.
+                raise unavailable("install_job_read_failed") from exc
+            if not isinstance(install_job, Mapping):
+                return await incomplete_or_block("procedure_preparation_install_missing")
+            if (
+                str(install_job.get("job_id") or "") != install_job_id
+                or str(install_job.get("job_kind") or "") != "routine_install"
+                or str(install_job.get("capability_version") or "") != ROUTINE_V2_CAPABILITY_VERSION
+                or str(install_job.get("status") or "") not in {
+                    "accepted",
+                    "queued",
+                    "running",
+                    "awaiting_approval",
+                    "succeeded",
+                    "degraded",
+                }
+            ):
+                return await fail("procedure_preparation_install_mismatch")
+            job_owner = install_job.get("owner") if isinstance(install_job.get("owner"), Mapping) else {}
+            authority = install_job.get("declared_authority") if isinstance(install_job.get("declared_authority"), Mapping) else {}
+            if (
+                str(job_owner.get("principal_id") or "") != str(owner_principal_id)
+                or str(install_job.get("operator_session_id") or install_job.get("session_id") or "") != str(owner_session_id)
+                or str(authority.get("principal") or "") != str(owner_principal_id)
+                or str(authority.get("owner_kind") or "") != "user"
+                or str(authority.get("session_id") or "") != str(owner_session_id)
+                or str(authority.get("routine_id") or "") != expected_routine_id
+                or type(authority.get("routine_version")) is not int
+                or authority.get("routine_version") != 1
+                or str(authority.get("template_id") or "") != str(binding.template_id)
+                or str(authority.get("plan_digest") or "") != str(provenance["plan_digest"])
+                or str(authority.get("source_proof_digest") or "") != str(provenance["source_proof_digest"])
+                or str(authority.get("workflow_sha256") or "") != str(version.workflow_sha256)
+                or str(authority.get("runbook_sha256") or "") != str(version.runbook_sha256)
+                or str(authority.get("source_provenance_sha256") or "") != _raw_digest(version.source_provenance_json)
+                or str(authority.get("capability_id") or "") != ROUTINE_V2_CAPABILITY_VERSION
+                or type(authority.get("budget_microusd")) is not int
+                or authority.get("budget_microusd") != 0
+            ):
+                return await fail("procedure_preparation_install_mismatch")
+            first_ref = persisted_provenance_refs[0]
+            goal_id = str(first_ref.get("goal_id") or "")
+            goal_revision = first_ref.get("goal_revision")
+            if (
+                not goal_id
+                or type(goal_revision) is not int
+                or goal_revision < 1
+                or str(install_job.get("goal_id") or "") != goal_id
+                or type(install_job.get("goal_revision")) is not int
+                or install_job.get("goal_revision") != goal_revision
+                or str(authority.get("goal_owner_principal_id") or "") != str(owner_principal_id)
+                or str(authority.get("goal_owner_session_id") or "") != str(owner_session_id)
+            ):
+                return await fail("procedure_preparation_install_mismatch")
+            try:
+                install_projection = await self.routines._v2_install_approval_projection(
+                    job_id=install_job_id,
+                    job=install_job,
+                    owner_principal_id=owner_principal_id,
+                    owner_session_id=owner_session_id,
+                    routine_id=expected_routine_id,
+                    version=1,
+                )
+            except Exception as exc:
+                # Approval/database read failures are unknown outcomes.  They
+                # must never be converted into a blocked proof or trigger a
+                # second install/approval attempt.
+                raise unavailable("install_approval_read_failed") from exc
+            if str(install_projection.get("install_approval_status") or "") not in {
+                "pending",
+                "approved",
+                "consumed",
+            } or not str(install_projection.get("approval_id") or ""):
+                return await incomplete_or_block("procedure_preparation_install_missing")
+        except ProcedureV2Error:
+            raise
+        except (KeyError, TypeError, ValueError, AttributeError):
+            return await fail("procedure_preparation_install_mismatch")
+
+        async with db_engine.get_session() as db:
+            result = await db.execute(
+                update(ProcedureV2Binding)
+                .where(
+                    ProcedureV2Binding.binding_id == binding.binding_id,
+                    ProcedureV2Binding.owner_principal_id == owner_principal_id,
+                    ProcedureV2Binding.owner_session_id == owner_session_id,
+                    ProcedureV2Binding.idempotency_key == req.idempotency_key,
+                    ProcedureV2Binding.request_digest == request_digest,
+                    ProcedureV2Binding.state == "preparing",
+                    ProcedureV2Binding.revision == int(binding.revision),
+                )
+                .values(
+                    version_id=expected_version_id,
+                    state="prepared",
+                    recovery_reason=None,
+                    revision=ProcedureV2Binding.revision + 1,
+                    updated_at=_now(),
+                )
+            )
+            if int(result.rowcount or 0) != 1:
+                current = (
+                    await db.execute(
+                        select(ProcedureV2Binding).where(
+                            ProcedureV2Binding.binding_id == binding.binding_id,
+                            ProcedureV2Binding.owner_principal_id == owner_principal_id,
+                            ProcedureV2Binding.owner_session_id == owner_session_id,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if current is None:
+                    raise ProcedureV2Error(
+                        "procedure_binding_not_found",
+                        "The procedure preparation is unavailable",
+                        status_code=404,
+                        recovery_action="recreate_procedure",
+                        binding_id=binding.binding_id,
+                    )
+                db.expunge(current)
+                if current.state == "prepared":
+                    return current
+                if current.state == "blocked":
+                    raise ProcedureV2Error(
+                        "procedure_binding_blocked",
+                        "The prepared procedure requires reconciliation",
+                        recovery_action="recreate_procedure",
+                        binding_id=current.binding_id,
+                    )
+                raise ProcedureV2Error(
+                    "procedure_binding_recovery_race",
+                    "The procedure preparation changed concurrently",
+                    recovery_action="reconcile_preparation",
+                    binding_id=current.binding_id,
+                )
+            updated = (
+                await db.execute(
+                    select(ProcedureV2Binding).where(
+                        ProcedureV2Binding.binding_id == binding.binding_id,
+                        ProcedureV2Binding.owner_principal_id == owner_principal_id,
+                        ProcedureV2Binding.owner_session_id == owner_session_id,
+                    )
+                )
+            ).scalar_one()
+            db.expunge(updated)
+            return updated
 
     async def create_from_tasks(
         self,
@@ -1164,6 +1760,12 @@ class ProcedureV2Service:
         # source task IDs and revisions are retained in the binding and are
         # sufficient to reject a same-key request that names another source;
         # no fresh authority or provider contact is needed for this path.
+        request_digest = _procedure_create_request_digest(req)
+        requested_refs = [
+            (str(item.task_id), int(item.expected_revision))
+            for item in req.source_tasks
+        ]
+        preparing_binding: ProcedureV2Binding | None = None
         async with db_engine.get_session() as db:
             committed = (
                 await db.execute(
@@ -1176,27 +1778,32 @@ class ProcedureV2Service:
             ).scalar_one_or_none()
             if committed is not None:
                 stored_refs = _json(committed.source_refs_json, [])
-                requested_refs = [
-                    (str(item.task_id), int(item.expected_revision))
-                    for item in req.source_tasks
-                ]
-                try:
-                    persisted_refs = [
-                        (str(item.get("task_id")), int(item.get("task_revision") or 0))
-                        for item in stored_refs
-                        if isinstance(item, Mapping)
-                    ] if isinstance(stored_refs, list) else []
-                except (TypeError, ValueError, OverflowError):
+                persisted_refs: list[tuple[str, int]] | None = None
+                if committed.request_digest != request_digest:
                     raise ProcedureV2Error(
-                        "procedure_binding_blocked",
-                        "The prepared procedure requires reconciliation",
-                        recovery_action="reconcile_preparation",
+                        "procedure_binding_conflict",
+                        "The idempotency key is bound to another reviewed procedure",
+                        recovery_action="use_new_idempotency_key",
                         binding_id=committed.binding_id,
                     )
-                if (
-                    committed.request_digest != _procedure_create_request_digest(req)
-                    or persisted_refs != requested_refs
-                ):
+                try:
+                    strict_stored_refs = self._strict_source_refs(stored_refs)
+                    persisted_refs = [
+                        (str(item["task_id"]), int(item["task_revision"]))
+                        for item in strict_stored_refs
+                    ]
+                except (TypeError, ValueError, OverflowError):
+                    if committed.state == "preparing":
+                        db.expunge(committed)
+                        preparing_binding = committed
+                    else:
+                        raise ProcedureV2Error(
+                            "procedure_binding_blocked",
+                            "The prepared procedure requires reconciliation",
+                            recovery_action="reconcile_preparation",
+                            binding_id=committed.binding_id,
+                        )
+                if preparing_binding is None and persisted_refs is not None and persisted_refs != requested_refs:
                     raise ProcedureV2Error(
                         "procedure_binding_conflict",
                         "The idempotency key is bound to another reviewed procedure",
@@ -1217,24 +1824,47 @@ class ProcedureV2Service:
                         owner_principal_id=owner_principal_id,
                         owner_session_id=owner_session_id,
                     ), 200
-                if committed.state == "blocked":
+                if preparing_binding is None and committed.state == "blocked":
                     raise ProcedureV2Error(
                         "procedure_binding_blocked",
                         "The prepared procedure requires reconciliation",
                         recovery_action="recreate_procedure",
                         binding_id=committed.binding_id,
                     )
-                if committed.state not in {"preparing"}:
+                if preparing_binding is None and committed.state not in {"preparing"}:
                     raise ProcedureV2Error(
                         "procedure_binding_state_invalid",
                         "The procedure preparation is in an unrecoverable state",
                         recovery_action="recreate_procedure",
                         binding_id=committed.binding_id,
                     )
+                if preparing_binding is None:
+                    db.expunge(committed)
+                    preparing_binding = committed
+        if preparing_binding is not None:
+            reconciled = await self._reconcile_preparing_binding(
+                preparing_binding,
+                req,
+                owner_principal_id=owner_principal_id,
+                owner_session_id=owner_session_id,
+                request_digest=request_digest,
+                requested_refs=requested_refs,
+            )
+            if reconciled.state == "prepared":
+                return await self._binding_response(
+                    reconciled,
+                    owner_principal_id=owner_principal_id,
+                    owner_session_id=owner_session_id,
+                ), 200
+            raise ProcedureV2Error(
+                "procedure_binding_recovery_race",
+                "The procedure preparation changed concurrently",
+                recovery_action="reconcile_preparation",
+                binding_id=reconciled.binding_id,
+            )
         base_req = ProcedureV2PreviewRequest.model_validate(req.model_dump(exclude={"preview_digest"}))
         resolved = await self._resolve_sources(base_req, owner_principal_id=owner_principal_id, owner_session_id=owner_session_id)
         preview = await self._preview_for_digest(req, resolved, owner_principal_id=owner_principal_id, owner_session_id=owner_session_id)
-        request_digest = _procedure_create_request_digest(req)
         deterministic_id = self._routine_id(owner_principal_id, owner_session_id, req.idempotency_key)
         async with db_engine.get_session() as db:
             await db.commit()
@@ -1462,7 +2092,11 @@ class ProcedureV2Service:
         try:
             plan = validate_procedure_plan(provenance.get("plan") or {})
             spec = get_procedure_template(str(provenance.get("template_id") or ""))
-            immutable_step_inputs = _validated_immutable_step_inputs(provenance.get("immutable_step_inputs"), spec)
+            immutable_step_inputs = _validated_immutable_step_inputs(
+                provenance.get("immutable_step_inputs"),
+                spec,
+                expected_step_input_digests=_plan_step_input_digests(plan),
+            )
         except Exception as exc:
             raise ProcedureV2Error("procedure_version_proof_invalid", "The reviewed procedure plan is invalid", recovery_action="recreate_procedure") from exc
         if int(routine.current_version or 0) != int(version_number) or not _text(version.installed_package_digest):
@@ -1843,7 +2477,11 @@ class ProcedureV2Service:
             try:
                 plan = validate_procedure_plan(provenance.get("plan") or {})
                 spec = get_procedure_template(str(provenance.get("template_id") or ""))
-                immutable_step_inputs = _validated_immutable_step_inputs(provenance.get("immutable_step_inputs"), spec)
+                immutable_step_inputs = _validated_immutable_step_inputs(
+                    provenance.get("immutable_step_inputs"),
+                    spec,
+                    expected_step_input_digests=_plan_step_input_digests(plan),
+                )
             except Exception:
                 return None
             expected_digest = _invocation_request_digest(
@@ -2230,7 +2868,18 @@ class ProcedureV2Service:
                     "audit_receipt_id": f"governed-schedule:{existing.binding_id}",
                 }, 200
         owner = WorkBoardOwner(principal_id=owner_principal_id, session_id=owner_session_id)
-        artifact = await self._prepare_schedule_artifact(owner, descriptor, req)
+        artifact = await self._prepare_schedule_artifact(
+            owner,
+            descriptor,
+            req,
+            retention_deadline=expires,
+        )
+        if _utc(artifact.expires_at) != expires:
+            raise ProcedureV2Error(
+                "procedure_schedule_artifact_retention_mismatch",
+                "The prepared schedule seed retention does not match the reviewed expiry",
+                recovery_action="use_new_idempotency_key",
+            )
         scheduled_job_id = str(uuid5(NAMESPACE_URL, f"seraph:procedure-v2-schedule:{owner_principal_id}:{owner_session_id}:{req.idempotency_key}"))
         binding_id = str(uuid5(NAMESPACE_URL, f"seraph:procedure-v2-binding:{owner_principal_id}:{owner_session_id}:{req.idempotency_key}"))
         from src.scheduler.governed_schedules import _digest as schedule_digest
@@ -2251,6 +2900,22 @@ class ProcedureV2Service:
                             "version": req.version,
                             "version_id": descriptor.version.version_id,
                             "template_id": descriptor.version.template_id,
+                            # Pin the complete reviewed procedure selector in
+                            # the durable schedule.  The scheduler must be
+                            # able to reject a paused/revised routine or
+                            # package mutation before it creates an
+                            # occurrence task; it must never re-resolve a
+                            # newer version under the same schedule key.
+                            "routine_revision": int(
+                                getattr(descriptor.version, "routine_revision", req.expected_routine_revision)
+                            ),
+                            "plan_digest": str(getattr(descriptor.version, "plan_digest", "") or ""),
+                            "source_proof_digest": str(
+                                getattr(descriptor.version, "source_proof_digest", "") or ""
+                            ),
+                            "package_digest": str(
+                                getattr(descriptor.version, "installed_package_digest", "") or ""
+                            ),
                             "goal_id": req.goal_id,
                             "goal_revision": req.expected_goal_revision,
                             "parameters": req.parameters,
@@ -2375,7 +3040,14 @@ class ProcedureV2Service:
             "audit_receipt_id": f"governed-schedule:{binding_id}",
         }, 201
 
-    async def _prepare_schedule_artifact(self, owner: WorkBoardOwner, descriptor: V2InvocationDescriptor, req: ProcedureV2ScheduleRequest):
+    async def _prepare_schedule_artifact(
+        self,
+        owner: WorkBoardOwner,
+        descriptor: V2InvocationDescriptor,
+        req: ProcedureV2ScheduleRequest,
+        *,
+        retention_deadline: datetime,
+    ):
         payload = {
             "routine_id": descriptor.version.routine_id,
             "version": descriptor.version.version,
@@ -2398,6 +3070,7 @@ class ProcedureV2Service:
                         input=payload,
                         idempotency_key=f"schedule:{req.idempotency_key}",
                     ),
+                    retention_deadline=retention_deadline,
                 )
             except BoardError as exc:
                 raise ProcedureV2Error(exc.code, str(exc), status_code=getattr(exc, "status_code", 409), recovery_action="retry_after_prerequisite") from exc

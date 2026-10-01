@@ -387,9 +387,14 @@ approval as current and approved. A pending approval routes the operator to
 the existing Pending approvals review surface; missing, expired, denied, or
 stale approval metadata asks for a fresh preview/rebind. A consumed approval
 keeps its exact receipt addressable for reconciliation. Package preview,
-operator review, activation approval, activation, pause, revoke, and selected
-version rollback remain explicit controls. No arbitrary approval ID or
-automatic activation is accepted.
+operator review, activation approval and package activation remain explicit
+controls. Activating the package does not activate the procedure: the Library
+requires a separate **Activate procedure** action and a current server
+readback before enabling invocation or scheduling. A paused procedure uses
+**Resume procedure** under the same current package and version checks.
+Unconfirmed activation requires an authority refresh before another lifecycle
+mutation. Pause, revoke and selected-version rollback remain explicit controls.
+No arbitrary approval ID or automatic activation is accepted.
 
 Invocation is manual and requires a fresh active goal revision, current
 owner/session authority, current grants and budgets, exact template
@@ -401,6 +406,10 @@ schedule controls, and can be paused, resumed, or revoked explicitly. Quiet
 hours, proactive consent, finite period, outstanding-job, attempt, runtime,
 and notification budgets remain admission fences; a quiet-hours or budget
 refusal is visible as deferred or blocked work rather than a hidden retry.
+Each occurrence also checks its pinned procedure revision, version, plan and
+current package lifecycle before publishing a task. A paused, revoked or
+changed procedure requires explicit review; the scheduler does not silently
+rebind its accepted schedule to newer authority.
 
 All routine, approval, invocation, schedule, and recovery state is bound to
 the authenticated owner session. Changing owner/session clears the old
@@ -412,6 +421,9 @@ readbacks are required before parent success, and every terminal result carries
 an explicit `no_learning` outcome. Failed, blocked, revoked, expired, and
 unknown cleanup states remain operator-visible and retain their recovery
 boundary.
+Calendar steps recheck the current procedure parent before each provider or
+model boundary. Parent cancellation, lease reclaim, expiry and package
+revocation cannot be replaced by a child's stored lineage fields.
 
 The v2 procedure surface is designed for the CPU-host contract. The cockpit,
 canonical state, artifact metadata, and fixed browser/calendar controls remain
@@ -420,11 +432,21 @@ absent. Governed model work, where the selected meeting path requires it, still
 uses the active OpenRouter admission, consent, and budget checks; this branch
 has not performed a live provider or account canary.
 
-This is a branch-local target, not Shipped `develop` truth. The implementation
-PR must still provide the managed backend/runtime and complete operator-journey
-receipts. Focused frontend/API tests and static builds establish source
-contracts only; they do not prove native leaf execution, live browser/calendar
-usefulness, or production readiness.
+This is a branch-local target, not Shipped `develop` truth. On October 1, 2026,
+the managed CPU-host journey prepared, reviewed, installed and activated a
+public-browser procedure, then executed its native leaf and verified both the
+parent and leaf readbacks. The leaf artifact hash matched the stored file.
+Twelve native vertical tests additionally exercised actual SQLite, Chromium,
+package files and intercepted Calendar/model boundaries. These are mechanical
+execution receipts; Calendar account/model usefulness and production readiness
+remain unverified. Fresh independent reviews accepted preparation recovery,
+interface authority/recovery and the dispatcher compatibility corrections.
+After the managed backend restart, a new public-browser invocation completed
+with parent and leaf readbacks, a matching artifact hash and explicit
+`no_learning`. A separate live response-loss check retained the lifecycle
+recovery gate across reload, blocked fresh preparation, and cleared it only
+after an explicit exact authority refresh before resume. The implementation
+PR carries the branch-specific review and validation receipts.
 
 ### Bounded public browser tasks
 

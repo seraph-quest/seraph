@@ -81,7 +81,7 @@ export interface ProcedureV2BindingMetadata {
   preview_expires_at: string | null;
   install_job_id: string | null;
   approval_id: string | null;
-  /** Server-owned install approval state. Undefined keeps compatibility with pre-M6 responses. */
+  /** Server-owned install approval state. Schema-v2 responses must include it. */
   install_approval_status?: string | null;
   install_approval_expires_at?: string | null;
   install_recovery_action?: string | null;
@@ -583,8 +583,12 @@ function validatePrepared(value: unknown): ProcedureV2Prepared {
   if (!isRecord(value) || (value.status !== "prepared" && value.status !== "blocked")) throw new Error("Procedure response has an invalid prepared v2 binding.");
   const installJobId = nullableStringValue(value.install_job_id, "install job id");
   const approvalId = nullableStringValue(value.approval_id, "approval id");
+  const hasInstallApprovalStatus = Object.prototype.hasOwnProperty.call(value, "install_approval_status");
+  const hasInstallApprovalExpiry = Object.prototype.hasOwnProperty.call(value, "install_approval_expires_at");
   if (value.status === "prepared" && (!installJobId || !approvalId || typeof value.routine_id !== "string" || !value.routine_id.trim()
-    || typeof value.version_id !== "string" || !value.version_id.trim() || typeof value.version !== "number")) {
+    || typeof value.version_id !== "string" || !value.version_id.trim() || typeof value.version !== "number"
+    || !hasInstallApprovalStatus || !hasInstallApprovalExpiry || typeof value.install_approval_status !== "string"
+    || !value.install_approval_status.trim())) {
     throw new Error("Prepared procedure is missing its exact install approval binding.");
   }
   const routineId = value.status === "prepared" ? stringValue(value.routine_id, "routine id") : undefined;
@@ -811,6 +815,13 @@ function validateRoutine(value: unknown): ProcedureV2Routine {
   };
 }
 
+function isSuccessfulLifecycleReceipt(value: unknown, routineId: string, action: "pause" | "revoke"): boolean {
+  return isRecord(value)
+    && value.status === (action === "pause" ? "paused" : "revoked")
+    && value.routine_id === routineId
+    && typeof value.reason === "string";
+}
+
 function stringArray(value: unknown, field: string): string[] {
   if (!Array.isArray(value)) throw new Error(`Procedure response has invalid ${field}.`);
   return value.map((item) => stringValue(item, field));
@@ -945,6 +956,12 @@ function validatePackageApproval(value: unknown): { digest: string; approval: Wo
 
 function validateBindingMetadata(value: unknown): ProcedureV2BindingMetadata {
   if (!isRecord(value)) throw new Error("Procedure response has an invalid procedure binding.");
+  if (!Object.prototype.hasOwnProperty.call(value, "install_approval_status")
+    || !Object.prototype.hasOwnProperty.call(value, "install_approval_expires_at")
+    || typeof value.install_approval_status !== "string"
+    || !value.install_approval_status.trim()) {
+    throw new Error("Procedure response has incomplete install approval metadata.");
+  }
   const revision = value.revision === null || value.revision === undefined ? null : integerValue(value.revision, "procedure binding revision");
   return {
     binding_id: nullableStringValue(value.binding_id, "procedure binding id"),
@@ -1137,8 +1154,29 @@ export const procedureV2Api = {
     return requestJson(`${routinePath(routineId)}/versions/${version}/package/activate`, jsonRequest({ expected_routine_revision: expectedRoutineRevision, approval_id: approvalId }), validatePackageMutation);
   },
 
-  lifecycle(routineId: string, action: "install" | "activate" | "pause" | "revoke" | "rollback", body: Record<string, unknown>): Promise<ProcedureV2Routine> {
-    return requestJson(`${routinePath(routineId)}/${action}`, jsonRequest(body), validateRoutine);
+  async lifecycle(routineId: string, action: "install" | "activate" | "pause" | "revoke" | "rollback", body: Record<string, unknown>): Promise<ProcedureV2Routine> {
+    const payload = await requestJson(`${routinePath(routineId)}/${action}`, jsonRequest(body), (value) => value);
+    try {
+      return validateRoutine(payload);
+    } catch (cause) {
+      // The shipped pause/revoke route returns a small committed mutation
+      // receipt, while install/activate/rollback return a routine projection.
+      // Read back the exact owner-scoped routine after a positively identified
+      // pause/revoke receipt; never repeat the mutation or accept the receipt
+      // itself as the lifecycle state.
+      if (action === "pause" || action === "revoke") {
+        if (isSuccessfulLifecycleReceipt(payload, routineId, action)) return requestJson(routinePath(routineId), {}, validateRoutine);
+      }
+      const message = cause instanceof Error ? cause.message : "The governed procedure response was malformed.";
+      throw new ProcedureV2ApiError(502, {
+        code: "procedure_response_invalid",
+        message,
+        recovery_action: "refresh_procedure",
+        retryable: true,
+        binding_id: null,
+        audit_receipt_id: null,
+      });
+    }
   },
 
   invoke(routineId: string, request: ProcedureV2InvokeRequest): Promise<ProcedureV2InvokeReceipt> {

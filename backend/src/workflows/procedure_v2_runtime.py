@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
-from dataclasses import asdict, is_dataclass
+from dataclasses import fields, is_dataclass
 import hashlib
 import json
 from pathlib import Path
@@ -22,6 +22,7 @@ import uuid
 from typing import Any
 
 from src.workflows.job_runtime import (
+    DurableJobAdmissionDenied,
     DurableJobError,
     DurableJobIdempotencyConflict,
     DurableJobIdentity,
@@ -81,10 +82,33 @@ def _as_mapping(value: Any) -> Mapping[str, Any]:
                 for key, child in dumped.items()
             }
     if is_dataclass(value):
-        dumped = asdict(value)
-        if isinstance(dumped, Mapping):
-            return dumped
+        # ``V2InvocationDescriptor`` is frozen and uses mapping proxies for
+        # its authority payload.  ``dataclasses.asdict`` deep-copies values,
+        # which cannot copy a mapping proxy and would turn a valid server
+        # descriptor into a transient TypeError at the execution boundary.
+        # Walk fields without copying opaque scalar values while preserving
+        # nested dataclass/mapping structure for the canonical plan reader.
+        return {
+            field.name: _normalize_descriptor_value(getattr(value, field.name))
+            for field in fields(value)
+        }
     raise ProcedureV2RuntimeError("procedure_descriptor_invalid")
+
+
+def _normalize_descriptor_value(value: Any) -> Any:
+    if is_dataclass(value):
+        return {
+            field.name: _normalize_descriptor_value(getattr(value, field.name))
+            for field in fields(value)
+        }
+    if isinstance(value, Mapping):
+        return {
+            key: _normalize_descriptor_value(child)
+            for key, child in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_normalize_descriptor_value(child) for child in value]
+    return value
 
 
 def _is_descriptor_object(value: Any) -> bool:
@@ -528,10 +552,10 @@ class ProcedureV2Runtime:
         resolver = self.resolver
         if resolver is None:
             try:
-                from src.workflows.routines import validate_v2_invocation_authority
+                from src.workflows.routines import routine_service
             except (ImportError, AttributeError) as exc:
                 raise ProcedureV2RuntimeError("procedure_authority_resolver_unavailable") from exc
-            resolver = validate_v2_invocation_authority
+            resolver = routine_service.validate_v2_invocation_authority
         resolved = await resolver(
             routine_id,
             int(version),
@@ -728,6 +752,64 @@ class ProcedureV2Runtime:
             )
         return current
 
+    async def _revoke_unpublished_child_artifact(self, owner: Any, artifact: Any) -> str:
+        """Revoke a child artifact only when no canonical publication won.
+
+        The cleanup runs in a fresh writer session after the publication
+        session has closed.  Its guard checks both native task and schedule
+        references under the exact owner; any protected or uncertain outcome
+        remains pending for reconciliation instead of deleting possible work.
+        """
+        from sqlalchemy import select
+
+        from src.db.models import GovernedScheduleBinding, WorkBoardTask
+        from src.work_board.input_artifacts import revoke_unpublished_input_artifact
+
+        artifact_id = _text(getattr(artifact, "artifact_id", None))
+        try:
+            expected_revision = int(getattr(artifact, "revision", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            return "unknown"
+        if not artifact_id or expected_revision < 1 or self.session_provider is None:
+            return "unknown"
+
+        async def publication_guard(check_db: Any, _row: Any) -> bool:
+            task_ref = (
+                await check_db.execute(
+                    select(WorkBoardTask.task_id).where(
+                        WorkBoardTask.input_artifact_id == artifact_id,
+                        WorkBoardTask.owner_principal_id == owner.principal_id,
+                        WorkBoardTask.owner_session_id == owner.session_id,
+                    ).limit(1)
+                )
+            ).scalar_one_or_none()
+            schedule_ref = (
+                await check_db.execute(
+                    select(GovernedScheduleBinding.binding_id).where(
+                        GovernedScheduleBinding.input_artifact_id == artifact_id,
+                        GovernedScheduleBinding.owner_principal_id == owner.principal_id,
+                        GovernedScheduleBinding.owner_session_id == owner.session_id,
+                    ).limit(1)
+                )
+            ).scalar_one_or_none()
+            return task_ref is None and schedule_ref is None
+
+        try:
+            async with self.session_provider() as db:
+                await revoke_unpublished_input_artifact(
+                    db,
+                    owner,
+                    artifact_id=artifact_id,
+                    expected_revision=expected_revision,
+                    publication_guard=publication_guard,
+                )
+            return "revoked"
+        except Exception as exc:
+            code = _text(getattr(exc, "code", None))
+            if code == "input_artifact_publication_protected":
+                return "protected"
+            return "unknown"
+
     async def _materialize_child_board(
         self,
         parent: Mapping[str, Any],
@@ -751,10 +833,7 @@ class ProcedureV2Runtime:
         from sqlalchemy import select
         from src.db.models import WorkBoardAttempt, WorkBoardStatus
         from src.work_board.contracts import WorkBoardInputArtifactCreate, WorkBoardTaskCreate
-        from src.work_board.input_artifacts import (
-            prepare_input_artifact,
-            resolve_input_artifact_for_copy,
-        )
+        from src.work_board.input_artifacts import prepare_input_artifact
         from src.work_board.repository import WorkBoardOwner
 
         parent_id = _text(parent.get("job_id") or parent.get("run_identity"))
@@ -774,26 +853,36 @@ class ProcedureV2Runtime:
 
         owner = WorkBoardOwner(principal_id=owner_id, session_id=session_id)
         if capability_id == "browser.public-task.v1":
-            # The source artifact is immutable reviewed plan data.  The copy
-            # helper verifies its owner, capability, canonical bytes and hash,
-            # but deliberately does not require its old goal revision: v2
-            # invocation may select a new current goal.
-            source = None
+            # Preparation copied the reviewed Browser envelope into the
+            # server-owned version.  Invocation must consume that copy
+            # directly: the short-lived source artifact may have expired and
+            # is never a second authority for URL/action selection.
             try:
-                async with self.session_provider() as db:
-                    source = await resolve_input_artifact_for_copy(
-                        db,
-                        owner,
-                        typed_input_ref=_text(step.get("typed_input_ref")),
-                        typed_input_digest=_text(step.get("typed_input_digest")),
-                        capability_id=capability_id,
-                        goal_id=goal_id,
-                        goal_revision=goal_revision,
-                        allow_goal_change=True,
-                    )
+                from src.browser.task_runner import BrowserTaskInput, _browser_input_digests
+
+                plan_input_digest = step.get("typed_input_digest")
+                copied_input_digest = inputs.get("input_envelope_digest")
+                copied_model_digest = inputs.get("browser_input_digest")
+                copied_consent_digest = inputs.get("action_consent_digest")
+                if (
+                    type(plan_input_digest) is not str
+                    or type(copied_input_digest) is not str
+                    or type(copied_model_digest) is not str
+                    or type(copied_consent_digest) is not str
+                    or plan_input_digest.lower() != copied_input_digest
+                ):
+                    raise ValueError("browser input is not bound to the reviewed plan")
+                model = BrowserTaskInput.model_validate(inputs.get("browser_input"))
+                envelope_digest, model_digest, consent_digest = _browser_input_digests(model)
+                if (
+                    copied_input_digest != envelope_digest
+                    or copied_model_digest != model_digest
+                    or copied_consent_digest != consent_digest
+                ):
+                    raise ValueError("browser input digest binding is invalid")
             except Exception as exc:
                 raise ProcedureV2RuntimeError("browser_leaf_input_unavailable") from exc
-            leaf_input = source.input
+            leaf_input = model.model_dump(mode="json", exclude_none=True)
         elif capability_id == "calendar.meeting-prep.v1":
             # Calendar's exact M5 input is selected afresh for this invocation;
             # it must never reuse a prior event artifact as authority.
@@ -805,85 +894,107 @@ class ProcedureV2Runtime:
             raise ProcedureV2RuntimeError("procedure_leaf_capability_unregistered")
 
         artifact_key = f"procedure-v2:{parent_id}:{step_id}:{child_id}"
-        async with self.session_provider() as db:
-            artifact = await prepare_input_artifact(
-                db,
-                owner,
-                WorkBoardInputArtifactCreate(
-                    schema_version=1,
-                    capability_id=capability_id,
-                    goal_id=goal_id,
-                    goal_revision=goal_revision,
-                    input=dict(leaf_input),
-                    idempotency_key=artifact_key,
-                ),
-            )
+        artifact = None
+        try:
+            async with self.session_provider() as db:
+                artifact = await prepare_input_artifact(
+                    db,
+                    owner,
+                    WorkBoardInputArtifactCreate(
+                        schema_version=1,
+                        capability_id=capability_id,
+                        goal_id=goal_id,
+                        goal_revision=goal_revision,
+                        input=dict(leaf_input),
+                        idempotency_key=artifact_key,
+                    ),
+                )
 
-            async def publication_guard(check_db: Any) -> None:
-                parent_task = await self.board_repository.get_task(check_db, owner, parent_task_id)
-                current_attempt = (
-                    await check_db.execute(
-                        select(WorkBoardAttempt).where(
-                            WorkBoardAttempt.task_id == parent_task_id,
-                            WorkBoardAttempt.attempt_id == parent_attempt_id,
+                async def publication_guard(check_db: Any) -> None:
+                    parent_task = await self.board_repository.get_task(check_db, owner, parent_task_id)
+                    current_attempt = (
+                        await check_db.execute(
+                            select(WorkBoardAttempt).where(
+                                WorkBoardAttempt.task_id == parent_task_id,
+                                WorkBoardAttempt.attempt_id == parent_attempt_id,
+                            )
                         )
-                    )
-                ).scalar_one_or_none()
-                if (
-                    parent_task.status is not WorkBoardStatus.running
-                    or int(parent_task.goal_revision) != goal_revision
-                    or int(parent_task.task_revision) < int(parent_authority.get("board_task_revision") or 0)
-                    or current_attempt is None
-                    or current_attempt.ended_at is not None
-                    or current_attempt.cancel_requested_at is not None
-                    or int(current_attempt.fencing_token or 0) != parent_board_fence
-                    or not current_attempt.lease_owner
-                ):
-                    raise ProcedureV2RuntimeError("procedure_parent_authority_stale")
-                if current_attempt.workflow_run_id not in {None, parent_id}:
-                    raise ProcedureV2RuntimeError("procedure_parent_workflow_binding_stale")
+                    ).scalar_one_or_none()
+                    if (
+                        parent_task.status is not WorkBoardStatus.running
+                        or int(parent_task.goal_revision) != goal_revision
+                        or int(parent_task.task_revision) < int(parent_authority.get("board_task_revision") or 0)
+                        or current_attempt is None
+                        or current_attempt.ended_at is not None
+                        or current_attempt.cancel_requested_at is not None
+                        or int(current_attempt.fencing_token or 0) != parent_board_fence
+                        or not current_attempt.lease_owner
+                    ):
+                        raise ProcedureV2RuntimeError("procedure_parent_authority_stale")
+                    if current_attempt.workflow_run_id not in {None, parent_id}:
+                        raise ProcedureV2RuntimeError("procedure_parent_workflow_binding_stale")
 
-            mutation = await self.board_repository.create_task(
-                db,
-                owner,
-                WorkBoardTaskCreate(
-                    title=f"Procedure leaf: {step_id}",
-                    body="",
-                    goal_id=goal_id,
-                    goal_revision=goal_revision,
-                    status=WorkBoardStatus.todo,
-                    capability_id=capability_id,
-                    input_artifact_id=artifact.artifact_id,
-                    executor_id=f"seraph-work-board:{capability_id}",
-                    priority=int(parent.get("priority") or 50),
-                    idempotency_scope="guardian-routine-v2-leaf",
-                    idempotency_key=f"{parent_id}:{step_id}:{child_id}",
-                    origin_thread_id=session_id,
-                ),
-                origin_session_id=session_id,
-                publication_authority_check=publication_guard,
-            )
-            child_task = mutation.task
-            lease_owner = _text(getattr(self, "board_lease_owner", None)) or "service:work-board"
-            promoted = await self.board_repository.promote_task_ready(
-                db,
-                child_task.task_id,
-                expected_revision=int(child_task.task_revision),
-                actor_principal_id=lease_owner,
-                actor_session_id=f"{lease_owner}:session",
-            )
-            if promoted is None:
-                raise ProcedureV2RuntimeError("procedure_leaf_not_ready")
-            child_task = promoted.task
-            claim = await self.board_repository.claim_ready_task(
-                db,
-                child_task.task_id,
-                expected_revision=int(child_task.task_revision),
-                lease_owner=lease_owner,
-                lease_seconds=max(1, min(self._remaining_seconds(parent), ROUTINE_V2_MAX_SECONDS)),
-                actor_principal_id=lease_owner,
-                actor_session_id=f"{lease_owner}:session",
-            )
+                try:
+                    mutation = await self.board_repository.create_task(
+                        db,
+                        owner,
+                        WorkBoardTaskCreate(
+                            title=f"Procedure leaf: {step_id}",
+                            body="",
+                            goal_id=goal_id,
+                            goal_revision=goal_revision,
+                            status=WorkBoardStatus.todo,
+                            capability_id=capability_id,
+                            input_artifact_id=artifact.artifact_id,
+                            executor_id=f"seraph-work-board:{capability_id}",
+                            priority=int(parent.get("priority") or 50),
+                            idempotency_scope="guardian-routine-v2-leaf",
+                            idempotency_key=f"{parent_id}:{step_id}:{child_id}",
+                            origin_thread_id=session_id,
+                        ),
+                        origin_session_id=session_id,
+                        publication_authority_check=publication_guard,
+                    )
+                except ProcedureV2RuntimeError:
+                    raise
+                except Exception as exc:
+                    # A generic writer/commit exception is ambiguous.  The
+                    # artifact may already be bound to a committed task, so
+                    # preserve the exact key and bytes for reconciliation.
+                    raise ProcedureV2RuntimeError(
+                        "procedure_leaf_publication_outcome_unknown",
+                        unknown=True,
+                    ) from exc
+                child_task = mutation.task
+                lease_owner = _text(getattr(self, "board_lease_owner", None)) or "service:work-board"
+                promoted = await self.board_repository.promote_task_ready(
+                    db,
+                    child_task.task_id,
+                    expected_revision=int(child_task.task_revision),
+                    actor_principal_id=lease_owner,
+                    actor_session_id=f"{lease_owner}:session",
+                )
+                if promoted is None:
+                    raise ProcedureV2RuntimeError("procedure_leaf_not_ready")
+                child_task = promoted.task
+                claim = await self.board_repository.claim_ready_task(
+                    db,
+                    child_task.task_id,
+                    expected_revision=int(child_task.task_revision),
+                    lease_owner=lease_owner,
+                    lease_seconds=max(1, min(self._remaining_seconds(parent), ROUTINE_V2_MAX_SECONDS)),
+                    actor_principal_id=lease_owner,
+                    actor_session_id=f"{lease_owner}:session",
+                )
+        except ProcedureV2RuntimeError as exc:
+            if artifact is not None and not exc.unknown:
+                cleanup = await self._revoke_unpublished_child_artifact(owner, artifact)
+                if cleanup != "revoked":
+                    raise ProcedureV2RuntimeError(
+                        "procedure_leaf_publication_outcome_unknown",
+                        unknown=True,
+                    ) from exc
+            raise
         if claim is None:
             raise ProcedureV2RuntimeError("procedure_leaf_claim_unavailable")
         return {
@@ -939,14 +1050,52 @@ class ProcedureV2Runtime:
                     child_id=child_id,
                     inputs=inputs,
                 )
-            admitted = await admitter(
-                parent=parent,
-                step=step,
-                descriptor=descriptor,
-                child_id=child_id,
-                inputs=inputs,
-                binding=binding,
-            )
+            try:
+                admitted = await admitter(
+                    parent=parent,
+                    step=step,
+                    descriptor=descriptor,
+                    child_id=child_id,
+                    inputs=inputs,
+                    binding=binding,
+                )
+            except (DurableJobLeaseError, DurableJobAdmissionDenied) as exc:
+                if isinstance(binding, Mapping):
+                    await self._settle_unadmitted_child(
+                        binding,
+                        reason="procedure_leaf_admission_denied",
+                        unknown=False,
+                    )
+                raise ProcedureV2RuntimeError("procedure_leaf_admission_denied") from exc
+            except DurableJobError as exc:
+                if isinstance(binding, Mapping):
+                    await self._settle_unadmitted_child(
+                        binding,
+                        reason="procedure_leaf_admission_unknown",
+                        unknown=True,
+                    )
+                raise ProcedureV2RuntimeError("procedure_leaf_admission_unknown", unknown=True) from exc
+            except Exception as exc:
+                # The Board child is materialized before the native adapter
+                # admission call.  An untyped adapter failure at that point
+                # has an ambiguous commit boundary: the native root may or
+                # may not exist.  Never let the raw exception escape while
+                # the claimed child remains running.  Settle the exact child
+                # through its owner/fence CAS and make the parent take the
+                # existing unknown/reconciliation path.  This deliberately
+                # preserves the deterministic child key; a retry must first
+                # reconcile it and may not invent a second root.
+                if isinstance(binding, Mapping):
+                    await self._settle_unadmitted_child(
+                        binding,
+                        reason="procedure_leaf_admission_unknown",
+                        unknown=True,
+                    )
+                    raise ProcedureV2RuntimeError(
+                        "procedure_leaf_admission_unknown",
+                        unknown=True,
+                    ) from exc
+                raise
             if not isinstance(admitted, Mapping):
                 raise ProcedureV2RuntimeError("procedure_leaf_admission_invalid")
             return dict(admitted)
@@ -1398,13 +1547,17 @@ class ProcedureV2Runtime:
         *,
         reason: str,
         unknown: bool = False,
+        expected_lease_owner: str | None = None,
+        expected_fencing_token: int | None = None,
     ) -> Mapping[str, Any]:
         """Fail a parent before native leaf admission/contact.
 
         Admission errors happen before a native root exists, so there is no
         child ledger for the coordinator to settle.  Closing the parent with
-        its own lease makes the failed boundary durable without inventing a
-        synthetic child effect.
+        its original lease makes the failed boundary durable without inventing
+        a synthetic child effect.  The caller must provide the lease snapshot
+        that authorized the operation.  A later read is only an observation:
+        it must never let an old executor adopt a reclaimed parent's lease.
         """
 
         current = await self.jobs.get_job(parent_job_id)
@@ -1419,13 +1572,26 @@ class ProcedureV2Runtime:
             *UNCERTAIN_EXTERNAL_EFFECT_STATUSES,
         }:
             return current
-        owner, fence = _lease(current)
+        if not expected_lease_owner or expected_fencing_token is None:
+            return current
+        try:
+            current_owner, current_fence = _lease(current)
+        except ProcedureV2RuntimeError:
+            return current
+        if (
+            current_owner != _text(expected_lease_owner)
+            or current_fence != int(expected_fencing_token)
+        ):
+            # The parent was reclaimed while this executor was away.  Do not
+            # spend the new worker's lease to settle the old executor's
+            # admission boundary; leave the row for canonical reconciliation.
+            return current
         try:
             return await self.jobs.transition_job(
                 parent_job_id,
                 "unknown_external_effect" if unknown else "blocked",
-                owner=owner,
-                fencing_token=fence,
+                owner=current_owner,
+                fencing_token=current_fence,
                 expected_revision=int(current.get("revision") or 0),
                 reason=reason,
                 result={
@@ -1437,6 +1603,124 @@ class ProcedureV2Runtime:
             )
         except DurableJobError:
             return await self.jobs.get_job(parent_job_id) or current
+
+    async def _settle_unadmitted_child(
+        self,
+        binding: Mapping[str, Any],
+        *,
+        reason: str,
+        unknown: bool,
+    ) -> None:
+        """Close the exact Board child created before native admission.
+
+        Native admission is effect-free.  A typed rejection can therefore end
+        the claimed child through the existing Board CAS while preserving the
+        parent/child identities and the recovery reason.  If that CAS cannot
+        be proven, surface an unknown outcome rather than pretending the
+        claimed row was released.
+        """
+
+        child_task = binding.get("task")
+        child_attempt = binding.get("attempt")
+        if child_task is None or child_attempt is None:
+            raise ProcedureV2RuntimeError("procedure_child_settlement_unknown", unknown=True)
+        if self.board_repository is None or self.session_provider is None:
+            raise ProcedureV2RuntimeError("procedure_child_settlement_unknown", unknown=True)
+        from sqlalchemy import select
+
+        from src.db.models import WorkBoardAttempt, WorkBoardStatus, WorkBoardTask
+
+        task_id = _text(getattr(child_task, "task_id", None))
+        attempt_id = _text(getattr(child_attempt, "attempt_id", None))
+        if not task_id or not attempt_id:
+            raise ProcedureV2RuntimeError("procedure_child_settlement_unknown", unknown=True)
+        safe_reason = _text(reason)[:128] or "procedure_leaf_admission_denied"
+        try:
+            async with self.session_provider() as db:
+                # The native adapter may have committed and linked its durable
+                # root before its response was lost.  The materialization
+                # snapshot is then stale: linking the root increments the
+                # Board task revision and may update the attempt fence.  Read
+                # the exact server-created rows again in this writer session
+                # before the CAS; never guess a revision or settle a different
+                # owner/task on an ambiguous boundary.
+                task_result = await db.execute(
+                    select(WorkBoardTask)
+                    .where(WorkBoardTask.task_id == task_id)
+                    .execution_options(populate_existing=True)
+                )
+                current_task = task_result.scalar_one_or_none()
+                attempt_result = await db.execute(
+                    select(WorkBoardAttempt)
+                    .where(
+                        WorkBoardAttempt.attempt_id == attempt_id,
+                        WorkBoardAttempt.task_id == task_id,
+                    )
+                    .execution_options(populate_existing=True)
+                )
+                current_attempt = attempt_result.scalar_one_or_none()
+                if current_task is None or current_attempt is None:
+                    raise ProcedureV2RuntimeError("procedure_child_settlement_unknown", unknown=True)
+                if (
+                    _text(current_task.owner_principal_id) != _text(getattr(child_task, "owner_principal_id", None))
+                    or _text(current_task.owner_session_id) != _text(getattr(child_task, "owner_session_id", None))
+                    or _text(current_attempt.task_id) != task_id
+                ):
+                    raise ProcedureV2RuntimeError("procedure_child_settlement_unknown", unknown=True)
+                original_lease_owner = _text(getattr(child_attempt, "lease_owner", None))
+                try:
+                    original_fence = int(getattr(child_attempt, "fencing_token", 0) or 0)
+                except (TypeError, ValueError, OverflowError):
+                    original_fence = 0
+                if (
+                    not original_lease_owner
+                    or original_fence < 1
+                    or _text(current_attempt.lease_owner) != original_lease_owner
+                    or int(current_attempt.fencing_token or 0) != original_fence
+                ):
+                    # A new worker may have reclaimed this exact attempt while
+                    # the native admission response was in flight.  Its lease
+                    # is not evidence for the old executor, so do not borrow
+                    # that worker's token to project a terminal result.
+                    raise ProcedureV2RuntimeError("procedure_child_settlement_unknown", unknown=True)
+                if current_task.status in {
+                    WorkBoardStatus.blocked,
+                    WorkBoardStatus.review,
+                    WorkBoardStatus.done,
+                } or current_attempt.ended_at is not None:
+                    # Another owner-bound recovery already won the exact CAS.
+                    # Keep the durable root for canonical reconciliation.
+                    return
+                await self.board_repository.project_attempt(
+                    db,
+                    task_id,
+                    attempt_id,
+                    expected_revision=int(current_task.task_revision),
+                    board_fence=original_fence,
+                    lease_owner=original_lease_owner,
+                    status=WorkBoardStatus.blocked,
+                    outcome="unknown_external_effect" if unknown else safe_reason,
+                    block_kind="unknown_effect" if unknown else "capability",
+                    block_reason=safe_reason,
+                    result_refs=[
+                        {
+                            "status": "unknown" if unknown else "blocked",
+                            "reason_code": safe_reason,
+                            "recovery_action": "reconcile_admission_binding" if unknown else "retry_after_prerequisite",
+                        }
+                    ],
+                    receipt_refs=[
+                        {
+                            "status": "unknown" if unknown else "blocked",
+                            "reason_code": safe_reason,
+                            "recovery_action": "reconcile_admission_binding" if unknown else "retry_after_prerequisite",
+                        }
+                    ],
+                    actor_principal_id=original_lease_owner,
+                    actor_session_id=f"{original_lease_owner}:session",
+                )
+        except Exception as exc:
+            raise ProcedureV2RuntimeError("procedure_child_settlement_unknown", unknown=True) from exc
 
     async def _execute_leaf(
         self,
@@ -1616,6 +1900,8 @@ class ProcedureV2Runtime:
                         parent_job_id,
                         reason=getattr(exc, "code", None) or "procedure_parent_authority_stale",
                         unknown=True,
+                        expected_lease_owner=parent_owner,
+                        expected_fencing_token=parent_fence,
                     )
                     return {
                         "status": _text(terminal.get("status")) or "unknown_external_effect",
@@ -1648,6 +1934,8 @@ class ProcedureV2Runtime:
                     parent_job_id,
                     reason="procedure_child_identity_mismatch",
                     unknown=True,
+                    expected_lease_owner=parent_owner,
+                    expected_fencing_token=parent_fence,
                 )
                 return {
                     "status": _text(terminal.get("status")) or "unknown_external_effect",
@@ -1663,6 +1951,8 @@ class ProcedureV2Runtime:
                     parent_job_id,
                     reason="procedure_child_missing",
                     unknown=True,
+                    expected_lease_owner=parent_owner,
+                    expected_fencing_token=parent_fence,
                 )
                 return {
                     "status": _text(terminal.get("status")) or "unknown_external_effect",
@@ -1677,6 +1967,8 @@ class ProcedureV2Runtime:
                         parent_job_id,
                         reason="procedure_child_checkpoint_missing",
                         unknown=True,
+                        expected_lease_owner=parent_owner,
+                        expected_fencing_token=parent_fence,
                     )
                     return {
                         "status": _text(terminal.get("status")) or "unknown_external_effect",
@@ -1697,6 +1989,8 @@ class ProcedureV2Runtime:
                         parent_job_id,
                         reason="procedure_child_terminal_proof_missing",
                         unknown=True,
+                        expected_lease_owner=parent_owner,
+                        expected_fencing_token=parent_fence,
                     )
                     return {
                         "status": _text(terminal.get("status")) or "unknown_external_effect",
@@ -1733,6 +2027,8 @@ class ProcedureV2Runtime:
                     parent_job_id,
                     reason="procedure_child_terminal_unknown",
                     unknown=True,
+                    expected_lease_owner=parent_owner,
+                    expected_fencing_token=parent_fence,
                 )
                 return {
                     "status": _text(terminal.get("status")) or "unknown_external_effect",
@@ -1746,6 +2042,8 @@ class ProcedureV2Runtime:
                     parent_job_id,
                     reason="procedure_child_uncheckpointed",
                     unknown=True,
+                    expected_lease_owner=parent_owner,
+                    expected_fencing_token=parent_fence,
                 )
                 return {
                     "status": _text(terminal.get("status")) or "unknown_external_effect",
@@ -1761,6 +2059,8 @@ class ProcedureV2Runtime:
                     parent_job_id,
                     reason=exc.code,
                     unknown=exc.unknown,
+                    expected_lease_owner=parent_owner,
+                    expected_fencing_token=parent_fence,
                 )
                 return {
                     "status": _text(terminal.get("status")) or ("unknown_external_effect" if exc.unknown else "blocked"),
@@ -1854,6 +2154,8 @@ class ProcedureV2Runtime:
                         parent_job_id,
                         reason="procedure_child_terminal_proof_missing",
                         unknown=True,
+                        expected_lease_owner=parent_owner,
+                        expected_fencing_token=parent_fence,
                     )
                     return {
                         "status": _text(terminal.get("status")) or "unknown_external_effect",
@@ -1919,6 +2221,8 @@ class ProcedureV2Runtime:
                     parent_job_id,
                     reason=getattr(exc, "code", None) or "procedure_parent_authority_stale",
                     unknown=True,
+                    expected_lease_owner=parent_owner,
+                    expected_fencing_token=parent_fence,
                 )
                 return {
                     "status": _text(terminal.get("status")) or "unknown_external_effect",
@@ -1930,15 +2234,19 @@ class ProcedureV2Runtime:
             if child_status not in {"succeeded", "degraded"}:
                 reason = _text(result.get("reason_code")) or ("reconcile_external_effect" if child_status in UNCERTAIN_EXTERNAL_EFFECT_STATUSES else "procedure_leaf_blocked")
                 latest_parent = await self.jobs.get_job(parent_job_id) or current_parent
-                latest_lease = latest_parent.get("lease") if isinstance(latest_parent.get("lease"), Mapping) else {}
                 to_status = "unknown_external_effect" if child_status in UNCERTAIN_EXTERNAL_EFFECT_STATUSES else "blocked"
                 try:
                     latest_parent = await self.jobs.transition_job(
                         parent_job_id,
                         to_status,
-                        owner=_text(latest_lease.get("owner")) or current_parent_owner,
-                        fencing_token=int(latest_lease.get("fencing_token") or current_parent_fence),
-                        expected_revision=int(latest_parent.get("revision") or 0),
+                        # ``current_parent`` is the lease snapshot that was
+                        # checked before this child settlement.  A fresh read
+                        # is useful for observing a concurrent transition, but
+                        # it must never let this executor adopt a reclaimed
+                        # parent's owner/fence to write a terminal state.
+                        owner=current_parent_owner,
+                        fencing_token=current_parent_fence,
+                        expected_revision=int(current_parent.get("revision") or 0),
                         reason=reason,
                         result={"status": to_status, "child_job_id": child_id, "memory_status": "no_learning"},
                         result_summary=reason,
@@ -2012,6 +2320,8 @@ class ProcedureV2Runtime:
                 parent_job_id,
                 reason=getattr(exc, "code", None) or "procedure_parent_authority_stale",
                 unknown=True,
+                expected_lease_owner=parent_owner,
+                expected_fencing_token=parent_fence,
             )
             return {
                 "status": _text(terminal.get("status")) or "unknown_external_effect",

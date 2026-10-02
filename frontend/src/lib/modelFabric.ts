@@ -90,6 +90,7 @@ export interface OpenRouterSetupStatus {
   egress_class: string;
   cloud_egress_acknowledged: boolean;
   spend_ceiling_microusd: number | null;
+  request_cost_bound_microusd?: number | null;
   max_queued: number;
   max_inflight: number;
   max_outstanding_per_owner: number;
@@ -122,6 +123,82 @@ export interface ModelFabricSettingsStatus {
   defaults: { egress_class: string; fallback_allowed: boolean };
   canary_endpoint: string;
   openrouter_setup?: OpenRouterSetupStatus | null;
+  inference_accounting?: InferenceAccountingStatus | null;
+  egress_revision?: number;
+  egress_revoked?: boolean;
+}
+
+export interface InferenceAccountingStatus {
+  status: string;
+  reason_code?: string;
+  accounting_continuity_verified?: boolean;
+  authorized_period?: string;
+  period_high_water?: string;
+  revision?: number;
+  period_review?: { endpoint: string; method: string; period_id: string; expected_revision: number } | null;
+  period_id?: string;
+  settings_revision?: number;
+  ceiling_microusd?: number;
+  committed_microusd?: number;
+  reserved_microusd?: number;
+  unknown_microusd?: number;
+  remaining_microusd?: number | null;
+  operations_truncated?: boolean;
+  operation_count?: number;
+  operations: Array<{
+    operation_id: string; job_id: string; owner_id: string; runtime_path: string;
+    state: string; revision: number; bound_microusd: number; period_id: string;
+    recovery_reason?: string | null;
+    controls?: Array<{ action: string; endpoint: string; method: string; expected_revision: number; job_id: string; operation_id: string }>;
+  }>;
+}
+
+export function normalizeInferenceAccounting(value: unknown): InferenceAccountingStatus | null {
+  const record = recordOf(value);
+  if (!record || typeof record.status !== "string") return null;
+  const operations = Array.isArray(record.operations) ? record.operations : [];
+  const periodReview = recordOf(record.period_review);
+  return {
+    status: record.status,
+    reason_code: typeof record.reason_code === "string" ? record.reason_code : undefined,
+    accounting_continuity_verified: record.accounting_continuity_verified === true,
+    authorized_period: typeof record.authorized_period === "string" ? record.authorized_period : undefined,
+    period_high_water: typeof record.period_high_water === "string" ? record.period_high_water : undefined,
+    revision: typeof record.revision === "number" ? record.revision : undefined,
+    period_review: periodReview && periodReview.endpoint === "/api/settings/model-fabric/accounting/period"
+      && periodReview.method === "POST" && periodReview.period_id === record.period_id
+      && periodReview.expected_revision === record.revision && typeof periodReview.period_id === "string"
+      && /^[0-9]{4}-(0[1-9]|1[0-2])$/.test(periodReview.period_id) && typeof periodReview.expected_revision === "number"
+      && Number.isSafeInteger(periodReview.expected_revision) && periodReview.expected_revision >= 1
+      ? { endpoint: periodReview.endpoint, method: "POST", period_id: periodReview.period_id, expected_revision: periodReview.expected_revision } : null,
+    period_id: typeof record.period_id === "string" ? record.period_id : undefined,
+    settings_revision: typeof record.settings_revision === "number" ? record.settings_revision : undefined,
+    ceiling_microusd: typeof record.ceiling_microusd === "number" ? record.ceiling_microusd : undefined,
+    committed_microusd: typeof record.committed_microusd === "number" ? record.committed_microusd : undefined,
+    reserved_microusd: typeof record.reserved_microusd === "number" ? record.reserved_microusd : undefined,
+    unknown_microusd: typeof record.unknown_microusd === "number" ? record.unknown_microusd : undefined,
+    remaining_microusd: typeof record.remaining_microusd === "number" ? record.remaining_microusd : null,
+    operations_truncated: record.operations_truncated === true,
+    operation_count: typeof record.operation_count === "number" ? record.operation_count : undefined,
+    operations: operations.flatMap((item) => {
+      const row = recordOf(item);
+      if (!row || typeof row.operation_id !== "string" || typeof row.job_id !== "string" || typeof row.revision !== "number" || typeof row.bound_microusd !== "number") return [];
+      const operationId = row.operation_id;
+      const jobId = row.job_id;
+      const revision = row.revision;
+      return [{ operation_id: row.operation_id, job_id: row.job_id, owner_id: String(row.owner_id ?? ""),
+        runtime_path: String(row.runtime_path ?? ""), state: String(row.state ?? "unknown"), revision: row.revision,
+        bound_microusd: row.bound_microusd, period_id: String(row.period_id ?? ""),
+        recovery_reason: typeof row.recovery_reason === "string" ? row.recovery_reason : null,
+        controls: Array.isArray(row.controls) ? row.controls.flatMap((entry) => {
+          const control = recordOf(entry);
+          if (!control || control.action !== "settle" || control.endpoint !== "/api/settings/model-fabric/accounting/settle" || control.method !== "POST" || control.operation_id !== row.operation_id || control.job_id !== row.job_id || control.expected_revision !== row.revision) return [];
+          return [{ action: "settle", endpoint: control.endpoint, method: "POST", expected_revision: revision,
+            job_id: jobId, operation_id: operationId }];
+        }) : [],
+      }];
+    }),
+  };
 }
 
 export interface ModelFabricCanaryResult {
@@ -194,6 +271,7 @@ function normalizeOpenRouterSetup(value: unknown): OpenRouterSetupStatus | null 
     spend_ceiling_microusd: typeof record.spend_ceiling_microusd === "number"
       ? record.spend_ceiling_microusd
       : null,
+    request_cost_bound_microusd: typeof record.request_cost_bound_microusd === "number" ? record.request_cost_bound_microusd : null,
     max_queued: typeof record.max_queued === "number" ? record.max_queued : 64,
     max_inflight: typeof record.max_inflight === "number" ? record.max_inflight : 1,
     max_outstanding_per_owner: typeof record.max_outstanding_per_owner === "number"
@@ -370,6 +448,9 @@ export function normalizeModelFabricSettings(value: unknown): ModelFabricSetting
       ? record.canary_endpoint
       : "/api/settings/model-fabric/canary",
     openrouter_setup: normalizeOpenRouterSetup(record.openrouter_setup),
+    inference_accounting: normalizeInferenceAccounting(record.inference_accounting),
+    egress_revision: typeof record.egress_revision === "number" ? record.egress_revision : undefined,
+    egress_revoked: record.egress_revoked === true,
   };
 }
 

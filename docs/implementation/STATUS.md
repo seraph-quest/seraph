@@ -28,6 +28,22 @@ remain usable without a local model server, CUDA, downloaded weights, or the VLM
 wrapper. Missing key, consent, approved upstream, model-fabric bounds/proofs,
 or budget is reported as blocked or configuration-required.
 
+Deployment inference accounting remains **Partial**. The canonical durable job
+repository owns finite reservations, immutable UTC-month attribution, account
+usage settlement, and unknown liabilities that carry across rollover and
+restore. The existing remote broker remains the sole serial executor. Paid
+egress requires a retained lifecycle witness outside root snapshots; stale or
+missing continuity blocks inference while deterministic CPU features remain
+usable. Settings exposes exact-operation manual reconciliation, explicitly
+marked externally unverified, without restoring job or grant authority. Live
+admission also requires exact review of every changed observed UTC month;
+clock correction conservatively retains future charges. Stable profile root
+binding and witnessed policy epochs prevent fresh-root budget bootstrap and
+archived egress reactivation. Overruns require explicit adequate reserve review
+bound to already-settled operation sequence/revision. Live
+provider charges and managed Docker mount operation remain unverified until
+separate operator-authorised operational receipts exist.
+
 The implementation merge gate is local provider-free validation: deterministic
 tests, intercepted transport tests, static/configuration checks, and negative
 boundary receipts. No paid OpenRouter/provider/GPU/VLM/Telegram/live-canary call

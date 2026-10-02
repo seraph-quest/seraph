@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import base64
 from datetime import datetime, timezone
+from decimal import Decimal
+from dataclasses import replace
 import hashlib
 import json
 import os
+from pathlib import Path
 import re
 import threading
 import time
@@ -14,7 +19,7 @@ from uuid import uuid4
 
 import httpx
 from config.settings import settings
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Query
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 from src.approval.runtime import get_current_trust_principal
@@ -174,8 +179,9 @@ class OpenRouterSetupInput(BaseModel):
     egress_class: EgressClass = EgressClass.LOCAL_ONLY
     cloud_egress: EgressClass | None = None
     cloud_egress_acknowledged: bool = False
-    spend_ceiling_microusd: int | None = Field(default=None, ge=1, le=1_000_000_000)
-    max_cost_microusd: int | None = Field(default=None, ge=1, le=1_000_000_000)
+    spend_ceiling_microusd: int | None = Field(default=None, ge=1, le=1_000_000_000, strict=True)
+    request_cost_bound_microusd: int | None = Field(default=None, ge=1, le=1_000_000_000, strict=True)
+    max_cost_microusd: int | None = Field(default=None, ge=1, le=1_000_000_000, strict=True)
     max_queued: int = Field(default=64, ge=1, le=64)
     max_queue_size: int | None = Field(default=None, ge=1, le=64)
     max_inflight: int = Field(default=1, ge=1, le=1)
@@ -194,6 +200,7 @@ class ModelFabricConfigurationRequest(BaseModel):
     workload_policies: tuple[WorkloadPolicyInput, ...] = ()
     openrouter: OpenRouterSetupInput | None = None
     openrouter_setup: OpenRouterSetupInput | None = None
+    expected_policy_revision: int | None = Field(default=None, ge=1, strict=True)
 
     @model_validator(mode="after")
     def one_openrouter_setup_field(self):
@@ -271,6 +278,7 @@ def _openrouter_setup_from_input(
         egress_class=egress_class,
         cloud_egress_acknowledged=body.cloud_egress_acknowledged,
         spend_ceiling_microusd=spend_ceiling,
+        request_cost_bound_microusd=body.request_cost_bound_microusd,
         max_queued=body.max_queue_size if body.max_queue_size is not None else body.max_queued,
         max_inflight=body.max_inflight,
         max_outstanding_per_owner=body.max_outstanding_per_owner,
@@ -420,6 +428,12 @@ async def get_model_fabric_settings():
 
 @router.put("/settings/model-fabric")
 async def put_model_fabric_settings(body: ModelFabricConfigurationRequest, request: Request):
+    from src.model_fabric.effective_policy import configuration_mutation_lock
+    async with configuration_mutation_lock:
+        return await _put_model_fabric_settings_locked(body, request)
+
+
+async def _put_model_fabric_settings_locked(body: ModelFabricConfigurationRequest, request: Request):
     if not _is_local_request(request):
         raise HTTPException(
             status_code=403,
@@ -432,6 +446,8 @@ async def put_model_fabric_settings(body: ModelFabricConfigurationRequest, reque
         setup_input = body.openrouter_setup or body.openrouter
         persisted = read_model_fabric_configuration()
         existing = persisted.openrouter_setup
+        if persisted.egress_revoked and body.expected_policy_revision != persisted.egress_revision:
+            raise HTTPException(status_code=409, detail="Explicit current policy revision is required to re-grant egress")
         if setup_input is not None:
             # Build and validate the complete profile before writing a new
             # credential. An invalid policy must never leave a usable secret
@@ -475,6 +491,13 @@ async def put_model_fabric_settings(body: ModelFabricConfigurationRequest, reque
                 status="ready",
             )
         validate_active_model_fabric_configuration(configuration)
+        configuration = replace(configuration, egress_revision=persisted.egress_revision + 1,
+            egress_revoked=False, egress_revocation_key=None)
+        if configuration.openrouter_setup is not None:
+            from src.workflows.job_runtime import durable_job_repository
+            review = (configuration.openrouter_setup.request_cost_bound_microusd or configuration.openrouter_setup.spend_ceiling_microusd) if setup_input is not None and "request_cost_bound_microusd" in setup_input.model_fields_set else None
+            await durable_job_repository.configure_inference_accounting(configuration.openrouter_setup.spend_ceiling_microusd,
+                reserve_review_microusd=review)
         write_model_fabric_configuration(configuration)
     except Exception as exc:
         if credential_mutated:
@@ -482,6 +505,9 @@ async def put_model_fabric_settings(body: ModelFabricConfigurationRequest, reque
                 await _restore_setup_credential(previous_vault_value, previous_process_value)
             except RuntimeError as rollback_error:
                 raise rollback_error
+        from src.workflows.inference_accounting import InferenceAccountingError
+        if isinstance(exc, InferenceAccountingError):
+            raise HTTPException(status_code=503, detail=exc.code) from exc
         if isinstance(exc, ValueError):
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         if isinstance(exc, RuntimeError):
@@ -490,6 +516,61 @@ async def put_model_fabric_settings(body: ModelFabricConfigurationRequest, reque
             raise HTTPException(status_code=503, detail="Model-fabric settings persistence failed") from exc
         raise
     return await model_fabric_settings_payload()
+
+
+class InferenceSettlementInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    operation_id: str = Field(min_length=1, max_length=256)
+    job_id: str = Field(min_length=1, max_length=256)
+    expected_revision: int = Field(ge=1, strict=True)
+    actual_cost_microusd: int = Field(ge=0, le=1_000_000_000, strict=True)
+    evidence_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+
+@router.get("/settings/model-fabric/accounting")
+async def get_inference_accounting(job_id: str | None = Query(default=None, min_length=1, max_length=256)):
+    from src.workflows.job_runtime import durable_job_repository
+    return await durable_job_repository.inference_accounting_snapshot(job_id=job_id)
+
+
+class InferencePeriodReviewInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    period_id: str = Field(pattern=r"^[0-9]{4}-(0[1-9]|1[0-2])$")
+    expected_revision: int = Field(strict=True, ge=1)
+
+
+@router.post("/settings/model-fabric/accounting/period")
+async def acknowledge_inference_period(body: InferencePeriodReviewInput, request: Request):
+    from src.auth.service import authenticate_principal
+    from src.workspace.accounting_continuity import acknowledge_accounting_period
+    principal = getattr(getattr(request.state, "operator", None), "principal", None)
+    if principal is None or not principal.authenticated or not _is_local_request(request):
+        raise HTTPException(status_code=403, detail="Authenticated deployment accounting owner required")
+    await authenticate_principal(principal.principal_id)
+    try:
+        return await asyncio.to_thread(acknowledge_accounting_period, root=Path(settings.workspace_dir).resolve(),
+            period=body.period_id, expected_revision=body.expected_revision, actor=principal.principal_id)
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/settings/model-fabric/accounting/settle")
+async def settle_inference_accounting(body: InferenceSettlementInput, request: Request):
+    from src.auth.service import authenticate_principal
+    from src.workflows.job_runtime import durable_job_repository
+    from src.workflows.inference_accounting import InferenceAccountingError
+    principal = getattr(getattr(request.state, "operator", None), "principal", None) or get_current_trust_principal()
+    if principal is None or not _is_local_request(request):
+        raise HTTPException(status_code=403, detail="Authenticated deployment accounting owner required")
+    await authenticate_principal(principal.principal_id)
+    try:
+        row = await durable_job_repository.settle_inference_cost(**body.model_dump(),
+            operator_id=principal.principal_id, reason="explicit_operator_account_settlement")
+    except InferenceAccountingError as exc:
+        raise HTTPException(status_code=409, detail=exc.code) from exc
+    return {"status": row["state"], "operation": row, "memory_status": "no_learning",
+        "authority_scope": "deployment_accounting", "job_authority_changed": False}
 
 
 @router.post("/settings/model-fabric/canary")
@@ -501,7 +582,7 @@ async def run_model_fabric_canary(body: CapabilityCanaryRequest, request: Reques
         )
     if body.capability not in _PROBE_CAPABILITIES:
         raise HTTPException(status_code=422, detail="Unsupported model capability")
-    principal = get_current_trust_principal()
+    principal = getattr(getattr(request.state, "operator", None), "principal", None) or get_current_trust_principal()
     if principal is None:
         raise HTTPException(status_code=401, detail="Authenticated model-inference principal required")
     if AuthorityGrant.MODEL_INFERENCE not in principal.grants:
@@ -744,6 +825,12 @@ async def model_fabric_settings_payload() -> dict[str, object]:
         status = "configuration_required"
     else:
         status = configured.status
+    from src.workflows.job_runtime import durable_job_repository
+    accounting = await durable_job_repository.inference_accounting_snapshot()
+    if openrouter_setup_status is not None and (configured.egress_revoked or accounting["status"] != "ready"):
+        openrouter_setup_status["status"] = "blocked"
+        openrouter_setup_status["error_code"] = configured.error_code or "provider_policy_revoked" if configured.egress_revoked else accounting.get("reason_code")
+        status = "blocked"
     return {
         "schema_version": "seraph.model-fabric.settings.v1",
         "status": "degraded" if configured.status == "degraded" else status,
@@ -757,6 +844,9 @@ async def model_fabric_settings_payload() -> dict[str, object]:
         "defaults": {"egress_class": EgressClass.LOCAL_ONLY.value, "fallback_allowed": False},
         "canary_endpoint": "/api/settings/model-fabric/canary",
         "openrouter_setup": openrouter_setup_status,
+        "inference_accounting": accounting,
+        "egress_revision": configured.egress_revision,
+        "egress_revoked": configured.egress_revoked,
     }
 
 
@@ -802,6 +892,12 @@ async def _openrouter_setup_status(setup: OpenRouterSetup | None) -> dict[str, o
 async def model_fabric_runtime_status(active_profile: str | None) -> dict[str, object]:
     configured = read_model_fabric_configuration()
     openrouter_setup_status = await _openrouter_setup_status(configured.openrouter_setup)
+    from src.workflows.job_runtime import durable_job_repository
+    accounting = await durable_job_repository.inference_accounting_snapshot()
+    accounting_reason = configured.error_code or "provider_policy_revoked" if configured.egress_revoked else accounting.get("reason_code") if accounting["status"] != "ready" else None
+    if openrouter_setup_status is not None and accounting_reason:
+        openrouter_setup_status["status"] = "blocked"
+        openrouter_setup_status["error_code"] = accounting_reason
     runtime_paths = {}
     degraded = configured.status == "degraded"
     status_paths = (*CANONICAL_ROUTE_SPECS, "capability_probe")
@@ -841,6 +937,9 @@ async def model_fabric_runtime_status(active_profile: str | None) -> dict[str, o
         all_profiles,
         active_profile=active_profile,
     )
+    if accounting_reason:
+        inference_readiness = {**inference_readiness, "status": "blocked",
+            "reasons": list(dict.fromkeys([*inference_readiness["reasons"], accounting_reason]))}
     return {
         "status": (
             "degraded"
@@ -854,6 +953,7 @@ async def model_fabric_runtime_status(active_profile: str | None) -> dict[str, o
         "configuration_error": configured.error_code,
         "configured_chat_profile": active_profile,
         "inference_readiness": inference_readiness,
+        "inference_accounting": {key: value for key, value in accounting.items() if key != "operations"},
         "profiles": [item for item in all_profiles if item["model_fabric_eligible"]],
         "excluded_profiles": [item for item in all_profiles if not item["model_fabric_eligible"]],
         "workload_policies": [_policy_payload(policy) for policy in configured.workload_policies],
@@ -931,6 +1031,7 @@ async def _execute_canary_transport(
     requirements,
     fixture,
 ):
+    from src.model_fabric.accounting import assert_current_inference_policy, capture_inference_usage, capture_response_usage
     endpoint = transport_endpoint(profile)
     headers = {"Content-Type": "application/json"}
     if profile.api_key:
@@ -950,17 +1051,24 @@ async def _execute_canary_transport(
         else:
             payload = fixture["json"]
             if capability == ModelCapability.STREAMING.value:
+                assert_current_inference_policy()
                 async with client.stream("POST", endpoint, headers=headers, json=payload) as response:
                     response.raise_for_status()
                     observed = False
                     async for line in response.aiter_lines():
+                        if line.strip().startswith("data:"):
+                            try:
+                                capture_inference_usage(json.loads(line.strip()[5:].strip(), parse_float=Decimal))
+                            except (ValueError, TypeError):
+                                pass
                         if _streaming_canary_delta(line):
                             observed = True
-                            break
                 if not observed:
                     return CapabilityProbeObservation(False, error_code="stream_empty")
             else:
+                assert_current_inference_policy()
                 response = await client.post(endpoint, headers=headers, json=payload)
+                capture_response_usage(response)
                 response.raise_for_status()
                 if not _validate_chat_canary_response(response.json(), capability):
                     return CapabilityProbeObservation(False, error_code="canary_shape_invalid")

@@ -42,6 +42,7 @@ from .gpu_admission import (
     GPU_OWNER_REVOCATION_REASON,
     priority_for_inference_context,
 )
+from .accounting import DurableInferenceBrokerMixin, bind_accounting_profile
 
 
 REMOTE_INFERENCE_ADMISSION_SCHEMA_VERSION = "seraph.remote-inference-admission.v1"
@@ -233,6 +234,7 @@ async def prepare_bound_remote_inference(
     Legacy receipt bindings without ``job_id`` remain compatible with the
     earlier post-dispatch projection seam.
     """
+    bind_accounting_profile(request.operation_id, str(profile_id or ""))
     binding = current_remote_inference_receipt_binding()
     if binding is None or binding.job_id is None:
         return
@@ -270,7 +272,7 @@ async def prepare_bound_remote_inference(
         ) from exc
 
 
-class RemoteInferenceAdmissionBroker(GpuAdmissionBroker[Any]):
+class RemoteInferenceAdmissionBroker(DurableInferenceBrokerMixin, GpuAdmissionBroker[Any]):
     """One bounded remote slot with owner-scoped admission reservations."""
 
     admission_schema_version = REMOTE_INFERENCE_ADMISSION_SCHEMA_VERSION
@@ -287,6 +289,7 @@ class RemoteInferenceAdmissionBroker(GpuAdmissionBroker[Any]):
         max_owner_cost_microusd: int | None = None,
         owner_budget_resolver: Callable[[str], int | None] | None = None,
         max_retries: int = REMOTE_INFERENCE_DEFAULT_RETRIES,
+        durable_accounting: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(
@@ -296,6 +299,9 @@ class RemoteInferenceAdmissionBroker(GpuAdmissionBroker[Any]):
             **kwargs,
         )
         self._owner_budget_resolver = owner_budget_resolver
+        # False is only for isolated provider-free broker fixtures. The one
+        # production instance always accounts; no server setting selects this.
+        self.durable_accounting = durable_accounting
         self.max_inflight = REMOTE_INFERENCE_DEFAULT_MAX_INFLIGHT
         self.max_retries = self._validate_retry_limit(max_retries)
 
@@ -497,7 +503,7 @@ RemoteInferenceAdmissionRequest = GpuAdmissionRequest
 RemoteInferenceAdmissionUncertainError = GpuAdmissionUncertainError
 RemoteInferencePriority = GpuPriority
 
-remote_inference_admission_broker: RemoteInferenceAdmissionBroker = RemoteInferenceAdmissionBroker()
+remote_inference_admission_broker: RemoteInferenceAdmissionBroker = RemoteInferenceAdmissionBroker(durable_accounting=True)
 
 
 def configure_remote_inference_admission(

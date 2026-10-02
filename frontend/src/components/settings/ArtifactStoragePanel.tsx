@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { InferenceAccountingPanel } from "./InferenceAccountingPanel";
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
 import {
@@ -1282,7 +1283,10 @@ export function ArtifactStoragePanel() {
                 setup={modelFabric?.openrouter_setup}
                 stale={modelFabricStale}
                 onSave={saveOpenRouterSetup}
+                policyRevision={modelFabric?.egress_revision}
+                policyRevoked={modelFabric?.egress_revoked}
               />
+              <InferenceAccountingPanel accounting={modelFabric?.inference_accounting} stale={modelFabricStale} onRefresh={fetchModelFabric} />
               <div className="mt-2 border border-retro-text/10 px-2 py-2">
                 <div className="text-[9px] text-retro-text/50 mb-1">
                   Manual exact-route canary. This runs inference only when you press Run; status refreshes never probe.

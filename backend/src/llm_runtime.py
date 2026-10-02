@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 import hashlib
 import ipaddress
 import json
+from decimal import Decimal
 import logging
 import math
 import os
@@ -1598,11 +1599,15 @@ def _governed_openai_chat_completion(
     headers = {"content-type": "application/json"}
     if api_key:
         headers["authorization"] = f"Bearer {api_key}"
+    from src.model_fabric.accounting import assert_current_inference_policy, capture_response_usage
+    assert_current_inference_policy()
     with httpx.Client(follow_redirects=False, timeout=httpx.Timeout(remaining)) as client:
         response = client.post(candidate.endpoint, headers=headers, json=body)
     # A synchronous provider call cannot be force-killed from the event loop;
     # discard its result if the operator was revoked while it was in flight.
+    capture_response_usage(response)
     assert_runtime_not_revoked()
+    assert_current_inference_policy()
     if 300 <= response.status_code < 400:
         raise RuntimeError("model_fabric_redirect_denied")
     response.raise_for_status()
@@ -4663,6 +4668,8 @@ async def stream_completion_with_fallback(
         if timeout_seconds <= 0:
             raise TimeoutError("model_fabric_deadline_exceeded")
         async with httpx.AsyncClient(follow_redirects=False, timeout=timeout_seconds) as client:
+            from src.model_fabric.accounting import assert_current_inference_policy, capture_inference_usage
+            assert_current_inference_policy()
             async with client.stream(
                 "POST", candidate.endpoint, headers=headers, json=transport_body
             ) as response:
@@ -4674,7 +4681,8 @@ async def stream_completion_with_fallback(
                     if data == "[DONE]":
                         break
                     try:
-                        event = json.loads(data)
+                        event = json.loads(data, parse_float=Decimal)
+                        capture_inference_usage(event)
                         delta = event["choices"][0]["delta"].get("content")
                     except (KeyError, IndexError, TypeError, json.JSONDecodeError):
                         continue

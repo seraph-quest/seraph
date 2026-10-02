@@ -9,6 +9,8 @@ import {
 } from "../../lib/modelFabric";
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
+import { useOptionalOperatorAuth } from "../auth/OperatorAuthGate";
+import { useAttentionNavigation } from "../../hooks/useAttentionNavigation";
 import { validateCalendarResultPreview } from "../../lib/calendar";
 import { SERAPH_BUILD_ID } from "../../config/release";
 import { useChatStore } from "../../stores/chatStore";
@@ -7881,9 +7883,21 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [approvalState, setApprovalState] = useState<Record<string, string>>({});
   const [selectedInspector, setSelectedInspector] = useState<InspectorSelection | null>(null);
   const [libraryInspectorOpen, setLibraryInspectorOpen] = useState(false);
-  const [selectedGuardianCandidate, setSelectedGuardianCandidate] = useState<GuardianInboxItem | null>(null);
+  const [guardianSelection, setGuardianSelection] = useState<{ ownerKey: string | null; item: GuardianInboxItem } | null>(null);
   const guardianInboxRef = useRef<GuardianInboxPanelHandle | null>(null);
   const [focusTaskId, setFocusTaskId] = useState<string | null>(null);
+  const attentionAuth = useOptionalOperatorAuth();
+  const attentionSession = attentionAuth?.session;
+  const attentionOwner = attentionSession && Date.parse(attentionSession.absolute_expires_at) > Date.now() && Date.parse(attentionSession.idle_expires_at) > Date.now()
+    ? { principalId: attentionSession.principal_id, sessionId: attentionSession.session_id }
+    : operatorAuth.status === "authenticated" && !attentionAuth && operatorAuth.principalId && operatorAuth.sessionId && operatorAuth.expiresAt && Date.parse(operatorAuth.expiresAt) > Date.now()
+      ? { principalId: operatorAuth.principalId, sessionId: operatorAuth.sessionId } : null;
+  const attentionNavigation = useAttentionNavigation(attentionOwner);
+  const attentionOwnerKey = attentionOwner ? `${attentionOwner.principalId}:${attentionOwner.sessionId}` : null;
+  const selectedGuardianCandidate = guardianSelection?.ownerKey === attentionOwnerKey ? guardianSelection.item : null;
+  const setSelectedGuardianCandidate = useCallback((item: GuardianInboxItem | null) => {
+    setGuardianSelection(item ? { ownerKey: attentionOwnerKey, item } : null);
+  }, [attentionOwnerKey]);
   const [selectedProcedureSourceTask, setSelectedProcedureSourceTask] = useState<WorkBoardTask | null>(null);
   const [daemonPresence, setDaemonPresence] = useState<DaemonPresenceState | null>(null);
   const [desktopNotifications, setDesktopNotifications] = useState<ObserverContinuitySnapshot["notifications"]>([]);
@@ -16338,6 +16352,18 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
       {activeSection === "home" ? (
         <CockpitHome
+          owner={attentionOwner}
+          focusAttentionId={attentionNavigation.homeFocusId}
+          onOpenAttention={(item) => {
+            if (item.taskId && attentionNavigation.fromHome(item)) {
+              setFocusTaskId(item.taskId);
+              selectCockpitSection("work");
+            } else if (item.inboxId) {
+              setSelectedGuardianCandidate(null);
+              attentionNavigation.focusInbox(item.inboxId);
+              selectCockpitSection("inbox");
+            }
+          }}
           onOpenSection={selectCockpitSection}
           onOpenApprovals={openApprovalsPane}
           goalSummary={currentGoal ? {
@@ -16363,12 +16389,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           </div>
           <div className="cockpit-inbox-layout">
             <GuardianInboxPanel
+              key={attentionOwner ? `${attentionOwner.principalId}:${attentionOwner.sessionId}` : "unconfirmed"}
               ref={guardianInboxRef}
               active
               pageSize={20}
+              pollIntervalMs={0}
+              focusItemId={attentionNavigation.inboxFocusId}
               autoFocusAcceptedTask
               onSelectItem={setSelectedGuardianCandidate}
-              onOpenTask={(taskId) => {
+              onOpenTask={(taskId, item) => {
+                attentionNavigation.fromInbox(taskId, item);
                 setFocusTaskId(taskId);
                 selectCockpitSection("work");
               }}
@@ -16389,6 +16419,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 }, 0);
               }}
               onOpenTask={(taskId) => {
+                attentionNavigation.fromInbox(taskId, selectedGuardianCandidate);
                 setFocusTaskId(taskId);
                 selectCockpitSection("work");
               }}
@@ -17388,8 +17419,27 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               </div>
             )}
             <WorkBoardPanel
-              ownerPrincipalId={operatorAuth.principalId}
-              ownerSessionId={operatorAuth.sessionId}
+              key={attentionOwner ? `${attentionOwner.principalId}:${attentionOwner.sessionId}` : "unconfirmed"}
+              attentionContext={attentionNavigation.origin}
+              onReturnAttention={() => {
+                const section = attentionNavigation.returnContext();
+                if (section) selectCockpitSection(section);
+              }}
+              onOpenAttentionGoal={() => {
+                if (!attentionOwner || !attentionNavigation.origin?.goalId) return;
+                selectCockpitSection("goals");
+                appEventBus.emit("attention:inspect-goal", { ...attentionOwner, goalId: attentionNavigation.origin.goalId });
+              }}
+              onOpenAttentionThread={() => {
+                if (!attentionOwner || !attentionNavigation.origin?.threadId) return;
+                const ownerKey = attentionNavigation.origin.ownerKey;
+                void openThread(attentionNavigation.origin.threadId).then((opened) => { if (opened && attentionNavigation.isCurrent(ownerKey)) selectCockpitSection("home"); });
+              }}
+              onOpenAccounting={() => {
+                if (attentionOwner) appEventBus.emit("settings:inspect-accounting", attentionOwner);
+              }}
+              ownerPrincipalId={attentionOwner?.principalId ?? null}
+              ownerSessionId={attentionOwner?.sessionId ?? null}
               focusTaskId={focusTaskId}
               onFocusTaskHandled={() => setFocusTaskId(null)}
               onSelectedTaskChange={setSelectedProcedureSourceTask}

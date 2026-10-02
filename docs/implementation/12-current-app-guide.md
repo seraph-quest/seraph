@@ -824,6 +824,10 @@ page counts are labelled as such, failed refreshes preserve last-known data,
 and unavailable queue or spend evidence remains unavailable. Pending approvals
 open the existing approval surface.
 
+Home's branch-local **Needs attention** snapshot deduplicates current-root task approvals, unknown outcomes, blocked or failed work, stale verification, and linked Inbox decisions. It retains last-confirmed metadata and uses explicit refresh. Attention opens the existing task inspector, rechecks the exact approval or owning readback, and returns keyboard focus to its originating Home or Inbox context. Recovered history remains read only. Pending approval timestamps include UTC offsets, so valid approvals retain their expiry instant in browsers in other timezones. Verified GitHub readback converges the original latest attempt only while the original owner, goal and connection authority remain valid; authority changes preserve settled-effect truth and a specific blocked task reason. Cost recovery links to Settings only after the owning API advertises the exact job/goal control. See [Attention and Recovery](./attention-recovery.md).
+
+The rendered Warsaw browser journey is mechanically verified through real ASGI HTTP/WebSocket handlers and retained SQLite/artifacts, with intercepted public-source/GitHub transport and an explicit server-side test permission. Recreating the ASGI app against the same database proves persisted recovery, not a managed-host backend process restart. Production GitHub write-consent creation remains a separate incomplete boundary owned by the tested-publication milestone; this UI does not create that consent. Live external usefulness remains unverified.
+
 This remains **Partial**; live provider and external-account usefulness remain
 explicitly **external-unverified**.
 

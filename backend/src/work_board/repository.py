@@ -21,7 +21,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from src.db.models import (
+    GitHubFollowthroughConnection,
     Goal,
+    OperatorSession,
     WorkBoardAttempt,
     WorkBoardComment,
     WorkBoardEvent,
@@ -30,6 +32,7 @@ from src.db.models import (
     WorkBoardReviewIntent,
     WorkBoardStatus,
     WorkBoardTask,
+    WorkflowRunState,
 )
 from src.vault import redaction as vault_redaction
 from src.goals.repository import deserialize_admission_budget
@@ -3448,6 +3451,7 @@ class WorkBoardRepository:
         block_kind: str | None = None,
         block_reason: str | None = None,
         verified_readback: Mapping[str, Any] | None = None,
+        reconciled_github_root: Mapping[str, Any] | None = None,
         actor_principal_id: str | None = None,
         actor_session_id: str | None = None,
         now: datetime | None = None,
@@ -3477,6 +3481,17 @@ class WorkBoardRepository:
                     "The supplied readback is not an independent durable workflow proof",
                 )
         observed_at = now or _now()
+        reconciliation_owner_live = False
+        if reconciled_github_root is not None:
+            # Authentication may persist expiry/revocation. Run it before the
+            # board write lock, then recheck its row under that lock below.
+            from src.auth.service import AuthFailure, authenticate_session
+            from src.security.trust_contract import AuthorityGrant
+            try:
+                operator = await authenticate_session(str(reconciled_github_root.get("session_id") or ""), touch=False)
+                reconciliation_owner_live = operator.principal.principal_id == reconciled_github_root.get("owner", {}).get("principal_id") and AuthorityGrant.EXTERNAL_MUTATION in operator.principal.grants
+            except AuthFailure:
+                pass
         await _begin_sqlite_immediate(db)
         task = await self._find_task(db, task_id)
         if task is None:
@@ -3485,7 +3500,9 @@ class WorkBoardRepository:
             principal_id=task.owner_principal_id,
             session_id=task.owner_session_id,
         )
-        if task.status is not WorkBoardStatus.running:
+        reconciling = reconciled_github_root is not None
+        reconciliation_proof = verified_readback
+        if task.status is not WorkBoardStatus.running and not reconciling:
             raise BoardError("task_not_running", "Only a running task can be projected")
         if task.task_revision != int(expected_revision):
             raise BoardRevisionConflict(task.task_id, int(expected_revision), task.task_revision)
@@ -3512,7 +3529,44 @@ class WorkBoardRepository:
         ).scalar_one_or_none()
         if attempt is None:
             raise BoardError("attempt_not_found", "The board attempt does not exist", status_code=404)
-        if attempt.lease_owner != lease_owner or attempt.fencing_token != int(board_fence) or attempt.ended_at is not None:
+        if reconciling:
+            latest = (await db.execute(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == task_id).order_by(WorkBoardAttempt.created_at.desc(), WorkBoardAttempt.attempt_id.desc()).limit(1))).scalar_one_or_none()
+            root = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == attempt.workflow_run_id))).scalar_one_or_none()
+            if (
+                task.capability_id != "work.github-followthrough.v1" or task.status is not WorkBoardStatus.blocked
+                or task.block_kind != "unknown_effect" or attempt.ended_at is None
+                or latest is None or latest.attempt_id != attempt_id or attempt.fencing_token != int(board_fence)
+                or root is None or root.status != "succeeded" or root.run_identity != reconciled_github_root.get("job_id")
+                or root.owner_kind != "user" or root.owner_principal_id != owner.principal_id
+                or root.session_id != owner.session_id or root.operator_session_id != owner.session_id
+                or root.goal_id != task.goal_id or root.goal_revision != task.goal_revision
+                or root.idempotency_scope != "work-board-attempt" or root.idempotency_key != f"{task_id}:{attempt_id}"
+                or root.revision != reconciled_github_root.get("revision")
+                or any(getattr(root, field) != reconciled_github_root.get(field) for field in ("input_digest", "authority_digest", "run_fingerprint"))
+            ):
+                raise BoardError("reconciliation_binding_mismatch", "Only the exact latest unknown GitHub attempt can adopt its verified root")
+            from src.workflows.job_runtime import _job_has_unsafe_effects
+            effects = json.loads(root.effect_receipts_json or "[]")
+            proof = reconciliation_proof or {}
+            if _job_has_unsafe_effects(effects) or not any(
+                item.get("receipt_kind") == "readback" and item.get("effect_type") == "github_publication"
+                and item.get("status") == "succeeded" and item.get("details", {}).get("verified") is True
+                and item.get("readback_id") == proof.get("readback_id")
+                and item.get("content_sha256") == proof.get("content_sha256")
+                and item.get("verified_at") == proof.get("verified_at") for item in effects
+            ):
+                raise BoardError("verified_readback_required", "Reconciliation needs this root's exact verified GitHub effect")
+            authority = json.loads(root.declared_authority_json or "{}")
+            if root.job_kind != "github_followthrough_v1" or authority.get("capability_id") != "work.github-followthrough.v1":
+                raise BoardError("reconciliation_binding_mismatch", "The durable root is not this GitHub capability")
+            connection = await db.get(GitHubFollowthroughConnection, authority.get("connection_id"))
+            current_session = await db.get(OperatorSession, owner.session_id)
+            live = reconciliation_owner_live and current_session is not None and current_session.principal_id == owner.principal_id and current_session.revoked_at is None and current_session.replaced_by_id is None and not current_session.is_bearer_tombstone and _utc_datetime(current_session.idle_expires_at) > _now() and _utc_datetime(current_session.absolute_expires_at) > _now()
+            if not live or connection is None or connection.owner_principal_id != owner.principal_id or connection.mode not in {"active", "reconcile_only"} or connection.revision != authority.get("connection_revision"):
+                status = WorkBoardStatus.blocked
+                outcome = block_reason = "reconciliation_authority_changed"
+                block_kind = "capability"
+        elif attempt.lease_owner != lease_owner or attempt.fencing_token != int(board_fence) or attempt.ended_at is not None:
             raise BoardError("stale_fence", "The board attempt fence is stale")
         # A worker can request review after the dispatcher has taken its
         # in-memory claim snapshot.  Treat the exact pending intent as a
@@ -3764,12 +3818,14 @@ class WorkBoardRepository:
         limit: int = 20,
     ) -> list[tuple[WorkBoardTask, WorkBoardAttempt]]:
         """Return running board attempts whose durable root is already linked."""
+        newer_attempt = aliased(WorkBoardAttempt)
         result = await db.execute(
             select(WorkBoardTask, WorkBoardAttempt)
             .join(WorkBoardAttempt, WorkBoardAttempt.task_id == WorkBoardTask.task_id)
+            .outerjoin(WorkflowRunState, WorkflowRunState.run_identity == WorkBoardAttempt.workflow_run_id)
             .where(
                 or_(
-                    WorkBoardTask.status == WorkBoardStatus.running,
+                    (WorkBoardTask.status == WorkBoardStatus.running) & WorkBoardAttempt.ended_at.is_(None),
                     (
                         WorkBoardTask.status == WorkBoardStatus.blocked
                     )
@@ -3780,10 +3836,19 @@ class WorkBoardRepository:
                             "awaiting_publication_preview",
                             "awaiting_publication_approval",
                         )
-                    ),
+                    ) & WorkBoardAttempt.ended_at.is_(None),
+                    (WorkBoardTask.status == WorkBoardStatus.blocked)
+                    & (WorkBoardTask.block_kind == "unknown_effect")
+                    & (WorkBoardTask.capability_id == "work.github-followthrough.v1")
+                    & WorkBoardAttempt.ended_at.is_not(None)
+                    & (WorkflowRunState.status == "succeeded")
+                    & ~select(newer_attempt.attempt_id).where(
+                        newer_attempt.task_id == WorkBoardTask.task_id,
+                        or_(newer_attempt.created_at > WorkBoardAttempt.created_at,
+                            (newer_attempt.created_at == WorkBoardAttempt.created_at) & (newer_attempt.attempt_id > WorkBoardAttempt.attempt_id)),
+                    ).exists(),
                 ),
                 WorkBoardAttempt.workflow_run_id.is_not(None),
-                WorkBoardAttempt.ended_at.is_(None),
             )
             .order_by(WorkBoardAttempt.created_at.asc(), WorkBoardAttempt.attempt_id.asc())
             .limit(max(1, min(int(limit), 100)))

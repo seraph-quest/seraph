@@ -493,6 +493,56 @@ def _verified_readback_exists(effects: Any) -> bool:
     return False
 
 
+def _resolve_readback_observations(
+    effects: list[dict[str, Any]], receipt: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Resolve diagnostics of this exact verified effect without erasing them.
+
+    Called within the successful readback's existing revision CAS. A diagnostic
+    never settles its parent, another operation, or an independent liability.
+    """
+    parent_id = receipt.get("effect_id")
+    if (
+        not isinstance(parent_id, str)
+        or sum(item.get("effect_id") == parent_id for item in effects) != 1
+        or receipt.get("reconciled") is not True
+        or receipt.get("reconciliation_status") != "resolved"
+        or not _verified_readback_exists([receipt])
+        or not _text(receipt.get("readback_id"))
+        or not _text(receipt.get("target_digest"))
+    ):
+        return effects
+    try:
+        verified_at = _as_utc(receipt.get("verified_at"))
+    except (TypeError, ValueError):
+        return effects
+    if verified_at is None:
+        return effects
+    resolved = []
+    for item in effects:
+        details = item.get("details")
+        nested = details.get("receipt") if isinstance(details, dict) else None
+        try:
+            observed_at = _as_utc(item.get("recorded_at"))
+        except (TypeError, ValueError):
+            observed_at = None
+        matches = (
+            item.get("receipt_kind") == "readback"
+            and item.get("original_effect_id") == parent_id
+            and isinstance(details, dict)
+            and details.get("readback_observation_only") is True
+            and details.get("verified") is False
+            and not details.get("reconciliation_required")
+            and not details.get("unknown_cost_outstanding")
+            and not (isinstance(nested, dict) and (nested.get("reconciliation_required") or nested.get("unknown_cost_outstanding")))
+            and item.get("effect_id") == f"{parent_id}:readback:{_digest({'status': item.get('status'), 'target_path': item.get('target_path')})[:16]}"
+            and all(item.get(field) == receipt.get(field) for field in ("effect_type", "target_path", "target_digest", "approval_id", "adapter_idempotency_key"))
+            and observed_at is not None and observed_at <= verified_at
+        )
+        resolved.append({**item, "reconciled": True, "reconciliation_status": "resolved", "resolution_parent_effect_id": parent_id, "resolution_readback_id": receipt["readback_id"], "resolution_verified_at": receipt["verified_at"]} if matches else item)
+    return resolved
+
+
 def _effect_recovery_state(effects: list[dict[str, Any]]) -> tuple[str, str]:
     """Classify an unresolved ledger for operator-visible recovery."""
     for item in effects:
@@ -5572,6 +5622,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     )
                 receipt["reconciled"] = True
                 receipt["reconciliation_status"] = "resolved"
+                existing = _resolve_readback_observations(existing, receipt)
             preserve_unresolved = (
                 receipt_kind == "readback"
                 and previous_status in UNRESOLVED_EFFECT_STATUSES

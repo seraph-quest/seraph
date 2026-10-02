@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, MouseEvent } from "react";
+import { createPortal } from "react-dom";
 
 import { API_URL, WS_URL } from "../../config/constants";
 import { resolveWebSocketUrl } from "../../hooks/useWebSocket";
@@ -13,6 +14,8 @@ import { RepoRepairForm } from "./RepoRepairForm";
 import type { PendingRepoRepairSubmission, RepoRepairSubmissionReceipt } from "./RepoRepairForm";
 import { MailPanel } from "./MailPanel";
 import { WorkBoardMemoryReview } from "./WorkBoardMemoryReview";
+import { TaskApprovalReview } from "./TaskApprovalReview";
+import { TaskEffectRecovery } from "./TaskEffectRecovery";
 import { TaskEvidencePanel } from "./TaskEvidencePanel";
 import { RepoRepairInspector } from "./RepoRepairInspector";
 import { validateCalendarExecution } from "../../lib/calendar";
@@ -131,6 +134,11 @@ export interface WorkBoardPanelProps {
   ownerSessionId?: string | null;
   /** Safe task metadata link for the Library's explicit procedure source picker. */
   onSelectedTaskChange?: (task: WorkBoardTask | null) => void;
+  attentionContext?: { taskId: string; approvalId?: string | null; origin: "home" | "inbox"; goalId?: string | null; threadId?: string | null } | null;
+  onReturnAttention?: () => void;
+  onOpenAttentionGoal?: () => void;
+  onOpenAttentionThread?: () => void;
+  onOpenAccounting?: () => void;
 }
 
 export interface WorkBoardArtifactInspectRequest {
@@ -783,6 +791,11 @@ function WorkBoardPanel({
   ownerPrincipalId,
   ownerSessionId,
   onSelectedTaskChange,
+  attentionContext,
+  onReturnAttention,
+  onOpenAttentionGoal,
+  onOpenAttentionThread,
+  onOpenAccounting,
 }: WorkBoardPanelProps) {
   const pendingCreateScope = ownerPrincipalId && ownerSessionId
     ? `${ownerPrincipalId}\u0000${ownerSessionId}`
@@ -3283,15 +3296,22 @@ function WorkBoardPanel({
         </section>
       )}
 
-      {selectedTask && (
-        <aside ref={taskDetailPanelRef} role="region" aria-label={`Task details for ${selectedTask.title}`} tabIndex={-1} className="fixed inset-y-0 right-0 z-[80] h-full w-full max-w-2xl overflow-y-auto border-l border-white/15 bg-slate-950 p-4 text-slate-100 shadow-2xl">
-            <div className="sticky top-0 z-10 -mx-4 -mt-4 mb-4 flex items-center justify-between border-b border-white/10 bg-slate-950/95 px-4 py-3 backdrop-blur">
-              <div>
+      {selectedTask && createPortal(
+        <aside hidden={createOpen || browserTaskOpen || calendarPrepOpen || repoRepairOpen} ref={taskDetailPanelRef} role="region" aria-label={`Task details for ${selectedTask.title}`} tabIndex={-1} className="fixed inset-y-0 right-0 z-[190] h-full w-full max-w-2xl overflow-y-auto border-l border-white/15 bg-slate-950 p-4 text-slate-100 shadow-2xl">
+            <div className="sticky top-0 z-10 -mx-4 -mt-4 mb-4 flex flex-wrap items-center justify-between gap-2 border-b border-white/10 bg-slate-950/95 px-4 py-3 backdrop-blur">
+              <div className="min-w-0 flex-1 break-words">
                 <div className="text-[10px] uppercase tracking-wide opacity-70">{STATUS_LABELS[selectedTask.status]} · revision {selectedTask.task_revision}</div>
                 <h2 id="work-board-detail-title" className="text-lg font-semibold">{selectedTask.title}</h2>
               </div>
-              <button type="button" className="cockpit-feedback-button" aria-label="Close task details" onClick={closeTask}>Close</button>
+              <div className="flex flex-wrap justify-end gap-2">
+                {attentionContext?.taskId === selectedTask.task_id && onReturnAttention && <button type="button" className="cockpit-feedback-button" onClick={() => { closeTask(); onReturnAttention(); }}>Return to {attentionContext.origin === "home" ? "Home attention" : "Inbox decision"}</button>}
+                <button type="button" className="cockpit-feedback-button" aria-label="Close task details" onClick={closeTask}>Close</button>
+              </div>
             </div>
+            {attentionContext?.taskId === selectedTask.task_id && <div className="mb-3 flex flex-wrap gap-2" aria-label="Originating context">
+              {attentionContext.goalId && onOpenAttentionGoal && <button type="button" className="cockpit-feedback-button" onClick={onOpenAttentionGoal}>Open originating goal</button>}
+              {attentionContext.threadId && onOpenAttentionThread && <button type="button" className="cockpit-feedback-button" onClick={onOpenAttentionThread}>Open originating thread</button>}
+            </div>}
             {selectedTask.ownership_access === "recovered_read_only" && <div role="status" className="mb-3 text-amber-200">Recovered original · read only. Previous approvals, jobs and permissions stay blocked. Create fresh reviewed intent through operator ownership recovery.</div>}
             <fieldset disabled={selectedTask.ownership_access === "recovered_read_only"}>
             {(detailLoading || stale) && <div className="mb-3 text-xs text-amber-200" role="status">{detailLoading ? "Refreshing task detail…" : "Showing the last confirmed task detail."}</div>}
@@ -3421,6 +3441,11 @@ function WorkBoardPanel({
                 <div className="font-semibold">Actions and recovery</div>
                 <div className="mt-1">{selectedTask.status === "blocked" ? `Blocked: ${selectedTask.block_reason || "No safe reason was supplied."}` : `Current state: ${STATUS_LABELS[selectedTask.status]}`}</div>
                 {selectedTask.recovery_action && <div className="mt-1">Server recovery action: {RECOVERY_LABELS[selectedTask.recovery_action]}</div>}
+                {selectedTask.ownership_access !== "recovered_read_only" && ownerPrincipalId && ownerSessionId && (selectedTask.recovery_action === "approve_existing_run" || (attentionContext?.taskId === selectedTask.task_id && attentionContext.approvalId)) && <TaskApprovalReview
+                  task={selectedTask} owner={{ principalId: ownerPrincipalId, sessionId: ownerSessionId }} approvalId={attentionContext?.taskId === selectedTask.task_id ? attentionContext.approvalId : null}
+                  metadataConfirmed={Boolean(selectedDetail) && !detailLoading && !stale && !detailError} onRefresh={refreshSelectedTask}
+                />}
+                {selectedTask.ownership_access !== "recovered_read_only" && ownerPrincipalId && ownerSessionId && selectedTask.recovery_action === "reconcile_external_effect" && <TaskEffectRecovery task={selectedTask} owner={{ principalId: ownerPrincipalId, sessionId: ownerSessionId }} metadataConfirmed={Boolean(selectedDetail) && !detailLoading && !stale && !detailError} onRefresh={refreshSelectedTask} onOpenAccounting={onOpenAccounting} />}
                 {selectedTask.capability_id === "guardian-routine.v1" && routinePublication && (
                   <section className="mt-3 rounded border border-amber-500/40 bg-amber-950/10 p-3" aria-label="Routine publication recovery">
                     <div className="font-semibold">Governed publication recovery</div>
@@ -4110,9 +4135,11 @@ function WorkBoardPanel({
               </section>
             </div>
             </fieldset>
-        </aside>
+        </aside>,
+        document.querySelector(".cockpit-shell") ?? document.body,
       )}
 
+      {createPortal(<div className="relative z-[200]">
       {createOpen && (
         <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/65 p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeCreateDialog(); }}>
           <form ref={createDialogRef} role="dialog" aria-modal="true" aria-labelledby="work-board-create-title" tabIndex={-1} className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded border border-white/15 bg-slate-950 p-4 text-slate-100 shadow-2xl" onSubmit={(event) => void createTask(event)}>
@@ -4203,6 +4230,7 @@ function WorkBoardPanel({
           }}
         />
       )}
+      </div>, document.querySelector(".cockpit-shell") ?? document.body)}
     </section>
   );
 }

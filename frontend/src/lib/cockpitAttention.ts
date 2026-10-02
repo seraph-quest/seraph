@@ -32,7 +32,8 @@ function exactAlias(contexts: Record<string, unknown>[], keys: string[], expecte
 export function taskApprovalMatches(task: Record<string, unknown>, approval: Record<string, unknown>, owner: AttentionOwner): boolean {
   const attempt = record(task.latest_attempt);
   const context = record(approval.approval_context);
-  const contexts = [context, record(context.authority)];
+  const scope = record(approval.approval_scope);
+  const contexts = [context, record(context.authority), scope, record(scope.authority)];
   return task.ownership_access !== "recovered_read_only"
     && task.owner_principal_id === owner.principalId && task.owner_session_id === owner.sessionId
     && approval.owner_principal_id === owner.principalId && approval.operator_session_id === owner.sessionId

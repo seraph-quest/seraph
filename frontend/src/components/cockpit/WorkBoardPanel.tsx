@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, MouseEvent } from "react";
+import { createPortal } from "react-dom";
 
 import { API_URL, WS_URL } from "../../config/constants";
 import { resolveWebSocketUrl } from "../../hooks/useWebSocket";
@@ -3295,8 +3296,8 @@ function WorkBoardPanel({
         </section>
       )}
 
-      {selectedTask && (
-        <aside ref={taskDetailPanelRef} role="region" aria-label={`Task details for ${selectedTask.title}`} tabIndex={-1} className="fixed inset-y-0 right-0 z-[80] h-full w-full max-w-2xl overflow-y-auto border-l border-white/15 bg-slate-950 p-4 text-slate-100 shadow-2xl">
+      {selectedTask && createPortal(
+        <aside hidden={createOpen || browserTaskOpen || calendarPrepOpen || repoRepairOpen} ref={taskDetailPanelRef} role="region" aria-label={`Task details for ${selectedTask.title}`} tabIndex={-1} className="fixed inset-y-0 right-0 z-[190] h-full w-full max-w-2xl overflow-y-auto border-l border-white/15 bg-slate-950 p-4 text-slate-100 shadow-2xl">
             <div className="sticky top-0 z-10 -mx-4 -mt-4 mb-4 flex flex-wrap items-center justify-between gap-2 border-b border-white/10 bg-slate-950/95 px-4 py-3 backdrop-blur">
               <div className="min-w-0 flex-1 break-words">
                 <div className="text-[10px] uppercase tracking-wide opacity-70">{STATUS_LABELS[selectedTask.status]} · revision {selectedTask.task_revision}</div>
@@ -4134,9 +4135,11 @@ function WorkBoardPanel({
               </section>
             </div>
             </fieldset>
-        </aside>
+        </aside>,
+        document.querySelector(".cockpit-shell") ?? document.body,
       )}
 
+      {createPortal(<div className="relative z-[200]">
       {createOpen && (
         <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/65 p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeCreateDialog(); }}>
           <form ref={createDialogRef} role="dialog" aria-modal="true" aria-labelledby="work-board-create-title" tabIndex={-1} className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded border border-white/15 bg-slate-950 p-4 text-slate-100 shadow-2xl" onSubmit={(event) => void createTask(event)}>
@@ -4227,6 +4230,7 @@ function WorkBoardPanel({
           }}
         />
       )}
+      </div>, document.querySelector(".cockpit-shell") ?? document.body)}
     </section>
   );
 }

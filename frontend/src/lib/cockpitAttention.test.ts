@@ -9,6 +9,11 @@ const ready = { work: "ready", approvals: "ready", inbox: "ready" } as const;
 function snapshot(tasks: Record<string, unknown>[] = [task], approvals: Record<string, unknown>[] = [approval]) { return { ...emptyCockpitHomeSnapshot, work: { tasks, next_after: null }, approvals }; }
 
 describe("bounded attention projection", () => {
+  it("uses current redacted scope authority and rejects conflicting legacy context", () => {
+    const scoped = { ...approval, approval_context: null, approval_scope: { authority: { job_id: "run", goal_id: "goal", goal_revision: 2 } } };
+    expect(taskApprovalMatches(task, scoped, owner)).toBe(true);
+    expect(taskApprovalMatches(task, { ...scoped, approval_context: { job_id: "other" } }, owner)).toBe(false);
+  });
   it("prioritizes exact current-root approvals above unknown effects and deduplicates linked inbox items", () => {
     const value = snapshot([{ ...task, task_id: "unknown", latest_attempt: null, block_kind: "unknown_effect" }, task]);
     value.inbox = { items: [{ id: "candidate", task_id: "task", state: "pending" } as never], next_cursor: null, last_confirmed_at: null };

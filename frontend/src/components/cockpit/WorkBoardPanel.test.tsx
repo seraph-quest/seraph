@@ -1334,16 +1334,50 @@ describe("WorkBoardPanel", () => {
     expect(document.activeElement).toBe(opener);
   });
 
-  it("traps focus in the create dialog, closes on Escape, and restores focus", async () => {
+  it.each([
+    ["Create task", "Create a goal-linked task"],
+    ["Public browser task", "Public browser task"],
+    ["Calendar meeting prep", "Prepare for a calendar meeting"],
+    ["Repository repair", "Repository repair"],
+  ])("keeps the selected task drawer behind the %s form", async (action, dialogName) => {
+    taskResponse(fetchMock, task({ title: "Preserved selection" }));
+    render(<WorkBoardPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Preserved selection" }));
+    const drawer = await screen.findByRole("region", { name: "Task details for Preserved selection" });
+    const opener = screen.getByRole("button", { name: action });
+    opener.focus();
+    fireEvent.click(opener);
+
+    const dialog = await screen.findByRole("dialog", { name: dialogName });
+    expect(dialog).toBeVisible();
+    expect(dialog.closest("section[aria-label='Work board']")).toBeNull();
+    expect(drawer).not.toBeVisible();
+    expect(screen.queryByRole("region", { name: "Task details for Preserved selection" })).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: action === "Create task" ? "Cancel" : "Close" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: dialogName })).not.toBeInTheDocument());
+    expect(screen.getByRole("region", { name: "Task details for Preserved selection" })).toBe(drawer);
+    expect(drawer).toBeVisible();
+  });
+
+  it("traps focus in the create dialog above a selected task, closes on Escape, and restores focus", async () => {
     taskResponse(fetchMock, task());
     render(<WorkBoardPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Bounded task" }));
+    const drawer = await screen.findByRole("region", { name: "Task details for Bounded task" });
     const opener = await screen.findByRole("button", { name: "Create task" });
     fireEvent.click(opener);
     const dialog = await screen.findByRole("dialog", { name: "Create a goal-linked task" });
+    expect(drawer).not.toBeVisible();
     const focusables = Array.from(dialog.querySelectorAll<HTMLElement>("button:not([disabled]), input:not([disabled]):not([type=\"hidden\"]), select:not([disabled]), textarea:not([disabled])"));
     expect(document.activeElement).toBe(focusables[0]);
-    const background = opener.closest<HTMLElement>(".cockpit-operator-row");
-    expect(background?.inert).toBe(true);
+    const backgroundIsInert = () => {
+      for (let element: HTMLElement | null = opener; element; element = element.parentElement) {
+        if (element.inert) return true;
+      }
+      return false;
+    };
+    expect(backgroundIsInert()).toBe(true);
 
     const first = focusables[0];
     const last = focusables[focusables.length - 1];
@@ -1358,7 +1392,8 @@ describe("WorkBoardPanel", () => {
 
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Create a goal-linked task" })).not.toBeInTheDocument());
     expect(document.activeElement).toBe(opener);
-    expect(background?.inert).toBe(false);
+    expect(backgroundIsInert()).toBe(false);
+    expect(drawer).toBeVisible();
   });
 
   it("refreshes canonical detail and snapshot after a stale revision conflict", async () => {

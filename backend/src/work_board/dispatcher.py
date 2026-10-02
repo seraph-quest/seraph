@@ -9477,6 +9477,7 @@ class WorkBoardDispatcher:
         block_reason: str | None = None,
         result_refs: Any = None,
         artifact_refs: Any = None,
+        reconciled_github_root: Mapping[str, Any] | None = None,
         lease_owner: str | None = None,
     ) -> BoardAttemptProjection:
         async with self.session_provider() as db:
@@ -9490,6 +9491,7 @@ class WorkBoardDispatcher:
                 status=status,
                 outcome=outcome,
                 verified_readback=dict(proof) if proof is not None else None,
+                reconciled_github_root=reconciled_github_root,
                 block_kind=block_kind,
                 block_reason=block_reason,
                 result_refs=result_refs,
@@ -9927,6 +9929,28 @@ class WorkBoardDispatcher:
         for task, attempt in linked:
             job_id = _text(attempt.workflow_run_id)
             if not job_id:
+                continue
+            if getattr(attempt, "ended_at", None) is not None:
+                # An explicit owning readback may settle an ended unknown
+                # GitHub attempt. This branch never prepares or executes work.
+                try:
+                    projection = await self.jobs.get_job(job_id)
+                    inputs = _parse_typed_input(task)
+                    expected = self._canonical_identity_from_projection(task, attempt, inputs, projection)
+                    bound = await self.jobs.get_by_idempotency_binding(
+                        expected_job_id=expected["job_id"],
+                        **{key: expected[key] for key in ("owner_principal_id", "owner_kind", "service_id", "goal_id", "goal_revision", "operator_session_id", "session_id", "job_kind", "capability_version", "idempotency_scope", "idempotency_key", "input_digest", "authority_digest", "run_fingerprint")})
+                    proof = self._workflow_readback(projection, job_id)
+                    if bound is None or _status(projection) != "succeeded" or proof is None:
+                        continue
+                    await self._project(task, attempt, board_revision=task.task_revision,
+                        status=WorkBoardStatus.review if task.requires_review else WorkBoardStatus.done,
+                        outcome="verified", proof=proof, reconciled_github_root=projection,
+                        result_refs=[{"job_id": job_id, "workflow_run_id": job_id, "status": "succeeded", "verified": True}],
+                        artifact_refs=projection.get("artifacts"))
+                    recovered.append(job_id)
+                except (BoardError, DurableJobError, ValueError, TypeError):
+                    logger.info("ended GitHub task %s retains its exact recovery block", task.task_id)
                 continue
             snapshot_revision: Any | None = None
             snapshot_fence: Any | None = None

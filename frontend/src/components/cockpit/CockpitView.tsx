@@ -7882,7 +7882,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [approvalState, setApprovalState] = useState<Record<string, string>>({});
   const [selectedInspector, setSelectedInspector] = useState<InspectorSelection | null>(null);
   const [libraryInspectorOpen, setLibraryInspectorOpen] = useState(false);
-  const [selectedGuardianCandidate, setSelectedGuardianCandidate] = useState<GuardianInboxItem | null>(null);
+  const [guardianSelection, setGuardianSelection] = useState<{ ownerKey: string | null; item: GuardianInboxItem } | null>(null);
   const guardianInboxRef = useRef<GuardianInboxPanelHandle | null>(null);
   const [focusTaskId, setFocusTaskId] = useState<string | null>(null);
   const attentionAuth = useOptionalOperatorAuth();
@@ -7892,6 +7892,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     : operatorAuth.status === "authenticated" && !attentionAuth && operatorAuth.principalId && operatorAuth.sessionId && operatorAuth.expiresAt && Date.parse(operatorAuth.expiresAt) > Date.now()
       ? { principalId: operatorAuth.principalId, sessionId: operatorAuth.sessionId } : null;
   const attentionNavigation = useAttentionNavigation(attentionOwner);
+  const attentionOwnerKey = attentionOwner ? `${attentionOwner.principalId}:${attentionOwner.sessionId}` : null;
+  const selectedGuardianCandidate = guardianSelection?.ownerKey === attentionOwnerKey ? guardianSelection.item : null;
+  const setSelectedGuardianCandidate = useCallback((item: GuardianInboxItem | null) => {
+    setGuardianSelection(item ? { ownerKey: attentionOwnerKey, item } : null);
+  }, [attentionOwnerKey]);
   const [selectedProcedureSourceTask, setSelectedProcedureSourceTask] = useState<WorkBoardTask | null>(null);
   const [daemonPresence, setDaemonPresence] = useState<DaemonPresenceState | null>(null);
   const [desktopNotifications, setDesktopNotifications] = useState<ObserverContinuitySnapshot["notifications"]>([]);

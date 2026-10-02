@@ -31,14 +31,21 @@ def _approval_expiry(value: object) -> datetime | None:
     if value is None:
         return None
     if isinstance(value, datetime):
-        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc) if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
     try:
         return datetime.fromtimestamp(float(value), tz=timezone.utc)
     except (TypeError, ValueError, OverflowError):
         try:
-            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            return parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
         except (TypeError, ValueError):
             return None
+
+
+def _approval_timestamp(value: object) -> str | None:
+    """Publish SQLite's naive UTC timestamps with explicit UTC authority."""
+    parsed = _approval_expiry(value)
+    return parsed.isoformat() if parsed is not None else None
 
 
 def _approval_is_expired(value: object, *, now: datetime | None = None) -> bool:
@@ -1413,8 +1420,8 @@ class ApprovalRepository:
                         "attachment_refs": attachment_refs,
                         "challenge": request.challenge or details.get("challenge"),
                         "action": request.action or details.get("action"),
-                        "expires_at": request.expires_at.isoformat() if request.expires_at is not None else details.get("expires_at"),
-                        "created_at": request.created_at.isoformat(),
+                        "expires_at": _approval_timestamp(request.expires_at if request.expires_at is not None else details.get("expires_at")),
+                        "created_at": _approval_timestamp(request.created_at),
                     }
                 )
             return output

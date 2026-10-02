@@ -8,14 +8,13 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
 import asyncio
 import pytest
 import pytest_asyncio
-from sqlalchemy import event, select
+from sqlalchemy import delete, event, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from sqlmodel import SQLModel
@@ -25,11 +24,12 @@ from tests.conftest import _PATCH_TARGETS
 from tests.test_first_result_setup import authenticated_setup_operator, setup_workspace, progress, run_task
 from src.auth import service as auth_service
 from src.approval.repository import approval_repository
-from src.db.models import ApprovalRequest, GuardianDecisionPacket, WorkBoardAttempt
+from src.db.models import ApprovalRequest, GuardianDecisionPacket, OperatorSession, WorkBoardAttempt, WorkBoardStatus, WorkBoardTask
 from src.extensions.github_followthrough import GitHubFollowthroughService
 from src.security.trust_contract import AuthorityGrant
 from src.vault.repository import vault_repository
 from src.work_board.dispatcher import WorkBoardDispatcher
+from src.work_board.repository import BoardError
 from src.workflows.job_runtime import durable_job_repository
 
 
@@ -83,9 +83,15 @@ def forbid_unintercepted_http(monkeypatch):
 
 async def _prepare_actual_github_task(client, async_db, setup_workspace, monkeypatch):
     source = ["Baseline release\n" * 8]
-    async def public_transport(url):
+    async def public_transport(url, **kwargs):
         assert url == "https://example.org/attention.txt"
-        return SimpleNamespace(status_code=200, headers={"content-type": "text/plain"}, content=source[0].encode())
+        from src.security.http_transport import fetch_pinned_https
+        async def resolver(host, port):
+            assert host == "example.org" and port == 443
+            return ["93.184.216.34"]
+        async def transport(request):
+            return httpx.Response(200, headers={"content-type": "text/plain"}, content=source[0].encode(), request=request)
+        return await fetch_pinned_https(url, resolver=resolver, transport=httpx.MockTransport(transport), **kwargs)
     monkeypatch.setattr("src.guardian.source_watch.fetch_pinned_https", public_transport)
     prepared = await client.post("/api/user/onboarding/starter", json=progress(starter="public_watch", journey_id="attention", title="Verified attention journey", source="https://example.org/attention.txt"))
     assert prepared.status_code == 200, prepared.text
@@ -127,7 +133,8 @@ async def _prepare_actual_github_task(client, async_db, setup_workspace, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_actual_approval_unknown_readback_restart_and_owner_denial(client, async_db, setup_workspace, monkeypatch):
+@pytest.mark.parametrize("adoption", ["verified", "expired_root", "revoked_connection", "changed_goal", "fresh_root"])
+async def test_actual_approval_unknown_readback_restart_and_owner_denial(client, async_db, setup_workspace, monkeypatch, adoption):
     requests = []
     remote = {}
     fail_readback = [True]
@@ -154,7 +161,7 @@ async def test_actual_approval_unknown_readback_restart_and_owner_denial(client,
     assert pending.status_code == 200 and len(pending.json()) == 1, pending.text
     row = pending.json()[0]
     assert row["owner_principal_id"] == auth["principal_id"] and row["operator_session_id"] == auth["session_id"]
-    assert row["approval_context"]["authority"]["job_id"] == job["job_id"]
+    assert row["approval_scope"]["authority"]["job_id"] == job["job_id"]
     approved = await client.post(f"/api/approvals/{approval_id}/approve")
     assert approved.status_code == 200, approved.text
     assert requests == []
@@ -173,23 +180,76 @@ async def test_actual_approval_unknown_readback_restart_and_owner_denial(client,
     assert owning.status_code == 200 and owning.json()["status"] == "unknown_external_effect"
     fail_readback[0] = False
     before = len(requests)
-    reconciliation_errors = []
-    original_reconcile = GitHubFollowthroughService.reconcile
-    async def traced_reconcile(self, **kwargs):
-        try:
-            return await original_reconcile(self, **kwargs)
-        except Exception as exc:
-            reconciliation_errors.append(f"{type(exc).__name__}: {exc}")
-            raise
-    monkeypatch.setattr(GitHubFollowthroughService, "reconcile", traced_reconcile)
     reconciled = await client.post(f"/api/capabilities/github/jobs/{job['job_id']}/reconcile", json={})
-    assert reconciled.status_code == 200, (reconciled.text, reconciliation_errors)
+    assert reconciled.status_code == 200, reconciled.text
     assert reconciled.json()["status"] == "succeeded"
     assert reconciled.json()["operation_id"] == owning.json()["operation_id"]
     assert requests[before:] == ["GET"] and requests.count("POST") == 1
     reopened = await durable_job_repository.get_job(job["job_id"])
     assert any(effect.get("receipt_kind") == "readback" and effect.get("status") == "succeeded" and effect.get("details", {}).get("verified") is True for effect in reopened["effects"])
-    await WorkBoardDispatcher(session_provider=async_db).run_pass()
+    observation = next(effect for effect in reopened["effects"] if effect.get("original_effect_id"))
+    assert observation["status"] == "unknown" and observation["reconciled"] is True
+    assert observation["resolution_parent_effect_id"] == f"github:{owning.json()['operation_id']}"
+    artifact = next(artifact for artifact in reopened["artifacts"] if artifact["artifact_type"] == "github_followthrough_result")
+    stored_output = (setup_workspace / artifact["file_path"]).read_bytes()
+    assert hashlib.sha256(stored_output).hexdigest() == artifact["content_sha256"]
+    assert json.loads(stored_output)["learning"] == "no_learning"
+    recovery_dispatcher = WorkBoardDispatcher(session_provider=async_db)
+    async with async_db() as db:
+        linked = await recovery_dispatcher.repository.list_linked_active_attempts(db)
+    assert any(pair[0].task_id == task["task_id"] for pair in linked), "The exact recovered root must be considered"
+    pair = next(pair for pair in linked if pair[0].task_id == task["task_id"])
+    proof = recovery_dispatcher._workflow_readback(reopened, job["job_id"])
+    for wrong in ("stale_revision", "wrong_job", "wrong_attempt"):
+        with pytest.raises(BoardError):
+            async with async_db() as db:
+                await recovery_dispatcher.repository.project_attempt(db, task["task_id"], "foreign-attempt" if wrong == "wrong_attempt" else pair[1].attempt_id, expected_revision=unknown["task_revision"] - (wrong == "stale_revision"), board_fence=pair[1].fencing_token, lease_owner="unused", status=WorkBoardStatus.done, outcome="verified", verified_readback=proof, reconciled_github_root={**reopened, **({"job_id": "foreign-job"} if wrong == "wrong_job" else {})})
+    if adoption == "verified":
+        # A later durable attempt is a negative race/corruption fixture, never
+        # an executable capability or the proof of successful execution.
+        newer = WorkBoardAttempt(task_id=task["task_id"], created_at=datetime.now(timezone.utc) + timedelta(seconds=1), ended_at=datetime.now(timezone.utc))
+        async with async_db() as db:
+            db.add(newer)
+        async with async_db() as db:
+            assert not any(row[0].task_id == task["task_id"] for row in await recovery_dispatcher.repository.list_linked_active_attempts(db))
+        with pytest.raises(BoardError, match="latest unknown GitHub"):
+            async with async_db() as db:
+                await recovery_dispatcher.repository.project_attempt(db, task["task_id"], pair[1].attempt_id, expected_revision=unknown["task_revision"], board_fence=pair[1].fencing_token, lease_owner="unused", status=WorkBoardStatus.done, outcome="verified", verified_readback=proof, reconciled_github_root=reopened)
+        async with async_db() as db:
+            await db.execute(delete(WorkBoardAttempt).where(WorkBoardAttempt.attempt_id == newer.attempt_id))
+            sibling = (await db.execute(select(WorkBoardTask, WorkBoardAttempt).join(WorkBoardAttempt, WorkBoardAttempt.task_id == WorkBoardTask.task_id).where(WorkBoardTask.capability_id == "guardian.research-watch.v1").limit(1))).first()
+        with pytest.raises(BoardError, match="latest unknown GitHub"):
+            async with async_db() as db:
+                await recovery_dispatcher.repository.project_attempt(db, sibling[0].task_id, sibling[1].attempt_id, expected_revision=sibling[0].task_revision, board_fence=sibling[1].fencing_token, lease_owner="unused", status=WorkBoardStatus.done, outcome="verified", verified_readback=proof, reconciled_github_root=reopened)
+    forged = await client.post(f"/api/work-board/tasks/{task['task_id']}/actions", json={"action": "retry", "expected_revision": unknown["task_revision"], "reconciled_github_root": reopened})
+    assert forged.status_code == 422
+    if adoption == "expired_root":
+        async with async_db() as db:
+            original_owner = await db.get(OperatorSession, auth["session_id"])
+            original_owner.idle_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+            db.add(original_owner)
+    elif adoption == "revoked_connection":
+        connection = (await client.get("/api/capabilities/github/connection")).json()
+        disabled = await client.put("/api/capabilities/github/connection", json={"repository": "example/repo", "vault_key": "attention-github", "mode": "disabled", "expected_revision": connection["revision"]})
+        assert disabled.status_code == 200, disabled.text
+    elif adoption == "changed_goal":
+        changed = await client.patch(f"/api/goals/{task['goal_id']}", json={"title": "Changed authority after readback", "expected_revision": task["goal_revision"]})
+        assert changed.status_code == 200, changed.text
+    elif adoption == "fresh_root":
+        assert (await client.post("/api/auth/logout")).status_code == 204
+        fresh = await client.post("/api/auth/login", json={"password": "first-result-test-secret", "start_new_scope": True})
+        assert fresh.status_code == 200 and fresh.json()["session_id"] != auth["session_id"]
+    await recovery_dispatcher.run_pass()
+    if adoption != "verified":
+        async with async_db() as db:
+            stored = (await db.execute(select(WorkBoardTask).where(WorkBoardTask.task_id == task["task_id"]))).scalar_one()
+            assert stored.status.value == "blocked" and stored.block_kind == "capability"
+            assert stored.block_reason.startswith("goal_authority_stale") if adoption == "changed_goal" else stored.block_reason == "reconciliation_authority_changed"
+            assert job["job_id"] in stored.result_refs_json
+        retained = await durable_job_repository.get_job(job["job_id"])
+        assert retained["status"] == "succeeded" and retained["effects"] == reopened["effects"]
+        assert requests[before:] == ["GET"] and requests.count("POST") == 1
+        return
     confirmed = (await client.get(f"/api/work-board/tasks/{task['task_id']}")).json()["task"]
     assert confirmed["status"] == "done" and confirmed["readback_status"] == "verified", confirmed
     assert confirmed["latest_attempt"]["attempt_id"] == unknown["latest_attempt"]["attempt_id"]
@@ -202,7 +262,7 @@ async def test_actual_approval_unknown_readback_restart_and_owner_denial(client,
     denied = await client.get(f"/api/capabilities/github/jobs/{job['job_id']}")
     assert denied.status_code in {403, 404} and "preview" not in denied.json()
     denied_task = await client.get(f"/api/work-board/tasks/{task['task_id']}")
-    assert denied_task.status_code == 404
+    assert denied_task.status_code in {403, 404} and "task" not in denied_task.json()
     assert requests.count("POST") == 1
 
 

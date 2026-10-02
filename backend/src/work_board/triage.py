@@ -1176,6 +1176,13 @@ async def _prepare_governed_proposal(
             "The vault redaction prerequisite is unavailable; provider contact was not started",
             status_code=409,
         )
+    from src.memory.evidence_working_set import evidence_for_task_context
+
+    async with get_session() as db:
+        evidence = await evidence_for_task_context(
+            db, WorkBoardOwner(principal_id=operator.principal.principal_id,
+                               session_id=operator.session_id), task.task_id, job_id, operator=operator,
+        )
     transformation_digest = canonical_digest(
         {
             "title_before": raw_title,
@@ -1183,6 +1190,7 @@ async def _prepare_governed_proposal(
             "title_after": safe_title,
             "body_after": safe_body,
             "kind": kind,
+            "evidence": evidence,
         }
     )
     messages = [
@@ -1203,6 +1211,7 @@ async def _prepare_governed_proposal(
                     "goal_revision": task.goal_revision,
                     "title_data": safe_title,
                     "body_data": safe_body,
+                    "evidence_data": evidence,
                     "required_fields": [
                         "title", "body", "capability_id", "typed_input_ref",
                         "typed_input_digest", "executor_id",
@@ -1983,6 +1992,7 @@ async def create_proposal(
         job_id, lease_owner, fence = job_binding
         marker_lost = False
         async with get_session() as db:
+            await _begin_sqlite_immediate(db)
             current_task = await repository._owned_task(db, owner, task_snapshot.task_id)
             if (
                 current_task.task_revision != proposal.parent_revision
@@ -2006,6 +2016,11 @@ async def create_proposal(
                     "The governed route or goal authority changed before provider contact",
                     status_code=409,
                 )
+            from src.memory.evidence_working_set import record_evidence_use, verify_evidence_use
+
+            prompt_data = json.loads(prepared_prompt[0][1]["content"])
+            await verify_evidence_use(db, owner, task_snapshot.task_id, job_id,
+                                      prompt_data.get("evidence_data"), operator=operator, record_use=False)
             marker_now = _now()
             claimed = await db.execute(
                 update(WorkBoardProposal)
@@ -2036,6 +2051,9 @@ async def create_proposal(
                         contact_state="unknown",
                     )
                     await db.flush()
+            else:
+                await record_evidence_use(db, owner, task_snapshot.task_id, job_id,
+                                          prompt_data.get("evidence_data"))
         if marker_lost:
             try:
                 await _transition_proposal_job(

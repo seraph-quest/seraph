@@ -22,7 +22,8 @@ export interface GuardianInboxPanelProps {
   pageSize?: number;
   pollIntervalMs?: number;
   autoFocusAcceptedTask?: boolean;
-  onOpenTask?: (taskId: string) => void;
+  onOpenTask?: (taskId: string, origin?: GuardianInboxItem) => void;
+  focusItemId?: string | null;
   onOpenGoals?: () => void;
   onOpenWork?: () => void;
   onSelectItem?: (item: GuardianInboxItem) => void;
@@ -329,12 +330,18 @@ export const GuardianInboxPanel = forwardRef<GuardianInboxPanelHandle, GuardianI
   pollIntervalMs = 30_000,
   autoFocusAcceptedTask = false,
   onOpenTask,
+  focusItemId,
   onOpenGoals,
   onOpenWork,
   onSelectItem,
   onInspectArtifact,
 }: GuardianInboxPanelProps, ref) {
   const [items, setItems] = useState<GuardianInboxItem[]>([]);
+  useEffect(() => {
+    if (!focusItemId) return;
+    const row = [...document.querySelectorAll<HTMLElement>("[data-testid^=\"guardian-inbox-row-\"]")].find((entry) => entry.dataset.testid === `guardian-inbox-row-${focusItemId}`);
+    row?.focus();
+  }, [focusItemId, items]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [lastConfirmedAt, setLastConfirmedAt] = useState<string | null>(null);
   const [loading, setLoading] = useState(autoLoad && active);
@@ -791,7 +798,7 @@ export const GuardianInboxPanel = forwardRef<GuardianInboxPanelHandle, GuardianI
       gestureRequests.current.delete(actionKey);
       clearPersistedGesture(item.id, action);
       if (autoFocusAcceptedTask && action === "accept_followup" && result.state === "accepted" && result.task_id) {
-        onOpenTask?.(result.task_id);
+        onOpenTask?.(result.task_id, updated);
       }
     } catch (err) {
       const message = err instanceof GuardianInboxApiError
@@ -1068,7 +1075,7 @@ export const GuardianInboxPanel = forwardRef<GuardianInboxPanelHandle, GuardianI
                           {entry.action} · {entry.outcome} · receipt {entry.receipt_id || "unavailable"}
                           {entry.created_at ? ` · ${formatTime(entry.created_at)}` : ""}
                           {entry.reason_state === "provided" && entry.safe_reason ? ` · reason: ${entry.safe_reason}` : ` · reason ${entry.reason_state}`}
-                          {entry.task_id && onOpenTask ? <> · <button type="button" onClick={() => onOpenTask(entry.task_id as string)}>Open task {entry.task_id}</button></> : null}
+                          {entry.task_id && onOpenTask ? <> · <button type="button" onClick={() => onOpenTask(entry.task_id as string, item)}>Open task {entry.task_id}</button></> : null}
                         </div>
                       ))}
                       {item.action_history_truncated ? <div>Older decision history is not shown.</div> : null}
@@ -1080,7 +1087,7 @@ export const GuardianInboxPanel = forwardRef<GuardianInboxPanelHandle, GuardianI
                       onClick={(event) => {
                         if (!onOpenTask) return;
                         event.preventDefault();
-                        onOpenTask(item.task_id as string);
+                        onOpenTask(item.task_id as string, item);
                       }}
                     >
                       Open accepted task {item.task_id}
@@ -1092,7 +1099,7 @@ export const GuardianInboxPanel = forwardRef<GuardianInboxPanelHandle, GuardianI
               {receipts[item.id] ? (
                 <div className="cockpit-outcome-note" role="status">
                   receipt · {receipts[item.id]}
-                  {item.task_id ? <> · <button type="button" onClick={() => onOpenTask?.(item.task_id as string)}>Open accepted task {item.task_id}</button></> : null}
+                  {item.task_id ? <> · <button type="button" onClick={() => onOpenTask?.(item.task_id as string, item)}>Open accepted task {item.task_id}</button></> : null}
                 </div>
               ) : null}
               {unknownActions[item.id] ? (

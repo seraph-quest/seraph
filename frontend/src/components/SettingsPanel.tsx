@@ -15,6 +15,7 @@ import { CalendarConnectionPanel } from "./settings/CalendarConnectionPanel";
 import { RepoSandboxPanel } from "./settings/RepoSandboxPanel";
 import { MailConnectionPanel } from "./settings/MailConnectionPanel";
 import { useOptionalOperatorAuth } from "./auth/OperatorAuthGate";
+import { appEventBus } from "../lib/appEventBus";
 
 interface SkillInfo {
   name: string;
@@ -445,6 +446,17 @@ export function SettingsPanel() {
   const [installing, setInstalling] = useState<string | null>(null);
   const [configuringServer, setConfiguringServer] = useState<McpServer | null>(null);
   const [activeSection, setActiveSection] = useState<SettingsSection>("artifacts");
+  const accountingSessionRef = useRef(operatorAuth?.session);
+  accountingSessionRef.current = operatorAuth?.session;
+  useEffect(() => {
+    const inspectAccounting = (event: { principalId: string; sessionId: string }) => {
+      const session = accountingSessionRef.current;
+      if (!session || event.principalId !== session.principal_id || event.sessionId !== session.session_id || !(Date.parse(session.absolute_expires_at) > Date.now()) || !(Date.parse(session.idle_expires_at) > Date.now())) return;
+      setActiveSection("artifacts"); setSettingsPanelOpen(true);
+    };
+    appEventBus.on("settings:inspect-accounting", inspectAccounting);
+    return () => appEventBus.off("settings:inspect-accounting", inspectAccounting);
+  }, [setSettingsPanelOpen]);
   const wasOpenRef = useRef(false);
 
   useLayoutEffect(() => {

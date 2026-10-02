@@ -28,6 +28,22 @@ remain usable without a local model server, CUDA, downloaded weights, or the VLM
 wrapper. Missing key, consent, approved upstream, model-fabric bounds/proofs,
 or budget is reported as blocked or configuration-required.
 
+Deployment inference accounting remains **Partial**. The canonical durable job
+repository owns finite reservations, immutable UTC-month attribution, account
+usage settlement, and unknown liabilities that carry across rollover and
+restore. The existing remote broker remains the sole serial executor. Paid
+egress requires a retained lifecycle witness outside root snapshots; stale or
+missing continuity blocks inference while deterministic CPU features remain
+usable. Settings exposes exact-operation manual reconciliation, explicitly
+marked externally unverified, without restoring job or grant authority. Live
+admission also requires exact review of every changed observed UTC month;
+clock correction conservatively retains future charges. Stable profile root
+binding and witnessed policy epochs prevent fresh-root budget bootstrap and
+archived egress reactivation. Overruns require explicit adequate reserve review
+bound to already-settled operation sequence/revision. Live
+provider charges and managed Docker mount operation remain unverified until
+separate operator-authorised operational receipts exist.
+
 The implementation merge gate is local provider-free validation: deterministic
 tests, intercepted transport tests, static/configuration checks, and negative
 boundary receipts. No paid OpenRouter/provider/GPU/VLM/Telegram/live-canary call
@@ -134,6 +150,7 @@ High-risk strategic wording in this status page remains governed by [19. Strateg
 - [ ] Calm cockpit sections and the canonical-memory inspector provide bounded Home, Inbox, Work, Goals, Library, and Connections navigation. Owner-session-scoped literal memory reads expose redacted provenance and explicit history; canonical controls retain the distinction between ordinary correction, reviewed task learning, archive/redact, and acknowledged deletion. This remains **Partial**; see [Current App Guide](./12-current-app-guide.md#cockpit-navigation-and-canonical-inspector).
 - [ ] Reviewed source-change follow-up is a bounded local capability: the goal budget and source-watch cadence feed an owner-scoped Guardian inbox; verified material packets can become one Triage Work Board task through an explicit, idempotent decision. General autonomous operation and live external/provider usefulness remain Partial; see [Guardian Intelligence](./05-guardian-intelligence.md#reviewed-goals-and-the-source-change-inbox).
 - [ ] Guided first-result setup is branch-local Partial: Home connects a local goal snapshot or public-source baseline plus snapshot to authenticated typed tasks, real dispatcher execution, canonical storage, and explicit verified artifact opening with `no_learning`. Owner/session-scoped activity records retain progress; manual-only public watches start with scheduled jobs disabled and are paused after observation. The managed keyless local journey and disk artifact digest are verified; live public-source usefulness remains externally unverified; see [Guided First Result Setup](./first-result-setup.md).
+- [ ] Unified attention and recovery is branch-local Partial: bounded Home attention opens exact task approvals and owning unknown-effect readback in the existing Work inspector, with owner-root-scoped return context and read-only recovered history. Rendered Warsaw approval, denial, cancellation and expiry exercise actual ASGI/SQLite records; same-database app recreation and GET-only readback converge the same original attempt without replay. API timestamps carry UTC offsets. Expiry, revocation and changed goals block task adoption without losing settled-effect truth. These intercepted mechanical receipts use explicit test-only external permission and do not establish production GitHub write-consent creation, managed-host API restart, or live external usefulness; see [Attention and Recovery](./attention-recovery.md).
 - [ ] Stable operator ownership and exact read-only recovery are branch-local intended post-program behavior: private device continuity can link explicitly selected records across new execution roots, while prior grants, effects and ambiguous legacy ownership remain blocked. Actual authenticated local snapshot execution, selection, fresh empty intent and evidence recall are covered by integrated tests and a managed browser/API/file receipt; promotion to `develop` remains pending. See [Operator ownership and recovery](./19-operator-ownership-and-recovery.md).
 - [ ] Local task evidence working sets are branch-local intended post-program behavior: canonical citation references, verified output lineage, exclusion and exact rendered-packet adoption use owner/task/goal/revision checks. Recovered history is read only; private and historic source egress stays blocked for generic strategist use. Focused API, SQLite, artifact and inspector checks establish local mechanics, not live provider usefulness. See [Task Evidence Working Sets](./task-evidence-working-sets.md).
 - [x] Seraph is usable today as a real guardian workspace with a browser cockpit, memory, screen awareness, proactive behavior, and a real action layer.

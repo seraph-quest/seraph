@@ -60,7 +60,7 @@ Public entry points: [docs](https://docs.seraph.quest),
 | **Guardian kernel** | Goals, policy, planning, prioritization, intervention, memory coordination, audit, and operator-visible state | Provider-specific behavior or unbounded side effects |
 | **Capability runtime** | Typed capabilities, durable jobs, checkpoints, artifacts, approvals, sandbox/policy enforcement, and bounded remote-inference admission | Product goals or hidden provider fallback |
 | **Model fabric** | OpenRouter-only active inference for the Epic #736 phase, with explicit routing, consent, budgets, and receipts | Agent identity, durable state, shell orchestration, or product policy |
-| **Interfaces and edges** | Browser cockpit, API, paired Mac observation edge, voice, and paired messaging adapters | Canonical memory, authority, or an independent agent runtime |
+| **Interfaces and edges** | Browser cockpit, API, consented local or paired desktop context, voice, and paired messaging adapters | Canonical memory, authority, or an independent agent runtime |
 
 The guardian kernel decides **why and what**. The capability runtime controls
 **how work may execute**. The model fabric supplies bounded inference. Interfaces
@@ -74,10 +74,11 @@ The following architecture decisions are normative:
 1. [ADR-001: Inference-only model providers](./decisions/001-inference-only-model-providers.md)
 2. [ADR-002: One-GPU serial priority scheduling](./decisions/002-one-gpu-serial-priority-scheduling.md)
 3. [ADR-003: Canonical memory boundary](./decisions/003-canonical-memory-boundary.md)
-4. [ADR-004: GPU core and paired Mac edge](./decisions/004-gpu-core-mac-edge-topology.md)
+4. [ADR-004: GPU core and paired Mac edge](./decisions/004-gpu-core-mac-edge-topology.md) (fixed placement superseded by ADR-008)
 5. [ADR-005: Epic integration branch workflow](./decisions/005-epic-integration-branch-workflow.md)
 6. [ADR-006: OpenRouter-only inference phase](./decisions/006-openrouter-only-inference-phase.md)
 7. [ADR-007: Bounded Node repair and Linux process supervision](./decisions/007-bounded-node-repair-supervision.md)
+8. [ADR-008: Portable core and consented context](./decisions/008-portable-core-and-consented-context.md)
 
 Changing a locked decision requires a superseding ADR, a tracked issue, an
 independent Critic/Contrarian review, and updates to every affected active doc.
@@ -92,7 +93,7 @@ Use these terms consistently in APIs, UI copy, issues, and active docs:
 - **artifact**: addressable output produced or consumed by a job;
 - **checkpoint**: durable resumable job state that excludes unsafe secret data;
 - **model route**: an inference endpoint plus model and effective routing state;
-- **edge**: a paired, revocable source or interface outside the GPU core;
+- **edge**: a paired, revocable source or interface outside the canonical core;
 - **provider**: an inference or advisory integration, never Seraph's authority;
 - **guardian cycle**: observe, assess, propose, approve when required, act,
   evaluate, and remember.
@@ -145,9 +146,10 @@ Open branches describe intended post-merge truth and must be identified as such.
 - Canonical goals, memory, jobs, artifacts, approvals, and audit records remain
   in Seraph-owned storage. Advisory memory providers may augment recall but do
   not become authoritative.
-- The target deployment places the authenticated Seraph core and canonical state
-  on the selected host (currently `jupyter`). A Mac is a paired, revocable
-  observation/interface edge, not the control plane. GPU hardware, local model
+- macOS and Linux are peer core-host targets under ADR-008. The operator chooses
+  the canonical workspace host; `jupyter` is a historical deployment example.
+  Consented context may originate locally or from a paired, revocable edge,
+  without transferring authority. GPU hardware, local model
   weights, and a VLM wrapper are not active product prerequisites during the
   OpenRouter-only phase.
 - Effective model, queue, edge, and degraded state must be operator-visible.

@@ -26,6 +26,7 @@ from sqlmodel import select
 from src.artifacts.registry import build_artifact_record
 from src.db.models import ApprovalRequest, Goal, GuardianRoutine, GuardianRoutineVersion, WorkflowRunState
 from src.db.session_refs import ensure_sessions_exist
+from src.workflows.inference_accounting import InferenceAccountingRepositoryMixin
 
 
 DURABLE_JOB_RECORD_SCHEMA_VERSION = 2
@@ -490,6 +491,56 @@ def _verified_readback_exists(effects: Any) -> bool:
         ):
             return True
     return False
+
+
+def _resolve_readback_observations(
+    effects: list[dict[str, Any]], receipt: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Resolve diagnostics of this exact verified effect without erasing them.
+
+    Called within the successful readback's existing revision CAS. A diagnostic
+    never settles its parent, another operation, or an independent liability.
+    """
+    parent_id = receipt.get("effect_id")
+    if (
+        not isinstance(parent_id, str)
+        or sum(item.get("effect_id") == parent_id for item in effects) != 1
+        or receipt.get("reconciled") is not True
+        or receipt.get("reconciliation_status") != "resolved"
+        or not _verified_readback_exists([receipt])
+        or not _text(receipt.get("readback_id"))
+        or not _text(receipt.get("target_digest"))
+    ):
+        return effects
+    try:
+        verified_at = _as_utc(receipt.get("verified_at"))
+    except (TypeError, ValueError):
+        return effects
+    if verified_at is None:
+        return effects
+    resolved = []
+    for item in effects:
+        details = item.get("details")
+        nested = details.get("receipt") if isinstance(details, dict) else None
+        try:
+            observed_at = _as_utc(item.get("recorded_at"))
+        except (TypeError, ValueError):
+            observed_at = None
+        matches = (
+            item.get("receipt_kind") == "readback"
+            and item.get("original_effect_id") == parent_id
+            and isinstance(details, dict)
+            and details.get("readback_observation_only") is True
+            and details.get("verified") is False
+            and not details.get("reconciliation_required")
+            and not details.get("unknown_cost_outstanding")
+            and not (isinstance(nested, dict) and (nested.get("reconciliation_required") or nested.get("unknown_cost_outstanding")))
+            and item.get("effect_id") == f"{parent_id}:readback:{_digest({'status': item.get('status'), 'target_path': item.get('target_path')})[:16]}"
+            and all(item.get(field) == receipt.get(field) for field in ("effect_type", "target_path", "target_digest", "approval_id", "adapter_idempotency_key"))
+            and observed_at is not None and observed_at <= verified_at
+        )
+        resolved.append({**item, "reconciled": True, "reconciliation_status": "resolved", "resolution_parent_effect_id": parent_id, "resolution_readback_id": receipt["readback_id"], "resolution_verified_at": receipt["verified_at"]} if matches else item)
+    return resolved
 
 
 def _effect_recovery_state(effects: list[dict[str, Any]]) -> tuple[str, str]:
@@ -1864,7 +1915,7 @@ class DurableJobSpec:
     routine_publication_admission_guard: DurableJobRoutinePublicationAdmissionGuard | None = None
 
 
-class DurableJobRepository:
+class DurableJobRepository(InferenceAccountingRepositoryMixin):
     """Persistence operations for the one canonical workflow job record."""
 
     async def _assert_routine_publication_admission_guard(
@@ -3825,6 +3876,9 @@ class DurableJobRepository:
                         "operator_visible": True,
                     },
                 )
+            accounting_resume = False
+            if run.attempt_count >= run.max_attempts and not continue_existing_attempt:
+                accounting_resume = await self._accounting_resume_claim_allowed(db, run)
             if continue_existing_attempt:
                 # An operator-approved pause is a continuation of the same
                 # durable attempt.  It must reacquire a fresh execution lease
@@ -3839,7 +3893,7 @@ class DurableJobRepository:
                     )
                 if int(run.attempt_count or 0) > int(run.max_attempts or 0):
                     raise DurableJobTransitionError("existing-attempt continuation exceeds attempt budget")
-            elif run.attempt_count >= run.max_attempts:
+            elif run.attempt_count >= run.max_attempts and not accounting_resume:
                 raise DurableJobTransitionError("attempt budget exhausted")
             conditions = [
                 WorkflowRunState.run_identity == job_id,
@@ -3858,7 +3912,7 @@ class DurableJobRepository:
                 "heartbeat_at": now,
                 "updated_at": now,
             }
-            if not continue_existing_attempt:
+            if not continue_existing_attempt and not accounting_resume:
                 claim_values["attempt_count"] = WorkflowRunState.attempt_count + 1
             result_update = await db.execute(
                 update(WorkflowRunState)
@@ -5595,6 +5649,7 @@ class DurableJobRepository:
                     )
                 receipt["reconciled"] = True
                 receipt["reconciliation_status"] = "resolved"
+                existing = _resolve_readback_observations(existing, receipt)
             preserve_unresolved = (
                 receipt_kind == "readback"
                 and previous_status in UNRESOLVED_EFFECT_STATUSES
@@ -5741,6 +5796,10 @@ class DurableJobRepository:
         if persisted_owner != str(safe_receipt["owner_id"]):
             raise DurableJobLeaseError("remote inference receipt owner does not match the durable job owner")
         admission_status = str(safe_receipt["status"])
+        from src.db.models import InferenceCostReservation
+        async with self._session() as accounting_db:
+            accounting_row = await accounting_db.get(InferenceCostReservation, str(safe_receipt["operation_id"]))
+            unknown_cost = accounting_row is not None and accounting_row.state in {"contact_started", "unknown"}
         return await self.record_effect(
             job_id,
             effect_type="remote_inference_admission",
@@ -5748,11 +5807,12 @@ class DurableJobRepository:
             target_path=f"remote_inference:{safe_receipt['operation_id']}",
             target_digest=_text(safe_receipt.get("operation_id")) or None,
             adapter_idempotency_key=_text(safe_receipt.get("operation_id")) or None,
-            status=REMOTE_INFERENCE_EFFECT_STATUSES[admission_status],
+            status="unknown" if unknown_cost else REMOTE_INFERENCE_EFFECT_STATUSES[admission_status],
             details={
                 "admission_status": admission_status,
                 "receipt": safe_receipt,
                 "receipt_digest": receipt_digest,
+                "unknown_cost_outstanding": unknown_cost,
             },
             owner=owner,
             fencing_token=fencing_token,
@@ -5856,6 +5916,9 @@ class DurableJobRepository:
                     raise DurableJobIdempotencyConflict(
                         "remote inference operation identity is bound to a different route/profile"
                     )
+                if previous.get("status") == "blocked" and previous_details.get("never_contacted") is True and await self._accounting_resume_claim_allowed(db, run):
+                    db.expunge(run)
+                    return _serialize(run, receipt=previous)
                 raise DurableJobIdempotencyConflict(
                     "remote inference operation identity is already fenced"
                 )
@@ -6301,7 +6364,7 @@ class DurableJobRepository:
 
     async def recover_stale_jobs(self, *, now: datetime | None = None) -> list[dict[str, Any]]:
         observed_at = now or _utc_now()
-        recovered: list[dict[str, Any]] = []
+        recovered: list[dict[str, Any]] = await self.recover_inference_accounting(now=observed_at)
         async with self._session() as db:
             result = await db.execute(
                 select(WorkflowRunState).where(
@@ -6504,6 +6567,7 @@ class DurableJobRepository:
         """
 
         observed_at = now or _utc_now()
+        await self.recover_inference_accounting(now=observed_at, job_id=job_id)
         async with self._session() as db:
             run = await self._fetch(db, job_id)
             if run.status != "running":

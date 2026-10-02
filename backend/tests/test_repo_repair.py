@@ -155,6 +155,7 @@ async def _configure_governed_openrouter_test_route() -> None:
             status="ready",
         )
     )
+    await durable_job_repository.configure_inference_accounting(setup.spend_ceiling_microusd)
     from src.llm_runtime import _provider_profile
 
     profile = _provider_profile("openrouter")
@@ -433,6 +434,9 @@ async def test_repo_repair_real_input_producer_reaches_private_source_review(
     monkeypatch.setattr(settings, "openrouter_provider_only", True)
     monkeypatch.setattr(settings, "openrouter_allowed_upstreams", "anthropic")
     monkeypatch.setattr(settings, "default_model", "openrouter/anthropic/claude-sonnet-4")
+    monkeypatch.setenv("SERAPH_WORKSPACE_LIFECYCLE_PATH", str(tmp_path / "deployment-lifecycle"))
+    from src.workspace.production import ProductionWorkspace, prepare_lifecycle_directory
+    prepare_lifecycle_directory(ProductionWorkspace(host_root=workspace))
     await _configure_governed_openrouter_test_route()
     if real_sandbox:
         sandbox_settings = effective_sandbox_settings
@@ -558,7 +562,8 @@ async def test_repo_repair_real_input_producer_reaches_private_source_review(
         content = json.dumps(_proposal_for_digest(base_digest), sort_keys=True)
         message = SimpleNamespace(role="assistant", content=content)
         response = SimpleNamespace(choices=[SimpleNamespace(message=message)])
-        return response, {"choices": [{"message": {"role": "assistant", "content": content}}]}
+        return response, {"id": "gen-repair-producer", "usage": {"cost": "0.0000101"},
+            "choices": [{"message": {"role": "assistant", "content": content}}]}
 
     def execute_job(_sandbox, job, *, before_dispatch=None):
         nonlocal sandbox_calls

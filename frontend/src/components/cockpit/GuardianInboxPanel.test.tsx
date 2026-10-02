@@ -323,7 +323,7 @@ describe("GuardianInboxPanel", () => {
     render(<GuardianInboxPanel pollIntervalMs={0} onOpenTask={onOpenTask} />);
     fireEvent.click(await screen.findByRole("button", { name: "View evidence and task" }));
     fireEvent.click(await screen.findByRole("link", { name: /Open accepted task task-1/ }));
-    expect(onOpenTask).toHaveBeenCalledWith("task-1");
+    expect(onOpenTask).toHaveBeenCalledWith("task-1", expect.objectContaining({ id: "inbox-1", task_id: "task-1", goal_id: "goal-1" }));
   });
 
   it("can focus the returned task after an accepted disposition", async () => {
@@ -334,7 +334,7 @@ describe("GuardianInboxPanel", () => {
     render(<GuardianInboxPanel pollIntervalMs={0} autoFocusAcceptedTask onOpenTask={onOpenTask} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Accept follow-up" }));
-    await waitFor(() => expect(onOpenTask).toHaveBeenCalledWith("task-accepted"));
+    await waitFor(() => expect(onOpenTask).toHaveBeenCalledWith("task-accepted", expect.objectContaining({ id: "inbox-1", task_id: "task-accepted", state: "accepted" })));
   });
 
   it("passes backend-shaped verified artifact metadata to the authorized inspector callback", async () => {

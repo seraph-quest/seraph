@@ -8009,7 +8009,7 @@ class WorkBoardDispatcher:
                     or int(terminal_task.goal_revision or 0) != int(task.goal_revision or 0)
                     or _text(terminal_attempt.workflow_run_id) != job_id
                     or _text(terminal_attempt.lease_owner) != _text(lease_owner)
-                    or int(terminal_attempt.fencing_token or 0) != int(fence)
+                    or int(terminal_attempt.fencing_token or 0) != int(attempt.fencing_token or 0)
                     or terminal_attempt.ended_at is not None
                     or terminal_attempt.cancel_requested_at is not None
                     or terminal_attempt.lease_expires_at is None
@@ -9499,6 +9499,7 @@ class WorkBoardDispatcher:
         block_reason: str | None = None,
         result_refs: Any = None,
         artifact_refs: Any = None,
+        reconciled_github_root: Mapping[str, Any] | None = None,
         lease_owner: str | None = None,
     ) -> BoardAttemptProjection:
         async with self.session_provider() as db:
@@ -9512,6 +9513,7 @@ class WorkBoardDispatcher:
                 status=status,
                 outcome=outcome,
                 verified_readback=dict(proof) if proof is not None else None,
+                reconciled_github_root=reconciled_github_root,
                 block_kind=block_kind,
                 block_reason=block_reason,
                 result_refs=result_refs,
@@ -9856,7 +9858,7 @@ class WorkBoardDispatcher:
             expected_authority_digest = _safe_digest(spec.declared_authority)
             expected_run_fingerprint = spec.run_fingerprint
         else:
-            if capability_id in {"guardian-routine.v1", "engineering.repo-repair.v1"}:
+            if capability_id in {"guardian-routine.v1", "engineering.repo-repair.v1", "calendar.meeting-prep.v1", "work.mail-reply-draft.v1"}:
                 # Routine invocation roots are already admitted and may be
                 # waiting on the operator approval boundary.  Re-entering
                 # RoutineService.invoke here (or rebuilding a repair Durable
@@ -9950,6 +9952,28 @@ class WorkBoardDispatcher:
             job_id = _text(attempt.workflow_run_id)
             if not job_id:
                 continue
+            if getattr(attempt, "ended_at", None) is not None:
+                # An explicit owning readback may settle an ended unknown
+                # GitHub attempt. This branch never prepares or executes work.
+                try:
+                    projection = await self.jobs.get_job(job_id)
+                    inputs = _parse_typed_input(task)
+                    expected = self._canonical_identity_from_projection(task, attempt, inputs, projection)
+                    bound = await self.jobs.get_by_idempotency_binding(
+                        expected_job_id=expected["job_id"],
+                        **{key: expected[key] for key in ("owner_principal_id", "owner_kind", "service_id", "goal_id", "goal_revision", "operator_session_id", "session_id", "job_kind", "capability_version", "idempotency_scope", "idempotency_key", "input_digest", "authority_digest", "run_fingerprint")})
+                    proof = self._workflow_readback(projection, job_id)
+                    if bound is None or _status(projection) != "succeeded" or proof is None:
+                        continue
+                    await self._project(task, attempt, board_revision=task.task_revision,
+                        status=WorkBoardStatus.review if task.requires_review else WorkBoardStatus.done,
+                        outcome="verified", proof=proof, reconciled_github_root=projection,
+                        result_refs=[{"job_id": job_id, "workflow_run_id": job_id, "status": "succeeded", "verified": True}],
+                        artifact_refs=projection.get("artifacts"))
+                    recovered.append(job_id)
+                except (BoardError, DurableJobError, ValueError, TypeError):
+                    logger.info("ended GitHub task %s retains its exact recovery block", task.task_id)
+                continue
             snapshot_revision: Any | None = None
             snapshot_fence: Any | None = None
             snapshot_owner: str = ""
@@ -10027,6 +10051,10 @@ class WorkBoardDispatcher:
 
                 status = _status(projection)
                 effects = projection.get("effects") if isinstance(projection.get("effects"), list) else []
+                accounting_resume = False
+                if _text(task.capability_id) in {"calendar.meeting-prep.v1", "work.mail-reply-draft.v1"}:
+                    resume_check = getattr(self.jobs, "inference_precontact_resume_allowed", None)
+                    accounting_resume = bool(resume_check is not None and await resume_check(job_id))
                 unsafe_effect = status in {"unknown_external_effect", "cost_liability"} or any(
                     isinstance(effect, Mapping)
                     and _status(effect.get("status")) in {"unknown", "intent", "dispatched"}
@@ -10119,7 +10147,7 @@ class WorkBoardDispatcher:
                     and status == "queued"
                     and _repair_approval_resume_recovery_ready(projection)
                 )
-                if status in {"accepted", "queued"} and (not effects or repair_approval_resume):
+                if status in {"accepted", "queued"} and (not effects or repair_approval_resume or accounting_resume):
                     # The root was admitted before the process stopped. Resume
                     # its durable state under the same binding. Only the local
                     # deterministic GoalSnapshot worker is resumed here; the
@@ -10197,6 +10225,12 @@ class WorkBoardDispatcher:
                         # service only while the exact root is accepted or
                         # queued and its effect ledger is empty; this is the
                         # admission crash window and cannot replay an effect.
+                        if _text(task.capability_id) in {"calendar.meeting-prep.v1", "work.mail-reply-draft.v1"}:
+                            if status == "accepted":
+                                projection = await self.jobs.queue_job(job_id, expected_revision=projection.get("revision"))
+                            projection = await self.jobs.claim_job(job_id, owner=self.runner_id,
+                                lease_seconds=await self._effective_runtime(task), expected_state="queued",
+                                expected_revision=projection.get("revision"), expected_fencing_token=(projection.get("lease") or {}).get("fencing_token"))
                         adapter_result = await self._execute_direct_adapter(
                             task,
                             attempt,

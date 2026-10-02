@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -34,7 +34,7 @@ describe("CockpitHome", () => {
     });
     render(<CockpitHome onOpenSection={vi.fn()} goalSummary={{ title: "Ship operator cockpit", status: "active", criterion: "A verified task receipt exists" }} />);
     expect(await screen.findByText("OpenRouter · governed")).toBeInTheDocument();
-    expect(screen.getByText("Review candidate · pending")).toBeInTheDocument();
+    expect(screen.getByText("Review candidate")).toBeInTheDocument();
     expect(screen.getByText(/A verified task receipt exists/)).toBeInTheDocument();
     expect(screen.getByText("1 / 1")).toBeInTheDocument();
     expect(fetchMock.mock.calls.filter(([input]) => String(input).includes("/api/operator/")).length).toBe(0);
@@ -73,7 +73,7 @@ describe("CockpitHome", () => {
     expect(within(workMetric as HTMLElement).getByText("—")).toBeInTheDocument();
     expect(within(inboxMetric as HTMLElement).getByText("—")).toBeInTheDocument();
     expect(within(approvalsMetric as HTMLElement).getByText("—")).toBeInTheDocument();
-    expect(screen.getByText("Inbox data unavailable.")).toBeInTheDocument();
+    expect(screen.getByText(/Inbox data unavailable/)).toBeInTheDocument();
     expect(screen.getByText("Work data unavailable.")).toBeInTheDocument();
     expect(screen.getByText("last confirmed · unavailable")).toBeInTheDocument();
   });
@@ -107,24 +107,36 @@ describe("CockpitHome", () => {
     expect(screen.getByText(/running \/ queued work on this page · last confirmed/)).toBeInTheDocument();
     expect(screen.getByText(/pending inbox items on this page · last confirmed/)).toBeInTheDocument();
     expect(screen.getByText(/pending approvals on this page · last confirmed/)).toBeInTheDocument();
-    expect(screen.getByText("Review candidate · pending")).toBeInTheDocument();
+    expect(screen.getByText("Review candidate")).toBeInTheDocument();
   });
 
-  it("resets the retry backoff before a manual Home refresh", async () => {
+  it("bounds mount reads and refreshes only on explicit operator request", async () => {
     const timeoutSpy = vi.spyOn(window, "setTimeout");
     fetchMock.mockResolvedValue(response({}, false, 503));
     render(<CockpitHome onOpenSection={vi.fn()} />);
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(6));
-    await waitFor(() => expect(timeoutSpy.mock.calls.some(([, delay]) => delay === 60_000)).toBe(true));
     fireEvent.click(screen.getByRole("button", { name: "Refresh Home" }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(12));
 
     const retryDelays = timeoutSpy.mock.calls
       .map(([, delay]) => delay)
       .filter((delay): delay is number => typeof delay === "number");
-    expect(retryDelays.filter((delay) => delay === 60_000).length).toBeGreaterThanOrEqual(2);
-    expect(retryDelays).not.toContain(120_000);
+    expect(retryDelays.filter((delay) => delay >= 30_000)).toEqual([]);
     timeoutSpy.mockRestore();
+  });
+
+  it("clears prior-root metadata and rejects delayed old-root reads", async () => {
+    const pending: ((value: unknown) => void)[] = [];
+    fetchMock.mockImplementation(() => new Promise((resolve) => pending.push(resolve)));
+    const props = { onOpenSection: vi.fn() };
+    const view = render(<CockpitHome {...props} owner={{ principalId: "old", sessionId: "old-root" }} />);
+    await waitFor(() => expect(pending).toHaveLength(6));
+    fetchMock.mockResolvedValue(response({ effective_runtime: { summary_label: "Current root runtime" } }));
+    view.rerender(<CockpitHome {...props} owner={{ principalId: "new", sessionId: "new-root" }} />);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(12));
+    await act(async () => { pending.forEach((resolve) => resolve(response({ effective_runtime: { summary_label: "Private previous root" } }))); });
+    expect(screen.queryByText("Private previous root")).not.toBeInTheDocument();
+    expect(screen.getByText("Current root runtime")).toBeInTheDocument();
   });
 });

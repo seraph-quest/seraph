@@ -16,6 +16,7 @@ import types
 from contextlib import ExitStack, asynccontextmanager, suppress
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from functools import wraps
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Sequence
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -797,7 +798,7 @@ from src.workflows.post_dx_live_durable_orchestration import (
 from src.evolution.engine import evolution_benchmark_gate_policy
 from src.approval.exceptions import ApprovalRequired
 from src.approval.runtime import get_current_trust_principal, reset_runtime_context, set_runtime_context
-from src.auth.service import test_bypass_operator
+from src.auth.service import AuthenticatedOperator, test_bypass_operator
 from src.security.trust_contract import AuthorityGrant, EgressClass, PrincipalType, TrustPrincipal
 from src.model_fabric.configuration import WorkloadPolicy
 from src.agent.session import SessionManager, session_manager
@@ -1007,8 +1008,8 @@ from src.tools.process_tools import (
 from src.tools.secret_ref_tools import SecretRefResolvingTool
 from src.tools.shell_tool import shell_execute
 from src.tools.web_search_tool import web_search
-from src.db.engine import _ensure_search_indexes
-from src.utils.background import drain_tracked_tasks
+from src.db.engine import _ensure_search_indexes, override_session_factory
+from src.utils.background import background_task_scope, drain_tracked_tasks
 from src.workflows.manager import WorkflowManager
 from src.models.schemas import WSResponse
 from src.vault.refs import issue_secret_ref
@@ -1029,6 +1030,44 @@ def _authenticated_daemon_request(worker_id: str) -> Request:
             "path": "/api/observer/notifications/next",
             "headers": [(b"x-seraph-daemon-id", worker_id.encode("utf-8"))],
             "state": {"operator": object()},
+        }
+    )
+
+
+def _eval_operator_principal(session_id: str = "test-auth-bypass") -> TrustPrincipal:
+    """Build the explicit synthetic operator identity used by direct route evals."""
+    return TrustPrincipal(
+        principal_id="operator:test-bypass",
+        principal_type=PrincipalType.OPERATOR,
+        authenticated=True,
+        grants=(
+            AuthorityGrant.INGRESS,
+            AuthorityGrant.MODEL_INFERENCE,
+            AuthorityGrant.CAPABILITY_EXECUTE,
+            AuthorityGrant.ARTIFACT_TRANSFER,
+        ),
+        session_id=session_id,
+        operator_session_id="test-auth-bypass",
+    )
+
+
+def _authenticated_operator_request(path: str = "/api/observer/continuity") -> Request:
+    """Build the operator request context enforced by authenticated API routes."""
+    now = datetime.now(timezone.utc)
+    operator = AuthenticatedOperator(
+        session_id="test-auth-bypass",
+        principal=_eval_operator_principal(),
+        idle_expires_at=now + timedelta(minutes=30),
+        absolute_expires_at=now + timedelta(hours=12),
+    )
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": path,
+            "headers": [],
+            "query_string": b"",
+            "state": {"operator": operator},
         }
     )
 
@@ -1332,6 +1371,7 @@ async def _run_governed_completion_fixture(
 EVAL_SYNC_CLIENT_DB_PATCH_TARGETS: tuple[str, ...] = (
     "src.db.engine.get_session",
     "src.agent.session.get_session",
+    "src.guardian.audio_worker.get_session",
     "src.approval.repository.get_session",
     "src.audit.repository.get_session",
     "src.goals.repository.get_session",
@@ -1349,6 +1389,7 @@ EVAL_SYNC_CLIENT_DB_PATCH_TARGETS: tuple[str, ...] = (
     "src.observer.screenshot_folder_source.get_session",
     "src.observer.screen_repository.get_session",
     "src.workflows.durable_state.get_session",
+    "src.workflows.job_runtime.get_session",
     "src.workflows.manager.get_session",
     "src.workflows.production_workflow_guarantees.get_session",
     "src.memory.repository.get_session",
@@ -1631,7 +1672,13 @@ class _FakeScreenRepoContext:
 
 
 @asynccontextmanager
-async def _patched_async_db(*patch_targets: str):
+async def _patched_async_db(*_legacy_patch_targets: str):
+    """Run an eval against an isolated DB without changing module globals.
+
+    Older call sites still name the imported accessors they used to patch.
+    Those accessors now resolve the same task-local factory in ``get_session``;
+    globally replacing them would redirect unrelated live requests.
+    """
     engine = create_async_engine(
         "sqlite+aiosqlite://",
         connect_args={"check_same_thread": False},
@@ -1642,39 +1689,27 @@ async def _patched_async_db(*patch_targets: str):
     async with engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
 
-    @asynccontextmanager
-    async def _get_session():
-        async with factory() as session:
-            try:
-                yield session
-                await session.commit()
-            except Exception:
-                await session.rollback()
-                raise
-
     try:
-        with ExitStack() as stack:
-            for target in dict.fromkeys((
-                *patch_targets,
-                "src.agent.session.get_session",
-                "src.memory.repository.get_session",
-                "src.profile.service.get_db",
-                "src.memory.hybrid_retrieval.get_session",
-                "src.memory.decay.get_session",
-                "src.memory.flush.get_session",
-            )):
-                stack.enter_context(patch(target, _get_session))
-            yield
+        with background_task_scope():
+            with override_session_factory(factory):
+                try:
+                    yield
+                finally:
+                    await drain_tracked_tasks(timeout_seconds=5.0)
     finally:
-        teardown_error: Exception | None = None
-        try:
-            await drain_tracked_tasks(timeout_seconds=5.0)
-        except Exception as exc:
-            teardown_error = exc
-        finally:
-            await engine.dispose()
-        if teardown_error is not None:
-            raise teardown_error
+        await engine.dispose()
+
+
+def _isolated_eval_database(
+    runner: Callable[[], Awaitable[dict[str, Any]]],
+) -> Callable[[], Awaitable[dict[str, Any]]]:
+    """Run one eval against an isolated database, including direct queue helpers."""
+    @wraps(runner)
+    async def _run() -> dict[str, Any]:
+        async with _patched_async_db():
+            return await runner()
+
+    return _run
 
 
 def _make_sync_client_with_db():
@@ -4835,6 +4870,7 @@ async def _eval_embedding_runtime_audit() -> dict[str, Any]:
             patch.object(settings, "openrouter_allow_fallbacks", False),
             patch.object(settings, "openrouter_require_parameters", True),
             patch.object(settings, "openrouter_data_collection", "deny"),
+            patch.dict(settings.__dict__, {"openrouter_data_retention_policy": "deny"}),
             patch.object(settings, "openrouter_zero_data_retention", True),
             patch.object(embedder_module, "effective_workload_policy", return_value=policy),
             patch.object(embedder_module, "get_current_trust_principal", return_value=principal),
@@ -5019,7 +5055,10 @@ async def _eval_filesystem_runtime_audit() -> dict[str, Any]:
             else:  # pragma: no cover - defensive guard
                 raise AssertionError("Expected path traversal guard to raise")
 
-            with patch("pathlib.Path.write_text", side_effect=PermissionError("denied")):
+            with patch(
+                "src.tools.filesystem_tool._write_workspace_text_bounded",
+                side_effect=PermissionError("denied"),
+            ):
                 write_failure = write_file.forward("blocked.txt", "denied content")
 
             await asyncio.sleep(0)
@@ -6551,7 +6590,10 @@ async def _eval_observer_goal_source_audit() -> dict[str, Any]:
         patch("src.goals.repository.goal_repository", mock_repo),
         patch.object(audit_repository, "log_event", AsyncMock()) as mock_log_event,
     ):
-        result = await gather_goals()
+        result = await gather_goals(
+            owner_principal_id="operator:eval",
+            owner_session_id="eval-goal-session",
+        )
 
     success = _find_audit_call(
         mock_log_event,
@@ -6635,21 +6677,22 @@ async def _eval_strategist_tick_behavior() -> dict[str, Any]:
     mock_deliver = AsyncMock(return_value=DeliveryDecision.deliver)
     mock_log_event = AsyncMock()
 
-    with (
-        patch("src.scheduler.jobs.strategist_tick.build_guardian_state", AsyncMock(return_value=MagicMock())),
-        patch(
-            "src.scheduler.jobs.strategist_tick.run_strategist_decision_completion",
-            AsyncMock(return_value=strategist_response),
-        ),
-        patch("src.observer.delivery.deliver_or_queue", mock_deliver),
-        patch.object(audit_repository, "log_event", mock_log_event),
-    ):
-        await _run_model_eval_job("strategist_tick_behavior", run_strategist_tick)
+    async with _patched_async_db():
+        with (
+            patch("src.scheduler.jobs.strategist_tick.build_guardian_state", AsyncMock(return_value=MagicMock())),
+            patch(
+                "src.scheduler.jobs.strategist_tick.run_strategist_decision_completion",
+                AsyncMock(return_value=strategist_response),
+            ),
+            patch("src.observer.delivery.deliver_or_queue", mock_deliver),
+            patch.object(audit_repository, "log_event", mock_log_event),
+        ):
+            await _run_model_eval_job("strategist_tick_behavior", run_strategist_tick)
 
     delivered_message = mock_deliver.await_args.args[0]
-    succeeded = _find_audit_call(
+    outcome = _find_audit_call(
         mock_log_event,
-        event_type="scheduler_job_succeeded",
+        event_type="scheduler_job_unknown_external_effect",
         tool_name="strategist_tick",
     )
     return {
@@ -6657,12 +6700,13 @@ async def _eval_strategist_tick_behavior() -> dict[str, Any]:
         "intervention_type": delivered_message.intervention_type,
         "urgency": delivered_message.urgency,
         "content_mentions_refocus": "refocus" in delivered_message.content.lower(),
-        "delivery": succeeded["details"]["delivery"],
+        "delivery": outcome["details"]["delivery"],
+        "recovery_action": outcome["details"]["recovery_action"],
         "reasoning": delivered_message.reasoning,
     }
 
 
-async def _eval_strategist_tick_learning_continuity_behavior() -> dict[str, Any]:
+async def _eval_strategist_tick_learning_policy_behavior() -> dict[str, Any]:
     from src.guardian.feedback import guardian_feedback_repository
 
     async with _patched_async_db(
@@ -6730,6 +6774,30 @@ async def _eval_strategist_tick_learning_continuity_behavior() -> dict[str, Any]
         with (
             patch("src.scheduler.jobs.strategist_tick.build_guardian_state", AsyncMock(return_value=guardian_state)),
             patch(
+                "src.scheduler.jobs.strategist_tick._run_opted_in_goal_web_brief",
+                AsyncMock(
+                    return_value={
+                        "status": "skipped",
+                        "reason": "eval_fixture_no_goal_work",
+                        "goal_id": None,
+                        "notification_owner_principal_id": "operator:test-bypass",
+                        "notification_operator_session_id": "test-auth-bypass",
+                    }
+                ),
+            ),
+            patch(
+                "src.scheduler.jobs.strategist_tick._run_opted_in_goal_snapshot",
+                AsyncMock(
+                    return_value={
+                        "status": "skipped",
+                        "reason": "eval_fixture_no_goal_work",
+                        "goal_id": None,
+                        "notification_owner_principal_id": "operator:test-bypass",
+                        "notification_operator_session_id": "test-auth-bypass",
+                    }
+                ),
+            ),
+            patch(
                 "src.scheduler.jobs.strategist_tick.run_strategist_decision_completion",
                 AsyncMock(return_value=strategist_response),
             ),
@@ -6739,14 +6807,13 @@ async def _eval_strategist_tick_learning_continuity_behavior() -> dict[str, Any]
             patch.object(audit_repository, "log_event", mock_log_event),
         ):
             await _run_model_eval_job(
-                "strategist_tick_learning_continuity_behavior",
+                "strategist_tick_learning_policy_behavior",
                 run_strategist_tick,
             )
-            continuity = await get_observer_continuity()
 
         scheduler_event = _find_audit_call(
             mock_log_event,
-            event_type="scheduler_job_succeeded",
+            event_type="scheduler_job_unknown_external_effect",
             tool_name="strategist_tick",
         )
         delivery_event = _find_audit_call(
@@ -6754,33 +6821,17 @@ async def _eval_strategist_tick_learning_continuity_behavior() -> dict[str, Any]
             event_type="observer_delivery_queued",
             tool_name="observer_delivery_gate",
         )
-        notification = continuity["notifications"][0] if continuity["notifications"] else None
-        intervention = continuity["recent_interventions"][0]
-        queued_ids = [item.id for item in await insight_queue.peek_all()]
-        if queued_ids:
-            await insight_queue.delete_many(queued_ids)
-        remaining_notifications = await native_notification_queue.count()
         await native_notification_queue.clear()
 
         return {
             "message_type": "proactive",
             "urgency": 2,
-            "scheduler_delivery": scheduler_event["details"]["delivery"],
+            "scheduler_delivery_decision": scheduler_event["details"]["delivery"],
+            "scheduler_recovery_action": scheduler_event["details"]["recovery_action"],
             "scheduler_policy_action": scheduler_event["details"]["policy_action"],
             "policy_reason": delivery_event["details"]["policy_reason"],
             "learning_bias": delivery_event["details"]["learning_bias"],
             "learning_channel_bias": delivery_event["details"]["learning_channel_bias"],
-            "transport": delivery_event["details"].get("transport"),
-            "delivered_connections": delivery_event["details"].get("delivered_connections", 0),
-            "continuity_notification_count": len(continuity["notifications"]),
-            "continuity_queued_insight_count": continuity["queued_insight_count"],
-            "continuity_surface": intervention["continuity_surface"],
-            "continuity_excerpt_mentions_workflow": "workflow review" in intervention["content_excerpt"].lower(),
-            "notification_intervention_matches": (
-                notification is not None
-                and notification["intervention_id"] == intervention["id"]
-            ),
-            "remaining_notifications_before_cleanup": remaining_notifications,
         }
 
 
@@ -7447,7 +7498,8 @@ async def _eval_memory_provider_stale_evidence_behavior() -> dict[str, Any]:
                 return_value=("- [goal] Keep Atlas moving", {"goal": ("Keep Atlas moving",)}),
             ),
         ):
-            retrieval = await plan_memory_retrieval(query="", active_projects=("Atlas launch",))
+            async with _patched_async_db():
+                retrieval = await plan_memory_retrieval(query="", active_projects=("Atlas launch",))
     finally:
         clear_memory_provider_adapters()
 
@@ -7644,7 +7696,11 @@ async def _eval_memory_provider_quality_gate_improvement_behavior() -> dict[str,
                 return_value=HybridMemoryRetrievalResult(context="", buckets={}, degraded=False, hits=()),
             ),
         ):
-            retrieval = await plan_memory_retrieval(query="Atlas investor brief owner", active_projects=("Atlas launch",))
+            async with _patched_async_db():
+                retrieval = await plan_memory_retrieval(
+                    query="Atlas investor brief owner",
+                    active_projects=("Atlas launch",),
+                )
     finally:
         clear_memory_provider_adapters()
 
@@ -7757,7 +7813,11 @@ async def _eval_memory_provider_quality_gate_suppression_behavior() -> dict[str,
                 return_value=HybridMemoryRetrievalResult(context="", buckets={}, degraded=False, hits=()),
             ),
         ):
-            retrieval = await plan_memory_retrieval(query="Atlas launch", active_projects=("Atlas launch",))
+            async with _patched_async_db():
+                retrieval = await plan_memory_retrieval(
+                    query="Atlas launch",
+                    active_projects=("Atlas launch",),
+                )
     finally:
         clear_memory_provider_adapters()
 
@@ -8600,21 +8660,17 @@ async def _eval_memory_contradiction_ranking_behavior() -> dict[str, Any]:
             importance=0.94,
             confidence=0.92,
         )
+        await memory_repository.create_memory(
+            content="Atlas release is delayed.",
+            kind="project",
+            summary="Atlas release is delayed.",
+            importance=0.41,
+            confidence=0.55,
+        )
 
         with patch(
             "src.memory.hybrid_retrieval.search_with_status",
-            return_value=(
-                [
-                    {
-                        "id": "",
-                        "text": "Atlas release is delayed.",
-                        "category": "project",
-                        "score": 0.39,
-                        "created_at": "2026-04-08T10:00:00+00:00",
-                    }
-                ],
-                False,
-            ),
+            return_value=([], False),
         ):
             hybrid = await retrieve_hybrid_memory(
                 query="Atlas release status",
@@ -10511,6 +10567,7 @@ async def _eval_observer_delivery_decision_behavior() -> dict[str, Any]:
     }
 
 
+@_isolated_eval_database
 async def _eval_native_presence_notification_behavior() -> dict[str, Any]:
     await native_notification_queue.clear()
     available_ctx = _make_context(
@@ -10595,20 +10652,22 @@ async def _eval_native_presence_notification_behavior() -> dict[str, Any]:
     }
 
 
+@_isolated_eval_database
 async def _eval_native_desktop_shell_behavior() -> dict[str, Any]:
     await native_notification_queue.clear()
     mgr = ContextManager()
     mgr.update_screen_context("VS Code — shell.py", "Editing native presence shell state.")
     mgr.update_capture_mode("balanced")
     mock_log_event = AsyncMock()
+    operator_request = _authenticated_operator_request("/api/observer/daemon-status")
 
     with (
         patch("src.api.observer.context_manager", mgr),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
-        initial_status = await daemon_status()
-        queued = await enqueue_test_native_notification()
-        queued_status = await daemon_status()
+        initial_status = await daemon_status(operator_request)
+        queued = await enqueue_test_native_notification(operator_request)
+        queued_status = await daemon_status(operator_request)
         polled = await get_next_native_notification(
             _authenticated_daemon_request("eval-daemon"),
             worker_id="eval-daemon",
@@ -10629,7 +10688,7 @@ async def _eval_native_desktop_shell_behavior() -> dict[str, Any]:
             ),
             request=_authenticated_daemon_request("eval-daemon"),
         )
-        acked_status = await daemon_status()
+        acked_status = await daemon_status(operator_request)
 
     queued_event = _find_audit_call(
         mock_log_event,
@@ -10657,23 +10716,25 @@ async def _eval_native_desktop_shell_behavior() -> dict[str, Any]:
     }
 
 
+@_isolated_eval_database
 async def _eval_cross_surface_notification_controls_behavior() -> dict[str, Any]:
     await native_notification_queue.clear()
     mgr = ContextManager()
     mgr.update_screen_context("Arc — Guardian Cockpit", "Reviewing pending desktop notifications.")
     mock_log_event = AsyncMock()
+    operator_request = _authenticated_operator_request("/api/observer/notifications")
 
     with (
         patch("src.api.observer.context_manager", mgr),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
-        first = await enqueue_test_native_notification()
-        second = await enqueue_test_native_notification()
-        listed_before = await list_native_notifications()
-        dismissed = await dismiss_native_notification(first["id"])
-        listed_after_single = await list_native_notifications()
-        dismissed_all = await dismiss_all_native_notifications()
-        final_status = await daemon_status()
+        first = await enqueue_test_native_notification(operator_request)
+        second = await enqueue_test_native_notification(operator_request)
+        listed_before = await list_native_notifications(operator_request)
+        dismissed = await dismiss_native_notification(first["id"], operator_request)
+        listed_after_single = await list_native_notifications(operator_request)
+        dismissed_all = await dismiss_all_native_notifications(operator_request)
+        final_status = await daemon_status(operator_request)
 
     dismiss_event = _find_audit_call(
         mock_log_event,
@@ -10709,13 +10770,19 @@ async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
     from src.guardian.feedback import guardian_feedback_repository
     from src.api.activity import get_activity_ledger
     from src.api.operator import get_operator_timeline
+    from src.observer.native_notification_queue import NativeNotificationQueue
 
+    eval_notification_queue = NativeNotificationQueue()
     async with _patched_async_db(
         "src.agent.session.get_session",
         "src.guardian.feedback.get_session",
         "src.observer.insight_queue.get_session",
     ):
-        await native_notification_queue.clear()
+        await eval_notification_queue.clear()
+        await session_manager.get_or_create(
+            "continuity-session",
+            owner_principal_id="operator:test-bypass",
+        )
         mgr = ContextManager()
         mgr.update_screen_context("Arc — Guardian Cockpit", "Reviewing continuity across browser and desktop.")
         mgr.update_capture_mode("balanced")
@@ -10739,7 +10806,7 @@ async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
             latest_outcome="delivered",
             transport="native_notification",
         )
-        notification = await native_notification_queue.enqueue(
+        notification = await eval_notification_queue.enqueue(
             intervention_id=native_intervention.id,
             title="Seraph alert",
             body="Desktop fallback is active.",
@@ -10750,6 +10817,8 @@ async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
             thread_source="session",
             continuation_mode="resume_thread",
             resume_message="Continue from this guardian intervention: Desktop fallback is active.",
+            owner_principal_id="operator:test-bypass",
+            operator_session_id="test-auth-bypass",
         )
         await guardian_feedback_repository.update_outcome(
             native_intervention.id,
@@ -10788,6 +10857,7 @@ async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
 
         with (
             patch("src.api.observer.context_manager", mgr),
+            patch("src.api.observer.native_notification_queue", eval_notification_queue),
             patch("src.scheduler.connection_manager.ws_manager", mock_ws_manager),
             patch("src.observer.delivery._active_channel_adapters", return_value={"websocket"}),
             patch(
@@ -10947,14 +11017,16 @@ async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
             patch("src.api.activity.audit_repository.list_events", AsyncMock(return_value=[])),
             patch("src.api.activity.list_recent_llm_calls", return_value=[]),
         ):
-            continuity = await get_observer_continuity()
+            continuity = await get_observer_continuity(
+                _authenticated_operator_request("/api/observer/continuity")
+            )
             operator_timeline = await get_operator_timeline(limit=20, session_id=None)
             activity_ledger = await get_activity_ledger(limit=40, session_id=None, window_hours=24)
 
         queued_ids = [item.id for item in await insight_queue.peek_all()]
         if queued_ids:
             await insight_queue.delete_many(queued_ids)
-        await native_notification_queue.clear()
+        await eval_notification_queue.clear()
 
     surfaces = {item["continuity_surface"] for item in continuity["recent_interventions"]}
     live_route = next(item for item in continuity["reach"]["route_statuses"] if item["route"] == "live_delivery")
@@ -11031,21 +11103,23 @@ async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
     }
 
 
+@_isolated_eval_database
 async def _eval_desktop_notification_action_replay_behavior() -> dict[str, Any]:
     await native_notification_queue.clear()
     mgr = ContextManager()
     mgr.update_screen_context("Desktop shell", "Replaying notification actions across browser and daemon surfaces.")
     mgr.update_capture_mode("balanced")
     mock_log_event = AsyncMock()
+    operator_request = _authenticated_operator_request("/api/observer/notifications")
 
     with (
         patch("src.api.observer.context_manager", mgr),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
-        first = await enqueue_test_native_notification()
-        listed = await list_native_notifications()
-        dismissed = await dismiss_native_notification(first["id"])
-        second = await enqueue_test_native_notification()
+        first = await enqueue_test_native_notification(operator_request)
+        listed = await list_native_notifications(operator_request)
+        dismissed = await dismiss_native_notification(first["id"], operator_request)
+        second = await enqueue_test_native_notification(operator_request)
         polled = await get_next_native_notification(
             _authenticated_daemon_request("eval-daemon"),
             worker_id="eval-daemon",
@@ -11066,7 +11140,7 @@ async def _eval_desktop_notification_action_replay_behavior() -> dict[str, Any]:
             ),
             request=_authenticated_daemon_request("eval-daemon"),
         )
-        final_status = await daemon_status()
+        final_status = await daemon_status(operator_request)
 
     dismiss_event = _find_audit_call(
         mock_log_event,
@@ -11098,6 +11172,7 @@ async def _eval_desktop_notification_action_replay_behavior() -> dict[str, Any]:
     }
 
 
+@_isolated_eval_database
 async def _eval_guardian_feedback_loop() -> dict[str, Any]:
     from src.guardian.feedback import guardian_feedback_repository
 
@@ -11107,10 +11182,16 @@ async def _eval_guardian_feedback_loop() -> dict[str, Any]:
         "src.guardian.feedback.get_session",
         "src.observer.insight_queue.get_session",
     ):
-        await session_manager.get_or_create("feedback-current")
+        await session_manager.get_or_create(
+            "feedback-current",
+            owner_principal_id="operator:test-bypass",
+        )
         await session_manager.add_message("feedback-current", "user", "How should Seraph intervene better?")
         await session_manager.add_message("feedback-current", "assistant", "Track intervention outcomes explicitly.")
-        await session_manager.get_or_create("feedback-prior")
+        await session_manager.get_or_create(
+            "feedback-prior",
+            owner_principal_id="operator:test-bypass",
+        )
         await session_manager.update_title("feedback-prior", "Guardian feedback retrospective")
         await session_manager.add_message(
             "feedback-prior",
@@ -11154,11 +11235,21 @@ async def _eval_guardian_feedback_loop() -> dict[str, Any]:
             patch("src.agent.factory.ToolCallingAgent") as mock_agent_cls,
             patch.object(audit_repository, "log_event", mock_log_event),
         ):
-            decision = await deliver_or_queue(
-                message,
-                guardian_confidence="grounded",
-                session_id="feedback-current",
+            runtime_tokens = set_runtime_context(
+                "feedback-current",
+                "high_risk",
+                trust_principal=_eval_operator_principal("feedback-current"),
             )
+            try:
+                decision = await deliver_or_queue(
+                    message,
+                    guardian_confidence="grounded",
+                    session_id="feedback-current",
+                    owner_principal_id="operator:test-bypass",
+                    operator_session_id="test-auth-bypass",
+                )
+            finally:
+                reset_runtime_context(runtime_tokens)
             polled = await get_next_native_notification(
                 _authenticated_daemon_request("eval-daemon"),
                 worker_id="eval-daemon",
@@ -11429,7 +11520,18 @@ async def _eval_workflow_approval_threading_behavior() -> dict[str, Any]:
                     "tool_name": "workflow_web_brief_to_file",
                     "summary": "Calling workflow",
                     "created_at": "2026-03-18T12:01:00Z",
-                    "details": {"arguments": {"query": "seraph", "file_path": "notes/brief.md"}},
+                    "details": {
+                        "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
+                        "run_fingerprint": "web-brief",
+                        "conversation_id": "thread-1",
+                        "operator_session_id": "operator-session-1",
+                        "owner_kind": "user",
+                        "owner_principal_id": "operator:eval",
+                        "goal_id": "goal-1",
+                        "criterion_id": "criterion-1",
+                        "goal_revision": 1,
+                        "plan_revision": 1,
+                    },
                 },
             ],
         ),
@@ -11440,7 +11542,18 @@ async def _eval_workflow_approval_threading_behavior() -> dict[str, Any]:
                     "id": "approval-1",
                     "tool_name": "workflow_web_brief_to_file",
                     "session_id": "thread-1",
-                    "fingerprint": "missing-match",
+                    "workflow_run_identity": "thread-1:workflow_web_brief_to_file:web-brief:evt-call",
+                    "conversation_id": "thread-1",
+                    "operator_session_id": "operator-session-1",
+                    "owner_kind": "user",
+                    "owner_principal_id": "operator:eval",
+                    "goal_id": "goal-1",
+                    "criterion_id": "criterion-1",
+                    "goal_revision": 1,
+                    "plan_revision": 1,
+                    "fingerprint": "web-brief",
+                    "status": "pending",
+                    "approval_expires_at": "2099-03-18T12:01:10Z",
                     "summary": "Approval pending for workflow_web_brief_to_file",
                     "risk_level": "medium",
                     "created_at": "2026-03-18T12:01:10Z",
@@ -11476,6 +11589,14 @@ async def _eval_workflow_approval_threading_behavior() -> dict[str, Any]:
             "src.api.workflows.session_manager.list_sessions",
             return_value=[{"id": "thread-1", "title": "Research thread"}],
         ),
+        patch(
+            "src.api.workflows.workflow_state_repository.list_runs",
+            new=AsyncMock(return_value=[]),
+        ),
+        patch(
+            "src.api.workflows.durable_job_repository.list_jobs",
+            new=AsyncMock(return_value=[]),
+        ),
     ):
         run = (await _list_workflow_runs(limit=4, session_id="thread-1"))[0]
 
@@ -11503,8 +11624,7 @@ async def _eval_workflow_approval_threading_behavior() -> dict[str, Any]:
         "checkpoint_candidate_kinds": [
             checkpoint["kind"] for checkpoint in run["checkpoint_candidates"]
         ],
-        "resume_plan_branch_kind": run["resume_plan"]["branch_kind"],
-        "resume_plan_requires_manual_execution": run["resume_plan"]["requires_manual_execution"],
+        "resume_plan_is_none": run.get("resume_plan") is None,
         "thread_continue_message": run["thread_continue_message"],
         "approval_recovery_message": run["approval_recovery_message"],
     }
@@ -11938,6 +12058,8 @@ async def _eval_workflow_context_condenser_behavior() -> dict[str, Any]:
                 {
                     "id": "run-1",
                     "run_identity": "session-1:workflow_repo_review:1",
+                    "owner_kind": "user",
+                    "owner_principal_id": "operator:test-bypass",
                     "workflow_name": "repo-review",
                     "summary": "Waiting on guarded approval",
                     "status": "awaiting_approval",
@@ -11961,6 +12083,8 @@ async def _eval_workflow_context_condenser_behavior() -> dict[str, Any]:
                 {
                     "id": "run-2",
                     "run_identity": "session-2:workflow_daily_brief:1",
+                    "owner_kind": "user",
+                    "owner_principal_id": "operator:test-bypass",
                     "workflow_name": "daily-brief",
                     "summary": "Failed while drafting follow-up",
                     "status": "failed",
@@ -11990,7 +12114,11 @@ async def _eval_workflow_context_condenser_behavior() -> dict[str, Any]:
             ],
         ),
     ):
-        payload = await get_operator_workflow_orchestration(limit_sessions=6, limit_workflows=8)
+        payload = await get_operator_workflow_orchestration(
+            _authenticated_operator_request("/api/operator/workflow-orchestration"),
+            limit_sessions=6,
+            limit_workflows=8,
+        )
 
     sessions_by_thread = {
         session.get("thread_id") or "__ambient__": session
@@ -12034,6 +12162,8 @@ async def _eval_workflow_operating_layer_behavior() -> dict[str, Any]:
                 {
                     "id": "run-1",
                     "run_identity": "session-1:workflow_repo_review:1",
+                    "owner_kind": "user",
+                    "owner_principal_id": "operator:test-bypass",
                     "workflow_name": "repo-review",
                     "summary": "Waiting on guarded approval",
                     "status": "awaiting_approval",
@@ -12058,6 +12188,8 @@ async def _eval_workflow_operating_layer_behavior() -> dict[str, Any]:
                     "id": "run-2",
                     "run_identity": "session-2:workflow_daily_brief:1",
                     "root_run_identity": "session-2:workflow_daily_brief:1",
+                    "owner_kind": "user",
+                    "owner_principal_id": "operator:test-bypass",
                     "workflow_name": "daily-brief",
                     "summary": "Failed while drafting follow-up",
                     "status": "failed",
@@ -12090,6 +12222,8 @@ async def _eval_workflow_operating_layer_behavior() -> dict[str, Any]:
                     "run_identity": "session-2:workflow_daily_brief:branch-1",
                     "root_run_identity": "session-2:workflow_daily_brief:1",
                     "parent_run_identity": "session-2:workflow_daily_brief:1",
+                    "owner_kind": "user",
+                    "owner_principal_id": "operator:test-bypass",
                     "branch_kind": "branch_from_checkpoint",
                     "workflow_name": "daily-brief",
                     "summary": "Branched repair draft completed",
@@ -12108,6 +12242,8 @@ async def _eval_workflow_operating_layer_behavior() -> dict[str, Any]:
                 {
                     "id": "run-4",
                     "run_identity": "ambient:workflow_cleanup:1",
+                    "owner_kind": "user",
+                    "owner_principal_id": "operator:test-bypass",
                     "workflow_name": "cleanup",
                     "summary": "Cleanup still needs follow-through.",
                     "status": "running",
@@ -12125,7 +12261,11 @@ async def _eval_workflow_operating_layer_behavior() -> dict[str, Any]:
             ],
         ),
     ):
-        payload = await get_operator_workflow_orchestration(limit_sessions=6, limit_workflows=8)
+        payload = await get_operator_workflow_orchestration(
+            _authenticated_operator_request("/api/operator/workflow-orchestration"),
+            limit_sessions=6,
+            limit_workflows=8,
+        )
 
     sessions_by_thread = {
         session.get("thread_id") or "__ambient__": session
@@ -12146,13 +12286,17 @@ async def _eval_workflow_operating_layer_behavior() -> dict[str, Any]:
         "atlas_queue_reason_visible": (
             atlas_session["queue_reason"] == "1 workflow awaits approval before the session can advance."
         ),
-        "atlas_queue_draft_visible": atlas_session["queue_draft"].startswith("Review the workflow queue for Atlas thread."),
+        "atlas_queue_draft_uses_safe_label": atlas_session["queue_draft"].startswith(
+            "Review the workflow queue for workflow thread."
+        ),
         "atlas_attention_summary_visible": all(
             fragment in atlas_session["attention_summary"]
             for fragment in ("approval gate", "branch ready", "debugger ready", "stalled")
         ),
         "brief_queue_state_visible": brief_session["queue_state"] == "boundary_blocked",
-        "brief_handoff_draft_visible": brief_session["handoff_draft"].startswith("Prepare a workflow handoff for Daily brief thread."),
+        "brief_handoff_draft_uses_safe_label": brief_session["handoff_draft"].startswith(
+            "Prepare a workflow handoff for workflow thread."
+        ),
         "brief_related_output_visible": brief_session["lead_related_output_paths"] == ["notes/daily-brief-v2.md"],
         "brief_output_history_visible": any(
             entry["path"] == "notes/daily-brief-v2.md"
@@ -12196,6 +12340,8 @@ async def _eval_workflow_anticipatory_repair_behavior() -> dict[str, Any]:
                 {
                     "id": "run-anticipatory",
                     "run_identity": "session-1:workflow_release_brief:1",
+                    "owner_kind": "user",
+                    "owner_principal_id": "operator:test-bypass",
                     "root_run_identity": "session-1:workflow_release_brief:1",
                     "workflow_name": "release-brief",
                     "summary": "Preparing release publication.",
@@ -12227,6 +12373,8 @@ async def _eval_workflow_anticipatory_repair_behavior() -> dict[str, Any]:
                 {
                     "id": "run-history",
                     "run_identity": "session-1:workflow_release_brief:branch-1",
+                    "owner_kind": "user",
+                    "owner_principal_id": "operator:test-bypass",
                     "root_run_identity": "session-1:workflow_release_brief:1",
                     "parent_run_identity": "session-1:workflow_release_brief:1",
                     "branch_kind": "branch_from_checkpoint",
@@ -12246,7 +12394,11 @@ async def _eval_workflow_anticipatory_repair_behavior() -> dict[str, Any]:
             ],
         ),
     ):
-        payload = await get_operator_workflow_orchestration(limit_sessions=6, limit_workflows=8)
+        payload = await get_operator_workflow_orchestration(
+            _authenticated_operator_request("/api/operator/workflow-orchestration"),
+            limit_sessions=6,
+            limit_workflows=8,
+        )
 
     session = payload["sessions"][0]
     workflow = next(item for item in payload["workflows"] if item["run_identity"] == "session-1:workflow_release_brief:1")
@@ -12256,7 +12408,9 @@ async def _eval_workflow_anticipatory_repair_behavior() -> dict[str, Any]:
         "session_anticipatory_summary_visible": "anticipatory ready" in str(session["attention_summary"] or ""),
         "workflow_risk_level_elevated": workflow["anticipatory_plan"]["risk_level"] in {"elevated", "high"},
         "workflow_backup_branch_ready": workflow["anticipatory_plan"]["backup_branch_ready"] is True,
-        "workflow_backup_branch_draft_visible": '_seraph_resume_from_step="draft"' in workflow["anticipatory_plan"]["backup_branch_draft"],
+        "session_backup_branch_draft_redacted": session["lead_backup_branch_draft"] is None,
+        "workflow_backup_branch_label_redacted": workflow["anticipatory_plan"]["backup_branch_label"] == "checkpoint",
+        "workflow_backup_branch_draft_redacted": workflow["anticipatory_plan"]["backup_branch_draft"] is None,
         "workflow_pre_repair_draft_visible": str(workflow["anticipatory_plan"]["anticipatory_repair_draft"]).startswith("Before continuing workflow"),
     }
 
@@ -12275,6 +12429,8 @@ async def _eval_workflow_condensation_fidelity_behavior() -> dict[str, Any]:
                 {
                     "id": "run-root",
                     "run_identity": "session-1:workflow_repo_review:1",
+                    "owner_kind": "user",
+                    "owner_principal_id": "operator:test-bypass",
                     "root_run_identity": "session-1:workflow_repo_review:1",
                     "workflow_name": "repo-review",
                     "summary": "Review handoff is still active.",
@@ -12307,6 +12463,8 @@ async def _eval_workflow_condensation_fidelity_behavior() -> dict[str, Any]:
                 {
                     "id": "run-branch",
                     "run_identity": "session-1:workflow_repo_review:branch-1",
+                    "owner_kind": "user",
+                    "owner_principal_id": "operator:test-bypass",
                     "root_run_identity": "session-1:workflow_repo_review:1",
                     "parent_run_identity": "session-1:workflow_repo_review:1",
                     "branch_kind": "branch_from_checkpoint",
@@ -12326,7 +12484,11 @@ async def _eval_workflow_condensation_fidelity_behavior() -> dict[str, Any]:
             ],
         ),
     ):
-        payload = await get_operator_workflow_orchestration(limit_sessions=6, limit_workflows=8)
+        payload = await get_operator_workflow_orchestration(
+            _authenticated_operator_request("/api/operator/workflow-orchestration"),
+            limit_sessions=6,
+            limit_workflows=8,
+        )
 
     workflow = next(item for item in payload["workflows"] if item["run_identity"] == "session-1:workflow_repo_review:1")
     return {
@@ -12351,6 +12513,8 @@ async def _eval_workflow_backup_branch_surface_behavior() -> dict[str, Any]:
                 {
                     "id": "run-1",
                     "run_identity": "session-1:workflow_repo_review:1",
+                    "owner_kind": "user",
+                    "owner_principal_id": "operator:test-bypass",
                     "root_run_identity": "session-1:workflow_repo_review:1",
                     "workflow_name": "repo-review",
                     "summary": "Comparison is running before publish.",
@@ -12382,14 +12546,19 @@ async def _eval_workflow_backup_branch_surface_behavior() -> dict[str, Any]:
             ],
         ),
     ):
-        payload = await get_operator_workflow_orchestration(limit_sessions=6, limit_workflows=8)
+        payload = await get_operator_workflow_orchestration(
+            _authenticated_operator_request("/api/operator/workflow-orchestration"),
+            limit_sessions=6,
+            limit_workflows=8,
+        )
 
     session = payload["sessions"][0]
     workflow = payload["workflows"][0]
     return {
-        "session_backup_branch_label_visible": session["lead_backup_branch_label"] == "compare (diff_compare)",
-        "session_backup_branch_draft_visible": '_seraph_resume_from_step="compare"' in session["lead_backup_branch_draft"],
-        "workflow_backup_branch_label_visible": workflow["anticipatory_plan"]["backup_branch_label"] == "compare (diff_compare)",
+        "session_backup_branch_label_redacted": session["lead_backup_branch_label"] == "checkpoint",
+        "session_backup_branch_draft_redacted": session["lead_backup_branch_draft"] is None,
+        "workflow_backup_branch_label_redacted": workflow["anticipatory_plan"]["backup_branch_label"] == "checkpoint",
+        "workflow_backup_branch_draft_redacted": workflow["anticipatory_plan"]["backup_branch_draft"] is None,
         "workflow_backup_branch_ready": workflow["anticipatory_plan"]["backup_branch_ready"] is True,
     }
 
@@ -12411,6 +12580,8 @@ async def _eval_workflow_multi_session_endurance_behavior() -> dict[str, Any]:
                 {
                     "id": "run-1",
                     "run_identity": "session-1:workflow_repo_review:1",
+                    "owner_kind": "user",
+                    "owner_principal_id": "operator:test-bypass",
                     "root_run_identity": "session-1:workflow_repo_review:1",
                     "workflow_name": "repo-review",
                     "summary": "Ready for anticipatory backup branch.",
@@ -12440,6 +12611,8 @@ async def _eval_workflow_multi_session_endurance_behavior() -> dict[str, Any]:
                 {
                     "id": "run-2",
                     "run_identity": "session-2:workflow_research_followup:1",
+                    "owner_kind": "user",
+                    "owner_principal_id": "operator:test-bypass",
                     "root_run_identity": "session-2:workflow_research_followup:1",
                     "workflow_name": "research-followup",
                     "summary": "Blocked after trust boundary drift.",
@@ -12466,7 +12639,11 @@ async def _eval_workflow_multi_session_endurance_behavior() -> dict[str, Any]:
             ],
         ),
     ):
-        payload = await get_operator_workflow_orchestration(limit_sessions=6, limit_workflows=8)
+        payload = await get_operator_workflow_orchestration(
+            _authenticated_operator_request("/api/operator/workflow-orchestration"),
+            limit_sessions=6,
+            limit_workflows=8,
+        )
 
     sessions = {item["thread_id"]: item for item in payload["sessions"]}
     return {
@@ -13033,7 +13210,10 @@ async def _eval_operator_guardian_state_surface_behavior() -> dict[str, Any]:
         ),
         patch("src.api.operator._operator_database_missing_tables", AsyncMock(return_value=[])),
     ):
-        payload = await get_operator_guardian_state(session_id="session-1")
+        payload = await get_operator_guardian_state(
+            _authenticated_operator_request("/api/operator/guardian-state"),
+            session_id="session-1",
+        )
 
     return {
         "session_id_matches": payload["summary"]["session_id"] == "session-1",
@@ -13068,6 +13248,7 @@ async def _eval_operator_guardian_state_surface_behavior() -> dict[str, Any]:
     }
 
 
+@_isolated_eval_database
 async def _eval_workflow_boundary_blocked_surface_behavior() -> dict[str, Any]:
     from src.api.activity import get_activity_ledger
     from src.api.operator import get_operator_timeline
@@ -13220,38 +13401,43 @@ async def _eval_approval_explainability_surface_behavior() -> dict[str, Any]:
         },
     }
 
-    with (
-        patch(
-            "src.api.approvals.session_manager.list_sessions",
-            return_value=[{"id": "thread-1", "title": "Research thread"}],
-        ),
-        patch("src.api.approvals.approval_repository.list_pending", return_value=[approval]),
-        patch(
-            "src.api.operator.session_manager.list_sessions",
-            return_value=[{"id": "thread-1", "title": "Research thread"}],
-        ),
-        patch("src.api.operator._list_workflow_runs", return_value=[]),
-        patch("src.api.operator.approval_repository.list_pending", return_value=[approval]),
-        patch("src.api.operator.native_notification_queue.list", return_value=[]),
-        patch("src.api.operator.insight_queue.peek_all", return_value=[]),
-        patch("src.api.operator.guardian_feedback_repository.list_recent", return_value=[]),
-        patch("src.api.operator.audit_repository.list_events", return_value=[]),
-        patch(
-            "src.api.activity.session_manager.list_sessions",
-            return_value=[{"id": "thread-1", "title": "Research thread"}],
-        ),
-        patch("src.api.activity._list_workflow_runs", return_value=[]),
-        patch("src.api.activity.approval_repository.list_pending", return_value=[approval]),
-        patch("src.api.activity.native_notification_queue.list", return_value=[]),
-        patch("src.api.activity.insight_queue.peek_all", return_value=[]),
-        patch("src.api.activity.guardian_feedback_repository.list_recent", return_value=[]),
-        patch("src.api.activity.audit_repository.list_events", return_value=[]),
-        patch("src.api.activity.list_recent_llm_calls", return_value=[]),
-        patch("src.api.operator._operator_database_missing_tables", AsyncMock(return_value=[])),
-    ):
-        pending_payload = await list_pending_approvals(session_id="thread-1", limit=10)
-        operator_payload = await get_operator_timeline(limit=10, session_id="thread-1")
-        activity_payload = await get_activity_ledger(limit=10, session_id="thread-1", window_hours=24)
+    async with _patched_async_db():
+        with (
+            patch(
+                "src.api.approvals.session_manager.list_sessions",
+                return_value=[{"id": "thread-1", "title": "Research thread"}],
+            ),
+            patch("src.api.approvals.approval_repository.list_pending", return_value=[approval]),
+            patch(
+                "src.api.operator.session_manager.list_sessions",
+                return_value=[{"id": "thread-1", "title": "Research thread"}],
+            ),
+            patch("src.api.operator._list_workflow_runs", return_value=[]),
+            patch("src.api.operator.approval_repository.list_pending", return_value=[approval]),
+            patch("src.api.operator.native_notification_queue.list", return_value=[]),
+            patch("src.api.operator.insight_queue.peek_all", return_value=[]),
+            patch("src.api.operator.guardian_feedback_repository.list_recent", return_value=[]),
+            patch("src.api.operator.audit_repository.list_events", return_value=[]),
+            patch(
+                "src.api.activity.session_manager.list_sessions",
+                return_value=[{"id": "thread-1", "title": "Research thread"}],
+            ),
+            patch("src.api.activity._list_workflow_runs", return_value=[]),
+            patch("src.api.activity.approval_repository.list_pending", return_value=[approval]),
+            patch("src.api.activity.native_notification_queue.list", return_value=[]),
+            patch("src.api.activity.insight_queue.peek_all", return_value=[]),
+            patch("src.api.activity.guardian_feedback_repository.list_recent", return_value=[]),
+            patch("src.api.activity.audit_repository.list_events", return_value=[]),
+            patch("src.api.activity.list_recent_llm_calls", return_value=[]),
+            patch("src.api.operator._operator_database_missing_tables", AsyncMock(return_value=[])),
+        ):
+            pending_payload = await list_pending_approvals(
+                _authenticated_operator_request("/api/approvals/pending"),
+                session_id="thread-1",
+                limit=10,
+            )
+            operator_payload = await get_operator_timeline(limit=10, session_id="thread-1")
+            activity_payload = await get_activity_ledger(limit=10, session_id="thread-1", window_hours=24)
 
     pending_item = pending_payload[0]
     operator_item = next(item for item in operator_payload["items"] if item["kind"] == "approval")
@@ -16730,7 +16916,12 @@ async def _m7_cockpit_endpoint_payload() -> dict[str, Any]:
         ),
         patch("src.api.operator.process_runtime_manager.list_all_processes", return_value=[]),
     ):
-        return await get_operator_m7_cockpit(session_id="session-1", window_hours=24, limit_workflows=20)
+        return await get_operator_m7_cockpit(
+            _authenticated_operator_request("/api/operator/m7-cockpit"),
+            session_id="session-1",
+            window_hours=24,
+            limit_workflows=20,
+        )
 
 
 def _eval_operator_cockpit_receipt_legibility_behavior() -> dict[str, Any]:
@@ -24948,6 +25139,7 @@ def _eval_capability_preflight_behavior() -> dict[str, Any]:
     }
 
 
+@_isolated_eval_database
 async def _eval_activity_ledger_attribution_behavior() -> dict[str, Any]:
     from src.api.activity import get_activity_ledger
 
@@ -28210,10 +28402,10 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         runner=_eval_strategist_tick_behavior,
     ),
     EvalScenario(
-        name="strategist_tick_learning_continuity_behavior",
+        name="strategist_tick_learning_policy_behavior",
         category="guardian",
-        description="Strategist tick can use learned delivery bias to reroute a high-salience reminder through native notifications, and that intervention shows up in the continuity snapshot.",
-        runner=_eval_strategist_tick_learning_continuity_behavior,
+        description="Strategist tick evaluates learned delivery policy and keeps delivery unknown until independent readback; this scenario does not claim conversation-scoped continuity.",
+        runner=_eval_strategist_tick_learning_policy_behavior,
     ),
     EvalScenario(
         name="guardian_state_synthesis",

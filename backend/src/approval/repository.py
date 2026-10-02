@@ -501,6 +501,7 @@ class ApprovalRepository:
         summary: str,
         fingerprint: str,
         details: dict[str, Any] | None = None,
+        request_id: str | None = None,
     ) -> ApprovalRequest:
         details = dict(details or {})
         canonical_session_id = str(session_id or "").strip() or None
@@ -613,28 +614,36 @@ class ApprovalRepository:
                     .values(status="expired", resolved_at=pending_now)
                 )
 
-            request = ApprovalRequest(
-                session_id=canonical_session_id,
-                conversation_id=identity.conversation_id or None,
-                thread_id=identity.thread_id or None,
-                owner_principal_id=supplied_owner,
-                operator_session_id=supplied_operator_session,
-                device_id=identity.device_id,
-                channel=identity.channel,
-                transport=identity.transport,
-                correlation_id=identity.correlation_id,
-                causation_id=identity.causation_id,
-                attachment_refs_json=json.dumps(safe_attachment_refs, sort_keys=True),
-                challenge=(str(details.get("challenge") or "").strip() or None),
-                action=(str(details.get("action") or "").strip() or None),
-                expires_at=pending_expires_at,
-                tool_name=tool_name,
-                risk_level=risk_level,
-                status="pending",
-                fingerprint=fingerprint,
-                summary=summary,
-                details_json=json.dumps(details) if details else None,
-            )
+            safe_request_id = str(request_id or "").strip() or None
+            if safe_request_id is not None and (
+                len(safe_request_id) > 256 or any(ord(character) < 32 for character in safe_request_id)
+            ):
+                raise ValueError("request_id is not a bounded approval identity")
+            request_fields = {
+                "session_id": canonical_session_id,
+                "conversation_id": identity.conversation_id or None,
+                "thread_id": identity.thread_id or None,
+                "owner_principal_id": supplied_owner,
+                "operator_session_id": supplied_operator_session,
+                "device_id": identity.device_id,
+                "channel": identity.channel,
+                "transport": identity.transport,
+                "correlation_id": identity.correlation_id,
+                "causation_id": identity.causation_id,
+                "attachment_refs_json": json.dumps(safe_attachment_refs, sort_keys=True),
+                "challenge": (str(details.get("challenge") or "").strip() or None),
+                "action": (str(details.get("action") or "").strip() or None),
+                "expires_at": pending_expires_at,
+                "tool_name": tool_name,
+                "risk_level": risk_level,
+                "status": "pending",
+                "fingerprint": fingerprint,
+                "summary": summary,
+                "details_json": json.dumps(details) if details else None,
+            }
+            if safe_request_id is not None:
+                request_fields["id"] = safe_request_id
+            request = ApprovalRequest(**request_fields)
             # The row id is part of the durable approval binding.  Persist it
             # in the server-owned details so a later resume can compare the
             # selected row with the job authority instead of trusting a
@@ -1094,6 +1103,13 @@ class ApprovalRepository:
         def detail(*names: str) -> Any:
             return _approval_detail_value(details, *names)
 
+        def explicit_null_detail(*names: str) -> bool:
+            values = [details[name] for name in names if name in details]
+            nested_context = details.get("approval_context")
+            if isinstance(nested_context, Mapping):
+                values.extend(nested_context[name] for name in names if name in nested_context)
+            return bool(values) and all(value is None for value in values)
+
         # These identities are part of the durable run contract even when
         # their values are absent.  Comparing the normalized pair makes a
         # candidate-present approval unable to authorize a candidate-absent
@@ -1180,6 +1196,15 @@ class ApprovalRepository:
                     return None
                 continue
             if observed is None:
+                # A user-owned run has no service id. Keep that explicit null
+                # binding distinct from a missing field so an approval cannot
+                # silently omit part of the durable execution identity.
+                if (
+                    _field_name == "service_id"
+                    and expected is None
+                    and explicit_null_detail(*names)
+                ):
+                    continue
                 return None
             if _field_name in {"goal_revision", "plan_revision"}:
                 if type(expected) is not int or expected <= 0:
@@ -1306,6 +1331,7 @@ class ApprovalRepository:
         self,
         *,
         session_id: str | None = None,
+        approval_id: str | None = None,
         limit: int = 20,
     ) -> list[dict]:
         limit = min(max(limit, 1), 100)
@@ -1318,6 +1344,8 @@ class ApprovalRepository:
             )
             if session_id is not None:
                 stmt = stmt.where(ApprovalRequest.session_id == session_id)
+            if approval_id is not None:
+                stmt = stmt.where(ApprovalRequest.id == approval_id)
 
             result = await db.execute(stmt)
             requests = result.scalars().all()

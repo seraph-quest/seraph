@@ -110,6 +110,18 @@ class WSResponse(BaseModel):
     approval_id: str | None = None
     tool_name: str | None = None
     risk_level: str | None = None
+    # Approval boundary metadata is server-owned and intentionally separate
+    # from the human-readable summary.  Missing values keep generic approvals
+    # generic; clients must never infer host execution from ``content``.
+    required_permissions: list[str] | None = None
+    local_host_execution_required: bool | None = None
+    executor_kind: str | None = None
+    executor_profile: str | None = None
+    executor_posture_digest: str | None = None
+    preparation_ready: bool | None = None
+    execution_ready: bool | None = None
+    operator_visible: bool | None = None
+    expires_at: float | None = None
     question: str | None = None
     reason: str | None = None
     options: list[str] | None = None

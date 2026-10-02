@@ -249,6 +249,43 @@ class ModelFabricRepository:
             return None
         return receipt
 
+    async def route_for_request(
+        self,
+        *,
+        request_id: str,
+        outcome: str | None = None,
+    ) -> RouteReceipt | None:
+        """Return the verified route receipt for one exact caller request.
+
+        Runtime callers must bind an operator-visible capability receipt to the
+        request that produced it.  A latest-by-runtime lookup can accidentally
+        adopt another concurrent model call, so this read is deliberately
+        keyed by the immutable request identity and then rechecks the stored
+        receipt hash before returning it.
+        """
+
+        safe_code(request_id, field_name="request_id")
+        if outcome is not None:
+            safe_code(outcome, field_name="route outcome")
+        async with self._session() as db:
+            stmt = select(ModelRouteReceiptRecord).where(
+                ModelRouteReceiptRecord.request_id == request_id,
+            )
+            if outcome is not None:
+                stmt = stmt.where(ModelRouteReceiptRecord.outcome == outcome)
+            stmt = stmt.order_by(col(ModelRouteReceiptRecord.finished_at).desc()).limit(1)
+            record = (await db.execute(stmt)).scalar_one_or_none()
+            if record is None:
+                return None
+            attempts_result = await db.execute(
+                select(ModelRouteAttemptReceiptRecord)
+                .where(ModelRouteAttemptReceiptRecord.route_receipt_id == record.receipt_id)
+                .order_by(ModelRouteAttemptReceiptRecord.attempt_index)
+            )
+            attempts = tuple(_attempt_from_record(item) for item in attempts_result.scalars().all())
+        receipt = _route_from_record(record, attempts)
+        return receipt if receipt.receipt_hash == record.receipt_hash else None
+
     async def latest_routes_for_runtime_paths(
         self,
         runtime_paths: tuple[str, ...],

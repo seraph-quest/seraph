@@ -251,6 +251,7 @@ async def test_rest_chat_ignores_legacy_route_selection_and_uses_governed_path(
     runtime_override,
     profile_preference,
     profile_config,
+    async_db,
 ):
     session = SimpleNamespace(id="legacy-session")
     profile = SimpleNamespace(onboarding_completed=False)
@@ -300,6 +301,7 @@ async def test_websocket_handler_ignores_legacy_route_selection_without_transpor
     runtime_override,
     profile_preference,
     profile_config,
+    async_db,
 ):
     from src.api.ws import websocket_chat
 

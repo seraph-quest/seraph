@@ -67,12 +67,14 @@ def _make_sync_client_with_db():
     targets = [
         "src.db.engine.get_session",
         "src.agent.session.get_session",
+        "src.workflows.job_runtime.get_session",
         "src.approval.repository.get_session",
         "src.audit.repository.get_session",
         "src.goals.repository.get_session",
         "src.profile.service.get_db",
         "src.vault.repository.get_session",
         "src.api.profile.get_db",
+        "src.api.ws.get_session",
     ]
     patches = [patch(t, _get_session) for t in targets]
     patches.append(patch("src.app.init_db", _test_init_db))

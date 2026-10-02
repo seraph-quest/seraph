@@ -271,6 +271,12 @@ def _validate_route_policy(*, batch_size: int, model: str) -> None:
             batch_size=batch_size,
             model=model,
         )
+    if str(getattr(settings, "openrouter_data_retention_policy", "deny") or "deny") != "deny":
+        _raise_configuration(
+            "openrouter_retention_policy_must_deny",
+            batch_size=batch_size,
+            model=model,
+        )
 
 
 def _embedding_provider_options() -> dict[str, object]:
@@ -286,6 +292,9 @@ def _embedding_provider_options() -> dict[str, object]:
             "allow_fallbacks": False,
             "require_parameters": True,
             "data_collection": "deny",
+            "data_retention_policy": str(
+                getattr(settings, "openrouter_data_retention_policy", "deny") or "deny"
+            ),
             "zdr": True,
         }
     }

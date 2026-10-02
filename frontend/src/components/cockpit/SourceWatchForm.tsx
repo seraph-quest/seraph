@@ -2,11 +2,14 @@ import { useCallback, useEffect, useState, type ReactNode } from "react";
 
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
+import type { GoalAdmissionBudget } from "../../types";
 
 export interface SourceWatchFormGoal {
   id: string;
   title: string;
   revision?: number | null;
+  proactive_enabled?: boolean;
+  admission_budget?: GoalAdmissionBudget | null;
 }
 
 interface SourceWatchRecord {
@@ -21,6 +24,7 @@ interface SourceWatchRecord {
   active_job_fence?: number | null;
   sources?: Array<{ source_key?: string; kind?: string; target?: string; priority?: number }>;
   criteria?: { include_terms?: string[]; exclude_terms?: string[] };
+  schedule?: { cron?: string; timezone?: string };
   last_status?: string | null;
   last_error_code?: string | null;
   baselines?: Array<{ source_key?: string; state?: string; sha256?: string; generation?: number }>;
@@ -46,7 +50,77 @@ interface SourceWatchRecord {
 
 export interface SourceWatchFormProps {
   goal: SourceWatchFormGoal | null;
+  goalOptions?: SourceWatchFormGoal[];
   autoLoad?: boolean;
+}
+
+const CADENCES = [
+  { value: "hourly", label: "Every hour", cron: "0 * * * *" },
+  { value: "six_hours", label: "Every 6 hours", cron: "0 */6 * * *" },
+  { value: "daily", label: "Daily at selected hour", cron: "0 8 * * *" },
+] as const;
+
+function operatorTimezone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+}
+
+function localParts(value: Date, timezone: string): Record<string, number> {
+  try {
+    return Object.fromEntries(
+      new Intl.DateTimeFormat("en-US", {
+        timeZone: timezone,
+        hour12: false,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        weekday: "short",
+        hourCycle: "h23",
+      }).formatToParts(value).map((part) => [part.type, Number(part.value)]),
+    ) as Record<string, number>;
+  } catch {
+    return localParts(value, "UTC");
+  }
+}
+
+function nextRunLabel(cadence: string, dailyHour: number, timezone: string): string {
+  const now = new Date();
+  const candidate = new Date(now);
+  candidate.setSeconds(0, 0);
+  candidate.setMinutes(candidate.getMinutes() + 1);
+  for (let minute = 0; minute < 60 * 24 * 8; minute += 1) {
+    const parts = localParts(candidate, timezone);
+    const isMatch = parts.minute === 0 && (
+      cadence === "hourly"
+      || (cadence === "six_hours" && parts.hour % 6 === 0)
+      || (cadence === "daily" && parts.hour === dailyHour)
+    );
+    if (isMatch) {
+      try {
+        return new Intl.DateTimeFormat(undefined, {
+          timeZone: timezone,
+          dateStyle: "medium",
+          timeStyle: "short",
+        }).format(candidate);
+      } catch {
+        return candidate.toISOString();
+      }
+    }
+    candidate.setMinutes(candidate.getMinutes() + 1);
+  }
+  return "next run unavailable";
+}
+
+function scheduleLabel(schedule: SourceWatchRecord["schedule"]): string {
+  const cron = schedule?.cron ?? "";
+  const timezone = schedule?.timezone ?? "UTC";
+  if (cron === "*/15 * * * *") return `legacy 15-minute cadence · ${timezone}`;
+  return `${cron || "custom cadence"} · ${timezone}`;
 }
 
 function detailFromPayload(payload: unknown): string {
@@ -60,10 +134,15 @@ function detailFromPayload(payload: unknown): string {
   return "request failed";
 }
 
-export function SourceWatchForm({ goal, autoLoad = true }: SourceWatchFormProps) {
+export function SourceWatchForm({ goal, goalOptions, autoLoad = true }: SourceWatchFormProps) {
   const [watches, setWatches] = useState<SourceWatchRecord[]>([]);
+  const [selectedGoalId, setSelectedGoalId] = useState(goal?.id ?? goalOptions?.[0]?.id ?? "");
   const [source, setSource] = useState("");
   const [includeTerms, setIncludeTerms] = useState("");
+  const [cadence, setCadence] = useState<(typeof CADENCES)[number]["value"]>("hourly");
+  const [dailyHour, setDailyHour] = useState(8);
+  const [timezone, setTimezone] = useState(operatorTimezone());
+  const [writeMode, setWriteMode] = useState<"approval_each_run" | "standing_reviewed">("approval_each_run");
   const [correctionIncludeTerms, setCorrectionIncludeTerms] = useState("");
   const [correctionExcludeTerms, setCorrectionExcludeTerms] = useState("");
   const [correctionReason, setCorrectionReason] = useState("");
@@ -89,9 +168,34 @@ export function SourceWatchForm({ goal, autoLoad = true }: SourceWatchFormProps)
     if (autoLoad) void loadWatches();
   }, [autoLoad, loadWatches]);
 
+  useEffect(() => {
+    setSelectedGoalId((current) => {
+      if (current && goalOptions?.some((option) => option.id === current)) return current;
+      return goal?.id ?? goalOptions?.[0]?.id ?? "";
+    });
+  }, [goal?.id, goalOptions?.length]);
+
+  const selectedGoal = goalOptions?.find((option) => option.id === selectedGoalId)
+    ?? (goal?.id === selectedGoalId ? goal : null)
+    ?? goal;
+  const selectedCadence = CADENCES.find((option) => option.value === cadence) ?? CADENCES[0];
+  const selectedSchedule = {
+    cron: cadence === "daily" ? `0 ${dailyHour} * * *` : selectedCadence.cron,
+    timezone: timezone.trim() || "UTC",
+  };
+
+  const reviewedGrantId = selectedGoal?.admission_budget?.grant_id?.trim() ?? "";
+
   const createWatch = async () => {
-    if (!goal?.id || !goal.revision || !source.trim()) {
+    if (!selectedGoal?.id || !selectedGoal.revision || !source.trim()) {
       setStatus("An active goal revision and HTTPS or workspace source are required.");
+      return;
+    }
+    if (
+      writeMode === "standing_reviewed"
+      && (!selectedGoal.proactive_enabled || !selectedGoal.admission_budget?.reviewed_grant || !reviewedGrantId.trim())
+    ) {
+      setStatus("Standing review is blocked: select a goal with a reviewed budget and current runtime permission.");
       return;
     }
     setBusy(true);
@@ -100,8 +204,8 @@ export function SourceWatchForm({ goal, autoLoad = true }: SourceWatchFormProps)
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          goal_id: goal.id,
-          expected_goal_revision: goal.revision,
+          goal_id: selectedGoal.id,
+          expected_goal_revision: selectedGoal.revision,
           sources: [{
             source_key: "primary",
             kind: source.trim().startsWith("https://") ? "public_https_text" : "workspace_text",
@@ -115,8 +219,9 @@ export function SourceWatchForm({ goal, autoLoad = true }: SourceWatchFormProps)
             min_changed_chars: 1,
             max_material_sources: 3,
           },
-          schedule: { cron: "*/15 * * * *", timezone: "UTC" },
-          write_mode: "approval_each_run",
+          schedule: selectedSchedule,
+          write_mode: writeMode,
+          ...(writeMode === "standing_reviewed" ? { reviewed_grant_id: reviewedGrantId.trim() } : {}),
         }),
       });
       const payload = await response.json().catch(() => null);
@@ -310,31 +415,96 @@ export function SourceWatchForm({ goal, autoLoad = true }: SourceWatchFormProps)
   return (
     <CardShell title="Guardian source watch" testId="source-watch-form">
       <div className="cockpit-outcome-copy">
-        {goal ? `Bound to ${goal.title} · goal revision ${goal.revision ?? "unknown"}` : "Select an active goal to configure a bounded watch."}
+        {selectedGoal ? `Bound to ${selectedGoal.title} · goal revision ${selectedGoal.revision ?? "unknown"}` : "Select an active goal to configure a bounded watch."}
       </div>
       <div className="source-watch-form-grid">
+        {goalOptions && goalOptions.length > 0 ? (
+          <select
+            aria-label="Guardian goal"
+            value={selectedGoalId}
+            onChange={(event) => setSelectedGoalId(event.target.value)}
+            disabled={busy}
+          >
+            {goalOptions.map((option) => (
+              <option key={option.id} value={option.id}>
+                {option.title} · revision {option.revision ?? "unknown"}
+              </option>
+            ))}
+          </select>
+        ) : null}
         <input
           aria-label="Guardian source"
           value={source}
           onChange={(event) => setSource(event.target.value)}
           placeholder="https://example.org/updates.txt or notes/plan.md"
-          disabled={!goal || busy}
+          disabled={!selectedGoal || busy}
         />
         <input
           aria-label="Guardian include terms"
           value={includeTerms}
           onChange={(event) => setIncludeTerms(event.target.value)}
           placeholder="include terms, comma separated"
-          disabled={!goal || busy}
+          disabled={!selectedGoal || busy}
         />
-        <button type="button" onClick={() => void createWatch()} disabled={!goal || busy}>
+        <select
+          aria-label="Guardian cadence"
+          value={cadence}
+          onChange={(event) => setCadence(event.target.value as (typeof CADENCES)[number]["value"])}
+          disabled={!selectedGoal || busy}
+        >
+          {CADENCES.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+        </select>
+        {cadence === "daily" ? (
+          <select
+            aria-label="Guardian daily hour"
+            value={dailyHour}
+            onChange={(event) => setDailyHour(Number(event.target.value))}
+            disabled={!selectedGoal || busy}
+          >
+            {Array.from({ length: 24 }, (_, hour) => <option key={hour} value={hour}>{String(hour).padStart(2, "0")}:00</option>)}
+          </select>
+        ) : null}
+        <input
+          aria-label="Guardian timezone"
+          value={timezone}
+          onChange={(event) => setTimezone(event.target.value)}
+          placeholder="Operator IANA timezone"
+          disabled={!selectedGoal || busy}
+        />
+        <div className="cockpit-outcome-note">Next run: {nextRunLabel(cadence, dailyHour, timezone)}</div>
+        <select
+          aria-label="Guardian write mode"
+          value={writeMode}
+          onChange={(event) => setWriteMode(event.target.value as "approval_each_run" | "standing_reviewed")}
+          disabled={!selectedGoal || busy}
+        >
+          <option value="approval_each_run">Approval required each run</option>
+          <option value="standing_reviewed">Standing reviewed local output</option>
+        </select>
+        {writeMode === "standing_reviewed" ? (
+          <>
+            <input
+              aria-label="Guardian reviewed grant reference"
+              value={reviewedGrantId}
+              placeholder="Current reviewed goal grant reference"
+              readOnly
+              disabled={!selectedGoal || busy}
+            />
+            <div className="cockpit-outcome-note">
+              Uses the selected goal's reviewed budget reference. The watch only writes the existing local dossier and still revalidates authority on each run.
+            </div>
+          </>
+        ) : (
+          <div className="cockpit-outcome-note">Each completed packet stays behind the existing awaiting approval controls.</div>
+        )}
+        <button type="button" onClick={() => void createWatch()} disabled={!selectedGoal || busy}>
           {busy ? "Working…" : "Add watch"}
         </button>
         <button type="button" onClick={() => void loadWatches()} disabled={busy}>
           Refresh watches
         </button>
       </div>
-      {watches.filter((watch) => !goal || watch.goal_id === goal.id).map((watch) => {
+      {watches.filter((watch) => !selectedGoal || watch.goal_id === selectedGoal.id).map((watch) => {
         const packet = packetFor(watch);
         const jobId = jobIdFor(watch);
         const state = watch.last_error_code || packet?.failure_code || watch.state === "blocked"
@@ -361,6 +531,7 @@ export function SourceWatchForm({ goal, autoLoad = true }: SourceWatchFormProps)
             <div className="cockpit-outcome-copy">
               {watch.sources?.length ?? 0} source(s) · {watch.write_mode} · {watch.last_status ?? "no run yet"}
             </div>
+            <div className="cockpit-outcome-note">schedule · {scheduleLabel(watch.schedule)}</div>
             <div className="cockpit-outcome-copy">
               baselines {watch.baselines?.filter((item) => item.state === "ready").length ?? 0}/{watch.sources?.length ?? 0}
               {packet?.status ? ` · packet ${packet.status}` : ""}

@@ -14,6 +14,9 @@ export interface ChatMessage {
   approvalId?: string;
   riskLevel?: string;
   approvalStatus?: "pending" | "approved" | "denied" | "consumed";
+  /** Server-owned approval boundary for trusted local repository execution. */
+  localHostExecutionRequired?: boolean;
+  requiredPermissions?: string[];
   clarificationQuestion?: string;
   clarificationReason?: string;
   clarificationOptions?: string[];
@@ -35,6 +38,8 @@ export interface WSResponse {
   approval_id?: string;
   tool_name?: string;
   risk_level?: string;
+  local_host_execution_required?: boolean;
+  required_permissions?: string[];
   question?: string;
   reason?: string;
   options?: string[];
@@ -90,6 +95,226 @@ export interface GoalSuccessCriterion {
   evidence_refs: string[];
 }
 
+export interface GoalAdmissionBudget {
+  reviewed_grant: boolean;
+  grant_id?: string | null;
+  max_outstanding_jobs: number;
+  max_attempts: number;
+  max_runtime_seconds: number;
+  notifications_per_day: number;
+  period_started_at?: string | null;
+  period_expires_at?: string | null;
+  quiet_hours_start?: number | null;
+  quiet_hours_end?: number | null;
+  timezone: string;
+}
+
+export type GuardianInboxState = "pending" | "snoozed" | "accepted" | "dismissed" | "expired";
+
+export type GuardianInboxAction = "accept_followup" | "snooze" | "dismiss";
+
+/** Safe evidence metadata exposed by the guardian inbox. Source content stays behind artifact access. */
+export interface GuardianInboxEvidenceRef {
+  artifact_id?: string | null;
+  artifact_type?: string | null;
+  file_path?: string | null;
+  content_sha256?: string | null;
+  sha256?: string | null;
+  kind?: string | null;
+  status?: string | null;
+  verification?: string | null;
+  last_verified_at?: string | null;
+  workflow_run_id?: string | null;
+  owner_session_id?: string | null;
+  target_path?: string | null;
+  artifact_url?: string | null;
+  label?: string | null;
+}
+
+/** Authorized durable source-job/readback receipt shown in item details. */
+export interface GuardianInboxReadback {
+  target_path?: string | null;
+  readback_id?: string | null;
+  verified_at?: string | null;
+  digest?: string | null;
+  status?: string | null;
+}
+
+/** Bounded, redacted, owner-checked detail preview for a verified artifact. */
+export interface GuardianInboxEvidencePreview {
+  artifact_id?: string | null;
+  artifact_type?: string | null;
+  file_path?: string | null;
+  sha256?: string | null;
+  owner_session_id?: string | null;
+  workflow_run_id?: string | null;
+  text?: string | null;
+  trust?: string | null;
+}
+
+export interface GuardianInboxJob {
+  id?: string | null;
+  status?: string | null;
+  attempt_count?: number | null;
+  max_attempts?: number | null;
+  readback_id?: string | null;
+  verified_at?: string | null;
+  digest?: string | null;
+  readback_status?: string | null;
+  readbacks?: GuardianInboxReadback[];
+}
+
+export type GuardianInboxReasonState = "provided" | "unavailable" | "not_provided";
+
+export interface GuardianInboxActionHistoryEntry {
+  receipt_id: string;
+  action: GuardianInboxAction | "unavailable";
+  created_at: string | null;
+  expected_revision: number | null;
+  result_revision: number | null;
+  task_id: string | null;
+  outcome: GuardianInboxState | "unavailable";
+  reason_state: GuardianInboxReasonState;
+  safe_reason: string | null;
+}
+
+/**
+ * Detail-only, owner-checked Mail selection metadata.  This deliberately
+ * carries no subject, preview, body, provider identity, or credentials.
+ */
+export interface GuardianInboxMailOrigin {
+  /** Exact source watch that produced this accepted candidate. */
+  watch_id: string;
+  message_binding_id: string;
+  message_revision: string;
+  status: string;
+  private: true;
+}
+
+/** Operator-safe projection of a durable, owner-scoped guardian intervention. */
+export interface GuardianInboxItem {
+  id: string;
+  revision: number;
+  state: GuardianInboxState;
+  /** True when the server sent an unknown state; actions are then disabled. */
+  degraded?: boolean;
+  source_kind: string;
+  source_id: string;
+  title: string;
+  summary: string;
+  why_now: string;
+  goal_id: string;
+  goal_revision: number;
+  watch_id: string;
+  plan_revision: number;
+  task_id?: string | null;
+  expires_at: string;
+  snoozed_until?: string | null;
+  evidence_refs: GuardianInboxEvidenceRef[];
+  evidence_previews?: GuardianInboxEvidencePreview[];
+  job?: GuardianInboxJob | null;
+  allowed_actions: GuardianInboxAction[];
+  evidence_status?: string | null;
+  source_status?: string | null;
+  source_freshness?: string | null;
+  verification_status?: string | null;
+  memory_status?: string | null;
+  policy_reason?: string | null;
+  recovery_action?: string | null;
+  evidence_url?: string | null;
+  task_url?: string | null;
+  watch_url?: string | null;
+  mail?: GuardianInboxMailOrigin | null;
+  action_history?: GuardianInboxActionHistoryEntry[];
+  action_history_truncated?: boolean;
+}
+
+export interface GuardianInboxPage {
+  items: GuardianInboxItem[];
+  next_cursor?: string | null;
+  last_confirmed_at?: string | null;
+}
+
+export interface GuardianInboxActionRequest {
+  action: GuardianInboxAction;
+  expected_revision: number;
+  idempotency_key: string;
+  until?: string;
+  reason?: string;
+}
+
+export interface GuardianInboxActionResponse {
+  id: string;
+  revision: number;
+  state: GuardianInboxState;
+  task_id?: string | null;
+  receipt_id: string;
+  recovery_action?: string | null;
+}
+
+export type CanonicalMemoryKind =
+  | "fact"
+  | "preference"
+  | "pattern"
+  | "goal"
+  | "reflection"
+  | "project"
+  | "collaborator"
+  | "obligation"
+  | "routine"
+  | "timeline"
+  | "commitment"
+  | "communication_preference"
+  | "procedural";
+
+export type CanonicalMemoryStatus = "active" | "archived" | "superseded";
+
+export interface CanonicalMemoryProvenance {
+  source_type?: string | null;
+  source_id?: string | null;
+  source_session_id?: string | null;
+  verified?: boolean | null;
+  [key: string]: unknown;
+}
+
+export interface CanonicalMemoryLink {
+  kind: string;
+  label?: string | null;
+  href?: string | null;
+  id?: string | null;
+}
+
+export interface CanonicalMemoryRecord {
+  id: string;
+  kind: CanonicalMemoryKind;
+  status: CanonicalMemoryStatus;
+  summary: string | null;
+  confidence: number | null;
+  created_at: string;
+  updated_at: string;
+  last_confirmed_at: string | null;
+  source_session_id: string;
+  safe_provenance: CanonicalMemoryProvenance;
+  links: CanonicalMemoryLink[];
+  content?: string | null;
+  current_source?: string | null;
+  conflict?: Record<string, unknown> | null;
+  tombstone?: Record<string, unknown> | null;
+  audit_links?: CanonicalMemoryLink[];
+  privacy_boundary?: string | null;
+  redaction_state?: string | null;
+  sources?: Array<Record<string, unknown>>;
+  source_state?: Record<string, unknown> | null;
+  conflict_state?: Record<string, unknown> | null;
+  tombstone_state?: string | null;
+}
+
+export interface CanonicalMemoryPage {
+  records: CanonicalMemoryRecord[];
+  next_cursor: string | null;
+  last_confirmed_at: string | null;
+}
+
 export interface GoalInfo {
   id: string;
   parent_id: string | null;
@@ -108,6 +333,770 @@ export interface GoalInfo {
   revision?: number;
   /** Null when no bounded verification criterion is configured. */
   success_criterion?: GoalSuccessCriterion | null;
+  proactive_enabled?: boolean;
+  admission_budget?: GoalAdmissionBudget | null;
+}
+
+export type WorkBoardStatus =
+  | "triage"
+  | "todo"
+  | "ready"
+  | "running"
+  | "blocked"
+  | "review"
+  | "done"
+  | "archived";
+
+export type WorkBoardRecoveryAction =
+  | "cancel"
+  | "unblock"
+  | "retry"
+  | "approve_existing_run"
+  | "restore_prerequisite"
+  | "configure_goal_success_criterion"
+  | "reconcile_admission_binding"
+  | "reconcile_external_effect"
+  | "renew_review"
+  | "prepare_routine_publication"
+  | "resume_routine_publication";
+
+export type WorkBoardReadbackStatus =
+  | "not_started"
+  | "pending"
+  | "verified"
+  | "failed"
+  | "unknown"
+  | "not_applicable";
+
+export type WorkBoardVerificationStatus =
+  | "not_started"
+  | "pending"
+  | "passed"
+  | "failed"
+  | "reconciliation_required"
+  | "cancelled";
+
+export interface WorkBoardReceiptReference {
+  artifact_id?: string;
+  /** Browser runner's safe artifact handle before board projection normalization. */
+  artifact_ref?: string;
+  artifact_sha256?: string;
+  artifact_type?: string;
+  file_path?: string;
+  content_sha256?: string;
+  size_bytes?: number;
+  exists?: boolean | null;
+  effect_id?: string;
+  effect_id_digest?: string;
+  effect_type?: string;
+  readback_id?: string;
+  verification_id?: string;
+  status?: string;
+  verified?: boolean | null;
+  target_digest?: string;
+  target_path?: string;
+  job_id?: string;
+  workflow_run_id?: string;
+  recovery_action?: string;
+  reason_code?: string;
+  error_code?: string;
+  child_job_id?: string;
+  readback_status?: WorkBoardReadbackStatus;
+  verification_status?: WorkBoardVerificationStatus;
+  outcome?: string;
+  receipt_kind?: "effect" | "readback" | string;
+  readback_digest?: string;
+  checkpoint_id?: string;
+  action_index?: number;
+  action_count?: number;
+  request_count?: number;
+  durable_status?: string;
+  cleanup_status?: string;
+  memory_status?: "no_learning" | string;
+  actual_page_url?: string;
+  actual_page_url_digest?: string;
+}
+
+export interface WorkBoardBrowserExecution {
+  capability_id: "browser.public-task.v1";
+  job_id: string;
+  durable_status: string;
+  action_index: number | null;
+  action_count: number | null;
+  request_count: number | null;
+  cleanup_status: "cleanup_verified" | "not_needed" | "cleanup_unknown" | "unknown";
+  memory_status: "no_learning" | "unknown";
+  readback_id: string | null;
+  artifact_id: string | null;
+  file_path: string | null;
+  content_sha256: string | null;
+}
+
+export interface WorkBoardAttempt {
+  attempt_id: string;
+  task_id: string;
+  workflow_run_id: string | null;
+  task_revision_at_claim: number;
+  lease_owner: string | null;
+  cancel_requested_at: string | null;
+  lease_expires_at: string | null;
+  heartbeat_at: string | null;
+  fencing_token: number;
+  executor_id: string | null;
+  started_at: string;
+  ended_at: string | null;
+  outcome: string | null;
+  receipt_refs: WorkBoardReceiptReference[];
+  browser_execution?: WorkBoardBrowserExecution | null;
+  calendar_execution?: CalendarExecutionProjection | null;
+  readback_status: WorkBoardReadbackStatus;
+  verification_status: WorkBoardVerificationStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Safe task projection returned by the authenticated /api/work-board routes. */
+export interface WorkBoardTask {
+  task_id: string;
+  creation_sequence: number;
+  owner_principal_id: string;
+  owner_session_id: string;
+  origin_session_id: string | null;
+  origin_thread_id: string | null;
+  goal_id: string;
+  goal_revision: number;
+  title: string;
+  body: string;
+  capability_id: string | null;
+  input_artifact_id?: string | null;
+  typed_input_ref: string | null;
+  typed_input_digest: string | null;
+  executor_id: string | null;
+  assignee_id: string | null;
+  priority: number;
+  idempotency_scope: string;
+  idempotency_key: string;
+  scheduled_at: string | null;
+  status: WorkBoardStatus;
+  block_kind: string | null;
+  block_reason: string | null;
+  block_source_status: WorkBoardStatus | null;
+  cancel_requested_at: string | null;
+  requires_review: boolean;
+  reviewer_id: string | null;
+  review_expires_at?: string | null;
+  dependency_count: number;
+  completed_dependency_count: number;
+  dispatch_rank: number | null;
+  dispatch_wait_reason?: string | null;
+  recovery_action: WorkBoardRecoveryAction | null;
+  readback_status: WorkBoardReadbackStatus;
+  verification_status: WorkBoardVerificationStatus;
+  task_revision: number;
+  result_refs: WorkBoardReceiptReference[];
+  artifact_refs: WorkBoardReceiptReference[];
+  latest_attempt: WorkBoardAttempt | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+  archived_at: string | null;
+}
+
+export interface WorkBoardComment {
+  comment_id: string;
+  task_id: string;
+  author_principal_id: string;
+  author_session_id: string;
+  body: string;
+  created_at: string;
+}
+
+export interface WorkBoardEvent {
+  event_id: number;
+  task_id: string;
+  kind: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface WorkBoardTaskDetail {
+  task: WorkBoardTask;
+  attempts: WorkBoardAttempt[];
+  parents: string[];
+  children: string[];
+  comments: WorkBoardComment[];
+  events: WorkBoardEvent[];
+  parent_handoffs?: WorkBoardSafeParentHandoff[];
+  revision: number;
+}
+
+export type RepoRepairExecutorKind = "local" | "docker_rootless" | "docker_rootful";
+
+export interface WorkBoardRepoRepairExecutorPosture {
+  kind?: RepoRepairExecutorKind;
+  profile?: string;
+  isolation_claim?: string;
+  network_isolation?: string;
+  resource_enforcement?: string;
+  image_digest?: string | null;
+  limits_digest?: string | null;
+  host_access?: string;
+  local_host_execution_required?: boolean;
+  [key: string]: unknown;
+}
+
+/** Owner-bound, content-free status projection for engineering.repo-repair.v1. */
+export interface WorkBoardRepoRepairProjection {
+  job_id: string;
+  status: string;
+  owner_principal_id: string;
+  operator_session_id: string;
+  task_id: string | null;
+  attempt_id: string | null;
+  workflow_run_id: string;
+  goal_id: string | null;
+  goal_revision: number | null;
+  revision: number | null;
+  authority_digest: string | null;
+  input_digest: string | null;
+  run_fingerprint: string | null;
+  capability_id: "engineering.repo-repair.v1";
+  capability_version: string | null;
+  /** Server-selected executor metadata; absent on legacy rootless rows. */
+  executor_kind?: RepoRepairExecutorKind;
+  executor_profile?: string | null;
+  executor_posture?: WorkBoardRepoRepairExecutorPosture | null;
+  executor_posture_digest?: string | null;
+  required_permissions?: string[];
+  local_host_execution_required?: boolean;
+  preparation_ready?: boolean;
+  execution_ready?: boolean;
+  limits: Record<string, number>;
+  preflight: Record<string, unknown> | null;
+  source_packet: {
+    packet_id: string;
+    state: string;
+    repository_ref: string;
+    base_snapshot_sha256: string;
+    source_manifest_sha256: string;
+    artifact_sha256: string;
+    revision: number;
+  } | null;
+  egress: {
+    consent_id: string;
+    revision: number;
+    runtime_path: string;
+    effective_profile_id: string;
+    effective_upstream: string;
+    maximum_input_bytes: number;
+    maximum_output_tokens: number;
+    expires_at: string;
+    state: string;
+  } | null;
+  proposal: {
+    proposal_id: string;
+    status: string;
+    revision: number;
+    base_snapshot_digest: string;
+    source_digest: string;
+    model_profile_id: string;
+    patch_sha256: string;
+    approval_id: string | null;
+    expires_at: string;
+    safe_metadata: Record<string, unknown>;
+  } | null;
+  execution: {
+    artifacts: Array<{
+      artifact_id?: string;
+      file_path?: string;
+      artifact_type?: string;
+      content_sha256?: string;
+    }>;
+    readback: {
+      receipt_kind?: string;
+      status?: string;
+      readback_id?: string;
+      target_path?: string;
+      content_sha256?: string;
+      verified?: boolean;
+      verified_at?: string;
+    } | null;
+    memory_status: string;
+    provider_contacted: boolean;
+  };
+  approval: {
+    approval_id: string;
+    status: string;
+    tool_name: string;
+    action: string;
+    expires_at: string | null;
+  } | null;
+  approval_id: string | null;
+  memory_status: string;
+  recovery_action: string;
+  operator_visible: boolean;
+}
+
+export interface WorkBoardRepoRepairSourcePreview {
+  job_id: string;
+  status: string;
+  recovery_action: string;
+  source_packet: {
+    packet_id: string;
+    state: string;
+    repository_ref: string;
+    base_snapshot_sha256: string;
+    source_manifest_sha256: string;
+    artifact_sha256: string;
+    selected_files: Array<{ path: string; size_bytes: number; sha256: string; text: string }>;
+    omissions: string[];
+    revision: number;
+  };
+  egress: {
+    runtime_path: string;
+    effective_profile_id: string | null;
+    effective_upstream: string | null;
+    maximum_input_bytes: number;
+    maximum_output_tokens: number;
+    expires_at: string | null;
+  };
+  provider_contacted: boolean;
+  operator_visible: boolean;
+}
+
+export interface WorkBoardSafeParentHandoff {
+  handoff_id: string;
+  parent_task_id: string;
+  child_task_id: string;
+  status: string;
+  summary: string;
+  artifact_refs: WorkBoardReceiptReference[];
+  result_refs: WorkBoardReceiptReference[];
+  verification_receipt: Record<string, unknown>;
+  source_attempt_id: string | null;
+  source_task_revision: number;
+  risks: string[];
+}
+
+export interface WorkBoardTaskPage {
+  tasks: WorkBoardTask[];
+  next_after: number | null;
+  last_event_id: number;
+}
+
+export interface WorkBoardEventPage {
+  events: WorkBoardEvent[];
+  last_event_id: number;
+  gap: boolean;
+}
+
+export interface WorkBoardExecutionLimits {
+  goal_id: string;
+  goal_revision: number;
+  effective_max_runtime_seconds: number;
+  default_max_runtime_seconds: number;
+  hard_max_runtime_seconds: number;
+  attempt_limit: number;
+  max_outstanding_jobs?: number;
+  limit_source: "goal_admission_budget" | "default";
+  browser_task_policy?: BrowserTaskPolicy | null;
+}
+
+export interface BrowserTaskPolicyRuleSet {
+  rules: string[];
+  truncated: boolean;
+  known: boolean;
+}
+
+export interface BrowserTaskPolicy {
+  policy_state: "confirmed" | "unknown";
+  policy_source: "configured_site_policy" | null;
+  allowlist: BrowserTaskPolicyRuleSet;
+  blocklist: BrowserTaskPolicyRuleSet;
+  limits: {
+    max_runtime_seconds: number;
+    hard_max_runtime_seconds: number;
+    max_actions: number;
+    max_navigations: number;
+    max_requests: number;
+    max_extract_bytes: number;
+    max_browser_contexts: number;
+    ready_capacity: number;
+    max_attempts: number;
+    max_outstanding_jobs: number;
+    inference: "none";
+  };
+}
+
+export interface WorkBoardInputArtifactCreateRequest {
+  schema_version: 1;
+  capability_id: "browser.public-task.v1";
+  goal_id: string;
+  goal_revision: number;
+  input: Record<string, unknown>;
+  idempotency_key: string;
+}
+
+export interface WorkBoardInputArtifactResponse {
+  artifact_id: string;
+  typed_input_ref: string;
+  typed_input_digest: string;
+  capability_id: "browser.public-task.v1";
+  goal_id: string;
+  goal_revision: number;
+  expires_at: string;
+  state?: string | null;
+  size_bytes?: number | null;
+  bound_task_id?: string | null;
+  bound_task_revision?: number | null;
+  revision?: number | null;
+}
+
+export interface WorkBoardTaskCreateRequest {
+  title: string;
+  body?: string;
+  goal_id: string;
+  goal_revision: number;
+  status?: "triage" | "todo";
+  capability_id?: string | null;
+  input_artifact_id?: string | null;
+  typed_input_ref?: string | null;
+  typed_input_digest?: string | null;
+  executor_id?: string | null;
+  assignee_id?: string | null;
+  priority?: number;
+  idempotency_scope?: string;
+  idempotency_key: string;
+  scheduled_at?: string | null;
+  requires_review?: boolean;
+  reviewer_id?: string | null;
+  origin_thread_id?: string | null;
+}
+
+export interface WorkBoardTaskPatchRequest {
+  expected_revision: number;
+  title?: string;
+  body?: string;
+  priority?: number;
+  capability_id?: string | null;
+  typed_input_ref?: string | null;
+  typed_input_digest?: string | null;
+  executor_id?: string | null;
+  assignee_id?: string | null;
+  scheduled_at?: string | null;
+}
+
+export type WorkBoardAction =
+  | "promote" | "block" | "unblock" | "retry" | "cancel" | "archive"
+  | "request_review" | "request_changes" | "complete_review" | "renew_review";
+
+export interface WorkBoardActionRequest {
+  action: WorkBoardAction;
+  expected_revision: number;
+  block_kind?: "operator" | "dependency" | "needs_input" | "capability" | "transient" | "cancelled" | "review_expired" | "unknown_effect";
+  source_status?: WorkBoardStatus;
+  attempt_id?: string;
+  evidence_refs?: string[];
+  reason?: string;
+  resolution?: string;
+}
+
+export interface WorkBoardProposalTask {
+  task_id?: string;
+  title: string;
+  body?: string;
+  goal_id?: string;
+  goal_revision?: number;
+  capability_id: string;
+  typed_input_ref?: string | null;
+  typed_input_digest?: string | null;
+  executor_id: string;
+  authority: string;
+  dependencies?: string[];
+  cost_estimate?: string | null;
+  capability_version?: string;
+}
+
+export interface WorkBoardProposalLink {
+  parent_task_id: string;
+  child_task_id: string;
+}
+
+export interface WorkBoardProposal {
+  kind: "specify" | "decompose";
+  proposal_id: string;
+  proposal_revision: number;
+  parent_task_id: string;
+  parent_revision: number;
+  idempotency_key?: string;
+  proposal_digest: string;
+  expires_at: string;
+  proposed_tasks: WorkBoardProposalTask[];
+  proposed_links: WorkBoardProposalLink[];
+  estimated_cost: string | null;
+  blocked_reason?: string | null;
+  recovery_action?: string | null;
+  status?: string;
+  request_digest?: string;
+  route_id?: string;
+  capability_id?: string;
+  capability_version?: string;
+  grant_revision?: number;
+  input_digest?: string;
+  admission_job_id?: string;
+  effect_id_digest?: string;
+  provider_contact_state?: string;
+}
+
+export interface WorkBoardCommentCreateRequest {
+  expected_revision: number;
+  body: string;
+}
+
+export interface WorkBoardLinkCreateRequest {
+  parent_task_id: string;
+  child_task_id: string;
+  expected_child_revision: number;
+}
+
+export interface WorkBoardLinkDeleteRequest extends WorkBoardLinkCreateRequest {}
+
+/** Safe preview returned before a verified board journey can become a routine. */
+export interface WorkBoardRoutinePreviewRequest {
+  source_task_id: string;
+  action_task_id: string;
+  expected_source_revision: number;
+  expected_action_revision: number;
+  name: string;
+  idempotency_key: string;
+}
+
+export interface WorkBoardRoutinePreview {
+  preview_digest: string;
+  source_refs: Record<string, string | number | boolean | null>;
+  version_plan: {
+    version: number;
+    steps: string[];
+    workflow: string;
+  };
+  typed_parameters: Record<string, string | number | boolean | null>;
+  permissions: {
+    capability_id: string;
+    external_mutation: string;
+    package_review: string;
+    shell_or_arbitrary_connector: boolean;
+  };
+  limits: {
+    runtime_seconds: number;
+    attempts: number;
+    remote_inference: boolean;
+  };
+  verifier: {
+    source: string;
+    required: boolean;
+    unknown_effect: string;
+  };
+  expires_at: string;
+  safe_summary: string;
+}
+
+export interface WorkBoardRoutineBinding {
+  routine_id: string;
+  state: string;
+  status: string;
+  revision: number;
+  version: number;
+  install_job_id: string;
+  preview_digest: string;
+  binding_id: string;
+  /** Present when the server can expose the exact approval receipt safely. */
+  approval_id?: string | null;
+}
+
+export interface WorkBoardRoutineVersion {
+  id: string;
+  routine_id: string;
+  version: number;
+  workflow_sha256: string;
+  runbook_sha256: string;
+  installed_package_digest: string | null;
+  source_provenance: Record<string, string | number | boolean | null | string[]>;
+  source_repository: string | null;
+  source_action: string | null;
+  source_issue_number: number | null;
+  created_at: string;
+  installed_at: string | null;
+}
+
+export interface WorkBoardRoutineRead {
+  id: string;
+  owner_principal_id: string;
+  state: string;
+  revision: number;
+  current_version: number | null;
+  name: string;
+  versions: WorkBoardRoutineVersion[];
+  package: {
+    status: string;
+    digest?: string | null;
+    review_id?: string | null;
+    reason?: string | null;
+  };
+}
+
+/** Redacted server-generated capability-pack proposal for one routine version. */
+export interface WorkBoardRoutinePackagePreview {
+  routine_id: string;
+  version: number;
+  pack_id: string;
+  digest: string;
+  installed_package_digest: string | null;
+  review_id: string | null;
+  status: string;
+  manifest: {
+    schema_version?: number;
+    display_name: string;
+    summary: string;
+    version: string;
+    authority: {
+      tools: string[];
+      filesystem: string[];
+      network: boolean;
+      secrets: string[];
+      approval: string;
+    };
+    resources: {
+      max_runtime_seconds: number;
+      max_artifact_bytes: number;
+      max_inference_cost_microusd: number;
+      inference_priority: string;
+    };
+    data_policy: { classes: string[]; egress: string[] };
+  };
+  runbook: {
+    title: string;
+    summary: string;
+    procedure: {
+      schema_version?: 1 | 2;
+      capability_id: string;
+      template_id?: string;
+      plan_digest?: string;
+      steps: Array<{ id: string; capability_id?: string; capability_version?: string; capability?: string; tool?: string }>;
+    };
+    bindings: {
+      workflow_sha256: string;
+      legacy_runbook_sha256?: string;
+      runbook_sha256?: string;
+      source_provenance_sha256: string;
+      plan_digest?: string;
+    };
+  };
+}
+
+/** Redacted JSON snapshot for one installed, digest-verified procedure version. */
+export interface WorkBoardRoutineProcedureExport {
+  schema_version: 1;
+  kind: "seraph.reviewed_procedure.v1";
+  pack_id: string;
+  version: number;
+  package_digest: string;
+  manifest: Record<string, unknown>;
+  runbook: Record<string, unknown>;
+}
+
+export interface WorkBoardRoutinePackageApproval {
+  approval_id: string;
+  status: "pending" | "approved" | "denied" | "expired" | "consumed";
+  action: string;
+  pack_id: string;
+  version: string;
+  digest: string;
+  goal_id: string;
+  expires_at?: string | null;
+}
+
+/** Owner/session-scoped source-watch fields safe for routine invocation selection. */
+export interface WorkBoardSourceWatch {
+  id: string;
+  goal_id: string;
+  goal_revision: number;
+  plan_revision: number;
+  state: string;
+  last_status: string | null;
+}
+
+export interface WorkBoardRoutineInvokeRequest {
+  version: number;
+  expected_routine_revision: number;
+  goal_id: string;
+  expected_goal_revision: number;
+  source_watch_id: string;
+  expected_watch_revision: number;
+  invocation_uuid: string;
+}
+
+export interface WorkBoardRoutineInvokeReceipt {
+  status: string;
+  task_id: string;
+  task_revision?: number;
+  deduped?: boolean;
+  preview?: {
+    routine_id?: string;
+    routine_revision?: number;
+    version?: number;
+    goal_id?: string;
+    goal_revision?: number;
+    source_watch_id?: string;
+    source_watch_revision?: number;
+    steps?: string[];
+  };
+}
+
+export interface WorkBoardRoutinePublicationPrepareRequest {
+  expected_revision: number;
+  title?: string | null;
+  body: string;
+}
+
+export interface WorkBoardRoutinePublicationState {
+  task_id: string;
+  task_revision: number;
+  attempt_id: string;
+  parent_workflow_run_id: string | null;
+  routine_id: string;
+  routine_version: number;
+  routine_revision: number;
+  source_watch_id: string;
+  source_watch_revision: number;
+  parent_status: string | null;
+  m3_job_id: string | null;
+  m3_status: string | null;
+  approval_id: string | null;
+  approval_status: string | null;
+  preview: {
+    repository?: string;
+    action?: string;
+    issue_number?: number | null;
+    title?: string | null;
+    body?: string | null;
+    body_sha256?: string;
+    marker?: string;
+    dossier_artifact_id?: string;
+    dossier_sha256?: string;
+    source_watch_id?: string;
+    connection_revision?: number;
+  } | null;
+  status: string | null;
+  recovery_action: "prepare_routine_publication" | "resume_routine_publication";
+}
+
+export interface WorkBoardRoutinePublicationResponse {
+  task: WorkBoardTask;
+  publication: WorkBoardRoutinePublicationState;
+  approval_required?: boolean;
+  operator_action?: string;
+  recovery?: Record<string, unknown>;
+  readback_required?: boolean;
 }
 
 /** The smaller goal shape returned by the loop inspection endpoint. */
@@ -267,4 +1256,286 @@ export interface DomainProgress {
 export interface ToolMeta {
   name: string;
   description: string;
+}
+
+export type CalendarConnectionState =
+  | "preparing"
+  | "active"
+  | "revoked"
+  | "expired"
+  | "blocked"
+  | "blocked_cleanup";
+
+export interface CalendarConnectionMetadata {
+  connection_id: string;
+  service: "calendar_readonly";
+  label: string;
+  credential_fingerprint: string;
+  state: CalendarConnectionState;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CalendarOption {
+  calendar_id: string;
+  summary: string;
+}
+
+export interface CalendarVerifyResponse {
+  connection: CalendarConnectionMetadata;
+  calendars: CalendarOption[];
+  calendar_list_revision: string;
+  pages_read: 1;
+  truncated: boolean;
+  provider_status: "verified";
+}
+
+export interface CreateCalendarConnectionRequest {
+  schema_version: 1;
+  service: "calendar_readonly";
+  label: string;
+  client_id: string;
+  client_secret?: string;
+  refresh_token: string;
+  idempotency_key: string;
+}
+
+export interface CalendarConnectionMutationRequest {
+  expected_revision: number;
+  idempotency_key: string;
+}
+
+export type CalendarAllowedField =
+  | "summary"
+  | "start"
+  | "end"
+  | "location"
+  | "description"
+  | "attendees";
+
+export type CalendarConsentState = "active" | "revoked" | "expired" | "consumed";
+
+export interface CalendarConsentMetadata {
+  consent_id: string;
+  connection_id: string;
+  connection_revision: number;
+  goal_id: string;
+  goal_revision: number;
+  allowed_fields: CalendarAllowedField[];
+  window_minutes: number;
+  max_events: number;
+  allow_remote_model: boolean;
+  expires_at: string;
+  state: CalendarConsentState;
+  revision: number;
+  consent_digest: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateCalendarReadConsentRequest {
+  schema_version: 1;
+  connection_id: string;
+  calendar_id: string;
+  goal_id: string;
+  goal_revision: number;
+  allowed_fields: CalendarAllowedField[];
+  window_minutes: number;
+  max_events: number;
+  allow_remote_model: boolean;
+  expires_at: string;
+  idempotency_key: string;
+}
+
+export interface CalendarEventOption {
+  event_binding_id: string;
+  event_binding_revision: number;
+  event_key: string;
+  event_revision: string;
+  calendar_list_revision: string;
+  summary: string;
+  start: string;
+  end: string;
+  location: string | null;
+  description: string | null;
+  attendees: string[] | null;
+}
+
+export interface CalendarEventListResponse {
+  events: CalendarEventOption[];
+  consent_id: string;
+  consent_revision: number;
+  connection_revision: number;
+  calendar_list_revision: string;
+  fetched_at: string;
+  pages_read: number;
+  truncated: boolean;
+}
+
+export interface CalendarMeetingPrepInput {
+  schema_version: 1;
+  consent_id: string;
+  event_binding_id: string;
+  expected_event_binding_revision: number;
+  expected_consent_revision: number;
+  expected_connection_revision: number;
+  event_revision: string;
+  calendar_list_revision: string;
+  goal_id: string;
+  goal_revision: number;
+  purpose: string;
+}
+
+export interface CreateCalendarPrepRequest {
+  schema_version: 1;
+  input: CalendarMeetingPrepInput;
+  title: string;
+  idempotency_key: string;
+}
+
+export interface CalendarInputArtifactMetadata {
+  artifact_id: string;
+  typed_input_ref: string;
+  typed_input_digest: string;
+  capability_id: "calendar.meeting-prep.v1";
+  goal_id: string;
+  goal_revision: number;
+  expires_at: string;
+}
+
+export interface CalendarPrepResponse {
+  input_artifact: CalendarInputArtifactMetadata;
+  task: WorkBoardTask;
+  idempotent_replay: boolean;
+}
+
+export type CalendarCadenceKind = "5min" | "hourly" | "6h" | "daily";
+
+export interface CalendarCadence {
+  kind: CalendarCadenceKind;
+  timezone: string;
+  daily_hour: number | null;
+  daily_minute: number | null;
+}
+
+export interface CreateCalendarScheduleRequest {
+  schema_version: 1;
+  consent_id: string;
+  goal_id: string;
+  goal_revision: number;
+  calendar_id: string;
+  cadence: CalendarCadence;
+  expires_at: string;
+  idempotency_key: string;
+}
+
+export type GovernedScheduleState = "active" | "paused" | "revoked" | "expired" | "blocked";
+export type GovernedOccurrenceState =
+  | "reserved"
+  | "running"
+  | "coalesced"
+  | "succeeded"
+  | "blocked"
+  | "cancelled"
+  | "unknown";
+
+export interface CalendarLatestOccurrence {
+  occurrence_id: string;
+  binding_revision: number;
+  slot_utc: string;
+  state: GovernedOccurrenceState;
+  task_id: string | null;
+  job_id: string | null;
+  failure_code: string | null;
+  recovery_action: string | null;
+  updated_at: string;
+}
+
+export interface GovernedScheduleBinding {
+  binding_id: string;
+  scheduled_job_id: string;
+  capability_id: string;
+  action_type: string;
+  goal_id: string;
+  goal_revision: number;
+  input_artifact_id: string;
+  input_digest: string;
+  consent_kind: string;
+  consent_id: string;
+  consent_revision: number;
+  consent_digest: string;
+  cadence: CalendarCadence;
+  binding_revision: number;
+  expires_at: string;
+  state: GovernedScheduleState;
+  last_slot_utc: string | null;
+  created_at: string;
+  updated_at: string;
+  latest_occurrence: CalendarLatestOccurrence | null;
+}
+
+export interface CalendarReadReceipt {
+  status: "succeeded" | "blocked" | "unknown";
+  request_digest: string;
+  response_digest: string | null;
+  verified_at: string | null;
+}
+
+export interface CalendarEffectiveRoute {
+  runtime_path: "strategist_agent";
+  provider: "openrouter";
+  model: string;
+  upstream_provider: string;
+  profile_id: string;
+  admission_digest: string;
+  status: string;
+  cost_microusd: number | null;
+}
+
+export interface CalendarExecutionProjection {
+  capability_id: "calendar.meeting-prep.v1";
+  job_id: string;
+  durable_status: string;
+  connection_id: string | null;
+  connection_revision: number | null;
+  consent_id: string | null;
+  consent_revision: number | null;
+  event_binding_id: string | null;
+  event_key: string | null;
+  event_revision: string | null;
+  calendar_list_revision: string | null;
+  read_1: CalendarReadReceipt | null;
+  read_2: CalendarReadReceipt | null;
+  effective_route: CalendarEffectiveRoute | null;
+  artifact_id: string | null;
+  file_path: string | null;
+  content_sha256: string | null;
+  readback_id: string | null;
+  verified_at: string | null;
+  memory_status: "no_learning" | null;
+  failure_code: string | null;
+  recovery_action: string | null;
+}
+
+export interface CalendarResultPreview {
+  schema_version: 1;
+  capability_id: "calendar.meeting-prep.v1";
+  artifact_id: string;
+  readback_id: string;
+  file_path: string;
+  content_sha256: string;
+  event_key: string;
+  event_revision: string;
+  summary: string;
+  agenda: string[];
+  questions: string[];
+  risks: string[];
+  preparation_steps: string[];
+}
+
+export interface CalendarApiErrorDetail {
+  code: string;
+  message: string;
+  recovery_action: string | null;
 }

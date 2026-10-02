@@ -64,6 +64,20 @@ describe("questStore", () => {
     expect(mockFetch).toHaveBeenCalledTimes(3);
   });
 
+  it("surfaces a failed create so the editor can retain its draft", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 409,
+      json: async () => ({ detail: { code: "goal_budget_conflict", recovery: "Review the current goal limits." } }),
+    });
+
+    await expect(useQuestStore.getState().createGoal({ title: "Draft standing goal" })).rejects.toMatchObject({
+      code: "goal_budget_conflict",
+      goalId: "",
+    } satisfies Partial<GoalUpdateError>);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
   it("updateGoal calls API and refreshes", async () => {
     mockFetch.mockResolvedValueOnce({ ok: true });
     mockFetch.mockResolvedValueOnce({ ok: true, json: async () => [] });

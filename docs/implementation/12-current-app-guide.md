@@ -288,6 +288,20 @@ credentialed cookies across the local frontend/backend ports; raw passwords and
 session tokens never enter frontend state. Multi-operator identity ownership
 remains outside the current single-operator boundary.
 
+On the #895 corrective branch, a refresh rotates only the bearer hash while
+retaining the active `OperatorSession.id` and absolute expiry. The retired hash
+is stored in a revoked tombstone and cannot authenticate or become an owner.
+Login, session, and successful refresh receipts expose
+`ownership_continuity=stable` or `legacy_rebind_required` plus the explicit
+`ownership_recovery_action`. A stable value means the same active owner remains
+current across bearer refresh; logout, idle/absolute expiry, and a new
+independent login still revoke or isolate the prior scope under the existing
+contract. Existing pre-corrective replacement rows are reported as blocked
+recovery: historical grants and approvals are not restored, and the cockpit
+keeps an accessible notice directing the operator to review and recreate work
+in the current scope. A separate audited recovery design is required before
+historical scopes can be migrated.
+
 `/api/runtime/status` and `/api/settings/artifact-storage` are the active
 operator receipts. They expose the effective OpenRouter route, consent,
 allow-list, budget, admission state, and disabled local-runtime reason. A
@@ -304,6 +318,411 @@ screen-observation storage, and VLM integration points exist on `develop`.
 cross-surface identity, selected voice/messaging channels, and outcome-first UX
 need Epic #736 milestones. Existing canaries or deterministic receipts do not
 make those product capabilities complete.
+
+### Operator work board (Epic #864 M6 branch-local target)
+
+The M4 work-board slice adds an authenticated, single-operator Kanban surface
+under `/api/work-board`. Seraph's SQLModel/SQLite workspace remains the
+canonical task store; `WorkflowRunState` remains authoritative for execution,
+leases, attempts, effects, checkpoints, and unknown external outcomes. A task
+card can therefore show `Triage`, `Todo`, `Ready`, `Running`, `Blocked`,
+`Review`, `Done`, or `Archived` while its durable workflow receipt remains the
+execution evidence.
+
+Review and handoff actions require a current owner session, the latest fenced
+attempt, and an independently verified readback containing a stable artifact or
+readback identity plus the producer's verification timestamp. A generic worker
+summary cannot complete a card. Expired review cards require the named
+reviewer's renewal path; unknown external effects require reconciliation and
+are never replayed automatically. Manual Specify and Decompose requests are
+provider-governed proposals that remain staged until operator acceptance; a
+missing route, authority, or budget is visible as a blocked recovery state.
+
+Epic #864 M5 adds a candidate from a verified task outcome only after
+independent readback. The candidate keeps its task, attempt, workflow, artifact,
+goal revision, content digest, provenance, confidence, and supersession evidence.
+Accept, edit and accept, reject, and rollback are operator actions; only an
+accepted candidate writes canonical memory. Failed, weak, unverified, or
+irrelevant outcomes record `no_learning`.
+
+Epic #864 M6 can draft a versioned declarative procedure from an operator-
+selected, verified research task and its linked verified follow-through task.
+The preview binds the source tasks, attempts, artifacts, readbacks, owner,
+session, goal revision, and fixed capability steps. Operator acceptance and the
+existing capability-pack review and activation lifecycle are required before
+reuse. Each invocation gets fresh goal revision, grants, approvals, budget,
+tasks, jobs, and readback. If a run needs publication, the operator inspects an
+exact same-card preview, approves it through Pending approvals, and resumes the
+same durable routine parent. The card reaches Done only after independent
+readback.
+
+This section describes the Epic #864 M6 integration-branch target while its
+aggregate PR is under review. It does not claim full Hermes parity, autonomous
+execution, memory superiority, or production readiness.
+
+### Reviewed procedures v2 (M6 #889) {#reviewed-procedures-v2-m6-889-branch-local-target}
+
+The #889 reviewed procedure surface turns verified Work Board outcomes into reusable,
+owner-bound procedures. It has exactly three registered templates:
+
+- `public-browser-check`: one `browser.public-task.v1` leaf;
+- `watch-and-public-browser`: `guardian.research-watch.v1` followed by
+  `browser.public-task.v1`, with a current watch revision and material-change
+  gate; and
+- `selected-meeting-prep`: one `calendar.meeting-prep.v1` leaf using the
+  existing M5 calendar input contract.
+
+Every plan is schema v2, uses the registered step IDs, capability IDs and
+versions, verifies native leaf readbacks, and is limited to two steps and 300
+seconds. A preview records the selected task, attempt, job, artifact digest,
+readback, owner/session, goal revision, typed input reference and digest. The
+browser input needed for later execution is copied into the immutable
+server-owned version; routine list/detail responses expose only safe provenance
+and digests, never the copied input body.
+
+Preparation creates an exact routine parent, immutable version, install job,
+and owner/session-bound approval. The install approval expires after five
+minutes. Installation remains blocked until the server confirms that exact
+approval as current and approved. A pending approval routes the operator to
+the existing Pending approvals review surface; missing, expired, denied, or
+stale approval metadata asks for a fresh preview/rebind. A consumed approval
+keeps its exact receipt addressable for reconciliation. Package preview,
+operator review, activation approval and package activation remain explicit
+controls. Activating the package does not activate the procedure: the Library
+requires a separate **Activate procedure** action and a current server
+readback before enabling invocation or scheduling. A paused procedure uses
+**Resume procedure** under the same current package and version checks.
+Unconfirmed activation requires an authority refresh before another lifecycle
+mutation. Pause, revoke and selected-version rollback remain explicit controls.
+No arbitrary approval ID or automatic activation is accepted.
+
+Invocation is manual and requires a fresh active goal revision, current
+owner/session authority, current grants and budgets, exact template
+parameters, and a new task/input artifact. Public and watch procedures can
+also create a finite governed schedule; meeting preparation remains a manual
+selected-event invocation. A schedule is bounded by the seven-day procedure
+limit and the earlier reviewed goal-budget expiry, uses the existing governed
+schedule controls, and can be paused, resumed, or revoked explicitly. Quiet
+hours, proactive consent, finite period, outstanding-job, attempt, runtime,
+and notification budgets remain admission fences; a quiet-hours or budget
+refusal is visible as deferred or blocked work rather than a hidden retry.
+Each occurrence also checks its pinned procedure revision, version, plan and
+current package lifecycle before publishing a task. A paused, revoked or
+changed procedure requires explicit review; the scheduler does not silently
+rebind its accepted schedule to newer authority.
+
+All routine, approval, invocation, schedule, and recovery state is bound to
+the authenticated owner session. Changing owner/session clears the old
+selection and metadata state, and late responses cannot populate the new
+session. Unknown or ambiguous mutations retain their bounded exact key and
+body for explicit reconciliation/retry; they are never replayed automatically.
+Definitive pre-effect rejection can ask for a fresh preview. Native leaf
+readbacks are required before parent success, and every terminal result carries
+an explicit `no_learning` outcome. Failed, blocked, revoked, expired, and
+unknown cleanup states remain operator-visible and retain their recovery
+boundary.
+Calendar steps recheck the current procedure parent before each provider or
+model boundary. Parent cancellation, lease reclaim, expiry and package
+revocation cannot be replaced by a child's stored lineage fields.
+
+The v2 procedure surface is designed for the CPU-host contract. The cockpit,
+canonical state, artifact metadata, and fixed browser/calendar controls remain
+usable when optional local model, GPU, VLM, connector, or provider services are
+absent. Governed model work, where the selected meeting path requires it, still
+uses the active OpenRouter admission, consent, and budget checks; this branch
+has not performed a live provider or account canary.
+
+This remains **Partial** and is not Shipped `develop` truth. On October 1, 2026,
+the managed CPU-host journey prepared, reviewed, installed and activated a
+public-browser procedure, then executed its native leaf and verified both the
+parent and leaf readbacks. The leaf artifact hash matched the stored file.
+Twelve native vertical tests additionally exercised actual SQLite, Chromium,
+package files and intercepted Calendar/model boundaries. These are mechanical
+execution receipts; Calendar account/model usefulness and production readiness
+remain **external-unverified**. Fresh independent reviews accepted preparation recovery,
+interface authority/recovery and the dispatcher compatibility corrections.
+After the managed backend restart, a new public-browser invocation completed
+with parent and leaf readbacks, a matching artifact hash and explicit
+`no_learning`. A separate live response-loss check retained the lifecycle
+recovery gate across reload, blocked fresh preparation, and cleared it only
+after an explicit exact authority refresh before resume. The implementation
+has independent preparation, interface-authority, and dispatcher recovery
+validation.
+
+### Governed repository repair (M4 #887) {#governed-repository-repair-m4-887-branch-local-target}
+
+The M4 capability adds a bounded repository-repair path to the existing Work Board
+execution boundary. In **Work → Repository repair**, an authenticated operator
+selects an owned active Goal and current revision, then supplies the strict
+repository-relative source and focused-test input. The form rejects protected
+paths, unsafe references, out-of-scope tests, and unbounded values before the
+server creates the typed owner/session-bound input artifact. Seraph then
+publishes a `Todo` task with the artifact ID; the artifact reservation and task
+publication use separate idempotency keys, and the task carries no caller-
+supplied typed reference or raw source path authority.
+
+The pending repair draft is private to the authenticated owner/session. An
+unknown artifact or task response retains the exact original keys and payload;
+the operator must reconcile or retry that exact request before another
+mutation is allowed. Artifact reads expose only safe identity, digest, expiry,
+and lifecycle metadata. The server then inspects a private snapshot, pauses
+for explicit code-egress consent, and asks the governed `strategist_agent`
+route for one strict patch proposal. The operator reviews the exact proposal
+and approval target before the selected executor's staged test/readback path
+can run.
+
+The repair path binds the source packet, model request and response, patch,
+approval, owner/session, Goal, attempt, and durable job by digest. It exposes
+blocked, stale, revoked, and unknown recovery states and records
+`memory_status=no_learning`. Tests run against the bounded staged snapshot and
+do not claim to modify the original checkout. Source text, prompts, model
+responses, and credentials stay out of generic operator projections.
+
+The selected repair executor is server-owned settings, visible in Settings →
+Repository sandbox and in the Work inspector. A fresh settings document selects
+the disabled **Trusted local staged runner** by default. Local execution uses a
+private staged directory and fixed test argv as the host user; it has no OS
+isolation guarantee, does not claim CPU, memory, PID, network, or filesystem
+confinement, and requires a separate exact `local_host_execution` approval for
+each job. The approval surface says **Approve local tests on this host** and
+shows the host-user filesystem, network, and resource boundary. Settings
+selection is never execution permission.
+
+The optional **Docker rootless** profile requires a strict Linux rootless
+daemon, pinned image, and independently verified fixed limits. The optional
+**Docker rootful** profile uses an existing configured daemon and must
+independently verify its non-root worker, network, read-only, capability, image,
+and resource posture. Missing or drifted evidence blocks the selected profile;
+Seraph does not silently switch between local, rootless, and rootful execution.
+The legacy
+`engineering.repo-change.v1` path remains strict rootless-only and is shown as a
+separate preflight.
+
+The settings and repair status APIs expose a complete typed `executor_posture`
+display projection alongside the exact server receipt in
+`executor_posture_raw`; `executor_posture_digest_basis=executor_posture_raw`
+documents that the unchanged `executor_posture_digest` binds the raw receipt,
+not display-only defaults. A blocked Docker receipt therefore reports
+`unverified` isolation, network, and resource labels without turning them into
+execution authority, while local `host_access` remains visible as the explicit
+per-job approval boundary.
+
+On a first managed local start, a newly created workspace is private (`0700`),
+settings descendants repaired on the current-owner write path are private,
+and the persisted selector file is `0600`. A pre-existing broad workspace or
+foreign-owned, symlinked, or otherwise untrusted settings path remains
+blocked. Use a private workspace beneath trusted ancestors and retry; Seraph
+does not automatically chmod an existing workspace root or shared ancestor.
+Saving selectors never starts Docker or changes host resource limits. A legacy
+settings document without an executor selector remains rootless-only until the
+operator explicitly selects another backend.
+
+This remains **Partial**. Intercepted model transport and executor
+mechanics prove request, authority, recovery, and readback contracts only. A
+local technical preflight can make preparation ready, but execution remains
+blocked until the exact per-job host approval is recorded. If Docker CPU,
+memory, pids, network, image, or daemon posture cannot be verified, the
+selected Docker path blocks without falling back. No live provider/account
+canary, paid inference, kernel resource-enforcement receipt, or
+original-repository write is claimed. Repair execution uses one durable
+`repo-repair-execution` slot across Goals and recovery, releases the
+`remote-inference` claim before approval or test dispatch, and sets one
+absolute execution deadline for staging, process startup/wait, output drain,
+cleanup, readback, and publication; it does not reset that deadline per phase.
+Cancellation or unproven cleanup/readback/publication remains blocked or
+unknown and is reconciled against the same job/attempt rather than replayed as
+a fresh proposal or execution. The final native verifier covers one local API
+journey, two approved Goals sharing one physical native worker, same-job API
+cancellation with fresh reconciliation, staged subprocess/filesystem
+readback, unchanged source/.git state, verified cleanup, and `no_learning`.
+Its deterministic model transport is intercepted. Local execution intentionally
+has no OS confinement. Provider/account usefulness, live OpenRouter quality,
+and Docker resource enforcement remain **external-unverified**. The original
+repository is not claimed changed,
+and this capability remains Partial rather than Shipped `develop` truth.
+
+### Bounded public browser tasks
+
+The bounded capability adds `browser.public-task.v1` through the existing Work
+Board dispatcher and durable job repository. Its form creates an owner-bound,
+immutable input artifact before creating a Todo task; the operator does not
+type a workspace path or digest. Artifact metadata reads return identity,
+digest, expiry, and lifecycle state, never the input body. Creation and task
+binding have separate idempotency keys, and an uncertain response requires
+explicit reconciliation or an exact retry rather than an automatic POST.
+
+The grammar permits HTTPS navigation and bounded DOM extraction only. Exact
+host and URL-prefix consent narrows the configured global site policy; query
+strings are part of that consent. Every request checks all resolved addresses
+and connects to a checked global address with the original Host and TLS name.
+Redirects require fresh consent and DNS checks. The ephemeral browser disables
+JavaScript and service workers and rejects authentication, cookies, popups,
+downloads, uploads, forms, and arbitrary scripts. An allowed public GET can
+still have site-specific effects; finite consent does not prove universal
+absence of mutation.
+
+Each response is limited to 256 KiB. The transport requests identity encoding
+and rejects compressed responses before decoding. A site that needs scripts,
+authentication, or a compressed response can therefore be unavailable to this
+capability even when it works in the operator's ordinary browser.
+
+One browser-task context occupies the cross-process task lane. At most eight
+browser tasks can be Ready globally. Each task has at most eight actions,
+eight navigations including the initial page, 32 requests, 64 KiB of serialized
+output, and 180 seconds, further narrowed by the current goal budget. This
+lane uses no model inference and does not acquire the remote-inference lane.
+Blocked resource and method callbacks share the 32-receipt progress limit.
+Overflow stops further checkpoints and prevents a successful artifact; blocked
+resources remain aborted and do not count as dispatched network effects.
+Missing browser prerequisites block execution while the CPU cockpit, task
+creation, and evidence inspection remain usable.
+
+A blocked durable job still occupies its goal's outstanding-work budget until
+it reaches a terminal state. A known admission-budget refusal reports
+`goal_budget_outstanding_limit` before browser launch and releases the browser
+lane; it does not authorize raising the goal budget or replaying the blocked
+job. A malformed or expired deadline before launch records explicit
+no-context cleanup. Once launch is entered, unverified cleanup remains unknown.
+
+Execution uses one deadline and reserves time for teardown. Awaited browser
+operations use the remaining budget. A stalled operating-system file operation
+can outlast this cooperative deadline; late work cannot publish success, and
+unverified cleanup holds the browser lane for explicit recovery.
+
+Current task, attempt, goal, session, artifact, and durable lease authority are
+rechecked before actions and requests. Success requires expected checks,
+artifact readback, and explicit `no_learning`. Cancellation records context
+cleanup. Unverified cleanup retains the browser resource and shows
+`browser_cleanup_required`; later browser tasks remain unclaimed. Recovery
+requires outcome reconciliation and a managed backend restart after checking
+cleanup. Restart releases the process-owned resource; it does not authorize
+replaying an unknown job. An ambiguous dispatched request or process restart
+requires outcome reconciliation and is never blindly replayed. Work Board
+status remains separate from the durable execution status; last-known metadata is not a
+readiness or success receipt.
+
+Opening a browser result in the existing artifact inspector requests an explicit
+owner-bound preview. The backend rereads only the job's canonical result file,
+checks its size and digest against the artifact and readback, and returns typed
+extracts and checks. The inspector renders the extracted text as plain text.
+Routine job and task reads remain metadata-only; a missing or altered result
+shows an unavailable preview rather than unchecked file content.
+
+This remains **Partial** and is not Shipped `develop` behavior. Local fixture
+execution and production-network evidence are separate proof boundaries;
+authenticated browsing and general computer use remain outside this capability.
+
+### Bounded calendar meeting preparation
+
+This remains **Partial** and is not Shipped `develop` behavior. Provider-free
+tests establish local mechanics; a working Google account and live model
+usefulness remain explicitly **external-unverified** without an authorized
+canary.
+
+Calendar settings accept an operator-supplied OAuth client and refresh token as
+write-only fields stored in the encrypted vault. Explicit verification obtains
+a bounded calendar list. Saving setup does not grant event access or model
+egress, and reading verified setup metadata does not repeat a provider call.
+An interrupted setup retains its original key. Retries during the 30-second
+preparation window preserve the pending result; a later retry reconciles stale
+vault material without storing a second credential. Missing material becomes
+blocked; unverified cleanup remains visibly blocked for reconciliation.
+Event consent binds the authenticated owner/session, an active goal, one
+verified calendar, selected fields, a finite window, an event limit, and expiry.
+Remote preparation requires an explicit model-egress choice.
+
+Work offers a meeting-preparation form using verified calendars and redacted
+events. Selecting an event creates an immutable typed input and a Todo task;
+the existing task controls govern admission and execution. Preparation rereads
+the selected event, synthesizes one bounded brief through the governed
+strategist route, and rereads the event again. Changed or revoked authority
+blocks publication. Completion requires artifact readback and an explicit
+`no_learning` receipt. Work shows the actual route and outcome.
+
+An optional finite schedule observes the consented calendar without making a
+model call. It creates preparation tasks for operator review, coalesces missed
+slots, and deduplicates unchanged event revisions. Pause and revoke are explicit
+controls. The current schedule lasts at most 24 hours, with earlier consent,
+goal, or input expiry tightening that limit. The form shows the effective bound;
+requests beyond it are refused rather than failing later without explanation.
+An uncertain previous read holds the observation lane until server
+reconciliation; an expired lease alone cannot free it. A refreshed list has its
+own read digest, while an unchanged event retains the selection provenance
+pinned by its existing task.
+
+Settings shows the latest scan outcome separately from the schedule's state.
+The server can settle a failed scan as blocked after proving that its actual
+read transport has closed, without claiming that the scan succeeded. This
+cleanup can finish after consent or session revocation; another scan still
+requires current authority. A failed close or a crash without settlement proof
+keeps the lane quarantined. Calendar read cleanup cannot settle model charges
+or replay the old scan.
+Cancellation finishes the scheduler run receipt while preserving any unknown
+occurrence. Revocation during proposal publication prevents a new task and
+tombstones its unbound input; uncertain artifact cleanup requires recovery.
+
+Unknown request outcomes retain their exact key and body. Closing and reopening
+Settings preserves credential-free controls only for the same authenticated
+owner/session. Setup credentials stay in component memory and are cleared on
+unmount or authentication failure. A deliberate new attempt requires a
+confirmed stale refusal or a reconciled known result; refreshing metadata alone
+cannot authorize duplicate work.
+
+The existing artifact inspector renders a verified brief as plain text.
+Missing, altered, revoked, or expired evidence leaves metadata and recovery
+visible without exposing an unchecked brief. Routine metadata reads do not
+load provider event bodies or brief content. This capability does not modify
+calendar events, send communications, or learn preferences from meeting content.
+
+### Bounded Gmail source, watch, and reply drafting (M7 #890) {#bounded-gmail-source-watch-and-reply-drafting-m7-890-branch-local-target}
+
+The branch adds an owner- and session-bound Gmail readonly path with encrypted
+credentials, explicit source and model consent, opaque local message bindings,
+bounded metadata watches, and private reply drafts. A watch uses the existing
+governed scheduler with the exact `hourly` or `6h` cadence shape, starts in
+`not_started`, and may create at most three neutral inbox notices during the
+finite Goal notification period. The 512-key seen cursor fails closed with
+`coverage_blocked` rather than forgetting older messages. Inbox acceptance is
+the explicit human-triage step; scanning never creates an executable reply or
+contacts a model per message.
+
+Reply drafting reads the selected message twice around one governed
+OpenRouter inference admission. The reviewed source is passed in full up to
+8 KiB, model output is exactly `{subject, body, caveats}`, and the server
+attaches the message revision before writing a 0600 encrypted private draft.
+The private artifact has durable checkpoint, hash, readback, exact-key replay,
+and unknown-recovery states. Generic Work Board, inbox, notifications, and
+browser storage do not expose the private body or operator intent. The bounded
+reply intent is a local 0600 typed-input artifact and remains a plaintext
+residual within the local-workspace trust boundary; the source body and draft
+remain encrypted private artifacts. Lost setup, reply, and watch responses can
+be resolved by their original opaque key under the current authenticated
+owner/session. Watch notices obey the Goal's finite quiet-hours and
+notification allowance across the whole period; uncertain or over-capacity
+coverage stays visibly blocked for reconciliation.
+
+This remains **Partial**. Focused SQLite and intercepted-transport tests prove the bounded
+mechanics; CPU-only/keyless OpenRouter operation, a real Google account, live
+Gmail usefulness, send operation, and paid model canary remain
+**external-unverified**. See the M7 mail wire contract in issue #890 for the
+exact request, recovery, privacy, and readback boundaries.
+
+### Reviewed source-change follow-up
+
+Goals expose their success criterion, finite proactive budget, quiet hours, and
+review boundary. Source watches offer hourly, six-hourly, or daily cadence and
+retain per-run approval by default. A verified material change appears in the
+Guardian intervention inbox with local evidence, freshness, expiry, and recovery
+state. Accepting it creates one goal-linked **Triage** task in the existing Work
+Board; it does not execute that task or grant additional permissions. Snooze and
+dismiss persist without learning. Zero notification allowance keeps the inbox
+usable without sending a message.
+
+See [Guardian Intelligence](./05-guardian-intelligence.md#reviewed-goals-and-the-source-change-inbox)
+for ownership, readback, idempotency, and bounded recovery contracts. Local
+source execution and live external/provider usefulness have separate evidence
+boundaries; live external/provider usefulness remains **external-unverified**.
+This capability remains **Partial**.
 
 ## Models And Runtime
 
@@ -361,6 +780,65 @@ interaction to the GPU core. Pairing must not implicitly authorize execution or
 data egress.
 
 ## Memory
+
+### Cockpit navigation and canonical inspector
+
+The bounded cockpit capability provides six persistent cockpit sections: **Home**,
+**Inbox**, **Work**, **Goals**, **Library**, and **Connections**. These select
+existing cockpit surfaces and retain the conversation, selected task, and
+window layout. Home is a bounded operational summary, not a second scheduler:
+page counts are labelled as such, failed refreshes preserve last-known data,
+and unavailable queue or spend evidence remains unavailable. Pending approvals
+open the existing approval surface.
+
+This remains **Partial**; live provider and external-account usefulness remain
+explicitly **external-unverified**.
+
+Connections labels Seraph presence as unknown until a complete continuity
+payload has been confirmed. A failed refresh retains previously confirmed
+values with explicit stale and last-confirmed labels. Missing metadata does
+not establish a clear queue, ready reach, or active proactive guidance; the
+operator can continue using Work while continuity metadata is unavailable.
+
+Inbox has one active owner for the candidate list and selected inspector.
+Selected detail reads at most 20 append-only action receipts, with explicit
+history truncation. New optional action reasons are bounded and server-redacted;
+legacy receipts show unavailable reasons rather than invented explanations.
+The receipt projection preserves action response and exact replay semantics.
+Last-known evidence remains readable during a failed refresh, while actions
+require current confirmed detail. Page-scoped filters do not claim global
+search. Accepting a follow-up opens its existing Triage task for review; it does
+not authorize execution. Work shows the Inbox origin only after an
+authenticated candidate lookup confirms the exact accepted task relation;
+the origin link returns to that decision. Inbox owns disposition controls and
+the adjacent evidence inspector remains read-only.
+
+Library reads canonical records through authenticated, owner-session-scoped
+`GET /api/memory/records` and `GET /api/memory/records/{id}`. Search is literal
+SQL text matching with bounded pagination; it performs no embedding or model
+request. The list is metadata-first. Selecting a record loads redacted content,
+bounded provenance, source/conflict state, and authorized task, artifact,
+readback, and audit references. Explicit history can inspect superseded or
+archived records; tombstoned, ownerless, and foreign-session records are not
+discoverable. This session boundary does not establish cross-login identity
+continuity. Task-linked artifact and readback references open the existing
+Work evidence route. Artifact inspection requires the authenticated job,
+parent lineage, identity and digest; a parent readback effect is matched by
+its exact effect and content digests rather than a fabricated artifact handle.
+Evidence-load failures appear in Work with a bounded explanation and retry
+guidance, including when the advanced operator pane is closed.
+
+Ordinary correction, pin, and archive/redact use existing canonical memory
+controls with a reason and an authoritative refresh. Strong deletion uses the
+separate acknowledged delete/export live control; archive is not deletion.
+Reviewed task learning opens the existing Work Board memory review. Its signed
+proposal and correction path supplies later comparison authority; a generic
+text correction does not acquire that authority. No automatic learning follows
+from opening Library, Home, or Inbox.
+
+These are the intended post-merge contracts. Milestone PRs carry branch-specific
+validation until the reviewed epic PR lands on `develop`; live provider quality
+and external-account behavior remain explicitly unverified.
 
 **Shipped foundation:** Seraph owns canonical local memory and can augment
 retrieval through guarded provider integrations.

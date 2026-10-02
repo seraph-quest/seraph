@@ -25,6 +25,7 @@ export const PANEL_MIN_SIZES: Record<string, { width: number; height: number }> 
   presence_pane: { width: 432, height: 384 },
   approvals_pane: { width: 224, height: 112 },
   operator_timeline_pane: { width: 304, height: 176 },
+  work_board_pane: { width: 640, height: 360 },
   response_pane: { width: 224, height: 112 },
   guardian_state_pane: { width: 240, height: 144 },
   workflows_pane: { width: 224, height: 112 },
@@ -334,16 +335,28 @@ export function getPackedCockpitPanels(
   paneVisibility: Partial<Record<CockpitPaneId, boolean>> = getDefaultPaneVisibility(layoutId),
 ): Record<string, PanelRect> {
   const frame = getWorkspaceFrame();
-  if (layoutId === "default") {
-    return buildDefaultPackedPanels(frame, paneVisibility);
+  const panels = layoutId === "default"
+    ? buildDefaultPackedPanels(frame, paneVisibility)
+    : buildPanelsForColumns(
+      frame,
+      LAYOUT_COLUMNS[layoutId]
+        .map((column) => ({
+          weight: column.weight,
+          panes: column.panes.filter((id) => paneVisibility[id as CockpitPaneId] !== false),
+        }))
+        .filter((column) => column.panes.length > 0),
+    ).panels;
+  if (paneVisibility.work_board_pane !== false) {
+    const width = Math.max(PANEL_MIN_SIZES.work_board_pane.width, snap(Math.min(1280, frame.width * 0.74)));
+    const height = Math.max(PANEL_MIN_SIZES.work_board_pane.height, snap(Math.min(760, frame.height * 0.78)));
+    panels.work_board_pane = {
+      x: snap(frame.x + (frame.width - width) / 2),
+      y: snap(frame.y + (frame.height - height) / 2),
+      width,
+      height,
+    };
   }
-  const columns = LAYOUT_COLUMNS[layoutId]
-    .map((column) => ({
-      weight: column.weight,
-      panes: column.panes.filter((id) => paneVisibility[id as CockpitPaneId] !== false),
-    }))
-    .filter((column) => column.panes.length > 0);
-  return buildPanelsForColumns(frame, columns).panels;
+  return panels;
 }
 
 function defaultPanels(): Record<string, PanelRect> {

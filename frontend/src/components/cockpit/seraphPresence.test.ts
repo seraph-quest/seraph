@@ -1,6 +1,21 @@
 import { describe, expect, it } from "vitest";
 
-import { deriveSeraphPresenceState } from "./seraphPresence";
+import {
+  deriveSeraphPresenceMetadataState,
+  deriveSeraphPresenceState,
+  type SeraphPresenceLoadState,
+} from "./seraphPresence";
+
+describe("deriveSeraphPresenceMetadataState", () => {
+  it.each([
+    ["a missing 200 payload", "loaded", false, "unavailable"],
+    ["an initial 503 or timeout", "stale", false, "unavailable"],
+    ["a confirmed payload", "loaded", true, "confirmed"],
+    ["a failed refresh after confirmation", "stale", true, "stale"],
+  ])("classifies %s without inventing readiness", (_label, loadState, hasConfirmedPayload, expected) => {
+    expect(deriveSeraphPresenceMetadataState(loadState as SeraphPresenceLoadState, hasConfirmedPayload)).toBe(expected);
+  });
+});
 
 describe("deriveSeraphPresenceState", () => {
   it("uses warning state when approvals are pending", () => {
@@ -141,6 +156,36 @@ describe("deriveSeraphPresenceState", () => {
 
     expect(descriptor.state).toBe("idle");
     expect(descriptor.tone).toBe("neutral");
+  });
+
+  it("does not claim healthy readiness when continuity metadata is unavailable", () => {
+    const descriptor = deriveSeraphPresenceState({
+      metadataState: "unavailable",
+      connectionStatus: "connected",
+      animationState: "idle",
+      isAgentBusy: false,
+      pendingApprovalCount: 0,
+      pendingNotificationCount: 0,
+      queuedInsightCount: 0,
+      degradedRouteCount: 0,
+      degradedSourceAdapterCount: 0,
+      attentionImportedFamilyCount: 0,
+      attentionPresenceSurfaceCount: 0,
+      actionableThreadCount: 0,
+      continuityHealth: null,
+      recommendedFocus: null,
+      recentTraceRole: null,
+      recentTraceTool: null,
+      latestResponseRole: null,
+      ambientState: "idle",
+      dataQuality: null,
+      recentInterventionCount: 0,
+      operatorStatus: null,
+    });
+
+    expect(descriptor.label).toBe("Unknown");
+    expect(descriptor.detail).toContain("metadata is unavailable");
+    expect(descriptor.tone).toBe("muted");
   });
 
   it("treats degraded typed adapters as proactive follow-through work when continuity is otherwise healthy", () => {

@@ -1,11 +1,14 @@
 """Tests for approval request APIs."""
 
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 import pytest
 from fastapi import HTTPException
 from starlette.requests import Request
 from unittest.mock import patch
 
+from src.db import engine as db_engine
+from src.db.models import ApprovalRequest, Session
 from src.approval.repository import approval_repository
 from src.auth.service import test_bypass_operator as _test_bypass_operator
 
@@ -200,6 +203,33 @@ async def test_list_pending_approvals_includes_thread_labels(client):
 
 
 @pytest.mark.asyncio
+async def test_list_pending_approvals_projects_typed_posture_without_private_arguments(client):
+    request = await approval_repository.get_or_create_pending(
+        session_id=None,
+        tool_name="repo_repair",
+        risk_level="high",
+        summary="Approve the repository repair executor",
+        fingerprint="typed-posture",
+        details={
+            "arguments": {"patch": "private-source-text"},
+            "required_permissions": ["local_host_execution", "workspace_write"],
+            "local_host_execution_required": True,
+            "executor_kind": "local",
+            "executor_profile": "local:repo-python-pytest-v1",
+            "executor_posture_digest": "b" * 64,
+        },
+    )
+    response = await client.get("/api/approvals/pending")
+    assert response.status_code == 200
+    item = next(value for value in response.json() if value["id"] == request.id)
+    assert "arguments" not in item
+    assert item["required_permissions"] == ["local_host_execution", "workspace_write"]
+    assert item["local_host_execution_required"] is True
+    assert item["executor_kind"] == "local"
+    assert item["executor_posture_digest"] == "b" * 64
+
+
+@pytest.mark.asyncio
 async def test_list_pending_approvals_includes_extension_lifecycle_context(client):
     request = await approval_repository.get_or_create_pending(
         session_id=None,
@@ -251,3 +281,93 @@ async def test_list_pending_approvals_includes_extension_lifecycle_context(clien
     assert approval["approval_scope"]["target"]["reference"] == "manifest.yaml"
     assert approval["approval_scope"]["config_scope"]["config_types"] == ["node_adapters"]
     assert approval["approval_context"]["execution_boundaries"] == ["workspace_write"]
+
+
+@pytest.mark.asyncio
+async def test_exact_pending_approval_filter_bypasses_page_limit_but_keeps_owner_and_status_gates(client, async_db):
+    operator = _test_bypass_operator()
+    current_principal = operator.principal.principal_id
+    current_operator_session = operator.session_id
+    foreign_principal = "operator:foreign-approval-filter"
+    foreign_operator_session = "auth:foreign-approval-filter"
+
+    conversations = [
+        *[f"approval-current-{index}" for index in range(10)],
+        "approval-foreign",
+        "approval-expired",
+        "approval-approved",
+        "approval-denied",
+    ]
+    async with db_engine.get_session() as db:
+        db.add_all(
+            [
+                Session(id=conversation_id, owner_principal_id=current_principal)
+                for conversation_id in conversations
+                if conversation_id != "approval-foreign"
+            ]
+            + [Session(id="approval-foreign", owner_principal_id=foreign_principal)]
+        )
+
+    async def create_for(
+        conversation_id: str,
+        fingerprint: str,
+        *,
+        principal_id: str = current_principal,
+        operator_session_id: str = current_operator_session,
+    ):
+        return await approval_repository.get_or_create_pending(
+            session_id=conversation_id,
+            tool_name="extension_install",
+            risk_level="high",
+            summary=f"Approval {fingerprint}",
+            fingerprint=fingerprint,
+            details={
+                "approval_conversation_id": conversation_id,
+                "approval_owner_operator_session_id": operator_session_id,
+                "approval_owner_principal_id": principal_id,
+            },
+        )
+
+    current_rows = [
+        await create_for(f"approval-current-{index}", f"current-{index}")
+        for index in range(10)
+    ]
+    foreign = await create_for(
+        "approval-foreign",
+        "foreign",
+        principal_id=foreign_principal,
+        operator_session_id=foreign_operator_session,
+    )
+    expired = await create_for("approval-expired", "expired")
+    approved = await create_for("approval-approved", "approved")
+    denied = await create_for("approval-denied", "denied")
+    await approval_repository.resolve(approved.id, "approved")
+    await approval_repository.resolve(denied.id, "denied")
+
+    async with db_engine.get_session() as db:
+        expired_row = await db.get(ApprovalRequest, expired.id)
+        assert expired_row is not None
+        expired_row.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+
+    target = current_rows[8]
+    generic = await client.get("/api/approvals/pending", params={"limit": 8})
+    assert generic.status_code == 200
+    generic_payload = generic.json()
+    assert len(generic_payload) <= 8
+    assert len(generic_payload) < len(current_rows)
+    assert all(item["status"] == "pending" for item in generic_payload)
+
+    exact = await client.get(
+        "/api/approvals/pending",
+        params={"approval_id": target.id, "limit": 1},
+    )
+    assert exact.status_code == 200
+    assert [item["id"] for item in exact.json()] == [target.id]
+
+    for unavailable_id in (foreign.id, expired.id, approved.id, denied.id, "approval-does-not-exist"):
+        unavailable = await client.get(
+            "/api/approvals/pending",
+            params={"approval_id": unavailable_id},
+        )
+        assert unavailable.status_code == 200
+        assert unavailable.json() == []

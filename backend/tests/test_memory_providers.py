@@ -416,7 +416,7 @@ def test_memory_provider_lifecycle_supports_config_and_enable(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_plan_memory_retrieval_merges_provider_hits_without_overriding_canonical(tmp_path):
+async def test_plan_memory_retrieval_merges_provider_hits_without_overriding_canonical(tmp_path, async_db):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     _write_memory_provider_extension(workspace)
@@ -457,7 +457,7 @@ async def test_plan_memory_retrieval_merges_provider_hits_without_overriding_can
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("query", ["Atlas launch status", ""])
-async def test_plan_memory_retrieval_keeps_canonical_memory_ahead_of_conflicting_provider_context(query):
+async def test_plan_memory_retrieval_keeps_canonical_memory_ahead_of_conflicting_provider_context(query, async_db):
     provider_result = MemoryProviderAggregateResult(
         context=(
             "- [project] graph-memory: Atlas launch is on track.\n"
@@ -520,7 +520,7 @@ async def test_plan_memory_retrieval_keeps_canonical_memory_ahead_of_conflicting
 
 
 @pytest.mark.asyncio
-async def test_plan_memory_retrieval_filters_normalized_provider_conflict_from_buckets():
+async def test_plan_memory_retrieval_filters_normalized_provider_conflict_from_buckets(async_db):
     suppressed_text = "  Atlas launch is on track. \n"
     provider_result = MemoryProviderAggregateResult(
         context=(
@@ -569,7 +569,7 @@ async def test_plan_memory_retrieval_filters_normalized_provider_conflict_from_b
 
 
 @pytest.mark.asyncio
-async def test_plan_memory_retrieval_suppresses_multiline_provider_conflict_record():
+async def test_plan_memory_retrieval_suppresses_multiline_provider_conflict_record(async_db):
     suppressed_text = "Atlas launch is on track.\n- [project] graph-memory: continuation"
     provider_result = MemoryProviderAggregateResult(
         context=(
@@ -682,7 +682,7 @@ async def test_provider_quality_gate_rejects_newline_in_aggregate_record_fields(
 
 
 @pytest.mark.asyncio
-async def test_plan_memory_retrieval_uses_provider_user_model_for_active_project_without_query(tmp_path):
+async def test_plan_memory_retrieval_uses_provider_user_model_for_active_project_without_query(tmp_path, async_db):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     _write_memory_provider_extension(workspace, capabilities=("user_model",))
@@ -729,7 +729,7 @@ async def test_plan_memory_retrieval_uses_provider_user_model_for_active_project
 
 
 @pytest.mark.asyncio
-async def test_plan_memory_retrieval_uses_query_matched_project_hint_for_provider_user_model(tmp_path):
+async def test_plan_memory_retrieval_uses_query_matched_project_hint_for_provider_user_model(tmp_path, async_db):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     _write_memory_provider_extension(workspace, capabilities=("user_model",))
@@ -786,7 +786,7 @@ async def test_plan_memory_retrieval_uses_query_matched_project_hint_for_provide
 
 
 @pytest.mark.asyncio
-async def test_plan_memory_retrieval_combines_retrieval_and_user_model_provider_context(tmp_path):
+async def test_plan_memory_retrieval_combines_retrieval_and_user_model_provider_context(tmp_path, async_db):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     _write_memory_provider_extension(workspace, capabilities=("retrieval", "user_model"))
@@ -820,7 +820,7 @@ async def test_plan_memory_retrieval_combines_retrieval_and_user_model_provider_
 
 
 @pytest.mark.asyncio
-async def test_plan_memory_retrieval_keeps_high_value_user_model_hits_when_retrieval_fills_limit(tmp_path):
+async def test_plan_memory_retrieval_keeps_high_value_user_model_hits_when_retrieval_fills_limit(tmp_path, async_db):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     _write_memory_provider_extension(workspace, capabilities=("retrieval", "user_model"))
@@ -881,7 +881,7 @@ async def test_plan_memory_retrieval_keeps_high_value_user_model_hits_when_retri
 
 
 @pytest.mark.asyncio
-async def test_plan_memory_retrieval_suppresses_stale_provider_retrieval_hits(tmp_path):
+async def test_plan_memory_retrieval_suppresses_stale_provider_retrieval_hits(tmp_path, async_db):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     _write_memory_provider_extension(workspace, capabilities=("retrieval",))
@@ -933,7 +933,7 @@ async def test_plan_memory_retrieval_suppresses_stale_provider_retrieval_hits(tm
 
 
 @pytest.mark.asyncio
-async def test_plan_memory_retrieval_suppresses_stale_provider_user_model_hits(tmp_path):
+async def test_plan_memory_retrieval_suppresses_stale_provider_user_model_hits(tmp_path, async_db):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     _write_memory_provider_extension(workspace, capabilities=("user_model",))
@@ -979,7 +979,7 @@ async def test_plan_memory_retrieval_suppresses_stale_provider_user_model_hits(t
 
 
 @pytest.mark.asyncio
-async def test_plan_memory_retrieval_suppresses_irrelevant_project_scoped_provider_hits(tmp_path):
+async def test_plan_memory_retrieval_suppresses_irrelevant_project_scoped_provider_hits(tmp_path, async_db):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     _write_memory_provider_extension(workspace, capabilities=("user_model",))
@@ -1024,7 +1024,7 @@ async def test_plan_memory_retrieval_suppresses_irrelevant_project_scoped_provid
 
 
 @pytest.mark.asyncio
-async def test_plan_memory_retrieval_degrades_cleanly_when_provider_fails(tmp_path):
+async def test_plan_memory_retrieval_degrades_cleanly_when_provider_fails(tmp_path, async_db):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     _write_memory_provider_extension(workspace)
@@ -1060,7 +1060,7 @@ async def test_plan_memory_retrieval_degrades_cleanly_when_provider_fails(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_plan_memory_retrieval_tolerates_provider_health_failures(tmp_path):
+async def test_plan_memory_retrieval_tolerates_provider_health_failures(tmp_path, async_db):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     _write_memory_provider_extension(workspace)

@@ -1504,6 +1504,56 @@ This section records the landed Batch C slices and their validation and review r
     - corrected the new guardian-learning regression to use the real feedback repository API and durable timestamps instead of an over-simplified fixture shape
     - aligned the long-horizon eval detail expectation in `backend/tests/test_eval_harness.py` with the shipped stronger receptivity downgrade (`low`) once multi-day negative trends and contradictory support line up
 
+## Reviewed goals and the source-change inbox
+
+The goal form exposes the existing structured success criterion, proactive
+toggle, and finite `GoalAdmissionBudget`. The operator reviews the budget,
+notification limit, quiet hours, timezone, and expiry explicitly. The generated
+budget-review reference identifies that review; it does not issue a new runtime
+permission. Existing goals can still be edited without enabling proactive work.
+
+Source watches remain `GuardianSourceWatch` records attached to the current
+goal revision. Supported sources are public HTTPS text and bounded workspace
+text. Cadence choices are hourly, every six hours, or daily in the selected
+timezone. Per-run approval is the default. Reviewed standing authority permits
+only the existing local dossier and task-file effects within the reviewed goal
+budget; it grants no external publication, account access, or cloud upload.
+
+`GET /api/guardian/inbox` projects owner-and-session-bound dispositions over
+verified material source packets. Baseline initialization and unchanged sources
+remain quiet. A candidate requires a completed durable source-watch job and
+both identified, timestamped artifact readbacks. List reads use receipt metadata
+and do not execute a source fetch, inference, job, notification, or memory write.
+Selected detail exposes the bound job status and safe readback identities without
+exposing service-owned job inputs or broadening workflow API ownership.
+Opening evidence or accepting a follow-up verifies the actual local bytes.
+Selected evidence can be read as a bounded, secret-redacted plain-text preview
+in the existing inspector. It is labeled untrusted source evidence and cannot
+grant permissions or automatically become executable instructions. Projection
+redaction is read-only; it does not create a nested audit writer inside the
+acceptance transaction.
+The candidate expires at the earlier of seven days after packet creation and
+the goal-budget expiry. Recovery and expiry maintenance are bounded within the
+existing dispatcher; opening the inbox does not scan historical packets.
+
+`Accept follow-up` atomically records a revision-checked disposition, append-only
+action receipt, and one goal-linked Work Board task in **Triage**. It grants no
+execution authority. The existing Specify/Decompose and task execution controls
+own subsequent work. `Snooze` and `Dismiss` persist decisions without creating
+tasks or learning. Retrying an unknown action uses the same idempotency key and
+payload; conflicting or stale decisions require reconciliation. Source prose
+cannot supply task instructions or permissions through the candidate summary.
+The existing GoalSnapshot follow-through retains its explicit `no_learning`
+result in durable effect, task, and authenticated job receipts. A missing result
+is not inferred to mean no learning, and this projection creates no memory write.
+Notification budget zero keeps candidates visible in the inbox while preserving
+the existing outbox's delivery policy and quiet hours.
+
+This is a bounded local source-change loop, with an explicit `no_learning`
+result. It does not establish general autonomous operation or live provider
+quality. On an open feature branch this section describes the intended
+post-merge behavior; the PR carries current validation and review receipts.
+
 ## Non-Goals
 
 - marketing “guardian intelligence” before the learning loop is real

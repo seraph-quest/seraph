@@ -1529,7 +1529,11 @@ async def apply_memory_live_control_action(
     elif normalized_action == "rollback_memory":
         if not memory_id:
             raise ValueError("memory_id is required for rollback_memory")
-        existing = await memory_repository.get_memory(memory_id)
+        # A canonical tombstone is hidden from ordinary retrieval.  The
+        # rollback guard must still inspect its redacted row so it can report
+        # the terminal delete/export boundary instead of treating it as a
+        # missing memory or ever attempting to revive it.
+        existing = await memory_repository.get_memory(memory_id, include_deleted=True)
         if existing is None:
             raise ValueError(f"Unknown memory id: {memory_id}")
         deletion_marker = _canonical_memory_deletion_marker(existing)
@@ -1675,3 +1679,31 @@ async def apply_memory_live_control_action(
         ),
         "policy": memory_operator_policy_payload(),
     }
+
+
+# M5 keeps its transaction-aware writer and dispatcher guard in a separate
+# module so the older operator correction surface retains its historical text
+# normalization and API behavior.  Re-export the bounded M5 entry points from
+# the canonical control module for callers that already depend on it.
+from src.memory.m5 import (  # noqa: E402  (import after legacy control definitions)
+    apply_memory_proposal_action,
+    create_memory_proposal,
+    evaluate_goal_candidate_memory,
+    list_memory_proposals,
+    list_work_board_decision_receipts,
+    m5_candidate_action_ids,
+    m5_goal_candidate_set_digest,
+    m5_goal_source_context_digest,
+    m5_canonical_json,
+    m5_digest,
+    m5_memory_scope,
+    m5_registered_capability_contracts,
+    m5_source_context_digest,
+    m5_task_intent_digest,
+    m5_text_digest,
+    normalize_m5_memory_text,
+    redact_m5_memory_references,
+    sanitize_m5_memory_text,
+    sanitize_m5_memory_text_async,
+    validate_goal_candidate_requests,
+)

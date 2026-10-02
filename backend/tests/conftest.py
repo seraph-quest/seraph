@@ -18,11 +18,21 @@ os.environ.setdefault("OPENROUTER_API_KEY", "test-key")
 os.environ.setdefault("WORKSPACE_DIR", "/tmp/seraph-test")
 os.environ.setdefault("CAPABILITY_JOURNAL_SECRET", "test-capability-journal-secret")
 
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--run-real-repo-sandbox",
+        action="store_true",
+        default=False,
+        help="run the explicit rootless Docker repository-repair acceptance journey",
+    )
+
+
 from config.settings import settings
 from src.app import create_app
 from src.audit.repository import AuditRepository, audit_repository
 from src.llm_runtime import _reset_target_health
-from src.db.engine import _ensure_search_indexes
+from src.db.engine import _configure_sqlite_connection, _ensure_search_indexes
 from src.memory.flush import _reset_memory_flush_state
 from src.memory.snapshots import _reset_bounded_guardian_snapshot_cache
 from src.utils.background import drain_tracked_tasks
@@ -38,6 +48,12 @@ _PATCH_TARGETS = [
     "src.model_fabric.repository.get_session",
     "src.profile.service.get_db",
     "src.api.settings.get_db",  # aliased: `import get_session as get_db`
+    "src.api.calendar.get_session",
+    "src.api.work_board.get_session",
+    "src.api.workflows.get_session",
+    "src.work_board.triage.get_session",
+    "src.work_board.dispatcher.get_session",
+    "src.api.ws.get_session",
     "src.api.nodes.get_session",
     "src.api.observer.get_session",
     "src.scheduler.jobs.memory_consolidation.get_session",
@@ -63,23 +79,38 @@ _PATCH_TARGETS = [
 # ── In-memory async DB fixture ──────────────────────────
 
 @pytest_asyncio.fixture
-async def async_db():
-    """Provide an in-memory SQLite engine with all tables created.
+async def async_db(request, tmp_path_factory):
+    """Provide an isolated SQLite engine with all tables created.
 
     Patches ``get_session`` in every module that imports it so the test
-    database is used transparently.
+    database is used transparently.  The default remains a single-connection
+    in-memory database for ordinary unit tests; native concurrency proofs may
+    request ``indirect=["file"]`` to exercise production-like SQLite pooling.
     """
-    engine = create_async_engine(
-        "sqlite+aiosqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
+    if getattr(request, "param", None) == "file":
+        database_path = tmp_path_factory.mktemp("async-db") / "test.sqlite3"
+        engine = create_async_engine(
+            f"sqlite+aiosqlite:///{database_path}",
+            echo=settings.database_echo,
+            connect_args={"check_same_thread": False},
+            pool_size=20,
+            max_overflow=0,
+            pool_timeout=3,
+            pool_pre_ping=True,
+        )
+        event.listen(engine.sync_engine, "connect", _configure_sqlite_connection)
+    else:
+        engine = create_async_engine(
+            "sqlite+aiosqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
 
-    @event.listens_for(engine.sync_engine, "connect")
-    def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record):
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.close()
+        @event.listens_for(engine.sync_engine, "connect")
+        def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record):
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
 
     factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
@@ -125,9 +156,36 @@ def app():
     return create_app()
 
 
+@pytest.fixture(autouse=True)
+def isolate_operator_auth_defaults(monkeypatch):
+    """Keep ordinary route tests independent of a copied live env file.
+
+    Authentication-negative tests opt back into a configured secret or turn
+    the bypass off in their own monkeypatch scope.  The default applies only
+    to this test process; production settings and middleware are unchanged.
+    """
+
+    from src.api.auth import _reset_login_throttle_for_tests
+
+    # Each test has its own database and client. Keep the process-local login
+    # throttle in the same scope, while preserving throttling within a test.
+    _reset_login_throttle_for_tests()
+    monkeypatch.setattr(settings, "deployment_environment", "test")
+    monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", True)
+    monkeypatch.setattr(settings, "operator_auth_secret", "")
+    monkeypatch.setattr(settings, "operator_auth_secret_hash", "")
+    yield
+    _reset_login_throttle_for_tests()
+
+
 @pytest_asyncio.fixture
-async def client(app, async_db):
+async def client(app, async_db, monkeypatch):
     """Async HTTP test client backed by the in-memory DB."""
+    # The repository's live ``.env.dev`` may be copied into the test process
+    # by managed tooling.  Keep this fixture's synthetic ASGI host and origin
+    # explicitly isolated instead of weakening production authentication.
+    monkeypatch.setattr(settings, "operator_auth_allowed_hosts", "test,localhost,127.0.0.1")
+    monkeypatch.setattr(settings, "operator_auth_allowed_origins", "http://localhost:3001")
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
@@ -253,10 +311,10 @@ def mocked_canonical_inference_context(monkeypatch):
         if inspect.isawaitable(result):
             timeout = kwargs.get("timeout")
             result = await asyncio.wait_for(result, timeout=timeout) if timeout is not None else await result
-        from src.llm_runtime import _log_llm_runtime_event_sync
+        from src.llm_runtime import _log_llm_runtime_event
 
         runtime_path = str(kwargs.get("runtime_path") or "test_inference")
-        _log_llm_runtime_event_sync(
+        await _log_llm_runtime_event(
             event_type="llm_primary_success",
             summary="Legacy caller fixture completed through the governed boundary",
             details={

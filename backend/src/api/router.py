@@ -7,6 +7,8 @@ from src.api.approvals import router as approvals_router
 from src.api.audio import router as audio_router
 from src.api.automation import router as automation_router
 from src.api.browser import router as browser_router
+from src.api.calendar import router as calendar_router
+from src.api.mail import router as mail_router
 from src.api.canvas import router as canvas_router
 from src.api.catalog import router as catalog_router
 from src.api.capabilities import router as capabilities_router
@@ -15,6 +17,7 @@ from src.api.chat import router as chat_router
 from src.api.extensions import router as extensions_router
 from src.api.evolution import router as evolution_router
 from src.api.goals import router as goals_router
+from src.api.guardian_inbox import router as guardian_inbox_router
 from src.api.mcp import router as mcp_router
 from src.api.memory import router as memory_router
 from src.api.model_fabric_settings import router as model_fabric_settings_router
@@ -28,6 +31,7 @@ from src.api.skills import router as skills_router
 from src.api.tools import router as tools_router
 from src.api.telegram import router as telegram_router
 from src.api.vault import router as vault_router
+from src.api.work_board import router as work_board_router
 from src.api.workflows import router as workflows_router
 from src.api.ws import router as ws_router
 
@@ -41,6 +45,8 @@ api_router.include_router(approvals_router, prefix="/api", tags=["approvals"])
 api_router.include_router(audio_router, prefix="/api", tags=["audio"])
 api_router.include_router(automation_router, prefix="/api", tags=["automation"])
 api_router.include_router(browser_router, prefix="/api", tags=["browser"])
+api_router.include_router(calendar_router, prefix="/api", tags=["calendar"])
+api_router.include_router(mail_router, prefix="/api", tags=["mail"])
 api_router.include_router(canvas_router, prefix="/api", tags=["canvas"])
 api_router.include_router(catalog_router, prefix="/api", tags=["catalog"])
 api_router.include_router(capabilities_router, prefix="/api", tags=["capabilities"])
@@ -50,6 +56,7 @@ api_router.include_router(extensions_router, prefix="/api", tags=["extensions"])
 api_router.include_router(evolution_router, prefix="/api", tags=["evolution"])
 api_router.include_router(sessions_router, prefix="/api", tags=["sessions"])
 api_router.include_router(goals_router, prefix="/api", tags=["goals"])
+api_router.include_router(guardian_inbox_router, prefix="/api", tags=["guardian-inbox"])
 api_router.include_router(profile_router, prefix="/api", tags=["profile"])
 api_router.include_router(tools_router, prefix="/api", tags=["tools"])
 api_router.include_router(telegram_router, prefix="/api", tags=["telegram"])
@@ -63,4 +70,5 @@ api_router.include_router(workflows_router, prefix="/api", tags=["workflows"])
 api_router.include_router(observer_router, prefix="/api", tags=["observer"])
 api_router.include_router(settings_router, prefix="/api", tags=["settings"])
 api_router.include_router(vault_router, prefix="/api", tags=["vault"])
+api_router.include_router(work_board_router, prefix="/api", tags=["work-board"])
 api_router.include_router(ws_router, prefix="/ws", tags=["websocket"])

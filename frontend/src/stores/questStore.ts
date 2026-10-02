@@ -378,6 +378,9 @@ interface QuestStore {
   updateGoal: (id: string, updates: {
     status?: string; title?: string; description?: string;
     level?: string; domain?: string; due_date?: string | null;
+    success_criterion?: GoalInfo["success_criterion"];
+    proactive_enabled?: boolean;
+    admission_budget?: GoalInfo["admission_budget"];
     expected_revision?: number;
   }) => Promise<void>;
   deleteGoal: (id: string) => Promise<void>;
@@ -434,13 +437,42 @@ export const useQuestStore = create<QuestStore>((set, get) => ({
 
   createGoal: async (goal) => {
     try {
-      await apiFetch(`${API_URL}/api/goals`, {
+      const res = await apiFetch(`${API_URL}/api/goals`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(goal),
       });
+      if (!res.ok) {
+        let detail: unknown = null;
+        try {
+          detail = await res.json();
+        } catch {
+          // Preserve the HTTP status in the user-facing error when the server
+          // cannot provide structured recovery metadata.
+        }
+        const detailRecord =
+          detail && typeof detail === "object" && !Array.isArray(detail)
+            ? (detail as Record<string, unknown>)
+            : null;
+        const nestedDetail =
+          detailRecord?.detail && typeof detailRecord.detail === "object" && !Array.isArray(detailRecord.detail)
+            ? (detailRecord.detail as Record<string, unknown>)
+            : detailRecord;
+        const code = typeof nestedDetail?.code === "string" ? nestedDetail.code : null;
+        const currentRevision =
+          typeof nestedDetail?.current_revision === "number" ? nestedDetail.current_revision : null;
+        const message =
+          typeof nestedDetail?.recovery === "string"
+            ? nestedDetail.recovery
+            : `Goal creation failed (HTTP ${res.status}).`;
+        throw new GoalUpdateError("", message, { code, currentRevision });
+      }
       await get().refresh();
-    } catch (err) { console.error("Failed to create goal:", err); }
+    } catch (err) {
+      if (err instanceof GoalUpdateError) throw err;
+      console.error("Failed to create goal:", err);
+      throw new GoalUpdateError("", "Goal creation could not be completed.");
+    }
   },
 
   updateGoal: async (id, updates) => {

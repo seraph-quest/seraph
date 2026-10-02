@@ -722,6 +722,32 @@ class ApprovalRepository:
             db.expunge(request)
             return request
 
+    async def revoke_unconsumed(self, approval_id: str, *, expected_revision: int,
+            owner_principal_id: str, operator_session_id: str) -> str:
+        """CAS against consume; a spent receipt cannot claim effect undo."""
+        async with get_session() as db:
+            row = await db.get(ApprovalRequest, approval_id)
+            if row is None or row.owner_principal_id != owner_principal_id or row.operator_session_id != operator_session_id:
+                raise LookupError("approval_not_found")
+            if row.status == "consumed":
+                return "already_consumed"
+            if approval_state_revision(row) != expected_revision or row.status not in {"pending", "approved"}:
+                raise ValueError("approval_revision_stale")
+            mutation = await db.execute(update(ApprovalRequest).where(
+                ApprovalRequest.id == approval_id,
+                ApprovalRequest.owner_principal_id == owner_principal_id,
+                ApprovalRequest.operator_session_id == operator_session_id,
+                ApprovalRequest.fingerprint == row.fingerprint,
+                ApprovalRequest.status == row.status,
+                ApprovalRequest.resolved_at == row.resolved_at,
+            ).values(status="denied", resolved_at=datetime.now(timezone.utc)).execution_options(synchronize_session=False))
+            if mutation.rowcount != 1:
+                await db.refresh(row)
+                if row.status == "consumed":
+                    return "already_consumed"
+                raise ValueError("approval_revision_stale")
+            return "revoked"
+
     async def merge_details(self, approval_id: str, details: dict[str, Any]) -> ApprovalRequest | None:
         """Merge additional metadata into an existing approval request."""
         async with get_session() as db:
@@ -1421,3 +1447,8 @@ class ApprovalRepository:
 
 
 approval_repository = ApprovalRepository()
+
+
+def approval_state_revision(row) -> int:
+    payload=[row.id,row.fingerprint,row.status,str(row.resolved_at),str(row.expires_at)]
+    return int(hashlib.sha256(json.dumps(payload).encode()).hexdigest()[:12],16)

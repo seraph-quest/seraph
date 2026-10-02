@@ -74,6 +74,14 @@ TELEGRAM_DELIVERY_LEASE_SECONDS = 90.0
 TELEGRAM_DELIVERY_DEADLINE_SECONDS = 24 * 60 * 60
 
 
+def telegram_state_revision(row) -> int:
+    # Safe exact state identity for adapter CAS, including repeated updates.
+    payload = [str(row.updated_at), row.pairing_state, row.revoked_at is not None,
+               row.transit_consent_reference, str(row.transit_consent_expires_at),
+               row.model_consent_reference, str(row.model_consent_expires_at)]
+    return int(hashlib.sha256(json.dumps(payload).encode()).hexdigest()[:12], 16)
+
+
 class TelegramTransportError(RuntimeError):
     """Bounded operator-safe adapter error."""
 
@@ -531,7 +539,7 @@ class TelegramTransportAdapter:
                 await db.flush()
                 return self._state_payload_from_row(row, now=current)
 
-    async def revoke(self, *, owner_principal_id: str, operator_session_id: str, reason: str = "operator_revoked") -> dict[str, Any]:
+    async def revoke(self, *, owner_principal_id: str, operator_session_id: str, reason: str = "operator_revoked", expected_revision: int | None = None) -> dict[str, Any]:
         owner = _owner(owner_principal_id)
         operator_session = _session(operator_session_id)
         async with self._lock:
@@ -539,6 +547,8 @@ class TelegramTransportAdapter:
                 row = await self._state(db)
                 if row is None or row.owner_principal_id != owner or row.operator_session_id != operator_session:
                     raise TelegramTransportError("telegram_authority_mismatch", "Telegram pairing belongs to another operator session")
+                if expected_revision is not None and telegram_state_revision(row) != expected_revision:
+                    raise TelegramTransportError("telegram_state_revision_conflict", "Telegram state changed")
                 current = _now()
                 row.pairing_state = "revoked"
                 row.revoked_at = current

@@ -316,8 +316,17 @@ historical scopes can be migrated.
 The #900 ownership implementation adds a separately reviewed private continuity
 credential and exact read-only recovery contract, described in
 [Operator ownership and recovery](./19-operator-ownership-and-recovery.md).
-It remains Partial until reviewed integration; it never restores prior grants,
+This is branch-local intended post-program behavior until reviewed promotion to
+`develop`; it never restores prior grants,
 adopts ambiguous legacy history, or substitutes a retired execution root.
+
+The task inspector also exposes local, goal-scoped
+[evidence working sets](./task-evidence-working-sets.md). Citation references are
+revalidated against canonical records and verified artifacts before inspection
+or explicit model-context adoption. Exact selected historical records remain
+read only, and historic/private source egress remains blocked for the generic
+strategist purpose. This is branch-local intended post-program behavior;
+provider usefulness remains externally unverified.
 
 `/api/runtime/status` and `/api/settings/artifact-storage` are the active
 operator receipts. They expose the effective OpenRouter route, consent,

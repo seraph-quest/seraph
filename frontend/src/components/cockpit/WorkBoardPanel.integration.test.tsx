@@ -145,6 +145,10 @@ describe("WorkBoardPanel integration", () => {
     const historical = boardTask({ ownership_access: "recovered_read_only", execution_block_reason: "current_scope_review_required", recovery_action: null });
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.endsWith("/evidence")) return Promise.resolve(response({ revision: 0, digest: null,
+        claims: [], excluded_source_ids: [], invalidated_count: 0, blocked_sources: [],
+        allow_model_context: false, mode: "lexical_degraded", reason: "remote_embeddings_not_used",
+        memory_status: "no_learning" }));
       if (url.endsWith("/api/work-board/tasks/task-1")) return Promise.resolve(response(detail(historical)));
       if (url.includes("/api/work-board/tasks?")) return Promise.resolve(response(page(historical, 1)));
       if (url.includes("/api/work-board/events?")) return Promise.resolve(response(emptyEvents(1)));
@@ -177,6 +181,10 @@ describe("WorkBoardPanel integration", () => {
 
     fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      if (url.endsWith("/evidence")) return Promise.resolve(response({ revision: 0, digest: null,
+        claims: [], excluded_source_ids: [], invalidated_count: 0, blocked_sources: [],
+        allow_model_context: false, mode: "lexical_degraded", reason: "remote_embeddings_not_used",
+        memory_status: "no_learning" }));
       if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) {
         snapshotCalls += 1;
         return Promise.resolve(response(page(currentTask, currentTask === blocked ? 10 : 11)));
@@ -304,6 +312,10 @@ describe("WorkBoardPanel integration", () => {
     });
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.endsWith("/evidence")) return Promise.resolve(response({ revision: 0, digest: null,
+        claims: [], excluded_source_ids: [], invalidated_count: 0, blocked_sources: [],
+        allow_model_context: false, mode: "lexical_degraded", reason: "remote_embeddings_not_used",
+        memory_status: "no_learning" }));
       if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) return Promise.resolve(response(page(calendarTask, 10)));
       if (url.includes("/api/work-board/events?")) return Promise.resolve(response(emptyEvents(10)));
       if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
@@ -383,6 +395,10 @@ describe("WorkBoardPanel integration", () => {
     });
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.endsWith("/evidence")) return Promise.resolve(response({ revision: 0, digest: null,
+        claims: [], excluded_source_ids: [], invalidated_count: 0, blocked_sources: [],
+        allow_model_context: false, mode: "lexical_degraded", reason: "remote_embeddings_not_used",
+        memory_status: "no_learning" }));
       if (url.includes("/api/work-board/tasks?") && !url.match(/\/tasks\/[^?]+/)) return Promise.resolve(response(page(calendarTask, 10)));
       if (url.includes("/api/work-board/events?")) return Promise.resolve(response(emptyEvents(10)));
       if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));

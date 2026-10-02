@@ -624,6 +624,7 @@ class GitHubFollowthroughService:
         token: str | None = None,
         json_body: dict[str, Any] | None = None,
         timeout_seconds: float = 20.0,
+        authority_check: Callable[[], Awaitable[None]] | None = None,
     ) -> PinnedResponse:
         headers = {
             "Accept": "application/vnd.github+json",
@@ -639,6 +640,8 @@ class GitHubFollowthroughService:
             "connect_timeout_seconds": min(5.0, float(timeout_seconds)),
             "max_bytes": MAX_RESPONSE_BYTES,
         }
+        if authority_check is not None:
+            kwargs["authority_check"] = authority_check
         if self._resolver is not None:
             kwargs["resolver"] = self._resolver
         if self._transport is not None:
@@ -657,6 +660,20 @@ class GitHubFollowthroughService:
             if row is not None:
                 db.expunge(row)
         return _connection_payload(row)
+
+    async def revoke_connection(self, *, owner_principal_id: str, expected_revision: int) -> dict[str, Any]:
+        """Fence publication locally while retaining any contacted liability."""
+        async with db_engine.get_session() as db:
+            result = await db.execute(
+                update(GitHubFollowthroughConnection).where(
+                    GitHubFollowthroughConnection.owner_principal_id == owner_principal_id,
+                    GitHubFollowthroughConnection.revision == expected_revision,
+                ).values(mode=CONNECTION_MODE_DISABLED,
+                    revision=GitHubFollowthroughConnection.revision + 1, updated_at=_now())
+            )
+            if result.rowcount != 1:
+                raise GitHubFollowthroughError("connection_revision_stale", status_code=409)
+        return await self.get_connection(owner_principal_id)
 
     async def put_connection(
         self,
@@ -2786,6 +2803,7 @@ class GitHubFollowthroughService:
         token: str,
         remote_id: int,
         deadline: float,
+        authority_check: Callable[[], Awaitable[None]] | None = None,
     ) -> tuple[bool, str, dict[str, Any] | None]:
         path = _canonical_path(prepared.repository, prepared.action, prepared.issue_number, remote_id)
         for attempt in range(READBACK_ATTEMPTS):
@@ -2793,11 +2811,14 @@ class GitHubFollowthroughService:
             if remaining <= 0:
                 return False, "readback_deadline", None
             try:
+                if authority_check is not None:
+                    await authority_check()
                 response = await self._request(
                     path,
                     method="GET",
                     token=token,
                     timeout_seconds=min(20.0, max(0.1, remaining)),
+                    **({"authority_check": authority_check} if authority_check is not None else {}),
                 )
             except Exception as exc:
                 if attempt + 1 >= READBACK_ATTEMPTS:
@@ -2807,6 +2828,8 @@ class GitHubFollowthroughService:
                     return False, "readback_deadline", None
                 await self._sleep(delay)
                 continue
+            if authority_check is not None:
+                await authority_check()
             payload = self._response_json(response)
             if response.status_code == 200 and payload is not None:
                 if prepared.action == ACTION_CREATE_ISSUE:
@@ -2856,6 +2879,10 @@ class GitHubFollowthroughService:
         payload: Mapping[str, Any],
         readback_path: str,
     ) -> dict[str, Any]:
+        connection = await self._get_connection_row(prepared.owner_principal_id)
+        if connection is None or connection.revision != prepared.connection_revision or connection.mode != CONNECTION_MODE_ACTIVE:
+            return await self._mark_unknown(prepared,reason="connection_revoked_before_adoption",current=current,
+                owner=owner,fence=fence,target_path=_publication_effect_target_path(prepared),readback_observation=True)
         verified_at = _now().isoformat()
         output = {
             "schema": "seraph.github-followthrough-result.v1",
@@ -3342,6 +3369,14 @@ class GitHubFollowthroughService:
                 request_body = {"title": prepared.title, "body": prepared.body}
             else:
                 request_body = {"body": prepared.body}
+            async def final_authority():
+                latest_connection = await self._get_connection_row(owner_principal_id)
+                if latest_connection is None:
+                    raise GitHubFollowthroughError("connection_missing")
+                await self._verify_live_handoff(prepared,owner_principal_id=owner_principal_id,connection=latest_connection)
+                await _require_live_owner_session(owner_principal_id=owner_principal_id,
+                    owner_session_id=owner_session_id or prepared.owner_session_id,
+                    external_mutation_granted=external_mutation_granted)
             try:
                 response = await self._request(
                     post_path,
@@ -3349,6 +3384,7 @@ class GitHubFollowthroughService:
                     token=token,
                     json_body=request_body,
                     timeout_seconds=min(20.0, max(0.1, deadline - _now().timestamp())),
+                    authority_check=final_authority,
                 )
             except Exception as exc:
                 unknown = await self._mark_unknown(
@@ -3359,6 +3395,16 @@ class GitHubFollowthroughService:
                     fence=fence,
                     target_path=post_path,
                 )
+                return await self._prepare_job_response(unknown, prepared=prepared)
+            # A revoke after contact cannot undo the remote effect. Keep its
+            # reservation and unknown outcome; do not adopt it as success.
+            observed_connection = await self._get_connection_row(owner_principal_id)
+            if (observed_connection is None
+                    or observed_connection.revision != prepared.connection_revision
+                    or observed_connection.mode != CONNECTION_MODE_ACTIVE):
+                unknown = await self._mark_unknown(prepared, reason="connection_revoked_after_contact",
+                    current=await durable_job_repository.get_job(job_id) or current,
+                    owner=owner, fence=fence, target_path=post_path)
                 return await self._prepare_job_response(unknown, prepared=prepared)
             response_payload = self._response_json(response)
             if response.status_code in {401, 403, 404, 422}:
@@ -3430,12 +3476,18 @@ class GitHubFollowthroughService:
                 expected_revision=int((await durable_job_repository.get_job(job_id) or current).get("revision") or 0),
             )
             latest = await durable_job_repository.get_job(job_id) or dispatch
-            verified, reason, readback_payload = await self._readback(
-                prepared,
-                token=token,
-                remote_id=remote_id,
-                deadline=deadline,
-            )
+            try:
+                verified, reason, readback_payload = await self._readback(
+                    prepared,
+                    token=token,
+                    remote_id=remote_id,
+                    deadline=deadline,
+                    authority_check=final_authority,
+                )
+            except GitHubFollowthroughError as exc:
+                unknown = await self._mark_unknown(prepared,reason=exc.code,current=latest,
+                    owner=owner,fence=fence,target_path=post_path,readback_observation=True)
+                return await self._prepare_job_response(unknown,prepared=prepared)
             readback_path = _canonical_path(prepared.repository, prepared.action, prepared.issue_number, remote_id)
             if not verified or readback_payload is None:
                 unknown = await self._mark_unknown(
@@ -3848,6 +3900,20 @@ async def put_github_connection(req: ConnectionRequest, request: Request):
             mode=req.mode,
             expected_revision=req.expected_revision,
         )
+    except GitHubFollowthroughError as exc:
+        raise _raise_http(exc) from exc
+
+
+class ConnectionRevokeRequest(BaseModel):
+    expected_revision: int = Field(ge=1)
+
+
+@github_followthrough_router.post("/connection/revoke")
+async def revoke_github_connection(req: ConnectionRevokeRequest, request: Request):
+    try:
+        operator = _operator(request)
+        return await github_followthrough_service.revoke_connection(
+            owner_principal_id=_principal_id(operator), expected_revision=req.expected_revision)
     except GitHubFollowthroughError as exc:
         raise _raise_http(exc) from exc
 

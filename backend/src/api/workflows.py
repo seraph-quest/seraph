@@ -62,6 +62,9 @@ from src.db.models import (
     Goal,
     GuardianDecisionPacket,
     GuardianSourceWatch,
+    RepoRepairEgressConsent as RepoRepairEgressConsentRow,
+    RepoRepairProposal as RepoRepairProposalRow,
+    RepoRepairSourcePacket as RepoRepairSourcePacketRow,
     WorkBoardAttempt,
     WorkBoardTask,
     WorkflowRunState,
@@ -76,6 +79,8 @@ from src.execution.repo_sandbox import (
     RepoSandboxLimits,
     RepoSandboxJob,
     RootlessDockerRepoSandbox,
+    build_repo_repair_executor,
+    executor_posture_digest,
     limits_digest,
 )
 from src.goals.contracts import GoalCandidateAction, GoalCandidateDecision, GoalOutcomeReceipt
@@ -98,6 +103,7 @@ from src.workflows.job_runtime import (
     DurableJobIdentity,
     DurableJobSpec,
     DurableJobError,
+    DurableJobLeaseError,
     DurableJobTransitionError,
     _canonical_reconciliation_receipt,
     durable_job_repository,
@@ -105,6 +111,7 @@ from src.workflows.job_runtime import (
 )
 from src.workflows.run_identity import build_workflow_run_identity, parse_workflow_run_identity
 from src.workspace import WorkspaceStateClass, canonical_workspace_registry
+from src.work_board.repository import BoardError, WorkBoardOwner, WorkBoardRepository, _utc_datetime
 from src.integrations.google_calendar import (
     MAX_CALENDAR_RESULT_BYTES,
     calendar_artifact_path_for_job,
@@ -1054,6 +1061,31 @@ class RepoChangeRetryRequest(BaseModel):
     model_config = {"extra": "forbid"}
 
     reconciliation_receipt: dict[str, Any]
+
+
+class RepoRepairEgressConsentRequest(BaseModel):
+    """Explicit acknowledgement for one private source packet."""
+
+    model_config = {"extra": "forbid", "strict": True}
+
+    expected_job_revision: int = Field(ge=1)
+    source_packet_digest: str = Field(min_length=64, max_length=64)
+    expected_source_manifest_digest: str = Field(min_length=64, max_length=64)
+    expected_profile_id: str = Field(min_length=1, max_length=128)
+    acknowledged_selected_source: bool
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class RepoRepairResumeRequest(BaseModel):
+    """Exact patch-approval resume binding for one repair root."""
+
+    model_config = {"extra": "forbid", "strict": True}
+
+    approval_id: str = Field(min_length=1, max_length=160)
+    proposal_id: str = Field(min_length=1, max_length=160)
+    expected_proposal_revision: int = Field(ge=1)
+    expected_job_revision: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
 
 
 _WORKFLOW_CONTROL_ACTIONS = frozenset(
@@ -5003,6 +5035,126 @@ _REPO_CHANGE_SERVICE_LEASE = "service:repo-change"
 _REPO_CHANGE_RECOVERY_LEASE = "service:repo-change:recovery"
 _REPO_CHANGE_APPROVAL_TTL_SECONDS = 5 * 60
 _REPO_CHANGE_JOB_TTL_SECONDS = 10 * 60
+_REPO_CHANGE_INFLIGHT_TASKS: dict[str, asyncio.Task[Any]] = {}
+
+
+def _build_repo_repair_executor_compat() -> Any:
+    """Select repair executor while preserving direct legacy settings objects."""
+
+    from src.execution.repo_sandbox import (
+        _effective_repo_sandbox_settings,
+        build_repo_repair_executor,
+    )
+
+    config = _effective_repo_sandbox_settings()
+    selected = str(getattr(config, "executor_kind", "local") or "local")
+    fields_set = getattr(config, "model_fields_set", set())
+    if (
+        selected == "local"
+        and "executor_kind" not in fields_set
+        and str(getattr(config, "docker_socket", "") or "").strip()
+        and str(getattr(config, "worker_image_digest", "") or "").strip()
+    ):
+        return RootlessDockerRepoSandbox(config=config)
+    return build_repo_repair_executor(config=config)
+
+
+def _build_repo_repair_executor_for_authority(authority: Mapping[str, Any] | None) -> Any:
+    """Select the executor recorded by an approved repair authority.
+
+    Legacy repo-change rows have no executor discriminator and retain the
+    historical strict rootless adapter.  M4 rows must carry the complete
+    server-built selector/posture binding; mutable settings are used only to
+    obtain the current trusted socket/config after every selector and posture
+    digest is compared with that persisted authority.
+    """
+
+    binding = dict(authority) if isinstance(authority, Mapping) else {}
+    requested_kind = str(binding.get("executor_kind") or "").strip()
+    if not requested_kind:
+        return RootlessDockerRepoSandbox()
+    if requested_kind not in {"local", "docker_rootless", "docker_rootful"}:
+        raise RepoSandboxError("approved executor kind is invalid")
+    from src.execution.repo_sandbox import _effective_repo_sandbox_settings
+
+    config = _effective_repo_sandbox_settings()
+    if str(getattr(config, "executor_kind", "") or "") != requested_kind:
+        raise RepoSandboxError("approved executor kind changed")
+    profile = str(getattr(config, "profile", "") or "")
+    expected_profile = f"{requested_kind}:{profile}"
+    if str(binding.get("executor_profile") or "") != expected_profile:
+        raise RepoSandboxError("approved executor profile changed")
+    if str(binding.get("sandbox_profile") or "") != profile:
+        raise RepoSandboxError("approved sandbox profile changed")
+
+    executor = build_repo_repair_executor(config=config)
+    if str(getattr(executor, "kind", "") or "") != requested_kind:
+        raise RepoSandboxError("approved executor selection is unavailable")
+    if str(binding.get("sandbox_image_digest") or "") != str(
+        getattr(config, "worker_image_digest", "") or ""
+    ):
+        raise RepoSandboxError("approved executor image changed")
+    if str(binding.get("sandbox_limits_digest") or "") != limits_digest(executor.limits):
+        raise RepoSandboxError("approved executor limits changed")
+    socket_digest = hashlib.sha256(
+        str(getattr(config, "docker_socket", "") or "").encode("utf-8")
+    ).hexdigest()
+    if str(binding.get("sandbox_socket_digest") or "") != socket_digest:
+        raise RepoSandboxError("approved executor socket changed")
+    posture = binding.get("executor_posture")
+    posture_digest = str(binding.get("executor_posture_digest") or "")
+    if (
+        not isinstance(posture, Mapping)
+        or str(posture.get("kind") or "") != requested_kind
+        or str(posture.get("profile") or "") != profile
+        or not posture_digest
+        or posture_digest != executor_posture_digest(posture)
+    ):
+        raise RepoSandboxError("approved executor posture changed")
+    return executor
+
+
+def _preflight_approved_executor_for_cleanup(
+    executor: Any,
+    authority: Mapping[str, Any] | None,
+) -> None:
+    """Recheck a selected Docker posture before touching an existing worker.
+
+    Cleanup/recovery may proceed after an operator disables the settings
+    toggle, because the already-approved job still owns an exact worker. The
+    probe therefore enables only this in-memory preflight copy; it never
+    authorizes a new dispatch. Legacy rows without M4 executor metadata retain
+    their historical rootless cleanup path.
+    """
+
+    binding = dict(authority) if isinstance(authority, Mapping) else {}
+    if not binding.get("executor_kind"):
+        return
+    kind = str(getattr(executor, "kind", "") or "")
+    if kind == "local":
+        return
+    config = getattr(executor, "config", None)
+    if config is None or not hasattr(config, "model_copy"):
+        raise RepoSandboxError("approved executor preflight configuration is unavailable")
+    probe_config = config.model_copy(update={"enabled": True})
+    probe = build_repo_repair_executor(config=probe_config)
+    preflight = probe.preflight(binding)
+    if not bool(getattr(preflight, "ok", False)):
+        raise RepoSandboxError(
+            str(getattr(preflight, "reason", None) or "approved executor posture unavailable")
+        )
+    if str(getattr(preflight, "executor_kind", "") or kind) != kind:
+        raise RepoSandboxError("approved executor posture kind changed")
+    posture = getattr(preflight, "posture", None)
+    posture = dict(posture) if isinstance(posture, Mapping) else {}
+    actual_digest = str(
+        getattr(preflight, "posture_digest", None)
+        or executor_posture_digest(posture)
+        or ""
+    )
+    expected_digest = str(binding.get("executor_posture_digest") or "")
+    if not expected_digest or actual_digest != expected_digest:
+        raise RepoSandboxError("approved executor posture changed")
 
 
 async def authenticate_repo_change_operator(
@@ -5063,11 +5215,31 @@ def _repo_change_safe_relative(value: str, *, field_name: str) -> str:
 
 
 def _repo_change_patch_candidates(artifact_id: str) -> tuple[str, ...]:
-    if not _WORKFLOW_SAFE_ARTIFACT_ID_RE.fullmatch(str(artifact_id or "")):
+    """Return only server-owned patch locations for either proof kind.
+
+    Guardian patches historically use an opaque artifact id.  Repository
+    repair proposals persist a digest-addressed relative artifact reference so
+    the proposal resolver can bind the bytes before execution.  Accepting the
+    latter here keeps the sandbox execution helper shared without turning a
+    caller supplied path into authority.
+    """
+
+    value = str(artifact_id or "").strip()
+    if value.startswith("artifacts/repo-repair/patch/"):
+        relative = PurePosixPath(value)
+        name = relative.name
+        if (
+            len(relative.parts) != 4
+            or relative.parts[:3] != ("artifacts", "repo-repair", "patch")
+            or not re.fullmatch(r"repo-repair-[0-9a-f]{32}-[0-9a-f]{64}\.diff", name)
+        ):
+            raise HTTPException(status_code=422, detail={"code": "patch_artifact_id_invalid"})
+        return (value,)
+    if not _WORKFLOW_SAFE_ARTIFACT_ID_RE.fullmatch(value):
         raise HTTPException(status_code=422, detail={"code": "patch_artifact_id_invalid"})
     return (
-        f"artifacts/repo-change/{artifact_id}.patch",
-        f".seraph/repo-change/artifacts/{artifact_id}.patch",
+        f"artifacts/repo-change/{value}.patch",
+        f".seraph/repo-change/artifacts/{value}.patch",
     )
 
 
@@ -5170,47 +5342,272 @@ def _repo_change_read_patch(artifact_id: str) -> bytes:
     raise HTTPException(status_code=422, detail={"code": "patch_artifact_unavailable"})
 
 
-def _repo_change_write_artifact(job_id: str, name: str, payload: bytes) -> str:
+def _repo_change_write_artifact(
+    job_id: str,
+    name: str,
+    payload: bytes,
+    *,
+    namespace: str = "repo-change",
+) -> str:
     """Write one fixed result artifact without following workspace symlinks."""
 
-    if not re.fullmatch(r"repo-change-[0-9a-f]{32}", str(job_id or "")):
+    if not re.fullmatch(r"(?:repo-change|repo-repair)-[0-9a-f]{32}", str(job_id or "")):
         raise RepoSandboxError("repository job artifact identity is invalid")
+    if namespace not in {"repo-change", "repo-repair"}:
+        raise RepoSandboxError("repository result artifact namespace is not allowed")
     if name not in {"manifest.json", "readback.json", "diff.patch", "pytest.stdout", "pytest.stderr"}:
         raise RepoSandboxError("repository result artifact name is not allowed")
     if not isinstance(payload, bytes):
         raise RepoSandboxError("repository result artifact must be bytes")
-    relative = f"artifacts/repo-change/{job_id}/{name}"
-    descriptor = _repo_change_open_workspace_file(
-        relative,
-        flags=os.O_WRONLY | os.O_CREAT,
-        create_parents=True,
-    )
+    relative = f"artifacts/{namespace}/{job_id}/{name}"
     try:
+        descriptor = _repo_change_open_workspace_file(
+            relative,
+            flags=os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            create_parents=True,
+        )
+    except FileExistsError:
+        existing_descriptor = _repo_change_open_workspace_file(relative, flags=os.O_RDONLY)
+        try:
+            metadata = os.fstat(existing_descriptor)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_mode & 0o077
+                or metadata.st_uid != os.getuid()
+                or metadata.st_nlink != 1
+            ):
+                raise RepoSandboxError("repository result artifact permissions are unsafe")
+            maximum = RepoSandboxLimits.from_settings(settings.repo_sandbox).max_output_bytes
+            with os.fdopen(existing_descriptor, "rb") as handle:
+                existing_descriptor = -1
+                existing = handle.read(maximum + 1)
+            if len(existing) > maximum:
+                raise RepoSandboxError("repository result artifact exceeds its fixed bound")
+            if existing != payload:
+                raise RepoSandboxError("repository result artifact collision")
+            return relative
+        finally:
+            if existing_descriptor >= 0:
+                os.close(existing_descriptor)
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_mode & 0o077
+            or metadata.st_uid != os.getuid()
+            or metadata.st_nlink != 1
+        ):
+            raise RepoSandboxError("repository result artifact permissions are unsafe")
         os.ftruncate(descriptor, 0)
         with os.fdopen(descriptor, "wb") as handle:
+            descriptor = -1
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
     except OSError as exc:
         raise RepoSandboxError("repository result artifact write failed") from exc
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
     return relative
 
 
-def _repo_change_dispatch_checkpoint(job: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Return the latest durable Docker dispatch fence payload."""
+def _repo_change_verify_persisted_artifact(relative_path: str) -> str:
+    """Hash the reopened, no-follow persisted result before success receipt."""
+
+    descriptor = _repo_change_open_workspace_file(relative_path, flags=os.O_RDONLY)
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_mode & 0o077
+            or metadata.st_uid != os.getuid()
+            or metadata.st_nlink != 1
+        ):
+            raise RepoSandboxError("repository result artifact permissions are unsafe")
+        maximum = RepoSandboxLimits.from_settings(settings.repo_sandbox).max_output_bytes
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = -1
+            payload = handle.read(maximum + 1)
+        if len(payload) > maximum:
+            raise RepoSandboxError("repository result artifact exceeds its fixed bound")
+        return hashlib.sha256(payload).hexdigest()
+    except OSError as exc:
+        raise RepoSandboxError("repository result artifact readback failed") from exc
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _repo_change_track_sandbox_call(job_id: str, callable_obj: Any, *args: Any, **kwargs: Any) -> asyncio.Task[Any]:
+    """Keep a cancelled caller's worker thread addressable until it settles."""
+
+    task = asyncio.create_task(asyncio.to_thread(callable_obj, *args, **kwargs))
+    _REPO_CHANGE_INFLIGHT_TASKS[job_id] = task
+
+    def _forget(done: asyncio.Task[Any]) -> None:
+        if _REPO_CHANGE_INFLIGHT_TASKS.get(job_id) is done:
+            _REPO_CHANGE_INFLIGHT_TASKS.pop(job_id, None)
+        try:
+            done.exception()
+        except BaseException:
+            pass
+
+    task.add_done_callback(_forget)
+    return task
+
+
+async def _repo_change_settle_cancelled_sandbox(
+    *,
+    job_id: str,
+    owner: str,
+    fencing_token: int,
+    task: asyncio.Task[Any] | None,
+    recovered: bool = False,
+) -> dict[str, Any]:
+    """Settle coroutine cancellation without losing the sandbox thread."""
+
+    settlement_error = False
+    try:
+        latest = await durable_job_repository.get_job(job_id)
+    except BaseException:
+        # Cancellation must remain operator-visible even when the durable read
+        # is itself interrupted or temporarily unavailable.  Keep the worker
+        # task addressable and never claim that a terminal receipt was written.
+        latest = {}
+        settlement_error = True
+    latest = latest if isinstance(latest, dict) else {}
+    status = str(latest.get("status") or "")
+    if not settlement_error and status not in {"cancelled", "unknown_external_effect", "cost_liability", "succeeded", "failed", "blocked"}:
+        dispatch_reserved = _repo_change_dispatch_reserved(latest)
+        target_status = "unknown_external_effect" if dispatch_reserved else "cancelled"
+        reason = "cancelled_after_dispatch" if dispatch_reserved else "cancelled_before_dispatch"
+        result = {
+            "learning": "no_learning",
+            "memory_status": "no_learning",
+            "reason_code": reason,
+            "recovered": recovered,
+            "dispatch_reserved": dispatch_reserved,
+            "operator_action": "reconcile_or_cancel" if dispatch_reserved else "none",
+            "thread_tracked": True,
+        }
+        try:
+            latest = await durable_job_repository.transition_job(
+                job_id,
+                target_status,
+                owner=owner,
+                fencing_token=fencing_token,
+                expected_revision=latest.get("revision"),
+                reason=reason,
+                result=result,
+                result_summary=(
+                    "Sandbox dispatch was interrupted; reconcile the external worker before retry."
+                    if dispatch_reserved
+                    else "Sandbox cancellation was recorded before external dispatch."
+                ),
+            )
+            status = str(latest.get("status") or target_status)
+        except BaseException:
+            settlement_error = True
+            try:
+                refreshed = await durable_job_repository.get_job(job_id)
+            except BaseException:
+                refreshed = None
+            latest = refreshed if isinstance(refreshed, dict) else latest
+            status = str(latest.get("status") or "unknown_external_effect")
+
+    # Give a cooperative worker a short bounded opportunity to settle.  The
+    # task remains in _REPO_CHANGE_INFLIGHT_TASKS when the deadline is reached,
+    # so a cancelled request never silently forgets a live Docker thread.
+    timeout_seconds = 0.0
+    deadline_value = latest.get("deadline_at") if isinstance(latest, dict) else None
+    if deadline_value:
+        try:
+            deadline = datetime.fromisoformat(str(deadline_value).replace("Z", "+00:00"))
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=timezone.utc)
+            timeout_seconds = max(0.0, min(5.0, (deadline - datetime.now(timezone.utc)).total_seconds()))
+        except (TypeError, ValueError):
+            timeout_seconds = 0.0
+    if task is not None and timeout_seconds > 0 and not task.done():
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=timeout_seconds)
+        except BaseException:
+            pass
+    return {
+        "status": status or "unknown_external_effect",
+        "job_id": job_id,
+        "job": latest,
+        "reason_code": (
+            "cancellation_settlement_unavailable"
+            if settlement_error
+            else ("cancelled_after_dispatch" if _repo_change_dispatch_reserved(latest) else "cancelled_before_dispatch")
+        ),
+        "operator_action": (
+            "reconcile_or_cancel"
+            if settlement_error or _repo_change_dispatch_reserved(latest)
+            else "none"
+        ),
+        "thread_tracked": bool(task is not None and not task.done()),
+        "learning": "no_learning",
+        "operator_visible": True,
+    }
+
+
+def _repo_change_dispatch_checkpoint_envelope(
+    job: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, int | None, bool]:
+    """Return the dispatch payload and its server-owned checkpoint fence.
+
+    ``record_checkpoint`` safely redacts token-shaped fields inside a payload,
+    while the checkpoint receipt's top-level ``fencing_token`` is the durable
+    CAS envelope written by the server.  Cancellation/recovery must use that
+    envelope for the original worker fence; the public payload is only a
+    structural projection.
+    """
 
     checkpoints = job.get("checkpoints") if isinstance(job, dict) else None
     if not isinstance(checkpoints, list):
-        return None
+        return None, None, True
     for item in reversed(checkpoints):
         payload = item.get("payload") if isinstance(item, dict) else None
-        if isinstance(payload, dict) and payload.get("phase") == "docker_dispatch_reserved":
-            return payload
-    return None
+        if isinstance(payload, dict) and payload.get("phase") in {
+            "docker_dispatch_reserved",
+            "executor_dispatch_reserved",
+        }:
+            envelope_fence: int | None = None
+            envelope_valid = True
+            if isinstance(item, dict) and "fencing_token" in item:
+                raw_fence = item.get("fencing_token")
+                if type(raw_fence) is int and raw_fence > 0:
+                    envelope_fence = raw_fence
+                else:
+                    envelope_valid = False
+            return dict(payload), envelope_fence, envelope_valid
+    return None, None, True
+
+
+def _repo_change_dispatch_checkpoint(job: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return the latest durable executor dispatch fence payload."""
+
+    payload, envelope_fence, envelope_valid = _repo_change_dispatch_checkpoint_envelope(job)
+    if payload is None:
+        return None
+    if envelope_valid and envelope_fence is not None:
+        payload_fence = payload.get("fencing_token")
+        if payload_fence in (None, "[redacted]"):
+            payload["fencing_token"] = envelope_fence
+    return payload
 
 
 def _repo_change_dispatch_reserved(job: dict[str, Any] | None) -> bool:
-    """Return whether the durable row crossed the Docker dispatch fence."""
+    """Return whether the durable row crossed the executor dispatch fence."""
 
     return _repo_change_dispatch_checkpoint(job) is not None
 
@@ -5221,26 +5618,257 @@ def _repo_change_dispatch_contract(
 ) -> tuple[bool, str, dict[str, Any] | None]:
     """Validate the persisted dispatch fence before adopting external work."""
 
-    payload = _repo_change_dispatch_checkpoint(job)
+    payload, envelope_fence, envelope_valid = _repo_change_dispatch_checkpoint_envelope(job)
     if payload is None:
         return False, "recovery_dispatch_fence_missing", None
+    if not envelope_valid:
+        return False, "recovery_dispatch_contract_mismatch", payload
+    payload_fence = payload.get("fencing_token")
+    if envelope_fence is not None:
+        if payload_fence not in (None, "[redacted]") and (
+            type(payload_fence) is not int or payload_fence != envelope_fence
+        ):
+            return False, "recovery_dispatch_contract_mismatch", payload
+        payload["fencing_token"] = envelope_fence
+    elif payload_fence is not None and (
+        type(payload_fence) is not int or payload_fence <= 0
+    ):
+        return False, "recovery_dispatch_contract_mismatch", payload
     job = job if isinstance(job, dict) else {}
     authority = authority if isinstance(authority, dict) else {}
+    try:
+        expected_base_digest = _repo_change_normalize_base_digest(authority)
+    except RepoSandboxError:
+        return False, "recovery_dispatch_contract_mismatch", payload
     token = RootlessDockerRepoSandbox._server_token(str(job.get("job_id") or ""))
+    executor_kind = str(authority.get("executor_kind") or "docker_rootless")
+    # Checkpoints written before the selectable-executor extension have no
+    # discriminator.  They are historical repo-change/rootless work and must
+    # remain replayable without inventing a new local authority field.
+    payload_executor_kind = str(payload.get("executor_kind") or "docker_rootless")
+    if payload_executor_kind != executor_kind:
+        return False, "recovery_dispatch_contract_mismatch", payload
     expected = {
         "job_id": str(job.get("job_id") or ""),
         "attempt": int(job.get("attempt_count") or 0),
         "authority_digest": str(job.get("authority_digest") or ""),
-        "base_digest": str(authority.get("base_digest") or ""),
-        "patch_sha256": str(authority.get("patch_sha256") or ""),
-        "image_digest": str(authority.get("image_digest") or ""),
-        "limits_digest": str(authority.get("limits_digest") or ""),
-        "container_name": f"{token}-worker",
-        "input_volume": f"{token}-input",
+        "base_digest": expected_base_digest,
     }
+    if "attempt_id" in payload:
+        declared_authority = (
+            job.get("declared_authority")
+            if isinstance(job.get("declared_authority"), Mapping)
+            else {}
+        )
+        expected_attempt_id = str(
+            authority.get("attempt_id")
+            or authority.get("work_board_attempt_id")
+            or declared_authority.get("attempt_id")
+            or ""
+        )
+        if not expected_attempt_id or payload.get("attempt_id") != expected_attempt_id:
+            return False, "recovery_dispatch_contract_mismatch", payload
+        try:
+            if int(payload.get("fencing_token") or 0) <= 0:
+                return False, "recovery_dispatch_contract_mismatch", payload
+        except (TypeError, ValueError, OverflowError):
+            return False, "recovery_dispatch_contract_mismatch", payload
+    if "executor_kind" in payload:
+        expected["executor_kind"] = executor_kind
+    if executor_kind == "local":
+        expected["process_group_identity"] = f"{token}-local"
+    else:
+        expected.update({
+            "patch_sha256": str(authority.get("patch_sha256") or ""),
+            "image_digest": str(authority.get("image_digest") or ""),
+            "limits_digest": str(authority.get("limits_digest") or ""),
+            "container_name": f"{token}-worker",
+            "input_volume": f"{token}-input",
+        })
     if any(payload.get(key) != value for key, value in expected.items()):
         return False, "recovery_dispatch_contract_mismatch", payload
     return True, "", payload
+
+
+def _repo_change_execution_authority(
+    job: Mapping[str, Any],
+    dispatch_payload: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return worker authority with the original dispatch attempt/fence.
+
+    The durable row's current lease can be a newly reclaimed cancellation or
+    recovery lease. Worker cleanup must use the accepted execution binding
+    recorded at dispatch, while owner/session and current-lease checks happen
+    independently before this helper is called.
+    """
+
+    authority = dict(
+        job.get("declared_authority")
+        if isinstance(job.get("declared_authority"), Mapping)
+        else {}
+    )
+    payload = (
+        dispatch_payload
+        if isinstance(dispatch_payload, Mapping)
+        else _repo_change_dispatch_checkpoint(dict(job))
+    )
+    if isinstance(payload, Mapping):
+        attempt_id = str(payload.get("attempt_id") or "").strip()
+        if attempt_id:
+            authority["attempt_id"] = attempt_id
+        try:
+            accepted_fence = int(payload.get("fencing_token") or 0)
+        except (TypeError, ValueError, OverflowError):
+            accepted_fence = 0
+        if accepted_fence > 0:
+            authority["fencing_token"] = accepted_fence
+    _repo_change_normalize_base_digest(authority)
+    return authority
+
+
+def _repo_change_normalize_base_digest(authority: dict[str, Any]) -> str:
+    """Normalize the server-owned repair base field used by the runner.
+
+    Repair proposals call the inspected snapshot ``base_snapshot_digest``;
+    the shared sandbox dispatch envelope calls the same immutable value
+    ``base_digest``.  A caller or a redacted checkpoint payload must never be
+    allowed to choose between two values, so an explicit disagreement fails
+    closed before any cleanup or worker contact.
+    """
+
+    canonical = str(authority.get("base_snapshot_digest") or "").strip()
+    alias = str(authority.get("base_digest") or "").strip()
+    if canonical and alias and canonical != alias:
+        raise RepoSandboxError("repository base digest authority changed")
+    resolved = alias or canonical
+    if resolved:
+        authority["base_digest"] = resolved
+    return resolved
+
+
+async def _repo_change_recovery_authority(
+    job: Mapping[str, Any],
+    dispatch_payload: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Rebuild the exact repair authority needed for cleanup/recovery.
+
+    The durable admission envelope predates the inspected source packet and
+    therefore may not contain the proposal's base snapshot or patch fields.
+    Recovery reads the owner/job-bound immutable proposal and source packet to
+    recover those fields.  It deliberately does not resolve approval expiry,
+    call the model, probe an executor, or replay proposal execution: cleanup
+    of an already-dispatched work item must remain possible after approval
+    expiry.  The dispatch payload remains a consistency check only.
+    """
+
+    authority = _repo_change_execution_authority(job, dispatch_payload)
+    if str(job.get("job_kind") or "") != "engineering.repo-repair.v1":
+        return authority
+
+    owner = job.get("owner") if isinstance(job.get("owner"), Mapping) else {}
+    declared = job.get("declared_authority") if isinstance(job.get("declared_authority"), Mapping) else {}
+    principal_id = str(owner.get("principal_id") or declared.get("principal") or "").strip()
+    session_id = str(
+        job.get("session_id")
+        or job.get("operator_session_id")
+        or declared.get("session_id")
+        or declared.get("operator_session_id")
+        or ""
+    ).strip()
+    job_id = str(job.get("job_id") or job.get("run_identity") or "").strip()
+    if not principal_id or not session_id or not job_id:
+        raise RepoSandboxError("repository repair recovery authority is incomplete")
+
+    approval_id = str(authority.get("approval_id") or declared.get("approval_id") or "").strip()
+    task_id = str(declared.get("task_id") or "").strip()
+    attempt_id = str(declared.get("attempt_id") or "").strip()
+    async with get_session() as db:
+        proposal_query = select(RepoRepairProposalRow).where(
+            RepoRepairProposalRow.workflow_run_id == job_id,
+            RepoRepairProposalRow.owner_principal_id == principal_id,
+            RepoRepairProposalRow.owner_session_id == session_id,
+        )
+        if task_id:
+            proposal_query = proposal_query.where(RepoRepairProposalRow.work_board_task_id == task_id)
+        if attempt_id:
+            proposal_query = proposal_query.where(RepoRepairProposalRow.work_board_attempt_id == attempt_id)
+        if approval_id:
+            proposal_query = proposal_query.where(RepoRepairProposalRow.approval_id == approval_id)
+        proposals = (
+            await db.execute(proposal_query.order_by(RepoRepairProposalRow.created_at.desc()))
+        ).scalars().all()
+        if len(proposals) != 1:
+            raise RepoSandboxError("repository repair recovery proposal is unavailable")
+        proposal = proposals[0]
+        packet = (
+            await db.execute(
+                select(RepoRepairSourcePacketRow).where(
+                    RepoRepairSourcePacketRow.id == proposal.source_packet_id,
+                    RepoRepairSourcePacketRow.workflow_run_id == job_id,
+                    RepoRepairSourcePacketRow.owner_principal_id == principal_id,
+                    RepoRepairSourcePacketRow.owner_session_id == session_id,
+                    RepoRepairSourcePacketRow.work_board_task_id == proposal.work_board_task_id,
+                    RepoRepairSourcePacketRow.work_board_attempt_id == proposal.work_board_attempt_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if packet is None:
+            raise RepoSandboxError("repository repair recovery source binding is unavailable")
+        db.expunge(proposal)
+        db.expunge(packet)
+
+    if str(proposal.status or "") not in {"approved", "consumed", "execution_failed", "blocked"}:
+        raise RepoSandboxError("repository repair recovery proposal is not executable")
+    if (
+        str(packet.state or "") != "verified"
+        or
+        str(packet.base_snapshot_digest or "") != str(proposal.base_snapshot_digest or "")
+        or str(packet.source_manifest_digest or "") != str(proposal.source_digest or "")
+    ):
+        raise RepoSandboxError("repository repair recovery source binding changed")
+    if (
+        str(proposal.owner_principal_id) != principal_id
+        or str(proposal.owner_session_id) != session_id
+        or str(proposal.workflow_run_id) != job_id
+        or str(proposal.goal_id or "") != str(job.get("goal_id") or declared.get("goal_id") or "")
+        or int(proposal.goal_revision or 0) != int(job.get("goal_revision") or declared.get("goal_revision") or 0)
+    ):
+        raise RepoSandboxError("repository repair recovery authority binding changed")
+    for authority_key, proposal_key in (
+        ("task_id", "work_board_task_id"),
+        ("attempt_id", "work_board_attempt_id"),
+    ):
+        declared_value = str(declared.get(authority_key) or "").strip()
+        if declared_value and declared_value != str(getattr(proposal, proposal_key) or ""):
+            raise RepoSandboxError("repository repair recovery attempt binding changed")
+
+    try:
+        from src.workflows.repo_repair import _proposal_authority_payload
+
+        canonical = _proposal_authority_payload(proposal)
+    except Exception as exc:
+        raise RepoSandboxError("repository repair recovery proposal authority is invalid") from exc
+    canonical["base_digest"] = str(proposal.base_snapshot_digest or "")
+    # The immutable proposal uses descriptive selector names while the shared
+    # runner consumes the legacy execution names.  Keep both server-derived;
+    # never fill these from the redacted dispatch payload.
+    for canonical_key, runner_key in (
+        ("sandbox_profile", "profile"),
+        ("sandbox_image_digest", "image_digest"),
+        ("sandbox_limits_digest", "limits_digest"),
+    ):
+        value = str(canonical.get(canonical_key) or "")
+        if value:
+            canonical[runner_key] = value
+    for key, value in canonical.items():
+        if value in (None, "", [], {}):
+            continue
+        existing = authority.get(key)
+        if existing not in (None, "", [], {}) and existing != value:
+            raise RepoSandboxError("repository repair recovery authority changed")
+        authority[key] = value
+    _repo_change_normalize_base_digest(authority)
+    return authority
 
 
 def _repo_change_error_code(exc: BaseException) -> str:
@@ -5288,6 +5916,136 @@ def _repo_change_cleanup_proven(cleanup: Any) -> bool:
     )
 
 
+async def _repo_change_reserve_cancel_cleanup(
+    job: Mapping[str, Any],
+    *,
+    reason: str,
+    expected_owner: str | None = None,
+    expected_fencing_token: int | None = None,
+) -> dict[str, Any]:
+    """Reserve cancellation before touching an externally dispatched worker."""
+
+    job_id = str(job.get("job_id") or "")
+    status = str(job.get("status") or "")
+    if status == "unknown_external_effect":
+        return dict(job)
+    lease = job.get("lease") if isinstance(job.get("lease"), Mapping) else {}
+    owner = str(lease.get("owner") or "") or None
+    try:
+        fencing_token = int(lease.get("fencing_token") or 0) or None
+    except (TypeError, ValueError, OverflowError):
+        fencing_token = None
+    if expected_owner is not None and owner != str(expected_owner):
+        raise DurableJobLeaseError("repository cancellation lease owner changed")
+    if expected_fencing_token is not None and fencing_token != int(expected_fencing_token):
+        raise DurableJobLeaseError("repository cancellation fencing token changed")
+    reserved = await durable_job_repository.transition_job(
+        job_id,
+        "unknown_external_effect",
+        owner=owner,
+        fencing_token=fencing_token,
+        expected_revision=job.get("revision"),
+        reason="cancel_cleanup_pending",
+        result={
+            "learning": "no_learning",
+            "memory_status": "no_learning",
+            "cancellation_pending": True,
+            "operator_action": "reconcile_or_cancel",
+            "requested_reason": reason,
+        },
+    )
+    return reserved
+
+
+async def _repo_change_record_cancel_cleanup(
+    job: Mapping[str, Any],
+    *,
+    cleanup: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Retain an unproven cancellation receipt on the reserved root."""
+
+    owner = job.get("owner") if isinstance(job.get("owner"), Mapping) else {}
+    return await durable_job_repository.record_recovery_checkpoint(
+        str(job.get("job_id") or ""),
+        owner_kind=str(owner.get("kind") or "user"),
+        owner_principal_id=str(owner.get("principal_id") or ""),
+        checkpoint_id=f"repo-change-cancel-cleanup:{job.get('job_id')}",
+        state={"phase": "cancel_cleanup", "status": "unknown_external_effect"},
+        checkpoint_payload={
+            "kind": "repo_change_cancel_cleanup",
+            "status": "unknown_external_effect",
+            "cleanup": dict(cleanup),
+            "operator_action": "reconcile_or_cancel",
+        },
+        expected_revision=int(job.get("revision") or 0),
+    )
+
+
+async def _repo_change_settle_reserved_cancel(
+    reserved: Mapping[str, Any],
+    *,
+    cleanup: Mapping[str, Any],
+    reason: str,
+) -> dict[str, Any]:
+    """Finish a cancellation that already owns the durable no-retry fence."""
+
+    job_id = str(reserved.get("job_id") or "")
+    latest = await durable_job_repository.get_job(job_id) or dict(reserved)
+    latest_status = str(latest.get("status") or "")
+    if latest_status != "unknown_external_effect":
+        if latest_status in {"cancelled", "succeeded", "failed", "blocked", "cost_liability"}:
+            return {
+                "status": latest_status,
+                "job": latest,
+                "cleanup": dict(cleanup),
+                "operator_action": _repo_change_terminal_action(latest_status),
+                "learning": "no_learning",
+            }
+        # The reservation disappeared or was replaced while external cleanup
+        # was in flight.  Never adopt that row's lease; retain an operator
+        # visible unknown outcome for explicit reconciliation.
+        return {
+            "status": "unknown_external_effect",
+            "durable_status": latest_status,
+            "job": latest,
+            "cleanup": dict(cleanup),
+            "operator_action": "reconcile_or_cancel",
+            "learning": "no_learning",
+        }
+    cleanup_proven = _repo_change_cleanup_proven(cleanup)
+    if cleanup_proven:
+        settled = await durable_job_repository.transition_job(
+            job_id,
+            "cancelled",
+            expected_revision=latest.get("revision"),
+            reason=reason,
+            result={
+                "learning": "no_learning",
+                "memory_status": "no_learning",
+                "cleanup": dict(cleanup),
+                "cleanup_proven": True,
+                "operator_action": "none",
+            },
+        )
+        return {
+            "status": settled.get("status"),
+            "job": settled,
+            "cleanup": dict(cleanup),
+            "operator_action": "none",
+        }
+    try:
+        retained = await _repo_change_record_cancel_cleanup(latest, cleanup=cleanup)
+    except Exception:
+        retained = latest
+    return {
+        "status": "unknown_external_effect",
+        "job": retained,
+        "cleanup": dict(cleanup),
+        "operator_action": "reconcile_or_cancel",
+        "learning": "no_learning",
+    }
+
+
 async def _repo_change_patch_read_blocked(
     *,
     job_id: str,
@@ -5295,6 +6053,7 @@ async def _repo_change_patch_read_blocked(
     fencing_token: int,
     revision: int,
     exc: BaseException,
+    authority: Mapping[str, Any] | None = None,
     recovered: bool = False,
 ) -> dict[str, Any]:
     """Persist an operator-visible block when an approved patch cannot be read.
@@ -5327,18 +6086,84 @@ async def _repo_change_patch_read_blocked(
             "operator_visible": True,
         }
     latest_lease = latest.get("lease") if isinstance(latest.get("lease"), dict) else {}
-    transition_owner = str(latest_lease.get("owner") or owner)
-    transition_fence = int(latest_lease.get("fencing_token") or fencing_token)
+    try:
+        live_fence = int(latest_lease.get("fencing_token") or 0)
+    except (TypeError, ValueError, OverflowError):
+        live_fence = -1
+    # This helper is called by the executor that held the original claim.  A
+    # successor lease must never be borrowed to finalize the old executor's
+    # patch-read failure; leave the row for bounded reconciliation instead.
+    if (
+        latest_status != "running"
+        or str(latest_lease.get("owner") or "") != str(owner)
+        or live_fence != int(fencing_token)
+    ):
+        return {
+            "status": "unknown_external_effect",
+            "job_id": job_id,
+            "job": latest,
+            "reason_code": "repository_recovery_lease_changed",
+            "operator_action": "reconcile_or_cancel",
+            "learning": "no_learning",
+            "operator_visible": True,
+        }
+    transition_owner = str(owner)
+    transition_fence = int(fencing_token)
     transition_revision = int(latest.get("revision") or revision)
     cleanup: dict[str, Any] | None = None
+    cleanup_reserved = False
     if _repo_change_dispatch_reserved(latest):
-        token = RootlessDockerRepoSandbox._server_token(job_id)
+        # The patch reader is an expired/restarted executor.  Reserve the
+        # durable root before touching Docker so a successor cannot claim the
+        # same job while this stale process is deleting its worker.
         try:
-            cleanup = RootlessDockerRepoSandbox().cancel(
-                container_name=f"{token}-worker",
-                additional_container_names=(f"{token}-loader",),
-                input_volume=f"{token}-input",
+            reserved = await _repo_change_reserve_cancel_cleanup(
+                latest,
+                reason=error_code,
+                expected_owner=transition_owner,
+                expected_fencing_token=transition_fence,
             )
+        except (DurableJobError, OSError, ValueError) as reserve_exc:
+            refreshed = await durable_job_repository.get_job(job_id) or latest
+            return {
+                "status": "unknown_external_effect",
+                "job_id": job_id,
+                "job": refreshed,
+                "reason_code": "repository_recovery_lease_changed",
+                "operator_action": "reconcile_or_cancel",
+                "error_type": type(reserve_exc).__name__,
+                "learning": "no_learning",
+                "operator_visible": True,
+            }
+        latest = reserved
+        transition_revision = int(latest.get("revision") or transition_revision)
+        cleanup_reserved = True
+        dispatch_payload = _repo_change_dispatch_checkpoint(latest)
+        try:
+            execution_authority = await _repo_change_recovery_authority(latest, dispatch_payload)
+            if authority:
+                execution_authority.update(dict(authority))
+                _repo_change_normalize_base_digest(execution_authority)
+            executor = _build_repo_repair_executor_for_authority(execution_authority)
+            await asyncio.to_thread(
+                _preflight_approved_executor_for_cleanup,
+                executor,
+                execution_authority,
+            )
+            if str(getattr(executor, "kind", "") or "") == "local":
+                cleanup = await asyncio.to_thread(
+                    executor.cancel,
+                    job_id=job_id,
+                    authority=execution_authority,
+                )
+            else:
+                token = RootlessDockerRepoSandbox._server_token(job_id)
+                cleanup = await asyncio.to_thread(
+                    executor.cancel,
+                    container_name=str((dispatch_payload or {}).get("container_name") or f"{token}-worker"),
+                    additional_container_names=(f"{token}-loader",),
+                    input_volume=str((dispatch_payload or {}).get("input_volume") or f"{token}-input"),
+                )
         except (OSError, RepoSandboxError, ValueError) as cleanup_exc:
             cleanup = {
                 "status": "unknown_external_effect",
@@ -5358,6 +6183,55 @@ async def _repo_change_patch_read_blocked(
         "cleanup_proven": cleanup_proven,
         "operator_action": "retry_or_cancel" if transition_status == "blocked" else "reconcile_or_cancel",
     }
+    if cleanup_reserved:
+        # The reservation intentionally clears the lease.  Settle only from
+        # that same unknown row; never write a blocked terminal state with the
+        # stale executor's owner/fence.
+        if cleanup_proven:
+            try:
+                reserved_latest = await durable_job_repository.get_job(job_id) or latest
+                blocked = await durable_job_repository.transition_job(
+                    job_id,
+                    "blocked",
+                    expected_revision=reserved_latest.get("revision"),
+                    reason=error_code,
+                    result=result,
+                    result_summary="Approved patch artifact could not be read after verified worker cleanup; create a fresh preview or cancel the job.",
+                )
+            except Exception as settle_exc:
+                refreshed = await durable_job_repository.get_job(job_id) or latest
+                return {
+                    "status": "unknown_external_effect",
+                    "job_id": job_id,
+                    "job": refreshed,
+                    "reason_code": "repository_recovery_cleanup_settlement_unavailable",
+                    "operator_action": "reconcile_or_cancel",
+                    "error_type": type(settle_exc).__name__,
+                    "learning": "no_learning",
+                    "operator_visible": True,
+                }
+            return {
+                "status": "blocked",
+                "job_id": job_id,
+                "job": blocked,
+                "reason_code": error_code,
+                "operator_action": "retry_or_cancel",
+                "learning": "no_learning",
+                "operator_visible": True,
+            }
+        try:
+            retained = await _repo_change_record_cancel_cleanup(latest, cleanup=cleanup or {})
+        except Exception:
+            retained = latest
+        return {
+            "status": "unknown_external_effect",
+            "job_id": job_id,
+            "job": retained,
+            "reason_code": error_code,
+            "operator_action": "reconcile_or_cancel",
+            "learning": "no_learning",
+            "operator_visible": True,
+        }
     blocked = await durable_job_repository.transition_job(
         job_id,
         transition_status,
@@ -5400,7 +6274,7 @@ async def _record_repo_change_goal_outcome(
         raise ValueError("repo-change goal outcome binding is incomplete")
     inputs = {
         "job_id": job_id,
-        "base_digest": str(authority.get("base_digest") or ""),
+        "base_digest": _repo_change_normalize_base_digest(authority),
         "patch_sha256": str(authority.get("patch_sha256") or ""),
     }
     dedupe_key = f"repo-change-outcome:{job_id}"
@@ -5476,6 +6350,22 @@ async def _repo_change_local_finalize_pending(
             "operator_action": "reconcile_or_cancel" if status == "unknown_external_effect" else "none",
             "learning": "no_learning",
         }
+    if latest is not None:
+        live_lease = latest.get("lease") if isinstance(latest.get("lease"), Mapping) else {}
+        try:
+            live_fence = int(live_lease.get("fencing_token") or 0)
+        except (TypeError, ValueError, OverflowError):
+            live_fence = -1
+        if str(live_lease.get("owner") or "") != str(owner) or live_fence != int(fencing_token):
+            return {
+                "status": "unknown_external_effect",
+                "job_id": job_id,
+                "job": latest,
+                "reason_code": "repository_execution_lease_changed",
+                "operator_action": "reconcile_or_cancel",
+                "learning": "no_learning",
+                "operator_visible": True,
+            }
     current_revision = int((latest or {}).get("revision") or revision)
     try:
         blocked = await durable_job_repository.transition_job(
@@ -5551,14 +6441,14 @@ async def _repo_change_reconcile_verified_local_result(
     if not expected_digest:
         return None
     try:
-        descriptor = _repo_change_open_workspace_file(expected_path, flags=os.O_RDONLY)
-        with os.fdopen(descriptor, "rb") as handle:
-            payload = handle.read(RepoSandboxLimits.from_settings(settings.repo_sandbox).max_output_bytes + 1)
-        if len(payload) > RepoSandboxLimits.from_settings(settings.repo_sandbox).max_output_bytes:
-            return None
+        # Restart adoption must apply the same private owner/mode/link checks
+        # as the normal success path.  A matching digest alone cannot prove
+        # that a readback file remained private after the original worker
+        # wrote it.
+        actual_digest = _repo_change_verify_persisted_artifact(expected_path)
     except (OSError, RepoSandboxError, ValueError):
         return None
-    if hashlib.sha256(payload).hexdigest() != expected_digest:
+    if actual_digest != expected_digest:
         return None
     current = await durable_job_repository.get_job(job_id) or job
     if str(current.get("status") or "") == "succeeded":
@@ -5755,34 +6645,110 @@ def _repo_change_dispatch_payload(
 
     job_id = str(current["job_id"])
     dispatch_token = RootlessDockerRepoSandbox._server_token(job_id)
-    return {
-        "phase": "docker_dispatch_reserved",
+    executor_kind = str(authority.get("executor_kind") or "docker_rootless")
+    dispatch_phase = "executor_dispatch_reserved" if executor_kind == "local" else "docker_dispatch_reserved"
+    payload = {
+        "phase": dispatch_phase,
         "job_id": job_id,
         "attempt": int(claimed.get("attempt_count") or 0),
         "authority_digest": str(current.get("authority_digest") or ""),
-        "base_digest": str(authority.get("base_digest") or ""),
-        "patch_sha256": str(authority.get("patch_sha256") or ""),
-        "image_digest": str(authority.get("image_digest") or ""),
-        "limits_digest": str(authority.get("limits_digest") or ""),
-        "container_name": f"{dispatch_token}-worker",
-        "input_volume": f"{dispatch_token}-input",
+        "base_digest": _repo_change_normalize_base_digest(authority),
         "retry": retry,
+        "executor_kind": executor_kind,
     }
+    # Cancellation and restart reconciliation must target the exact accepted
+    # worker attempt. A later cancellation lease is an ownership check only;
+    # it cannot authorize a different child fence.
+    accepted_attempt_id = str(
+        authority.get("attempt_id")
+        or authority.get("work_board_attempt_id")
+        or (
+            claimed.get("declared_authority")
+            if isinstance(claimed.get("declared_authority"), Mapping)
+            else {}
+        ).get("attempt_id")
+        or ""
+    ).strip()
+    if accepted_attempt_id:
+        payload["attempt_id"] = accepted_attempt_id
+    try:
+        accepted_fence = int((claimed.get("lease") or {}).get("fencing_token") or 0)
+    except (TypeError, ValueError, OverflowError):
+        accepted_fence = 0
+    if accepted_fence > 0:
+        payload["fencing_token"] = accepted_fence
+    if executor_kind == "local":
+        payload["process_group_identity"] = f"{dispatch_token}-local"
+    else:
+        payload.update({
+            "patch_sha256": str(authority.get("patch_sha256") or ""),
+            "image_digest": str(authority.get("image_digest") or ""),
+            "limits_digest": str(authority.get("limits_digest") or ""),
+            "container_name": f"{dispatch_token}-worker",
+            "input_volume": f"{dispatch_token}-input",
+        })
+    return payload
 
 
-async def _execute_repo_change_claimed(
+async def _execute_repo_change_claimed_inner(
     *,
     current: dict[str, Any],
     authority: dict[str, Any],
     claimed: dict[str, Any],
     approval_id: str | None = None,
     retry: bool = False,
+    proof_kind: str = "GuardianPacket",
+    execution_deadline_at: str | None = None,
 ) -> dict[str, Any]:
-    """Run one already-approved, fenced repository job exactly once."""
+    """Run one already-approved, fenced repository job exactly once.
+
+    ``GuardianPacket`` is the historical ``engineering.repo-change.v1``
+    authority.  ``RepoRepairProposal`` is an explicit second proof shape for
+    the M4 repair capability; it shares the fixed sandbox runner and durable
+    readback path but never enters the Guardian candidate resolver.
+    """
+    if proof_kind not in {"GuardianPacket", "RepoRepairProposal"}:
+        raise DurableJobError("repository execution proof kind is invalid")
+    artifact_namespace = "repo-repair" if proof_kind == "RepoRepairProposal" else "repo-change"
     lease = claimed.get("lease") or {}
     owner = str(lease.get("owner") or _REPO_CHANGE_SERVICE_LEASE)
     fencing_token = int(lease.get("fencing_token") or 0)
     revision = int(claimed.get("revision") or 0)
+    claimed_owner = owner
+    claimed_fencing_token = fencing_token
+
+    async def current_claim() -> dict[str, Any]:
+        """Reload the root without adopting a successor worker's lease."""
+
+        latest = await durable_job_repository.get_job(str(current["job_id"]))
+        if not latest:
+            raise DurableJobError("repository_execution_root_missing")
+        latest_lease = latest.get("lease") or {}
+        live_owner = str(latest_lease.get("owner") or "")
+        try:
+            live_fence = int(latest_lease.get("fencing_token") or 0)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise DurableJobLeaseError("repository execution lease is malformed") from exc
+        status = str(latest.get("status") or "")
+        if status in {"cancelled", "unknown_external_effect", "cost_liability"}:
+            return latest
+        if status != "running" or live_owner != claimed_owner or live_fence != claimed_fencing_token:
+            raise DurableJobLeaseError("repository execution lease changed")
+        return latest
+
+    def claim_matches(latest: Mapping[str, Any] | None) -> bool:
+        if not isinstance(latest, Mapping):
+            return False
+        live_lease = latest.get("lease") or {}
+        try:
+            live_fence = int(live_lease.get("fencing_token") or 0)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        return (
+            str(latest.get("status") or "") == "running"
+            and str(live_lease.get("owner") or "") == claimed_owner
+            and live_fence == claimed_fencing_token
+        )
 
     async def record_repo_phase(
         phase: str,
@@ -5790,51 +6756,64 @@ async def _execute_repo_change_claimed(
         checkpoint_payload: dict[str, Any] | None = None,
         **details: Any,
     ) -> dict[str, Any]:
-        nonlocal owner, fencing_token, revision
-        latest = await durable_job_repository.get_job(str(current["job_id"])) or claimed
-        latest_lease = latest.get("lease") or lease
+        nonlocal revision
+        latest = await current_claim()
+        if str(latest.get("status") or "") in {"cancelled", "unknown_external_effect", "cost_liability"}:
+            raise DurableJobLeaseError("repository execution root is no longer runnable")
         updated = await durable_job_repository.record_checkpoint(
             str(current["job_id"]),
             checkpoint_id=phase,
             state={"phase": phase, **details},
             checkpoint_payload=checkpoint_payload,
-            owner=str(latest_lease.get("owner") or owner),
-            fencing_token=int(latest_lease.get("fencing_token") or fencing_token),
+            owner=claimed_owner,
+            fencing_token=claimed_fencing_token,
             expected_revision=int(latest.get("revision") or revision),
         )
-        owner = str((updated.get("lease") or {}).get("owner") or owner)
-        fencing_token = int((updated.get("lease") or {}).get("fencing_token") or fencing_token)
+        updated_lease = updated.get("lease") or {}
+        if (
+            str(updated_lease.get("owner") or "") != claimed_owner
+            or int(updated_lease.get("fencing_token") or 0) != claimed_fencing_token
+        ):
+            raise DurableJobLeaseError("repository checkpoint changed execution lease")
         revision = int(updated.get("revision") or revision)
         return updated
 
-    await record_repo_phase(
-        "admitted",
-        job_status="accepted",
-        retry=retry,
-    )
-    await record_repo_phase(
-        "approved",
-        approval_id=approval_id or str(authority.get("approval_id") or ""),
-        retry=retry,
-    )
+    sandbox_task: asyncio.Task[Any] | None = None
     try:
+        # These checkpoints are the last durable owner/fence checks before
+        # patch loading and Docker dispatch.  Keep them inside the same
+        # failure boundary as the worker so a cancellation or lease change
+        # observed here never escapes into a caller that could retry the
+        # sandbox without a canonical receipt.
+        await record_repo_phase(
+            "admitted",
+            job_status="accepted",
+            retry=retry,
+        )
+        await record_repo_phase(
+            "approved",
+            approval_id=approval_id or str(authority.get("approval_id") or ""),
+            retry=retry,
+        )
         try:
             patch = _repo_change_read_patch(str(authority.get("patch_artifact_id") or ""))
         except (HTTPException, OSError) as exc:
             return await _repo_change_patch_read_blocked(
                 job_id=str(current["job_id"]),
-                owner=owner,
-                fencing_token=fencing_token,
+                owner=claimed_owner,
+                fencing_token=claimed_fencing_token,
                 revision=revision,
                 exc=exc,
+                authority=authority,
             )
         if hashlib.sha256(patch).hexdigest() != str(authority.get("patch_sha256") or ""):
             return await _repo_change_patch_read_blocked(
                 job_id=str(current["job_id"]),
-                owner=owner,
-                fencing_token=fencing_token,
+                owner=claimed_owner,
+                fencing_token=claimed_fencing_token,
                 revision=revision,
                 exc=RepoSandboxError("patch_digest_changed"),
+                authority=authority,
             )
         await record_repo_phase("worker_started", retry=retry)
 
@@ -5852,12 +6831,17 @@ async def _execute_repo_change_claimed(
             # wins first changes the row to terminal and makes this write
             # fail; a cancellation that arrives after this write must retain
             # an unknown-effect recovery state.
+            dispatch_details = {
+                "retry": retry,
+                "executor_kind": dispatch_payload.get("executor_kind"),
+            }
+            for key in ("container_name", "input_volume", "process_group_identity"):
+                if key in dispatch_payload:
+                    dispatch_details[key] = dispatch_payload[key]
             return await record_repo_phase(
-                "docker_dispatch_reserved",
+                str(dispatch_payload.get("phase") or "docker_dispatch_reserved"),
                 checkpoint_payload=dispatch_payload,
-                container_name=dispatch_payload["container_name"],
-                input_volume=dispatch_payload["input_volume"],
-                retry=retry,
+                **dispatch_details,
             )
 
         def dispatch_guard() -> None:
@@ -5868,8 +6852,14 @@ async def _execute_repo_change_claimed(
                 future.cancel()
                 raise RepoSandboxError("repo_change_dispatch_fence_lost", phase="worker_started") from exc
 
-        result = await asyncio.to_thread(
-            RootlessDockerRepoSandbox().execute_job,
+        execution_sandbox = (
+            _build_repo_repair_executor_compat()
+            if proof_kind == "RepoRepairProposal"
+            else RootlessDockerRepoSandbox()
+        )
+        sandbox_task = _repo_change_track_sandbox_call(
+            str(current["job_id"]),
+            execution_sandbox.execute_job,
             RepoSandboxJob(
                 job_id=str(current["job_id"]), repository_root=str(authority.get("repository_ref") or ""),
                 patch_bytes=patch, allowed_paths=tuple(authority.get("allowed_paths") or ()),
@@ -5877,9 +6867,49 @@ async def _execute_repo_change_claimed(
                 base_digest=str(authority.get("base_digest") or ""), deadline_seconds=int(authority.get("deadline_seconds", 180)),
                 worker_image_digest=str(authority.get("image_digest") or ""),
                 limits_digest=str(authority.get("limits_digest") or ""),
+                execution_deadline_at=(
+                    str(execution_deadline_at or authority.get("execution_deadline_at") or "").strip() or None
+                ),
+                attempt_id=str(
+                    authority.get("attempt_id")
+                    or authority.get("work_board_attempt_id")
+                    or (claimed.get("declared_authority") or {}).get("attempt_id")
+                    or ""
+                ),
+                fencing_token=claimed_fencing_token,
+                expected_posture_digest=str(authority.get("executor_posture_digest") or ""),
+                expected_worker_source_sha256=str(
+                    (authority.get("executor_posture") or {}).get("worker_source_sha256")
+                    if isinstance(authority.get("executor_posture"), Mapping)
+                    else ""
+                ),
+                expected_interpreter_sha256=str(
+                    (authority.get("executor_posture") or {}).get("interpreter_sha256")
+                    if isinstance(authority.get("executor_posture"), Mapping)
+                    else ""
+                ),
+                expected_pytest_executable_sha256=str(
+                    (authority.get("executor_posture") or {}).get("pytest_executable_sha256")
+                    if isinstance(authority.get("executor_posture"), Mapping)
+                    else ""
+                ),
+                expected_pytest_package_sha256=str(
+                    (authority.get("executor_posture") or {}).get("pytest_package_sha256")
+                    if isinstance(authority.get("executor_posture"), Mapping)
+                    else ""
+                ),
             ),
             before_dispatch=dispatch_guard,
         )
+        try:
+            result = await asyncio.shield(sandbox_task)
+        except asyncio.CancelledError:
+            return await _repo_change_settle_cancelled_sandbox(
+                job_id=str(current["job_id"]),
+                owner=claimed_owner,
+                fencing_token=claimed_fencing_token,
+                task=sandbox_task,
+            )
         result_phases = result.get("checkpoint_phases") if isinstance(result, dict) else []
         for phase in ("snapshot_verified", "input_loaded", "tests_finished", "output_exported"):
             if isinstance(result_phases, list) and phase in result_phases:
@@ -5889,7 +6919,19 @@ async def _execute_repo_change_claimed(
                     image_digest=authority.get("image_digest"),
                     retry=retry,
                 )
-    except (OSError, RepoSandboxError) as exc:
+    except asyncio.CancelledError:
+        # Cancellation can happen during any claimed boundary, including a
+        # phase checkpoint or patch read before the sandbox task is created.
+        # Reuse the same owner/fence settlement path so pre-dispatch work is
+        # terminally cancelled while a crossed dispatch fence remains
+        # unknown until its external worker settles.
+        return await _repo_change_settle_cancelled_sandbox(
+            job_id=str(current["job_id"]),
+            owner=claimed_owner,
+            fencing_token=claimed_fencing_token,
+            task=sandbox_task,
+        )
+    except (OSError, RepoSandboxError, DurableJobError) as exc:
         latest = await durable_job_repository.get_job(str(current["job_id"]))
         if latest and str(latest.get("status") or "") in {"cancelled", "unknown_external_effect"}:
             status = str(latest.get("status"))
@@ -5900,7 +6942,15 @@ async def _execute_repo_change_claimed(
                 "operator_action": "reconcile_or_cancel" if status == "unknown_external_effect" else "none",
                 "learning": "no_learning",
             }
-        latest_lease = (latest or {}).get("lease") or lease
+        if latest is not None and not claim_matches(latest):
+            return {
+                "status": "unknown_external_effect",
+                "reason_code": "repository_execution_lease_changed",
+                "job_id": current["job_id"],
+                "job": latest,
+                "operator_action": "reconcile_or_cancel",
+                "learning": "no_learning",
+            }
         if isinstance(exc, RepoSandboxError):
             for phase in exc.checkpoint_phases:
                 if phase in {"snapshot_verified", "input_loaded", "tests_finished", "output_exported"}:
@@ -5914,8 +6964,8 @@ async def _execute_repo_change_claimed(
             await durable_job_repository.transition_job(
                 str(current["job_id"]),
                 failure_status,
-                owner=str(latest_lease.get("owner") or owner),
-                fencing_token=int(latest_lease.get("fencing_token") or fencing_token),
+                owner=claimed_owner,
+                fencing_token=claimed_fencing_token,
                 expected_revision=(await durable_job_repository.get_job(str(current["job_id"])) or latest or {}).get("revision"),
                 reason=error_code,
                 result={
@@ -5938,9 +6988,6 @@ async def _execute_repo_change_claimed(
         }
 
     latest = await durable_job_repository.get_job(str(current["job_id"]))
-    latest_lease = (latest or {}).get("lease") or lease
-    owner = str(latest_lease.get("owner") or owner)
-    fencing_token = int(latest_lease.get("fencing_token") or fencing_token)
     revision = int((latest or {}).get("revision") or 0)
     if latest and str(latest.get("status") or "") in {"cancelled", "unknown_external_effect"}:
         status = str(latest.get("status"))
@@ -5949,6 +6996,15 @@ async def _execute_repo_change_claimed(
             "job_id": current["job_id"],
             "job": latest,
             "operator_action": "reconcile_or_cancel" if status == "unknown_external_effect" else "none",
+            "learning": "no_learning",
+        }
+    if latest is not None and not claim_matches(latest):
+        return {
+            "status": "unknown_external_effect",
+            "reason_code": "repository_execution_lease_changed",
+            "job_id": current["job_id"],
+            "job": latest,
+            "operator_action": "reconcile_or_cancel",
             "learning": "no_learning",
         }
     if result.get("status") == "unknown_external_effect":
@@ -5960,7 +7016,7 @@ async def _execute_repo_change_claimed(
             "operator_visible": True,
         }
         await durable_job_repository.transition_job(
-            str(current["job_id"]), "unknown_external_effect", owner=owner, fencing_token=fencing_token,
+            str(current["job_id"]), "unknown_external_effect", owner=claimed_owner, fencing_token=claimed_fencing_token,
             expected_revision=revision, reason="cleanup_unproven",
             result=unknown_result,
         )
@@ -5976,11 +7032,19 @@ async def _execute_repo_change_claimed(
                 if phase in {"snapshot_verified", "input_loaded", "tests_finished", "output_exported"}:
                     await record_repo_phase(phase, profile=authority.get("profile"), image_digest=authority.get("image_digest"), retry=retry)
         latest = await durable_job_repository.get_job(str(current["job_id"])) or latest or current
-        latest_lease = latest.get("lease") or latest_lease
+        if not claim_matches(latest):
+            return {
+                "status": "unknown_external_effect",
+                "reason_code": "repository_execution_lease_changed",
+                "job_id": current["job_id"],
+                "job": latest,
+                "operator_action": "reconcile_or_cancel",
+                "learning": "no_learning",
+            }
         blocked = await durable_job_repository.transition_job(
             str(current["job_id"]), "blocked",
-            owner=str(latest_lease.get("owner") or owner),
-            fencing_token=int(latest_lease.get("fencing_token") or fencing_token),
+            owner=claimed_owner,
+            fencing_token=claimed_fencing_token,
             expected_revision=int(latest.get("revision") or revision),
             reason=str(result.get("reason") or "sandbox_preflight_blocked"),
             result={"learning": "no_learning", "memory_status": "no_learning", "preflight": result.get("preflight"), "retry": retry},
@@ -6001,7 +7065,12 @@ async def _execute_repo_change_claimed(
             payload = outputs.get(name)
             if not isinstance(payload, bytes):
                 continue
-            written[name] = _repo_change_write_artifact(str(current["job_id"]), name, payload)
+            written[name] = _repo_change_write_artifact(
+                str(current["job_id"]),
+                name,
+                payload,
+                namespace=artifact_namespace,
+            )
             latest = await durable_job_repository.record_artifact(
                 str(current["job_id"]), file_path=written[name], artifact_type="repo_change_" + name.replace(".", "_"),
                 owner=owner, fencing_token=fencing_token, expected_revision=revision,
@@ -6010,34 +7079,56 @@ async def _execute_repo_change_claimed(
         readback_path = written.get("readback.json")
         readback_bytes = outputs.get("readback.json")
         if result.get("status") == "succeeded" and readback_path and isinstance(readback_bytes, bytes):
+            expected_readback_digest = hashlib.sha256(readback_bytes).hexdigest()
+            readback_digest = _repo_change_verify_persisted_artifact(readback_path)
+            if readback_digest != expected_readback_digest:
+                raise RepoSandboxError("repository result artifact readback digest changed")
+            readback_identity_digest = hashlib.sha256(
+                f"{current['job_id']}:{readback_path}:{readback_digest}".encode("utf-8")
+            ).hexdigest()[:32]
+            readback_id = f"{artifact_namespace}-readback-{readback_identity_digest}"
             latest = await durable_job_repository.record_readback(
                 str(current["job_id"]), target_path=readback_path, status="succeeded",
-                target_digest=hashlib.sha256(readback_bytes).hexdigest(), content_sha256=hashlib.sha256(readback_bytes).hexdigest(),
+                target_digest=readback_digest, content_sha256=readback_digest,
+                readback_id=readback_id, verified_at=datetime.now(timezone.utc).isoformat(),
                 details={"verified": True, "output_exists": True, "workspace_contained": True, "goal_id_read_back": bool(current.get("goal_id")), "learning": "no_learning", "retry": retry},
                 owner=owner, fencing_token=fencing_token, expected_revision=revision,
             )
             revision = int(latest.get("revision") or revision)
             latest = await durable_job_repository.get_job(str(current["job_id"])) or latest
-            latest_lease = latest.get("lease") or latest_lease
+            if not claim_matches(latest):
+                return await _repo_change_local_finalize_pending(
+                    job_id=str(current["job_id"]),
+                    owner=claimed_owner,
+                    fencing_token=claimed_fencing_token,
+                    revision=revision,
+                    retry=retry,
+                    error_type="repository_execution_lease_changed",
+                )
             checkpoint = await durable_job_repository.record_checkpoint(
                 str(current["job_id"]), checkpoint_id="readback_verified",
                 state={"phase": "readback_verified", "readback_path": readback_path, "retry": retry},
                 owner=owner, fencing_token=fencing_token, expected_revision=int(latest.get("revision") or revision),
             )
             revision = int(checkpoint.get("revision") or revision)
-            await _record_repo_change_goal_outcome(
-                job=latest,
-                authority=authority,
-                artifact_ref=readback_path,
-            )
+            if proof_kind == "GuardianPacket":
+                await _record_repo_change_goal_outcome(
+                    job=latest,
+                    authority=authority,
+                    artifact_ref=readback_path,
+                )
             await durable_job_repository.transition_job(
-                str(current["job_id"]), "succeeded", owner=owner, fencing_token=fencing_token, expected_revision=revision,
+                str(current["job_id"]), "succeeded", owner=claimed_owner, fencing_token=claimed_fencing_token, expected_revision=revision,
                 reason="repo_change_readback_verified", result={"readback_path": readback_path, "learning": "no_learning", "manifest": manifest, "retry": retry},
-                result_summary="Bounded repository change completed with verified readback.",
+                result_summary=(
+                    "Bounded repository repair completed with verified readback."
+                    if proof_kind == "RepoRepairProposal"
+                    else "Bounded repository change completed with verified readback."
+                ),
             )
         else:
             await durable_job_repository.transition_job(
-                str(current["job_id"]), "failed", owner=owner, fencing_token=fencing_token, expected_revision=revision,
+                str(current["job_id"]), "failed", owner=claimed_owner, fencing_token=claimed_fencing_token, expected_revision=revision,
                 reason="worker_failed",
                 result={"learning": "no_learning", "memory_status": "no_learning", "manifest": manifest, "retry": retry},
             )
@@ -6051,6 +7142,42 @@ async def _execute_repo_change_claimed(
             error_type=type(exc).__name__,
         )
     return (await durable_job_repository.get_job(str(current["job_id"]))) or {"status": "failed", "job_id": current["job_id"]}
+
+
+async def _execute_repo_change_claimed(
+    *,
+    current: dict[str, Any],
+    authority: dict[str, Any],
+    claimed: dict[str, Any],
+    approval_id: str | None = None,
+    retry: bool = False,
+    proof_kind: str = "GuardianPacket",
+    execution_deadline_at: str | None = None,
+) -> dict[str, Any]:
+    """Keep cancellation operator-visible across the whole claimed boundary."""
+
+    try:
+        return await _execute_repo_change_claimed_inner(
+            current=current,
+            authority=authority,
+            claimed=claimed,
+            approval_id=approval_id,
+            retry=retry,
+            proof_kind=proof_kind,
+            execution_deadline_at=execution_deadline_at,
+        )
+    except asyncio.CancelledError:
+        lease = claimed.get("lease") if isinstance(claimed.get("lease"), Mapping) else {}
+        try:
+            fencing_token = int(lease.get("fencing_token") or 0)
+        except (TypeError, ValueError, OverflowError):
+            fencing_token = 0
+        return await _repo_change_settle_cancelled_sandbox(
+            job_id=str(current.get("job_id") or ""),
+            owner=str(lease.get("owner") or _REPO_CHANGE_SERVICE_LEASE),
+            fencing_token=fencing_token,
+            task=None,
+        )
 
 
 async def _run_repo_change_after_approval(*, job: dict[str, Any], operator: Any, approval_id: str) -> dict[str, Any]:
@@ -6114,6 +7241,226 @@ async def _run_repo_change_after_approval(*, job: dict[str, Any], operator: Any,
         claimed=claimed,
         approval_id=approval_id,
     )
+
+
+async def _resolve_repo_repair_proposal(
+    *,
+    current: Mapping[str, Any],
+    claimed: Mapping[str, Any],
+    approval_id: str | None = None,
+) -> tuple[RepoRepairProposalRow, dict[str, Any], Any]:
+    """Resolve one approved repair proposal into the sandbox authority.
+
+    This is deliberately separate from ``_resolve_repo_change_candidate``.
+    Repair proposals are model-generated evidence bound to their own source
+    packet, response, patch, and exact approval; a Guardian candidate or
+    packet must never be manufactured for this capability.
+    """
+
+    owner = current.get("owner") if isinstance(current.get("owner"), Mapping) else {}
+    owner_principal_id = str(owner.get("principal_id") or "")
+    owner_session_id = str(current.get("session_id") or current.get("operator_session_id") or "")
+    job_id = str(current.get("job_id") or "")
+    if not owner_principal_id or not owner_session_id or not job_id:
+        raise HTTPException(status_code=409, detail={"code": "repair_authority_corrupt"})
+    requested_approval_id = str(approval_id or "")
+    async with get_session() as db:
+        query = select(RepoRepairProposalRow).where(
+            RepoRepairProposalRow.workflow_run_id == job_id,
+            RepoRepairProposalRow.owner_principal_id == owner_principal_id,
+            RepoRepairProposalRow.owner_session_id == owner_session_id,
+        )
+        if requested_approval_id:
+            query = query.where(RepoRepairProposalRow.approval_id == requested_approval_id)
+        proposal = (
+            await db.execute(query.order_by(RepoRepairProposalRow.created_at.desc()).limit(1))
+        ).scalar_one_or_none()
+        if proposal is None:
+            raise HTTPException(status_code=409, detail={"code": "repair_proposal_unavailable"})
+        db.expunge(proposal)
+    exact_approval_id = str(proposal.approval_id or requested_approval_id or "")
+    if not exact_approval_id:
+        raise HTTPException(status_code=409, detail={"code": "repair_approval_binding_missing"})
+    approval = await approval_repository.get(exact_approval_id)
+    if approval is None or str(getattr(approval, "status", "")) not in {"approved", "consumed"}:
+        raise HTTPException(status_code=409, detail={"code": "approval_not_current"})
+    if (
+        str(getattr(approval, "owner_principal_id", "") or "") != owner_principal_id
+        or str(getattr(approval, "operator_session_id", "") or "") != owner_session_id
+    ):
+        raise HTTPException(status_code=409, detail={"code": "approval_owner_mismatch"})
+    from src.workflows.repo_repair import (
+        RepoRepairService,
+        _executor_preflight,
+        _proposal_authority_payload,
+        _sandbox_authority_payload,
+    )
+
+    try:
+        resolved = await RepoRepairService(session_factory=get_session).resolve_proposal(
+            proposal.proposal_id,
+            owner=WorkBoardOwner(principal_id=owner_principal_id, session_id=owner_session_id),
+            durable_job=current,
+            approval=approval,
+            expected_revision=int(proposal.revision),
+        )
+    except Exception as exc:
+        mapped = _repo_repair_error(exc)
+        raise mapped from exc
+    authority = _proposal_authority_payload(resolved)
+    # The shared sandbox runner consumes ``base_digest``.  Proposal rows use
+    # the more explicit ``base_snapshot_digest`` name, so normalize it at the
+    # server-owned handoff rather than making the runner infer a new authority
+    # field from a caller projection.
+    authority["base_digest"] = resolved.base_snapshot_digest
+    reviewed_kind = str(
+        _proposal_authority_payload(resolved).get("executor_kind") or "docker_rootless"
+    )
+    if reviewed_kind not in {"local", "docker_rootless", "docker_rootful"}:
+        raise HTTPException(status_code=409, detail={"code": "repair_executor_authority_changed", "recovery_action": "create_fresh_repair", "operator_visible": True})
+    try:
+        sandbox = build_repo_repair_executor() if reviewed_kind != "docker_rootless" else RootlessDockerRepoSandbox()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "repair_executor_unavailable", "recovery_action": "restore_executor_prerequisite", "operator_visible": True},
+        ) from exc
+    authority_projection = _proposal_authority_payload(resolved)
+    reviewed_sandbox = {
+        key: authority_projection.get(key)
+        for key in authority_projection
+        if key.startswith("sandbox_") or key in {
+            "executor_kind",
+            "executor_profile",
+            "executor_posture_digest",
+            "required_permissions",
+            "local_host_execution_required",
+        }
+    }
+    try:
+        current_preflight = await asyncio.to_thread(_executor_preflight, sandbox)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "repair_executor_preflight_blocked", "recovery_action": "restore_executor_prerequisite", "operator_visible": True},
+        ) from exc
+    if not bool(getattr(current_preflight, "ok", False)):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "repair_executor_preflight_blocked", "recovery_action": "restore_executor_prerequisite", "operator_visible": True},
+        )
+    current_sandbox = _sandbox_authority_payload(sandbox, current_preflight)
+    durable_authority = current.get("declared_authority") if isinstance(current.get("declared_authority"), Mapping) else {}
+    # Old repair jobs/proposals have no selectable-executor metadata.  They
+    # remain bound to the historical rootless adapter and are not rejected
+    # merely because the additive M4 posture fields are absent.
+    if reviewed_sandbox and (
+        any(current_sandbox.get(key) != value for key, value in reviewed_sandbox.items())
+        or any(durable_authority.get(key) != reviewed_sandbox[key] for key in reviewed_sandbox)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "repair_sandbox_authority_changed",
+                "recovery_action": "create_fresh_repair",
+                "operator_visible": True,
+            },
+        )
+    now = datetime.now(timezone.utc)
+    raw_deadline = current.get("deadline_at")
+    if isinstance(raw_deadline, datetime):
+        deadline = raw_deadline if raw_deadline.tzinfo is not None else raw_deadline.replace(tzinfo=timezone.utc)
+    elif isinstance(raw_deadline, str) and raw_deadline.strip():
+        try:
+            deadline = datetime.fromisoformat(raw_deadline.replace("Z", "+00:00"))
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=timezone.utc)
+        except ValueError:
+            raise HTTPException(status_code=409, detail={"code": "repair_deadline_invalid", "recovery_action": "create_fresh_repair"})
+    else:
+        raise HTTPException(status_code=409, detail={"code": "repair_deadline_invalid", "recovery_action": "create_fresh_repair"})
+    remaining_seconds = int((deadline - now).total_seconds())
+    if remaining_seconds < 30:
+        raise HTTPException(status_code=409, detail={"code": "repair_deadline_expired"})
+    remaining_seconds = min(int(sandbox.limits.max_wall_seconds), remaining_seconds)
+    authority.update({
+        "executor_kind": reviewed_kind,
+        "executor_profile": reviewed_sandbox.get("executor_profile"),
+        "executor_posture_digest": reviewed_sandbox.get("executor_posture_digest"),
+        "required_permissions": list(reviewed_sandbox.get("required_permissions") or []),
+        "local_host_execution_required": bool(reviewed_sandbox.get("local_host_execution_required")),
+        "profile": reviewed_sandbox.get("sandbox_profile"),
+        "limits_digest": reviewed_sandbox.get("sandbox_limits_digest"),
+        "deadline_seconds": remaining_seconds,
+        "deadline_at": deadline.astimezone(timezone.utc).isoformat(),
+        "approval_id": exact_approval_id,
+    })
+    if reviewed_kind == "local":
+        authority["image_digest"] = ""
+    else:
+        try:
+            authority["image_digest"] = sandbox.validate_image_digest(str(reviewed_sandbox.get("sandbox_image_digest") or ""))
+        except RepoSandboxError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "repair_executor_authority_changed", "recovery_action": "create_fresh_repair", "operator_visible": True},
+            ) from exc
+    return resolved, authority, approval
+
+
+async def _resume_verified_repo_execution(
+    *,
+    proof_kind: str,
+    current: Mapping[str, Any],
+    claimed: Mapping[str, Any],
+    approval_id: str | None = None,
+    authority: Mapping[str, Any] | None = None,
+    execution_deadline_at: str | None = None,
+) -> dict[str, Any]:
+    """Execute one explicitly discriminated repository proof.
+
+    Keeping the discriminator at this boundary prevents repair proposals from
+    accidentally entering the historical Guardian candidate resolver while
+    allowing both capabilities to share the fixed sandbox/readback runner.
+    """
+
+    if proof_kind == "GuardianPacket":
+        if not isinstance(authority, Mapping):
+            raise DurableJobError("guardian_execution_authority_missing")
+        return await _execute_repo_change_claimed(
+            current=dict(current),
+            authority=dict(authority),
+            claimed=dict(claimed),
+            approval_id=approval_id,
+            proof_kind=proof_kind,
+            execution_deadline_at=execution_deadline_at,
+        )
+    if proof_kind != "RepoRepairProposal":
+        raise DurableJobError("repository_execution_proof_kind_invalid")
+    proposal, resolved_authority, resolved_approval = await _resolve_repo_repair_proposal(
+        current=current,
+        claimed=claimed,
+        approval_id=approval_id,
+    )
+    if execution_deadline_at:
+        resolved_authority["execution_deadline_at"] = str(execution_deadline_at)
+    result = await _execute_repo_change_claimed(
+        current=dict(current),
+        authority=resolved_authority,
+        claimed=dict(claimed),
+        approval_id=str(getattr(resolved_approval, "id", "") or proposal.approval_id or approval_id or ""),
+        proof_kind=proof_kind,
+        execution_deadline_at=execution_deadline_at,
+    )
+    if str(result.get("status") or "") in {"succeeded", "failed"}:
+        async with get_session() as db:
+            persisted = await db.get(RepoRepairProposalRow, proposal.proposal_id)
+            if persisted is not None and persisted.status == "approved":
+                persisted.status = "consumed" if str(result.get("status")) == "succeeded" else "execution_failed"
+                persisted.last_receipt_id = str(result.get("job_id") or current.get("job_id") or "")
+                persisted.revision = int(persisted.revision) + 1
+                await db.flush()
+    return result
 
 
 async def _recover_repo_change_preview_job(*, job: dict[str, Any], operator: Any) -> dict[str, Any]:
@@ -6479,6 +7826,762 @@ async def _preview_repo_change_for_operator(
         raise HTTPException(status_code=409, detail={"code": "repo_change_admission_blocked", "reason": str(exc)}) from exc
 
 
+def _repo_repair_error(exc: Exception) -> HTTPException:
+    """Map a repair service error without exposing private artifact content."""
+
+    from src.workflows.repo_repair import RepoRepairError
+
+    if isinstance(exc, RepoRepairError):
+        return HTTPException(
+            status_code=int(exc.status_code),
+            detail={"code": exc.code, "message": str(exc), "operator_visible": True},
+        )
+    if isinstance(exc, BoardError):
+        return HTTPException(
+            status_code=409,
+            detail={"code": getattr(exc, "code", "repair_board_recovery_blocked"), "operator_visible": True},
+        )
+    if isinstance(exc, (DurableJobError, DurableJobTransitionError, ValueError)):
+        return HTTPException(
+            status_code=409,
+            detail={"code": "repair_recovery_blocked", "reason": str(exc)[:256], "operator_visible": True},
+        )
+    return HTTPException(
+        status_code=503,
+        detail={"code": "repair_storage_unavailable", "operator_visible": True},
+    )
+
+
+async def _owned_repo_repair_job(
+    job_id: str,
+    operator: AuthenticatedOperator,
+) -> tuple[str, dict[str, Any]]:
+    safe_job_id = _safe_board_job_reference(job_id)
+    if not safe_job_id:
+        raise HTTPException(status_code=404, detail={"code": "repo_repair_job_not_found"})
+    job = await durable_job_repository.get_job(safe_job_id)
+    if job is None or str(job.get("job_kind") or "") != "engineering.repo-repair.v1":
+        raise HTTPException(status_code=404, detail={"code": "repo_repair_job_not_found"})
+    owner = job.get("owner") if isinstance(job.get("owner"), Mapping) else {}
+    authority = job.get("declared_authority") if isinstance(job.get("declared_authority"), Mapping) else {}
+    if str(owner.get("principal_id") or "") != str(operator.principal.principal_id):
+        raise HTTPException(status_code=403, detail={"code": "repo_repair_owner_mismatch"})
+    if str(job.get("session_id") or job.get("operator_session_id") or authority.get("session_id") or "") != str(operator.session_id):
+        raise HTTPException(status_code=403, detail={"code": "repo_repair_session_mismatch"})
+    return safe_job_id, job
+
+
+async def _repo_repair_rows(
+    job_id: str,
+    operator: AuthenticatedOperator,
+) -> tuple[RepoRepairSourcePacketRow | None, RepoRepairEgressConsentRow | None, RepoRepairProposalRow | None]:
+    async with get_session() as db:
+        packet = (
+            await db.execute(
+                select(RepoRepairSourcePacketRow)
+                .where(
+                    RepoRepairSourcePacketRow.workflow_run_id == job_id,
+                    RepoRepairSourcePacketRow.owner_principal_id == str(operator.principal.principal_id),
+                    RepoRepairSourcePacketRow.owner_session_id == str(operator.session_id),
+                )
+                .order_by(RepoRepairSourcePacketRow.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        consent = (
+            await db.execute(
+                select(RepoRepairEgressConsentRow)
+                .where(
+                    RepoRepairEgressConsentRow.workflow_run_id == job_id,
+                    RepoRepairEgressConsentRow.owner_principal_id == str(operator.principal.principal_id),
+                    RepoRepairEgressConsentRow.owner_session_id == str(operator.session_id),
+                )
+                .order_by(RepoRepairEgressConsentRow.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        proposal = (
+            await db.execute(
+                select(RepoRepairProposalRow)
+                .where(
+                    RepoRepairProposalRow.workflow_run_id == job_id,
+                    RepoRepairProposalRow.owner_principal_id == str(operator.principal.principal_id),
+                    RepoRepairProposalRow.owner_session_id == str(operator.session_id),
+                )
+                .order_by(RepoRepairProposalRow.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        for row in (packet, consent, proposal):
+            if row is not None:
+                db.expunge(row)
+        return packet, consent, proposal
+
+
+def _repo_repair_route_metadata() -> tuple[str | None, str | None]:
+    """Read the effective governed route without contacting a provider."""
+
+    try:
+        from src.llm_runtime import build_model_kwargs
+
+        kwargs = build_model_kwargs(
+            temperature=0.2,
+            max_tokens=4096,
+            runtime_path="strategist_agent",
+        )
+        profile = str(kwargs.get("runtime_profile") or "").strip() or None
+        base = str(kwargs.get("api_base") or "").strip().rstrip("/")
+        upstream = "openrouter" if "openrouter.ai/api/v1" in base else (base or None)
+        return profile, upstream
+    except Exception:
+        return None, None
+
+
+async def _resume_repo_repair_board_attempt(
+    job_id: str,
+    operator: AuthenticatedOperator,
+) -> None:
+    """Reacquire the same suspended WorkBoard attempt under its next fence."""
+
+    async with get_session() as db:
+        task = (
+            await db.execute(
+                select(WorkBoardTask).where(
+                    WorkBoardTask.capability_id == "engineering.repo-repair.v1",
+                    WorkBoardTask.owner_principal_id == str(operator.principal.principal_id),
+                    WorkBoardTask.owner_session_id == str(operator.session_id),
+                    WorkBoardTask.status == "blocked",
+                    WorkBoardTask.block_reason.in_(("repo_repair_code_egress_review", "review_repo_repair_proposal")),
+                )
+            )
+        ).scalars().all()
+        candidates: list[tuple[WorkBoardTask, WorkBoardAttempt]] = []
+        for candidate in task:
+            attempt = (
+                await db.execute(
+                    select(WorkBoardAttempt).where(
+                        WorkBoardAttempt.task_id == candidate.task_id,
+                        WorkBoardAttempt.workflow_run_id == job_id,
+                        WorkBoardAttempt.ended_at.is_(None),
+                    )
+                )
+            ).scalar_one_or_none()
+            if attempt is not None:
+                candidates.append((candidate, attempt))
+        if not candidates:
+            raise BoardError("repair_board_attempt_missing", "The repair board attempt is unavailable")
+        candidate, attempt = candidates[0]
+        if attempt.lease_owner is not None or attempt.lease_expires_at is not None:
+            return
+        repository = WorkBoardRepository()
+        await repository.resume_routine_attempt_for_operator_recovery(
+            db,
+            candidate.task_id,
+            attempt.attempt_id,
+            expected_revision=int(candidate.task_revision),
+            previous_fence=int(attempt.fencing_token),
+            next_fence=int(attempt.fencing_token) + 1,
+            lease_owner="service:work-board",
+            lease_seconds=300,
+            workflow_run_id=job_id,
+            actor_principal_id=str(operator.principal.principal_id),
+            actor_session_id=str(operator.session_id),
+            capability_id="engineering.repo-repair.v1",
+        )
+
+
+async def _safe_repo_repair_projection(
+    job_id: str,
+    job: Mapping[str, Any],
+    *,
+    operator: AuthenticatedOperator,
+    packet: RepoRepairSourcePacketRow | None = None,
+    consent: RepoRepairEgressConsentRow | None = None,
+    proposal: RepoRepairProposalRow | None = None,
+) -> dict[str, Any]:
+    authority = job.get("declared_authority") if isinstance(job.get("declared_authority"), Mapping) else {}
+    preflight = None
+    checkpoints = job.get("checkpoints") if isinstance(job.get("checkpoints"), list) else []
+    for item in checkpoints:
+        if isinstance(item, Mapping) and item.get("checkpoint_id") in {"repo-repair-preflight", f"repo-repair-preflight:{job_id}"}:
+            if isinstance(item.get("payload"), Mapping):
+                preflight = dict(item["payload"])
+    # The durable authority keeps the exact raw posture and digest used by
+    # approval/dispatch.  Build only an additive public display copy here so
+    # a minimal Docker receipt cannot poison the strict inspector contract.
+    # This local import avoids making the settings API part of the workflow
+    # module's import graph at startup.
+    from src.api.settings import _executor_posture_projection
+
+    executor_kind = str(authority.get("executor_kind") or "docker_rootless")
+    raw_posture = authority.get("executor_posture")
+    raw_posture = dict(raw_posture) if isinstance(raw_posture, Mapping) else {}
+    preflight_receipt = preflight.get("receipt") if isinstance(preflight, Mapping) else None
+    display_posture, raw_posture = _executor_posture_projection(
+        settings.repo_sandbox,
+        {
+            "ok": preflight_receipt.get("ok") is True if isinstance(preflight_receipt, Mapping) else False,
+            "posture": raw_posture,
+            "posture_digest": authority.get("executor_posture_digest"),
+            "profile": authority.get("sandbox_profile") or raw_posture.get("profile"),
+            "image_digest": authority.get("sandbox_image_digest"),
+        },
+        executor_kind=executor_kind,
+        limits_digest_value=(
+            str(authority.get("sandbox_limits_digest"))
+            if authority.get("sandbox_limits_digest")
+            else None
+        ),
+    )
+    approval_id = str(getattr(proposal, "approval_id", None) or authority.get("approval_id") or "") or None
+    approval_projection: dict[str, Any] | None = None
+    if approval_id:
+        # Pending approvals are operator-visible metadata.  Read only the
+        # exact owner-bound approval named by the proposal; never expose its
+        # details JSON or any private source/model payload.
+        approval = await approval_repository.get(approval_id)
+        if approval is not None:
+            try:
+                approval_details = json.loads(getattr(approval, "details_json", None) or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                approval_details = {}
+            if not isinstance(approval_details, Mapping):
+                approval_details = {}
+            approval_projection = {
+                "approval_id": approval_id,
+                "status": str(getattr(approval, "status", "") or "unknown"),
+                "tool_name": str(getattr(approval, "tool_name", "") or ""),
+                "action": str(getattr(approval, "action", "") or ""),
+                "expires_at": _utc_datetime(getattr(approval, "expires_at", None)).isoformat()
+                if getattr(approval, "expires_at", None) is not None else None,
+                "executor_kind": str(approval_details.get("executor_kind") or authority.get("executor_kind") or "docker_rootless"),
+                "executor_profile": str(approval_details.get("executor_profile") or authority.get("executor_profile") or ""),
+                "executor_posture_digest": str(approval_details.get("executor_posture_digest") or authority.get("executor_posture_digest") or ""),
+                "required_permissions": [
+                    str(item)
+                    for item in (approval_details.get("required_permissions") or authority.get("required_permissions") or [])
+                ],
+                "local_host_execution_required": bool(
+                    approval_details.get("local_host_execution_required")
+                    if "local_host_execution_required" in approval_details
+                    else authority.get("local_host_execution_required", False)
+                ),
+            }
+    status = str(job.get("status") or "blocked")
+    reason = str(job.get("failure_reason") or "")
+    effects = job.get("effects") if isinstance(job.get("effects"), list) else []
+    artifacts = job.get("artifacts") if isinstance(job.get("artifacts"), list) else []
+    safe_artifacts = [
+        {
+            "artifact_id": item.get("artifact_id"),
+            "file_path": item.get("file_path"),
+            "artifact_type": item.get("artifact_type"),
+            "content_sha256": item.get("content_sha256"),
+        }
+        for item in artifacts
+        if isinstance(item, Mapping)
+        and isinstance(item.get("file_path"), str)
+        and str(item.get("file_path")).startswith(f"artifacts/repo-repair/{job_id}/")
+    ]
+    readback = next(
+        (
+            {
+                "receipt_kind": item.get("receipt_kind"),
+                "status": item.get("status"),
+                "readback_id": item.get("readback_id"),
+                "target_path": item.get("target_path"),
+                "content_sha256": item.get("content_sha256") or item.get("target_digest"),
+                "verified": bool((item.get("details") or {}).get("verified")) if isinstance(item.get("details"), Mapping) else False,
+                "verified_at": item.get("verified_at"),
+            }
+            for item in reversed(effects)
+            if isinstance(item, Mapping)
+            and str(item.get("receipt_kind") or "") == "readback"
+            and str(item.get("target_path") or "").startswith(f"artifacts/repo-repair/{job_id}/")
+        ),
+        None,
+    )
+    if reason == "repo_repair_code_egress_review":
+        recovery_action = "review_code_egress"
+    elif reason == "review_repo_repair_proposal" or status == "awaiting_approval":
+        recovery_action = "review_repo_repair_proposal"
+    elif status in {"unknown_external_effect", "cost_liability"}:
+        recovery_action = "reconcile_external_effect"
+    elif status == "blocked":
+        recovery_action = (
+            "restore_local_workspace"
+            if str(authority.get("executor_kind") or "docker_rootless") == "local"
+            else "restore_executor_prerequisite"
+        )
+    else:
+        recovery_action = "dispatcher_will_resume_same_root"
+    return {
+        "job_id": job_id,
+        "status": status,
+        "owner_principal_id": str(operator.principal.principal_id),
+        "operator_session_id": str(operator.session_id),
+        "task_id": authority.get("task_id"),
+        "attempt_id": authority.get("attempt_id"),
+        "workflow_run_id": job_id,
+        "goal_id": job.get("goal_id"),
+        "goal_revision": job.get("goal_revision"),
+        "revision": job.get("revision"),
+        "authority_digest": job.get("authority_digest"),
+        "input_digest": job.get("input_digest"),
+        "run_fingerprint": job.get("run_fingerprint"),
+        "capability_id": "engineering.repo-repair.v1",
+        "capability_version": job.get("capability_version"),
+        "executor_kind": executor_kind,
+        "executor_profile": authority.get("executor_profile"),
+        "executor_posture": display_posture,
+        "executor_posture_raw": raw_posture,
+        "executor_posture_digest": authority.get("executor_posture_digest"),
+        "executor_posture_digest_basis": "executor_posture_raw",
+        "required_permissions": list(authority.get("required_permissions") or []),
+        "local_host_execution_required": bool(authority.get("local_host_execution_required")),
+        "limits": authority.get("limits") if isinstance(authority.get("limits"), Mapping) else {},
+        "preflight": preflight,
+        "source_packet": (
+            {
+                "packet_id": packet.id,
+                "state": packet.state,
+                "repository_ref": packet.repository_ref,
+                "base_snapshot_sha256": packet.base_snapshot_digest,
+                "source_manifest_sha256": packet.source_manifest_digest,
+                "artifact_sha256": packet.artifact_sha256,
+                "revision": int(packet.revision),
+            }
+            if packet is not None
+            else None
+        ),
+        "egress": (
+            {
+                "consent_id": consent.id,
+                "revision": int(consent.revision),
+                "runtime_path": consent.runtime_path,
+                "effective_profile_id": consent.effective_profile_id,
+                "effective_upstream": consent.effective_upstream,
+                "maximum_input_bytes": int(consent.maximum_input_bytes),
+                "maximum_output_tokens": int(consent.maximum_output_tokens),
+                "expires_at": _utc_datetime(consent.expires_at).isoformat(),
+                "state": consent.state,
+            }
+            if consent is not None
+            else None
+        ),
+        "proposal": (
+            {
+                "proposal_id": proposal.proposal_id,
+                "status": proposal.status,
+                "revision": int(proposal.revision),
+                "base_snapshot_digest": proposal.base_snapshot_digest,
+                "source_digest": proposal.source_digest,
+                "model_profile_id": proposal.model_profile_id,
+                "patch_sha256": proposal.patch_sha256,
+                "approval_id": proposal.approval_id,
+                "expires_at": _utc_datetime(proposal.expires_at).isoformat(),
+                "safe_metadata": json.loads(proposal.safe_metadata_json or "{}"),
+            }
+            if proposal is not None
+            else None
+        ),
+        "execution": {
+            "artifacts": safe_artifacts,
+            "readback": readback,
+            "memory_status": "no_learning",
+            "provider_contacted": proposal is not None,
+        },
+        "approval_id": approval_id,
+        "approval": approval_projection,
+        "memory_status": "no_learning",
+        "recovery_action": recovery_action,
+        "operator_visible": True,
+    }
+
+
+@router.get("/workflows/repo-repair/{job_id}/source-preview")
+async def get_repo_repair_source_preview(job_id: str, request: Request):
+    operator = _require_authenticated_capability_operator(request)
+    safe_job_id, job = await _owned_repo_repair_job(job_id, operator)
+    packet, consent, proposal = await _repo_repair_rows(safe_job_id, operator)
+    if packet is None:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "repair_source_packet_unavailable", "recovery_action": "reconcile_source_packet", "operator_visible": True},
+        )
+    from src.workflows.repo_repair import RepoRepairService
+
+    service = RepoRepairService()
+    packet_projection = service._packet_result(packet)
+    try:
+        raw = service._read_private_artifact(packet_projection.artifact_ref, expected_digest=packet_projection.artifact_sha256)
+        payload = json.loads(raw.decode("utf-8"))
+        if not isinstance(payload, Mapping) or str(payload.get("packet_id")) != str(packet.id):
+            raise ValueError("source packet identity changed")
+        files = payload.get("files")
+        if not isinstance(files, list):
+            raise ValueError("source packet file list is unavailable")
+        selected_files = []
+        for item in files:
+            if not isinstance(item, Mapping):
+                raise ValueError("source packet file metadata is invalid")
+            selected_files.append({
+                "path": str(item.get("path") or ""),
+                "size_bytes": int(item.get("size_bytes") or 0),
+                "sha256": str(item.get("sha256") or ""),
+                "text": str(item.get("text") or ""),
+            })
+    except Exception as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "repair_source_packet_unavailable", "recovery_action": "reconcile_source_packet", "operator_visible": True},
+        ) from exc
+    profile, upstream = _repo_repair_route_metadata()
+    return {
+        "job_id": safe_job_id,
+        "status": job.get("status"),
+        "recovery_action": "review_code_egress" if job.get("status") == "paused" else "review_repo_repair_proposal",
+        "source_packet": {
+            "packet_id": packet.id,
+            "state": packet.state,
+            "repository_ref": packet.repository_ref,
+            "base_snapshot_sha256": packet.base_snapshot_digest,
+            "source_manifest_sha256": packet.source_manifest_digest,
+            "artifact_sha256": packet.artifact_sha256,
+            "selected_files": selected_files,
+            "omissions": [],
+            "revision": int(packet.revision),
+        },
+        "egress": {
+            "runtime_path": "strategist_agent",
+            "effective_profile_id": consent.effective_profile_id if consent is not None else profile,
+            "effective_upstream": consent.effective_upstream if consent is not None else upstream,
+            "maximum_input_bytes": 64 * 1024,
+            "maximum_output_tokens": 4096,
+            "expires_at": consent.expires_at.isoformat() if consent is not None else None,
+        },
+        "provider_contacted": proposal is not None,
+        "operator_visible": True,
+    }
+
+
+@router.post("/workflows/repo-repair/{job_id}/code-egress-consent")
+async def grant_repo_repair_code_egress_consent(
+    job_id: str,
+    req: RepoRepairEgressConsentRequest,
+    request: Request,
+):
+    operator = _require_authenticated_capability_operator(request)
+    safe_job_id, job = await _owned_repo_repair_job(job_id, operator)
+    if req.acknowledged_selected_source is not True:
+        raise HTTPException(status_code=422, detail={"code": "repair_source_acknowledgement_required"})
+    for field_name, value in (
+        ("source_packet_digest", req.source_packet_digest),
+        ("expected_source_manifest_digest", req.expected_source_manifest_digest),
+    ):
+        if value.lower() != value or not _WORKFLOW_SAFE_ARTIFACT_DIGEST_RE.fullmatch(value):
+            raise HTTPException(status_code=422, detail={"code": f"{field_name}_invalid"})
+    try:
+        if int(req.expected_job_revision) != int(job.get("revision") or 0):
+            raise HTTPException(status_code=409, detail={"code": "repair_job_revision_stale", "recovery_action": "refresh_repair_status"})
+        if str(job.get("status") or "") not in {"paused", "queued", "running"}:
+            raise HTTPException(status_code=409, detail={"code": "repair_consent_state_invalid", "recovery_action": "refresh_repair_status"})
+        packet, existing_consent, _proposal = await _repo_repair_rows(safe_job_id, operator)
+        if packet is None:
+            raise HTTPException(status_code=409, detail={"code": "repair_source_packet_unavailable", "recovery_action": "reconcile_source_packet"})
+        if req.source_packet_digest != str(packet.artifact_sha256) or req.expected_source_manifest_digest != str(packet.source_manifest_digest):
+            raise HTTPException(status_code=409, detail={"code": "repair_source_packet_binding_changed", "recovery_action": "refresh_source_preview"})
+        from src.llm_runtime import build_model_kwargs
+        from src.workflows.repo_repair import (
+            REPO_REPAIR_MAX_CONSENT_TTL,
+            RepoRepairService,
+        )
+
+        route = build_model_kwargs(
+            temperature=0.2,
+            max_tokens=4096,
+            runtime_path="strategist_agent",
+            profile=req.expected_profile_id,
+        )
+        observed_profile = str(route.get("runtime_profile") or "").strip()
+        base = str(route.get("api_base") or "").strip().rstrip("/")
+        observed_upstream = "openrouter" if "openrouter.ai/api/v1" in base else base
+        if observed_profile != req.expected_profile_id or observed_upstream != "openrouter":
+            raise HTTPException(status_code=409, detail={"code": "repair_model_route_blocked", "recovery_action": "restore_openrouter_route"})
+        authority = job.get("declared_authority") if isinstance(job.get("declared_authority"), Mapping) else {}
+        task_id = str(authority.get("task_id") or "")
+        attempt_id = str(authority.get("attempt_id") or "")
+        goal_id = str(job.get("goal_id") or authority.get("goal_id") or "")
+        goal_revision = int(job.get("goal_revision") or authority.get("goal_revision") or 0)
+        now = datetime.now(timezone.utc)
+        expires_at = now + REPO_REPAIR_MAX_CONSENT_TTL
+        # Consent cannot outlive the already admitted durable root.  The
+        # source service enforces the same boundary from canonical rows; cap
+        # the API request before entering that transaction so a short goal
+        # runtime remains usable.
+        lease = job.get("lease") if isinstance(job.get("lease"), Mapping) else {}
+        for raw_boundary in (job.get("deadline_at"), lease.get("expires_at")):
+            if isinstance(raw_boundary, datetime):
+                boundary = raw_boundary if raw_boundary.tzinfo is not None else raw_boundary.replace(tzinfo=timezone.utc)
+            elif isinstance(raw_boundary, str) and raw_boundary.strip():
+                try:
+                    boundary = datetime.fromisoformat(raw_boundary.replace("Z", "+00:00"))
+                except ValueError:
+                    boundary = None
+                if boundary is not None and boundary.tzinfo is None:
+                    boundary = boundary.replace(tzinfo=timezone.utc)
+            else:
+                boundary = None
+            if boundary is not None:
+                expires_at = min(expires_at, boundary.astimezone(timezone.utc))
+        if expires_at <= now:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "repair_deadline_expired", "recovery_action": "reconcile_external_effect", "operator_visible": True},
+            )
+        # Use the API's owner-bound session factory so the consent write is
+        # part of the same configured database boundary as job/board recovery
+        # (and remains testable against an isolated store).
+        consent = await RepoRepairService(session_factory=get_session).grant_egress_consent(
+            owner=WorkBoardOwner(principal_id=str(operator.principal.principal_id), session_id=str(operator.session_id)),
+            work_board_task_id=task_id,
+            work_board_attempt_id=attempt_id,
+            workflow_run_id=safe_job_id,
+            packet=RepoRepairService._packet_result(packet),
+            effective_profile_id=observed_profile,
+            effective_upstream=observed_upstream,
+            request_key=req.idempotency_key,
+            expires_at=expires_at,
+        )
+        current = await durable_job_repository.get_job(safe_job_id)
+        if current is None:
+            raise DurableJobError("repair_durable_root_missing")
+        if str(current.get("status") or "") == "paused":
+            current = await durable_job_repository.resume_job(
+                safe_job_id,
+                expected_revision=int(current.get("revision") or 0),
+                reason="repo_repair_code_egress_consented",
+            )
+        elif str(current.get("status") or "") not in {"queued", "running", "awaiting_approval"}:
+            raise DurableJobTransitionError("repair durable root is not resumable after consent")
+        try:
+            await _resume_repo_repair_board_attempt(safe_job_id, operator)
+        except BoardError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "repair_board_resume_required", "recovery_action": "retry_same_consent", "operator_visible": True},
+            ) from exc
+        current = await durable_job_repository.get_job(safe_job_id) or current
+        return {
+            "job_id": safe_job_id,
+            "status": current.get("status"),
+            "consent_id": consent.id,
+            "consent_revision": int(consent.revision),
+            "expires_at": consent.expires_at.isoformat(),
+            "recovery_action": "dispatcher_will_resume_same_root",
+            "operator_visible": True,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _repo_repair_error(exc) from exc
+
+
+@router.post("/workflows/repo-repair/{job_id}/resume")
+async def resume_repo_repair(
+    job_id: str,
+    req: RepoRepairResumeRequest,
+    request: Request,
+):
+    """Consume one exact repair approval and resume the same durable root."""
+
+    operator = _require_authenticated_capability_operator(request)
+    safe_job_id, job = await _owned_repo_repair_job(job_id, operator)
+    packet, consent, proposal = await _repo_repair_rows(safe_job_id, operator)
+    if proposal is None:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "repair_proposal_unavailable", "recovery_action": "refresh_repair_status", "operator_visible": True},
+        )
+    if str(proposal.proposal_id) != str(req.proposal_id) or str(proposal.workflow_run_id) != safe_job_id:
+        raise HTTPException(status_code=409, detail={"code": "repair_proposal_binding_changed", "recovery_action": "refresh_repair_status"})
+    if int(proposal.revision) != int(req.expected_proposal_revision):
+        raise HTTPException(status_code=409, detail={"code": "repair_proposal_revision_stale", "recovery_action": "refresh_repair_status"})
+    if str(proposal.approval_id or "") != str(req.approval_id):
+        raise HTTPException(status_code=409, detail={"code": "repair_approval_binding_changed", "recovery_action": "refresh_repair_status"})
+    if _utc_datetime(proposal.expires_at) <= _utc_datetime(datetime.now(timezone.utc)):
+        raise HTTPException(status_code=409, detail={"code": "repair_proposal_expired", "recovery_action": "create_fresh_repair"})
+    from src.workflows.repo_repair import (
+        REPO_REPAIR_APPROVAL_ACTION,
+        REPO_REPAIR_APPROVAL_TOOL,
+        _repair_approval_fingerprint,
+    )
+
+    approval = await approval_repository.get(req.approval_id)
+    if approval is None:
+        raise HTTPException(status_code=409, detail={"code": "approval_not_current", "recovery_action": "refresh_repair_status"})
+    approval_consumed = str(approval.status or "") == "consumed"
+    if (
+        approval.owner_principal_id != str(operator.principal.principal_id)
+        or approval.operator_session_id != str(operator.session_id)
+        or approval.session_id not in {None, str(operator.session_id)}
+        or str(approval.tool_name or "") != REPO_REPAIR_APPROVAL_TOOL
+        or str(approval.action or "") != REPO_REPAIR_APPROVAL_ACTION
+        or approval.expires_at is None
+        or (
+            not approval_consumed
+            and (
+                _utc_datetime(approval.expires_at) <= _utc_datetime(datetime.now(timezone.utc))
+                or _utc_datetime(approval.expires_at) > _utc_datetime(proposal.expires_at)
+            )
+        )
+    ):
+        raise HTTPException(status_code=409, detail={"code": "approval_not_current", "recovery_action": "refresh_repair_status"})
+    expected_fingerprint = _repair_approval_fingerprint(proposal, approval.expires_at)
+    if approval_consumed:
+        fingerprint_valid = (
+            bool(proposal.approval_fingerprint)
+            and str(approval.fingerprint or "") == str(proposal.approval_fingerprint)
+        )
+    else:
+        fingerprint_valid = (
+            bool(proposal.approval_fingerprint)
+            and str(proposal.approval_fingerprint) == expected_fingerprint
+            and str(approval.fingerprint or "") == expected_fingerprint
+        )
+    if not fingerprint_valid:
+        raise HTTPException(status_code=409, detail={"code": "approval_not_current", "recovery_action": "refresh_repair_status"})
+
+    current = await durable_job_repository.get_job(safe_job_id)
+    if current is None:
+        raise HTTPException(status_code=404, detail={"code": "repo_repair_job_not_found"})
+    if int(current.get("revision") or 0) != int(req.expected_job_revision):
+        # A completed first request is replayable only when its exact durable
+        # approval receipt carries the same request key.  A caller may not use
+        # a stale revision to select another root or approval.
+        if str(current.get("status") or "") not in {"queued", "running", "succeeded", "failed", "blocked", "unknown_external_effect", "cost_liability"}:
+            raise HTTPException(status_code=409, detail={"code": "repair_job_revision_stale", "recovery_action": "refresh_repair_status"})
+
+    status = str(current.get("status") or "")
+    effects = current.get("effects") if isinstance(current.get("effects"), list) else []
+    resume_effect = next(
+        (
+            item for item in effects
+            if isinstance(item, Mapping)
+            and item.get("kind") == "approval_resume"
+            and str(item.get("approval_id") or "") == str(req.approval_id)
+        ),
+        None,
+    )
+    if status in {"queued", "running", "succeeded", "failed", "blocked", "unknown_external_effect", "cost_liability"}:
+        if not isinstance(resume_effect, Mapping):
+            raise HTTPException(status_code=409, detail={"code": "repair_resume_receipt_missing", "recovery_action": "reconcile_external_effect"})
+        stored_key = str(resume_effect.get("request_idempotency_key") or "")
+        if stored_key != str(req.idempotency_key):
+            raise HTTPException(status_code=409, detail={"code": "repair_resume_idempotency_conflict", "recovery_action": "refresh_repair_status"})
+        packet, consent, proposal = await _repo_repair_rows(safe_job_id, operator)
+        return await _safe_repo_repair_projection(
+            safe_job_id,
+            current,
+            operator=operator,
+            packet=packet,
+            consent=consent,
+            proposal=proposal,
+        )
+    if status != "awaiting_approval":
+        raise HTTPException(status_code=409, detail={"code": "repair_resume_state_invalid", "recovery_action": "refresh_repair_status"})
+    if str(approval.status or "") != "approved":
+        raise HTTPException(status_code=409, detail={"code": "approval_not_current", "recovery_action": "approve_exact_repair_proposal"})
+
+    owner_principal_id = str(operator.principal.principal_id)
+    operator_session_id = str(operator.session_id)
+    durable_owner = current.get("owner") if isinstance(current.get("owner"), Mapping) else {}
+    authority = current.get("declared_authority") if isinstance(current.get("declared_authority"), Mapping) else {}
+    expires_at = _utc_datetime(approval.expires_at).timestamp()
+    receipt = {
+        "status": "approved",
+        "authenticated": True,
+        "operator_principal_id": owner_principal_id,
+        "operator_session_id": operator_session_id,
+        "owner_kind": str(durable_owner.get("kind") or "user"),
+        "owner_principal_id": str(durable_owner.get("principal_id") or owner_principal_id),
+        "service_id": durable_owner.get("service_id"),
+        "approval_id": req.approval_id,
+        "authority_digest": current.get("authority_digest"),
+        "goal_id": current.get("goal_id"),
+        "goal_revision": current.get("goal_revision"),
+        "plan_revision": current.get("plan_revision"),
+        "capability_version": current.get("capability_version"),
+        "budget_microusd": 0,
+        "budget_digest": current.get("budget_digest"),
+        "expires_at": expires_at,
+        "request_idempotency_key": req.idempotency_key,
+    }
+    try:
+        resumed = await durable_job_repository.resume_approved_job(
+            safe_job_id,
+            approval_receipt=receipt,
+            approval_id=req.approval_id,
+            authority_digest=str(current.get("authority_digest") or ""),
+            goal_id=current.get("goal_id"),
+            goal_revision=current.get("goal_revision"),
+            plan_revision=current.get("plan_revision"),
+            capability_version=str(current.get("capability_version") or ""),
+            owner_kind=str(durable_owner.get("kind") or "user"),
+            owner_principal_id=str(durable_owner.get("principal_id") or owner_principal_id),
+            service_id=durable_owner.get("service_id"),
+            budget_microusd=0,
+            budget_digest=str(current.get("budget_digest") or ""),
+            operator_principal_id=owner_principal_id,
+            operator_session_id=operator_session_id,
+            expires_at=expires_at,
+            expected_revision=current.get("revision"),
+        )
+    except (DurableJobError, DurableJobTransitionError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail={"code": "approval_resume_blocked", "reason": str(exc)[:256], "operator_visible": True}) from exc
+
+    async with get_session() as db:
+        persisted = await db.get(RepoRepairProposalRow, req.proposal_id)
+        if persisted is None or persisted.owner_principal_id != owner_principal_id or persisted.owner_session_id != operator_session_id:
+            raise HTTPException(status_code=409, detail={"code": "repair_proposal_binding_changed"})
+        if int(persisted.revision) != int(req.expected_proposal_revision):
+            raise HTTPException(status_code=409, detail={"code": "repair_proposal_revision_stale"})
+        if persisted.status == "awaiting_approval":
+            persisted.status = "approved"
+            persisted.revision = int(persisted.revision) + 1
+            await db.flush()
+
+    try:
+        await _resume_repo_repair_board_attempt(safe_job_id, operator)
+    except BoardError as exc:
+        raise HTTPException(status_code=503, detail={"code": "repair_board_resume_required", "recovery_action": "retry_same_resume", "operator_visible": True}) from exc
+    latest = await durable_job_repository.get_job(safe_job_id) or resumed
+    packet, consent, proposal = await _repo_repair_rows(safe_job_id, operator)
+    return await _safe_repo_repair_projection(
+        safe_job_id,
+        latest,
+        operator=operator,
+        packet=packet,
+        consent=consent,
+        proposal=proposal,
+    )
+
+
+@router.get("/workflows/repo-repair/{job_id}")
+async def get_repo_repair(job_id: str, request: Request):
+    operator = _require_authenticated_capability_operator(request)
+    safe_job_id, job = await _owned_repo_repair_job(job_id, operator)
+    packet, consent, proposal = await _repo_repair_rows(safe_job_id, operator)
+    return await _safe_repo_repair_projection(
+        safe_job_id,
+        job,
+        operator=operator,
+        packet=packet,
+        consent=consent,
+        proposal=proposal,
+    )
+
+
 @router.post("/workflows/repo-change/preview")
 async def preview_repo_change(req: RepoChangePreviewRequest, request: Request):
     operator = _require_authenticated_capability_operator(request)
@@ -6647,7 +8750,10 @@ async def cancel_repo_change_for_authenticated_operator(
     status = str(job.get("status") or "")
     if status in {"queued", "awaiting_approval", "accepted", "paused", "blocked"}:
         if status == "blocked" and _repo_change_dispatch_reserved(job):
-            authority = job.get("declared_authority") if isinstance(job.get("declared_authority"), dict) else {}
+            try:
+                authority = await _repo_change_recovery_authority(job)
+            except (OSError, RepoSandboxError, ValueError):
+                authority = {}
             dispatch_ok, dispatch_reason, dispatch_payload = _repo_change_dispatch_contract(job, authority)
             if not dispatch_ok or dispatch_payload is None:
                 uncertain = await durable_job_repository.transition_job(
@@ -6667,36 +8773,58 @@ async def cancel_repo_change_for_authenticated_operator(
                     "job": uncertain,
                     "operator_action": "reconcile_or_cancel",
                 }
-            token = RootlessDockerRepoSandbox._server_token(job_id)
             try:
-                cleanup = RootlessDockerRepoSandbox().cancel(
-                    container_name=str(dispatch_payload["container_name"]),
-                    additional_container_names=(f"{token}-loader",),
-                    input_volume=str(dispatch_payload["input_volume"]),
+                reserved = await _repo_change_reserve_cancel_cleanup(job, reason=reason)
+            except (DurableJobError, DurableJobTransitionError, ValueError) as exc:
+                latest = await durable_job_repository.get_job(job_id)
+                if latest is not None and str(latest.get("status") or "") in {
+                    "cancelled",
+                    "unknown_external_effect",
+                    "succeeded",
+                    "failed",
+                    "blocked",
+                }:
+                    latest_status = str(latest.get("status"))
+                    return {
+                        "status": latest_status,
+                        "job": latest,
+                        "operator_action": _repo_change_terminal_action(latest_status),
+                    }
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "repo_change_cancel_race", "reason": str(exc), "operator_visible": True},
+                ) from exc
+            # Keep the canonical proposal/source-bound fields recovered above;
+            # the checkpoint contributes only the accepted attempt/fence.
+            authority = _repo_change_execution_authority(
+                {"declared_authority": authority},
+                dispatch_payload,
+            )
+            executor_kind = str(authority.get("executor_kind") or "docker_rootless")
+            try:
+                executor = _build_repo_repair_executor_for_authority(authority)
+                await asyncio.to_thread(
+                    _preflight_approved_executor_for_cleanup,
+                    executor,
+                    authority,
                 )
+                if executor_kind == "local":
+                    cleanup = await asyncio.to_thread(
+                        executor.cancel,
+                        job_id=job_id,
+                        authority=authority,
+                    )
+                else:
+                    token = RootlessDockerRepoSandbox._server_token(job_id)
+                    cleanup = await asyncio.to_thread(
+                        executor.cancel,
+                        container_name=str(dispatch_payload["container_name"]),
+                        additional_container_names=(f"{token}-loader",),
+                        input_volume=str(dispatch_payload["input_volume"]),
+                    )
             except (OSError, RepoSandboxError, ValueError) as exc:
                 cleanup = {"status": "unknown_external_effect", "reason": "cleanup_unproven", "error": type(exc).__name__}
-            cleanup_proven = _repo_change_cleanup_proven(cleanup)
-            settled_status = "cancelled" if cleanup_proven else "unknown_external_effect"
-            settled = await durable_job_repository.transition_job(
-                job_id,
-                settled_status,
-                expected_revision=job.get("revision"),
-                    reason=reason if cleanup_proven else "cleanup_unproven",
-                result={
-                    "learning": "no_learning",
-                    "memory_status": "no_learning",
-                    "cleanup": cleanup,
-                    "cleanup_proven": cleanup_proven,
-                    "operator_action": "none" if cleanup_proven else "reconcile_or_cancel",
-                },
-            )
-            return {
-                "status": settled.get("status"),
-                "job": settled,
-                "cleanup": cleanup,
-                "operator_action": "none" if cleanup_proven else "reconcile_or_cancel",
-            }
+            return await _repo_change_settle_reserved_cancel(reserved, cleanup=cleanup, reason=reason)
         cancelled = await durable_job_repository.transition_job(
             job_id,
             "cancelled",
@@ -6708,6 +8836,19 @@ async def cancel_repo_change_for_authenticated_operator(
     if status == "running":
         token = RootlessDockerRepoSandbox._server_token(job_id)
         lease = job.get("lease") or {}
+        original_cancel_owner = str(lease.get("owner") or "")
+        try:
+            original_cancel_fence = int(lease.get("fencing_token") or 0)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "repo_change_cancel_lease_invalid", "operator_visible": True},
+            ) from exc
+        if not original_cancel_owner or original_cancel_fence <= 0:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "repo_change_cancel_lease_invalid", "operator_visible": True},
+            )
         try:
             checkpoint = await durable_job_repository.record_checkpoint(
                 job_id,
@@ -6758,10 +8899,33 @@ async def cancel_repo_change_for_authenticated_operator(
                 ),
             }
         checkpoint_lease = latest.get("lease") or checkpoint.get("lease") or lease
+        try:
+            checkpoint_owner = str(checkpoint_lease.get("owner") or "")
+            checkpoint_fence = int(checkpoint_lease.get("fencing_token") or 0)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "repo_change_cancel_lease_invalid", "operator_visible": True},
+            ) from exc
+        if checkpoint_owner != original_cancel_owner or checkpoint_fence != original_cancel_fence:
+            return {
+                "status": "unknown_external_effect",
+                "durable_status": latest_status,
+                "reason_code": "repository_cancel_lease_changed",
+                "operator_action": "reconcile_or_cancel",
+                "job": latest,
+                "operator_visible": True,
+            }
         dispatch_reserved = _repo_change_dispatch_reserved(latest) or _repo_change_dispatch_reserved(checkpoint)
         dispatch_payload = None
         if dispatch_reserved:
-            authority = latest.get("declared_authority") if isinstance(latest.get("declared_authority"), dict) else {}
+            try:
+                authority = await _repo_change_recovery_authority(
+                    latest,
+                    _repo_change_dispatch_checkpoint(latest) or _repo_change_dispatch_checkpoint(checkpoint),
+                )
+            except (OSError, RepoSandboxError, ValueError):
+                authority = {}
             dispatch_ok, dispatch_reason, dispatch_payload = _repo_change_dispatch_contract(latest, authority)
             if not dispatch_ok or dispatch_payload is None:
                 uncertain = await durable_job_repository.transition_job(
@@ -6784,19 +8948,60 @@ async def cancel_repo_change_for_authenticated_operator(
                     "operator_action": "reconcile_or_cancel",
                     "job": uncertain,
                 }
-        worker_name = str((dispatch_payload or {}).get("container_name") or f"{token}-worker")
-        input_volume = str((dispatch_payload or {}).get("input_volume") or f"{token}-input")
         try:
-            cleanup = RootlessDockerRepoSandbox().cancel(
-                container_name=worker_name,
-                additional_container_names=(f"{token}-loader",),
-                input_volume=input_volume,
+            reserved = await _repo_change_reserve_cancel_cleanup(
+                latest,
+                reason=reason,
+                expected_owner=original_cancel_owner,
+                expected_fencing_token=original_cancel_fence,
             )
+        except (DurableJobError, DurableJobTransitionError, ValueError) as exc:
+            latest_after_race = await durable_job_repository.get_job(job_id)
+            if latest_after_race is not None and str(latest_after_race.get("status") or "") in {
+                "cancelled",
+                "unknown_external_effect",
+                "succeeded",
+                "failed",
+                "blocked",
+            }:
+                latest_status = str(latest_after_race.get("status"))
+                return {
+                    "status": latest_status,
+                    "job": latest_after_race,
+                    "operator_action": _repo_change_terminal_action(latest_status),
+                }
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "repo_change_cancel_race", "reason": str(exc), "operator_visible": True},
+            ) from exc
+        execution_authority = authority if dispatch_reserved else _repo_change_execution_authority(latest, dispatch_payload)
+        execution_kind = str(execution_authority.get("executor_kind") or "docker_rootless")
+        try:
+            executor = _build_repo_repair_executor_for_authority(execution_authority)
+            await asyncio.to_thread(
+                _preflight_approved_executor_for_cleanup,
+                executor,
+                execution_authority,
+            )
+            if execution_kind == "local":
+                cleanup = await asyncio.to_thread(
+                    executor.cancel,
+                    job_id=job_id,
+                    authority=execution_authority,
+                )
+            else:
+                worker_name = str((dispatch_payload or {}).get("container_name") or f"{token}-worker")
+                input_volume = str((dispatch_payload or {}).get("input_volume") or f"{token}-input")
+                cleanup = await asyncio.to_thread(
+                    executor.cancel,
+                    container_name=worker_name,
+                    additional_container_names=(f"{token}-loader",),
+                    input_volume=input_volume,
+                )
         except (OSError, RepoSandboxError, ValueError) as exc:
             latest_after_error = await durable_job_repository.get_job(job_id) or latest
             if str(latest_after_error.get("status") or "") in {
                 "cancelled",
-                "unknown_external_effect",
                 "succeeded",
                 "failed",
                 "blocked",
@@ -6808,29 +9013,21 @@ async def cancel_repo_change_for_authenticated_operator(
                     "job": latest_after_error,
                     "operator_action": "reconcile_or_cancel" if latest_status == "unknown_external_effect" else "none",
                 }
-            uncertain = await durable_job_repository.transition_job(
-                job_id,
-                "unknown_external_effect",
-                owner=str(checkpoint_lease.get("owner") or ""),
-                fencing_token=int(checkpoint_lease.get("fencing_token") or 0),
-                expected_revision=latest_after_error.get("revision"),
-                reason="cancel_unavailable",
-                result={
-                    "learning": "no_learning",
-                    "memory_status": "no_learning",
-                    "cleanup": {"status": "unknown_external_effect", "reason": "cancel_unavailable", "error": str(exc)},
-                },
-            )
-            return {
+            cleanup = {
                 "status": "unknown_external_effect",
-                "reason_code": "cancel_unavailable",
-                "operator_action": "reconcile_or_cancel",
-                "job": uncertain,
-                "learning": "no_learning",
+                "reason": "cancel_unavailable",
+                "error": type(exc).__name__,
             }
+            return await _repo_change_settle_reserved_cancel(
+                reserved,
+                cleanup=cleanup,
+                reason="cancel_unavailable",
+            )
         latest_after_cleanup = await durable_job_repository.get_job(job_id) or latest
         latest_status = str(latest_after_cleanup.get("status") or "")
         if latest_status in {"cancelled", "unknown_external_effect", "succeeded", "failed", "blocked"}:
+            if latest_status == "unknown_external_effect":
+                return await _repo_change_settle_reserved_cancel(reserved, cleanup=cleanup, reason=reason)
             return {
                 "status": latest_status,
                 "cleanup": cleanup,
@@ -6843,72 +9040,7 @@ async def cancel_repo_change_for_authenticated_operator(
                     else "none"
                 ),
             }
-        dispatch_reserved = dispatch_reserved or _repo_change_dispatch_reserved(latest_after_cleanup)
-        cleanup_proven = _repo_change_cleanup_proven(cleanup)
-        # A missing dispatch fence does not prove that cleanup happened.  Keep
-        # the durable row uncertain until the cancel receipt explicitly proves
-        # the worker and volume are gone.
-        cleanup_unproven = not cleanup_proven
-        # Dispatch alone is not an unresolved effect once the exact worker and
-        # input volume removal are proven.  Reserve the uncertain state for a
-        # cleanup receipt that cannot establish what remains externally.
-        transition_status = "unknown_external_effect" if cleanup_unproven else "cancelled"
-        transition_lease = latest_after_cleanup.get("lease") or checkpoint_lease
-        transition_revision = latest_after_cleanup.get("revision")
-        transition_reason = "cleanup_unproven" if cleanup_unproven else reason
-        transition_result = (
-            {
-                "learning": "no_learning",
-                "memory_status": "no_learning",
-                "cleanup": cleanup,
-                "dispatch_reserved": dispatch_reserved,
-                "cleanup_proven": cleanup_proven,
-                "operator_action": "reconcile_or_cancel" if transition_status == "unknown_external_effect" else "none",
-            }
-        )
-        try:
-            updated = await durable_job_repository.transition_job(
-                job_id,
-                transition_status,
-                owner=str(transition_lease.get("owner") or ""),
-                fencing_token=int(transition_lease.get("fencing_token") or 0),
-                expected_revision=transition_revision,
-                reason=transition_reason,
-                result=transition_result,
-            )
-        except (DurableJobError, ValueError) as exc:
-            latest_after_race = await durable_job_repository.get_job(job_id)
-            if latest_after_race is not None and str(latest_after_race.get("status") or "") in {
-                "cancelled",
-                "unknown_external_effect",
-                "succeeded",
-                "failed",
-                "blocked",
-            }:
-                latest_status = str(latest_after_race.get("status"))
-                return {
-                    "status": latest_status,
-                    "cleanup": cleanup,
-                    "job": latest_after_race,
-                    "operator_action": (
-                        "reconcile_or_cancel"
-                        if latest_status == "unknown_external_effect"
-                        else "retry_or_cancel"
-                        if latest_status in {"failed", "blocked"}
-                        else "none"
-                    ),
-                }
-            raise HTTPException(
-                status_code=409,
-                detail={"code": "repo_change_cancel_race", "reason": str(exc), "operator_visible": True},
-            ) from exc
-        return {
-            "status": updated.get("status"),
-            "cleanup": cleanup,
-            "job": updated,
-            "operator_action": "reconcile_or_cancel" if transition_status == "unknown_external_effect" else "none",
-            "learning": "no_learning",
-        }
+        return await _repo_change_settle_reserved_cancel(reserved, cleanup=cleanup, reason=reason)
     return {"status": status, "job": job, "operator_action": "reconcile" if status == "unknown_external_effect" else "none"}
 
 
@@ -6922,7 +9054,12 @@ async def cancel_repo_change(job_id: str, req: RepoChangeCancelRequest, request:
     )
 
 
-async def _recover_repo_change_after_restart(*, job: dict[str, Any], operator: Any) -> dict[str, Any]:
+async def _recover_repo_change_after_restart_inner(
+    *,
+    job: dict[str, Any],
+    operator: Any,
+    cancellation_claim: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Adopt a matching worker without replaying the approved operation."""
 
     job_id = str(job["job_id"])
@@ -6962,6 +9099,10 @@ async def _recover_repo_change_after_restart(*, job: dict[str, Any], operator: A
             "learning": "no_learning",
             "job": job,
         }
+    try:
+        authority = await _repo_change_recovery_authority(job)
+    except (OSError, RepoSandboxError, ValueError):
+        authority = {}
     dispatch_ok, dispatch_reason, dispatch_payload = _repo_change_dispatch_contract(job, authority)
     if not dispatch_ok:
         try:
@@ -7014,49 +9155,127 @@ async def _recover_repo_change_after_restart(*, job: dict[str, Any], operator: A
     owner = str(lease.get("owner") or _REPO_CHANGE_SERVICE_LEASE)
     fencing_token = int(lease.get("fencing_token") or 0)
     revision = int(claimed.get("revision") or 0)
+    claimed_owner = owner
+    claimed_fencing_token = fencing_token
+    if cancellation_claim is not None:
+        cancellation_claim.update(
+            {
+                "acquired": True,
+                "owner": claimed_owner,
+                "fencing_token": claimed_fencing_token,
+            }
+        )
+
+    async def current_recovery_claim() -> dict[str, Any]:
+        latest = await durable_job_repository.get_job(job_id)
+        if not latest:
+            raise DurableJobError("repository recovery root missing")
+        live_lease = latest.get("lease") if isinstance(latest.get("lease"), dict) else {}
+        try:
+            live_fence = int(live_lease.get("fencing_token") or 0)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise DurableJobLeaseError("repository recovery lease is malformed") from exc
+        status = str(latest.get("status") or "")
+        if status in {"cancelled", "unknown_external_effect", "cost_liability"}:
+            return latest
+        if status != "running" or str(live_lease.get("owner") or "") != claimed_owner or live_fence != claimed_fencing_token:
+            raise DurableJobLeaseError("repository recovery lease changed")
+        return latest
+
+    def recovery_claim_matches(latest: Mapping[str, Any] | None) -> bool:
+        if not isinstance(latest, Mapping):
+            return False
+        live_lease = latest.get("lease") if isinstance(latest.get("lease"), Mapping) else {}
+        try:
+            live_fence = int(live_lease.get("fencing_token") or 0)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        return (
+            str(latest.get("status") or "") == "running"
+            and str(live_lease.get("owner") or "") == claimed_owner
+            and live_fence == claimed_fencing_token
+        )
 
     async def record_repo_phase(phase: str, **details: Any) -> dict[str, Any]:
-        nonlocal owner, fencing_token, revision
-        latest = await durable_job_repository.get_job(job_id) or claimed
-        latest_lease = latest.get("lease") if isinstance(latest.get("lease"), dict) else lease
+        nonlocal revision
+        latest = await current_recovery_claim()
+        if str(latest.get("status") or "") in {"cancelled", "unknown_external_effect", "cost_liability"}:
+            raise DurableJobLeaseError("repository recovery root is no longer runnable")
         updated = await durable_job_repository.record_checkpoint(
             job_id,
             checkpoint_id=phase,
             state={"phase": phase, **details},
-            owner=str(latest_lease.get("owner") or owner),
-            fencing_token=int(latest_lease.get("fencing_token") or fencing_token),
+            owner=claimed_owner,
+            fencing_token=claimed_fencing_token,
             expected_revision=int(latest.get("revision") or revision),
         )
-        owner = str((updated.get("lease") or {}).get("owner") or owner)
-        fencing_token = int((updated.get("lease") or {}).get("fencing_token") or fencing_token)
+        updated_lease = updated.get("lease") if isinstance(updated.get("lease"), Mapping) else {}
+        if str(updated_lease.get("owner") or "") != claimed_owner or int(updated_lease.get("fencing_token") or 0) != claimed_fencing_token:
+            raise DurableJobLeaseError("repository recovery checkpoint changed execution lease")
         revision = int(updated.get("revision") or revision)
         return updated
 
-    await record_repo_phase("admitted", job_status="accepted")
-    await record_repo_phase("approved", recovery=True)
+    sandbox_task: asyncio.Task[Any] | None = None
+
+    try:
+        await record_repo_phase("admitted", job_status="accepted")
+        await record_repo_phase("approved", recovery=True)
+    except asyncio.CancelledError:
+        return await _repo_change_settle_cancelled_sandbox(
+            job_id=job_id,
+            owner=claimed_owner,
+            fencing_token=claimed_fencing_token,
+            task=None,
+            recovered=True,
+        )
+    except (DurableJobError, OSError, RepoSandboxError) as exc:
+        latest = await durable_job_repository.get_job(job_id) or claimed
+        status = str(latest.get("status") or "")
+        if status in {"cancelled", "unknown_external_effect", "cost_liability"}:
+            return {"status": status, "job_id": job_id, "job": latest, "learning": "no_learning", "operator_visible": True}
+        return {
+            "status": "unknown_external_effect",
+            "job_id": job_id,
+            "job": latest,
+            "reason_code": "repository_recovery_lease_changed",
+            "operator_action": "reconcile_or_cancel",
+            "error_type": type(exc).__name__,
+            "learning": "no_learning",
+            "operator_visible": True,
+        }
     try:
         try:
             patch = _repo_change_read_patch(str(authority.get("patch_artifact_id") or ""))
         except (HTTPException, OSError) as exc:
             return await _repo_change_patch_read_blocked(
                 job_id=job_id,
-                owner=owner,
-                fencing_token=fencing_token,
+                owner=claimed_owner,
+                fencing_token=claimed_fencing_token,
                 revision=revision,
                 exc=exc,
+                authority=authority,
                 recovered=True,
             )
         if hashlib.sha256(patch).hexdigest() != str(authority.get("patch_sha256") or ""):
             return await _repo_change_patch_read_blocked(
                 job_id=job_id,
-                owner=owner,
-                fencing_token=fencing_token,
+                owner=claimed_owner,
+                fencing_token=claimed_fencing_token,
                 revision=revision,
                 exc=RepoSandboxError("patch_digest_changed", phase="admitted"),
+                authority=authority,
                 recovered=True,
             )
-        result = await asyncio.to_thread(
-            RootlessDockerRepoSandbox().recover_job,
+        execution_authority = await _repo_change_recovery_authority(claimed, dispatch_payload)
+        execution_sandbox = _build_repo_repair_executor_for_authority(execution_authority)
+        await asyncio.to_thread(
+            _preflight_approved_executor_for_cleanup,
+            execution_sandbox,
+            execution_authority,
+        )
+        sandbox_task = _repo_change_track_sandbox_call(
+            job_id,
+            execution_sandbox.recover_job,
             RepoSandboxJob(
                 job_id=job_id,
                 repository_root=str(authority.get("repository_ref") or ""),
@@ -7072,17 +9291,47 @@ async def _recover_repo_change_after_restart(*, job: dict[str, Any], operator: A
             expected_container_name=str((dispatch_payload or {}).get("container_name") or ""),
             expected_input_volume=str((dispatch_payload or {}).get("input_volume") or ""),
         )
-    except (OSError, RepoSandboxError) as exc:
+        try:
+            result = await asyncio.shield(sandbox_task)
+        except asyncio.CancelledError:
+            return await _repo_change_settle_cancelled_sandbox(
+                job_id=job_id,
+                owner=claimed_owner,
+                fencing_token=claimed_fencing_token,
+                task=sandbox_task,
+                recovered=True,
+            )
+    except asyncio.CancelledError:
+        return await _repo_change_settle_cancelled_sandbox(
+            job_id=job_id,
+            owner=claimed_owner,
+            fencing_token=claimed_fencing_token,
+            task=sandbox_task,
+            recovered=True,
+        )
+    except (OSError, RepoSandboxError, DurableJobError) as exc:
         latest = await durable_job_repository.get_job(job_id) or claimed
-        latest_lease = latest.get("lease") if isinstance(latest.get("lease"), dict) else lease
+        status = str(latest.get("status") or "")
+        if status in {"cancelled", "unknown_external_effect", "cost_liability"}:
+            return {"status": status, "job_id": job_id, "job": latest, "learning": "no_learning", "operator_visible": True}
+        if not recovery_claim_matches(latest):
+            return {
+                "status": "unknown_external_effect",
+                "job_id": job_id,
+                "job": latest,
+                "reason_code": "repository_recovery_lease_changed",
+                "operator_action": "reconcile_or_cancel",
+                "learning": "no_learning",
+                "operator_visible": True,
+            }
         failure_status = "failed" if isinstance(exc, RepoSandboxError) and exc.terminal_status == "failed" else "blocked"
         error_code = _repo_change_error_code(exc)
         try:
             await durable_job_repository.transition_job(
                 job_id,
                 failure_status,
-                owner=str(latest_lease.get("owner") or owner),
-                fencing_token=int(latest_lease.get("fencing_token") or fencing_token),
+                owner=claimed_owner,
+                fencing_token=claimed_fencing_token,
                 expected_revision=latest.get("revision"),
                 reason=error_code,
                 result={
@@ -7113,16 +9362,26 @@ async def _recover_repo_change_after_restart(*, job: dict[str, Any], operator: A
     except Exception as exc:
         return await _repo_change_local_finalize_pending(
             job_id=job_id,
-            owner=owner,
-            fencing_token=fencing_token,
+            owner=claimed_owner,
+            fencing_token=claimed_fencing_token,
             revision=revision,
             recovered=True,
             error_type=type(exc).__name__,
         )
     latest = await durable_job_repository.get_job(job_id) or claimed
-    latest_lease = latest.get("lease") if isinstance(latest.get("lease"), dict) else lease
-    owner = str(latest_lease.get("owner") or owner)
-    fencing_token = int(latest_lease.get("fencing_token") or fencing_token)
+    if str(latest.get("status") or "") in {"cancelled", "unknown_external_effect", "cost_liability"}:
+        status = str(latest.get("status"))
+        return {"status": status, "job_id": job_id, "job": latest, "learning": "no_learning", "operator_visible": True}
+    if not recovery_claim_matches(latest):
+        return {
+            "status": "unknown_external_effect",
+            "job_id": job_id,
+            "job": latest,
+            "reason_code": "repository_recovery_lease_changed",
+            "operator_action": "reconcile_or_cancel",
+            "learning": "no_learning",
+            "operator_visible": True,
+        }
     revision = int(latest.get("revision") or revision)
     if result.get("status") == "unknown_external_effect":
         unknown_result = {
@@ -7135,8 +9394,8 @@ async def _recover_repo_change_after_restart(*, job: dict[str, Any], operator: A
         unknown = await durable_job_repository.transition_job(
             job_id,
             "unknown_external_effect",
-            owner=owner,
-            fencing_token=fencing_token,
+            owner=claimed_owner,
+            fencing_token=claimed_fencing_token,
             expected_revision=revision,
             reason="cleanup_unproven",
             result=unknown_result,
@@ -7162,8 +9421,8 @@ async def _recover_repo_change_after_restart(*, job: dict[str, Any], operator: A
         failed = await durable_job_repository.transition_job(
             job_id,
             "failed",
-            owner=owner,
-            fencing_token=fencing_token,
+            owner=claimed_owner,
+            fencing_token=claimed_fencing_token,
             expected_revision=revision,
             reason="output_lost",
             result=output_lost_result,
@@ -7183,8 +9442,8 @@ async def _recover_repo_change_after_restart(*, job: dict[str, Any], operator: A
         blocked = await durable_job_repository.transition_job(
             job_id,
             "blocked",
-            owner=owner,
-            fencing_token=fencing_token,
+            owner=claimed_owner,
+            fencing_token=claimed_fencing_token,
             expected_revision=revision,
             reason=str(result.get("reason") or "sandbox_recovery_blocked"),
             result={"learning": "no_learning", "memory_status": "no_learning", "preflight": result.get("preflight")},
@@ -7215,23 +9474,33 @@ async def _recover_repo_change_after_restart(*, job: dict[str, Any], operator: A
                 job_id,
                 file_path=written[name],
                 artifact_type="repo_change_" + name.replace(".", "_"),
-                owner=owner,
-                fencing_token=fencing_token,
+                owner=claimed_owner,
+                fencing_token=claimed_fencing_token,
                 expected_revision=revision,
             )
             revision = int(receipt.get("revision") or revision)
         readback_path = written.get("readback.json")
         readback_bytes = outputs.get("readback.json")
         if result.get("status") == "succeeded" and readback_path and isinstance(readback_bytes, bytes):
+            expected_readback_digest = hashlib.sha256(readback_bytes).hexdigest()
+            readback_digest = _repo_change_verify_persisted_artifact(readback_path)
+            if readback_digest != expected_readback_digest:
+                raise RepoSandboxError("repository result artifact readback digest changed")
+            readback_identity_digest = hashlib.sha256(
+                f"{job_id}:{readback_path}:{readback_digest}".encode("utf-8")
+            ).hexdigest()[:32]
+            readback_id = f"repo-change-readback-{readback_identity_digest}"
             receipt = await durable_job_repository.record_readback(
                 job_id,
                 target_path=readback_path,
                 status="succeeded",
-                target_digest=hashlib.sha256(readback_bytes).hexdigest(),
-                content_sha256=hashlib.sha256(readback_bytes).hexdigest(),
+                target_digest=readback_digest,
+                content_sha256=readback_digest,
+                readback_id=readback_id,
+                verified_at=datetime.now(timezone.utc).isoformat(),
                 details={"verified": True, "output_exists": True, "workspace_contained": True, "goal_id_read_back": bool(latest.get("goal_id")), "learning": "no_learning", "recovered": True},
-                owner=owner,
-                fencing_token=fencing_token,
+                owner=claimed_owner,
+                fencing_token=claimed_fencing_token,
                 expected_revision=revision,
             )
             revision = int(receipt.get("revision") or revision)
@@ -7239,8 +9508,8 @@ async def _recover_repo_change_after_restart(*, job: dict[str, Any], operator: A
                 job_id,
                 checkpoint_id="readback_verified",
                 state={"phase": "readback_verified", "readback_path": readback_path, "recovered": True},
-                owner=owner,
-                fencing_token=fencing_token,
+                owner=claimed_owner,
+                fencing_token=claimed_fencing_token,
                 expected_revision=revision,
             )
             revision = int(checkpoint.get("revision") or revision)
@@ -7253,8 +9522,8 @@ async def _recover_repo_change_after_restart(*, job: dict[str, Any], operator: A
             done = await durable_job_repository.transition_job(
                 job_id,
                 "succeeded",
-                owner=owner,
-                fencing_token=fencing_token,
+                owner=claimed_owner,
+                fencing_token=claimed_fencing_token,
                 expected_revision=revision,
                 reason="repo_change_restart_readback_verified",
                 result={"readback_path": readback_path, "learning": "no_learning", "manifest": manifest, "recovered": True},
@@ -7264,8 +9533,8 @@ async def _recover_repo_change_after_restart(*, job: dict[str, Any], operator: A
         failed = await durable_job_repository.transition_job(
             job_id,
             "failed",
-            owner=owner,
-            fencing_token=fencing_token,
+            owner=claimed_owner,
+            fencing_token=claimed_fencing_token,
             expected_revision=revision,
             reason="worker_failed",
             result={"learning": "no_learning", "memory_status": "no_learning", "manifest": manifest, "recovered": True},
@@ -7274,11 +9543,49 @@ async def _recover_repo_change_after_restart(*, job: dict[str, Any], operator: A
     except Exception as exc:
         return await _repo_change_local_finalize_pending(
             job_id=job_id,
-            owner=owner,
-            fencing_token=fencing_token,
+            owner=claimed_owner,
+            fencing_token=claimed_fencing_token,
             revision=revision,
             recovered=True,
             error_type=type(exc).__name__,
+        )
+
+
+async def _recover_repo_change_after_restart(*, job: dict[str, Any], operator: Any) -> dict[str, Any]:
+    """Keep restart recovery cancellation visible after worker readback too."""
+
+    cancellation_claim: dict[str, Any] = {"acquired": False}
+    try:
+        return await _recover_repo_change_after_restart_inner(
+            job=job,
+            operator=operator,
+            cancellation_claim=cancellation_claim,
+        )
+    except asyncio.CancelledError:
+        # The inner function records the exact owner/fence immediately after
+        # its transfer CAS.  Never infer a claim from the latest row: a
+        # successor may use the same recovery owner with a newer fence.
+        if not cancellation_claim.get("acquired"):
+            latest = None
+            try:
+                latest = await durable_job_repository.get_job(str(job.get("job_id") or ""))
+            except BaseException:
+                latest = None
+            return {
+                "status": "unknown_external_effect",
+                "job_id": str(job.get("job_id") or ""),
+                "job": latest if isinstance(latest, Mapping) else job,
+                "reason_code": "repository_recovery_cancellation_unclaimed",
+                "operator_action": "reconcile_or_cancel",
+                "learning": "no_learning",
+                "operator_visible": True,
+            }
+        return await _repo_change_settle_cancelled_sandbox(
+            job_id=str(job.get("job_id") or ""),
+            owner=str(cancellation_claim.get("owner") or _REPO_CHANGE_RECOVERY_LEASE),
+            fencing_token=int(cancellation_claim.get("fencing_token") or 0),
+            task=None,
+            recovered=True,
         )
 
 

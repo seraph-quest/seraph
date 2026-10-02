@@ -39,16 +39,120 @@ from src.work_board.dispatcher import (
     GOAL_SNAPSHOT_CAPABILITY,
     WorkBoardDispatcher,
     _preflight_recovery_action,
+    _repair_approval_resume_recovery_ready,
     _stable_reason_code,
     registered_executor_id,
 )
 import src.work_board.dispatcher as dispatcher_module
 from src.work_board.repository import BoardMutation, BoardError, WorkBoardRepository
 from src.work_board import review as review_service
-from src.workflows.job_runtime import DurableJobError, DurableJobRepository
+from src.workflows.job_runtime import DurableJobError, DurableJobLeaseError, DurableJobRepository
 
 
 OWNER = WorkBoardOwner(principal_id="operator:dispatcher", session_id="dispatcher-session")
+
+
+def _repair_approval_recovery_projection() -> dict[str, Any]:
+    job_id = "repair-recovery-job"
+    owner_id = "operator:repair"
+    operation_id = "remote-operation-1"
+    expiry = (datetime.now(timezone.utc) + timedelta(minutes=4)).timestamp()
+    return {
+        "job_id": job_id,
+        "run_identity": job_id,
+        "status": "queued",
+        "owner": {"kind": "user", "principal_id": owner_id, "service_id": None},
+        "session_id": "session:repair",
+        "operator_session_id": "session:repair",
+        "goal_id": "goal:repair",
+        "goal_revision": 2,
+        "plan_revision": 1,
+        "authority_digest": "authority-repair",
+        "budget_digest": "budget-repair",
+        "capability_version": "1",
+        "declared_authority": {
+            "capability_id": "engineering.repo-repair.v1",
+            "approval_id": "approval-repair",
+        },
+        "effects": [
+            {
+                "effect_id": f"remote_inference:{operation_id}",
+                "receipt_kind": "effect",
+                "effect_type": "remote_inference_admission",
+                "target_digest": operation_id,
+                "status": "succeeded",
+                "details": {
+                    "admission_status": "settled",
+                    "receipt": {
+                        "status": "settled",
+                        "operation_id": operation_id,
+                        "job_id": job_id,
+                        "owner_id": owner_id,
+                    },
+                },
+            },
+            {
+                "kind": "approval_resume",
+                "status": "approved",
+                "approval_request_status": "consumed",
+                "approval_id": "approval-repair",
+                "operator_principal_id": owner_id,
+                "operator_session_id": "session:repair",
+                "owner_kind": "user",
+                "owner_principal_id": owner_id,
+                "service_id": None,
+                "authority_digest": "authority-repair",
+                "goal_id": "goal:repair",
+                "goal_revision": 2,
+                "plan_revision": 1,
+                "capability_version": "1",
+                "budget_digest": "budget-repair",
+                "expires_at": expiry,
+            },
+        ],
+    }
+
+
+def test_repair_approval_recovery_accepts_settled_admission_and_consumed_resume():
+    assert _repair_approval_resume_recovery_ready(_repair_approval_recovery_projection()) is True
+
+
+def test_repair_approval_recovery_rejects_unknown_effect_kind():
+    projection = _repair_approval_recovery_projection()
+    projection["effects"].append(
+        {
+            "effect_type": "unregistered_effect",
+            "receipt_kind": "effect",
+            "status": "succeeded",
+        }
+    )
+    assert _repair_approval_resume_recovery_ready(projection) is False
+
+
+def test_repair_approval_recovery_rejects_duplicate_resume_receipt():
+    projection = _repair_approval_recovery_projection()
+    projection["effects"].append(dict(projection["effects"][1]))
+    assert _repair_approval_resume_recovery_ready(projection) is False
+
+
+def test_repair_approval_recovery_rejects_foreign_admission_and_authority_mismatch():
+    projection = _repair_approval_recovery_projection()
+    remote = projection["effects"][0]
+    remote["details"]["receipt"]["job_id"] = "foreign-job"
+    assert _repair_approval_resume_recovery_ready(projection) is False
+
+    projection = _repair_approval_recovery_projection()
+    projection["effects"][1]["authority_digest"] = "foreign-authority"
+    assert _repair_approval_resume_recovery_ready(projection) is False
+
+
+def test_repair_approval_recovery_rejects_unresolved_admission():
+    projection = _repair_approval_recovery_projection()
+    remote = projection["effects"][0]
+    remote["status"] = "intent"
+    remote["details"]["admission_status"] = "intent"
+    remote["details"]["receipt"]["status"] = "intent"
+    assert _repair_approval_resume_recovery_ready(projection) is False
 
 
 @pytest.mark.parametrize(
@@ -1878,6 +1982,91 @@ async def test_linked_running_missing_lease_fails_closed(monkeypatch):
     assert projected[0]["status"] is WorkBoardStatus.blocked
     assert projected[0]["block_kind"] == "unknown_effect"
     assert projected[0]["block_reason"] == "reconcile_external_effect"
+
+
+@pytest.mark.asyncio
+async def test_linked_same_owner_stale_lease_error_is_not_silently_stranded(monkeypatch):
+    """An unchanged same-owner lease error still reaches fail-closed projection."""
+
+    task = SimpleNamespace(
+        task_id="task-same-owner-stale",
+        owner_principal_id="operator:one",
+        owner_session_id="session-one",
+        goal_id="goal-one",
+        goal_revision=3,
+        capability_id="guardian.research-watch.v1",
+        status=WorkBoardStatus.running,
+        task_revision=4,
+        requires_review=False,
+    )
+    attempt = SimpleNamespace(
+        task_id=task.task_id,
+        attempt_id="attempt-same-owner-stale",
+        workflow_run_id="source-watch:watch-1:attempt-same-owner-stale",
+        ended_at=None,
+        cancel_requested_at=None,
+        lease_owner="service:work-board",
+        fencing_token=2,
+    )
+    projection = {
+        "job_id": attempt.workflow_run_id,
+        "run_identity": attempt.workflow_run_id,
+        "status": "running",
+        "revision": 11,
+        "effects": [],
+        "lease": {
+            "owner": attempt.lease_owner,
+            "fencing_token": attempt.fencing_token,
+            "expires_at": (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
+        },
+    }
+
+    class Jobs:
+        async def get_job(self, _job_id):
+            return dict(projection)
+
+    class Repository:
+        async def list_linked_active_attempts(self, _db, *, limit):
+            assert limit > 0
+            return [(task, attempt)]
+
+    class Result:
+        def first(self):
+            return task, attempt
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def execute(self, *_args, **_kwargs):
+            return Result()
+
+    dispatcher = WorkBoardDispatcher(
+        repository=Repository(),
+        jobs=Jobs(),
+        session_provider=lambda: Session(),
+    )
+
+    async def stale_binding(*_args, **_kwargs):
+        raise DurableJobLeaseError("same-owner lease expired")
+
+    dispatcher._lookup_linked_binding = stale_binding
+    projected: list[dict[str, Any]] = []
+
+    async def project(*_args, **kwargs):
+        projected.append(kwargs)
+
+    dispatcher._project = project
+
+    recovered = await dispatcher.reconcile_linked_attempts()
+
+    assert recovered == [attempt.workflow_run_id]
+    assert projected
+    assert projected[0]["status"] is WorkBoardStatus.blocked
+    assert projected[0]["block_reason"] == "reconcile_admission_binding"
 
 
 @pytest.mark.asyncio

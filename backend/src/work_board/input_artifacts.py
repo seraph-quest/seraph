@@ -17,7 +17,6 @@ import os
 from pathlib import Path
 import re
 import stat
-import tempfile
 from typing import Any, Awaitable, Callable, Mapping
 import uuid
 
@@ -51,6 +50,14 @@ INPUT_ARTIFACT_ROOT = "artifacts/work-board/inputs"
 _ARTIFACT_NAMESPACE = uuid.UUID("2b5b3f8d-6d2f-5b4f-91f3-3dcb22bc7697")
 _ALLOWED_STATES = frozenset({"pending", "bound", "consumed", "expired", "revoked", "deleted"})
 _EXECUTABLE_STATES = frozenset({"pending", "bound"})
+
+
+class _InputArtifactCleanupUnverified(OSError):
+    """The exact terminal artifact file could not be proven safe to remove."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = str(reason or "cleanup_unverified")[:128]
+        super().__init__(self.reason)
 
 
 @dataclass(frozen=True)
@@ -177,14 +184,96 @@ def _payload_path(artifact: WorkBoardInputArtifact) -> Path:
     return candidate
 
 
-def _safe_file_bytes(path: Path, *, expected_digest: str, expected_size: int) -> bytes:
+def _open_input_artifact_parent(path: Path, *, create: bool) -> tuple[int, str]:
+    """Open the typed-input parent through held no-follow directory handles."""
+
+    root = canonical_workspace_root(settings.workspace_dir)
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        relative = path.relative_to(root)
+    except ValueError as exc:
+        raise OSError("input artifact path escapes the canonical workspace") from exc
+    if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        raise OSError("input artifact path is invalid")
+
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow | cloexec
+    parent_fd = -1
+    try:
+        if create:
+            root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        parent_fd = os.open(root, directory_flags)
+        root_metadata = os.fstat(parent_fd)
+        if (
+            not stat.S_ISDIR(root_metadata.st_mode)
+            or root_metadata.st_uid not in {0, os.getuid()}
+        ):
+            raise OSError("input artifact workspace root is untrusted")
+
+        for component in relative.parts[:-1]:
+            if create:
+                try:
+                    os.mkdir(component, 0o700, dir_fd=parent_fd)
+                except FileExistsError:
+                    pass
+            next_fd = os.open(component, directory_flags, dir_fd=parent_fd)
+            os.close(parent_fd)
+            parent_fd = next_fd
+            metadata = os.fstat(parent_fd)
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or metadata.st_uid != os.getuid()
+            ):
+                raise OSError("input artifact parent is not a private directory")
+            if create:
+                # A previously-created canonical artifact directory may have
+                # inherited the live workspace's group/other bits.  Repair it
+                # through the held descriptor after proving it is a current
+                # user's real directory; the canonical workspace root itself
+                # is intentionally left untouched.
+                os.fchmod(parent_fd, 0o700)
+                metadata = os.fstat(parent_fd)
+            if metadata.st_mode & 0o077:
+                raise OSError("input artifact parent is not a private directory")
+        return parent_fd, relative.parts[-1]
+    except BaseException:
+        if parent_fd >= 0:
+            try:
+                os.close(parent_fd)
+            except OSError:
+                pass
+        raise
+
+
+def _private_input_file_metadata(metadata: os.stat_result) -> bool:
+    return bool(
+        stat.S_ISREG(metadata.st_mode)
+        and not metadata.st_mode & 0o077
+        and metadata.st_uid == os.getuid()
+        and metadata.st_nlink == 1
+    )
+
+
+def _safe_file_bytes(path: Path, *, expected_digest: str, expected_size: int) -> bytes:
+    parent_fd = -1
+    descriptor = -1
+    try:
+        parent_fd, filename = _open_input_artifact_parent(path, create=False)
+        descriptor = os.open(
+            filename,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=parent_fd,
+        )
     except OSError as exc:
+        if parent_fd >= 0:
+            try:
+                os.close(parent_fd)
+            except OSError:
+                pass
         raise BoardError("input_artifact_unavailable", "The input artifact file is unavailable", status_code=409) from exc
     try:
         stat_result = os.fstat(descriptor)
-        if not stat_result or not stat.S_ISREG(stat_result.st_mode) or stat_result.st_size != int(expected_size):
+        if not _private_input_file_metadata(stat_result) or stat_result.st_size != int(expected_size):
             raise BoardError("input_artifact_file_invalid", "The input artifact is not the verified regular file", status_code=409)
         if stat_result.st_size > INPUT_ARTIFACT_MAX_BYTES:
             raise BoardError("input_artifact_too_large", "The input artifact exceeds 64 KiB", status_code=409)
@@ -198,7 +287,10 @@ def _safe_file_bytes(path: Path, *, expected_digest: str, expected_size: int) ->
             remaining -= len(chunk)
         payload = b"".join(chunks)
     finally:
-        os.close(descriptor)
+        if descriptor >= 0:
+            os.close(descriptor)
+        if parent_fd >= 0:
+            os.close(parent_fd)
     if len(payload) != int(expected_size) or hashlib.sha256(payload).hexdigest() != expected_digest:
         raise BoardError("input_artifact_digest_mismatch", "The input artifact digest does not match", status_code=409)
     return payload
@@ -330,32 +422,198 @@ async def _finalize_pending(
 
 
 def _write_payload(path: Path, payload: bytes) -> None:
-    parent = path.parent
-    parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    parent_fd = -1
+    descriptor = -1
+    temporary_name = ""
     try:
-        os.chmod(parent, 0o700)
-    except OSError:
-        pass
-    fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=parent)
-    temporary = Path(temporary_name)
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "wb", closefd=True) as handle:
+        parent_fd, filename = _open_input_artifact_parent(path, create=True)
+        for _attempt in range(5):
+            temporary_name = f".{filename}.{uuid.uuid4().hex}.tmp"
+            try:
+                descriptor = os.open(
+                    temporary_name,
+                    os.O_WRONLY
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_CLOEXEC", 0),
+                    0o600,
+                    dir_fd=parent_fd,
+                )
+                break
+            except FileExistsError:
+                temporary_name = ""
+        if descriptor < 0:
+            raise OSError("input artifact temporary file could not be reserved")
+        with os.fdopen(descriptor, "wb", closefd=True) as handle:
+            descriptor = -1
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        directory_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+
+        # A hard-link publication makes the final name no-clobber while the
+        # directory descriptor remains held.  An existing name is accepted
+        # only when its private metadata and bytes are an exact replay.
         try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-    finally:
-        if temporary.exists():
+            os.link(
+                temporary_name,
+                filename,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+        except FileExistsError:
+            existing_fd = -1
             try:
-                temporary.unlink()
+                existing_fd = os.open(
+                    filename,
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+                    dir_fd=parent_fd,
+                )
+                existing_metadata = os.fstat(existing_fd)
+                if not _private_input_file_metadata(existing_metadata):
+                    raise OSError("existing input artifact is not private")
+                existing = os.read(existing_fd, INPUT_ARTIFACT_MAX_BYTES + 1)
+                if len(existing) > INPUT_ARTIFACT_MAX_BYTES or existing != payload:
+                    raise OSError("input artifact collision")
+            finally:
+                if existing_fd >= 0:
+                    os.close(existing_fd)
+        else:
+            os.unlink(temporary_name, dir_fd=parent_fd)
+            temporary_name = ""
+        os.fsync(parent_fd)
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
             except OSError:
                 pass
+        if parent_fd >= 0 and temporary_name:
+            try:
+                os.unlink(temporary_name, dir_fd=parent_fd)
+            except OSError:
+                pass
+        if parent_fd >= 0:
+            try:
+                os.close(parent_fd)
+            except OSError:
+                pass
+
+
+def _cleanup_private_input_file(
+    path: Path,
+    *,
+    expected_digest: str,
+    expected_size: int,
+) -> None:
+    """Remove one terminal input only after exact descriptor-bound proof.
+
+    The parent directory stays open and no-follow for the complete operation.
+    The target is opened no-follow, checked against the recorded owner/mode/
+    link/size/digest, then compared with a fresh name-relative stat immediately
+    before unlinking.  A missing or replaced target is an unknown cleanup
+    outcome, never permission to remove another file.
+    """
+
+    parent_fd = -1
+    descriptor = -1
+    try:
+        try:
+            parent_fd, filename = _open_input_artifact_parent(path, create=False)
+            descriptor = os.open(
+                filename,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=parent_fd,
+            )
+        except FileNotFoundError as exc:
+            raise _InputArtifactCleanupUnverified("cleanup_target_missing") from exc
+        except OSError as exc:
+            raise _InputArtifactCleanupUnverified("cleanup_target_unavailable") from exc
+
+        metadata = os.fstat(descriptor)
+        try:
+            expected_size_int = int(expected_size)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise _InputArtifactCleanupUnverified("cleanup_size_invalid") from exc
+        if (
+            expected_size_int < 0
+            or expected_size_int > INPUT_ARTIFACT_MAX_BYTES
+            or not _private_input_file_metadata(metadata)
+            or metadata.st_size != expected_size_int
+        ):
+            raise _InputArtifactCleanupUnverified("cleanup_target_metadata_mismatch")
+
+        chunks: list[bytes] = []
+        remaining = INPUT_ARTIFACT_MAX_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, min(remaining, 64 * 1024))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        if len(payload) != expected_size_int or hashlib.sha256(payload).hexdigest() != str(expected_digest):
+            raise _InputArtifactCleanupUnverified("cleanup_digest_mismatch")
+
+        # The open descriptor proves the bytes and metadata we inspected.  A
+        # final no-follow name stat prevents a replacement that happened after
+        # open/read from being unlinked through the held parent descriptor.
+        try:
+            named_metadata = os.stat(filename, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError as exc:
+            raise _InputArtifactCleanupUnverified("cleanup_target_replaced") from exc
+        if any(
+            getattr(named_metadata, field, None) != getattr(metadata, field, None)
+            for field in ("st_dev", "st_ino", "st_mode", "st_uid", "st_nlink", "st_size")
+        ):
+            raise _InputArtifactCleanupUnverified("cleanup_target_replaced")
+        if not _private_input_file_metadata(named_metadata):
+            raise _InputArtifactCleanupUnverified("cleanup_target_metadata_mismatch")
+        try:
+            os.unlink(filename, dir_fd=parent_fd)
+        except FileNotFoundError as exc:
+            raise _InputArtifactCleanupUnverified("cleanup_target_replaced") from exc
+        os.fsync(parent_fd)
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if parent_fd >= 0:
+            try:
+                os.close(parent_fd)
+            except OSError:
+                pass
+
+
+def _cleanup_required_error(
+    row: WorkBoardInputArtifact,
+    *,
+    state: str,
+    reason: str,
+    cleanup_required_artifact_ids: list[str] | None = None,
+) -> BoardError:
+    """Return the stable operator receipt for a terminal cleanup unknown."""
+
+    extra: dict[str, Any] = {
+        "artifact_id": str(row.artifact_id),
+        "state": str(state),
+        "revision": int(row.revision),
+        "cleanup_status": "cleanup_required",
+        "reason_code": str(reason or "cleanup_unverified")[:128],
+        "recovery_action": "reconcile_input_artifact_cleanup",
+    }
+    if cleanup_required_artifact_ids is not None:
+        extra["cleanup_required_artifact_ids"] = list(cleanup_required_artifact_ids)
+        extra["cleanup_required_count"] = len(cleanup_required_artifact_ids)
+    return BoardError(
+        "input_artifact_cleanup_required",
+        "The input artifact terminal cleanup requires reconciliation",
+        status_code=503,
+        **extra,
+    )
 
 
 async def prepare_input_artifact(
@@ -916,20 +1174,22 @@ async def _set_terminal_state(
             status_code=409,
         )
     await db.refresh(row)
-    if require_pending_unbound:
-        # Publication cleanup has a stronger unknown-outcome contract than
-        # ordinary expiry/revocation: commit the tombstone before removing
-        # bytes.  A commit failure therefore leaves the pending row and file
-        # available for exact-key reconciliation rather than a missing file
-        # behind a rolled-back row.
-        await db.commit()
+    # The terminal fence must be durable before filesystem mutation.  If the
+    # process dies after this commit, the row remains non-executable and the
+    # exact cleanup receipt can be reconciled without reopening the input.
+    await db.commit()
     try:
-        if path is not None and (path.exists() or path.is_symlink()):
-            path.unlink()
-    except OSError:
-        # The state tombstone is still authoritative and prevents every
-        # resolver from reopening the bytes; retain only the safe digest.
-        pass
+        if path is None:
+            raise _InputArtifactCleanupUnverified("cleanup_reference_invalid")
+        _cleanup_private_input_file(
+            path,
+            expected_digest=row.payload_sha256,
+            expected_size=row.size_bytes,
+        )
+    except _InputArtifactCleanupUnverified as exc:
+        raise _cleanup_required_error(row, state=state, reason=exc.reason) from exc
+    except OSError as exc:
+        raise _cleanup_required_error(row, state=state, reason="cleanup_unverified") from exc
     return _metadata(row)
 
 
@@ -1016,7 +1276,7 @@ async def expire_input_artifacts(
             .limit(max(1, min(int(limit), 20)))
         )
     ).scalars().all()
-    expired = 0
+    expired_rows: list[WorkBoardInputArtifact] = []
     for row in rows:
         current_revision = int(row.revision)
         next_revision = current_revision + 1
@@ -1046,14 +1306,36 @@ async def expire_input_artifacts(
         if int(result.rowcount or 0) != 1:
             continue
         await db.refresh(row)
-        expired += 1
+        expired_rows.append(row)
+
+    # Expiry uses one bounded writer transaction, so make every terminal
+    # fence durable before touching any payload.  A failed cleanup below
+    # leaves an expired, non-executable row and raises an explicit receipt.
+    await db.commit()
+    cleanup_failures: list[tuple[WorkBoardInputArtifact, str]] = []
+    for row in expired_rows:
         try:
             path = _payload_path(row)
-            if path.exists() or path.is_symlink():
-                path.unlink()
-        except (BoardError, OSError):
-            pass
-    return expired
+            _cleanup_private_input_file(
+                path,
+                expected_digest=row.payload_sha256,
+                expected_size=row.size_bytes,
+            )
+        except BoardError as exc:
+            cleanup_failures.append((row, exc.code))
+        except _InputArtifactCleanupUnverified as exc:
+            cleanup_failures.append((row, exc.reason))
+        except OSError as exc:
+            cleanup_failures.append((row, "cleanup_unverified"))
+    if cleanup_failures:
+        first_row, first_reason = cleanup_failures[0]
+        raise _cleanup_required_error(
+            first_row,
+            state="expired",
+            reason=first_reason,
+            cleanup_required_artifact_ids=[str(row.artifact_id) for row, _reason in cleanup_failures],
+        )
+    return len(expired_rows)
 
 
 __all__ = [

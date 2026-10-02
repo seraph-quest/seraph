@@ -1,15 +1,18 @@
 """Focused M3 browser lane and public policy contract checks."""
 
 from datetime import datetime, timedelta, timezone
+import hashlib
 import os
 from pathlib import Path
 import subprocess
 import sys
+import stat
 from types import SimpleNamespace
 
 import pytest
 import src.browser.task_runner as task_runner_module
 import src.work_board.dispatcher as dispatcher_module
+import src.work_board.input_artifacts as input_artifacts_module
 from config.settings import settings
 from src.artifacts.registry import artifact_id_for
 from src.api.work_board import (
@@ -40,12 +43,15 @@ from src.work_board.dispatcher import (
     validate_capability_input,
 )
 from src.work_board.input_artifacts import (
+    _safe_file_bytes,
+    _write_payload,
     bind_input_artifact,
     consume_input_artifact,
     delete_input_artifact,
     expire_input_artifacts,
     prepare_input_artifact,
     resolve_input_artifact_for_task,
+    revoke_input_artifact,
 )
 from src.work_board.repository import BoardError, WorkBoardRepository
 from sqlalchemy import select
@@ -128,6 +134,22 @@ def _browser_task(*, task_id: str, goal_id: str, status: WorkBoardStatus) -> Wor
         status=status,
         task_revision=1,
     )
+
+
+async def _cleanup_artifact(async_db, *, goal_id: str, idempotency_key: str):
+    async with async_db() as db:
+        await _browser_goal(
+            db,
+            goal_id=goal_id,
+            budget=GoalAdmissionBudget(max_outstanding_jobs=1, max_attempts=1, max_runtime_seconds=120),
+        )
+        metadata = await prepare_input_artifact(
+            db,
+            OWNER,
+            _artifact_request(goal_id=goal_id, idempotency_key=idempotency_key),
+        )
+        await db.commit()
+        return metadata, _artifact_path(metadata)
 
 
 def test_browser_lane_is_nonblocking_and_keeps_a_private_lock(tmp_path: Path):
@@ -375,6 +397,71 @@ def test_unregistered_and_non_task_capabilities_cannot_enter_artifact_storage(mo
     assert exc_info.value.code == "typed_input_category_invalid"
 
 
+def test_typed_input_file_private_metadata_and_no_clobber(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    path = tmp_path / "artifacts" / "work-board" / "inputs" / "artifact.json"
+    first = b'{"schema_version":1}'
+    second = b'{"schema_version":2}'
+    digest = hashlib.sha256(first).hexdigest()
+
+    _write_payload(path, first)
+    assert _safe_file_bytes(path, expected_digest=digest, expected_size=len(first)) == first
+    _write_payload(path, first)
+    with pytest.raises(OSError, match="collision"):
+        _write_payload(path, second)
+    assert path.read_bytes() == first
+
+    path.chmod(0o644)
+    with pytest.raises(BoardError, match="verified regular file"):
+        _safe_file_bytes(path, expected_digest=digest, expected_size=len(first))
+
+    path.chmod(0o600)
+    hardlink = path.with_name("hardlink.json")
+    os.link(path, hardlink)
+    with pytest.raises(BoardError, match="verified regular file"):
+        _safe_file_bytes(path, expected_digest=digest, expected_size=len(first))
+    hardlink.unlink()
+
+    outside = tmp_path / "outside.json"
+    outside.write_bytes(first)
+    path.unlink()
+    path.symlink_to(outside)
+    with pytest.raises(BoardError, match="unavailable"):
+        _safe_file_bytes(path, expected_digest=digest, expected_size=len(first))
+
+    original_fstat = input_artifacts_module.os.fstat
+
+    def foreign_owner_fstat(fd):
+        metadata = original_fstat(fd)
+        if stat.S_ISREG(metadata.st_mode):
+            return SimpleNamespace(
+                st_mode=metadata.st_mode,
+                st_nlink=metadata.st_nlink,
+                st_uid=os.getuid() + 1,
+            )
+        return metadata
+
+    path.unlink()
+    _write_payload(path, first)
+    monkeypatch.setattr(input_artifacts_module.os, "fstat", foreign_owner_fstat)
+    with pytest.raises(BoardError, match="verified regular file"):
+        _safe_file_bytes(path, expected_digest=digest, expected_size=len(first))
+
+
+def test_typed_input_writer_rejects_symlinked_parent(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    root = tmp_path / "artifacts" / "work-board"
+    root.mkdir(parents=True, mode=0o700)
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o700)
+    (root / "inputs").symlink_to(outside, target_is_directory=True)
+    target = root / "inputs" / "artifact.json"
+
+    with pytest.raises(OSError):
+        _write_payload(target, b"private")
+    assert not (outside / "artifact.json").exists()
+
+
 @pytest.mark.asyncio
 async def test_artifact_owner_digest_file_and_expiry_fences(async_db, tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
@@ -402,7 +489,8 @@ async def test_artifact_owner_digest_file_and_expiry_fences(async_db, tmp_path, 
             )
         assert owner_error.value.code == "input_artifact_not_found"
 
-        payload = bytearray(_artifact_path(metadata).read_bytes())
+        original_payload = _artifact_path(metadata).read_bytes()
+        payload = bytearray(original_payload)
         payload[0] ^= 1
         _artifact_path(metadata).write_bytes(payload)
         with pytest.raises(BoardError) as digest_error:
@@ -417,32 +505,148 @@ async def test_artifact_owner_digest_file_and_expiry_fences(async_db, tmp_path, 
             )
         assert digest_error.value.code == "input_artifact_digest_mismatch"
 
-        # A fresh artifact proves the expiry branch independently of the file
-        # tamper branch above.
-        expiry_request = _artifact_request(idempotency_key="expiry-key")
-        expiry_metadata = await prepare_input_artifact(
-            db,
-            OWNER,
-            expiry_request,
-            now=observed_at,
-        )
         with pytest.raises(BoardError) as expiry_error:
             await resolve_input_artifact_for_task(
                 db,
                 OWNER,
-                artifact_id=expiry_metadata.artifact_id,
-                goal_id=expiry_request.goal_id,
+                artifact_id=metadata.artifact_id,
+                goal_id=request.goal_id,
                 goal_revision=1,
-                capability_id=expiry_request.capability_id,
-                now=expiry_metadata.expires_at,
+                capability_id=request.capability_id,
+                now=metadata.expires_at,
             )
         assert expiry_error.value.code == "input_artifact_expired"
-        # The first artifact was created with the same fixed clock and is also
-        # due at this exact boundary; both rows must be tombstoned and both
-        # payload files removed.
-        assert await expire_input_artifacts(db, now=expiry_metadata.expires_at) == 2
+
+        with pytest.raises(BoardError) as cleanup_error:
+            await expire_input_artifacts(db, now=metadata.expires_at)
+        assert cleanup_error.value.code == "input_artifact_cleanup_required"
+        assert cleanup_error.value.extra["cleanup_status"] == "cleanup_required"
+        assert cleanup_error.value.extra["state"] == "expired"
+        expired = await db.get(WorkBoardInputArtifact, metadata.artifact_id)
+        assert expired is not None and expired.state == "expired"
+        assert _artifact_path(metadata).read_bytes() == bytes(payload)
+
+        # A terminal row can be reconciled after the operator restores the
+        # recorded bytes; the exact cleanup proof then permits removal.
+        _artifact_path(metadata).write_bytes(original_payload)
+        deleted = await delete_input_artifact(
+            db,
+            OWNER,
+            artifact_id=metadata.artifact_id,
+            expected_revision=int(expired.revision),
+        )
+        assert deleted.state == "deleted"
         assert not _artifact_path(metadata).exists()
-        assert not _artifact_path(expiry_metadata).exists()
+
+
+@pytest.mark.asyncio
+async def test_expire_input_artifact_removes_exact_private_payload(async_db, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    async with async_db() as db:
+        await _browser_goal(
+            db,
+            goal_id="goal-artifact-expire-valid",
+            budget=GoalAdmissionBudget(max_outstanding_jobs=1, max_attempts=1, max_runtime_seconds=120),
+        )
+        metadata = await prepare_input_artifact(
+            db,
+            OWNER,
+            _artifact_request(
+                goal_id="goal-artifact-expire-valid",
+                idempotency_key="expire-valid",
+            ),
+            now=datetime(2026, 9, 30, tzinfo=timezone.utc),
+        )
+        path = _artifact_path(metadata)
+        assert await expire_input_artifacts(db, now=metadata.expires_at) == 1
+        assert not path.exists()
+        expired = await db.get(WorkBoardInputArtifact, metadata.artifact_id)
+        assert expired is not None and expired.state == "expired"
+
+
+@pytest.mark.asyncio
+async def test_prepare_input_artifact_repairs_existing_canonical_parent_modes(
+    async_db, tmp_path, monkeypatch
+):
+    """An existing artifact hierarchy is privately repaired through FDs."""
+
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    artifact_root = tmp_path / "artifacts"
+    work_board_root = artifact_root / "work-board"
+    input_root = work_board_root / "inputs"
+    input_root.mkdir(parents=True)
+    for directory in (artifact_root, work_board_root, input_root):
+        directory.chmod(0o775)
+    unrelated = input_root / "keep-existing.txt"
+    unrelated.write_text("keep", encoding="utf-8")
+    unrelated.chmod(0o600)
+    tmp_path.chmod(0o755)
+
+    async with async_db() as db:
+        await _browser_goal(
+            db,
+            goal_id="goal-artifact-parent-mode-repair",
+            budget=GoalAdmissionBudget(max_outstanding_jobs=1, max_attempts=1, max_runtime_seconds=120),
+        )
+        metadata = await prepare_input_artifact(
+            db,
+            OWNER,
+            _artifact_request(
+                goal_id="goal-artifact-parent-mode-repair",
+                idempotency_key="parent-mode-repair",
+            ),
+        )
+
+    assert metadata.state == "pending"
+    assert stat.S_IMODE(tmp_path.stat().st_mode) == 0o755
+    assert all(stat.S_IMODE(directory.stat().st_mode) == 0o700 for directory in (artifact_root, work_board_root, input_root))
+    assert unrelated.read_text(encoding="utf-8") == "keep"
+    assert stat.S_IMODE(unrelated.stat().st_mode) == 0o600
+
+
+@pytest.mark.asyncio
+async def test_expiry_attempts_safe_rows_after_one_cleanup_unknown(async_db, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    observed_at = datetime(2026, 9, 30, tzinfo=timezone.utc)
+    async with async_db() as db:
+        await _browser_goal(
+            db,
+            goal_id="goal-artifact-expire-batch",
+            budget=GoalAdmissionBudget(max_outstanding_jobs=2, max_attempts=1, max_runtime_seconds=120),
+        )
+        unsafe = await prepare_input_artifact(
+            db,
+            OWNER,
+            _artifact_request(
+                goal_id="goal-artifact-expire-batch",
+                idempotency_key="expire-batch-unsafe",
+            ),
+            now=observed_at,
+        )
+        safe = await prepare_input_artifact(
+            db,
+            OWNER,
+            _artifact_request(
+                goal_id="goal-artifact-expire-batch",
+                idempotency_key="expire-batch-safe",
+            ),
+            now=observed_at,
+        )
+        unsafe_path = _artifact_path(unsafe)
+        safe_path = _artifact_path(safe)
+        unsafe_path.write_bytes(b"tampered batch payload")
+
+        with pytest.raises(BoardError) as cleanup_error:
+            await expire_input_artifacts(db, now=observed_at + timedelta(days=2))
+        assert cleanup_error.value.code == "input_artifact_cleanup_required"
+        assert cleanup_error.value.extra["cleanup_required_artifact_ids"] == [unsafe.artifact_id]
+        assert cleanup_error.value.extra["cleanup_required_count"] == 1
+        assert unsafe_path.read_bytes() == b"tampered batch payload"
+        assert not safe_path.exists()
+        unsafe_row = await db.get(WorkBoardInputArtifact, unsafe.artifact_id)
+        safe_row = await db.get(WorkBoardInputArtifact, safe.artifact_id)
+        assert unsafe_row is not None and unsafe_row.state == "expired"
+        assert safe_row is not None and safe_row.state == "expired"
 
 
 @pytest.mark.asyncio
@@ -588,6 +792,157 @@ async def test_artifact_delete_requires_terminal_bound_task_and_binding_cas(asyn
         with pytest.raises(BoardError) as cas_error:
             await bind_input_artifact(db, OWNER, artifact=stale, task_id="loser", task_revision=1)
         assert cas_error.value.code == "input_artifact_task_conflict"
+
+
+@pytest.mark.asyncio
+async def test_terminal_cleanup_rejects_replaced_or_digest_changed_file(async_db, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    metadata, path = await _cleanup_artifact(
+        async_db,
+        goal_id="goal-cleanup-replaced",
+        idempotency_key="cleanup-replaced",
+    )
+    original_payload = path.read_bytes()
+    replacement_payload = bytes([original_payload[0] ^ 1]) + original_payload[1:]
+    replacement = path.with_name("replacement.json")
+    path.rename(replacement)
+    replacement.rename(path)
+    path.write_bytes(replacement_payload)
+
+    async with async_db() as db:
+        with pytest.raises(BoardError) as cleanup_error:
+            await delete_input_artifact(db, OWNER, artifact_id=metadata.artifact_id)
+        assert cleanup_error.value.code == "input_artifact_cleanup_required"
+        assert cleanup_error.value.extra["reason_code"] == "cleanup_digest_mismatch"
+        row = await db.get(WorkBoardInputArtifact, metadata.artifact_id)
+        assert row is not None and row.state == "deleted"
+    assert path.read_bytes() == replacement_payload
+
+
+@pytest.mark.asyncio
+async def test_terminal_cleanup_rejects_mode_hardlink_and_foreign_owner(
+    async_db, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+
+    mode_metadata, mode_path = await _cleanup_artifact(
+        async_db,
+        goal_id="goal-cleanup-mode",
+        idempotency_key="cleanup-mode",
+    )
+    mode_path.chmod(0o644)
+    async with async_db() as db:
+        with pytest.raises(BoardError) as mode_error:
+            await delete_input_artifact(db, OWNER, artifact_id=mode_metadata.artifact_id)
+        assert mode_error.value.extra["reason_code"] == "cleanup_target_metadata_mismatch"
+    mode_path.chmod(0o600)
+
+    link_metadata, link_path = await _cleanup_artifact(
+        async_db,
+        goal_id="goal-cleanup-link",
+        idempotency_key="cleanup-link",
+    )
+    hardlink = link_path.with_name("cleanup-hardlink.json")
+    os.link(link_path, hardlink)
+    async with async_db() as db:
+        with pytest.raises(BoardError) as link_error:
+            await delete_input_artifact(db, OWNER, artifact_id=link_metadata.artifact_id)
+        assert link_error.value.extra["reason_code"] == "cleanup_target_metadata_mismatch"
+    hardlink.unlink()
+
+    owner_metadata, owner_path = await _cleanup_artifact(
+        async_db,
+        goal_id="goal-cleanup-owner",
+        idempotency_key="cleanup-owner",
+    )
+    original_fstat = input_artifacts_module.os.fstat
+
+    def foreign_target_owner(fd):
+        metadata = original_fstat(fd)
+        if stat.S_ISREG(metadata.st_mode):
+            return SimpleNamespace(
+                st_dev=metadata.st_dev,
+                st_ino=metadata.st_ino,
+                st_mode=metadata.st_mode,
+                st_nlink=metadata.st_nlink,
+                st_uid=os.getuid() + 1,
+                st_size=metadata.st_size,
+            )
+        return metadata
+
+    monkeypatch.setattr(input_artifacts_module.os, "fstat", foreign_target_owner)
+    try:
+        async with async_db() as db:
+            with pytest.raises(BoardError) as owner_error:
+                await revoke_input_artifact(db, OWNER, artifact_id=owner_metadata.artifact_id)
+            assert owner_error.value.extra["reason_code"] == "cleanup_target_metadata_mismatch"
+    finally:
+        monkeypatch.setattr(input_artifacts_module.os, "fstat", original_fstat)
+    assert owner_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_terminal_cleanup_rejects_symlinked_parent_and_keeps_outside_file(
+    async_db, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    metadata, path = await _cleanup_artifact(
+        async_db,
+        goal_id="goal-cleanup-parent",
+        idempotency_key="cleanup-parent",
+    )
+    parent = path.parent
+    path.unlink()
+    parent.rmdir()
+    outside = tmp_path / "outside-inputs"
+    outside.mkdir(mode=0o700)
+    outside_file = outside / path.name
+    outside_file.write_bytes(b"outside private bytes")
+    outside_file.chmod(0o600)
+    parent.symlink_to(outside, target_is_directory=True)
+
+    async with async_db() as db:
+        with pytest.raises(BoardError) as parent_error:
+            await delete_input_artifact(db, OWNER, artifact_id=metadata.artifact_id)
+        assert parent_error.value.extra["reason_code"] == "cleanup_target_unavailable"
+        row = await db.get(WorkBoardInputArtifact, metadata.artifact_id)
+        assert row is not None and row.state == "deleted"
+    assert outside_file.read_bytes() == b"outside private bytes"
+
+
+@pytest.mark.asyncio
+async def test_terminal_cleanup_requires_reconciliation_when_payload_is_missing(
+    async_db, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    metadata, path = await _cleanup_artifact(
+        async_db,
+        goal_id="goal-cleanup-missing",
+        idempotency_key="cleanup-missing",
+    )
+    path.unlink()
+
+    async with async_db() as db:
+        with pytest.raises(BoardError) as missing_error:
+            await delete_input_artifact(db, OWNER, artifact_id=metadata.artifact_id)
+        assert missing_error.value.code == "input_artifact_cleanup_required"
+        assert missing_error.value.extra["reason_code"] == "cleanup_target_missing"
+        row = await db.get(WorkBoardInputArtifact, metadata.artifact_id)
+        assert row is not None and row.state == "deleted"
+
+
+@pytest.mark.asyncio
+async def test_revoke_input_artifact_removes_exact_private_payload(async_db, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    metadata, path = await _cleanup_artifact(
+        async_db,
+        goal_id="goal-cleanup-revoke-valid",
+        idempotency_key="cleanup-revoke-valid",
+    )
+    async with async_db() as db:
+        revoked = await revoke_input_artifact(db, OWNER, artifact_id=metadata.artifact_id)
+        assert revoked.state == "revoked"
+    assert not path.exists()
 
 
 @pytest.mark.asyncio
@@ -806,12 +1161,15 @@ async def test_post_claim_readiness_rejects_forged_attempt_context(async_db, mon
     assert reason == "The board attempt limit has been exhausted"
 
 
-def test_public_browser_calendar_and_reviewed_procedure_capabilities_are_the_only_artifact_storage_opt_ins():
+def test_registered_typed_artifact_capabilities_have_an_explicit_opt_in_allowlist():
     approved_public_capabilities = {
         "browser.public-task.v1",
         "calendar.meeting-prep.v1",
         "calendar.observe_due_events.v1",
+        "engineering.repo-repair.v1",
+        "gmail.scan_metadata.v1",
         "guardian-routine.v2",
+        "work.mail-reply-draft.v1",
     }
     assert {
         capability_id

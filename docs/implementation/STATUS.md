@@ -81,7 +81,7 @@ High-risk strategic wording in this status page remains governed by [19. Strateg
 
 ## Current Snapshot
 
-- [ ] Epic #883 M6 #889 branch-local reviewed-procedure v2 target adds exactly three
+- [ ] Epic #883 M6 #889 reviewed-procedure v2 adds exactly three
   fixed templates (`public-browser-check`, `watch-and-public-browser`, and
   `selected-meeting-prep`) with registered native leaf capabilities, at most
   two steps/300 seconds, copied server-owned executable inputs, exact source
@@ -89,18 +89,40 @@ High-risk strategic wording in this status page remains governed by [19. Strateg
   manual invocation, and finite governed public/watch schedules. Owner/session
   fences, exact unknown-request retry, native readbacks, explicit
   `no_learning`, quiet-hours and finite goal-budget admission, and CPU-host
-  optional-dependency behavior are part of the target. This remains a
-  branch-labelled target: October 1 managed CPU-host public-browser execution
+  optional-dependency behavior are part of the capability. This remains
+  **Partial**: October 1 managed CPU-host public-browser execution
   and twelve native vertical tests establish bounded mechanical execution,
   and live response-loss recovery passed independent review and focused
   validation. Live Calendar/model usefulness and production proof remain
-  unverified. See [Current
+  **external-unverified**. See [Current
   App Guide](./12-current-app-guide.md#reviewed-procedures-v2-m6-889-branch-local-target).
-- [ ] Bounded calendar meeting preparation adds write-only encrypted setup, verified calendar selection, finite event/model consent, a goal-linked Todo task, governed brief synthesis with two fresh event reads, and verified plaintext artifact inspection. Finite observation schedules propose deduplicated tasks for review without calling a model. This is intended post-epic behavior; reviewed PRs own implementation evidence, and live Google/model usefulness remains external-unverified without an authorized canary. See [Current App Guide](./12-current-app-guide.md#bounded-calendar-meeting-preparation).
-- [ ] M7 #890 adds a branch-local bounded Gmail readonly path: encrypted owner/session-bound setup, explicit source and model consent, opaque message bindings, governed hourly or six-hour metadata watches, finite Goal quiet-hours and period-wide notification caps with visible coverage-blocked recovery, and private reply drafts with two source reads, one governed OpenRouter admission, encrypted artifact/readback, exact-key recovery, and `no_learning`. The bounded reply intent remains a local 0600 plaintext typed-input residual; source bodies and drafts stay encrypted and private, with no provider draft or send operation. Focused SQLite and intercepted-transport receipts cover the mechanics; CPU-only/keyless OpenRouter operation, real Google-account usefulness, and paid-model canaries remain external-unverified. See [Current App Guide](./12-current-app-guide.md#bounded-gmail-source-watch-and-reply-drafting-m7-890-branch-local-target).
-- [ ] Bounded public browser tasks add typed input creation, finite HTTPS navigation/extraction, a single browser-task context lane, durable action and readback receipts, and explicit no-learning outcomes through Work. Current goal budgets narrow the fixed request, action, output, and runtime limits. Local browser mechanics and production transport have separate validation receipts; authenticated browsing and general computer use remain excluded from this capability. Open milestone/epic PRs own validation until integration; see [Current App Guide](./12-current-app-guide.md#bounded-public-browser-tasks).
-- [ ] Calm cockpit sections and the canonical-memory inspector provide bounded Home, Inbox, Work, Goals, Library, and Connections navigation. Owner-session-scoped literal memory reads expose redacted provenance and explicit history; canonical controls retain the distinction between ordinary correction, reviewed task learning, archive/redact, and acknowledged deletion. Open milestone/epic PRs own validation until integration; see [Current App Guide](./12-current-app-guide.md#cockpit-navigation-and-canonical-inspector).
-- [ ] Reviewed source-change follow-up is a bounded local capability: the goal budget and source-watch cadence feed an owner-scoped Guardian inbox; verified material packets can become one Triage Work Board task through an explicit, idempotent decision. The open PR owns branch validation until integration. General autonomous operation and live external/provider usefulness remain Partial; see [Guardian Intelligence](./05-guardian-intelligence.md#reviewed-goals-and-the-source-change-inbox).
+- [ ] Epic #883 M4 #887 is a bounded repository-repair capability:
+  selected-source inspection, explicit code-egress consent, one governed
+  `strategist_agent` proposal, exact patch approval, and staged test/readback
+  evidence with `no_learning`. The server-owned selector offers a disabled
+  local host-user runner by default plus optional strict Docker rootless and
+  existing-daemon rootful profiles; every local job requires the exact
+  `local_host_execution` approval and is presented with no isolation guarantee.
+  Missing or drifted readiness blocks the selected backend without fallback;
+  legacy `engineering.repo-change.v1` remains strict rootless-only. One
+  durable `repo-repair-execution` slot spans Goals and recovery, remote
+  inference is released before approval/test dispatch, and one absolute
+  deadline covers staging through publication. Cancellation or unproven
+  cleanup/readback/publication remains recoverable on the same job/attempt.
+  The final native verifier covers one local API journey, two approved Goals
+  sharing one physical native worker, same-job API cancellation with fresh
+  reconciliation, staged readback/cleanup, source/.git preservation, and
+  `no_learning`; its deterministic transport is intercepted. Local execution
+  intentionally has no OS confinement. Intercepted transport and executor
+  mechanics do not prove live provider use or Docker resource enforcement.
+  Provider and account usefulness remain **external-unverified**. This remains
+  **Partial** and is not Shipped
+  `develop` truth. See [Current App Guide](./12-current-app-guide.md#governed-repository-repair-m4-887-branch-local-target).
+- [ ] Bounded calendar meeting preparation adds write-only encrypted setup, verified calendar selection, finite event/model consent, a goal-linked Todo task, governed brief synthesis with two fresh event reads, and verified plaintext artifact inspection. Finite observation schedules propose deduplicated tasks for review without calling a model. This remains **Partial**; live Google/model usefulness remains external-unverified without an authorized canary. See [Current App Guide](./12-current-app-guide.md#bounded-calendar-meeting-preparation).
+- [ ] M7 #890 adds a bounded Gmail readonly path: encrypted owner/session-bound setup, explicit source and model consent, opaque message bindings, governed hourly or six-hour metadata watches, finite Goal quiet-hours and period-wide notification caps with visible coverage-blocked recovery, and private reply drafts with two source reads, one governed OpenRouter admission, encrypted artifact/readback, exact-key recovery, and `no_learning`. The bounded reply intent remains a local 0600 plaintext typed-input residual; source bodies and drafts stay encrypted and private, with no provider draft or send operation. This remains **Partial**. Focused SQLite and intercepted-transport receipts cover the mechanics; CPU-only/keyless OpenRouter operation, real Google-account usefulness, and paid-model canaries remain external-unverified. See [Current App Guide](./12-current-app-guide.md#bounded-gmail-source-watch-and-reply-drafting-m7-890-branch-local-target).
+- [ ] Bounded public browser tasks add typed input creation, finite HTTPS navigation/extraction, a single browser-task context lane, durable action and readback receipts, and explicit no-learning outcomes through Work. Current goal budgets narrow the fixed request, action, output, and runtime limits. This remains **Partial**; local browser mechanics and production transport have separate validation receipts; authenticated browsing and general computer use remain excluded from this capability. See [Current App Guide](./12-current-app-guide.md#bounded-public-browser-tasks).
+- [ ] Calm cockpit sections and the canonical-memory inspector provide bounded Home, Inbox, Work, Goals, Library, and Connections navigation. Owner-session-scoped literal memory reads expose redacted provenance and explicit history; canonical controls retain the distinction between ordinary correction, reviewed task learning, archive/redact, and acknowledged deletion. This remains **Partial**; see [Current App Guide](./12-current-app-guide.md#cockpit-navigation-and-canonical-inspector).
+- [ ] Reviewed source-change follow-up is a bounded local capability: the goal budget and source-watch cadence feed an owner-scoped Guardian inbox; verified material packets can become one Triage Work Board task through an explicit, idempotent decision. General autonomous operation and live external/provider usefulness remain Partial; see [Guardian Intelligence](./05-guardian-intelligence.md#reviewed-goals-and-the-source-change-inbox).
 - [x] Seraph is usable today as a real guardian workspace with a browser cockpit, memory, screen awareness, proactive behavior, and a real action layer.
 - [x] Public docs target the `v2026.6.30` app era; the published GitHub Pages site updates only after a `main` push touches `docs/**` and the Pages workflow succeeds.
 - [x] The live truth surface is now `docs/research/` plus `docs/implementation/`, while the GitHub Project, issues, and PRs carry active execution state.

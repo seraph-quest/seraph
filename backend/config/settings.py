@@ -9,14 +9,18 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ENV_FILE = REPO_ROOT / ".env.dev"
 
 
-class RepoSandboxSettings(BaseModel):
-    """Operator-owned configuration for the one supported repository profile.
+RepoSandboxExecutorKind = Literal["local", "docker_rootless", "docker_rootful"]
 
-    The worker receives none of these values.  They are only consumed by the
-    trusted backend Docker runner, and an empty socket/image deliberately keeps
-    the capability blocked until the operator provisions the prerequisite.
+
+class RepoSandboxSettings(BaseModel):
+    """Operator-owned configuration for the governed repository executor.
+
+    The worker receives none of these values. They are consumed only by the
+    trusted backend executor. Local is the usable CPU-host default; Docker
+    selectors remain blocked until their daemon/image prerequisites are proven.
     """
 
+    executor_kind: RepoSandboxExecutorKind = "local"
     enabled: bool = False
     docker_socket: str = ""
     worker_image_digest: str = ""

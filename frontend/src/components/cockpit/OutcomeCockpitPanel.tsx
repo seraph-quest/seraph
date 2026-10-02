@@ -58,6 +58,7 @@ export interface OutcomeApprovalSummary {
   actionStatus?: string | null;
   scope?: string[];
   permissions?: string[];
+  localHostExecutionRequired?: boolean;
   threadLabel?: string | null;
   authorized?: boolean;
   ownerPrincipal?: string | null;
@@ -322,6 +323,8 @@ export function OutcomeCockpitPanel({
   );
   const approvalCardState: OutcomeCockpitState = approval?.state
     ?? (approvalLoadState === "loading" ? "loading" : approvalLoadState === "stale" ? "stale" : "empty");
+  const localHostExecution = approval?.localHostExecutionRequired === true
+    || approval?.permissions?.includes("local_host_execution") === true;
   const recoveryLocked = !(
     work?.state
     && !RECOVERY_LOCKED_STATES.includes(work.state)
@@ -443,7 +446,7 @@ export function OutcomeCockpitPanel({
               {approval && onApprove ? (
                 <ActionButton
                   action={{
-                    label: "Approve",
+                    label: localHostExecution ? "Approve local tests on this host" : "Approve",
                     onClick: onApprove,
                     disabled: approvalLocked,
                     title: approvalLocked ? "Approval authority is stale, unavailable, or blocked." : undefined,
@@ -471,6 +474,9 @@ export function OutcomeCockpitPanel({
               <ValueRow label="action" value={display(approval.actionStatus, "pending")}/>
               <ValueRow label="scope" value={approval.scope?.length ? approval.scope.join(" · ") : "scope unavailable"} />
               <ValueRow label="permission scope" value={approval.permissions?.length ? approval.permissions.join(" · ") : "permission scope unavailable"} />
+              {localHostExecution && (
+                <div className="rounded border border-amber-500/40 bg-amber-950/10 p-2 text-[11px] text-amber-200">Host permission: this repair runs as the Seraph user with filesystem, network, and host resource access after approval. No isolation guarantee is provided.</div>
+              )}
               <ValueRow label="thread" value={display(approval.threadLabel, "thread unavailable")} />
               <ValueRow label="owner principal" value={display(approval.ownerPrincipal)} />
               <ValueRow label="owner session" value={display(approval.ownerSession)} />

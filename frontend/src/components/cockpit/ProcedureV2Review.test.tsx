@@ -1355,6 +1355,7 @@ describe("ProcedureV2Review", () => {
     });
 
     render(<ProcedureV2Review ownerPrincipalId="operator:one" ownerSessionId="session-1" goals={[goal]} />);
+    await screen.findByRole("option", { name: /Reusable public check.*paused/ });
     fireEvent.change(await screen.findByLabelText("Existing reviewed procedure"), { target: { value: pausedRoutine.id } });
     const resume = await screen.findByRole("button", { name: "Resume procedure" });
     fireEvent.click(resume);

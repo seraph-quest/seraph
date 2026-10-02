@@ -9,6 +9,7 @@ from uuid import uuid4
 from smolagents import Tool
 
 from src.approval.exceptions import ApprovalRequired
+from src.approval.metadata import approval_wire_metadata
 from src.approval.identity import (
     approval_owner_operator_session_id,
     build_approval_owner_details,
@@ -439,8 +440,20 @@ class ApprovalTool(Tool):
                     **({"approval_context": approval_context} if approval_context else {}),
                     "approval_expires_at": approval_expires_at,
                     "expires_at": approval_expires_at,
+                    **approval_wire_metadata(
+                        {
+                            **(approval_context or {}),
+                            "expires_at": approval_expires_at,
+                        }
+                    ),
                 },
             )
+        )
+        wire_metadata = approval_wire_metadata(
+            {
+                **(approval_context or {}),
+                "expires_at": approval_expires_at,
+            }
         )
         raise ApprovalRequired(
             approval_id=request.id,
@@ -448,6 +461,7 @@ class ApprovalTool(Tool):
             tool_name=self.name,
             risk_level=request.risk_level,
             summary=summary,
+            **wire_metadata,
         )
 
     def _normalize_invocation(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:

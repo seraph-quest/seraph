@@ -13,6 +13,17 @@ function makeId(): string {
 }
 
 const WS_BACKOFF_MAX_MS = 30_000;
+const MAX_APPROVAL_PERMISSION_BYTES = 128;
+
+function boundedApprovalPermissions(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string"
+      && item.trim().length > 0
+      && item.length <= MAX_APPROVAL_PERMISSION_BYTES
+      && !item.includes("\u0000"))
+    : [];
+}
+
 export const WS_RESPONSE_TIMEOUT_MS = 130_000;
 export const REST_RESPONSE_TIMEOUT_MS = 130_000;
 export const ONBOARDING_SKIP_ACK_TIMEOUT_MS = 10_000;
@@ -364,6 +375,8 @@ export function useWebSocket() {
             approvalId: detail.approval_id,
             toolUsed: detail.tool_name,
             riskLevel: detail.risk_level,
+            localHostExecutionRequired: detail.local_host_execution_required === true,
+            requiredPermissions: boundedApprovalPermissions(detail.required_permissions),
             approvalStatus: "pending",
           };
           addMessage(approvalMsg);
@@ -588,6 +601,8 @@ export function useWebSocket() {
             approvalId: data.approval_id,
             toolUsed: data.tool_name,
             riskLevel: data.risk_level,
+            localHostExecutionRequired: data.local_host_execution_required === true,
+            requiredPermissions: boundedApprovalPermissions(data.required_permissions),
             approvalStatus: "pending",
           };
           addMessage(approvalMsg);

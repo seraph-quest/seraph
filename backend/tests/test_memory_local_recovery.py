@@ -97,6 +97,11 @@ class _SyncAsyncSession:
     def __init__(self, session: Session):
         self._session = session
 
+    @property
+    def bind(self):
+        """Expose the wrapped SQLAlchemy engine for dialect-aware helpers."""
+        return self._session.get_bind()
+
     async def execute(self, statement, *args, **kwargs):
         return self._session.execute(statement, *args, **kwargs)
 

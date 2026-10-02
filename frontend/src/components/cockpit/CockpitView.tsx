@@ -1389,6 +1389,65 @@ interface PendingApproval {
   package_path?: string | null;
   lifecycle_boundaries?: string[] | null;
   permissions?: Record<string, unknown> | null;
+  local_host_execution_required?: boolean;
+  required_permissions?: string[];
+}
+
+function approvalHasLocalHostPermission(value: Record<string, unknown> | null | undefined): boolean {
+  if (!value) return false;
+  const required = value.required_permissions;
+  if (Array.isArray(required) && required.some((item) => item === "local_host_execution")) return true;
+  return ["approval_context", "permissions", "sandbox"].some((key) => {
+    const nested = value[key];
+    return nested && typeof nested === "object" && !Array.isArray(nested)
+      ? approvalHasLocalHostPermission(nested as Record<string, unknown>)
+      : false;
+  });
+}
+
+function isLocalHostExecutionApproval(approval: PendingApproval | null | undefined): boolean {
+  if (!approval) return false;
+  return approval.local_host_execution_required === true
+    || approval.required_permissions?.includes("local_host_execution") === true
+    || approvalHasLocalHostPermission(approval.permissions)
+    || approvalHasLocalHostPermission(approval.approval_scope)
+    || approvalHasLocalHostPermission(approval.approval_context);
+}
+
+function approvalActionLabel(approval: PendingApproval | null | undefined): string {
+  return isLocalHostExecutionApproval(approval) ? "Approve local tests on this host" : "Approve";
+}
+
+const MAX_APPROVAL_PERMISSION_BYTES = 128;
+
+function isBoundedApprovalPermission(value: unknown): value is string {
+  return typeof value === "string"
+    && value.trim().length > 0
+    && value.length <= MAX_APPROVAL_PERMISSION_BYTES
+    && !value.includes("\u0000");
+}
+
+function normalizeApprovalPermissionList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter(isBoundedApprovalPermission) : [];
+}
+
+function normalizeApprovalPermissions(value: unknown): Record<string, unknown> | null {
+  if (Array.isArray(value)) return { required_permissions: normalizeApprovalPermissionList(value) };
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  if (record.required_permissions === undefined) return record;
+  if (!Array.isArray(record.required_permissions)) return null;
+  return {
+    ...record,
+    required_permissions: normalizeApprovalPermissionList(record.required_permissions),
+  };
+}
+
+function approvalPermissionLabels(value: Record<string, unknown> | null | undefined): string[] {
+  if (!value) return [];
+  const required = normalizeApprovalPermissionList(value.required_permissions);
+  const keys = Object.keys(value).filter(isBoundedApprovalPermission).filter((key) => key !== "required_permissions");
+  return [...new Set([...required, ...keys])];
 }
 
 type ExactApprovalLoadState = "idle" | "loading" | "ready" | "missing" | "unavailable";
@@ -1410,9 +1469,10 @@ function normalizePendingApprovals(value: unknown): PendingApproval[] {
     const optionalTime = (value: unknown): string | number | null => (
       typeof value === "string" || (typeof value === "number" && Number.isFinite(value)) ? value : null
     );
-    const permissions = record.permissions && typeof record.permissions === "object" && !Array.isArray(record.permissions)
-      ? record.permissions as Record<string, unknown>
-      : null;
+    const permissions = normalizeApprovalPermissions(record.permissions);
+    const requiredPermissions = Array.isArray(record.required_permissions)
+      ? normalizeApprovalPermissionList(record.required_permissions)
+      : [];
     const approvalScope = record.approval_scope && typeof record.approval_scope === "object" && !Array.isArray(record.approval_scope)
       ? record.approval_scope as Record<string, unknown>
       : null;
@@ -1458,6 +1518,8 @@ function normalizePendingApprovals(value: unknown): PendingApproval[] {
         ? record.lifecycle_boundaries.filter((item): item is string => typeof item === "string")
         : null,
       permissions,
+      local_host_execution_required: record.local_host_execution_required === true,
+      required_permissions: requiredPermissions,
     });
     return items;
   }, []);
@@ -11219,7 +11281,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       createdAt: outcomeApproval.created_at,
       actionStatus: outcomeApprovalActionState,
       scope: approvalScopeLabels,
-      permissions: outcomeApproval.permissions ? Object.keys(outcomeApproval.permissions) : [],
+      permissions: [...new Set([
+        ...approvalPermissionLabels(outcomeApproval.permissions),
+        ...normalizeApprovalPermissionList(outcomeApproval.required_permissions),
+      ])],
+      localHostExecutionRequired: isLocalHostExecutionApproval(outcomeApproval),
       threadLabel: outcomeApproval.thread_label ?? outcomeApproval.thread_id ?? outcomeApproval.session_id ?? null,
       authorized: approvalAuthorityReady,
       ownerPrincipal: redactIdentifier(outcomeApproval.approval_owner_principal_id),
@@ -14465,6 +14531,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     if (selectedInspector.kind === "approval") {
       const approval = selectedInspector.approval;
       const owner = displayApprovalOwnerMetadata(approval);
+      const localHostApproval = isLocalHostExecutionApproval(approval);
       const approvalScope = approval.approval_scope ?? approval.approval_context;
       const approvalScopeAction = approvalScope
         && typeof approvalScope === "object"
@@ -14477,7 +14544,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         ...displayApprovalScopeTarget(approvalScope),
       ].filter((value): value is string => Boolean(value)).join(" · ") || "unavailable";
       title = approval.tool_name;
-      meta = `${approval.risk_level} approval`;
+      meta = `${approval.risk_level} approval${localHostApproval ? " · host execution" : ""}`;
       body = `approval request · ${redactApprovalText(approval.summary, approval.approval_scope ?? approval.approval_context)}`;
       details = {
         approval_id: approval.id,
@@ -14494,6 +14561,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         package_path: approval.package_path ?? "n/a",
         lifecycle_boundaries: approval.lifecycle_boundaries ?? [],
         permissions: approval.permissions ?? {},
+        permission_boundary: localHostApproval
+          ? "Approve local tests on this host · host-user filesystem/network/resource access is visible; no isolation guarantee"
+          : "n/a",
         approval_scope: approvalScopeDisplay,
         bound_revision: approval.goal_revision ?? approval.plan_revision ?? "unavailable",
         authority: approvalActionAllowed(approval) ? "ready" : "locked",
@@ -14708,7 +14778,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   disabled={approvalActionDisabled(selectedWorkflowApproval)}
                   onClick={() => void handleApprovalDecision(selectedWorkflowApproval, "approve")}
                 >
-                  Approve
+                  {approvalActionLabel(selectedWorkflowApproval)}
                 </button>
                 <button
                   className="cockpit-feedback-button"
@@ -14869,11 +14939,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               })()}
               <button
                 className="cockpit-feedback-button"
-                aria-label={`Approve approval context for ${selectedWorkflowName}`}
+                aria-label={`${approvalActionLabel(selectedWorkflowApproval)} approval context for ${selectedWorkflowName}`}
                 disabled={approvalActionDisabled(selectedWorkflowApproval)}
                 onClick={() => void handleApprovalDecision(selectedWorkflowApproval, "approve")}
               >
-                Approve
+                {approvalActionLabel(selectedWorkflowApproval)}
               </button>
               <button
                 className="cockpit-feedback-button"
@@ -16700,6 +16770,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                               ? ` · thread ${approval.thread_id.slice(0, 6)}`
                               : ""}
                         </div>
+                        {isLocalHostExecutionApproval(approval) && (
+                          <div className="cockpit-row-meta text-amber-200">Host permission · no isolation guarantee · review the exact host scope</div>
+                        )}
                       </button>
                       <div className="cockpit-feedback-row">
                         {approval.resume_message && (
@@ -16731,7 +16804,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                           disabled={approvalActionDisabled(approval)}
                           onClick={() => void handleApprovalDecision(approval, "approve")}
                         >
-                          Approve
+                          {approvalActionLabel(approval)}
                         </button>
                         <button
                           className="cockpit-feedback-button"
@@ -17457,6 +17530,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             {workflowSupervisionSummary(workflow).join(" · ")}
                           </div>
                         ) : null}
+                        {approval && isLocalHostExecutionApproval(approval) && (
+                          <div className="cockpit-row-meta text-amber-200">Host permission · no isolation guarantee · review the exact host scope</div>
+                        )}
                         {workflowBranchDebugSummary(workflow).length > 0 ? (
                           <div className="cockpit-row-meta">
                             {workflowBranchDebugSummary(workflow).join(" · ")}
@@ -17484,7 +17560,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                               disabled={approvalActionDisabled(approval)}
                               onClick={() => void handleApprovalDecision(approval, "approve")}
                             >
-                              Approve
+                              {approvalActionLabel(approval)}
                             </button>
                             <button
                               className="cockpit-feedback-button"
@@ -18533,7 +18609,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       <button
                         type="button"
                         className="cockpit-operator-button"
-                        aria-label="Approve top M7 approval"
+                        aria-label={`${approvalActionLabel(primaryApprovalTriageEntry?.approval)} top M7 approval`}
                         disabled={
                           !primaryApprovalTriageEntry?.approval
                           || !m7ControlEnabled("approve", Boolean(primaryApprovalTriageEntry?.approval))
@@ -18541,7 +18617,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         }
                         onClick={() => approveOperatorTriageEntry(primaryApprovalTriageEntry)}
                       >
-                        approve
+                        {approvalActionLabel(primaryApprovalTriageEntry?.approval)}
                       </button>
                       <button
                         type="button"
@@ -19768,10 +19844,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                               <button
                                 type="button"
                                 className="cockpit-operator-button"
-                                aria-label={`Approve ${entry.label}`}
+                                aria-label={`${approvalActionLabel(entry.approval)} ${entry.label}`}
                                 onClick={() => approveOperatorTriageEntry(entry)}
                               >
-                                approve
+                                {approvalActionLabel(entry.approval)}
                               </button>
                               <button
                                 type="button"
@@ -20664,11 +20740,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             <button
                               type="button"
                               className="cockpit-operator-button"
-                              aria-label={`Approve ${entry.label}`}
+                              aria-label={`${approvalActionLabel(entry.approval)} ${entry.label}`}
                               disabled={approvalActionDisabled(entry.approval)}
                               onClick={() => void handleApprovalDecision(entry.approval!, "approve")}
                             >
-                              approve
+                              {approvalActionLabel(entry.approval)}
                             </button>
                           )}
                           {entry.threadId && canOpenLedgerThread(entry.threadId, sessionId, knownSessionIds) && (

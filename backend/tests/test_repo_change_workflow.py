@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
 
-from config.settings import settings
+from config.settings import RepoSandboxSettings, settings
 from src.api.workflows import (
     RepoChangeCancelRequest,
     RepoChangePreviewRequest,
@@ -19,8 +20,16 @@ from src.api.workflows import (
     _repo_change_candidate_plan_matches,
     _repo_change_dispatch_payload,
     _repo_change_dispatch_contract,
+    _repo_change_execution_authority,
+    _preflight_approved_executor_for_cleanup,
+    _build_repo_repair_executor_for_authority,
     _repo_change_local_finalize_pending,
+    _repo_change_patch_read_blocked,
+    _repo_change_reconcile_verified_local_result,
     _repo_change_read_patch,
+    _repo_change_settle_cancelled_sandbox,
+    _repo_change_verify_persisted_artifact,
+    _repo_change_write_artifact,
     _execute_repo_change_claimed,
     _recover_repo_change_after_restart,
     _record_repo_change_goal_outcome,
@@ -29,7 +38,16 @@ from src.api.workflows import (
     retry_repo_change,
     _repo_change_safe_relative,
 )
-from src.execution.repo_sandbox import RepoSandboxLimits, RootlessDockerRepoSandbox
+from src.execution.repo_sandbox import (
+    RepoSandboxError,
+    RepoSandboxLimits,
+    RootfulDockerRepoSandbox,
+    RootlessDockerRepoSandbox,
+    executor_posture_digest,
+    limits_digest,
+)
+from src.work_board.dispatcher import _assert_repo_repair_executor_authority
+from src.workflows.job_runtime import DurableJobError
 
 
 def test_repo_change_request_rejects_unknown_execution_controls():
@@ -54,6 +72,68 @@ def test_repo_change_identity_is_deterministic_and_owner_bound():
     other_owner = _repo_change_job_id("operator:two", "same-key")
     assert first == second
     assert first != other_owner
+
+
+def test_repo_repair_selector_drift_blocks_before_model_contact():
+    posture = {"kind": "docker_rootful", "profile": "repo-python-pytest-v1"}
+    preflight = SimpleNamespace(
+        ok=True,
+        posture=posture,
+        posture_digest=executor_posture_digest(posture),
+        as_receipt=lambda: {"ok": True, "posture": posture, "posture_digest": executor_posture_digest(posture)},
+    )
+    executor = SimpleNamespace(
+        kind="docker_rootful",
+        config=SimpleNamespace(
+            profile="repo-python-pytest-v1",
+            worker_image_digest="",
+            docker_socket="/var/run/docker.sock",
+        ),
+        limits=RepoSandboxLimits(),
+    )
+    with pytest.raises(DurableJobError, match="executor_authority_changed"):
+        _assert_repo_repair_executor_authority(
+            {
+                "executor_kind": "docker_rootless",
+                "executor_profile": "docker_rootless:repo-python-pytest-v1",
+                "executor_posture": {"kind": "docker_rootless", "profile": "repo-python-pytest-v1"},
+                "executor_posture_digest": "a" * 64,
+            },
+            executor,
+            preflight,
+        )
+
+
+def test_repo_repair_cleanup_rejects_fresh_posture_drift(monkeypatch: pytest.MonkeyPatch):
+    expected_posture = {"kind": "docker_rootful", "profile": "repo-python-pytest-v1"}
+
+    class ProbeConfig:
+        def model_copy(self, *, update):
+            return self
+
+    class ProbeExecutor:
+        kind = "docker_rootful"
+
+        def preflight(self, authority):
+            return SimpleNamespace(
+                ok=True,
+                executor_kind="docker_rootful",
+                posture=expected_posture,
+                posture_digest="b" * 64,
+            )
+
+    monkeypatch.setattr(
+        "src.api.workflows.build_repo_repair_executor",
+        lambda *, config: ProbeExecutor(),
+    )
+    with pytest.raises(RepoSandboxError, match="posture changed"):
+        _preflight_approved_executor_for_cleanup(
+            SimpleNamespace(kind="docker_rootful", config=ProbeConfig()),
+            {
+                "executor_kind": "docker_rootful",
+                "executor_posture_digest": "a" * 64,
+            },
+        )
 
 
 def test_repo_change_paths_block_escape():
@@ -196,6 +276,126 @@ def test_dispatch_payload_uses_the_post_claim_attempt_count():
         },
     )
     assert valid and reason == ""
+
+
+def test_cancel_authority_keeps_original_dispatch_attempt_and_fence():
+    job = {
+        "job_id": "repo-change-" + "2" * 32,
+        "declared_authority": {
+            "executor_kind": "local",
+            "attempt_id": "attempt-original",
+            "authority_digest": "a" * 64,
+        },
+        "lease": {"owner": "service:recovery", "fencing_token": 99},
+        "checkpoints": [
+            {
+                "payload": {
+                    "phase": "executor_dispatch_reserved",
+                    "attempt_id": "attempt-original",
+                    "fencing_token": 7,
+                }
+            }
+        ],
+    }
+    authority = _repo_change_execution_authority(job)
+    assert authority["attempt_id"] == "attempt-original"
+    assert authority["fencing_token"] == 7
+    assert authority["fencing_token"] != job["lease"]["fencing_token"]
+
+
+def test_dispatch_contract_recovers_redacted_payload_fence_from_server_envelope():
+    job_id = "repo-change-" + "3" * 32
+    token = RootlessDockerRepoSandbox._server_token(job_id)
+    checkpoint = {
+        "checkpoint_id": "executor_dispatch_reserved",
+        # This top-level receipt field is the server-owned CAS envelope.
+        "fencing_token": 7,
+        "payload": {
+            "phase": "executor_dispatch_reserved",
+            "job_id": job_id,
+            "attempt": 1,
+            "attempt_id": "attempt-original",
+            "fencing_token": "[redacted]",
+            "authority_digest": "a" * 64,
+            "base_digest": "b" * 64,
+            "executor_kind": "local",
+            "process_group_identity": f"{token}-local",
+        },
+    }
+    job = {
+        "job_id": job_id,
+        "attempt_count": 1,
+        "authority_digest": "a" * 64,
+        "declared_authority": {
+            "executor_kind": "local",
+            "attempt_id": "attempt-original",
+        },
+        "checkpoints": [checkpoint],
+    }
+    authority = {
+        "executor_kind": "local",
+        "attempt_id": "attempt-original",
+        "base_digest": "b" * 64,
+    }
+
+    valid, reason, payload = _repo_change_dispatch_contract(job, authority)
+    assert valid and reason == ""
+    assert payload is not None and payload["fencing_token"] == 7
+    assert _repo_change_execution_authority(job, payload)["fencing_token"] == 7
+
+    forged_payload = {**checkpoint["payload"], "fencing_token": 99}
+    forged_job = {
+        **job,
+        "checkpoints": [{**checkpoint, "payload": forged_payload}],
+    }
+    forged_valid, forged_reason, _ = _repo_change_dispatch_contract(forged_job, authority)
+    assert not forged_valid
+    assert forged_reason == "recovery_dispatch_contract_mismatch"
+
+
+def _rootful_executor_authority() -> tuple[RepoSandboxSettings, dict[str, object]]:
+    image = "registry.example/seraph/repo-worker@sha256:" + "a" * 64
+    config = RepoSandboxSettings(
+        executor_kind="docker_rootful",
+        enabled=True,
+        docker_socket="unix:///run/docker.sock",
+        worker_image_digest=image,
+        profile="repo-python-pytest-v1",
+    )
+    executor = RootfulDockerRepoSandbox(config=config)
+    posture = {"kind": "docker_rootful", "profile": config.profile}
+    return config, {
+        "executor_kind": "docker_rootful",
+        "executor_profile": f"docker_rootful:{config.profile}",
+        "sandbox_profile": config.profile,
+        "sandbox_image_digest": image,
+        "sandbox_limits_digest": limits_digest(executor.limits),
+        "sandbox_socket_digest": hashlib.sha256(config.docker_socket.encode()).hexdigest(),
+        "executor_posture": posture,
+        "executor_posture_digest": executor_posture_digest(posture),
+    }
+
+
+def test_approved_rootful_executor_selection_is_provider_free(monkeypatch: pytest.MonkeyPatch):
+    config, authority = _rootful_executor_authority()
+    monkeypatch.setattr(
+        "src.execution.repo_sandbox._effective_repo_sandbox_settings",
+        lambda: config,
+    )
+    selected = _build_repo_repair_executor_for_authority(authority)
+    assert isinstance(selected, RootfulDockerRepoSandbox)
+    assert selected.kind == "docker_rootful"
+
+
+def test_approved_rootful_executor_rejects_mutated_socket_before_contact(monkeypatch: pytest.MonkeyPatch):
+    config, authority = _rootful_executor_authority()
+    monkeypatch.setattr(
+        "src.execution.repo_sandbox._effective_repo_sandbox_settings",
+        lambda: config,
+    )
+    authority["sandbox_socket_digest"] = "f" * 64
+    with pytest.raises(RepoSandboxError, match="socket changed"):
+        _build_repo_repair_executor_for_authority(authority)
 
 
 @pytest.mark.parametrize("existing_status", ["succeeded", "running"])
@@ -460,6 +660,322 @@ def test_approved_patch_read_failure_blocks_execution_job(monkeypatch: pytest.Mo
     assert repository.transitions[0][1]["result"]["operator_action"] == "retry_or_cancel"
 
 
+def test_patch_read_failure_never_borrows_successor_lease(monkeypatch: pytest.MonkeyPatch):
+    job_id = "repo-change-" + "1" * 32
+    successor = {
+        "job_id": job_id,
+        "status": "running",
+        "revision": 8,
+        "lease": {"owner": "service:new-worker", "fencing_token": 9},
+        "checkpoints": [],
+    }
+
+    class FakeRepository:
+        async def get_job(self, _job_id):
+            return successor
+
+        async def transition_job(self, *_args, **_kwargs):
+            raise AssertionError("a stale worker must not transition the successor")
+
+    monkeypatch.setattr("src.api.workflows.durable_job_repository", FakeRepository())
+    result = asyncio.run(
+        _repo_change_patch_read_blocked(
+            job_id=job_id,
+            owner="service:old-worker",
+            fencing_token=4,
+            revision=7,
+            exc=HTTPException(status_code=422, detail={"code": "patch_artifact_unavailable"}),
+        )
+    )
+    assert result["status"] == "unknown_external_effect"
+    assert result["reason_code"] == "repository_recovery_lease_changed"
+    assert result["job"]["lease"] == successor["lease"]
+
+
+@pytest.mark.asyncio
+async def test_sandbox_cancellation_settles_before_and_after_dispatch(monkeypatch: pytest.MonkeyPatch):
+    class FakeRepository:
+        def __init__(self, job):
+            self.job = job
+            self.transitions = []
+
+        async def get_job(self, _job_id):
+            return dict(self.job)
+
+        async def transition_job(self, _job_id, status, **kwargs):
+            self.transitions.append((status, kwargs))
+            self.job["status"] = status
+            self.job["revision"] = int(self.job.get("revision", 0)) + 1
+            return dict(self.job)
+
+    before_job = {
+        "job_id": "repo-change-" + "2" * 32,
+        "status": "running",
+        "revision": 3,
+        "deadline_at": (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat(),
+        "checkpoints": [],
+    }
+    before_repository = FakeRepository(before_job)
+    monkeypatch.setattr("src.api.workflows.durable_job_repository", before_repository)
+    before_task = asyncio.create_task(asyncio.sleep(0))
+    before = await _repo_change_settle_cancelled_sandbox(
+        job_id=before_job["job_id"],
+        owner="service:repo-change",
+        fencing_token=4,
+        task=before_task,
+    )
+    assert before["status"] == "cancelled"
+    assert before["reason_code"] == "cancelled_before_dispatch"
+    assert before_repository.transitions[0][0] == "cancelled"
+
+    after_job = {
+        "job_id": "repo-change-" + "3" * 32,
+        "status": "running",
+        "revision": 3,
+        "deadline_at": (datetime.now(timezone.utc) + timedelta(milliseconds=20)).isoformat(),
+        "checkpoints": [{"payload": {"phase": "docker_dispatch_reserved"}}],
+    }
+    after_repository = FakeRepository(after_job)
+    monkeypatch.setattr("src.api.workflows.durable_job_repository", after_repository)
+    release = asyncio.Event()
+
+    async def non_cooperative_worker():
+        await release.wait()
+
+    after_task = asyncio.create_task(non_cooperative_worker())
+    after = await _repo_change_settle_cancelled_sandbox(
+        job_id=after_job["job_id"],
+        owner="service:repo-change",
+        fencing_token=4,
+        task=after_task,
+    )
+    assert after["status"] == "unknown_external_effect"
+    assert after["reason_code"] == "cancelled_after_dispatch"
+    assert after["operator_action"] == "reconcile_or_cancel"
+    assert after["thread_tracked"] is True
+    assert after_repository.transitions[0][0] == "unknown_external_effect"
+    release.set()
+    await after_task
+
+
+def test_claimed_boundary_cancellation_before_admission_is_terminal(monkeypatch: pytest.MonkeyPatch):
+    job = {
+        "job_id": "repo-change-" + "6" * 32,
+        "status": "running",
+        "revision": 3,
+        "lease": {"owner": "service:repo-change", "fencing_token": 4},
+        "checkpoints": [],
+    }
+    transitions = []
+
+    class FakeRepository:
+        async def get_job(self, _job_id):
+            return dict(job)
+
+        async def record_checkpoint(self, _job_id, **_kwargs):
+            raise asyncio.CancelledError()
+
+        async def transition_job(self, _job_id, status, **kwargs):
+            transitions.append((status, kwargs))
+            job["status"] = status
+            job["revision"] += 1
+            return dict(job)
+
+    monkeypatch.setattr("src.api.workflows.durable_job_repository", FakeRepository())
+    result = asyncio.run(
+        _execute_repo_change_claimed(
+            current=job,
+            authority={},
+            claimed=job,
+        )
+    )
+    assert result["status"] == "cancelled"
+    assert result["reason_code"] == "cancelled_before_dispatch"
+    assert transitions[0][0] == "cancelled"
+
+
+def test_claimed_boundary_cancellation_during_readback_is_unknown(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    job_id = "repo-change-" + "7" * 32
+    patch = b"--- a/src/app.py\n+++ b/src/app.py\n"
+    job = {
+        "job_id": job_id,
+        "status": "running",
+        "revision": 3,
+        "attempt_count": 1,
+        "authority_digest": "a" * 64,
+        "lease": {"owner": "service:repo-change", "fencing_token": 4},
+        "checkpoints": [],
+    }
+    authority = {
+        "base_digest": "b" * 64,
+        "patch_artifact_id": "art_" + "a" * 24,
+        "patch_sha256": hashlib.sha256(patch).hexdigest(),
+        "allowed_paths": ["src/app.py"],
+        "test_args": ["pytest", "src/app.py"],
+        "repository_ref": "repos/example",
+        "image_digest": "image@sha256:" + "i" * 64,
+        "limits_digest": "l" * 64,
+        "deadline_seconds": 180,
+    }
+    transitions = []
+
+    class FakeRepository:
+        async def get_job(self, _job_id):
+            return dict(job)
+
+        async def record_checkpoint(self, _job_id, **kwargs):
+            job["revision"] += 1
+            job["checkpoints"].append({"checkpoint_id": kwargs["checkpoint_id"], "payload": kwargs.get("checkpoint_payload")})
+            return dict(job)
+
+        async def record_artifact(self, _job_id, **_kwargs):
+            job["revision"] += 1
+            return dict(job)
+
+        async def record_readback(self, _job_id, **_kwargs):
+            raise AssertionError("readback receipt must not be written after cancellation")
+
+        async def transition_job(self, _job_id, status, **kwargs):
+            transitions.append((status, kwargs))
+            job["status"] = status
+            job["revision"] += 1
+            return dict(job)
+
+    def execute_job(_sandbox, sandbox_job, *, before_dispatch=None):
+        if before_dispatch is not None:
+            before_dispatch()
+        return {
+            "status": "succeeded",
+            "manifest": {},
+            "outputs": {"readback.json": b'{"status":"succeeded"}'},
+            "checkpoint_phases": [],
+        }
+
+    monkeypatch.setattr("src.api.workflows.durable_job_repository", FakeRepository())
+    monkeypatch.setattr("src.api.workflows.settings.workspace_dir", str(tmp_path / "workspace"))
+    (tmp_path / "workspace").mkdir()
+    monkeypatch.setattr("src.api.workflows._repo_change_read_patch", lambda _artifact_id: patch)
+    monkeypatch.setattr(RootlessDockerRepoSandbox, "execute_job", execute_job)
+
+    def cancel_during_readback(_artifact_ref):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr("src.api.workflows._repo_change_verify_persisted_artifact", cancel_during_readback)
+    result = asyncio.run(
+        _execute_repo_change_claimed(
+            current=job,
+            authority=authority,
+            claimed=job,
+            approval_id="approval-readback-cancel",
+        )
+    )
+    assert result["status"] == "unknown_external_effect", result
+    assert result["reason_code"] == "cancelled_after_dispatch"
+    assert transitions[-1][0] == "unknown_external_effect"
+
+
+def test_restart_cancellation_does_not_borrow_same_owner_successor_fence(monkeypatch: pytest.MonkeyPatch):
+    job_id = "repo-change-" + "8" * 32
+    successor = {
+        "job_id": job_id,
+        "status": "running",
+        "revision": 8,
+        "lease": {"owner": "service:repo-change:recovery", "fencing_token": 6},
+        "checkpoints": [],
+    }
+
+    class FakeRepository:
+        async def get_job(self, _job_id):
+            return dict(successor)
+
+        async def transition_job(self, *_args, **_kwargs):
+            raise AssertionError("recovery cancellation must not transition a same-owner successor")
+
+    async def cancelled_after_claim(*, job, operator, cancellation_claim):
+        cancellation_claim.update(
+            {
+                "acquired": True,
+                "owner": "service:repo-change:recovery",
+                "fencing_token": 5,
+            }
+        )
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr("src.api.workflows.durable_job_repository", FakeRepository())
+    monkeypatch.setattr("src.api.workflows._recover_repo_change_after_restart_inner", cancelled_after_claim)
+    result = asyncio.run(
+        _recover_repo_change_after_restart(
+            job={"job_id": job_id, "status": "running", "lease": {"owner": "service:old", "fencing_token": 4}},
+            operator=SimpleNamespace(),
+        )
+    )
+    assert result["status"] == "running"
+    assert result["reason_code"] == "cancellation_settlement_unavailable"
+    assert result["job"]["lease"]["fencing_token"] == 6
+
+
+def test_result_artifact_reopen_hash_rejects_tamper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+    job_id = "repo-change-" + "4" * 32
+    payload = b'{"status":"succeeded"}'
+    relative = _repo_change_write_artifact(job_id, "readback.json", payload)
+    assert _repo_change_verify_persisted_artifact(relative) == hashlib.sha256(payload).hexdigest()
+    artifact = workspace / relative
+    artifact.write_bytes(b'{"status":"tampered"}')
+    assert _repo_change_verify_persisted_artifact(relative) != hashlib.sha256(payload).hexdigest()
+
+
+def test_restart_readback_reconcile_rejects_private_mode_tamper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+    job_id = "repo-change-" + "f" * 32
+    payload = b'{"status":"succeeded"}'
+    relative = _repo_change_write_artifact(job_id, "readback.json", payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    job = {
+        "job_id": job_id,
+        "status": "blocked",
+        "revision": 4,
+        "owner": {"kind": "user", "principal_id": "operator:one"},
+        "effects": [
+            {
+                "receipt_kind": "readback",
+                "status": "succeeded",
+                "target_path": relative,
+                "content_sha256": digest,
+                "details": {"verified": True},
+            }
+        ],
+    }
+    finalized = False
+
+    class FakeRepository:
+        async def get_job(self, _job_id):
+            return dict(job)
+
+        async def finalize_reconciled_job(self, *_args, **_kwargs):
+            nonlocal finalized
+            finalized = True
+            return {**job, "status": "succeeded"}
+
+    monkeypatch.setattr("src.api.workflows.durable_job_repository", FakeRepository())
+    artifact = workspace / relative
+    artifact.chmod(0o644)
+
+    result = asyncio.run(
+        _repo_change_reconcile_verified_local_result(job=job, authority={})
+    )
+
+    assert result is None
+    assert finalized is False
+    assert artifact.read_bytes() == payload
+
+
 def test_approved_patch_read_failure_blocks_restart_recovery_job(monkeypatch: pytest.MonkeyPatch):
     job_id = "repo-change-" + "e" * 32
     token = RootlessDockerRepoSandbox._server_token(job_id)
@@ -539,7 +1055,10 @@ def test_approved_patch_read_failure_blocks_restart_recovery_job(monkeypatch: py
     assert result["reason_code"] == "patch_artifact_unavailable"
     assert result["operator_action"] == "reconcile_or_cancel"
     assert repository.job["status"] == "unknown_external_effect"
-    assert repository.transitions[0][1]["reason"] == "patch_artifact_unavailable"
+    # Recovery reserves the original root before touching the externally
+    # dispatched worker; the patch error remains in the operator receipt.
+    assert repository.transitions[0][1]["reason"] == "cancel_cleanup_pending"
+    assert repository.transitions[0][1]["result"]["requested_reason"] == "patch_artifact_unavailable"
 
 
 def test_restart_missing_worker_is_failed_with_output_lost_receipt(monkeypatch: pytest.MonkeyPatch):
@@ -666,6 +1185,7 @@ def test_cancel_without_dispatch_fence_keeps_unproven_cleanup_uncertain(monkeypa
             return "server-token"
 
         def cancel(self, **_kwargs):
+            assert job["status"] == "unknown_external_effect"
             return {"status": "unknown_external_effect", "reason": "cleanup_unproven"}
 
     repository = FakeRepository()
@@ -688,4 +1208,212 @@ def test_cancel_without_dispatch_fence_keeps_unproven_cleanup_uncertain(monkeypa
     assert result["status"] == "unknown_external_effect"
     assert result["operator_action"] == "reconcile_or_cancel"
     assert repository.transitions[0][0] == "unknown_external_effect"
-    assert repository.transitions[0][1]["result"]["cleanup_proven"] is False
+    assert repository.transitions[0][1]["result"]["cancellation_pending"] is True
+
+
+def test_cancel_reserves_original_root_before_proven_cleanup(monkeypatch: pytest.MonkeyPatch):
+    job_id = "repo-change-" + "a" * 32
+    job = {
+        "job_id": job_id,
+        "status": "running",
+        "revision": 3,
+        "owner": {"principal_id": "operator:one"},
+        "declared_authority": {"session_id": "session-1"},
+        "lease": {"owner": "service:repo-change", "fencing_token": 9},
+        "checkpoints": [],
+    }
+
+    class FakeRepository:
+        def __init__(self):
+            self.transitions = []
+
+        async def get_job(self, _job_id):
+            return dict(job)
+
+        async def record_checkpoint(self, _job_id, **_kwargs):
+            job["revision"] += 1
+            return dict(job)
+
+        async def transition_job(self, _job_id, status, **kwargs):
+            self.transitions.append((status, kwargs))
+            job["status"] = status
+            job["lease"] = {} if status == "unknown_external_effect" else job.get("lease", {})
+            job["revision"] += 1
+            return dict(job)
+
+    class FakeSandbox:
+        @staticmethod
+        def _server_token(_job_id):
+            return "server-token"
+
+        def cancel(self, **_kwargs):
+            # The external cleanup sees the root only after its original
+            # lease has been atomically reserved and cleared.
+            assert job["status"] == "unknown_external_effect"
+            assert job["lease"] == {}
+            return {"status": "cancelled", "cleanup_proven": True}
+
+    repository = FakeRepository()
+    monkeypatch.setattr("src.api.workflows.durable_job_repository", repository)
+    monkeypatch.setattr("src.api.workflows.RootlessDockerRepoSandbox", FakeSandbox)
+    monkeypatch.setattr(
+        "src.api.workflows._require_authenticated_capability_operator",
+        lambda _request: SimpleNamespace(
+            principal=SimpleNamespace(principal_id="operator:one"),
+            session_id="session-1",
+        ),
+    )
+    result = asyncio.run(
+        cancel_repo_change(
+            job_id,
+            RepoChangeCancelRequest(reason="stop-now"),
+            object(),
+        )
+    )
+    assert result["status"] == "cancelled"
+    assert [status for status, _kwargs in repository.transitions] == [
+        "unknown_external_effect",
+        "cancelled",
+    ]
+
+
+def test_cancel_blocked_dispatch_reserves_before_cleanup(monkeypatch: pytest.MonkeyPatch):
+    job_id = "repo-change-" + "b" * 32
+    token = RootlessDockerRepoSandbox._server_token(job_id)
+    authority = {
+        "session_id": "session-1",
+        "base_digest": "b" * 64,
+        "patch_sha256": "p" * 64,
+        "image_digest": "image@sha256:" + "i" * 64,
+        "limits_digest": "l" * 64,
+    }
+    dispatch = {
+        "phase": "docker_dispatch_reserved",
+        "job_id": job_id,
+        "attempt": 1,
+        "authority_digest": "a" * 64,
+        "base_digest": authority["base_digest"],
+        "patch_sha256": authority["patch_sha256"],
+        "image_digest": authority["image_digest"],
+        "limits_digest": authority["limits_digest"],
+        "container_name": f"{token}-worker",
+        "input_volume": f"{token}-input",
+    }
+    job = {
+        "job_id": job_id,
+        "status": "blocked",
+        "revision": 3,
+        "attempt_count": 1,
+        "authority_digest": "a" * 64,
+        "owner": {"principal_id": "operator:one"},
+        "declared_authority": authority,
+        "checkpoints": [{"payload": dispatch}],
+    }
+
+    class FakeRepository:
+        def __init__(self):
+            self.transitions = []
+
+        async def get_job(self, _job_id):
+            return dict(job)
+
+        async def transition_job(self, _job_id, status, **kwargs):
+            self.transitions.append((status, kwargs))
+            job["status"] = status
+            if status == "unknown_external_effect":
+                job["lease"] = {}
+            job["revision"] += 1
+            return dict(job)
+
+    class FakeSandbox:
+        @staticmethod
+        def _server_token(_job_id):
+            return token
+
+        def cancel(self, **_kwargs):
+            assert job["status"] == "unknown_external_effect"
+            assert not job.get("lease")
+            return {"status": "cancelled", "cleanup_proven": True}
+
+    repository = FakeRepository()
+    monkeypatch.setattr("src.api.workflows.durable_job_repository", repository)
+    monkeypatch.setattr("src.api.workflows.RootlessDockerRepoSandbox", FakeSandbox)
+    monkeypatch.setattr(
+        "src.api.workflows._require_authenticated_capability_operator",
+        lambda _request: SimpleNamespace(
+            principal=SimpleNamespace(principal_id="operator:one"),
+            session_id="session-1",
+        ),
+    )
+    result = asyncio.run(
+        cancel_repo_change(
+            job_id,
+            RepoChangeCancelRequest(reason="stop-now"),
+            object(),
+        )
+    )
+    assert result["status"] == "cancelled"
+    assert [status for status, _kwargs in repository.transitions] == [
+        "unknown_external_effect",
+        "cancelled",
+    ]
+
+
+def test_cancel_never_borrows_successor_lease(monkeypatch: pytest.MonkeyPatch):
+    job_id = "repo-change-" + "c" * 32
+    job = {
+        "job_id": job_id,
+        "status": "running",
+        "revision": 3,
+        "owner": {"principal_id": "operator:one"},
+        "declared_authority": {"session_id": "session-1"},
+        "lease": {"owner": "service:old", "fencing_token": 4},
+        "checkpoints": [],
+    }
+
+    class FakeRepository:
+        def __init__(self):
+            self.transitions = []
+
+        async def get_job(self, _job_id):
+            return dict(job)
+
+        async def record_checkpoint(self, _job_id, **_kwargs):
+            # Simulate a lease transfer after the request's initial read.
+            job["lease"] = {"owner": "service:new", "fencing_token": 5}
+            job["revision"] += 1
+            return dict(job)
+
+        async def transition_job(self, _job_id, status, **kwargs):
+            self.transitions.append((status, kwargs))
+            raise AssertionError("the cancellation route must not transition a successor")
+
+    class FakeSandbox:
+        @staticmethod
+        def _server_token(_job_id):
+            return "server-token"
+
+        def cancel(self, **_kwargs):
+            raise AssertionError("the cancellation route must not clean up a successor")
+
+    repository = FakeRepository()
+    monkeypatch.setattr("src.api.workflows.durable_job_repository", repository)
+    monkeypatch.setattr("src.api.workflows.RootlessDockerRepoSandbox", FakeSandbox)
+    monkeypatch.setattr(
+        "src.api.workflows._require_authenticated_capability_operator",
+        lambda _request: SimpleNamespace(
+            principal=SimpleNamespace(principal_id="operator:one"),
+            session_id="session-1",
+        ),
+    )
+    result = asyncio.run(
+        cancel_repo_change(
+            job_id,
+            RepoChangeCancelRequest(reason="stop-now"),
+            object(),
+        )
+    )
+    assert result["status"] == "unknown_external_effect"
+    assert result["reason_code"] == "repository_cancel_lease_changed"
+    assert result["durable_status"] == "running"
+    assert repository.transitions == []

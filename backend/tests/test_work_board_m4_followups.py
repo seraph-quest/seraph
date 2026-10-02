@@ -736,7 +736,7 @@ async def test_accept_specify_applies_to_same_triage_card_without_child_or_link(
 
 
 @pytest.mark.asyncio
-async def test_proposal_prompt_redacts_before_provider_contact_and_binds_transform(monkeypatch):
+async def test_proposal_prompt_redacts_before_provider_contact_and_binds_transform(async_db, monkeypatch):
     async def secrets():
         return [("openrouter", "sk-live-triage-secret")]
 
@@ -774,6 +774,17 @@ async def test_proposal_prompt_redacts_before_provider_contact_and_binds_transfo
         body="Private body sk-live-triage-secret must not leave Seraph.",
         idempotency_key="redacted-prompt-parent-key",
     )
+    async with async_db() as db:
+        db.add(Goal(
+            id=parent.goal_id,
+            title="Prompt preparation goal",
+            owner_principal_id=OWNER.principal_id,
+            owner_session_id=OWNER.session_id,
+            revision=1,
+            status="active",
+        ))
+        db.add(parent)
+        await db.commit()
     messages, _bound_principal, _context, transformation_digest = await triage_service._prepare_governed_proposal(
         parent,
         kind="specify",

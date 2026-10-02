@@ -316,8 +316,17 @@ historical scopes can be migrated.
 The #900 ownership implementation adds a separately reviewed private continuity
 credential and exact read-only recovery contract, described in
 [Operator ownership and recovery](./19-operator-ownership-and-recovery.md).
-It remains Partial until reviewed integration; it never restores prior grants,
+This is branch-local intended post-program behavior until reviewed promotion to
+`develop`; it never restores prior grants,
 adopts ambiguous legacy history, or substitutes a retired execution root.
+
+The task inspector also exposes local, goal-scoped
+[evidence working sets](./task-evidence-working-sets.md). Citation references are
+revalidated against canonical records and verified artifacts before inspection
+or explicit model-context adoption. Exact selected historical records remain
+read only, and historic/private source egress remains blocked for the generic
+strategist purpose. This is branch-local intended post-program behavior;
+provider usefulness remains externally unverified.
 
 `/api/runtime/status` and `/api/settings/artifact-storage` are the active
 operator receipts. They expose the effective OpenRouter route, consent,
@@ -377,9 +386,9 @@ This section describes the Epic #864 M6 integration-branch target while its
 aggregate PR is under review. It does not claim full Hermes parity, autonomous
 execution, memory superiority, or production readiness.
 
-### Reviewed procedures v2 (M6 #889 branch-local target)
+### Reviewed procedures v2 (M6 #889) {#reviewed-procedures-v2-m6-889-branch-local-target}
 
-The #889 branch-local target turns verified Work Board outcomes into reusable,
+The #889 reviewed procedure surface turns verified Work Board outcomes into reusable,
 owner-bound procedures. It has exactly three registered templates:
 
 - `public-browser-check`: one `browser.public-task.v1` leaf;
@@ -449,25 +458,118 @@ absent. Governed model work, where the selected meeting path requires it, still
 uses the active OpenRouter admission, consent, and budget checks; this branch
 has not performed a live provider or account canary.
 
-This is a branch-local target, not Shipped `develop` truth. On October 1, 2026,
+This remains **Partial** and is not Shipped `develop` truth. On October 1, 2026,
 the managed CPU-host journey prepared, reviewed, installed and activated a
 public-browser procedure, then executed its native leaf and verified both the
 parent and leaf readbacks. The leaf artifact hash matched the stored file.
 Twelve native vertical tests additionally exercised actual SQLite, Chromium,
 package files and intercepted Calendar/model boundaries. These are mechanical
 execution receipts; Calendar account/model usefulness and production readiness
-remain unverified. Fresh independent reviews accepted preparation recovery,
+remain **external-unverified**. Fresh independent reviews accepted preparation recovery,
 interface authority/recovery and the dispatcher compatibility corrections.
 After the managed backend restart, a new public-browser invocation completed
 with parent and leaf readbacks, a matching artifact hash and explicit
 `no_learning`. A separate live response-loss check retained the lifecycle
 recovery gate across reload, blocked fresh preparation, and cleared it only
 after an explicit exact authority refresh before resume. The implementation
-PR carries the branch-specific review and validation receipts.
+has independent preparation, interface-authority, and dispatcher recovery
+validation.
+
+### Governed repository repair (M4 #887) {#governed-repository-repair-m4-887-branch-local-target}
+
+The M4 capability adds a bounded repository-repair path to the existing Work Board
+execution boundary. In **Work → Repository repair**, an authenticated operator
+selects an owned active Goal and current revision, then supplies the strict
+repository-relative source and focused-test input. The form rejects protected
+paths, unsafe references, out-of-scope tests, and unbounded values before the
+server creates the typed owner/session-bound input artifact. Seraph then
+publishes a `Todo` task with the artifact ID; the artifact reservation and task
+publication use separate idempotency keys, and the task carries no caller-
+supplied typed reference or raw source path authority.
+
+The pending repair draft is private to the authenticated owner/session. An
+unknown artifact or task response retains the exact original keys and payload;
+the operator must reconcile or retry that exact request before another
+mutation is allowed. Artifact reads expose only safe identity, digest, expiry,
+and lifecycle metadata. The server then inspects a private snapshot, pauses
+for explicit code-egress consent, and asks the governed `strategist_agent`
+route for one strict patch proposal. The operator reviews the exact proposal
+and approval target before the selected executor's staged test/readback path
+can run.
+
+The repair path binds the source packet, model request and response, patch,
+approval, owner/session, Goal, attempt, and durable job by digest. It exposes
+blocked, stale, revoked, and unknown recovery states and records
+`memory_status=no_learning`. Tests run against the bounded staged snapshot and
+do not claim to modify the original checkout. Source text, prompts, model
+responses, and credentials stay out of generic operator projections.
+
+The selected repair executor is server-owned settings, visible in Settings →
+Repository sandbox and in the Work inspector. A fresh settings document selects
+the disabled **Trusted local staged runner** by default. Local execution uses a
+private staged directory and fixed test argv as the host user; it has no OS
+isolation guarantee, does not claim CPU, memory, PID, network, or filesystem
+confinement, and requires a separate exact `local_host_execution` approval for
+each job. The approval surface says **Approve local tests on this host** and
+shows the host-user filesystem, network, and resource boundary. Settings
+selection is never execution permission.
+
+The optional **Docker rootless** profile requires a strict Linux rootless
+daemon, pinned image, and independently verified fixed limits. The optional
+**Docker rootful** profile uses an existing configured daemon and must
+independently verify its non-root worker, network, read-only, capability, image,
+and resource posture. Missing or drifted evidence blocks the selected profile;
+Seraph does not silently switch between local, rootless, and rootful execution.
+The legacy
+`engineering.repo-change.v1` path remains strict rootless-only and is shown as a
+separate preflight.
+
+The settings and repair status APIs expose a complete typed `executor_posture`
+display projection alongside the exact server receipt in
+`executor_posture_raw`; `executor_posture_digest_basis=executor_posture_raw`
+documents that the unchanged `executor_posture_digest` binds the raw receipt,
+not display-only defaults. A blocked Docker receipt therefore reports
+`unverified` isolation, network, and resource labels without turning them into
+execution authority, while local `host_access` remains visible as the explicit
+per-job approval boundary.
+
+On a first managed local start, a newly created workspace is private (`0700`),
+settings descendants repaired on the current-owner write path are private,
+and the persisted selector file is `0600`. A pre-existing broad workspace or
+foreign-owned, symlinked, or otherwise untrusted settings path remains
+blocked. Use a private workspace beneath trusted ancestors and retry; Seraph
+does not automatically chmod an existing workspace root or shared ancestor.
+Saving selectors never starts Docker or changes host resource limits. A legacy
+settings document without an executor selector remains rootless-only until the
+operator explicitly selects another backend.
+
+This remains **Partial**. Intercepted model transport and executor
+mechanics prove request, authority, recovery, and readback contracts only. A
+local technical preflight can make preparation ready, but execution remains
+blocked until the exact per-job host approval is recorded. If Docker CPU,
+memory, pids, network, image, or daemon posture cannot be verified, the
+selected Docker path blocks without falling back. No live provider/account
+canary, paid inference, kernel resource-enforcement receipt, or
+original-repository write is claimed. Repair execution uses one durable
+`repo-repair-execution` slot across Goals and recovery, releases the
+`remote-inference` claim before approval or test dispatch, and sets one
+absolute execution deadline for staging, process startup/wait, output drain,
+cleanup, readback, and publication; it does not reset that deadline per phase.
+Cancellation or unproven cleanup/readback/publication remains blocked or
+unknown and is reconciled against the same job/attempt rather than replayed as
+a fresh proposal or execution. The final native verifier covers one local API
+journey, two approved Goals sharing one physical native worker, same-job API
+cancellation with fresh reconciliation, staged subprocess/filesystem
+readback, unchanged source/.git state, verified cleanup, and `no_learning`.
+Its deterministic model transport is intercepted. Local execution intentionally
+has no OS confinement. Provider/account usefulness, live OpenRouter quality,
+and Docker resource enforcement remain **external-unverified**. The original
+repository is not claimed changed,
+and this capability remains Partial rather than Shipped `develop` truth.
 
 ### Bounded public browser tasks
 
-The integration target adds `browser.public-task.v1` through the existing Work
+The bounded capability adds `browser.public-task.v1` through the existing Work
 Board dispatcher and durable job repository. Its form creates an owner-bound,
 immutable input artifact before creating a Todo task; the operator does not
 type a workspace path or digest. Artifact metadata reads return identity,
@@ -532,18 +634,16 @@ extracts and checks. The inspector renders the extracted text as plain text.
 Routine job and task reads remain metadata-only; a missing or altered result
 shows an unavailable preview rather than unchecked file content.
 
-This is an intended post-epic contract, not Shipped `develop` behavior. The
-milestone PR owns actual browser, transport, API, interface, and recovery
-validation. Local fixture execution and production-network evidence must be
-identified separately; authenticated browsing and general computer use remain
-outside this capability.
+This remains **Partial** and is not Shipped `develop` behavior. Local fixture
+execution and production-network evidence are separate proof boundaries;
+authenticated browsing and general computer use remain outside this capability.
 
 ### Bounded calendar meeting preparation
 
-This is an intended post-epic contract, not Shipped `develop` behavior. The
-reviewed milestone and epic PRs own implementation validation. Provider-free
+This remains **Partial** and is not Shipped `develop` behavior. Provider-free
 tests establish local mechanics; a working Google account and live model
-usefulness remain explicitly external-unverified without an authorized canary.
+usefulness remain explicitly **external-unverified** without an authorized
+canary.
 
 Calendar settings accept an operator-supplied OAuth client and refresh token as
 write-only fields stored in the encrypted vault. Explicit verification obtains
@@ -600,7 +700,7 @@ visible without exposing an unchecked brief. Routine metadata reads do not
 load provider event bodies or brief content. This capability does not modify
 calendar events, send communications, or learn preferences from meeting content.
 
-### Bounded Gmail source, watch, and reply drafting (M7 #890 branch-local target)
+### Bounded Gmail source, watch, and reply drafting (M7 #890) {#bounded-gmail-source-watch-and-reply-drafting-m7-890-branch-local-target}
 
 The branch adds an owner- and session-bound Gmail readonly path with encrypted
 credentials, explicit source and model consent, opaque local message bindings,
@@ -627,8 +727,7 @@ owner/session. Watch notices obey the Goal's finite quiet-hours and
 notification allowance across the whole period; uncertain or over-capacity
 coverage stays visibly blocked for reconciliation.
 
-This remains **Partial** and branch-local until the reviewed milestone is
-integrated. Focused SQLite and intercepted-transport tests prove the bounded
+This remains **Partial**. Focused SQLite and intercepted-transport tests prove the bounded
 mechanics; CPU-only/keyless OpenRouter operation, a real Google account, live
 Gmail usefulness, send operation, and paid model canary remain
 **external-unverified**. See the M7 mail wire contract in issue #890 for the
@@ -648,7 +747,8 @@ usable without sending a message.
 See [Guardian Intelligence](./05-guardian-intelligence.md#reviewed-goals-and-the-source-change-inbox)
 for ownership, readback, idempotency, and bounded recovery contracts. Local
 source execution and live external/provider usefulness have separate evidence
-boundaries. Until integration, the open PR owns branch validation truth.
+boundaries; live external/provider usefulness remains **external-unverified**.
+This capability remains **Partial**.
 
 ## Models And Runtime
 
@@ -709,13 +809,16 @@ data egress.
 
 ### Cockpit navigation and canonical inspector
 
-The integration target provides six persistent cockpit sections: **Home**,
+The bounded cockpit capability provides six persistent cockpit sections: **Home**,
 **Inbox**, **Work**, **Goals**, **Library**, and **Connections**. These select
 existing cockpit surfaces and retain the conversation, selected task, and
 window layout. Home is a bounded operational summary, not a second scheduler:
 page counts are labelled as such, failed refreshes preserve last-known data,
 and unavailable queue or spend evidence remains unavailable. Pending approvals
 open the existing approval surface.
+
+This remains **Partial**; live provider and external-account usefulness remain
+explicitly **external-unverified**.
 
 Connections labels Seraph presence as unknown until a complete continuity
 payload has been confirmed. A failed refresh retains previously confirmed

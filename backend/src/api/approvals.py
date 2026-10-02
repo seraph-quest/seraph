@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 import json
 
 from src.approval.repository import approval_repository
+from src.approval.metadata import approval_wire_metadata
 from src.approval.surfaces import approval_surface_metadata
 from src.agent.session import session_manager
 from src.audit.repository import audit_repository
@@ -27,6 +28,103 @@ def _approval_details(request) -> dict:
     except (TypeError, ValueError):
         return {}
     return details if isinstance(details, dict) else {}
+
+
+_SAFE_PENDING_FIELDS = frozenset(
+    {
+        "id",
+        "session_id",
+        "tool_name",
+        "risk_level",
+        "status",
+        "fingerprint",
+        "summary",
+        "conversation_id",
+        "thread_id",
+        "owner_principal_id",
+        "operator_session_id",
+        "device_id",
+        "channel",
+        "transport",
+        "correlation_id",
+        "causation_id",
+        "attachment_refs",
+        "challenge",
+        "action",
+        "expires_at",
+        "created_at",
+        "resume_message",
+        "extension_id",
+        "extension_display_name",
+        "extension_action",
+        "package_path",
+        "permissions",
+    }
+)
+
+
+def _safe_approval_context(value) -> dict | None:
+    """Keep only bounded display context; never return tool arguments."""
+
+    if not isinstance(value, dict):
+        return None
+    allowed = {
+        "risk_level",
+        "execution_boundaries",
+        "authenticated_source",
+        "workflow_name",
+        "requires_lifecycle_approval",
+        "executor_kind",
+        "executor_profile",
+        "executor_posture_digest",
+        "required_permissions",
+        "local_host_execution_required",
+        "preparation_ready",
+        "execution_ready",
+        "operator_visible",
+    }
+    result = {}
+    typed = approval_wire_metadata(value)
+    for key in allowed:
+        item = value.get(key)
+        if key in {
+            "executor_kind",
+            "executor_profile",
+            "executor_posture_digest",
+            "required_permissions",
+            "local_host_execution_required",
+            "preparation_ready",
+            "execution_ready",
+            "operator_visible",
+        }:
+            if key in typed:
+                result[key] = typed[key]
+            continue
+        if isinstance(item, bool):
+            result[key] = item
+        elif isinstance(item, str) and len(item) <= 256:
+            result[key] = item
+        elif isinstance(item, list):
+            strings = [entry for entry in item[:16] if isinstance(entry, str) and len(entry) <= 128]
+            if len(strings) == len(item[:16]):
+                result[key] = strings
+    return result or None
+
+
+def _safe_pending_approval(approval: dict, approval_metadata: dict) -> dict:
+    """Project a pending row without spreading private details JSON."""
+
+    safe = {key: approval.get(key) for key in _SAFE_PENDING_FIELDS if key in approval}
+    safe.update(
+        {
+            "lifecycle_boundaries": approval_metadata["lifecycle_boundaries"],
+            "requires_lifecycle_approval": approval_metadata["requires_lifecycle_approval"],
+            "approval_scope": approval_metadata["approval_scope"],
+            "approval_context": _safe_approval_context(approval_metadata["approval_context"]),
+        }
+    )
+    safe.update(approval_wire_metadata(approval))
+    return safe
 
 
 def _approval_attachment_refs(request) -> list[dict]:
@@ -159,9 +257,9 @@ async def list_pending_approvals(
         if conversation_id and owner_principal_id and conversation_id not in owned_session_ids:
             continue
         approval_metadata = approval_surface_metadata(approval)
-        items.append(
+        item = _safe_pending_approval(approval, approval_metadata)
+        item.update(
             {
-                **approval,
                 "thread_id": approval.get("session_id"),
                 "conversation_id": approval.get("conversation_id") or approval.get("session_id"),
                 "owner_principal_id": approval.get("owner_principal_id"),
@@ -185,9 +283,10 @@ async def list_pending_approvals(
                 "permissions": approval.get("permissions"),
                 "requires_lifecycle_approval": approval_metadata["requires_lifecycle_approval"],
                 "approval_scope": approval_metadata["approval_scope"],
-                "approval_context": approval_metadata["approval_context"],
             }
         )
+        item["approval_context"] = _safe_approval_context(approval_metadata["approval_context"])
+        items.append(item)
     return items
 
 

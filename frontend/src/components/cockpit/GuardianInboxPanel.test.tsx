@@ -486,11 +486,12 @@ describe("GuardianInboxPanel", () => {
     };
     let listCalls = 0;
     let detailCalls = 0;
+    let bindingChanged = false;
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/guardian/inbox?") && !url.includes("/api/guardian/inbox/inbox-1")) {
         listCalls += 1;
-        const list = listCalls < 3 ? firstItem : secondItem;
+        const list = bindingChanged ? secondItem : firstItem;
         return Promise.resolve(response({ items: [list], next_cursor: null }));
       }
       if (url.endsWith("/api/guardian/inbox/inbox-1")) {
@@ -509,6 +510,7 @@ describe("GuardianInboxPanel", () => {
     expect(screen.getByText("durable job job-first · succeeded")).toBeInTheDocument();
     expect(screen.getByText(/readback-first · succeeded/)).toBeInTheDocument();
 
+    bindingChanged = true;
     await waitFor(() => expect(screen.getByText("durable job job-second · succeeded")).toBeInTheDocument(), { timeout: 750 });
     expect(screen.queryByText("durable job job-first · succeeded")).not.toBeInTheDocument();
     expect(screen.getByText(/readback-second · succeeded/)).toBeInTheDocument();

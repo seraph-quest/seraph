@@ -9,6 +9,7 @@ from typing import Any
 
 import httpx
 import pytest
+from cryptography.fernet import Fernet
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
@@ -28,6 +29,8 @@ from src.db.models import (
 )
 from src.security.http_transport import PinnedResponse
 from src.scheduler.scheduled_jobs import execute_scheduled_job
+from config.settings import settings
+from src.vault import crypto as vault_crypto
 from src.vault import encrypt
 from src.scheduler.governed_schedules import (
     action_spec,
@@ -46,6 +49,16 @@ from src.work_board.contracts import WorkBoardOwner
 OWNER = "operator:scheduler-tests"
 SESSION = "scheduler-test-session"
 NOW = datetime(2026, 9, 30, 12, 0, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def reset_calendar_vault_cipher(monkeypatch):
+    """Bind test ciphertext and readonly redaction to one fresh key per test."""
+
+    monkeypatch.setattr(settings, "vault_encryption_key", Fernet.generate_key().decode())
+    vault_crypto._fernet = None
+    yield
+    vault_crypto._fernet = None
 
 
 class _SchedulerProvider:

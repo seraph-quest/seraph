@@ -1,6 +1,6 @@
 # Operator ownership and recovery
 
-**Document class:** operator contract; #900 implementation is Partial until its reviewed integration lands. [Project Constitution](./00-project-constitution.md) remains target authority. This contract does not introduce enterprise IAM or change deployment configuration ownership.
+**Document class:** operator contract; branch-local intended post-program behavior until reviewed promotion to `develop`. [Project Constitution](./00-project-constitution.md) remains target authority. This contract does not introduce enterprise IAM or change deployment configuration ownership.
 
 A password login creates a finite execution root with a persisted, unique server principal. Bearer refresh preserves that root and principal through the existing credential CAS. Logout, idle or absolute expiry, identity revocation, and workspace restore revoke execution authority. Historical record IDs, original owner pairs, effects, and receipts remain immutable.
 
@@ -34,4 +34,6 @@ Ambiguous principal-only legacy conversations, devices, vault records, and exist
 | Browser/tool vault | Exact current unique principal; raw values never browser metadata | Null-owner secrets remain system-only; no guessed-key adoption |
 | Profile/soul, runtime/provider settings, capability registry | Deployment operator configuration, intentionally singleton | Not private execution history or identity proof; onboarding task/result authority remains separately scoped |
 
-Provider configuration credentials remain deployment settings; this contract does not duplicate or transfer them. Singleton profile completion is not evidence that a new root owns an earlier setup task/result. Browser and managed integration receipts must verify that distinction when onboarding is integrated.
+Provider configuration credentials remain deployment settings; this contract does not duplicate or transfer them. Singleton profile completion is not evidence that a new root owns an earlier setup task/result.
+
+The managed keyless browser/API/file receipt on 2026-10-02 verifies actual enrollment, queued local starter execution, verified artifact opening, logout and a new root under the same private identity, exact goal/task/output selection, empty fresh intent and local source-span inspection. Historical task access was denied before selection and read-only afterward. The actual 147-byte snapshot SHA256 matched its durable readback. The integrated `test_899_identity_snapshot_evidence.py` additionally covers expiry, exact cross-project lineage and authority/tampering negatives. These receipts establish local mechanics; production restore, external-account behavior, provider usefulness and promotion to `develop` remain unverified.

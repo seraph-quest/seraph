@@ -203,6 +203,33 @@ async def test_list_pending_approvals_includes_thread_labels(client):
 
 
 @pytest.mark.asyncio
+async def test_list_pending_approvals_projects_typed_posture_without_private_arguments(client):
+    request = await approval_repository.get_or_create_pending(
+        session_id=None,
+        tool_name="repo_repair",
+        risk_level="high",
+        summary="Approve the repository repair executor",
+        fingerprint="typed-posture",
+        details={
+            "arguments": {"patch": "private-source-text"},
+            "required_permissions": ["local_host_execution", "workspace_write"],
+            "local_host_execution_required": True,
+            "executor_kind": "local",
+            "executor_profile": "local:repo-python-pytest-v1",
+            "executor_posture_digest": "b" * 64,
+        },
+    )
+    response = await client.get("/api/approvals/pending")
+    assert response.status_code == 200
+    item = next(value for value in response.json() if value["id"] == request.id)
+    assert "arguments" not in item
+    assert item["required_permissions"] == ["local_host_execution", "workspace_write"]
+    assert item["local_host_execution_required"] is True
+    assert item["executor_kind"] == "local"
+    assert item["executor_posture_digest"] == "b" * 64
+
+
+@pytest.mark.asyncio
 async def test_list_pending_approvals_includes_extension_lifecycle_context(client):
     request = await approval_repository.get_or_create_pending(
         session_id=None,

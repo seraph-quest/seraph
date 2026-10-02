@@ -56,7 +56,7 @@ The protected outcomes are:
 ### Assumptions
 
 - Seraph is initially a single-operator product, not a multi-tenant service.
-- The GPU host administrator is trusted to administer the machine. SSH remains an
+- The operator-selected core-host administrator is trusted to administer the machine. SSH remains an
   administrative path, not product transport.
 - The LAN reduces exposure but is not trusted as an authorization mechanism.
 - Local and remote model output is untrusted input to policy and capability code.
@@ -96,7 +96,7 @@ They must not be inferred from this contract.
 
 ```text
 browser -> reverse proxy -> REST/WebSocket -> backend
-Mac edge or messaging channel -> paired ingress -> backend
+Paired desktop edge or messaging channel -> paired ingress -> backend
 scheduler/service principal -> job runner -> capability or model route
 external page/document/repository -> content parser -> model context
 backend -> local or remote model endpoint -> untrusted model output

@@ -448,10 +448,24 @@ def _validate_stage_receipt(receipt: object) -> dict[str, Any]:
         "token_invalidation",
         "secret_values_included",
     }
-    if set(reconciliation) != reconciliation_required:
+    if not reconciliation_required.issubset(reconciliation) or set(reconciliation) - reconciliation_required - {"inference_accounting"}:
         raise WorkspaceLifecycleError("restore reconciliation receipt contains unsupported fields")
     if reconciliation["status"] != "ready" or reconciliation["secret_values_included"] is not False:
         raise WorkspaceLifecycleError("restore reconciliation receipt is not secret-safe")
+
+    accounting = reconciliation.get("inference_accounting")
+    if accounting is not None:
+        if not isinstance(accounting, dict):
+            raise WorkspaceLifecycleError("accounting retention receipt is invalid")
+        if accounting.get("status") == "not_initialized":
+            if set(accounting) != {"status"}:
+                raise WorkspaceLifecycleError("accounting retention receipt is invalid")
+        elif accounting.get("status") == "retained_latest" and set(accounting) == {"status", "revision", "operations"}:
+            for field in ("revision", "operations"):
+                if type(accounting[field]) is not int or not 0 <= accounting[field] <= 2**63 - 1:
+                    raise WorkspaceLifecycleError("accounting retention count is invalid")
+        else:
+            raise WorkspaceLifecycleError("accounting retention receipt is invalid")
 
     derived = reconciliation["derived_rebuild"]
     if not isinstance(derived, dict) or set(derived) != {
@@ -1414,6 +1428,15 @@ def _validate_stage(
             # rows.  The schema and row counts remain covered below; payload
             # bytes are intentionally allowed to differ from the archive.
             continue
+        if (allow_database_mutation and registry.config.identity.root_kind is WorkspaceRootKind.PRODUCTION
+            and logical_path == "model-fabric-settings.json"):
+            from src.workspace.accounting_witness import verify_restored_policy_reconciliation
+            archived = loaded.payloads.get(logical_path)
+            if archived is not None and verify_restored_policy_reconciliation(
+                root=registry.config.identity.root, archived=archived, staged=payload):
+                if stat.S_IMODE(target.stat().st_mode) != 0o600:
+                    raise WorkspaceLifecycleError("reconciled provider policy permissions mismatch")
+                continue
         archive_entry = archive_entries.get(logical_path)
         if not isinstance(archive_entry, dict):
             raise WorkspaceLifecycleError(f"staged canonical archive metadata is missing: {logical_path}")

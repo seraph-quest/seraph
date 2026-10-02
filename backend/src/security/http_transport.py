@@ -167,6 +167,7 @@ async def fetch_pinned_https(
     transport: httpx.AsyncBaseTransport | None = None,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     max_bytes: int = MAX_RESPONSE_BYTES,
+    authority_check: Callable[[], Awaitable[None]] | None = None,
 ) -> PinnedResponse:
     """Fetch one public HTTPS response without redirects or ambient proxies."""
 
@@ -178,6 +179,7 @@ async def fetch_pinned_https(
         timeout_seconds=timeout_seconds,
         max_bytes=max_bytes,
         headers={"Accept": "text/plain, text/html, application/xhtml+xml"},
+        authority_check=authority_check,
     )
 
 
@@ -194,6 +196,7 @@ async def request_pinned_https(
     connect_timeout_seconds: float | None = None,
     max_bytes: int = MAX_RESPONSE_BYTES,
     _lifecycle_marker: _TransportLifecycleMarker | None = None,
+    authority_check: Callable[[], Awaitable[None]] | None = None,
 ) -> PinnedResponse:
     """Issue one bounded GET/POST over the same pinned HTTPS boundary.
 
@@ -327,6 +330,8 @@ async def request_pinned_https(
             )
             client_created = True
             try:
+                if authority_check is not None:
+                    await authority_check()
                 async with client.stream(
                     normalized_method,
                     request_url,

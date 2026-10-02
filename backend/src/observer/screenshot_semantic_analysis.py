@@ -488,6 +488,8 @@ async def _analyze_with_openrouter(image_path: Path, artifacts: dict[str, Any]) 
             timeout=httpx.Timeout(remaining_seconds),
             follow_redirects=False,
         ) as client:
+            from src.model_fabric.accounting import assert_current_inference_policy
+            assert_current_inference_policy()
             response = await client.post(
                 endpoint,
                 json=transport_body,
@@ -502,6 +504,8 @@ async def _analyze_with_openrouter(image_path: Path, artifacts: dict[str, Any]) 
                 f"OpenRouter vision request failed with HTTP {exc.response.status_code}"
             ) from exc
         try:
+            from src.model_fabric.accounting import capture_response_usage
+            capture_response_usage(response)
             payload = response.json()
         except ValueError as exc:
             raise ScreenshotSemanticAnalysisError("OpenRouter vision response was not JSON") from exc

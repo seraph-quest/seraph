@@ -12,8 +12,8 @@ from sqlalchemy.pool import StaticPool
 from sqlalchemy import event
 from sqlmodel import SQLModel
 from tests.conftest import _PATCH_TARGETS
-from types import SimpleNamespace
 
+import httpx
 import pytest
 import pytest_asyncio
 from sqlalchemy import select
@@ -167,10 +167,16 @@ async def test_public_baseline_then_snapshot_is_verified_and_schedule_stays_disa
     source_file.write_text("A useful public-source baseline\nRelease notes version one\n")
     requests = []
 
-    async def intercepted_public_transport(url):
+    async def intercepted_public_transport(url, **kwargs):
         requests.append(url)
         assert url == "https://example.org/updates.txt"
-        return SimpleNamespace(status_code=200, headers={"content-type": "text/plain", "etag": "version-one"}, content=source_file.read_bytes())
+        from src.security.http_transport import fetch_pinned_https
+        async def resolver(host, port):
+            assert host == "example.org" and port == 443
+            return ["93.184.216.34"]
+        async def transport(request):
+            return httpx.Response(200, headers={"content-type": "text/plain", "etag": "version-one"}, content=source_file.read_bytes(), request=request)
+        return await fetch_pinned_https(url, resolver=resolver, transport=httpx.MockTransport(transport), **kwargs)
 
     monkeypatch.setattr("src.guardian.source_watch.fetch_pinned_https", intercepted_public_transport)
     prepared = await client.post("/api/user/onboarding/starter", json=progress(starter="public_watch", journey_id="public", title="Observe my public source", source="https://example.org/updates.txt"))

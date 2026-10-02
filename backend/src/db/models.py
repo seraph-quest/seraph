@@ -1759,6 +1759,55 @@ class WorkflowRunState(SQLModel, table=True):
     result_summary: Optional[str] = Field(default=None)
 
 
+class InferenceAccountingOwner(SQLModel, table=True):
+    """Deployment budget metadata owned by DurableJobRepository."""
+
+    __tablename__ = "inference_accounting_owners"
+    id: str = Field(default="deployment", primary_key=True)
+    deployment_id: str = Field(default_factory=_uuid, unique=True)
+    ceiling_microusd: int
+    settings_revision: int = Field(default=1)
+    settings_history_json: str = Field(default="[]")
+    revision: int = Field(default=1)
+    ledger_digest: str = Field(default="")
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+
+class InferenceCostReservation(SQLModel, table=True):
+    """Accounting evidence for a canonical job, never a second job lifecycle."""
+
+    __tablename__ = "inference_cost_reservations"
+    operation_id: str = Field(primary_key=True)
+    deployment_id: str = Field(index=True)
+    job_id: str = Field(index=True)
+    owner_id: str = Field(index=True)
+    goal_id: Optional[str] = Field(default=None, index=True)
+    goal_revision: Optional[int] = None
+    payload_digest: str
+    policy_digest: str
+    runtime_path: str
+    profile_id: str
+    period_id: str = Field(index=True)
+    settings_revision: int
+    ceiling_microusd: int
+    bound_microusd: int
+    owner_ceiling_microusd: Optional[int] = None
+    sequence: int = Field(index=True)
+    priority: int
+    deadline_at: datetime
+    state: str = Field(default="reserved", index=True)
+    job_fencing_token: int
+    contact_started_at: Optional[datetime] = None
+    actual_cost_microusd: Optional[int] = None
+    provider_operation_id: Optional[str] = None
+    evidence_json: str = Field(default="[]")
+    recovery_reason: Optional[str] = None
+    revision: int = Field(default=1)
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+
 class WorkflowStepState(SQLModel, table=True):
     __tablename__ = "workflow_step_states"
 

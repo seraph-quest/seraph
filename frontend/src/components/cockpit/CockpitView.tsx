@@ -1,3 +1,4 @@
+import { EffectiveGrantsPanel } from "../settings/EffectiveGrantsPanel";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import { appEventBus } from "../../lib/appEventBus";
@@ -17854,6 +17855,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             </section>
           </CockpitWorkspaceWindow>
         )}
+
+        {activeSection === "connections" && operatorAuth.status === "authenticated" && <EffectiveGrantsPanel key={operatorAuth.sessionId ?? "none"} sessionId={operatorAuth.sessionId} />}
 
         {visibleSections.conversation && (
           <>

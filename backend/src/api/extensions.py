@@ -1581,6 +1581,22 @@ async def update_channel_routing(req: ChannelRoutingUpdateRequest, request: Requ
         reset_runtime_context(tokens)
 
 
+
+
+@router.get("/extensions/effective-grants")
+async def effective_grants(request: Request):
+    from src.extensions.effective_grants import inventory
+    return await inventory(request)
+
+
+from src.extensions.effective_grants import RevokeRequest
+
+@router.post("/extensions/effective-grants/revoke")
+async def revoke_effective_grant(body: RevokeRequest, request: Request):
+    from src.extensions.effective_grants import revoke
+    return await revoke(request,body)
+
+
 @router.get("/extensions/{extension_id}")
 async def get_extension_package(extension_id: str):
     try:

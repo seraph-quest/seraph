@@ -26,6 +26,7 @@ from sqlmodel import select
 from src.artifacts.registry import build_artifact_record
 from src.db.models import ApprovalRequest, Goal, GuardianRoutine, GuardianRoutineVersion, WorkflowRunState
 from src.db.session_refs import ensure_sessions_exist
+from src.workflows.inference_accounting import InferenceAccountingRepositoryMixin
 
 
 DURABLE_JOB_RECORD_SCHEMA_VERSION = 2
@@ -1905,7 +1906,7 @@ class DurableJobSpec:
     routine_publication_admission_guard: DurableJobRoutinePublicationAdmissionGuard | None = None
 
 
-class DurableJobRepository:
+class DurableJobRepository(InferenceAccountingRepositoryMixin):
     """Persistence operations for the one canonical workflow job record."""
 
     async def _assert_routine_publication_admission_guard(
@@ -3848,6 +3849,9 @@ class DurableJobRepository:
                         "operator_visible": True,
                     },
                 )
+            accounting_resume = False
+            if run.attempt_count >= run.max_attempts and not continue_existing_attempt:
+                accounting_resume = await self._accounting_resume_claim_allowed(db, run)
             if continue_existing_attempt:
                 # An operator-approved pause is a continuation of the same
                 # durable attempt.  It must reacquire a fresh execution lease
@@ -3862,7 +3866,7 @@ class DurableJobRepository:
                     )
                 if int(run.attempt_count or 0) > int(run.max_attempts or 0):
                     raise DurableJobTransitionError("existing-attempt continuation exceeds attempt budget")
-            elif run.attempt_count >= run.max_attempts:
+            elif run.attempt_count >= run.max_attempts and not accounting_resume:
                 raise DurableJobTransitionError("attempt budget exhausted")
             conditions = [
                 WorkflowRunState.run_identity == job_id,
@@ -3881,7 +3885,7 @@ class DurableJobRepository:
                 "heartbeat_at": now,
                 "updated_at": now,
             }
-            if not continue_existing_attempt:
+            if not continue_existing_attempt and not accounting_resume:
                 claim_values["attempt_count"] = WorkflowRunState.attempt_count + 1
             result_update = await db.execute(
                 update(WorkflowRunState)
@@ -5765,6 +5769,10 @@ class DurableJobRepository:
         if persisted_owner != str(safe_receipt["owner_id"]):
             raise DurableJobLeaseError("remote inference receipt owner does not match the durable job owner")
         admission_status = str(safe_receipt["status"])
+        from src.db.models import InferenceCostReservation
+        async with self._session() as accounting_db:
+            accounting_row = await accounting_db.get(InferenceCostReservation, str(safe_receipt["operation_id"]))
+            unknown_cost = accounting_row is not None and accounting_row.state in {"contact_started", "unknown"}
         return await self.record_effect(
             job_id,
             effect_type="remote_inference_admission",
@@ -5772,11 +5780,12 @@ class DurableJobRepository:
             target_path=f"remote_inference:{safe_receipt['operation_id']}",
             target_digest=_text(safe_receipt.get("operation_id")) or None,
             adapter_idempotency_key=_text(safe_receipt.get("operation_id")) or None,
-            status=REMOTE_INFERENCE_EFFECT_STATUSES[admission_status],
+            status="unknown" if unknown_cost else REMOTE_INFERENCE_EFFECT_STATUSES[admission_status],
             details={
                 "admission_status": admission_status,
                 "receipt": safe_receipt,
                 "receipt_digest": receipt_digest,
+                "unknown_cost_outstanding": unknown_cost,
             },
             owner=owner,
             fencing_token=fencing_token,
@@ -5880,6 +5889,9 @@ class DurableJobRepository:
                     raise DurableJobIdempotencyConflict(
                         "remote inference operation identity is bound to a different route/profile"
                     )
+                if previous.get("status") == "blocked" and previous_details.get("never_contacted") is True and await self._accounting_resume_claim_allowed(db, run):
+                    db.expunge(run)
+                    return _serialize(run, receipt=previous)
                 raise DurableJobIdempotencyConflict(
                     "remote inference operation identity is already fenced"
                 )
@@ -6325,7 +6337,7 @@ class DurableJobRepository:
 
     async def recover_stale_jobs(self, *, now: datetime | None = None) -> list[dict[str, Any]]:
         observed_at = now or _utc_now()
-        recovered: list[dict[str, Any]] = []
+        recovered: list[dict[str, Any]] = await self.recover_inference_accounting(now=observed_at)
         async with self._session() as db:
             result = await db.execute(
                 select(WorkflowRunState).where(
@@ -6528,6 +6540,7 @@ class DurableJobRepository:
         """
 
         observed_at = now or _utc_now()
+        await self.recover_inference_accounting(now=observed_at, job_id=job_id)
         async with self._session() as db:
             run = await self._fetch(db, job_id)
             if run.status != "running":

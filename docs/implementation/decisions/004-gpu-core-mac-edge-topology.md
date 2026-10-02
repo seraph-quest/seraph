@@ -8,6 +8,11 @@ title: "ADR-004: GPU Core And Paired Mac Edge"
 
 **Decision class:** Target architecture
 
+**Supersession:** [ADR-008](./008-portable-core-and-consented-context.md)
+supersedes the fixed GPU-core/Mac-edge placement. The original decision below
+is preserved as historical rationale; its pairing, consent, revocation,
+authenticated transport and canonical-state safeguards remain applicable.
+
 ## Context
 
 Seraph currently runs its browser/backend development surfaces on the Mac and

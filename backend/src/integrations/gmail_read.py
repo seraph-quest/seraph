@@ -441,9 +441,11 @@ class GoogleGmailReadonlyAdapter:
                 timeout_seconds=10,
                 max_bytes=MAX_PROVIDER_RESPONSE_BYTES,
                 _lifecycle_marker=self._transport_lifecycle,
+                authority_check=self._check_authority,
             )
         except (PinnedTransportError, TimeoutError, OSError, RuntimeError, httpx.HTTPError) as exc:
             raise GmailReadError("mail_provider_unavailable", "Gmail authorization is unavailable", status_code=503, recovery_action="retry") from exc
+        await self._check_authority()
         if response.status_code != 200:
             raise GmailReadError("mail_token_refresh_failed", "Gmail authorization was refused", status_code=502, recovery_action="restore_prerequisite")
         body = _validate_json_response(response)
@@ -482,9 +484,11 @@ class GoogleGmailReadonlyAdapter:
                 timeout_seconds=10,
                 max_bytes=MAX_PROVIDER_RESPONSE_BYTES,
                 _lifecycle_marker=self._transport_lifecycle,
+                authority_check=self._check_authority,
             )
         except (PinnedTransportError, TimeoutError, OSError, RuntimeError, httpx.HTTPError) as exc:
             raise GmailReadError("mail_provider_unavailable", "Gmail provider read is unavailable", status_code=503, recovery_action="retry") from exc
+        await self._check_authority()
         if response.status_code in {401, 403}:
             raise GmailReadError("mail_provider_unauthorized", "Gmail authorization was refused", status_code=403, recovery_action="restore_prerequisite")
         if response.status_code != 200:

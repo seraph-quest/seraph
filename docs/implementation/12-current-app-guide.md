@@ -483,7 +483,9 @@ validation.
 
 The #912 branch target adds the explicit `repo-node24-npm-v1` profile behind
 this same Work/API/durable-job journey. [ADR-007](decisions/007-bounded-node-repair-supervision.md)
-owns its accepted contract; it is not shipped `develop` truth. Settings select
+owns its accepted contract; it is not shipped `develop` truth.
+[Optional Node Repository Repair](./optional-node-repair.md) describes installed
+runtime selection, finite selectors, exact approval and unknown recovery. Settings select
 an already installed absolute Node 24 executable. Only finite inspected `npm
 test`, `npm run build`, or `npm run build test` selections are accepted; Seraph
 maps their script bodies to direct Node argv and never runs npm, shell bodies,

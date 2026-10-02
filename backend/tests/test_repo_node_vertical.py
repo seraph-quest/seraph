@@ -13,6 +13,7 @@ from pathlib import Path
 import shutil
 import signal
 import subprocess
+import tempfile
 import time
 from types import SimpleNamespace
 
@@ -26,7 +27,40 @@ from tests import test_repo_repair_local_vertical as native
 from tests.test_repo_node import make_fixture, NODE, PROFILE
 
 
+PROOF_ROOT=Path(tempfile.mkdtemp(prefix=f"seraph-912-integrated-evidence-{os.getpid()}-"))
+
+
+def _retained(name):
+    PROOF_ROOT.mkdir(mode=0o700,exist_ok=True)
+    return PROOF_ROOT/name
+
+
+def _prepare_accounting_fixture(tmp_path,monkeypatch):
+    """Use a unique real deployment witness and finite governed reservation."""
+    from src.workspace.production import ProductionWorkspace,prepare_lifecycle_directory
+    monkeypatch.setenv("SERAPH_WORKSPACE_LIFECYCLE_PATH",str(tmp_path/"deployment-lifecycle"))
+    original_path=native.Path
+    shared_receipts={"/tmp/seraph-887-native-pending-safe-projection.json","/tmp/seraph-887-local-vertical-receipt.json"}
+    def retained_native_path(*args,**kwargs):
+        if len(args)==1 and str(args[0]) in shared_receipts:
+            return _retained(original_path(args[0]).name)
+        return original_path(*args,**kwargs)
+    monkeypatch.setattr(native,"Path",retained_native_path)
+    original_setup=native.OpenRouterSetup
+    monkeypatch.setattr(native,"OpenRouterSetup",lambda **kwargs:original_setup(**kwargs,request_cost_bound_microusd=1_000))
+    original_configuration=native._configure_openrouter
+    def configure():
+        prepare_lifecycle_directory(ProductionWorkspace(host_root=Path(native.settings.workspace_dir)))
+        persist=original_configuration()
+        async def finish():
+            await durable_job_repository.configure_inference_accounting(25_000)
+            await persist()
+        return finish
+    monkeypatch.setattr(native,"_configure_openrouter",configure)
+
+
 async def _prepare_node_flow(client,async_db,tmp_path,monkeypatch,*,typescript=False,script=None,wall_seconds=180,low_due=False):
+    _prepare_accounting_fixture(tmp_path,monkeypatch)
     fixture_root=tmp_path/"fixture";fixture_root.mkdir(mode=0o700)
     executor,fixture_repo,fixture_job=make_fixture(fixture_root,typescript=typescript,script=script)
     request={"repository_path":"repo","problem_statement":"Repair the bounded JS/TS fixture value.","acceptance_criteria":["Actual test and selected build pass."],
@@ -49,7 +83,7 @@ async def _prepare_node_flow(client,async_db,tmp_path,monkeypatch,*,typescript=F
             output={"summary":"Fix the approved fixture value.","base_snapshot_sha256":base,"patch_unified_diff":fixture_job.patch_bytes.decode(),"allowed_paths":list(fixture_job.allowed_paths),"test_args":list(fixture_job.test_args),"expected_outcome":"Actual selected tests/build pass."}
             content=json.dumps(output)
             response=SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(role="assistant",content=content))])
-            return response,{"choices":[{"message":{"role":"assistant","content":content}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"cost":0}}
+            return response,{"id":"gen-node-fixture", "choices":[{"message":{"role":"assistant","content":content}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"cost":"0.000001"}}
         return transport
     monkeypatch.setattr(native,"_init_repository",init_repository)
     monkeypatch.setattr(native,"_repair_input",lambda:request)
@@ -106,11 +140,19 @@ async def test_authenticated_node_work_vertical(client,async_db,tmp_path,monkeyp
     assert all(command["argv"][0]==NODE for command in manifest["commands"])
     assert len(flow["transport_calls"])==1
     assert (await durable_job_repository.get_job(job_id))["status"]=="succeeded"
+    accounting=await durable_job_repository.inference_accounting_snapshot()
+    assert accounting["committed_microusd"]==1,accounting
+    assert len(accounting["operations"])==1
+    assert accounting["operations"][0]["state"]=="settled"
+    from src.workspace.production import ProductionWorkspace,read_lifecycle_receipt
+    witness=read_lifecycle_receipt(ProductionWorkspace(host_root=flow["workspace"]))
+    assert witness["deployment_binding"]["root_path_digest"]==ProductionWorkspace(host_root=flow["workspace"]).identity_digest
+    _retained("seraph-912-"+("ts" if typescript else "js")+"-actual-accounting.json").write_text(json.dumps({"accounting":accounting,"lifecycle_witness":witness,"fixture_transport_only":True},indent=2))
     receipt={"profile":PROFILE,"typescript":typescript,"job_id":job_id,"proposal_id":proposal["proposal_id"],"approval_id":proposal["approval_id"],"status":"succeeded","transport_intercepted":True,"plan":plan,"commands":manifest["commands"],"readback_sha256":readback["content_sha256"],"readback_verified":True,"cleanup_proven":True,"memory_status":"no_learning","original_sha256":flow["source_before"]["sha256"]}
-    Path("/tmp/seraph-912-"+("ts" if typescript else "js")+"-vertical-receipt.json").write_text(json.dumps(receipt,indent=2))
-    Path("/tmp/seraph-912-"+("ts" if typescript else "js")+"-pending-ui.json").write_text(json.dumps(payload,indent=2))
-    Path("/tmp/seraph-912-"+("ts" if typescript else "js")+"-final-api.json").write_text(json.dumps(final_payload,indent=2))
-    Path("/tmp/seraph-912-"+("ts" if typescript else "js")+"-actual-readback.json").write_bytes(data)
+    _retained("seraph-912-"+("ts" if typescript else "js")+"-vertical-receipt.json").write_text(json.dumps(receipt,indent=2))
+    _retained("seraph-912-"+("ts" if typescript else "js")+"-pending-ui.json").write_text(json.dumps(payload,indent=2))
+    _retained("seraph-912-"+("ts" if typescript else "js")+"-final-api.json").write_text(json.dumps(final_payload,indent=2))
+    _retained("seraph-912-"+("ts" if typescript else "js")+"-actual-readback.json").write_bytes(data)
 
 
 
@@ -212,12 +254,12 @@ async def test_durable_node_lifecycle_and_retained_slot(client,async_db,tmp_path
         assert native._tree_receipt(flow["repository"])==flow["source_before"]
         assert supervisor.start_identity(os.getpid())
         retained_marker=fresh._read_job_marker(job_id)
-        Path("/tmp/seraph-912-"+failure+"-actual-marker.json").write_text(json.dumps(retained_marker,indent=2))
+        _retained("seraph-912-"+failure+"-actual-marker.json").write_text(json.dumps(retained_marker,indent=2))
         if retained_marker and isinstance(retained_marker.get("stage_directory"),str):
             actual_result=flow["workspace"]/retained_marker["stage_directory"]/"out"/"supervisor-result.json"
             if actual_result.is_file():
-                Path("/tmp/seraph-912-"+failure+"-actual-supervisor-result.json").write_bytes(actual_result.read_bytes())
-        Path("/tmp/seraph-912-"+failure+"-durable-receipt.json").write_text(json.dumps({"job_id":job_id,"original_marker_attempt_id":marker["attempt_id"],"original_marker_fencing_token":marker["fencing_token"],"final_first_job_fencing_token":(job.get("lease") or {}).get("fencing_token"),"final_first_job_lease":job.get("lease"),"recovered_first_job_lease":recovered_job.get("lease"),"recovered_first_job_status":recovered_job["status"],"second_accepted_job":second_job,"failure":failure,"status":job["status"],"same_root_recovery":True,"successor_blocked":job["status"]=="unknown_external_effect","owned_child_quiescent":True,"delayed_sentinel_absent":True,"restart_identity_faults_rejected":identity_faults,"reconciled":reconciled,"model_calls":len(flow["transport_calls"])},indent=2))
+                _retained("seraph-912-"+failure+"-actual-supervisor-result.json").write_bytes(actual_result.read_bytes())
+        _retained("seraph-912-"+failure+"-durable-receipt.json").write_text(json.dumps({"job_id":job_id,"original_marker_attempt_id":marker["attempt_id"],"original_marker_fencing_token":marker["fencing_token"],"final_first_job_fencing_token":(job.get("lease") or {}).get("fencing_token"),"final_first_job_lease":job.get("lease"),"recovered_first_job_lease":recovered_job.get("lease"),"recovered_first_job_status":recovered_job["status"],"second_accepted_job":second_job,"failure":failure,"status":job["status"],"same_root_recovery":True,"successor_blocked":job["status"]=="unknown_external_effect","owned_child_quiescent":True,"delayed_sentinel_absent":True,"restart_identity_faults_rejected":identity_faults,"reconciled":reconciled,"model_calls":len(flow["transport_calls"])},indent=2))
     finally:
         if stopped and owned_pid and owned_start:
             supervisor.exact_signal(owned_pid,owned_start,signal.SIGCONT)
@@ -261,3 +303,18 @@ async def test_authenticated_node_missing_recorded_preflight_blocks_display(clie
         assert payload["execution_ready"] is False
         assert payload["preflight"]["status"]=="blocked"
         assert payload["authority_digest"]==original_digest
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db",["file"],indirect=True)
+async def test_integrated_original_python_native_vertical(client,async_db,tmp_path,monkeypatch):
+    _prepare_accounting_fixture(tmp_path,monkeypatch)
+    original_factory=native._model_transport
+    def factory(calls):
+        original_transport=original_factory(calls)
+        def transport(**kwargs):
+            response,raw=original_transport(**kwargs)
+            return response,{**raw,"id":"gen-python-fixture","usage":{**raw.get("usage",{}),"cost":"0.000001"}}
+        return transport
+    monkeypatch.setattr(native,"_model_transport",factory)
+    await native.test_local_native_repo_repair_api_vertical(client,async_db,tmp_path,monkeypatch)

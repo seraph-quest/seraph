@@ -10,9 +10,8 @@ Seraph is an AI guardian that remembers, watches, and acts. This page is the fas
 **Document class:** Shipped and Partial implementation inventory.
 **Target authority:** [Project Constitution](./00-project-constitution.md).
 
-The detailed inventory below records the large existing baseline. Some shipped
-surfaces remain transitional, including the Mac-hosted core, and Epic #736
-tracks their replacement. New target capabilities remain **Planned** until
+The detailed inventory below records the large existing baseline. Some shipped runtime contracts and implementations remain transitional;
+Epic #736 tracks their migration while macOS and Linux remain peer core-host targets. New target capabilities remain **Planned** until
 merged to `develop` with the required validation receipts.
 
 For a shorter reader-facing overview of the current app, start with
@@ -134,8 +133,11 @@ High-risk strategic wording in this status page remains governed by [19. Strateg
   Provider and account usefulness remain **external-unverified**. This remains
   **Partial** and is not Shipped
   `develop` truth. See [Current App Guide](./12-current-app-guide.md#governed-repository-repair-m4-887-branch-local-target).
-- [ ] Epic #899 milestone #912 is a **Partial** Node repair branch target,
-  pending cumulative integration and independent review. ADR-007 accepts one
+- [ ] Epic #899 milestone #912 adds a **Partial** Node repair capability on
+  the open program branch, with explicit installed-runtime, approval and recovery
+  boundaries. It is not Shipped `develop` truth until the final reviewed program lands.
+  [Optional Node Repository Repair](./optional-node-repair.md) documents the
+  installed runtime and exact host approval boundary. ADR-007 accepts one
   inspected Node/npm profile behind the existing repair journey. Authenticated
   JS and TypeScript durable-job tests exercise real direct Node build/test
   execution, exact host approval, artifact hash readback and `no_learning`;

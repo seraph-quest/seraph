@@ -199,6 +199,14 @@ conversation remains the continuity surface.
 
 ## Native Daemon Operations
 
+[ADR-008](./decisions/008-portable-core-and-consented-context.md) defines macOS
+and Linux as peer core-host targets. The native daemon and macOS permission
+guidance below describe the existing Mac-specific implementation, not verified
+Linux capture. Selected task context remains Planned until its typed attachment,
+local privacy preview and per-platform adapter receipts are implemented. That
+attachment path must not enter general screenshot observation or automatic
+analysis. Missing optional capture services must not prevent core operation.
+
 Native desktop presence is optional and is controlled by `DAEMON_ENABLED` in
 the selected `.env.*` file. `DAEMON_ENABLED=false` is a configured-off state, not
 a daemon crash. Enable it with `DAEMON_ENABLED=true`, then use

@@ -31,7 +31,11 @@ Seraph frontend       http://127.0.0.1:3001
   -> OpenRouter       https://openrouter.ai/api/v1
 ```
 
-The backend and canonical workspace remain local on a CPU-capable host. All
+The backend and canonical workspace remain local on a CPU-capable host.
+[ADR-008](./decisions/008-portable-core-and-consented-context.md) defines macOS
+and Linux as peer core-host targets. This accepted target does not establish
+new platform-specific capture or execution readiness; each selected optional
+adapter/profile must report its actual proof and availability. All
 active text, vision, and embedding inference is admitted through the governed
 OpenRouter profile. A missing key, empty upstream allow-list, missing cloud
 consent, absent budget, or unverified capability blocks the request and is
@@ -204,10 +208,10 @@ Seraph frontend       http://127.0.0.1:3001
   -> GPU model server http://192.168.1.26:8000/v1
 ```
 
-The accepted architecture decision places the core on the GPU host and uses a
-paired Mac edge. Until their
-migration tickets ship, the backend and frontend remain local and GPU services
-are reached over documented HTTP APIs. `ssh jupyter` is an administrator path
+The historical ADR-004 target placed the core on the GPU host and used a
+paired Mac edge. ADR-008 supersedes that fixed placement with an
+operator-selected macOS or Linux core host. Historical GPU services
+were reached over documented HTTP APIs. `ssh jupyter` is an administrator path
 for inventory and maintenance, not application transport or a required tunnel.
 
 ## Run The Current App
@@ -801,9 +805,12 @@ adapter when cloud consent and capability configuration are present, and feed
 report infrastructure. Capture, analysis, and report synthesis are separate
 stages and expose separate failures.
 
-**Planned:** a paired, revocable Mac edge supplies observation and native
-interaction to the GPU core. Pairing must not implicitly authorize execution or
-data egress.
+**Planned:** explicitly selected desktop context on macOS or Linux attaches
+reviewed content to an exact owned task under ADR-008. Existing Mac-native
+capture remains a separate implementation fact. Optional paired edges and
+local capture adapters require their own readiness receipts; pairing must not
+implicitly authorize execution or data egress. Task attachments must bypass
+general screenshot observation and automatic analysis.
 
 ## Memory
 
@@ -949,4 +956,5 @@ execution.
 - [Development Status](./STATUS.md)
 - [Documentation Contract](./08-docs-contract.md)
 - [ADR-004: GPU Core And Paired Mac Edge](./decisions/004-gpu-core-mac-edge-topology.md)
+- [ADR-008: Portable Core And Consented Context](./decisions/008-portable-core-and-consented-context.md)
 - [ADR-006: OpenRouter-only inference phase](./decisions/006-openrouter-only-inference-phase.md)

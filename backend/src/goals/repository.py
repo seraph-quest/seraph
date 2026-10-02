@@ -5,14 +5,17 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from sqlalchemy import delete, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlmodel import select, col
 
 from src.db.engine import get_session
+from src.db.session_refs import ensure_sessions_exist
 from src.db.models import (
     Goal,
     GoalLevel,
     GoalDomain,
     GoalStatus,
+    AuditEvent,
     NativeNotificationOutbox,
     QueuedInsight,
     StrategyDelta,
@@ -152,6 +155,8 @@ class GoalRepository:
         owner_session_id: str | None = None,
         operator_session_id: str | None = None,
         admission_budget: GoalAdmissionBudget | dict | None = None,
+        setup_goal_id: str | None = None,
+        setup_permission_event: AuditEvent | None = None,
     ) -> Goal:
         if level not in _VALID_LEVELS:
             raise ValueError(f"Invalid level '{level}'. Must be one of: {_VALID_LEVELS}")
@@ -169,7 +174,7 @@ class GoalRepository:
             owner_session_id,
         )
         async with get_session() as db:
-            goal_id = uuid.uuid4().hex[:8]
+            goal_id = setup_goal_id or uuid.uuid4().hex[:8]
 
             # Build materialized path
             path = "/"
@@ -210,6 +215,25 @@ class GoalRepository:
                 owner_session_id=owner_session_id,
                 admission_budget_json=serialize_admission_budget(admission_budget),
             )
+            if setup_goal_id:
+                # Private setup seam: the database primary key wins a cross-tab
+                # race. Never create a second goal or reinterpret its payload.
+                if proactive_enabled and setup_permission_event is None:
+                    raise ValueError("setup_initial_permission_receipt_required")
+                inserted = await db.execute(sqlite_insert(Goal).values(**goal.model_dump()).on_conflict_do_nothing(index_elements=["id"]))
+                stored = (await db.execute(select(Goal).where(Goal.id == goal_id))).scalar_one()
+                for field in ("title", "description", "level", "domain", "parent_id", "success_criterion_json", "owner_principal_id", "owner_session_id"):
+                    if getattr(stored, field) != getattr(goal, field):
+                        raise ValueError("setup_journey_payload_conflict")
+                # Permission and its receipt become visible together. A replay
+                # never reapplies consent, including a crash before this flush.
+                if inserted.rowcount == 1 and setup_permission_event is not None:
+                    if await db.get(AuditEvent, setup_permission_event.id) is not None:
+                        raise ValueError("setup_initial_permission_already_recorded")
+                    await ensure_sessions_exist(db, [setup_permission_event.session_id])
+                    db.add(setup_permission_event)
+                    await db.flush()
+                return stored
             db.add(goal)
             await db.flush()
             return goal

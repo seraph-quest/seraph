@@ -22,7 +22,7 @@ from types import MappingProxyType
 from typing import Any, Literal, Mapping
 import uuid
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from sqlalchemy import func, select
 
 from src.approval.repository import approval_repository
@@ -268,6 +268,16 @@ class _GoalSnapshotInput(BaseModel):
 
     file_path: str = Field(min_length=1, max_length=512)
 
+    @field_validator("file_path")
+    @classmethod
+    def validate_output_path(cls, value: str) -> str:
+        from src.tools.filesystem_tool import _is_secret_like_workspace_path
+
+        path = normalize_workspace_relative_path(value)
+        if _is_secret_like_workspace_path(path):
+            raise ValueError("Snapshot output must not name a secret-like workspace path")
+        return path
+
 
 class _SourceWatchInput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -479,10 +489,12 @@ REGISTERED_CAPABILITIES: dict[str, CapabilitySpec] = {
     GOAL_SNAPSHOT_CAPABILITY: CapabilitySpec(
         GOAL_SNAPSHOT_CAPABILITY,
         GOAL_SNAPSHOT_VERSION,
+        secret_like=False,
     ),
     "guardian.research-watch.v1": CapabilitySpec(
         "guardian.research-watch.v1",
         "1",
+        secret_like=False,
     ),
     "engineering.repo-change.v1": CapabilitySpec(
         "engineering.repo-change.v1",
@@ -7912,9 +7924,13 @@ class WorkBoardDispatcher:
                 and not _text(projection.get("parent_run_identity"))
                 and not _text(projection.get("parent_job_id"))
             )
+        observation_completed = (
+            _text(authority.get("capability_id")) == "guardian.research-watch.v1"
+            and _status(result) in {"baseline_initialized", "rebaseline_required", "no_change"}
+        )
         if (
             _status(projection) != "succeeded"
-            or _status(result) not in {"succeeded", "completed"}
+            or (_status(result) not in {"succeeded", "completed"} and not observation_completed)
             or not lineage_ok
         ):
             return None

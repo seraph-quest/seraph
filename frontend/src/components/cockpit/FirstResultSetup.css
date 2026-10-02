@@ -1,0 +1,25 @@
+.first-result-setup { padding: 1rem; min-width: 0; }
+.first-result-setup fieldset { display: flex; flex-direction: column; gap: .75rem; min-width: 0; }
+.first-result-setup label { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+.first-result-setup input:not([type="radio"]) { width: 100%; padding: .5rem; min-width: 0; }
+.first-result-setup p, .first-result-setup pre { overflow-wrap: anywhere; }
+.first-result-setup pre { white-space: pre-wrap; max-height: 24rem; overflow: auto; }
+.first-result-setup button { min-height: 44px; padding: .5rem .75rem; margin: .25rem; }
+.first-result-setup input[type="radio"] { width: 1.25rem; height: 1.25rem; }
+.first-result-setup :focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
+
+/* The composer must not occlude setup controls on compact desktop windows. */
+@media (min-width: 769px) and (max-height: 700px) {
+  .first-result-setup {
+    max-height: calc(100dvh - 290px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scroll-padding-block: 1rem;
+  }
+  .first-result-setup ol {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .25rem 1rem;
+  }
+  .first-result-setup button, .first-result-setup input { scroll-margin-block: 1rem; }
+}

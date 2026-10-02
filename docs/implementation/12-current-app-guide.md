@@ -123,6 +123,17 @@ chat reports that it was blocked before provider contact and tells the operator
 which setup controls are missing. That state does not imply an uncertain
 provider outcome and does not trigger an automatic retry.
 
+Home also has a branch-local **Your first verified result** journey: choose
+a deterministic local snapshot or public-source baseline plus snapshot, review
+the $0 model cost and finite permissions, queue a typed task through the managed
+dispatcher, and explicitly open its independently verified result. Progress is
+owner/session-scoped in the existing activity ledger. The public watch starts
+with scheduling disabled and is paused after observation. A baseline is not a
+material-change dossier; both starters record `no_learning`. This remains
+Partial on the open integration branch. The managed keyless local journey and
+artifact digest are verified; live public-source usefulness remains unverified. See
+[Guided First Result Setup](./first-result-setup.md) for bounds and recovery.
+
 The production backend's canonical workspace is the host path configured by
 `BACKEND_DATA_PATH_PROD`, mounted only as `WORKSPACE_DIR=/app/data`. The managed
 maintenance commands resolve that bind before doing any work and fail closed on

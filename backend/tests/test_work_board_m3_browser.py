@@ -459,8 +459,8 @@ async def test_artifact_secret_like_rejected_and_legacy_pending_replay_recovers(
                 db,
                 OWNER,
                 _artifact_request(
-                    capability_id=GOAL_SNAPSHOT_CAPABILITY,
-                    input={"file_path": "artifacts/result.md"},
+                    capability_id="engineering.repo-change.v1",
+                    input={"candidate_id": "candidate", "repository_path": "repo", "patch_artifact_id": "patch", "patch_sha256": "a" * 64, "allowed_paths": ["file.txt"], "test_args": ["pytest"]},
                 ),
             )
         assert secret_error.value.code == "secret_like_capability_blocked"
@@ -806,12 +806,16 @@ async def test_post_claim_readiness_rejects_forged_attempt_context(async_db, mon
     assert reason == "The board attempt limit has been exhausted"
 
 
-def test_public_browser_calendar_and_reviewed_procedure_capabilities_are_the_only_artifact_storage_opt_ins():
+def test_only_reviewed_capabilities_opt_into_public_artifact_storage():
     approved_public_capabilities = {
         "browser.public-task.v1",
         "calendar.meeting-prep.v1",
         "calendar.observe_due_events.v1",
         "guardian-routine.v2",
+        "workflow.goal-snapshot-to-file",
+        "guardian.research-watch.v1",
+        "gmail.scan_metadata.v1",
+        "work.mail-reply-draft.v1",
     }
     assert {
         capability_id

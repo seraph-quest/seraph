@@ -11,6 +11,7 @@ import { CalendarPrepForm } from "./CalendarPrepForm";
 import type { PendingCalendarSubmission } from "./CalendarPrepForm";
 import { MailPanel } from "./MailPanel";
 import { WorkBoardMemoryReview } from "./WorkBoardMemoryReview";
+import { TaskEvidencePanel } from "./TaskEvidencePanel";
 import { validateCalendarExecution } from "../../lib/calendar";
 import type {
   GoalInfo,
@@ -3985,6 +3986,8 @@ function WorkBoardPanel({
                 ownerPrincipalId={ownerPrincipalId}
                 ownerSessionId={ownerSessionId}
               />
+
+              <TaskEvidencePanel task={selectedTask} ownerSessionId={ownerSessionId} />
 
               {selectedDetail?.parent_handoffs && selectedDetail.parent_handoffs.length > 0 && (
                 <section className="rounded border border-white/10 p-3" aria-label="Safe parent handoffs">

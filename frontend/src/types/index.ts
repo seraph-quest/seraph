@@ -280,6 +280,8 @@ export interface CanonicalMemoryLink {
 }
 
 export interface CanonicalMemoryRecord {
+  ownership_access?: "recovered_read_only";
+  execution_block_reason?: string;
   id: string;
   kind: CanonicalMemoryKind;
   status: CanonicalMemoryStatus;
@@ -311,6 +313,8 @@ export interface CanonicalMemoryPage {
 }
 
 export interface GoalInfo {
+  ownership_access?: "recovered_read_only";
+  execution_block_reason?: string;
   id: string;
   parent_id: string | null;
   path: string;
@@ -452,6 +456,8 @@ export interface WorkBoardAttempt {
 
 /** Safe task projection returned by the authenticated /api/work-board routes. */
 export interface WorkBoardTask {
+  ownership_access?: "recovered_read_only";
+  execution_block_reason?: string;
   task_id: string;
   creation_sequence: number;
   owner_principal_id: string;
@@ -790,6 +796,8 @@ export interface WorkBoardRoutineVersion {
 }
 
 export interface WorkBoardRoutineRead {
+  ownership_access?: "recovered_read_only";
+  execution_block_reason?: string;
   id: string;
   owner_principal_id: string;
   state: string;

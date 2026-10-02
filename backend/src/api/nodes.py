@@ -154,6 +154,21 @@ def _node_inventory(state_payload: dict[str, Any] | None = None) -> list[NodeAda
     return inventory
 
 
+def _node_inventory_for_owner(owner_principal_id: str):
+    from dataclasses import replace
+    # Public adapter availability remains visible. Pairing/private device facts
+    # are scoped to the actual proved principal; ambiguous role rows block.
+    rows = []
+    state_payload = load_extension_state_payload()
+    for item in _node_inventory(state_payload):
+        entry, _ = current_pairing(state_payload, extension_id=item.extension_id, reference=item.reference, name=item.name)
+        if entry and entry.get("owner_principal_id") != owner_principal_id:
+            item = replace(item, pairing={}, paired=False, revoked=False,
+                           pairing_state="re_pair_required", trust_state="unpaired", safe_follow_up_ready=False, runtime_state="unpaired_staged", presence_contract={"status": "blocked", "reason": "current_owner_re_pair_required"})
+        rows.append(item)
+    return rows
+
+
 def _adapter_payload(item: NodeAdapterInventoryEntry) -> dict[str, Any]:
     return {
         "extension_id": item.extension_id,
@@ -191,8 +206,8 @@ def _find_adapter(
 
 
 @router.get("/nodes/adapters")
-async def list_node_adapters():
-    inventory = _node_inventory()
+async def list_node_adapters(request: Request):
+    inventory = _node_inventory_for_owner(_operator_principal_id(request))
     return {
         "adapters": [
             _adapter_payload(item)
@@ -203,8 +218,7 @@ async def list_node_adapters():
 
 @router.get("/nodes/pairings")
 async def list_node_pairings(request: Request):
-    _operator_principal_id(request)
-    inventory = _node_inventory()
+    inventory = _node_inventory_for_owner(_operator_principal_id(request))
     return {
         "pairings": [
             {
@@ -237,6 +251,9 @@ async def pair_node(request: NodePairingMutationRequest, http_request: Request):
         extension_id=request.extension_id,
         reference=request.reference,
     )
+    existing, _ = current_pairing(state_payload, extension_id=adapter.extension_id, reference=adapter.reference, name=adapter.name)
+    if existing and existing.get("owner_principal_id") != owner_principal_id:
+        raise HTTPException(status_code=404, detail={"code": "node_pairing_not_found"})
     device_id = request.device_id or f"device-{uuid4().hex[:16]}"
     pairing_id = request.pairing_id or f"pairing-{uuid4().hex[:16]}"
     expected_revision = (

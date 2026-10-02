@@ -424,23 +424,35 @@ async def list_goals(
 ):
     """List the authenticated operator's goals, optionally filtered."""
     operator = _require_authenticated_operator(request)
+    from src.auth.ownership import selected_read_scopes, RECOVERED_FIELDS
+    recovered = await selected_read_scopes(operator, "goal")
     goals = await goal_repository.list_goals(
         level=level,
         domain=domain,
         status=status,
         owner_principal_id=operator.principal.principal_id,
         owner_session_id=operator.session_id,
+        recovered_read_scopes=recovered,
     )
-    return [_goal_payload(goal) for goal in goals]
+    result = []
+    for goal in goals:
+        payload = _goal_payload(goal)
+        if goal.id in recovered:
+            payload.update(RECOVERED_FIELDS)
+            payload.update(proactive_enabled=False, admission_budget=None)
+        result.append(payload)
+    return result
 
 
 @router.get("/goals/tree")
 async def get_goal_tree(request: Request):
     """Get the authenticated operator's goal tree as nested structure."""
     operator = _require_authenticated_operator(request)
+    from src.auth.ownership import selected_read_scopes
     return await goal_repository.get_tree(
         owner_principal_id=operator.principal.principal_id,
         owner_session_id=operator.session_id,
+        recovered_read_scopes=await selected_read_scopes(operator, "goal"),
     )
 
 
@@ -448,9 +460,11 @@ async def get_goal_tree(request: Request):
 async def get_goal_dashboard(request: Request):
     """Get summary stats for the authenticated operator's goals."""
     operator = _require_authenticated_operator(request)
+    from src.auth.ownership import selected_read_scopes
     return await goal_repository.get_dashboard(
         owner_principal_id=operator.principal.principal_id,
         owner_session_id=operator.session_id,
+        recovered_read_scopes=await selected_read_scopes(operator, "goal"),
     )
 
 

@@ -233,6 +233,7 @@ async def get_memory_records(
     """Read the authenticated operator's canonical memory library page."""
 
     context = authenticated_memory_context(http_request)
+    from src.auth.ownership import selected_read_scopes
     try:
         return await memory_repository.list_memory_records(
             owner_session_id=context.session_id,
@@ -241,6 +242,7 @@ async def get_memory_records(
             query=q,
             kind=kind,
             status=status,
+            recovered_read_scopes=await selected_read_scopes(http_request.state.operator, "memory"),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -251,8 +253,10 @@ async def get_memory_record(http_request: Request, memory_id: str):
     """Read one owner-scoped canonical memory record without an existence hint."""
 
     context = authenticated_memory_context(http_request)
+    from src.auth.ownership import selected_read_scopes, RECOVERED_FIELDS
+    recovered = await selected_read_scopes(http_request.state.operator, "memory")
     record = await memory_repository.get_memory_record(
-        owner_session_id=context.session_id,
+        owner_session_id=recovered.get(memory_id, context.session_id),
         memory_id=memory_id,
     )
     if record is None:
@@ -260,6 +264,8 @@ async def get_memory_record(http_request: Request, memory_id: str):
             status_code=404,
             detail={"code": "memory_record_not_found"},
         )
+    if memory_id in recovered:
+        record.update(RECOVERED_FIELDS)
     return record
 
 

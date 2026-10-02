@@ -550,6 +550,33 @@ def read_lifecycle_receipt(workspace: ProductionWorkspace) -> dict[str, Any] | N
     return value
 
 
+def _invalidate_transport_credentials(connection) -> int:
+    """Exact legacy edge/Telegram generations; no provider/config secrets."""
+    columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(secrets)")}
+    if not {"key", "encrypted_value"}.issubset(columns):
+        return 0
+    revoked = ", revoked_at = CURRENT_TIMESTAMP" if "revoked_at" in columns else ""
+    before = connection.total_changes
+    connection.execute(
+        "UPDATE secrets SET encrypted_value = 'revoked:workspace-restore'" + revoked +
+        " WHERE (substr(key,1,20) = 'seraph-node-pairing-' AND length(key) = 60 AND substr(key,21) NOT GLOB '*[^0-9a-f]*') "
+        "OR (substr(key,1,25) = 'telegram.transport.token:' AND length(key) = 89 AND substr(key,26) NOT GLOB '*[^0-9a-f]*')"
+    )
+    return connection.total_changes - before
+
+
+def _invalidate_continuity_credentials(connection) -> int:
+    """A restored proof snapshot must never resurrect consumed/revoked hashes."""
+    columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(operator_continuity_credentials)")}
+    if not columns:
+        return 0
+    if not {"token_hash", "kind", "revoked_at"}.issubset(columns):
+        raise ProductionWorkspaceReconciliationError("continuity credential invalidation schema is unavailable")
+    count = int(connection.execute("SELECT COUNT(*) FROM operator_continuity_credentials WHERE revoked_at IS NULL").fetchone()[0])
+    connection.execute("UPDATE operator_continuity_credentials SET revoked_at = CURRENT_TIMESTAMP WHERE revoked_at IS NULL")
+    return count
+
+
 def reconcile_production_restore(
     *,
     root: Path,
@@ -604,6 +631,7 @@ def reconcile_production_restore(
     if not database_path.is_file() or database_path.is_symlink():
         raise ProductionWorkspaceReconciliationError("staged authority database is unavailable")
     invalidated_sessions = 0
+    invalidated_continuity = 0
     invalidated_authority = 0
     tables_present: list[str] = []
     try:
@@ -634,6 +662,8 @@ def reconcile_production_restore(
                     "UPDATE operator_sessions SET revoked_at = CURRENT_TIMESTAMP "
                     "WHERE revoked_at IS NULL"
                 )
+            invalidated_continuity = _invalidate_continuity_credentials(connection)
+            _invalidate_transport_credentials(connection)
             if "production_workflow_authority_states" in table_names:
                 tables_present.append("production_workflow_authority_states")
                 columns = {
@@ -687,6 +717,7 @@ def reconcile_production_restore(
             "status": "applied",
             "tables_present": tables_present,
             "operator_sessions_invalidated": invalidated_sessions,
+            "continuity_credentials_invalidated": invalidated_continuity,
             "workflow_authority_rows_blocked": invalidated_authority,
         },
         "token_invalidation": {
@@ -746,6 +777,7 @@ def reconcile_production_rollback(
     merged_rows: dict[str, int] = {}
     preserved_rows: dict[str, int] = {}
     invalidated_sessions = 0
+    invalidated_continuity = 0
     blocked_authority = 0
     try:
         source = sqlite3.connect(active_db)
@@ -793,6 +825,8 @@ def reconcile_production_rollback(
                     "WHERE revoked_at IS NULL"
                 )
 
+            invalidated_continuity = _invalidate_continuity_credentials(target_connection)
+            _invalidate_transport_credentials(target_connection)
             if "production_workflow_authority_states" in target_tables:
                 columns = set(
                     table_columns(target_connection, "production_workflow_authority_states")
@@ -837,6 +871,7 @@ def reconcile_production_rollback(
         "rows_merged": merged_rows,
         "rows_preserved": preserved_rows,
         "operator_sessions_invalidated": invalidated_sessions,
+            "continuity_credentials_invalidated": invalidated_continuity,
         "workflow_authority_rows_blocked": blocked_authority,
         "optional_credentials_invalidated": ["google_calendar_token.json"]
         if optional_token_invalidated

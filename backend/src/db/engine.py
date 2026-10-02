@@ -364,8 +364,8 @@ async def _ensure_legacy_columns(conn) -> None:
         # persisted user/assistant transcript are provably conversations, so
         # claim those legacy rows for the canonical single operator.  Empty
         # placeholders created by service/job references remain ownerless and
-        # therefore fail closed until an authenticated chat ingress explicitly
-        # binds them.
+        # remain blocked at authenticated ingress. The role label retained on
+        # transcripts is migration metadata, never attributable to a new root.
         message_columns = await _table_columns("messages")
         if (
             message_columns
@@ -772,6 +772,14 @@ async def _ensure_operator_session_columns(conn) -> None:
         existing = {row[0] for row in result.fetchall()}
     if not existing:
         return
+    if "operator_identity_id" not in existing:
+        await conn.exec_driver_sql(
+            "ALTER TABLE operator_sessions ADD COLUMN operator_identity_id VARCHAR"
+        )
+    await conn.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_operator_sessions_operator_identity_id "
+        "ON operator_sessions (operator_identity_id)"
+    )
     if "is_bearer_tombstone" not in existing:
         if dialect == "sqlite":
             await conn.exec_driver_sql(
@@ -796,6 +804,79 @@ async def _ensure_operator_session_columns(conn) -> None:
         "CREATE INDEX IF NOT EXISTS ix_operator_sessions_replacement_state "
         "ON operator_sessions (replaced_by_id, is_bearer_tombstone, revoked_at)"
     )
+
+
+async def _ensure_vault_owner(conn) -> None:
+    columns = {row[1] for row in (await conn.exec_driver_sql("PRAGMA table_info(secrets)")).fetchall()}
+    if not columns:
+        return
+    if "owner_principal_id" not in columns:
+        await conn.exec_driver_sql("ALTER TABLE secrets ADD COLUMN owner_principal_id VARCHAR")
+    if "revoked_at" not in columns:
+        await conn.exec_driver_sql("ALTER TABLE secrets ADD COLUMN revoked_at DATETIME")
+    await conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_secrets_owner_principal_id ON secrets (owner_principal_id)")
+    await conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_secrets_revoked_at ON secrets (revoked_at)")
+
+
+OPERATOR_PRINCIPAL_SCHEMA = 900
+
+
+async def _ensure_operator_principals(conn) -> None:
+    """Forward-only owner migration; never transfer old execution envelopes.
+
+    Legacy bearer authority is revoked before the principal-required issuance
+    fence is installed. An old binary therefore cannot authenticate old tokens
+    or insert a new shared-role session into this SQLite workspace.
+    """
+    if conn.dialect.name != "sqlite":
+        raise RuntimeError("operator principal migration requires canonical SQLite")
+    version = (await conn.exec_driver_sql("PRAGMA user_version")).scalar_one()
+    if version > OPERATOR_PRINCIPAL_SCHEMA:
+        raise RuntimeError("workspace requires a newer compatible runtime; restore backup for downgrade")
+    columns = {row[1] for row in (await conn.exec_driver_sql("PRAGMA table_info(operator_sessions)")).fetchall()}
+    if not columns:
+        return
+    migrating = "principal_id" not in columns
+    if migrating:
+        await conn.exec_driver_sql("ALTER TABLE operator_sessions ADD COLUMN principal_id VARCHAR")
+        await conn.exec_driver_sql("ALTER TABLE operator_sessions ADD COLUMN legacy_owner_principal_id VARCHAR")
+        # These two credential key formats are emitted by paired_edge.py and
+        # telegram_transport.py. Invalidate only exact legacy generations; old
+        # readers ignore revoked_at, so their ciphertext must also be unusable.
+        secret_columns = {row[1] for row in (await conn.exec_driver_sql("PRAGMA table_info(secrets)")).fetchall()}
+        if {"key", "encrypted_value", "revoked_at", "owner_principal_id"}.issubset(secret_columns):
+            await conn.exec_driver_sql(
+                "UPDATE secrets SET revoked_at = CURRENT_TIMESTAMP, encrypted_value = 'revoked:operator-principal-migration' "
+                "WHERE owner_principal_id IS NULL AND revoked_at IS NULL AND ("
+                "(substr(key,1,20) = 'seraph-node-pairing-' AND length(key) = 60 AND substr(key,21) NOT GLOB '*[^0-9a-f]*') OR "
+                "(substr(key,1,25) = 'telegram.transport.token:' AND length(key) = 89 AND substr(key,26) NOT GLOB '*[^0-9a-f]*'))"
+            )
+        await conn.exec_driver_sql(
+            "UPDATE operator_sessions SET principal_id = 'operator:root:' || id, "
+            "legacy_owner_principal_id = CASE WHEN is_bearer_tombstone = 0 THEN 'operator:single' ELSE NULL END, "
+            "revoked_at = COALESCE(revoked_at, CURRENT_TIMESTAMP)"
+        )
+    invalid = (await conn.exec_driver_sql(
+        "SELECT id FROM operator_sessions WHERE principal_id IS NULL "
+        "OR principal_id NOT LIKE 'operator:root:%' OR length(principal_id) < 20 "
+        "OR length(principal_id) > 128 OR substr(principal_id, 15) GLOB '*[^A-Za-z0-9_-]*' LIMIT 1"
+    )).first()
+    duplicate = (await conn.exec_driver_sql(
+        "SELECT principal_id FROM operator_sessions GROUP BY principal_id HAVING count(*) > 1 LIMIT 1"
+    )).first()
+    if invalid or duplicate:
+        raise RuntimeError("operator_principal_migration_required: malformed or duplicate principal; restore backup")
+    await conn.exec_driver_sql("CREATE UNIQUE INDEX IF NOT EXISTS ix_operator_sessions_principal_id ON operator_sessions (principal_id)")
+    for event in ("INSERT", "UPDATE OF principal_id"):
+        trigger = "operator_principal_required_" + ("insert" if event == "INSERT" else "update")
+        await conn.exec_driver_sql(
+            f"CREATE TRIGGER IF NOT EXISTS {trigger} BEFORE {event} ON operator_sessions "
+            "WHEN NEW.principal_id IS NULL OR NEW.principal_id NOT LIKE 'operator:root:%' "
+            "OR length(NEW.principal_id) < 20 OR length(NEW.principal_id) > 128 "
+            "OR substr(NEW.principal_id, 15) GLOB '*[^A-Za-z0-9_-]*' "
+            "BEGIN SELECT RAISE(ABORT, 'operator_principal_migration_required'); END"
+        )
+    await conn.exec_driver_sql(f"PRAGMA user_version = {OPERATOR_PRINCIPAL_SCHEMA}")
 
 
 async def _ensure_telegram_transport_columns(conn) -> None:
@@ -1548,6 +1629,8 @@ async def init_db() -> None:
 
     os.makedirs(os.path.dirname(_db_path), exist_ok=True)
     async with engine.begin() as conn:
+        if conn.dialect.name == "sqlite":
+            await conn.exec_driver_sql("BEGIN IMMEDIATE")
         # Migrate an existing workflow table before SQLModel creates its
         # conditional unique idempotency index.  ``create_all`` attempts to
         # create model indexes for existing tables too; running it first would
@@ -1555,6 +1638,8 @@ async def init_db() -> None:
         # preserve and block those rows for operator reconciliation.
         await _ensure_legacy_columns(conn)
         await _ensure_operator_session_columns(conn)
+        await _ensure_vault_owner(conn)
+        await _ensure_operator_principals(conn)
         await _ensure_telegram_transport_columns(conn)
         await _ensure_work_board_columns(conn)
         # Existing routine-binding tables need their additive columns before
@@ -1566,6 +1651,7 @@ async def init_db() -> None:
         await _ensure_calendar_columns(conn)
         await _ensure_mail_columns(conn)
         await conn.run_sync(SQLModel.metadata.create_all)
+        await _ensure_operator_principals(conn)
         await _ensure_guardian_inbox_columns(conn)
         await _ensure_m5_columns(conn)
         await _ensure_work_board_indexes(conn)

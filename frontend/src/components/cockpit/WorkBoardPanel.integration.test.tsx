@@ -141,6 +141,25 @@ describe("WorkBoardPanel integration", () => {
     vi.restoreAllMocks();
   });
 
+  it("shows the recovered original task and disables historical actions", async () => {
+    const historical = boardTask({ ownership_access: "recovered_read_only", execution_block_reason: "current_scope_review_required", recovery_action: null });
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/work-board/tasks/task-1")) return Promise.resolve(response(detail(historical)));
+      if (url.includes("/api/work-board/tasks?")) return Promise.resolve(response(page(historical, 1)));
+      if (url.includes("/api/work-board/events?")) return Promise.resolve(response(emptyEvents(1)));
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
+      return Promise.resolve(response({}));
+    });
+    render(<WorkBoardPanel ownerPrincipalId="operator:one" ownerSessionId="new-current-session" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Recoverable task" }));
+    expect(await screen.findByText(/Previous approvals, jobs and permissions stay blocked/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add comment" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Close task details" })).not.toBeDisabled();
+    expect(screen.getByRole("listitem")).toHaveAttribute("draggable", "false");
+    expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(true);
+  });
+
   it("projects an action receipt through the event cursor and recovers a blocked task", async () => {
     const blocked = boardTask();
     const recovered = boardTask({

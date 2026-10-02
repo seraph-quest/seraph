@@ -9895,14 +9895,26 @@ def _procedure_http_error(exc: ProcedureV2Error) -> HTTPException:
 @routine_router.get("")
 async def list_routines(request: Request):
     operator = _operator(request)
-    return {"routines": await routine_service.list(owner_principal_id=operator.principal.principal_id, owner_session_id=operator.session_id)}
+    from src.auth.ownership import selected_read_scopes, selected_read_principal, RECOVERED_FIELDS
+    recovered = await selected_read_scopes(operator, "routine")
+    routines = await routine_service.list(owner_principal_id=operator.principal.principal_id, owner_session_id=operator.session_id)
+    for routine_id, historical_owner in recovered.items():
+        routine = await routine_service.read(routine_id, owner_principal_id=await selected_read_principal(operator, "routine", routine_id), owner_session_id=historical_owner)
+        routine.update(RECOVERED_FIELDS)
+        routines.append(routine)
+    return {"routines": routines}
 
 
 @routine_router.get("/{routine_id}")
 async def get_routine(routine_id: str, request: Request):
     operator = _operator(request)
+    from src.auth.ownership import selected_read_scopes, selected_read_principal, RECOVERED_FIELDS
+    recovered = await selected_read_scopes(operator, "routine")
     try:
-        return await routine_service.read(routine_id, owner_principal_id=operator.principal.principal_id, owner_session_id=operator.session_id)
+        routine = await routine_service.read(routine_id, owner_principal_id=(await selected_read_principal(operator, "routine", routine_id)) if routine_id in recovered else operator.principal.principal_id, owner_session_id=recovered.get(routine_id, operator.session_id))
+        if routine_id in recovered:
+            routine.update(RECOVERED_FIELDS)
+        return routine
     except RoutineError as exc:
         raise _http_error(exc) from exc
 

@@ -966,6 +966,7 @@ async def _safe_task_payload(
     attempt_count: int = 0,
     dispatch_rank: int | None = None,
     browser_projection: Mapping[str, Any] | None = None,
+    recovered_read_only: bool = False,
 ) -> dict[str, Any]:
     payload = _task_payload(
         task,
@@ -1014,6 +1015,11 @@ async def _safe_task_payload(
                     value,
                     fail_closed=True,
                 )
+    if recovered_read_only:
+        from src.auth.ownership import RECOVERED_FIELDS
+        payload.update(RECOVERED_FIELDS)
+        payload.update(recovery_action=None, dispatch_rank=None, dispatch_wait_reason=None)
+        return payload
     if payload.get("recovery_action") == "retry":
         # Recovery controls are an operator projection of current authority,
         # not a cached promise from the last dispatcher pass.  Re-run the
@@ -1692,8 +1698,10 @@ async def list_work_board_tasks(
     limit: int = Query(default=100, ge=1, le=100),
 ):
     operator = _operator(request)
+    from src.auth.ownership import selected_read_scopes, selected_read_principal
     try:
         async with get_session() as db:
+            recovered = await selected_read_scopes(operator, "task", db=db)
             page = await repository.list_tasks(
                 db,
                 _owner(operator),
@@ -1703,6 +1711,7 @@ async def list_work_board_tasks(
                 query=q,
                 after=after,
                 limit=limit,
+                recovered_read_scopes=recovered,
             )
             browser_job_ids = [
                 str(attempt.workflow_run_id)
@@ -1732,6 +1741,7 @@ async def list_work_board_tasks(
                             if task.task_id in page.latest_attempts and page.latest_attempts[task.task_id].workflow_run_id
                             else None
                         ),
+                        recovered_read_only=task.task_id in recovered,
                     )
                     for task in page.tasks
                 ],
@@ -1840,14 +1850,20 @@ async def create_work_board_input_artifact(
 @router.get("/input-artifacts/{artifact_id}")
 async def get_work_board_input_artifact(request: Request, artifact_id: str):
     operator = _operator(request)
+    from src.auth.ownership import selected_read_scopes, selected_read_principal, RECOVERED_FIELDS
     try:
         async with get_session() as db:
+            recovered = await selected_read_scopes(operator, "artifact", db=db)
+            read_owner = WorkBoardOwner(principal_id=(await selected_read_principal(operator, "artifact", artifact_id, db=db)) if artifact_id in recovered else operator.principal.principal_id, session_id=recovered.get(artifact_id, operator.session_id))
             metadata = await read_input_artifact_metadata(
                 db,
-                _owner(operator),
+                read_owner,
                 artifact_id=artifact_id,
             )
-            return _input_artifact_payload(metadata, include_details=True)
+            payload = _input_artifact_payload(metadata, include_details=True)
+            if artifact_id in recovered:
+                payload.update(RECOVERED_FIELDS)
+            return payload
     except BoardError as exc:
         _raise_board_error(exc)
     except SQLAlchemyError as exc:
@@ -1910,10 +1926,13 @@ async def create_work_board_task(request: Request, body: WorkBoardTaskCreate):
 @router.get("/tasks/{task_id}")
 async def get_work_board_task(request: Request, task_id: str):
     operator = _operator(request)
+    from src.auth.ownership import selected_read_scopes, selected_read_principal
     try:
         async with get_session() as db:
-            detail = await repository.get_detail(db, _owner(operator), task_id)
-            dispatch_rank = await repository.dispatch_rank(db, _owner(operator), detail["task"])
+            recovered = await selected_read_scopes(operator, "task", db=db)
+            read_owner = WorkBoardOwner(principal_id=(await selected_read_principal(operator, "task", task_id, db=db)) if task_id in recovered else operator.principal.principal_id, session_id=recovered.get(task_id, operator.session_id))
+            detail = await repository.get_detail(db, read_owner, task_id)
+            dispatch_rank = None if task_id in recovered else await repository.dispatch_rank(db, _owner(operator), detail["task"])
             latest_attempt = detail["attempts"][0] if detail["attempts"] else None
             task_payload = await _safe_task_payload(
                 detail["task"],
@@ -1922,6 +1941,7 @@ async def get_work_board_task(request: Request, task_id: str):
                 latest_attempt=latest_attempt,
                 attempt_count=len(detail["attempts"]),
                 dispatch_rank=dispatch_rank,
+                recovered_read_only=task_id in recovered,
             )
             attempts_payload = []
             for item in detail["attempts"]:
@@ -1943,11 +1963,11 @@ async def get_work_board_task(request: Request, task_id: str):
             return {
                 "task": task_payload,
                 "attempts": attempts_payload,
-                "parents": detail["parents"],
-                "children": detail["children"],
+                "parents": [identifier for identifier in detail["parents"] if task_id not in recovered or identifier in recovered],
+                "children": [identifier for identifier in detail["children"] if task_id not in recovered or identifier in recovered],
                 "comments": [await _safe_comment_payload(item, db=db) for item in detail["comments"]],
                 "events": [_event_payload(item) for item in detail["events"]],
-                "parent_handoffs": await review_service.parent_handoffs(
+                "parent_handoffs": [] if task_id in recovered else await review_service.parent_handoffs(
                     db,
                     _owner(operator),
                     detail["task"],

@@ -379,6 +379,7 @@ class TelegramTransportAdapter:
                 raise TelegramTransportError("telegram_unconfigured", "Telegram pairing is not configured")
             if row.owner_principal_id != owner or row.operator_session_id != operator_session:
                 raise TelegramTransportError("telegram_authority_mismatch", "Telegram pairing belongs to another operator session")
+            await self._assert_active_row(row, current=current)
             if row.pairing_state != "active":
                 raise TelegramTransportError(f"telegram_pairing_{row.pairing_state}", "Telegram pairing is not active")
             expiry = _aware(row.pairing_expires_at)
@@ -738,7 +739,7 @@ class TelegramTransportAdapter:
                 if row is None or row.owner_principal_id != owner or row.operator_session_id != operator_session:
                     raise TelegramTransportError("telegram_authority_mismatch", "Telegram pairing belongs to another operator session")
                 current = _now()
-                self._assert_active_row(row, current=current)
+                await self._assert_active_row(row, current=current)
                 token = await vault_repository.get(row.token_secret_ref or "")
                 if not token:
                     raise TelegramTransportError("telegram_token_unavailable", "Scoped Telegram token is unavailable")
@@ -964,6 +965,7 @@ class TelegramTransportAdapter:
                 current = _now()
                 if row.pairing_state != "active":
                     raise TelegramTransportError("telegram_pairing_not_active", "Telegram pairing is not active")
+                await self._assert_active_row(row, current=current)
                 update_payload = await self._build_update(payload, row, now=current)
                 # A retry that omits the adapter sequence must retain the
                 # original canonical digest.  Resolve that sequence from the
@@ -1163,7 +1165,7 @@ class TelegramTransportAdapter:
                 if row is None or row.owner_principal_id != owner or row.operator_session_id != operator_session:
                     raise TelegramTransportError("telegram_authority_mismatch", "Telegram pairing belongs to another operator session")
                 current = _now()
-                self._assert_active_row(row, current=current)
+                await self._assert_active_row(row, current=current)
                 target_chat_id = chat_id if chat_id is not None else row.chat_id
                 if target_chat_id != row.chat_id:
                     raise TelegramTransportError("telegram_identity_not_allowlisted", "Telegram chat is not paired")
@@ -1264,7 +1266,14 @@ class TelegramTransportAdapter:
                 return self._outbox_payload(result.scalar_one())
 
     @staticmethod
-    def _assert_active_row(row: TelegramTransportState, *, current: datetime) -> None:
+    async def _assert_active_row(row: TelegramTransportState, *, current: datetime) -> None:
+        from src.auth.service import authenticate_principal, AuthFailure
+        try:
+            operator = await authenticate_principal(str(row.owner_principal_id or ""))
+            if operator.session_id != row.operator_session_id:
+                raise AuthFailure("session_revoked")
+        except AuthFailure as exc:
+            raise TelegramTransportError("telegram_owner_reconnect_required", "Reconnect and review current operator authority") from exc
         if row.pairing_state != "active":
             raise TelegramTransportError("telegram_pairing_not_active", "Telegram pairing is not active")
         expiry = _aware(row.pairing_expires_at)
@@ -1388,7 +1397,7 @@ class TelegramTransportAdapter:
                 state = await self._state(db)
                 if state is None or state.owner_principal_id != owner or state.operator_session_id != operator_session:
                     raise TelegramTransportError("telegram_authority_mismatch", "Telegram pairing belongs to another operator session")
-                self._assert_active_row(state, current=current)
+                await self._assert_active_row(state, current=current)
                 token = await vault_repository.get(state.token_secret_ref or "")
                 if not token:
                     raise TelegramTransportError("telegram_token_unavailable", "Scoped Telegram token is unavailable")
@@ -1674,7 +1683,7 @@ class TelegramTransportAdapter:
                     state = await self._state(db)
                     if state is None or state.owner_principal_id != owner or state.operator_session_id != operator_session:
                         raise TelegramTransportError("telegram_authority_mismatch", "Telegram pairing belongs to another operator session")
-                    self._assert_active_row(state, current=current)
+                    await self._assert_active_row(state, current=current)
                     if row.attempt_count >= row.max_attempts:
                         raise TelegramTransportError("telegram_delivery_attempts_exhausted", "Telegram delivery retry budget is exhausted")
                     if row.deadline_at is not None and (_aware(row.deadline_at) or current) <= current:

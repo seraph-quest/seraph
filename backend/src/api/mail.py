@@ -721,18 +721,10 @@ def _revoke_request_digest(
 
 
 async def _assert_live_session(db: Any, owner: WorkBoardOwner) -> None:
-    if owner.principal_id != "operator:single":
-        # The explicit test bypass has no durable OperatorSession row.  Keep
-        # it available only under the same test-only configuration gate as
-        # auth.service.test_bypass_operator; every deployed owner must use the
-        # canonical principal derived by authenticate_session.
-        if not (
-            owner.principal_id == "operator:test-bypass"
-            and settings.deployment_environment == "test"
-            and settings.operator_auth_allow_unauthenticated_tests
-        ):
-            raise GmailReadError("session_unavailable", "The operator session is unavailable", status_code=401, recovery_action="login")
-        return
+    if owner.principal_id == "operator:test-bypass":
+        if settings.deployment_environment == "test" and settings.operator_auth_allow_unauthenticated_tests:
+            return
+        raise GmailReadError("session_unavailable", "The operator session is unavailable", status_code=401, recovery_action="login")
     session = (
         await db.execute(
             select(OperatorSession)
@@ -740,7 +732,7 @@ async def _assert_live_session(db: Any, owner: WorkBoardOwner) -> None:
             .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
-    if session is None:
+    if session is None or session.principal_id != owner.principal_id:
         raise GmailReadError("session_unavailable", "The operator session is unavailable", status_code=401, recovery_action="login")
     if (
         session.is_bearer_tombstone is not False

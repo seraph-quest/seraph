@@ -2455,6 +2455,10 @@ class PairedEdgeArtifact(SQLModel, table=True):
 class Secret(SQLModel, table=True):
     __tablename__ = "secrets"
 
+    # Null is a legacy/system secret; never attributable to a browser login.
+    owner_principal_id: Optional[str] = Field(default=None, index=True)
+    revoked_at: Optional[datetime] = Field(default=None, index=True)
+
     id: str = Field(default_factory=_uuid, primary_key=True)
     key: str = Field(unique=True, index=True)
     encrypted_value: str
@@ -2633,6 +2637,10 @@ class OperatorSession(SQLModel, table=True):
 
     id: str = Field(default_factory=_uuid, primary_key=True)
     token_hash: str = Field(unique=True, index=True)
+    principal_id: str = Field(default_factory=lambda: "operator:root:" + _uuid(), unique=True, index=True)
+    legacy_owner_principal_id: Optional[str] = Field(default=None)
+    # Data continuity only. Never an authentication or execution-session alias.
+    operator_identity_id: Optional[str] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=_now, index=True)
     last_seen_at: datetime = Field(default_factory=_now, index=True)
     idle_expires_at: datetime = Field(index=True)
@@ -2651,3 +2659,36 @@ class OperatorSession(SQLModel, table=True):
             index=True,
         ),
     )
+
+
+class OperatorIdentity(SQLModel, table=True):
+    __tablename__ = "operator_identities"
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    created_at: datetime = Field(default_factory=_now)
+    revoked_at: Optional[datetime] = Field(default=None)
+
+
+class OperatorContinuityCredential(SQLModel, table=True):
+    __tablename__ = "operator_continuity_credentials"
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    identity_id: str = Field(foreign_key="operator_identities.id", index=True)
+    token_hash: str = Field(unique=True, index=True)
+    kind: str = Field(index=True)
+    expires_at: datetime
+    revoked_at: Optional[datetime] = Field(default=None)
+    created_at: datetime = Field(default_factory=_now)
+
+
+class OperatorRecoveryJournal(SQLModel, table=True):
+    __tablename__ = "operator_recovery_journals"
+    __table_args__ = (Index("ux_operator_recovery_identity_key", "identity_id", "idempotency_key", unique=True),)
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    identity_id: str = Field(foreign_key="operator_identities.id", index=True)
+    current_session_id: str = Field(index=True)
+    idempotency_key: str
+    request_digest: str
+    selections_json: str
+    state: str = Field(default="confirmed", index=True)
+    fresh_work_json: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_now)
+    rolled_back_at: Optional[datetime] = Field(default=None)

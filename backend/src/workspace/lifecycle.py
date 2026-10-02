@@ -466,13 +466,12 @@ def _validate_stage_receipt(receipt: object) -> dict[str, Any]:
     _bounded_receipt_count(derived["stored_derived_files"], label="stored derived file count")
 
     authority = reconciliation["authority_invalidation"]
-    if not isinstance(authority, dict) or set(authority) != {
-        "status",
-        "tables_present",
-        "operator_sessions_invalidated",
-        "workflow_authority_rows_blocked",
-    }:
+    required_authority = {
+        "status", "tables_present", "operator_sessions_invalidated", "workflow_authority_rows_blocked",
+    }
+    if not isinstance(authority, dict) or not required_authority.issubset(authority) or set(authority) - required_authority - {"continuity_credentials_invalidated"}:
         raise WorkspaceLifecycleError("authority invalidation receipt is invalid")
+    _bounded_receipt_count(authority.get("continuity_credentials_invalidated", 0), label="invalidated continuity count")
     if authority["status"] != "applied":
         raise WorkspaceLifecycleError("authority invalidation receipt is not applied")
     _bounded_identifier_list(authority["tables_present"], label="authority table list")

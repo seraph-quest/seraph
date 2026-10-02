@@ -3176,14 +3176,16 @@ function WorkBoardPanel({
                         <article
                           key={task.task_id}
                           role="listitem"
-                          draggable
+                          draggable={task.ownership_access !== "recovered_read_only"}
                           onDragStart={(event) => {
+                            if (task.ownership_access === "recovered_read_only") { event.preventDefault(); return; }
                             dragTaskIdRef.current = task.task_id;
                             event.dataTransfer.setData("text/plain", task.task_id);
                             event.dataTransfer.effectAllowed = "move";
                           }}
                           className="rounded border border-white/10 bg-slate-950/60 p-3 text-xs"
                         >
+                          {task.ownership_access === "recovered_read_only" && <div className="mb-2 text-amber-200">Recovered original · read only</div>}
                           <button type="button" className="w-full text-left" onClick={() => openTask(task.task_id)} aria-label={`Open task ${task.title}`}>
                             <div className="flex items-start justify-between gap-2">
                               <span className="break-all font-mono text-[10px] opacity-70">{task.task_id}</span>
@@ -3244,7 +3246,8 @@ function WorkBoardPanel({
               </div>
               <button type="button" className="cockpit-feedback-button" aria-label="Close task details" onClick={closeTask}>Close</button>
             </div>
-
+            {selectedTask.ownership_access === "recovered_read_only" && <div role="status" className="mb-3 text-amber-200">Recovered original · read only. Previous approvals, jobs and permissions stay blocked. Create fresh reviewed intent through operator ownership recovery.</div>}
+            <fieldset disabled={selectedTask.ownership_access === "recovered_read_only"}>
             {(detailLoading || stale) && <div className="mb-3 text-xs text-amber-200" role="status">{detailLoading ? "Refreshing task detail…" : "Showing the last confirmed task detail."}</div>}
             {detailError && <div className="mb-3 rounded border border-red-500/40 p-2 text-sm" role="alert">{detailError}<button type="button" className="ml-2 underline" onClick={() => void refreshSelectedTask()}>Refresh detail</button></div>}
             {actionError && <div className="mb-3 rounded border border-amber-500/40 p-2 text-sm" role="alert">{actionError}</div>}
@@ -3564,8 +3567,8 @@ function WorkBoardPanel({
                       >
                         <option value="">Create from a verified journey</option>
                         {routineRecords.map((record) => (
-                          <option key={record.id} value={record.id}>
-                            {record.name} · {record.state} · revision {record.revision}
+                          <option key={record.id} value={record.id} disabled={record.ownership_access === "recovered_read_only"}>
+                            {record.name}{record.ownership_access === "recovered_read_only" ? " · recovered read only" : ""} · {record.state} · revision {record.revision}
                           </option>
                         ))}
                       </select>
@@ -3804,7 +3807,7 @@ function WorkBoardPanel({
                                 onChange={(event) => { setRoutineInvocationGoalId(event.currentTarget.value); setRoutineInvocationWatchId(""); setRoutineInvokeReceipt(null); setRoutineError(null); }}
                               >
                                 <option value="">Choose an active goal</option>
-                                {activeRoutineGoals.map((goal) => <option key={goal.id} value={goal.id}>{goal.title} · revision {goal.revision ?? "unavailable"}</option>)}
+                                {activeRoutineGoals.map((goal) => <option key={goal.id} value={goal.id} disabled={goal.ownership_access === "recovered_read_only"}>{goal.title} · revision {goal.revision ?? "unavailable"}</option>)}
                               </select>
                             </label>
                             <label>Approved source watch
@@ -4045,6 +4048,7 @@ function WorkBoardPanel({
                 </div>
               </section>
             </div>
+            </fieldset>
         </aside>
       )}
 
@@ -4058,7 +4062,7 @@ function WorkBoardPanel({
             <fieldset disabled={Boolean(pendingCreate)} className="mt-3 grid gap-3 sm:grid-cols-2">
               <label className="sm:col-span-2">Title<input className="cockpit-input mt-1 w-full" autoFocus={!pendingCreate} maxLength={200} required value={createDraft.title} onChange={(event) => setCreateField("title", event.currentTarget.value)} /></label>
               <label className="sm:col-span-2">Bounded task description<textarea className="cockpit-input mt-1 w-full" maxLength={4000} rows={3} value={createDraft.body} onChange={(event) => setCreateField("body", event.currentTarget.value)} /></label>
-              <label>Goal<select className="cockpit-input mt-1 w-full" required value={createDraft.goalId} onChange={(event) => selectGoal(event.currentTarget.value)}><option value="">Choose a goal</option>{allGoals.map((goal) => <option key={goal.id} value={goal.id}>{goal.title} · {goal.id}</option>)}</select></label>
+              <label>Goal<select className="cockpit-input mt-1 w-full" required value={createDraft.goalId} onChange={(event) => selectGoal(event.currentTarget.value)}><option value="">Choose a goal</option>{allGoals.map((goal) => <option key={goal.id} value={goal.id} disabled={goal.ownership_access === "recovered_read_only"}>{goal.title} · {goal.id}</option>)}</select></label>
               <label>Goal revision<input className="cockpit-input mt-1 w-full" type="number" min={1} readOnly value={createDraft.goalRevision} aria-readonly="true" /></label>
               <label>Initial status<select className="cockpit-input mt-1 w-full" value={createDraft.status} onChange={(event) => setCreateField("status", event.currentTarget.value as CreateDraft["status"])}><option value="triage">Triage · rough idea</option><option value="todo">Todo · specified</option></select></label>
               <label>Priority 0–100<input className="cockpit-input mt-1 w-full" type="number" min={0} max={100} value={createDraft.priority} onChange={(event) => setCreateField("priority", event.currentTarget.value)} /></label>

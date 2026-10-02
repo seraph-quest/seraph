@@ -1366,6 +1366,7 @@ class WorkBoardRepository:
         query: str | None = None,
         after: int | None = None,
         limit: int = _TASK_LIMIT,
+        recovered_read_scopes: dict[str, str] | None = None,
     ) -> BoardPage:
         # The task rows, dependency counts, and event cursor must all come
         # from one SQLite snapshot.  API callers use a fresh session; an
@@ -1393,9 +1394,9 @@ class WorkBoardRepository:
             str(task_id): index
             for index, task_id in enumerate(ready_result.scalars().all(), start=1)
         }
+        from src.auth.ownership import read_scope_clause
         statement = select(WorkBoardTask).where(
-            WorkBoardTask.owner_principal_id == owner.principal_id,
-            WorkBoardTask.owner_session_id == owner.session_id,
+            read_scope_clause(WorkBoardTask.task_id, WorkBoardTask.owner_session_id, owner.session_id, recovered_read_scopes or {}, principal_column=WorkBoardTask.owner_principal_id, current_principal=owner.principal_id),
         )
         if status is not None:
             statement = statement.where(WorkBoardTask.status == status)

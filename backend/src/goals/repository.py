@@ -502,6 +502,7 @@ class GoalRepository:
         parent_id: Optional[str] = None,
         owner_principal_id: str | None = None,
         owner_session_id: str | None = None,
+        recovered_read_scopes: dict[str, str] | None = None,
     ) -> list[Goal]:
         async with get_session() as db:
             query = select(Goal)
@@ -513,10 +514,11 @@ class GoalRepository:
                 query = query.where(Goal.status == status)
             if parent_id is not None:
                 query = query.where(Goal.parent_id == parent_id)
-            if owner_principal_id is not None:
+            if owner_principal_id is not None and owner_session_id is None:
                 query = query.where(Goal.owner_principal_id == owner_principal_id)
             if owner_session_id is not None:
-                query = query.where(Goal.owner_session_id == owner_session_id)
+                from src.auth.ownership import read_scope_clause
+                query = query.where(read_scope_clause(Goal.id, Goal.owner_session_id, owner_session_id, recovered_read_scopes or {}, principal_column=Goal.owner_principal_id if owner_principal_id is not None else None, current_principal=owner_principal_id))
             query = query.order_by(Goal.sort_order, col(Goal.created_at).asc())
             result = await db.execute(query)
             return list(result.scalars().all())
@@ -539,14 +541,16 @@ class GoalRepository:
         *,
         owner_principal_id: str | None = None,
         owner_session_id: str | None = None,
+        recovered_read_scopes: dict[str, str] | None = None,
     ) -> list[dict]:
         """Return a goal tree, optionally restricted to one canonical owner."""
         async with get_session() as db:
             query = select(Goal)
-            if owner_principal_id is not None:
+            if owner_principal_id is not None and owner_session_id is None:
                 query = query.where(Goal.owner_principal_id == owner_principal_id)
             if owner_session_id is not None:
-                query = query.where(Goal.owner_session_id == owner_session_id)
+                from src.auth.ownership import read_scope_clause
+                query = query.where(read_scope_clause(Goal.id, Goal.owner_session_id, owner_session_id, recovered_read_scopes or {}, principal_column=Goal.owner_principal_id if owner_principal_id is not None else None, current_principal=owner_principal_id))
             result = await db.execute(query.order_by(Goal.sort_order, col(Goal.created_at).asc()))
             all_goals = result.scalars().all()
 
@@ -575,6 +579,11 @@ class GoalRepository:
                 "created_at": g.created_at.isoformat(),
                 "children": [],
             }
+            if recovered_read_scopes and g.id in recovered_read_scopes:
+                from src.auth.ownership import RECOVERED_FIELDS
+                goal_map[g.id].update(RECOVERED_FIELDS)
+                goal_map[g.id]["proactive_enabled"] = False
+                goal_map[g.id]["admission_budget"] = None
 
         roots = []
         for g in all_goals:
@@ -596,14 +605,16 @@ class GoalRepository:
         *,
         owner_principal_id: str | None = None,
         owner_session_id: str | None = None,
+        recovered_read_scopes: dict[str, str] | None = None,
     ) -> dict:
         """Return summary stats for the goals UI."""
         async with get_session() as db:
             query = select(Goal)
-            if owner_principal_id is not None:
+            if owner_principal_id is not None and owner_session_id is None:
                 query = query.where(Goal.owner_principal_id == owner_principal_id)
             if owner_session_id is not None:
-                query = query.where(Goal.owner_session_id == owner_session_id)
+                from src.auth.ownership import read_scope_clause
+                query = query.where(read_scope_clause(Goal.id, Goal.owner_session_id, owner_session_id, recovered_read_scopes or {}, principal_column=Goal.owner_principal_id if owner_principal_id is not None else None, current_principal=owner_principal_id))
             result = await db.execute(query)
             all_goals = result.scalars().all()
 

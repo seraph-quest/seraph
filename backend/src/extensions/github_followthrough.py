@@ -673,7 +673,7 @@ class GitHubFollowthroughService:
             raise GitHubFollowthroughError("connection_mode_invalid", status_code=422)
         if mode == CONNECTION_MODE_ACTIVE and not _text(owner_principal_id):
             raise GitHubFollowthroughError("owner_required", status_code=401)
-        if mode != CONNECTION_MODE_DISABLED and not await vault_repository.exists(vault_key):
+        if mode != CONNECTION_MODE_DISABLED and not await vault_repository.exists(vault_key, owner_principal_id=owner_principal_id):
             raise GitHubFollowthroughError("credential_not_configured", status_code=409)
         async with db_engine.get_session() as db:
             row = (
@@ -2032,7 +2032,7 @@ class GitHubFollowthroughService:
             raise GitHubFollowthroughError("connection_revision_stale")
         if connection.mode != CONNECTION_MODE_ACTIVE:
             raise GitHubFollowthroughError("connection_not_active", status_code=403)
-        if not connection.vault_key or not await vault_repository.exists(connection.vault_key):
+        if not connection.vault_key or not await vault_repository.exists(connection.vault_key, owner_principal_id=owner_principal_id):
             raise GitHubFollowthroughError("credential_not_configured", status_code=409)
         packet, watch, goal, _dossier_text = await self._load_dossier(
             owner_principal_id=owner_principal_id,
@@ -2463,7 +2463,7 @@ class GitHubFollowthroughService:
             raise GitHubFollowthroughError("repository_binding_changed")
         if connection.mode != CONNECTION_MODE_ACTIVE:
             raise GitHubFollowthroughError("connection_not_active", status_code=403)
-        if not connection.vault_key or not await vault_repository.exists(connection.vault_key):
+        if not connection.vault_key or not await vault_repository.exists(connection.vault_key, owner_principal_id=owner_principal_id):
             raise GitHubFollowthroughError("credential_not_configured", status_code=409)
         request = PrepareRequest(
             conversation_id=prepared.conversation_id,
@@ -2492,7 +2492,7 @@ class GitHubFollowthroughService:
 
     async def _load_token(self, connection: GitHubFollowthroughConnection) -> str:
         try:
-            token = await vault_repository.get(connection.vault_key)
+            token = await vault_repository.get(connection.vault_key, owner_principal_id=connection.owner_principal_id)
         except Exception as exc:
             raise GitHubFollowthroughError("credential_resolution_failed", status_code=409) from exc
         if not isinstance(token, str) or not token.strip():

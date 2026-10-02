@@ -14,6 +14,7 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 from fastapi import APIRouter, HTTPException, Request as HttpRequest
 
 from src.approval.exceptions import ApprovalRequired
+from src.approval.metadata import approval_wire_metadata
 from src.approval.repository import approval_repository
 from src.approval.runtime import (
     get_current_approval_mode,
@@ -72,6 +73,35 @@ from src.model_fabric import NoCompliantModelRouteError
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _approval_transport_metadata(exc: ApprovalRequired, approval: object | None = None) -> dict[str, object]:
+    """Project only typed approval posture/permission fields to chat clients."""
+
+    metadata: dict[str, object] = {}
+    for field_name in (
+        "required_permissions",
+        "local_host_execution_required",
+        "executor_kind",
+        "executor_profile",
+        "executor_posture_digest",
+        "preparation_ready",
+        "execution_ready",
+        "operator_visible",
+        "expires_at",
+    ):
+        value = getattr(exc, field_name, None)
+        if value is not None:
+            metadata[field_name] = value
+    details_json = getattr(approval, "details_json", None) if approval is not None else None
+    try:
+        details = json.loads(details_json or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        details = {}
+    # The durable approval row is authoritative when available.  The helper
+    # drops arguments, source, and all other private details.
+    metadata.update(approval_wire_metadata(details))
+    return metadata
 
 
 async def _watch_rest_operator_session(
@@ -836,6 +866,13 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
             exc.approval_id,
             {"resume_message": request.message},
         )
+        try:
+            approval_row = await approval_repository.get(exc.approval_id)
+        except Exception:
+            # A transport receipt must not turn a valid approval pause into a
+            # server error when the optional metadata read is unavailable.
+            approval_row = None
+        approval_metadata = _approval_transport_metadata(exc, approval_row)
         await audit_repository.log_event(
             session_id=exc.session_id,
             actor="agent",
@@ -856,6 +893,7 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
                     f"{exc.summary}\n\n"
                     "This is a high-risk action. Approve it first, then resend your request."
                 ),
+                **approval_metadata,
             },
         )
     except ClarificationRequired as exc:

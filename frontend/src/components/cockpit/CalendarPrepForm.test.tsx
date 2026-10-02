@@ -10,6 +10,7 @@ function response(payload: unknown, ok = true, status = ok ? 200 : 500) {
 }
 
 const digest = "a".repeat(64);
+const futureConsentExpiry = () => new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString();
 const connection = {
   connection_id: "connection-1",
   service: "calendar_readonly",
@@ -54,7 +55,7 @@ describe("CalendarPrepForm", () => {
     fetchMock
       .mockResolvedValueOnce(response({ connections: [connection] }))
       .mockResolvedValueOnce(response({ connection, calendars: [{ calendar_id: "calendar-1", summary: "Work" }], calendar_list_revision: digest, pages_read: 1, truncated: false, provider_status: "verified" }))
-      .mockResolvedValueOnce(response({ consent: { consent_id: "consent-1", connection_id: "connection-1", connection_revision: 2, goal_id: "goal-1", goal_revision: 4, allowed_fields: ["summary", "start", "end", "location"], window_minutes: 1440, max_events: 20, allow_remote_model: true, expires_at: "2026-10-01T09:00:00Z", state: "active", revision: 1, consent_digest: digest, created_at: "2026-09-30T09:00:00Z", updated_at: "2026-09-30T09:00:00Z" } }))
+      .mockResolvedValueOnce(response({ consent: { consent_id: "consent-1", connection_id: "connection-1", connection_revision: 2, goal_id: "goal-1", goal_revision: 4, allowed_fields: ["summary", "start", "end", "location"], window_minutes: 1440, max_events: 20, allow_remote_model: true, expires_at: futureConsentExpiry(), state: "active", revision: 1, consent_digest: digest, created_at: "2026-09-30T09:00:00Z", updated_at: "2026-09-30T09:00:00Z" } }))
       .mockResolvedValueOnce(response({ events: [{ event_binding_id: "binding-1", event_binding_revision: 3, event_key: digest, event_revision: digest, calendar_list_revision: selectedEventListRevision, summary: "Planning", start: "2026-09-30T12:00:00Z", end: "2026-09-30T13:00:00Z", location: "Room 1", description: null, attendees: null }], consent_id: "consent-1", consent_revision: 1, connection_revision: 2, calendar_list_revision: digest, fetched_at: "2026-09-30T09:01:00Z", pages_read: 1, truncated: false }))
       .mockResolvedValueOnce(response({ input_artifact: { artifact_id: "artifact-1", typed_input_ref: "workspace-json:artifacts/work-board/inputs/artifact-1.json", typed_input_digest: digest, capability_id: "calendar.meeting-prep.v1", goal_id: "goal-1", goal_revision: 4, expires_at: "2026-10-01T09:00:00Z" }, task: { task_id: "task-1", title: "Prepare meeting", goal_id: "goal-1", goal_revision: 4, input_artifact_id: "artifact-1", capability_id: "calendar.meeting-prep.v1" }, idempotent_replay: false }));
     render(<CalendarPrepForm goals={[goal]} onCreated={onCreated} onClose={vi.fn()} />);
@@ -81,7 +82,7 @@ describe("CalendarPrepForm", () => {
     fetchMock
       .mockResolvedValueOnce(response({ connections: [connection] }))
       .mockResolvedValueOnce(response({ connection, calendars: [{ calendar_id: "calendar-1", summary: "Work" }], calendar_list_revision: digest, pages_read: 1, truncated: false, provider_status: "verified" }))
-      .mockResolvedValueOnce(response({ consent: { consent_id: "consent-1", connection_id: "connection-1", connection_revision: 2, goal_id: "goal-1", goal_revision: 4, allowed_fields: ["summary", "start", "end", "location"], window_minutes: 1440, max_events: 20, allow_remote_model: true, expires_at: "2026-10-01T09:00:00Z", state: "active", revision: 1, consent_digest: digest, created_at: "2026-09-30T09:00:00Z", updated_at: "2026-09-30T09:00:00Z" } }))
+      .mockResolvedValueOnce(response({ consent: { consent_id: "consent-1", connection_id: "connection-1", connection_revision: 2, goal_id: "goal-1", goal_revision: 4, allowed_fields: ["summary", "start", "end", "location"], window_minutes: 1440, max_events: 20, allow_remote_model: true, expires_at: futureConsentExpiry(), state: "active", revision: 1, consent_digest: digest, created_at: "2026-09-30T09:00:00Z", updated_at: "2026-09-30T09:00:00Z" } }))
       .mockResolvedValueOnce(response({ events: [{ event_binding_id: "binding-1", event_binding_revision: 3, event_key: digest, event_revision: digest, calendar_list_revision: digest, summary: "Planning", start: "2026-09-30T12:00:00Z", end: "2026-09-30T13:00:00Z", location: null, description: null, attendees: null }], consent_id: "consent-1", consent_revision: 1, connection_revision: 2, calendar_list_revision: digest, fetched_at: "2026-09-30T09:01:00Z", pages_read: 1, truncated: false }))
       .mockRejectedValueOnce(new Error("network closed"))
       .mockResolvedValueOnce(response({ input_artifact: { artifact_id: "artifact-1", typed_input_ref: "workspace-json:artifacts/work-board/inputs/artifact-1.json", typed_input_digest: digest, capability_id: "calendar.meeting-prep.v1", goal_id: "goal-1", goal_revision: 4, expires_at: "2026-10-01T09:00:00Z" }, task: { task_id: "task-1", title: "Prepare meeting", goal_id: "goal-1", goal_revision: 4, input_artifact_id: "artifact-1", capability_id: "calendar.meeting-prep.v1" }, idempotent_replay: false }));
@@ -204,7 +205,7 @@ describe("CalendarPrepForm", () => {
     fetchMock
       .mockResolvedValueOnce(response({ connections: [connection] }))
       .mockResolvedValueOnce(response({ connection, calendars: [{ calendar_id: "calendar-1", summary: "Work" }], calendar_list_revision: digest, pages_read: 1, truncated: false, provider_status: "verified" }))
-      .mockResolvedValueOnce(response({ consent: { consent_id: "consent-1", connection_id: "connection-1", connection_revision: 2, goal_id: "goal-1", goal_revision: 4, allowed_fields: ["summary", "start", "end"], window_minutes: 1440, max_events: 20, allow_remote_model: true, expires_at: "2026-10-01T09:00:00Z", state: "active", revision: 1, consent_digest: digest, created_at: "2026-09-30T09:00:00Z", updated_at: "2026-09-30T09:00:00Z" } }))
+      .mockResolvedValueOnce(response({ consent: { consent_id: "consent-1", connection_id: "connection-1", connection_revision: 2, goal_id: "goal-1", goal_revision: 4, allowed_fields: ["summary", "start", "end"], window_minutes: 1440, max_events: 20, allow_remote_model: true, expires_at: futureConsentExpiry(), state: "active", revision: 1, consent_digest: digest, created_at: "2026-09-30T09:00:00Z", updated_at: "2026-09-30T09:00:00Z" } }))
       .mockResolvedValueOnce(response({ events: [event], consent_id: "consent-1", consent_revision: 1, connection_revision: 2, calendar_list_revision: digest, fetched_at: "2026-09-30T09:01:00Z", pages_read: 1, truncated: false }))
       .mockResolvedValueOnce(response({ detail: { code: "calendar_event_revision_stale", message: "event changed", recovery_action: null } }, false, 409))
       .mockResolvedValueOnce(response({ events: [{ ...event, event_binding_revision: 4, event_revision: "b".repeat(64) }], consent_id: "consent-1", consent_revision: 1, connection_revision: 2, calendar_list_revision: digest, fetched_at: "2026-09-30T09:02:00Z", pages_read: 1, truncated: false }));

@@ -684,7 +684,12 @@ function start_local_backend() {
     fi
 
     require_free_port "$LOCAL_BACKEND_PORT" "Local backend"
-    mkdir -p "$LOCAL_WORKSPACE_DIR" "$LOCAL_LLM_LOG_DIR"
+    # A newly-created local workspace is a private operator store.  ``-m``
+    # applies only to directories created by this command; it deliberately
+    # does not chmod an existing workspace or any shared ancestor.  The
+    # backend's trusted-directory reader will keep rejecting an existing
+    # broad workspace rather than silently repairing its root.
+    mkdir -p -m 700 "$LOCAL_WORKSPACE_DIR" "$LOCAL_LLM_LOG_DIR"
     echo "Starting local backend on http://127.0.0.1:$LOCAL_BACKEND_PORT ..."
     nohup /bin/bash -c '
         cd "$1" || exit 1

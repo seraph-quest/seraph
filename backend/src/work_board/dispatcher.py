@@ -25,7 +25,7 @@ import uuid
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from sqlalchemy import func, select
 
-from src.approval.repository import approval_repository
+from src.approval.repository import approval_repository, fingerprint_tool_call
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.artifacts.registry import artifact_id_for
 from src.auth.service import AuthFailure, authenticate_session
@@ -72,9 +72,16 @@ from src.workflows.job_runtime import (
     DurableJobError,
     DurableJobIdempotencyConflict,
     DurableJobIdentity,
+    DurableJobLeaseError,
     DurableJobSpec,
+    DurableJobTransitionError,
     UNCERTAIN_EXTERNAL_EFFECT_STATUSES,
+    _terminal_remote_settlement_effect,
     durable_job_repository,
+)
+from src.workflows.repair_capacity import (
+    RepoRepairCapacityLane,
+    try_acquire_repo_repair_capacity,
 )
 
 logger = logging.getLogger(__name__)
@@ -482,6 +489,15 @@ def _typed_input_model(capability_id: str) -> type[BaseModel] | None:
         except (ImportError, ModuleNotFoundError):
             return None
         return BrowserTaskInput
+    if capability_id == "engineering.repo-repair.v1":
+        # The repair workflow owns its strict intent model.  Resolve it lazily
+        # so the workflow module can import the board contracts without a
+        # dispatcher import cycle during application startup.
+        try:
+            from src.workflows.repo_repair import RepoRepairInput
+        except (ImportError, ModuleNotFoundError):
+            return None
+        return RepoRepairInput
     return None
 
 
@@ -499,6 +515,12 @@ REGISTERED_CAPABILITIES: dict[str, CapabilitySpec] = {
     "engineering.repo-change.v1": CapabilitySpec(
         "engineering.repo-change.v1",
         "1",
+    ),
+    "engineering.repo-repair.v1": CapabilitySpec(
+        "engineering.repo-repair.v1",
+        "1",
+        input_category="task",
+        secret_like=False,
     ),
     "work.github-followthrough.v1": CapabilitySpec(
         "work.github-followthrough.v1",
@@ -612,6 +634,262 @@ def _text(value: Any) -> str:
     return str(getattr(value, "value", value) or "").strip()
 
 
+def _build_repo_repair_executor_compat() -> Any:
+    """Select repair posture while preserving pre-selector settings objects.
+
+    A persisted legacy settings document is normalized by the executor module
+    to ``docker_rootless``.  A few callers/tests construct the old Pydantic
+    object directly, however; when that object omitted ``executor_kind`` but
+    carries the old Docker selectors, preserve its historical rootless
+    meaning instead of silently treating it as trusted local execution.
+    Explicit ``executor_kind="local"`` always wins.
+    """
+
+    from src.execution.repo_sandbox import (
+        RootlessDockerRepoSandbox,
+        _effective_repo_sandbox_settings,
+        build_repo_repair_executor,
+    )
+
+    config = _effective_repo_sandbox_settings()
+    selected = _text(getattr(config, "executor_kind", "local")) or "local"
+    fields_set = getattr(config, "model_fields_set", set())
+    if (
+        selected == "local"
+        and "executor_kind" not in fields_set
+        and _text(getattr(config, "docker_socket", ""))
+        and _text(getattr(config, "worker_image_digest", ""))
+    ):
+        return RootlessDockerRepoSandbox(config=config)
+    return build_repo_repair_executor(config=config)
+
+
+def _assert_repo_repair_executor_authority(
+    authority: Mapping[str, Any],
+    executor: Any,
+    preflight: Any,
+) -> None:
+    """Reject mutable selector/posture drift before source/model contact."""
+
+    # Rows written before the selectable-executor extension remain on the
+    # strict historical rootless path.  New repair rows carry this complete
+    # selector envelope from admission and must match it byte-for-byte at the
+    # claimed execution boundary.
+    if not _text(authority.get("executor_kind")):
+        return
+    if not bool(getattr(preflight, "ok", False)):
+        raise DurableJobError("repo_repair_executor_authority_changed")
+    from src.workflows.repo_repair import _sandbox_authority_payload
+
+    current = _sandbox_authority_payload(executor, preflight)
+    for key in (
+        "sandbox_profile",
+        "sandbox_image_digest",
+        "sandbox_limits_digest",
+        "sandbox_socket_digest",
+        "executor_kind",
+        "executor_profile",
+        "executor_posture",
+        "executor_posture_digest",
+        "required_permissions",
+        "local_host_execution_required",
+    ):
+        expected = authority.get(key)
+        if expected in (None, "", [], {}):
+            continue
+        if current.get(key) != expected:
+            raise DurableJobError("repo_repair_executor_authority_changed")
+
+
+async def _reserve_repo_repair_execution_capacity(
+    *,
+    jobs: Any,
+    job_id: str,
+    attempt_id: str,
+    workspace_root: str,
+    owner: str,
+    fencing_token: int,
+    authority_digest: str,
+    execution_deadline_at: str,
+    expected_revision: int | None,
+) -> RepoRepairCapacityLane:
+    """Acquire the physical lane and its exact durable reservation."""
+
+    lane = await asyncio.to_thread(
+        try_acquire_repo_repair_capacity,
+        workspace_root,
+        job_id=job_id,
+    )
+    if lane is None:
+        raise DurableJobAdmissionDenied("repo_repair_execution_busy")
+    try:
+        try:
+            reserved = await jobs.reserve_repo_repair_execution(
+                job_id,
+                owner=owner,
+                fencing_token=fencing_token,
+                attempt_id=attempt_id,
+                authority_digest=authority_digest,
+                execution_deadline_at=execution_deadline_at,
+                expected_revision=expected_revision,
+            )
+        except (DurableJobAdmissionDenied, DurableJobLeaseError, DurableJobTransitionError):
+            # A durable busy denial proves this caller did not reserve the
+            # lane.  Release only this process's flock; the other job's
+            # reservation remains authoritative.
+            await asyncio.to_thread(lane.release_after_denied)
+            raise
+        checkpoints = reserved.get("checkpoints") if isinstance(reserved, Mapping) else []
+        for checkpoint in reversed(checkpoints if isinstance(checkpoints, list) else []):
+            if not isinstance(checkpoint, Mapping) or checkpoint.get("checkpoint_id") != "repo-repair-execution-reservation":
+                continue
+            payload = checkpoint.get("payload") if isinstance(checkpoint.get("payload"), Mapping) else {}
+            deadline = str(payload.get("execution_deadline_at") or "").strip()
+            if deadline:
+                setattr(lane, "execution_deadline_at", deadline)
+            break
+        # The marker is deliberately written only after SQLite accepted the
+        # exact reservation.  If marker publication fails, retain the flock
+        # and let recovery reconcile the durable row instead of freeing it.
+        await asyncio.to_thread(
+            lane.bind_owner,
+            job_id=job_id,
+            attempt_id=attempt_id,
+            fence_token=fencing_token,
+            authority_digest=authority_digest,
+        )
+        return lane
+    except Exception:
+        # A durable reservation may have been committed before marker writing
+        # failed.  Never release that reservation or authorize a successor.
+        try:
+            lane.quarantine(job_id)
+        except Exception:
+            pass
+        raise
+
+
+def _repo_repair_execution_deadline_at(
+    *,
+    projection: Mapping[str, Any],
+    authority: Mapping[str, Any],
+    approval_expires_at: Any,
+    max_wall_seconds: int,
+    board_lease_expires_at: Any = None,
+    goal_window_at: Any = None,
+) -> str:
+    """Compute one UTC deadline at the physical reservation boundary."""
+
+    now = datetime.now(timezone.utc)
+    candidates: list[datetime] = [
+        now + timedelta(seconds=max(1, min(int(max_wall_seconds), MAX_RUNTIME_SECONDS)))
+    ]
+    allowance = authority.get("deadline_seconds")
+    if allowance is None and isinstance(authority.get("limits"), Mapping):
+        allowance = authority["limits"].get("runtime_seconds")
+    try:
+        if allowance is not None:
+            candidates.append(now + timedelta(seconds=max(1, int(allowance))))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise DurableJobError("repo_repair_execution_allowance_invalid") from exc
+    for raw in (
+        projection.get("deadline_at"),
+        authority.get("deadline_at"),
+        (projection.get("lease") or {}).get("expires_at")
+        if isinstance(projection.get("lease"), Mapping)
+        else None,
+        board_lease_expires_at,
+        goal_window_at,
+        approval_expires_at,
+    ):
+        if raw is None or raw == "":
+            continue
+        try:
+            if isinstance(raw, datetime):
+                parsed = raw if raw.tzinfo is not None else raw.replace(tzinfo=timezone.utc)
+            elif isinstance(raw, (int, float)):
+                parsed = datetime.fromtimestamp(float(raw), timezone.utc)
+            else:
+                parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise DurableJobError("repo_repair_execution_deadline_invalid") from exc
+        candidates.append(parsed.astimezone(timezone.utc))
+    deadline = min(candidates)
+    if deadline <= now:
+        raise DurableJobError("repo_repair_execution_deadline_expired")
+    return deadline.isoformat()
+
+
+def _repo_repair_result_proven(result: Mapping[str, Any]) -> tuple[bool, bool]:
+    """Return cleanup/readback proof from the safe durable projection."""
+
+    job = result.get("job") if isinstance(result.get("job"), Mapping) else {}
+    checkpoints = job.get("checkpoints") if isinstance(job.get("checkpoints"), list) else []
+    phases = {
+        str(item.get("checkpoint_id") or "")
+        for item in checkpoints
+        if isinstance(item, Mapping)
+    }
+    cleanup = "cleanup_verified" in phases or (
+        isinstance(result.get("cleanup"), Mapping)
+        and result["cleanup"].get("cleanup_proven") is True
+    )
+    readback = "readback_verified" in phases or bool(
+        isinstance(job.get("effects"), list)
+        and any(
+            isinstance(item, Mapping)
+            and str(item.get("receipt_kind") or "") == "readback"
+            and str(item.get("status") or "") == "succeeded"
+            for item in job["effects"]
+        )
+    )
+    # A terminal failed/cancelled outcome has no successful artifact readback;
+    # cleanup itself is the bounded readback for the failed external attempt.
+    if str(result.get("status") or "") in {"failed", "cancelled", "degraded"} and cleanup:
+        readback = True
+    return cleanup, readback
+
+
+async def _settle_repo_repair_execution_capacity(
+    *,
+    jobs: Any,
+    lane: RepoRepairCapacityLane,
+    result: Mapping[str, Any],
+    job_id: str,
+    attempt_id: str,
+    fencing_token: int,
+    authority_digest: str,
+) -> None:
+    """Release durable reservation then flock, or quarantine on uncertainty."""
+
+    cleanup, readback = _repo_repair_result_proven(result)
+    status = str(result.get("status") or "")
+    if status not in {"succeeded", "degraded", "failed", "cancelled"} or not cleanup or not readback:
+        await asyncio.to_thread(lane.quarantine, job_id)
+        return
+    try:
+        await jobs.settle_repo_repair_execution(
+            job_id,
+            attempt_id=attempt_id,
+            fencing_token=fencing_token,
+            authority_digest=authority_digest,
+            cleanup_proven=cleanup,
+            readback_verified=readback,
+            outcome_status=status,
+            expected_revision=(
+                result.get("job", {}).get("revision")
+                if isinstance(result.get("job"), Mapping)
+                else None
+            ),
+        )
+        await asyncio.to_thread(lane.clear_quarantine)
+    except Exception:
+        await asyncio.to_thread(lane.quarantine, job_id)
+        raise
+
+
 def _load_json_mapping(value: Any) -> dict[str, Any]:
     if isinstance(value, Mapping):
         return dict(value)
@@ -642,6 +920,124 @@ def _status(value: Any) -> str:
         receipt_status = receipt.get("status") if isinstance(receipt, Mapping) else None
         return _text(value.get("status") or receipt_status)
     return _text(value)
+
+
+def _repair_approval_resume_recovery_ready(projection: Mapping[str, Any]) -> bool:
+    """Recognize the exact post-approval repair recovery ledger.
+
+    A repair root can be queued after approval while retaining the successful
+    remote model-admission effect that produced its proposal.  The approval
+    transition appends one server-validated ``approval_resume`` record to that
+    ledger.  Resume is safe only for that exact two-part shape: one consumed
+    approval record and one settled canonical remote admission bound to this
+    job and owner.  Unknown effect kinds, duplicate approval records, foreign
+    bindings, and unresolved/cost-liable admissions remain ineligible.
+    """
+
+    effects = projection.get("effects")
+    if not isinstance(effects, list) or len(effects) < 2:
+        return False
+    job_id = _text(projection.get("job_id") or projection.get("run_identity"))
+    owner = projection.get("owner") if isinstance(projection.get("owner"), Mapping) else {}
+    owner_principal_id = _text(owner.get("principal_id"))
+    if not job_id or not owner_principal_id:
+        return False
+
+    authority = (
+        projection.get("declared_authority")
+        if isinstance(projection.get("declared_authority"), Mapping)
+        else {}
+    )
+    approval_id = _text(authority.get("approval_id"))
+    if not approval_id and isinstance(authority.get("approval"), Mapping):
+        approval_id = _text(
+            authority["approval"].get("approval_id") or authority["approval"].get("id")
+        )
+    authority_digest = _text(projection.get("authority_digest"))
+    if not approval_id or not authority_digest:
+        return False
+
+    approval_receipts: list[Mapping[str, Any]] = []
+    remote_effects: list[Mapping[str, Any]] = []
+    for effect in effects:
+        if not isinstance(effect, Mapping):
+            return False
+        kind = _text(effect.get("kind"))
+        effect_type = _text(effect.get("effect_type"))
+        if kind == "approval_resume":
+            # Approval transitions append their own typed record; accepting a
+            # generic effect with the same status would bypass that boundary.
+            if effect_type or _text(effect.get("receipt_kind")):
+                return False
+            approval_receipts.append(effect)
+            continue
+        if effect_type != "remote_inference_admission" or kind:
+            return False
+        if _text(effect.get("receipt_kind")) != "effect":
+            return False
+        if (
+            _terminal_remote_settlement_effect(
+                [effect],
+                expected_job_id=job_id,
+                expected_owner_id=owner_principal_id,
+            )
+            is None
+        ):
+            return False
+        remote_effects.append(effect)
+
+    # The model proposal has one durable broker admission and the approval
+    # transition has one durable resume record.  Repeated records are not a
+    # harmless history variant: they indicate a malformed or replayed ledger.
+    if len(approval_receipts) != 1 or len(remote_effects) != 1:
+        return False
+    approval = approval_receipts[0]
+    if (
+        _text(approval.get("status")) != "approved"
+        or _text(approval.get("approval_request_status")) != "consumed"
+        or _text(approval.get("approval_id")) != approval_id
+        or _text(approval.get("authority_digest")) != authority_digest
+    ):
+        return False
+
+    expected_owner_kind = _text(owner.get("kind"))
+    expected_service_id = _text(owner.get("service_id"))
+    if (
+        not expected_owner_kind
+        or not _text(approval.get("operator_principal_id"))
+        or _text(approval.get("owner_kind")) != expected_owner_kind
+        or _text(approval.get("owner_principal_id")) != owner_principal_id
+        or _text(approval.get("service_id")) != expected_service_id
+    ):
+        return False
+    expected_operator_session_id = _text(
+        projection.get("operator_session_id") or projection.get("session_id")
+    )
+    if expected_operator_session_id and _text(approval.get("operator_session_id")) != expected_operator_session_id:
+        return False
+
+    for field_name in (
+        "goal_id",
+        "goal_revision",
+        "plan_revision",
+        "capability_version",
+        "budget_digest",
+    ):
+        expected = projection.get(field_name)
+        actual = approval.get(field_name)
+        if expected is None:
+            if actual not in (None, ""):
+                return False
+        elif actual != expected:
+            return False
+
+    try:
+        expires_at = float(approval.get("expires_at"))
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if not math.isfinite(expires_at) or expires_at <= _now().timestamp():
+        return False
+    return True
 
 
 def _browser_cleanup_receipt_proven(projection: Mapping[str, Any]) -> bool:
@@ -3163,6 +3559,40 @@ class WorkBoardDispatcher:
                     }
                 )
                 return receipts, proven
+            if capability == "engineering.repo-repair.v1":
+                # Repair execution uses the same authenticated owner/session
+                # boundary as the HTTP workflow route.  The route helper
+                # forwards the original dispatch attempt/fence recorded in
+                # the durable checkpoint; this board cancellation lease is
+                # only the current ownership/revocation check.
+                from src.api.workflows import (
+                    authenticate_repo_change_operator,
+                    cancel_repo_change_for_authenticated_operator,
+                )
+
+                operator = await authenticate_repo_change_operator(
+                    task.owner_session_id,
+                    owner_principal_id=task.owner_principal_id,
+                )
+                result = await cancel_repo_change_for_authenticated_operator(
+                    _text(attempt.workflow_run_id),
+                    operator=operator,
+                    reason=reason,
+                )
+                result_status = _status(result)
+                cleanup = result.get("cleanup") if isinstance(result, Mapping) else None
+                proven = result_status == "cancelled" and (
+                    not isinstance(cleanup, Mapping)
+                    or cleanup.get("cleanup_proven") is True
+                )
+                receipts.append(
+                    {
+                        "job_id": attempt.workflow_run_id,
+                        "status": "cancelled" if proven else "unknown",
+                        "reason_code": "operator_cancelled" if proven else "cleanup_unproven",
+                    }
+                )
+                return receipts, proven
             if capability == "work.github-followthrough.v1":
                 from src.extensions.github_followthrough import GitHubFollowthroughService
 
@@ -3352,6 +3782,27 @@ class WorkBoardDispatcher:
         configured = int(getattr(budget, "max_runtime_seconds", DEFAULT_RUNTIME_SECONDS)) if budget else DEFAULT_RUNTIME_SECONDS
         hard_cap = 180 if _text(task.capability_id) == "browser.public-task.v1" else MAX_RUNTIME_SECONDS
         return max(1, min(configured, hard_cap))
+
+    async def _repo_repair_goal_window(self, task: WorkBoardTask) -> datetime | None:
+        """Read the owner-bound Goal window used by physical repair execution.
+
+        The durable projection already carries its own deadline.  This second
+        bound keeps a late restart from outliving the canonical Goal row when
+        an operator shortens the Goal window after admission.
+        """
+
+        async with self.session_provider() as db:
+            goal = (
+                await db.execute(
+                    select(Goal).where(
+                        Goal.id == task.goal_id,
+                        Goal.owner_principal_id == task.owner_principal_id,
+                        Goal.owner_session_id == task.owner_session_id,
+                        Goal.revision == task.goal_revision,
+                    )
+                )
+            ).scalar_one_or_none()
+        return getattr(goal, "due_date", None) if goal is not None else None
 
     async def _effective_browser_limits(self, task: WorkBoardTask) -> tuple[int, int]:
         """Read the current owner-bound goal budget for the browser adapter."""
@@ -3845,6 +4296,28 @@ class WorkBoardDispatcher:
                     return "source_watch_not_active", "The procedure source watch is not currently active"
                 if int(watch.get("plan_revision") or 0) != int(inputs["expected_watch_revision"]):
                     return "watch_plan_revision_stale", "The procedure source watch revision changed"
+                return None, None
+
+            if capability == "engineering.repo-repair.v1":
+                # Repository repair is an optional execution capability.  Its
+                # provider-free gate must be visible during the public board
+                # admission pass, before a claim or durable root is created.
+                # The service performs the same preflight again after claim;
+                # this check only proves that the configured rootless profile
+                # can be admitted on this host.
+                budget = deserialize_admission_budget(goal)
+                if budget is None or not bool(getattr(budget, "reviewed_grant", False)):
+                    return "goal_budget_not_reviewed", "Repository repair requires a reviewed finite goal budget"
+                # Technical preparation is provider-free and may perform
+                # filesystem/Docker probes.  Keep it off the event loop; the
+                # exact local_host_execution approval is checked later at the
+                # job-bound execution boundary.
+                preflight = await asyncio.to_thread(_build_repo_repair_executor_compat().preflight)
+                if not preflight.ok:
+                    return (
+                        _stable_reason_code(_text(preflight.reason), fallback="isolation_unavailable"),
+                        "The repository isolation profile is not currently available",
+                    )
                 return None, None
 
             if capability == "guardian-routine.v2":
@@ -4955,6 +5428,7 @@ class WorkBoardDispatcher:
                 # phase may enter the capability's existing execution path.
                 if _text(task.capability_id) in {
                     "calendar.meeting-prep.v1",
+                    "engineering.repo-repair.v1",
                     "work.mail-reply-draft.v1",
                 }:
                     # User-owned direct adapters must explicitly cross the
@@ -4967,13 +5441,27 @@ class WorkBoardDispatcher:
                         reason=(
                             "calendar_board_linked"
                             if _text(task.capability_id) == "calendar.meeting-prep.v1"
+                            else "repo_repair_board_linked"
+                            if _text(task.capability_id) == "engineering.repo-repair.v1"
                             else "mail_reply_board_linked"
                         ),
                     )
                     projection = await self.jobs.claim_job(
                         job_id,
-                        owner=self.runner_id,
-                        lease_seconds=max(1, min(int(runtime_seconds), 180)),
+                        owner=(
+                            attempt.lease_owner or self.runner_id
+                            if _text(task.capability_id) == "engineering.repo-repair.v1"
+                            else self.runner_id
+                        ),
+                        lease_seconds=max(
+                            1,
+                            min(
+                                int(runtime_seconds),
+                                180
+                                if _text(task.capability_id) == "calendar.meeting-prep.v1"
+                                else MAX_RUNTIME_SECONDS,
+                            ),
+                        ),
                         expected_state="queued",
                         expected_revision=int(queued.get("revision") or 0),
                         expected_fencing_token=int(queued.get("fencing_token") or 0),
@@ -5031,6 +5519,24 @@ class WorkBoardDispatcher:
                     reason=safe_status,
                 )
                 result[safe_status] = True
+                return result
+            if _text(task.capability_id) == "engineering.repo-repair.v1" and safe_status == "paused":
+                await self._pause_repo_repair_for_operator(
+                    task,
+                    attempt,
+                    projection,
+                    reason=_text(adapter_result.get("reason_code")) or "repo_repair_code_egress_review",
+                )
+                result["paused"] = True
+                return result
+            if _text(task.capability_id) == "engineering.repo-repair.v1" and safe_status == "awaiting_approval":
+                await self._pause_repo_repair_for_operator(
+                    task,
+                    attempt,
+                    projection,
+                    reason="review_repo_repair_proposal",
+                )
+                result["awaiting_approval"] = True
                 return result
             # GitHub prepare creates the exact durable approval job but must
             # not publish while the operator is still deciding. Keep the
@@ -5462,6 +5968,542 @@ class WorkBoardDispatcher:
                 **handoff_kwargs,
                 admit_only=admission_only,
             )
+        if capability_id == "engineering.repo-repair.v1":
+            from src.workflows.repo_repair import RepoRepairService
+            from src.workflows.job_runtime import _digest as _durable_digest
+
+            job_id, owner_principal, job_kind, service_id, binding_key = self._direct_job_identity(
+                task,
+                attempt,
+                inputs,
+            )
+            input_digest = self._direct_input_digest(task, attempt, inputs)
+            # Keep the declared authority and the board's independently
+            # reconstructed digest on one server-owned schema.  The execution
+            # deadline remains the requested finite runtime; ``limits`` is the
+            # capability's immutable hard cap and therefore does not change
+            # when a caller re-enters the same admission binding.
+            admission_preflight = None
+            admission_sandbox = None
+            if admission_only:
+                # Capture the server-owned executable posture at durable
+                # admission.  The same receipt is later compared at the
+                # approval/execution boundary; probing it only on the event
+                # loop would make local/native execution block chat.
+                admission_sandbox = _build_repo_repair_executor_compat()
+                admission_preflight = await asyncio.to_thread(admission_sandbox.preflight)
+                if not bool(getattr(admission_preflight, "ok", False)):
+                    return {
+                        "job_id": job_id,
+                        "status": "blocked",
+                        "reason_code": _text(getattr(admission_preflight, "reason", None)) or "repo_sandbox_preflight_blocked",
+                        "recovery_action": "restore_executor_prerequisite",
+                        "admission_only": False,
+                    }
+            authority = self._repo_repair_authority_payload(
+                task,
+                attempt,
+                input_digest=input_digest,
+                preflight=admission_preflight,
+            )
+            canonical_inputs = {
+                "schema_version": 1,
+                "capability_id": capability_id,
+                "input": dict(inputs),
+            }
+            if admission_only:
+                spec = DurableJobSpec(
+                    identity=DurableJobIdentity(
+                        job_id=job_id,
+                        owner_kind="user",
+                        owner_principal_id=owner_principal,
+                        job_kind=job_kind,
+                        capability_version="1",
+                        idempotency_scope="work-board-attempt",
+                        idempotency_key=binding_key,
+                    ),
+                    inputs=canonical_inputs,
+                    session_id=task.owner_session_id,
+                    conversation_id=task.owner_session_id,
+                    operator_session_id=task.owner_session_id,
+                    goal_id=task.goal_id,
+                    goal_revision=int(task.goal_revision),
+                    priority=int(task.priority),
+                    # Repair execution is the single durable host/executor
+                    # lane.  The strategist call happened before this
+                    # accepted root; do not retain the remote-inference claim
+                    # while waiting for operator approval or local tests.
+                    resource_claims=("repo-repair-execution",),
+                    declared_authority=authority,
+                    deadline_at=self.now() + timedelta(seconds=max(1, min(int(runtime_seconds), MAX_RUNTIME_SECONDS))),
+                    max_attempts=1,
+                    max_outstanding_jobs=1,
+                    service_id=service_id,
+                    run_fingerprint=input_digest,
+                    budget_microusd=0,
+                    budget_digest=_durable_digest({"budget_microusd": 0}),
+                )
+                admitted = await self.jobs.admit_job(spec)
+                admitted_job = _text(admitted.get("job_id") or admitted.get("run_identity")) or job_id
+                if admitted_job != job_id:
+                    raise DurableJobIdempotencyConflict("Repository repair admission returned a different durable root")
+                if (
+                    _text(admitted.get("input_digest")) != input_digest
+                    or _text(admitted.get("run_fingerprint")) != input_digest
+                    or _text(admitted.get("authority_digest")) != _safe_digest(authority)
+                ):
+                    raise DurableJobIdempotencyConflict("Repository repair durable input or authority digest is inconsistent")
+                return {
+                    "job_id": job_id,
+                    "status": _status(admitted) or "accepted",
+                    "input_digest": input_digest,
+                    "authority_digest": _safe_digest(authority),
+                    "run_fingerprint": input_digest,
+                    "admission_only": True,
+                    **({"job": admitted} if isinstance(admitted, Mapping) else {}),
+                }
+
+            projection = await self.jobs.get_job(job_id)
+            if not isinstance(projection, Mapping) or _status(projection) != "running":
+                return {
+                    "job_id": job_id,
+                    "status": _status(projection) or "blocked",
+                    "reason_code": "repair_durable_job_not_running",
+                    "recovery_action": "reconcile_admission_binding",
+                    "admission_only": False,
+                }
+            sandbox = _build_repo_repair_executor_compat()
+            preflight = await asyncio.to_thread(sandbox.preflight)
+            lease = projection.get("lease") if isinstance(projection.get("lease"), Mapping) else {}
+            lease_owner = _text(lease.get("owner"))
+            fencing_token = int(lease.get("fencing_token") or 0)
+            if not lease_owner or fencing_token <= 0:
+                raise DurableJobError("repair_durable_lease_missing")
+            persisted_authority = (
+                projection.get("declared_authority")
+                if isinstance(projection.get("declared_authority"), Mapping)
+                else {}
+            )
+            try:
+                _assert_repo_repair_executor_authority(
+                    persisted_authority,
+                    sandbox,
+                    preflight,
+                )
+            except DurableJobError:
+                blocked = await self.jobs.transition_job(
+                    job_id,
+                    "blocked",
+                    owner=lease_owner,
+                    fencing_token=fencing_token,
+                    reason="repo_repair_executor_authority_changed",
+                    expected_revision=projection.get("revision"),
+                )
+                return {
+                    "job_id": job_id,
+                    "status": "blocked",
+                    "reason_code": "repo_repair_executor_authority_changed",
+                    "recovery_action": "create_fresh_repair",
+                    "admission_only": False,
+                    "job": blocked,
+                }
+            preflight_receipt = preflight.as_receipt()
+            try:
+                await self.jobs.record_checkpoint(
+                    job_id,
+                    checkpoint_id="repo-repair-preflight",
+                    state={"phase": "preflight", "status": "ready" if preflight.ok else "blocked"},
+                    checkpoint_payload=preflight_receipt,
+                    owner=lease_owner,
+                    fencing_token=fencing_token,
+                    expected_revision=projection.get("revision"),
+                )
+            except Exception as exc:
+                raise DurableJobError("repair_preflight_checkpoint_unavailable") from exc
+            if not preflight.ok:
+                blocked = await self.jobs.transition_job(
+                    job_id,
+                    "blocked",
+                    owner=lease_owner,
+                    fencing_token=fencing_token,
+                    reason=_text(preflight.reason) or "repo_sandbox_preflight_blocked",
+                    expected_revision=int(projection.get("revision") or 0) + 1,
+                )
+                return {
+                    "job_id": job_id,
+                    "status": "blocked",
+                    "reason_code": _text(preflight.reason) or "repo_sandbox_preflight_blocked",
+                    "recovery_action": "restore_executor_prerequisite",
+                    "preflight": preflight_receipt,
+                    "admission_only": False,
+                    "job": blocked,
+                }
+
+            repair_service = RepoRepairService(
+                sandbox=sandbox,
+                session_factory=self.session_provider,
+            )
+            packet = await repair_service.inspect_and_prepare(
+                inputs,
+                owner=WorkBoardOwner(
+                    principal_id=task.owner_principal_id,
+                    session_id=task.owner_session_id,
+                ),
+                work_board_task_id=task.task_id,
+                work_board_attempt_id=attempt.attempt_id,
+                workflow_run_id=job_id,
+                goal_id=task.goal_id,
+                goal_revision=int(task.goal_revision),
+                input_digest=input_digest,
+            )
+            # Source publication records two fenced checkpoints on the same
+            # durable root.  Refresh the root before a pause/approval CAS;
+            # the admission projection is intentionally stale after that
+            # private publication boundary.
+            projection = await self.jobs.get_job(job_id)
+            if not isinstance(projection, Mapping) or _status(projection) != "running":
+                raise DurableJobError("repair_durable_job_changed_after_source_inspection")
+            lease = projection.get("lease") if isinstance(projection.get("lease"), Mapping) else {}
+            if (
+                _text(lease.get("owner")) != lease_owner
+                or int(lease.get("fencing_token") or 0) != fencing_token
+            ):
+                raise DurableJobLeaseError("repair durable lease changed after source inspection")
+            # Source inspection is an explicit private-code boundary.  Once
+            # the operator has granted the exact packet/profile consent, the
+            # same durable root may advance to one governed strategist call.
+            # No second admission/root is created and no source text enters
+            # the generic job projection.
+            from src.db.models import RepoRepairEgressConsent as RepoRepairEgressConsentRow
+            from src.workflows.repo_repair import (
+                REPO_REPAIR_APPROVAL_ACTION,
+                REPO_REPAIR_APPROVAL_TOOL,
+                RepoRepairProposal as RepoRepairProposalRow,
+                _repair_approval_fingerprint,
+            )
+
+            async with self.session_provider() as consent_db:
+                consent = (
+                    await consent_db.execute(
+                        select(RepoRepairEgressConsentRow).where(
+                            RepoRepairEgressConsentRow.owner_principal_id == task.owner_principal_id,
+                            RepoRepairEgressConsentRow.owner_session_id == task.owner_session_id,
+                            RepoRepairEgressConsentRow.workflow_run_id == job_id,
+                            RepoRepairEgressConsentRow.work_board_task_id == task.task_id,
+                            RepoRepairEgressConsentRow.work_board_attempt_id == attempt.attempt_id,
+                            RepoRepairEgressConsentRow.source_packet_id == packet.packet_id,
+                            RepoRepairEgressConsentRow.state == "active",
+                        )
+                    )
+                ).scalars().first()
+                if consent is not None:
+                    consent_db.expunge(consent)
+                existing_proposal = (
+                    await consent_db.execute(
+                        select(RepoRepairProposalRow).where(
+                            RepoRepairProposalRow.owner_principal_id == task.owner_principal_id,
+                            RepoRepairProposalRow.owner_session_id == task.owner_session_id,
+                            RepoRepairProposalRow.workflow_run_id == job_id,
+                            RepoRepairProposalRow.work_board_task_id == task.task_id,
+                            RepoRepairProposalRow.work_board_attempt_id == attempt.attempt_id,
+                        ).order_by(RepoRepairProposalRow.created_at.desc()).limit(1)
+                    )
+                ).scalar_one_or_none()
+                if existing_proposal is not None:
+                    consent_db.expunge(existing_proposal)
+            if consent is None:
+                paused = await self.jobs.pause_job(
+                    job_id,
+                    owner=lease_owner,
+                    fencing_token=fencing_token,
+                    reason="repo_repair_code_egress_review",
+                    expected_revision=int(projection.get("revision") or 0),
+                )
+                return {
+                    "job_id": job_id,
+                    "status": "paused",
+                    "reason_code": "repo_repair_code_egress_review",
+                    "recovery_action": "review_code_egress",
+                    "packet_id": packet.packet_id,
+                    "packet_revision": int(packet.revision),
+                    "source_manifest_sha256": packet.source_manifest_sha256,
+                    "base_snapshot_sha256": packet.base_snapshot_sha256,
+                    "preflight": preflight_receipt,
+                    "job": paused,
+                    "admission_only": False,
+                }
+
+            # An exact approved proposal is a post-approval proof, not a new
+            # model request.  Resume the same durable root through the shared
+            # proof-discriminated sandbox/readback helper.  This branch is
+            # intentionally before ``generate_proposal`` so a restart cannot
+            # regenerate a model patch after approval.
+            if existing_proposal is not None and str(existing_proposal.status or "") == "approved":
+                from src.api.workflows import _resume_verified_repo_execution
+                execution_lease = projection.get("lease") if isinstance(projection.get("lease"), Mapping) else {}
+                execution_owner = _text(execution_lease.get("owner"))
+                execution_fence = int(execution_lease.get("fencing_token") or 0)
+                execution_authority_digest = _text(projection.get("authority_digest"))
+                if not execution_owner or execution_fence <= 0 or len(execution_authority_digest) != 64:
+                    raise DurableJobError("repo_repair_execution_authority_missing")
+                execution_deadline_at = _repo_repair_execution_deadline_at(
+                    projection=projection,
+                    authority=(
+                        projection.get("declared_authority")
+                        if isinstance(projection.get("declared_authority"), Mapping)
+                        else {}
+                    ),
+                    approval_expires_at=getattr(existing_proposal, "expires_at", None),
+                    max_wall_seconds=int(getattr(getattr(sandbox, "limits", None), "max_wall_seconds", 180) or 180),
+                    board_lease_expires_at=attempt.lease_expires_at,
+                    goal_window_at=(
+                        await self._repo_repair_goal_window(task)
+                    ),
+                )
+                try:
+                    execution_lane = await _reserve_repo_repair_execution_capacity(
+                        jobs=self.jobs,
+                        job_id=job_id,
+                        attempt_id=attempt.attempt_id,
+                        workspace_root=str(settings.workspace_dir),
+                        owner=execution_owner,
+                        fencing_token=execution_fence,
+                        authority_digest=execution_authority_digest,
+                        execution_deadline_at=execution_deadline_at,
+                        expected_revision=projection.get("revision"),
+                    )
+                    execution_deadline_at = str(
+                        getattr(execution_lane, "execution_deadline_at", "") or execution_deadline_at
+                    )
+                except DurableJobAdmissionDenied as exc:
+                    blocked = await self.jobs.transition_job(
+                        job_id,
+                        "blocked",
+                        owner=execution_owner,
+                        fencing_token=execution_fence,
+                        expected_revision=projection.get("revision"),
+                        reason=str(getattr(exc, "reason", "repo_repair_execution_busy")),
+                        result={
+                            "reason_code": str(getattr(exc, "reason", "repo_repair_execution_busy")),
+                            "learning": "no_learning",
+                            "memory_status": "no_learning",
+                            "operator_visible": True,
+                        },
+                    )
+                    return {
+                        "job_id": job_id,
+                        "status": "blocked",
+                        "reason_code": str(getattr(exc, "reason", "repo_repair_execution_busy")),
+                        "recovery_action": "retry_same_root_after_capacity_release",
+                        "job": blocked,
+                        "admission_only": False,
+                    }
+                try:
+                    execution = await _resume_verified_repo_execution(
+                        proof_kind="RepoRepairProposal",
+                        current=projection,
+                        claimed=projection,
+                        approval_id=str(existing_proposal.approval_id or ""),
+                        execution_deadline_at=execution_deadline_at,
+                    )
+                    await _settle_repo_repair_execution_capacity(
+                        jobs=self.jobs,
+                        lane=execution_lane,
+                        result=execution,
+                        job_id=job_id,
+                        attempt_id=attempt.attempt_id,
+                        fencing_token=execution_fence,
+                        authority_digest=execution_authority_digest,
+                    )
+                except BaseException:
+                    # The durable reservation and physical flock remain held
+                    # until exact same-job cleanup/readback reconciliation.
+                    await asyncio.to_thread(execution_lane.quarantine, job_id)
+                    raise
+                return {
+                    **dict(execution),
+                    "job_id": job_id,
+                    "admission_only": False,
+                }
+
+            owner = WorkBoardOwner(
+                principal_id=task.owner_principal_id,
+                session_id=task.owner_session_id,
+            )
+            principal = TrustPrincipal(
+                principal_id=task.owner_principal_id,
+                principal_type=PrincipalType.OPERATOR,
+                authenticated=True,
+                revoked=False,
+                grants=(AuthorityGrant.MODEL_INFERENCE,),
+                session_id=task.owner_session_id,
+                operator_session_id=task.owner_session_id,
+                job_id=job_id,
+            )
+            proposal = await repair_service.generate_proposal(
+                packet,
+                inputs,
+                owner=owner,
+                principal=principal,
+                lease_owner=lease_owner,
+                fencing_token=fencing_token,
+                consent=consent,
+            )
+            # Proposal generation persists private response checkpoints on the
+            # same durable root.  Those checkpoints advance the root revision,
+            # so the pre-generation projection cannot authorize the approval
+            # binding.  Re-read the running root and its original lease fence
+            # before mutating the approval state; never refresh the fence to
+            # adopt a different worker.
+            projection = await self.jobs.get_job(job_id)
+            if not isinstance(projection, Mapping) or _status(projection) != "running":
+                raise DurableJobError("repair_durable_job_changed_after_proposal")
+            proposal_lease = projection.get("lease") if isinstance(projection.get("lease"), Mapping) else {}
+            if (
+                _text(proposal_lease.get("owner")) != lease_owner
+                or int(proposal_lease.get("fencing_token") or 0) != fencing_token
+            ):
+                raise DurableJobLeaseError("repair durable lease changed after proposal generation")
+            # Approval identity is deterministic for this proposal, so a
+            # crash between approval creation and proposal binding replays the
+            # same row rather than creating a second approval or root.
+            approval_id = str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"seraph:repo-repair-approval:{job_id}:{proposal.proposal_id}",
+                )
+            )
+            if proposal.approval_id:
+                approval = await approval_repository.get(str(proposal.approval_id))
+                if approval is None:
+                    raise DurableJobError("repo_repair_approval_binding_missing")
+                approval_id = str(proposal.approval_id)
+                approval_fingerprint = str(proposal.approval_fingerprint or "")
+            else:
+                proposal.approval_id = approval_id
+                approval_expiry = min(
+                    proposal.expires_at,
+                    self.now() + timedelta(minutes=5),
+                )
+                approval_fingerprint = _repair_approval_fingerprint(proposal, approval_expiry)
+                try:
+                    proposal_metadata = json.loads(proposal.safe_metadata_json or "{}")
+                except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                    raise DurableJobError("repo_repair_proposal_metadata_invalid") from exc
+                sandbox_metadata = (
+                    proposal_metadata.get("sandbox")
+                    if isinstance(proposal_metadata, Mapping)
+                    else None
+                )
+                if not isinstance(sandbox_metadata, Mapping):
+                    raise DurableJobError("repo_repair_executor_authority_missing")
+                required_permissions = [
+                    str(item) for item in (sandbox_metadata.get("required_permissions") or [])
+                ]
+                executor_kind = str(sandbox_metadata.get("executor_kind") or "docker_rootless")
+                approval = await approval_repository.get_or_create_pending(
+                    session_id=task.owner_session_id,
+                    tool_name=REPO_REPAIR_APPROVAL_TOOL,
+                    risk_level="high",
+                    summary=f"Review the bounded repository repair proposal for goal {task.goal_id}",
+                    fingerprint=approval_fingerprint,
+                    request_id=approval_id,
+                    details={
+                        "action": REPO_REPAIR_APPROVAL_ACTION,
+                        "approval_owner_principal_id": task.owner_principal_id,
+                        "approval_owner_operator_session_id": task.owner_session_id,
+                        "approval_operator_principal_id": task.owner_principal_id,
+                        "approval_execution_owner_principal_id": task.owner_principal_id,
+                        "approval_execution_session_id": task.owner_session_id,
+                        "approval_conversation_id": task.owner_session_id,
+                        "durable_job_id": job_id,
+                        "durable_owner_kind": "user",
+                        "durable_owner_principal_id": task.owner_principal_id,
+                        "durable_service_id": None,
+                        "durable_authority_digest": projection.get("authority_digest"),
+                        "durable_goal_id": task.goal_id,
+                        "durable_goal_revision": int(task.goal_revision),
+                        "durable_capability_version": "1",
+                        "durable_budget_digest": projection.get("budget_digest"),
+                        "proposal_id": proposal.proposal_id,
+                        "proposal_revision": int(proposal.revision),
+                        "source_packet_id": packet.packet_id,
+                        "source_manifest_digest": packet.source_manifest_sha256,
+                        "base_snapshot_digest": packet.base_snapshot_sha256,
+                        "model_profile_id": proposal.model_profile_id,
+                        "patch_sha256": proposal.patch_sha256,
+                        "executor_kind": executor_kind,
+                        "executor_profile": str(sandbox_metadata.get("executor_profile") or ""),
+                        "executor_posture_digest": str(sandbox_metadata.get("executor_posture_digest") or ""),
+                        "required_permissions": required_permissions,
+                        "local_host_execution_required": executor_kind == "local",
+                        "expires_at": approval_expiry.timestamp(),
+                        "memory_status": "no_learning",
+                    },
+                )
+                if str(approval.id) != approval_id:
+                    raise DurableJobIdempotencyConflict("repo repair approval identity changed")
+                async with self.session_provider() as proposal_db:
+                    persisted_proposal = await proposal_db.get(RepoRepairProposalRow, proposal.proposal_id)
+                    if persisted_proposal is None:
+                        raise DurableJobError("repo_repair_proposal_missing")
+                    if persisted_proposal.approval_id not in {None, approval_id}:
+                        raise DurableJobIdempotencyConflict("repo repair proposal approval binding changed")
+                    persisted_proposal.approval_id = approval_id
+                    persisted_proposal.approval_fingerprint = approval_fingerprint
+                    await proposal_db.flush()
+            bound = await self.jobs.bind_approval_id(
+                job_id,
+                approval_id,
+                owner=lease_owner,
+                fencing_token=fencing_token,
+                expected_revision=projection.get("revision"),
+            )
+            # Binding the approval id is part of the durable authority, so it
+            # advances the authority digest.  The approval row was created
+            # before that CAS; update its still-pending server-owned receipt
+            # before exposing the approval or allowing resume.  Otherwise a
+            # restart would hold a valid approval whose old digest can never
+            # satisfy the durable resume check.
+            bound_authority_digest = str(bound.get("authority_digest") or "")
+            if not bound_authority_digest:
+                raise DurableJobError("repo_repair_approval_authority_missing")
+            updated_approval = await approval_repository.update_pending_details(
+                approval_id,
+                owner_principal_id=task.owner_principal_id,
+                operator_session_id=task.owner_session_id,
+                updates={
+                    "authority_digest": bound_authority_digest,
+                    "durable_authority_digest": bound_authority_digest,
+                    "approval_expires_at": approval.expires_at.timestamp()
+                    if approval.expires_at
+                    else None,
+                },
+            )
+            if updated_approval is None:
+                raise DurableJobError("repo_repair_approval_binding_update_failed")
+            held = await self.jobs.transition_job(
+                job_id,
+                "awaiting_approval",
+                owner=lease_owner,
+                fencing_token=fencing_token,
+                expected_revision=bound.get("revision"),
+                reason="repo_repair_approval_required",
+            )
+            return {
+                "job_id": job_id,
+                "status": "awaiting_approval",
+                "reason_code": "review_repo_repair_proposal",
+                "recovery_action": "review_repo_repair_proposal",
+                "packet_id": packet.packet_id,
+                "proposal_id": proposal.proposal_id,
+                "approval_id": approval_id,
+                "proposal_revision": int(proposal.revision),
+                "patch_sha256": proposal.patch_sha256,
+                "preflight": preflight_receipt,
+                "job": held,
+                "admission_only": False,
+            }
         if capability_id == "engineering.repo-change.v1":
             from src.api.workflows import (
                 RepoChangePreviewRequest,
@@ -7344,6 +8386,24 @@ class WorkBoardDispatcher:
                 None,
                 binding_key,
             )
+        if capability_id == "engineering.repo-repair.v1":
+            repair_job_id = "repo-repair-" + hashlib.sha256(
+                (
+                    "engineering.repo-repair.v1\0"
+                    + task.owner_principal_id
+                    + "\0"
+                    + task.task_id
+                    + "\0"
+                    + attempt.attempt_id
+                ).encode("utf-8")
+            ).hexdigest()[:32]
+            return (
+                repair_job_id,
+                task.owner_principal_id,
+                "engineering.repo-repair.v1",
+                None,
+                binding_key,
+            )
         if capability_id == "work.github-followthrough.v1":
             from src.extensions.github_followthrough import _operation_id
 
@@ -7443,6 +8503,14 @@ class WorkBoardDispatcher:
                     **handoff_binding,
                 }
             )
+        if capability_id == "engineering.repo-repair.v1":
+            # The typed input artifact is the immutable producer contract.  A
+            # digest of only the nested input would permit an envelope drift
+            # between task creation and execution.
+            digest = _text(getattr(task, "typed_input_digest", None)).lower()
+            if not _SHA256.fullmatch(digest):
+                raise TypedInputError("typed_input_digest_mismatch", "the repair task has no canonical input artifact digest")
+            return digest
         if capability_id == "work.github-followthrough.v1":
             attempt_uuid = uuid.uuid5(
                 uuid.NAMESPACE_URL,
@@ -7570,6 +8638,7 @@ class WorkBoardDispatcher:
             "engineering.repo-change.v1": "engineering.repo-change.v1",
             "work.github-followthrough.v1": "1",
             "guardian-routine.v1": "guardian-routine.v1",
+            "engineering.repo-repair.v1": "1",
             "guardian-routine.v2": "guardian-routine.v2",
             "calendar.meeting-prep.v1": "1",
             "work.mail-reply-draft.v1": "1",
@@ -7585,6 +8654,14 @@ class WorkBoardDispatcher:
             from src.integrations.google_calendar import calendar_authority_digest
 
             return calendar_authority_digest(task=task, attempt=attempt)
+        if _text(task.capability_id) == "engineering.repo-repair.v1":
+            return _safe_digest(
+                WorkBoardDispatcher._repo_repair_authority_payload(
+                    task,
+                    attempt,
+                    input_digest=WorkBoardDispatcher._direct_input_digest(task, attempt, inputs),
+                )
+            )
         if _text(task.capability_id) == "work.mail-reply-draft.v1":
             from src.workflows.mail_reply_draft import authority_payload, canonical_digest
 
@@ -7603,6 +8680,51 @@ class WorkBoardDispatcher:
                 "runtime_cap": MAX_RUNTIME_SECONDS,
             }
         )
+
+    @staticmethod
+    def _repo_repair_authority_payload(
+        task: WorkBoardTask,
+        attempt: WorkBoardAttempt,
+        *,
+        input_digest: str,
+        preflight: Any | None = None,
+    ) -> dict[str, Any]:
+        """Build the immutable repair authority used by admission and replay.
+
+        The requested job deadline is persisted separately on the durable root.
+        This payload carries the fixed capability ceiling so a replay cannot
+        derive a different authority digest from a caller-selected timeout.
+        """
+
+        from src.workflows.repo_repair import _sandbox_authority_payload
+
+        sandbox = _build_repo_repair_executor_compat()
+        sandbox_selectors = _sandbox_authority_payload(sandbox, preflight)
+        return {
+            "principal": task.owner_principal_id,
+            "owner_kind": "user",
+            "session_id": task.owner_session_id,
+            "operator_session_id": task.owner_session_id,
+            "goal_owner_principal_id": task.owner_principal_id,
+            "goal_owner_session_id": task.owner_session_id,
+            "goal_id": task.goal_id,
+            "goal_revision": int(task.goal_revision),
+            "capability_id": task.capability_id,
+            "capability_version": "1",
+            "executor_id": registered_executor_id("engineering.repo-repair.v1"),
+            "attempt_id": attempt.attempt_id,
+            "task_id": task.task_id,
+            "input_artifact_id": _text(task.input_artifact_id),
+            "input_artifact_digest": input_digest,
+            "finite_authority": True,
+            "limits": {
+                "runtime_seconds": MAX_RUNTIME_SECONDS,
+                "max_attempts": 1,
+            },
+            "budget_microusd": 0,
+            "required_permissions": list(sandbox_selectors.get("required_permissions") or []),
+            **sandbox_selectors,
+        }
 
     @staticmethod
     def _direct_run_fingerprint(
@@ -7692,6 +8814,47 @@ class WorkBoardDispatcher:
             raise DurableJobIdempotencyConflict(
                 "adapter admission projection is missing canonical immutable digests"
             )
+        if _text(task.capability_id) == "engineering.repo-repair.v1":
+            expected_authority = WorkBoardDispatcher._repo_repair_authority_payload(
+                task,
+                attempt,
+                input_digest=WorkBoardDispatcher._direct_input_digest(task, attempt, inputs),
+            )
+            # Posture hashes are captured from the durable projection during
+            # admission.  Reconstructing a preflight here would block this
+            # synchronous identity helper and could select a different
+            # descriptor; server-owned projection fields are the exact
+            # immutable selectors already checked below.
+            for selector in (
+                "sandbox_profile",
+                "sandbox_image_digest",
+                "sandbox_limits_digest",
+                "sandbox_socket_digest",
+                "executor_kind",
+                "executor_profile",
+                "executor_posture",
+                "executor_posture_digest",
+                "required_permissions",
+                "local_host_execution_required",
+            ):
+                if selector in authority:
+                    expected_authority[selector] = authority[selector]
+            # Approval binding is a deliberate post-admission authority
+            # extension.  Recovery must validate the persisted approval id as
+            # part of that same authority digest rather than comparing the
+            # queued projection with the pre-approval admission envelope.
+            projected_approval_id = _text(authority.get("approval_id"))
+            if projected_approval_id:
+                expected_authority["approval_id"] = projected_approval_id
+            expected_digests = {
+                "input_digest": WorkBoardDispatcher._direct_input_digest(task, attempt, inputs),
+                "authority_digest": _safe_digest(expected_authority),
+                "run_fingerprint": WorkBoardDispatcher._direct_run_fingerprint(task, attempt, inputs),
+            }
+            if digests != expected_digests:
+                raise DurableJobIdempotencyConflict(
+                    "repository repair admission projection changed the task-bound digest contract"
+                )
         identity = {
             "owner_principal_id": expected_owner,
             "owner_kind": "service" if expected_service else "user",
@@ -8374,6 +9537,39 @@ class WorkBoardDispatcher:
                 actor_session_id=self.runner_session,
             )
 
+    async def _pause_repo_repair_for_operator(
+        self,
+        task: WorkBoardTask,
+        attempt: WorkBoardAttempt,
+        projection: Mapping[str, Any],
+        *,
+        reason: str,
+    ) -> BoardAttemptProjection:
+        """Release the board lease while private repair source awaits consent."""
+
+        if reason not in {"repo_repair_code_egress_review", "review_repo_repair_proposal"}:
+            raise BoardError("repo_repair_wait_reason_invalid", "The repository repair is not waiting for an operator decision")
+        lease = projection.get("lease") if isinstance(projection.get("lease"), Mapping) else {}
+        try:
+            durable_fence = int(lease.get("fencing_token") or projection.get("fencing_token") or attempt.fencing_token)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise BoardError("repo_repair_wait_fence_invalid", "The durable repair fence is malformed") from exc
+        async with self.session_provider() as db:
+            return await self.repository.pause_routine_attempt_for_operator(
+                db,
+                task.task_id,
+                attempt.attempt_id,
+                expected_revision=int(task.task_revision),
+                board_fence=int(attempt.fencing_token),
+                lease_owner=attempt.lease_owner,
+                workflow_run_id=str(attempt.workflow_run_id or ""),
+                durable_fence=durable_fence,
+                reason=reason,
+                actor_principal_id=self.runner_id,
+                actor_session_id=self.runner_session,
+                capability_id="engineering.repo-repair.v1",
+            )
+
     async def resume_routine_attempt_for_operator_recovery(
         self,
         owner: WorkBoardOwner,
@@ -8638,13 +9834,14 @@ class WorkBoardDispatcher:
             expected_authority_digest = _safe_digest(spec.declared_authority)
             expected_run_fingerprint = spec.run_fingerprint
         else:
-            if capability_id == "guardian-routine.v1":
+            if capability_id in {"guardian-routine.v1", "engineering.repo-repair.v1"}:
                 # Routine invocation roots are already admitted and may be
                 # waiting on the operator approval boundary.  Re-entering
-                # RoutineService.invoke here would rebuild a fresh deadline
-                # and authority envelope, causing a false immutable-field
-                # conflict during recovery.  Inspect the deterministic root
-                # and validate its persisted projection instead.
+                # RoutineService.invoke here (or rebuilding a repair Durable
+                # JobSpec) would rebuild a fresh deadline and authority
+                # envelope, causing a false immutable-field conflict during
+                # recovery.  Inspect the deterministic root and validate its
+                # persisted projection instead.
                 expected_job_id, expected_owner, expected_kind, expected_service, binding_key = (
                     self._direct_job_identity(task, attempt, inputs)
                 )
@@ -8731,6 +9928,9 @@ class WorkBoardDispatcher:
             job_id = _text(attempt.workflow_run_id)
             if not job_id:
                 continue
+            snapshot_revision: Any | None = None
+            snapshot_fence: Any | None = None
+            snapshot_owner: str = ""
             try:
                 projection = await self.jobs.get_job(job_id)
                 if not isinstance(projection, Mapping):
@@ -8747,6 +9947,19 @@ class WorkBoardDispatcher:
                     )
                     recovered.append(job_id)
                     continue
+
+                # Keep the exact durable snapshot that this reconciliation
+                # pass adopted.  A later fenced claim may advance the root
+                # under the same canonical board owner, so owner equality
+                # alone cannot identify a benign CAS loser.
+                snapshot_revision = projection.get("revision")
+                snapshot_lease = (
+                    projection.get("lease")
+                    if isinstance(projection.get("lease"), Mapping)
+                    else {}
+                )
+                snapshot_fence = snapshot_lease.get("fencing_token")
+                snapshot_owner = _text(snapshot_lease.get("owner"))
 
                 # A linked row is recoverable only when the persisted durable
                 # admission still matches the exact per-capability root and
@@ -8873,7 +10086,18 @@ class WorkBoardDispatcher:
                         recovered.append(job_id)
                         continue
 
-                if status in {"accepted", "queued"} and not effects:
+                # Approval/consent recovery may leave the same repair root in
+                # ``queued`` with its settled model-admission effect and one
+                # durable ``approval_resume`` receipt.  Those two receipts
+                # prove the already-approved root; they must not be mistaken
+                # for a new admission.  Claim the exact queued root, then
+                # re-enter the existing proof-discriminated executor below.
+                repair_approval_resume = (
+                    _text(task.capability_id) == "engineering.repo-repair.v1"
+                    and status == "queued"
+                    and _repair_approval_resume_recovery_ready(projection)
+                )
+                if status in {"accepted", "queued"} and (not effects or repair_approval_resume):
                     # The root was admitted before the process stopped. Resume
                     # its durable state under the same binding. Only the local
                     # deterministic GoalSnapshot worker is resumed here; the
@@ -8907,6 +10131,43 @@ class WorkBoardDispatcher:
                             runtime_seconds=await self._effective_runtime(task),
                         )
                         await self._settle_parent(job_id, parent_owner, parent_fence, outcome)
+                        projection = await self.jobs.get_job(job_id) or projection
+                    elif _text(task.capability_id) == "engineering.repo-repair.v1":
+                        if status == "accepted":
+                            projection = await self.jobs.queue_job(
+                                job_id,
+                                expected_revision=projection.get("revision"),
+                            )
+                        if _status(projection) == "queued":
+                            projection = await self.jobs.claim_job(
+                                job_id,
+                                # The durable root must retain the canonical
+                                # board lease owner while its fence advances
+                                # for this same approved attempt.  A runner
+                                # identity is an in-process scheduler handle;
+                                # persisting it here would make the repair
+                                # authority compare unequal and falsely reject
+                                # the exact board attempt during source review.
+                                owner=attempt.lease_owner or self.runner_id,
+                                lease_seconds=await self._effective_runtime(task),
+                                expected_state="queued",
+                                expected_revision=projection.get("revision"),
+                                expected_fencing_token=(projection.get("lease") or {}).get("fencing_token"),
+                                continue_existing_attempt=int(projection.get("attempt_count") or 0) > 0,
+                            )
+                        if _status(projection) != "running":
+                            raise DurableJobError("repair_durable_job_not_running")
+                        adapter_result = await self._execute_direct_adapter(
+                            task,
+                            attempt,
+                            inputs,
+                            runtime_seconds=await self._effective_runtime(task),
+                        )
+                        returned_job_id = self._adapter_job_id(adapter_result)
+                        if returned_job_id and returned_job_id != job_id:
+                            raise DurableJobIdempotencyConflict(
+                                "repository repair recovery returned a different durable root"
+                            )
                         projection = await self.jobs.get_job(job_id) or projection
                     else:
                         # Direct adapters own their historical root, but each
@@ -9075,6 +10336,25 @@ class WorkBoardDispatcher:
                         continue
 
                 if (
+                    _text(task.capability_id) == "engineering.repo-repair.v1"
+                    and status == "awaiting_approval"
+                ):
+                    # Repair approval is an explicit operator wait on the
+                    # same open board attempt.  Keep the task recoverable with
+                    # the repair-specific reason; the generic blocked
+                    # projection would lose that recovery route behind a
+                    # broad ``needs_input`` card.
+                    if task.status is WorkBoardStatus.running:
+                        await self._pause_repo_repair_for_operator(
+                            task,
+                            attempt,
+                            projection,
+                            reason="review_repo_repair_proposal",
+                        )
+                    recovered.append(job_id)
+                    continue
+
+                if (
                     _text(task.capability_id) == "guardian-routine.v1"
                     and status == "blocked"
                     and _text(projection.get("failure_reason"))
@@ -9141,6 +10421,78 @@ class WorkBoardDispatcher:
                     recovered.append(job_id)
             except Exception as exc:
                 logger.info("linked work-board run %s requires recovery: %s", job_id, type(exc).__name__)
+                # Two managed dispatchers may observe the same queued linked
+                # root before one of their fenced claims wins.  The loser
+                # must not project the shared board attempt while the winner
+                # owns the durable lease: doing so would turn the winner's
+                # later terminal projection into ``task_not_running`` and
+                # leave the loser waiting on a false recovery path.  Re-read
+                # both authorities before attempting any board mutation.
+                try:
+                    latest = await self.jobs.get_job(job_id)
+                    latest_lease = latest.get("lease") if isinstance(latest, Mapping) else None
+                    latest_owner = _text(latest_lease.get("owner")) if isinstance(latest_lease, Mapping) else ""
+                    expected_owner = _text(attempt.lease_owner) or self.runner_id
+                    latest_revision = latest.get("revision") if isinstance(latest, Mapping) else None
+                    latest_fence = latest_lease.get("fencing_token") if isinstance(latest_lease, Mapping) else None
+                    # A same-owner CAS loser is benign only when the durable
+                    # revision/fence moved beyond the adopted snapshot.  A
+                    # stale lease/error with the same owner and unchanged
+                    # fence still belongs to this reconciliation pass and
+                    # must reach the fail-closed board projection below.
+                    cas_advanced = (
+                        _status(latest) == "running"
+                        and latest_owner
+                        and snapshot_revision is not None
+                        and latest_revision is not None
+                        and (
+                            latest_owner != expected_owner
+                            or latest_revision != snapshot_revision
+                            or latest_fence != snapshot_fence
+                        )
+                    )
+                    if cas_advanced:
+                        recovered.append(job_id)
+                        continue
+                    if snapshot_revision is None or snapshot_fence is None or not snapshot_owner:
+                        # A malformed durable snapshot cannot participate in
+                        # the revision/fence CAS comparison.  It is already
+                        # fail-closed input, so retain the exact linked pair
+                        # for the fenced blocking projection below.  Complete
+                        # snapshots still take the fresh DB read, including
+                        # same-owner stale-lease cases.
+                        current_pair = (task, attempt)
+                    else:
+                        async with self.session_provider() as recovery_db:
+                            current_pair = (
+                                await recovery_db.execute(
+                                    select(WorkBoardTask, WorkBoardAttempt)
+                                    .join(WorkBoardAttempt, WorkBoardAttempt.task_id == WorkBoardTask.task_id)
+                                    .where(
+                                        WorkBoardTask.task_id == task.task_id,
+                                        WorkBoardAttempt.attempt_id == attempt.attempt_id,
+                                    )
+                                )
+                            ).first()
+                    if current_pair is None:
+                        recovered.append(job_id)
+                        continue
+                    current_task, current_attempt = current_pair
+                    if (
+                        current_task.status is not WorkBoardStatus.running
+                        or int(current_task.task_revision) != int(task.task_revision)
+                        or int(current_attempt.fencing_token) != int(attempt.fencing_token)
+                        or _text(current_attempt.lease_owner) != _text(attempt.lease_owner)
+                        or current_attempt.ended_at is not None
+                    ):
+                        recovered.append(job_id)
+                        continue
+                except Exception:
+                    # A failed authority re-read cannot justify a mutation.
+                    # Leave the exact linked root for the next bounded pass;
+                    # never replace an uncertain owner with a guessed block.
+                    recovered.append(job_id)
+                    continue
                 try:
                     await self._project(
                         task,

@@ -12,6 +12,7 @@ import { WorkflowPanel } from "./settings/WorkflowPanel";
 import { SourceWatchPanel } from "./settings/SourceWatchPanel";
 import { ArtifactStoragePanel } from "./settings/ArtifactStoragePanel";
 import { CalendarConnectionPanel } from "./settings/CalendarConnectionPanel";
+import { RepoSandboxPanel } from "./settings/RepoSandboxPanel";
 import { MailConnectionPanel } from "./settings/MailConnectionPanel";
 import { useOptionalOperatorAuth } from "./auth/OperatorAuthGate";
 
@@ -136,12 +137,13 @@ interface McpServer {
   auth_hint: string;
 }
 
-type SettingsSection = "artifacts" | "general" | "native" | "policies" | "audit" | "workflows" | "guardian" | "calendar" | "mail" | "skills" | "discover" | "mcp";
+type SettingsSection = "artifacts" | "general" | "native" | "repo-sandbox" | "policies" | "audit" | "workflows" | "guardian" | "calendar" | "mail" | "skills" | "discover" | "mcp";
 
 const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string }> = [
   { id: "artifacts", label: "Screenshot/VLM" },
   { id: "general", label: "General" },
   { id: "native", label: "Native" },
+  { id: "repo-sandbox", label: "Repo Sandbox" },
   { id: "policies", label: "Policies" },
   { id: "audit", label: "Audit" },
   { id: "workflows", label: "Workflows" },
@@ -717,6 +719,8 @@ export function SettingsPanel() {
           {activeSection === "general" && <InterruptionModeToggle />}
 
           {activeSection === "native" && <DaemonStatus />}
+
+          {activeSection === "repo-sandbox" && <RepoSandboxPanel />}
 
           {activeSection === "artifacts" && <ArtifactStoragePanel />}
 

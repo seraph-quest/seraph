@@ -89,6 +89,7 @@ class OpenRouterSetup:
     egress_class: EgressClass = EgressClass.LOCAL_ONLY
     cloud_egress_acknowledged: bool = False
     spend_ceiling_microusd: int | None = None
+    request_cost_bound_microusd: int | None = None
     max_queued: int = _MAX_OPENROUTER_QUEUE
     max_inflight: int = 1
     max_outstanding_per_owner: int = _MAX_OPENROUTER_OWNER_OUTSTANDING
@@ -106,6 +107,9 @@ class ModelFabricConfiguration:
     error_code: str | None = None
     updated_at: str | None = None
     openrouter_setup: OpenRouterSetup | None = None
+    egress_revision: int = 1
+    egress_revoked: bool = False
+    egress_revocation_key: str | None = None
 
 
 def openrouter_policy_for_setup(setup: OpenRouterSetup, runtime_path: str) -> WorkloadPolicy:
@@ -136,7 +140,18 @@ def read_model_fabric_configuration() -> ModelFabricConfiguration:
         return ModelFabricConfiguration()
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-        return _configuration_from_payload(payload)
+        configured = _configuration_from_payload(payload)
+        if configured.openrouter_setup is not None:
+            from src.workspace.accounting_witness import policy_continuity
+            from src.workspace.production import ProductionWorkspace
+            try:
+                valid, retained = policy_continuity(ProductionWorkspace(host_root=path.parent), payload)
+            except (RuntimeError, ValueError):
+                valid, retained = False, None
+            if not valid:
+                return replace(configured, status="degraded", error_code="provider_policy_continuity_unavailable",
+                    egress_revoked=True, egress_revision=max(configured.egress_revision, (retained or {}).get("revision", 0)))
+        return configured
     except (OSError, ValueError, json.JSONDecodeError):
         return ModelFabricConfiguration(status="degraded", error_code="configuration_unreadable")
 
@@ -184,6 +199,10 @@ def write_model_fabric_configuration(configuration: ModelFabricConfiguration) ->
     validated = _configuration_from_payload(_configuration_payload(configuration))
     path = model_fabric_configuration_path()
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if validated.openrouter_setup is not None:
+        from src.workspace.accounting_witness import publish_policy_configuration
+        publish_policy_configuration(path.parent, _configuration_payload(validated))
+        return
     temporary = path.with_suffix(".tmp")
     temporary.write_text(
         json.dumps(_configuration_payload(validated), indent=2, sort_keys=True),
@@ -243,6 +262,8 @@ def effective_provider_profiles(legacy_profiles: dict[str, ProviderProfile]) -> 
 
 def effective_workload_policy(runtime_path: str) -> WorkloadPolicy:
     configured = read_model_fabric_configuration()
+    if configured.egress_revoked:
+        return WorkloadPolicy(runtime_path=runtime_path)
     if configured.status == "ready":
         if configured.openrouter_setup is not None:
             return openrouter_policy_for_setup(configured.openrouter_setup, runtime_path)
@@ -255,6 +276,8 @@ def effective_workload_policy(runtime_path: str) -> WorkloadPolicy:
 def _configuration_from_payload(payload: object) -> ModelFabricConfiguration:
     if not isinstance(payload, dict) or payload.get("schema_version") != CONFIG_SCHEMA_VERSION:
         raise ValueError("unsupported model-fabric configuration schema")
+    if type(payload.get("egress_revision", 1)) is not int or payload.get("egress_revision", 1) < 1 or type(payload.get("egress_revoked", False)) is not bool:
+        raise ValueError("invalid model-fabric egress revision")
     raw_profiles = payload.get("profiles", [])
     raw_policies = payload.get("workload_policies", [])
     if not isinstance(raw_profiles, list) or not isinstance(raw_policies, list):
@@ -273,6 +296,9 @@ def _configuration_from_payload(payload: object) -> ModelFabricConfiguration:
         status="ready",
         updated_at=str(payload.get("updated_at") or "") or None,
         openrouter_setup=setup,
+        egress_revision=payload.get("egress_revision", 1),
+        egress_revoked=payload.get("egress_revoked", False),
+        egress_revocation_key=payload.get("egress_revocation_key"),
     )
 
 
@@ -364,6 +390,9 @@ def _policy_from_payload(payload: object) -> WorkloadPolicy:
 def _configuration_payload(configuration: ModelFabricConfiguration) -> dict[str, object]:
     payload: dict[str, object] = {
         "schema_version": CONFIG_SCHEMA_VERSION,
+        "egress_revision": configuration.egress_revision,
+        "egress_revoked": configuration.egress_revoked,
+        "egress_revocation_key": configuration.egress_revocation_key,
         "updated_at": configuration.updated_at or datetime.now(timezone.utc).isoformat(),
         "profiles": [_profile_payload(profile) for profile in configuration.profiles],
         "workload_policies": [
@@ -452,8 +481,10 @@ def validate_openrouter_setup(setup: OpenRouterSetup) -> None:
         raise ValueError("vision and embedding workloads require zero-data-retention policy")
     if setup.egress_class is EgressClass.LOCAL_ONLY or not setup.cloud_egress_acknowledged:
         raise ValueError("OpenRouter setup requires explicit cloud egress acknowledgement")
-    if setup.spend_ceiling_microusd is None or not 1 <= int(setup.spend_ceiling_microusd) <= 1_000_000_000:
+    if type(setup.spend_ceiling_microusd) is not int or not 1 <= setup.spend_ceiling_microusd <= 1_000_000_000:
         raise ValueError("OpenRouter setup requires a positive finite spend ceiling")
+    if setup.request_cost_bound_microusd is not None and (type(setup.request_cost_bound_microusd) is not int or not 1 <= setup.request_cost_bound_microusd <= setup.spend_ceiling_microusd):
+        raise ValueError("OpenRouter request cost bound must be a positive integer within the deployment ceiling")
     if setup.max_inflight != 1:
         raise ValueError("OpenRouter admission allows exactly one in-flight request")
     if not 1 <= int(setup.max_queued) <= _MAX_OPENROUTER_QUEUE:

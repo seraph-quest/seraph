@@ -7987,7 +7987,7 @@ class WorkBoardDispatcher:
                     or int(terminal_task.goal_revision or 0) != int(task.goal_revision or 0)
                     or _text(terminal_attempt.workflow_run_id) != job_id
                     or _text(terminal_attempt.lease_owner) != _text(lease_owner)
-                    or int(terminal_attempt.fencing_token or 0) != int(fence)
+                    or int(terminal_attempt.fencing_token or 0) != int(attempt.fencing_token or 0)
                     or terminal_attempt.ended_at is not None
                     or terminal_attempt.cancel_requested_at is not None
                     or terminal_attempt.lease_expires_at is None
@@ -9834,7 +9834,7 @@ class WorkBoardDispatcher:
             expected_authority_digest = _safe_digest(spec.declared_authority)
             expected_run_fingerprint = spec.run_fingerprint
         else:
-            if capability_id in {"guardian-routine.v1", "engineering.repo-repair.v1"}:
+            if capability_id in {"guardian-routine.v1", "engineering.repo-repair.v1", "calendar.meeting-prep.v1", "work.mail-reply-draft.v1"}:
                 # Routine invocation roots are already admitted and may be
                 # waiting on the operator approval boundary.  Re-entering
                 # RoutineService.invoke here (or rebuilding a repair Durable
@@ -10005,6 +10005,10 @@ class WorkBoardDispatcher:
 
                 status = _status(projection)
                 effects = projection.get("effects") if isinstance(projection.get("effects"), list) else []
+                accounting_resume = False
+                if _text(task.capability_id) in {"calendar.meeting-prep.v1", "work.mail-reply-draft.v1"}:
+                    resume_check = getattr(self.jobs, "inference_precontact_resume_allowed", None)
+                    accounting_resume = bool(resume_check is not None and await resume_check(job_id))
                 unsafe_effect = status in {"unknown_external_effect", "cost_liability"} or any(
                     isinstance(effect, Mapping)
                     and _status(effect.get("status")) in {"unknown", "intent", "dispatched"}
@@ -10097,7 +10101,7 @@ class WorkBoardDispatcher:
                     and status == "queued"
                     and _repair_approval_resume_recovery_ready(projection)
                 )
-                if status in {"accepted", "queued"} and (not effects or repair_approval_resume):
+                if status in {"accepted", "queued"} and (not effects or repair_approval_resume or accounting_resume):
                     # The root was admitted before the process stopped. Resume
                     # its durable state under the same binding. Only the local
                     # deterministic GoalSnapshot worker is resumed here; the
@@ -10175,6 +10179,12 @@ class WorkBoardDispatcher:
                         # service only while the exact root is accepted or
                         # queued and its effect ledger is empty; this is the
                         # admission crash window and cannot replay an effect.
+                        if _text(task.capability_id) in {"calendar.meeting-prep.v1", "work.mail-reply-draft.v1"}:
+                            if status == "accepted":
+                                projection = await self.jobs.queue_job(job_id, expected_revision=projection.get("revision"))
+                            projection = await self.jobs.claim_job(job_id, owner=self.runner_id,
+                                lease_seconds=await self._effective_runtime(task), expected_state="queued",
+                                expected_revision=projection.get("revision"), expected_fencing_token=(projection.get("lease") or {}).get("fencing_token"))
                         adapter_result = await self._execute_direct_adapter(
                             task,
                             attempt,

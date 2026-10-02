@@ -911,9 +911,75 @@ The accepted #775 phase uses one shared bounded `remote_inference`
 admission lane: the active request finishes, then the highest-priority ready
 request runs. Interactive work outranks scheduled and background work. Queue,
 consent, cancellation, and uncertain remote outcomes remain operator-visible.
-The current process-local lane does not yet provide durable queue persistence or
-provider cost reservation/reconciliation; those limits remain tracked by
-#743/#744 and are not silently treated as complete.
+The canonical job repository owns deployment accounting reservations and their
+original UTC calendar month and settings revision. The deployment owner does
+not change with login, enrollment, or root identity. Actual OpenRouter account
+`usage.cost` rounds upward to whole micro USD; upstream BYOK charges and credit
+purchase fees are outside this accounting scope. Missing cost remains held,
+including across restart and month rollover. Server-reviewed per-request
+reservations and a monthly admission ceiling bound local admission; they do not
+prove the provider cannot charge more. An over-bound charge is retained in full
+and blocks further admission until an authenticated settings request explicitly
+reviews an adequate request reserve. That review records the exact settled
+operation sequence and settlement revision. Cap edits, unrelated settings
+saves and month rollover cannot clear it, and the review cannot cover an
+unknown operation that settles later.
+
+Every observed UTC month change, including normal calendar rollover, blocks
+fresh admission until the operator acknowledges the exact server-observed
+month and accounting revision in Settings > Artifacts. This deliberate review
+prevents clock jumps from granting a fresh allowance. Correction preserves the
+trusted month high-water; future-attributed settled charges conservatively
+count against current capacity and original operation months remain unchanged.
+Settlement remains available while the period requires review. The review
+cannot grant provider access, resume a job, or adopt a result.
+
+Settings > Artifacts exposes committed, reserved, unknown, and remaining cost,
+and exact-operation reconciliation with operation/job identity, revision,
+evidence digest, and an idempotency key. Manual declared amounts remain
+externally unverified and cannot revive a grant, resume a job, or adopt output.
+Deployment-wide egress revocation preserves credentials and cost history;
+re-grant requires an explicit current settings revision.
+
+The managed launcher retains one profile descriptor at
+`docker-data/<dev|prod>/workspace-lifecycle`, independent of the configured
+workspace path, outside the restorable root (Docker mounts it at
+`/app/workspace-lifecycle`). A different or empty root cannot initialize a new
+budget under an existing deployment descriptor. Legacy receipt
+migration runs under the existing maintenance fence. Restore and rollback must
+retain the latest ledger matching its external high-water witness before
+promotion. Missing mount proof, missing witness, or stale ledger visibly blocks
+billable egress. A crash between witness persistence and SQLite commit also
+blocks pending continuity reconciliation; a new budget cannot repair it. The
+trusted directory retains one bounded content-free transaction checkpoint.
+With the runtime stopped, `./manage.sh -e prod accounting-reconcile --confirm`
+repairs only the exact base revision and witnessed digest under the existing
+maintenance fence. It retains every unknown/contact liability and changes no
+job execution or grant authority. Arbitrarily older snapshots still require
+the latest retained ledger rather than this one-transaction delta. This
+does not claim tamper resistance against a host administrator replacing every
+trusted store.
+
+The retained receipt also binds the owning configuration's monotonic egress
+epoch and digest. Copying older settings blocks inference; restore and rollback
+publish the archived policy revoked at a newer epoch before promotion. Only
+`egress_revoked`, `egress_revision`, and `egress_revocation_key` may differ from
+the archived policy during this reconciliation, and staged bytes must match
+the trusted digest. Every other canonical file and policy field retains its
+archive hash check. `./manage.sh -e prod accounting-reconcile --policy --confirm`
+repairs the latest interrupted publication; a pending active publication
+becomes revoked and needs fresh current-revision settings review. Exact clock
+review is also available under stopped-runtime maintenance with
+`accounting-reconcile --period YYYY-MM --expected-revision N --confirm`, where
+the period must equal the current server-observed UTC month. Managed
+`accounting-rebind --from-root /absolute/prior/root --confirm` fences both roots,
+retains the latest ledger and unresolved liabilities, revokes copied provider
+authority, then changes the descriptor binding. Every ledger-linked job must
+match the source's immutable invocation and authority bindings. Existing and
+missing target rows receive source evidence in a blocked state with no lease
+and a revision/fence newer than both generations; conflicting or missing source
+jobs reject the transaction. Exact interrupted retry retains that fresh fence
+and preserves audit/FK rows. It grants no job execution.
 
 The typed durable job contract persists a monotonic row revision alongside its
 owner fencing token. Claim, heartbeat, expired-lease transfer, and terminal
@@ -928,11 +994,15 @@ reconciliation path, while deadline-expired or attempt-exhausted retries are
 rejected. Corrupt or missing effect history on an effect-bound failure blocks
 retry. A concurrent duplicate admission returns the original durable row after
 the unique idempotency fence, and the legacy projection cannot reset or
-finalize a typed job. This bounded slice remains Partial because durable queue
-restart adoption and automatic provider-cost reservation/reconciliation are
-outside the current process-local contract. Those limits remain
-operator-visible and must not be described as exactly-once or crash-proof
-execution.
+finalize a typed job. Calendar and Mail typed jobs may recover a never-contacted
+reservation through the existing Work Board artifact and attempt binding,
+current original root/session/grants/policy, immutable input digest, and
+unexpired deadline. Their reservation identity and priority order remain
+stable. Digest-only ephemeral callbacks remain visibly blocked after restart;
+contacted work never auto-replays. This bounded slice remains Partial: live
+provider quality and billing evidence, and managed Docker deployment receipts,
+are separate operational evidence. It must not be described as exactly-once or
+crash-proof execution.
 
 ## Failure And Recovery
 

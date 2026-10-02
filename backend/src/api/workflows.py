@@ -5355,7 +5355,7 @@ def _repo_change_write_artifact(
         raise RepoSandboxError("repository job artifact identity is invalid")
     if namespace not in {"repo-change", "repo-repair"}:
         raise RepoSandboxError("repository result artifact namespace is not allowed")
-    if name not in {"manifest.json", "readback.json", "diff.patch", "pytest.stdout", "pytest.stderr"}:
+    if name not in {"manifest.json", "readback.json", "diff.patch", "pytest.stdout", "pytest.stderr", "build.stdout", "build.stderr"}:
         raise RepoSandboxError("repository result artifact name is not allowed")
     if not isinstance(payload, bytes):
         raise RepoSandboxError("repository result artifact must be bytes")
@@ -5882,6 +5882,16 @@ def _repo_change_error_code(exc: BaseException) -> str:
     if isinstance(exc, RepoSandboxError):
         return "repo_sandbox_execution_failed"
     return "repo_change_execution_error"
+
+
+def _repo_change_execution_failure_status(exc: BaseException, authority: Mapping[str, Any]) -> str:
+    """Keep selected Node cleanup uncertainty visible; preserve legacy mapping."""
+    if isinstance(exc, RepoSandboxError):
+        if authority.get("sandbox_profile") == "repo-node24-npm-v1" and exc.terminal_status == "unknown_external_effect":
+            return "unknown_external_effect"
+        if exc.terminal_status == "failed":
+            return "failed"
+    return "blocked"
 
 
 def _repo_change_patch_error_code(exc: BaseException) -> str:
@@ -6958,7 +6968,7 @@ async def _execute_repo_change_claimed_inner(
                         await record_repo_phase(phase, error_phase=True, retry=retry)
                     except Exception:
                         break
-        failure_status = "failed" if isinstance(exc, RepoSandboxError) and exc.terminal_status == "failed" else "blocked"
+        failure_status = _repo_change_execution_failure_status(exc, authority)
         error_code = _repo_change_error_code(exc)
         try:
             await durable_job_repository.transition_job(
@@ -7061,7 +7071,10 @@ async def _execute_repo_change_claimed_inner(
             cleanup_checkpoint = await record_repo_phase("cleanup_verified", retry=retry)
             revision = int(cleanup_checkpoint.get("revision") or revision)
         written: dict[str, str] = {}
-        for name in ("manifest.json", "readback.json", "diff.patch", "pytest.stdout", "pytest.stderr"):
+        output_names = ("manifest.json", "readback.json", "diff.patch", "pytest.stdout", "pytest.stderr")
+        if authority.get("sandbox_profile") == "repo-node24-npm-v1":
+            output_names += ("build.stdout", "build.stderr")
+        for name in output_names:
             payload = outputs.get(name)
             if not isinstance(payload, bytes):
                 continue
@@ -7338,7 +7351,7 @@ async def _resolve_repo_repair_proposal(
         }
     }
     try:
-        current_preflight = await asyncio.to_thread(_executor_preflight, sandbox)
+        current_preflight = await asyncio.to_thread(_executor_preflight, sandbox, authority_projection)
     except Exception as exc:
         raise HTTPException(
             status_code=409,
@@ -7452,6 +7465,24 @@ async def _resume_verified_repo_execution(
         proof_kind=proof_kind,
         execution_deadline_at=execution_deadline_at,
     )
+    if resolved_authority.get("sandbox_profile") == "repo-node24-npm-v1":
+        # Capacity proof comes from an independently fetched canonical row,
+        # never from the adapter result or a client-supplied projection.
+        canonical = await durable_job_repository.get_job(str(current.get("job_id") or ""))
+        original = claimed.get("declared_authority") or {}
+        original_attempt = original.get("attempt_id") or original.get("work_board_attempt_id")
+        canonical_authority = (canonical or {}).get("declared_authority") or {}
+        canonical_attempt = canonical_authority.get("attempt_id") or canonical_authority.get("work_board_attempt_id")
+        if (
+            canonical is not None
+            and canonical.get("job_id") == current.get("job_id") == result.get("job_id")
+            and canonical.get("status") == result.get("status")
+            and canonical.get("authority_digest") == claimed.get("authority_digest")
+            and bool(claimed.get("authority_digest"))
+            and bool(original_attempt) and canonical_attempt == original_attempt
+            and (canonical.get("lease") or {}).get("fencing_token") == (claimed.get("lease") or {}).get("fencing_token")
+        ):
+            result = {**result, "job": canonical}
     if str(result.get("status") or "") in {"succeeded", "failed"}:
         async with get_session() as db:
             persisted = await db.get(RepoRepairProposalRow, proposal.proposal_id)
@@ -8024,7 +8055,7 @@ async def _safe_repo_repair_projection(
             "posture": raw_posture,
             "posture_digest": authority.get("executor_posture_digest"),
             "profile": authority.get("sandbox_profile") or raw_posture.get("profile"),
-            "image_digest": authority.get("sandbox_image_digest"),
+            "image_digest": (None if executor_kind == "local" and authority.get("sandbox_profile") == "repo-node24-npm-v1" else authority.get("sandbox_image_digest")),
         },
         executor_kind=executor_kind,
         limits_digest_value=(
@@ -8140,7 +8171,11 @@ async def _safe_repo_repair_projection(
         "required_permissions": list(authority.get("required_permissions") or []),
         "local_host_execution_required": bool(authority.get("local_host_execution_required")),
         "limits": authority.get("limits") if isinstance(authority.get("limits"), Mapping) else {},
-        "preflight": preflight,
+        **({
+            "preparation_ready": isinstance(preflight_receipt, Mapping) and preflight_receipt.get("ok") is True,
+            "execution_ready": False,
+            "preflight": {**(preflight or {}), "status": (str(preflight_receipt.get("status") or "blocked") if isinstance(preflight_receipt, Mapping) else "blocked"), "evidence_basis": "recorded_job_preflight"},
+        } if authority.get("sandbox_profile") == "repo-node24-npm-v1" else {"preflight": preflight}),
         "source_packet": (
             {
                 "packet_id": packet.id,

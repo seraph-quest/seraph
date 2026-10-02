@@ -1,0 +1,387 @@
+{
+  "job_id": "repo-repair-0f7321ee0f51b2acf6bf9d58484f2625",
+  "status": "awaiting_approval",
+  "owner_principal_id": "operator:root:a3cc46b8e3a04d17a0cc846fe5d12f50",
+  "operator_session_id": "525ba7f09f934733953a66800ca426b2",
+  "task_id": "cf7f5e916347410bbe384ebd157b4338",
+  "attempt_id": "8d1b2ec60d194ab0b04b7b13698da7af",
+  "workflow_run_id": "repo-repair-0f7321ee0f51b2acf6bf9d58484f2625",
+  "goal_id": "goal:native-high",
+  "goal_revision": 1,
+  "revision": 20,
+  "authority_digest": "a044ed12b0cbf205b6b89d1ba0962a6ab53b4617a234f243de63ee8ef49f96d8",
+  "input_digest": "6b7498e128ae56801e9767d1f46195fc00f028d01997dcd58d54bbc7abd13fbb",
+  "run_fingerprint": "6b7498e128ae56801e9767d1f46195fc00f028d01997dcd58d54bbc7abd13fbb",
+  "capability_id": "engineering.repo-repair.v1",
+  "capability_version": "1",
+  "executor_kind": "local",
+  "executor_profile": "local:repo-node24-npm-v1",
+  "executor_posture": {
+    "dependency_limits": {
+      "aggregate_bytes": 67108864,
+      "file_bytes": 16777216,
+      "files": 512
+    },
+    "execution_plan": {
+      "commands": [
+        {
+          "argv": [
+            "/tmp/node-v24.15.0-linux-x64/bin/node",
+            "node_modules/typescript/lib/tsc.js",
+            "--project",
+            "tsconfig.json"
+          ],
+          "body": "tsc --project tsconfig.json",
+          "paths": [],
+          "script": "build"
+        },
+        {
+          "argv": [
+            "/tmp/node-v24.15.0-linux-x64/bin/node",
+            "--test",
+            "tests/app.test.js"
+          ],
+          "body": "node --test tests/app.test.js",
+          "paths": [
+            "tests/app.test.js"
+          ],
+          "script": "test"
+        }
+      ],
+      "configs": {
+        "tsconfig.json": "c125e9f4b10be4f5a1fc0ab76e9562782f0fc960d0256b8766a026ad38fc157a",
+        "typescript_entry_sha256": "08e6b5db2bd9ee78fc577ec6dd6bfeca3bc42eaee5c7b582fafc289883f7613d",
+        "typescript_version": "5.6.3"
+      },
+      "dependency_aliases": {},
+      "dependency_manifest_sha256": "878e1b0728a861d6f1f220af7a96741e3efc71fb7e4b5cd6834d511c2826789c",
+      "lifecycle_hooks_executed": false,
+      "lockfile_sha256": "cdd7bf84b4f082961e0c6c14a8b43250e5321ba378a4a682b9d13ccf4e8dd793",
+      "output_directory": "dist",
+      "package_sha256": "941223323fa779c48131cbd5d2d77fe948c05d3c5e824ea4e1b790666206d7df",
+      "selection": [
+        "npm",
+        "run",
+        "build",
+        "test"
+      ],
+      "snapshot_sha256": "cdbb534574ca24fc45025883b00efa616f40f7582f7d24a371c5ab755aacee74"
+    },
+    "git_sha256": "587ef21868c948b883993e23209b86a72a6ddc06aab1545c697ffc31075acd4a",
+    "host_access": "explicit_job_approval_required",
+    "interpreter_entry_path": "/home/pawel/repos/seraph/backend/.venv/bin/python",
+    "interpreter_sha256": "0dc3a692fa85fcdb7f1a5877d2adf179809ac417a07ffde2373c832863800a15",
+    "isolation_claim": "none",
+    "kind": "local",
+    "limits_digest": "8e9bdc23d4ac6ba1b0cb8c214bc1fad4af24cf2b6ff61c11957fe2de1cdff4fb",
+    "network_isolation": "not_verified",
+    "node_path": "/tmp/node-v24.15.0-linux-x64/bin/node",
+    "node_sha256": "d1de76d8edf2fededf6f8b30d244e2c0529ac607923a018283b77e9c74bd932c",
+    "node_version": "v24.15.0",
+    "npm_entry_sha256": "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
+    "npm_executed": false,
+    "npm_package_sha256": "48a06e6aeede3499e391710db82fe948afa7e74ecbf3e819b66121f3cd54666b",
+    "npm_version": "11.12.1",
+    "process_supervision": "linux_per_job_subreaper",
+    "profile": "repo-node24-npm-v1",
+    "resource_enforcement": "admission_and_wall_timeout_only",
+    "supervisor_source_sha256": "326e8741120dcea5393ec8926b7667507a97c748cca7d41025764def66627ff8",
+    "unenforced_limits": [
+      "cpu",
+      "memory",
+      "pids"
+    ],
+    "worker_source_sha256": "2617fbcaf5ca0731564acd69ec01b22411cef5e6d1003091f16d886a385aa565",
+    "image_digest": null,
+    "local_host_execution_required": true
+  },
+  "executor_posture_raw": {
+    "dependency_limits": {
+      "aggregate_bytes": 67108864,
+      "file_bytes": 16777216,
+      "files": 512
+    },
+    "execution_plan": {
+      "commands": [
+        {
+          "argv": [
+            "/tmp/node-v24.15.0-linux-x64/bin/node",
+            "node_modules/typescript/lib/tsc.js",
+            "--project",
+            "tsconfig.json"
+          ],
+          "body": "tsc --project tsconfig.json",
+          "paths": [],
+          "script": "build"
+        },
+        {
+          "argv": [
+            "/tmp/node-v24.15.0-linux-x64/bin/node",
+            "--test",
+            "tests/app.test.js"
+          ],
+          "body": "node --test tests/app.test.js",
+          "paths": [
+            "tests/app.test.js"
+          ],
+          "script": "test"
+        }
+      ],
+      "configs": {
+        "tsconfig.json": "c125e9f4b10be4f5a1fc0ab76e9562782f0fc960d0256b8766a026ad38fc157a",
+        "typescript_entry_sha256": "08e6b5db2bd9ee78fc577ec6dd6bfeca3bc42eaee5c7b582fafc289883f7613d",
+        "typescript_version": "5.6.3"
+      },
+      "dependency_aliases": {},
+      "dependency_manifest_sha256": "878e1b0728a861d6f1f220af7a96741e3efc71fb7e4b5cd6834d511c2826789c",
+      "lifecycle_hooks_executed": false,
+      "lockfile_sha256": "cdd7bf84b4f082961e0c6c14a8b43250e5321ba378a4a682b9d13ccf4e8dd793",
+      "output_directory": "dist",
+      "package_sha256": "941223323fa779c48131cbd5d2d77fe948c05d3c5e824ea4e1b790666206d7df",
+      "selection": [
+        "npm",
+        "run",
+        "build",
+        "test"
+      ],
+      "snapshot_sha256": "cdbb534574ca24fc45025883b00efa616f40f7582f7d24a371c5ab755aacee74"
+    },
+    "git_sha256": "587ef21868c948b883993e23209b86a72a6ddc06aab1545c697ffc31075acd4a",
+    "host_access": "explicit_job_approval_required",
+    "interpreter_entry_path": "/home/pawel/repos/seraph/backend/.venv/bin/python",
+    "interpreter_sha256": "0dc3a692fa85fcdb7f1a5877d2adf179809ac417a07ffde2373c832863800a15",
+    "isolation_claim": "none",
+    "kind": "local",
+    "limits_digest": "8e9bdc23d4ac6ba1b0cb8c214bc1fad4af24cf2b6ff61c11957fe2de1cdff4fb",
+    "network_isolation": "not_verified",
+    "node_path": "/tmp/node-v24.15.0-linux-x64/bin/node",
+    "node_sha256": "d1de76d8edf2fededf6f8b30d244e2c0529ac607923a018283b77e9c74bd932c",
+    "node_version": "v24.15.0",
+    "npm_entry_sha256": "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
+    "npm_executed": false,
+    "npm_package_sha256": "48a06e6aeede3499e391710db82fe948afa7e74ecbf3e819b66121f3cd54666b",
+    "npm_version": "11.12.1",
+    "process_supervision": "linux_per_job_subreaper",
+    "profile": "repo-node24-npm-v1",
+    "resource_enforcement": "admission_and_wall_timeout_only",
+    "supervisor_source_sha256": "326e8741120dcea5393ec8926b7667507a97c748cca7d41025764def66627ff8",
+    "unenforced_limits": [
+      "cpu",
+      "memory",
+      "pids"
+    ],
+    "worker_source_sha256": "2617fbcaf5ca0731564acd69ec01b22411cef5e6d1003091f16d886a385aa565"
+  },
+  "executor_posture_digest": "9c53e1a91a43f308169f915c4ae5cb591a4313b98e04f38d8211b55a953eb806",
+  "executor_posture_digest_basis": "executor_posture_raw",
+  "required_permissions": [
+    "local_host_execution"
+  ],
+  "local_host_execution_required": true,
+  "limits": {
+    "max_attempts": 1,
+    "runtime_seconds": 900
+  },
+  "preparation_ready": true,
+  "execution_ready": false,
+  "preflight": {
+    "attempt_id": "8d1b2ec60d194ab0b04b7b13698da7af",
+    "kind": "repo_sandbox_preflight",
+    "learning": "no_learning",
+    "lease_fence": 2,
+    "lease_owner": "service:work-board",
+    "receipt": {
+      "cgroup_driver": null,
+      "cgroup_version": null,
+      "daemon_reported": {},
+      "executor_kind": "local",
+      "image_digest": null,
+      "ok": true,
+      "operator_visible": true,
+      "posture": {
+        "dependency_limits": "[redacted]",
+        "execution_plan": "[redacted]",
+        "git_sha256": "[redacted]",
+        "host_access": "[redacted]",
+        "interpreter_entry_path": "[redacted]",
+        "interpreter_sha256": "[redacted]",
+        "isolation_claim": "[redacted]",
+        "kind": "[redacted]",
+        "limits_digest": "[redacted]",
+        "network_isolation": "[redacted]",
+        "node_path": "[redacted]",
+        "node_sha256": "[redacted]",
+        "node_version": "[redacted]",
+        "npm_entry_sha256": "[redacted]",
+        "npm_executed": "[redacted]",
+        "npm_package_sha256": "[redacted]",
+        "npm_version": "[redacted]",
+        "process_supervision": "[redacted]",
+        "profile": "[redacted]",
+        "resource_enforcement": "[redacted]",
+        "supervisor_source_sha256": "[redacted]",
+        "unenforced_limits": "[redacted]",
+        "worker_source_sha256": "[redacted]"
+      },
+      "posture_digest": "9c53e1a91a43f308169f915c4ae5cb591a4313b98e04f38d8211b55a953eb806",
+      "profile": "repo-node24-npm-v1",
+      "reason": "node_local_staging_available",
+      "rootless": null,
+      "status": "ready",
+      "support_confirmed": false
+    },
+    "workflow_run_id": "repo-repair-0f7321ee0f51b2acf6bf9d58484f2625",
+    "status": "ready",
+    "evidence_basis": "recorded_job_preflight"
+  },
+  "source_packet": {
+    "packet_id": "12ea724cbd415d76862e298eb3ea21a9",
+    "state": "verified",
+    "repository_ref": "repo",
+    "base_snapshot_sha256": "cdbb534574ca24fc45025883b00efa616f40f7582f7d24a371c5ab755aacee74",
+    "source_manifest_sha256": "e7f822973ba88a8835603e8a9e562e65a275389d3a59c0eee716b0ad84df82c9",
+    "artifact_sha256": "0b6878a84bfc958de2b4869f7dea3be406e985bb7c94a9dd814fa2736be09f95",
+    "revision": 1
+  },
+  "egress": {
+    "consent_id": "df07bc4456f2415280d3d4ba5909da64",
+    "revision": 1,
+    "runtime_path": "strategist_agent",
+    "effective_profile_id": "openrouter",
+    "effective_upstream": "openrouter",
+    "maximum_input_bytes": 65536,
+    "maximum_output_tokens": 4096,
+    "expires_at": "2026-10-02T16:58:42.635024+00:00",
+    "state": "active"
+  },
+  "proposal": {
+    "proposal_id": "b94d197d37824ea28ba1c9c9b3bcca16",
+    "status": "awaiting_approval",
+    "revision": 1,
+    "base_snapshot_digest": "cdbb534574ca24fc45025883b00efa616f40f7582f7d24a371c5ab755aacee74",
+    "source_digest": "e7f822973ba88a8835603e8a9e562e65a275389d3a59c0eee716b0ad84df82c9",
+    "model_profile_id": "openrouter",
+    "patch_sha256": "43c993c0d0229710be8108c124ea508d3addd422eb5d164dd536a2344895b926",
+    "approval_id": "f6898f5b-ad60-5251-8891-9eaeddb2da25",
+    "expires_at": "2026-10-02T17:26:45.121626+00:00",
+    "safe_metadata": {
+      "expected_outcome": "Actual selected tests/build pass.",
+      "memory_status": "no_learning",
+      "sandbox": {
+        "executor_kind": "local",
+        "executor_posture": {
+          "dependency_limits": {
+            "aggregate_bytes": 67108864,
+            "file_bytes": 16777216,
+            "files": 512
+          },
+          "execution_plan": {
+            "commands": [
+              {
+                "argv": [
+                  "/tmp/node-v24.15.0-linux-x64/bin/node",
+                  "node_modules/typescript/lib/tsc.js",
+                  "--project",
+                  "tsconfig.json"
+                ],
+                "body": "tsc --project tsconfig.json",
+                "paths": [],
+                "script": "build"
+              },
+              {
+                "argv": [
+                  "/tmp/node-v24.15.0-linux-x64/bin/node",
+                  "--test",
+                  "tests/app.test.js"
+                ],
+                "body": "node --test tests/app.test.js",
+                "paths": [
+                  "tests/app.test.js"
+                ],
+                "script": "test"
+              }
+            ],
+            "configs": {
+              "tsconfig.json": "c125e9f4b10be4f5a1fc0ab76e9562782f0fc960d0256b8766a026ad38fc157a",
+              "typescript_entry_sha256": "08e6b5db2bd9ee78fc577ec6dd6bfeca3bc42eaee5c7b582fafc289883f7613d",
+              "typescript_version": "5.6.3"
+            },
+            "dependency_aliases": {},
+            "dependency_manifest_sha256": "878e1b0728a861d6f1f220af7a96741e3efc71fb7e4b5cd6834d511c2826789c",
+            "lifecycle_hooks_executed": false,
+            "lockfile_sha256": "cdd7bf84b4f082961e0c6c14a8b43250e5321ba378a4a682b9d13ccf4e8dd793",
+            "output_directory": "dist",
+            "package_sha256": "941223323fa779c48131cbd5d2d77fe948c05d3c5e824ea4e1b790666206d7df",
+            "selection": [
+              "npm",
+              "run",
+              "build",
+              "test"
+            ],
+            "snapshot_sha256": "cdbb534574ca24fc45025883b00efa616f40f7582f7d24a371c5ab755aacee74"
+          },
+          "git_sha256": "587ef21868c948b883993e23209b86a72a6ddc06aab1545c697ffc31075acd4a",
+          "host_access": "explicit_job_approval_required",
+          "interpreter_entry_path": "/home/pawel/repos/seraph/backend/.venv/bin/python",
+          "interpreter_sha256": "0dc3a692fa85fcdb7f1a5877d2adf179809ac417a07ffde2373c832863800a15",
+          "isolation_claim": "none",
+          "kind": "local",
+          "limits_digest": "8e9bdc23d4ac6ba1b0cb8c214bc1fad4af24cf2b6ff61c11957fe2de1cdff4fb",
+          "network_isolation": "not_verified",
+          "node_path": "/tmp/node-v24.15.0-linux-x64/bin/node",
+          "node_sha256": "d1de76d8edf2fededf6f8b30d244e2c0529ac607923a018283b77e9c74bd932c",
+          "node_version": "v24.15.0",
+          "npm_entry_sha256": "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
+          "npm_executed": false,
+          "npm_package_sha256": "48a06e6aeede3499e391710db82fe948afa7e74ecbf3e819b66121f3cd54666b",
+          "npm_version": "11.12.1",
+          "process_supervision": "linux_per_job_subreaper",
+          "profile": "repo-node24-npm-v1",
+          "resource_enforcement": "admission_and_wall_timeout_only",
+          "supervisor_source_sha256": "326e8741120dcea5393ec8926b7667507a97c748cca7d41025764def66627ff8",
+          "unenforced_limits": [
+            "cpu",
+            "memory",
+            "pids"
+          ],
+          "worker_source_sha256": "2617fbcaf5ca0731564acd69ec01b22411cef5e6d1003091f16d886a385aa565"
+        },
+        "executor_posture_digest": "9c53e1a91a43f308169f915c4ae5cb591a4313b98e04f38d8211b55a953eb806",
+        "executor_profile": "local:repo-node24-npm-v1",
+        "local_host_execution_required": true,
+        "required_permissions": [
+          "local_host_execution"
+        ],
+        "sandbox_image_digest": "",
+        "sandbox_limits_digest": "8e9bdc23d4ac6ba1b0cb8c214bc1fad4af24cf2b6ff61c11957fe2de1cdff4fb",
+        "sandbox_profile": "repo-node24-npm-v1",
+        "sandbox_socket_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "summary": "Fix the approved fixture value."
+    }
+  },
+  "execution": {
+    "artifacts": [],
+    "readback": null,
+    "memory_status": "no_learning",
+    "provider_contacted": true
+  },
+  "approval_id": "f6898f5b-ad60-5251-8891-9eaeddb2da25",
+  "approval": {
+    "approval_id": "f6898f5b-ad60-5251-8891-9eaeddb2da25",
+    "status": "pending",
+    "tool_name": "engineering.repo-repair.v1",
+    "action": "repo_repair.resolve",
+    "expires_at": "2026-10-02T17:01:47.371228+00:00",
+    "executor_kind": "local",
+    "executor_profile": "local:repo-node24-npm-v1",
+    "executor_posture_digest": "9c53e1a91a43f308169f915c4ae5cb591a4313b98e04f38d8211b55a953eb806",
+    "required_permissions": [
+      "local_host_execution"
+    ],
+    "local_host_execution_required": true
+  },
+  "memory_status": "no_learning",
+  "recovery_action": "review_repo_repair_proposal",
+  "operator_visible": true
+}

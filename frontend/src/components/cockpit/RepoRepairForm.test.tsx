@@ -80,6 +80,19 @@ describe("RepoRepairForm", () => {
     vi.restoreAllMocks();
   });
 
+  it("publishes only finite named Node script selections", async () => {
+    installFetch(fetchMock);
+    const onCreated = vi.fn();
+    render(<RepoRepairForm goals={[goal]} ownerPrincipalId="operator:one" ownerSessionId="operator-session-1" onCreated={onCreated} onClose={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("Repair source paths"), { target: { value: "src/app.ts" } });
+    fireEvent.change(screen.getByLabelText("Repair allowed paths"), { target: { value: "src/app.ts\ntests/app.test.js" } });
+    fireEvent.change(screen.getByLabelText("Repair test arguments"), { target: { value: "npm\nrun\nbuild\ntest" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create repository repair task" }));
+    await waitFor(() => expect(onCreated).toHaveBeenCalled());
+    const body = JSON.parse(String(postCalls(fetchMock)[0]?.[1]?.body));
+    expect(body.input.test_args).toEqual(["npm", "run", "build", "test"]);
+  });
+
   it("creates the strict input artifact before the opaque Todo task envelope", async () => {
     installFetch(fetchMock);
     const onCreated = vi.fn();

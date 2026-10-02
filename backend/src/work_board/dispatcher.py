@@ -5969,7 +5969,7 @@ class WorkBoardDispatcher:
                 admit_only=admission_only,
             )
         if capability_id == "engineering.repo-repair.v1":
-            from src.workflows.repo_repair import RepoRepairService
+            from src.workflows.repo_repair import RepoRepairService, _executor_preflight
             from src.workflows.job_runtime import _digest as _durable_digest
 
             job_id, owner_principal, job_kind, service_id, binding_key = self._direct_job_identity(
@@ -5991,7 +5991,11 @@ class WorkBoardDispatcher:
                 # approval/execution boundary; probing it only on the event
                 # loop would make local/native execution block chat.
                 admission_sandbox = _build_repo_repair_executor_compat()
-                admission_preflight = await asyncio.to_thread(admission_sandbox.preflight)
+                admission_preflight = await asyncio.to_thread(
+                    _executor_preflight, admission_sandbox,
+                    {"repository_ref": inputs.get("repository_path"),
+                     "test_args": inputs.get("test_args"), "allowed_paths": inputs.get("allowed_paths")},
+                )
                 if not bool(getattr(admission_preflight, "ok", False)):
                     return {
                         "job_id": job_id,
@@ -6043,7 +6047,11 @@ class WorkBoardDispatcher:
                     budget_microusd=0,
                     budget_digest=_durable_digest({"budget_microusd": 0}),
                 )
-                admitted = await self.jobs.admit_job(spec)
+                admitted = await self.jobs.admit_job(
+                    spec,
+                    **({"repo_node_posture_expectation": json.loads(json.dumps(admission_preflight.posture))}
+                       if authority.get("sandbox_profile") == "repo-node24-npm-v1" else {}),
+                )
                 admitted_job = _text(admitted.get("job_id") or admitted.get("run_identity")) or job_id
                 if admitted_job != job_id:
                     raise DurableJobIdempotencyConflict("Repository repair admission returned a different durable root")
@@ -6073,7 +6081,11 @@ class WorkBoardDispatcher:
                     "admission_only": False,
                 }
             sandbox = _build_repo_repair_executor_compat()
-            preflight = await asyncio.to_thread(sandbox.preflight)
+            preflight = await asyncio.to_thread(
+                _executor_preflight, sandbox,
+                {"repository_ref": inputs.get("repository_path"),
+                 "test_args": inputs.get("test_args"), "allowed_paths": inputs.get("allowed_paths")},
+            )
             lease = projection.get("lease") if isinstance(projection.get("lease"), Mapping) else {}
             lease_owner = _text(lease.get("owner"))
             fencing_token = int(lease.get("fencing_token") or 0)
@@ -6452,12 +6464,22 @@ class WorkBoardDispatcher:
                     persisted_proposal.approval_id = approval_id
                     persisted_proposal.approval_fingerprint = approval_fingerprint
                     await proposal_db.flush()
+            node_expectation = None
+            if persisted_authority.get("sandbox_profile") == "repo-node24-npm-v1":
+                approval_preflight = await asyncio.to_thread(
+                    _executor_preflight, sandbox,
+                    {"repository_ref": inputs.get("repository_path"),
+                     "test_args": inputs.get("test_args"), "allowed_paths": inputs.get("allowed_paths")},
+                )
+                _assert_repo_repair_executor_authority(persisted_authority, sandbox, approval_preflight)
+                node_expectation = json.loads(json.dumps(approval_preflight.posture))
             bound = await self.jobs.bind_approval_id(
                 job_id,
                 approval_id,
                 owner=lease_owner,
                 fencing_token=fencing_token,
                 expected_revision=projection.get("revision"),
+                **({"repo_node_posture_expectation": node_expectation} if node_expectation is not None else {}),
             )
             # Binding the approval id is part of the durable authority, so it
             # advances the authority digest.  The approval row was created

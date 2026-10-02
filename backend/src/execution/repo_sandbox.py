@@ -573,7 +573,7 @@ class RepoSandboxPreflight:
             }
         digest = self.posture_digest or executor_posture_digest(posture)
         return {
-            "profile": PROFILE,
+            "profile": posture.get("profile", PROFILE),
             "executor_kind": self.executor_kind,
             "status": self.status,
             "ok": self.ok,
@@ -3903,6 +3903,10 @@ def build_repo_repair_executor(config: RepoSandboxSettings | None = None) -> Rep
     """Build the server-selected executor without fallback."""
 
     value = config or _effective_repo_sandbox_settings()
+    if value.profile == "repo-node24-npm-v1":
+        from src.execution.repo_node import NodeRepoRepairExecutor
+
+        return NodeRepoRepairExecutor(config=value)
     kind = str(value.executor_kind)
     if kind == "local":
         return LocalRepoRepairExecutor(config=value)

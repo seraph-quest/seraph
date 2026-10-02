@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { RepoRepairInspector } from "./RepoRepairInspector";
+import nodePendingApi from "./__fixtures__/node-repair-pending-api.json";
 
 function response(payload: unknown, ok = true, status = ok ? 200 : 409) {
   return { ok, status, json: async () => payload } as unknown as Response;
@@ -93,6 +94,24 @@ describe("RepoRepairInspector", () => {
     window.sessionStorage.clear();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+  });
+
+  it("renders exact script and argv from the authenticated TypeScript API receipt", async () => {
+    vi.mocked(fetch).mockResolvedValue(response(nodePendingApi));
+    render(<RepoRepairInspector jobId={nodePendingApi.job_id} ownerPrincipalId={nodePendingApi.owner_principal_id} ownerSessionId={nodePendingApi.operator_session_id} taskOwnerPrincipalId={nodePendingApi.owner_principal_id} taskOwnerSessionId={nodePendingApi.operator_session_id} />);
+    expect(await screen.findByLabelText("Reviewed Node execution inputs")).toBeInTheDocument();
+    expect(screen.getByText("tsc --project tsconfig.json")).toBeInTheDocument();
+    expect(screen.getByText(/Direct argv: .*node_modules\/typescript\/lib\/tsc.js --project tsconfig.json/)).toBeInTheDocument();
+    expect(screen.getByText("node --test tests/app.test.js")).toBeInTheDocument();
+    expect(screen.getByText(/CPU, memory and PID ceilings unenforced/)).toBeInTheDocument();
+    expect(screen.getByText(/npm and pre\/post hooks are not executed/)).toBeInTheDocument();
+  });
+
+  it("renders recorded Node preflight blocked without claiming readiness", async () => {
+    vi.mocked(fetch).mockResolvedValue(response({...nodePendingApi,preparation_ready:false,execution_ready:false,preflight:{status:"blocked",evidence_basis:"recorded_job_preflight"}}));
+    render(<RepoRepairInspector jobId={nodePendingApi.job_id} ownerPrincipalId={nodePendingApi.owner_principal_id} ownerSessionId={nodePendingApi.operator_session_id} taskOwnerPrincipalId={nodePendingApi.owner_principal_id} taskOwnerSessionId={nodePendingApi.operator_session_id} />);
+    expect(await screen.findByText("Recorded job preflight: blocked")).toBeInTheDocument();
+    expect(screen.getByText("Preparation: blocked · execution: blocked")).toBeInTheDocument();
   });
 
   it("does not request a repair projection without an exact current task owner binding", async () => {

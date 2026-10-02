@@ -88,7 +88,9 @@ function parseExecutionMetadata(value: unknown): RepoRepairExecutionMetadata | n
     ? value.executor_kind as RepoRepairExecutorKind
     : "docker_rootless";
   if (explicit && !isExecutorKind(value.executor_kind)) return null;
-  const expectedProfile = `${kind}:repo-python-pytest-v1`;
+  const profile = isRecord(value.executor_posture) ? value.executor_posture.profile : "repo-python-pytest-v1";
+  if (profile !== undefined && !["repo-python-pytest-v1", "repo-node24-npm-v1"].includes(String(profile))) return null;
+  const expectedProfile = `${kind}:${profile ?? "repo-python-pytest-v1"}`;
   if (explicit && value.executor_profile !== expectedProfile) return null;
   if (!explicit && value.executor_profile !== undefined && value.executor_profile !== expectedProfile) return null;
   if (!isRecord(value.executor_posture) && explicit) return null;
@@ -100,7 +102,7 @@ function parseExecutionMetadata(value: unknown): RepoRepairExecutionMetadata | n
   };
   if (explicit && ["kind", "profile", "isolation_claim", "network_isolation", "resource_enforcement", "limits_digest"].some((key) => !Object.prototype.hasOwnProperty.call(posture, key))) return null;
   if (posture.kind !== undefined && posture.kind !== kind) return null;
-  if (posture.profile !== undefined && posture.profile !== "repo-python-pytest-v1") return null;
+  if (posture.profile !== undefined && !["repo-python-pytest-v1", "repo-node24-npm-v1"].includes(String(posture.profile))) return null;
   if (!boundedMetadata(posture.isolation_claim, 128) || !boundedMetadata(posture.network_isolation, 128) || !boundedMetadata(posture.resource_enforcement, 128)) return null;
   const hostAccess = posture.host_access;
   if (hostAccess !== undefined && (!boundedMetadata(hostAccess, 128) || (kind !== "local" || hostAccess !== LOCAL_HOST_ACCESS))) return null;
@@ -268,15 +270,17 @@ function buildRepoRepairInput(draft: RepoRepairDraft): RepoRepairInput {
     throw new Error("Every source path must also appear in allowed paths.");
   }
   const testArgs = lines(draft.testArgs, "Test arguments", 1, MAX_TEST_ARGS, 4_096);
+  const nodeSelection = ["npm test", "npm run build", "npm run build test"].includes(testArgs.join(" "));
   let namedTestPath = false;
   const normalizedTestArgs = testArgs.map((value) => {
+    if (nodeSelection) return value;
     if (value === "pytest" || ALLOWED_TEST_FLAGS.has(value)) return value;
     const path = isSafeRepoPath(value, "Test argument");
     if (!allowed.has(path)) throw new Error("Every test path must appear in allowed paths.");
     namedTestPath = true;
     return path;
   });
-  if (!namedTestPath) throw new Error("Test arguments must name at least one allowed test path.");
+  if (!nodeSelection && !namedTestPath) throw new Error("Test arguments must name at least one allowed test path.");
   return {
     repository_path: repositoryPath,
     problem_statement: problemStatement,
@@ -579,7 +583,7 @@ export function RepoRepairForm({
             <label>Source paths <span className="text-xs opacity-70">one per line, up to 8</span><textarea aria-label="Repair source paths" className="cockpit-input mt-1 w-full font-mono" rows={5} required value={sourcePaths} onChange={(event) => setSourcePaths(event.currentTarget.value)} /></label>
           </div>
           <label>Allowed paths <span className="text-xs opacity-70">one per line; source and test paths must be included</span><textarea aria-label="Repair allowed paths" className="cockpit-input mt-1 w-full font-mono" rows={5} required value={allowedPaths} onChange={(event) => setAllowedPaths(event.currentTarget.value)} /></label>
-          <label>Focused test arguments <span className="text-xs opacity-70">one per line; pytest, -q, -x, --maxfail=1, --disable-warnings, and allowed paths only</span><textarea aria-label="Repair test arguments" className="cockpit-input mt-1 w-full font-mono" rows={4} required value={testArgs} onChange={(event) => setTestArgs(event.currentTarget.value)} /></label>
+          <label>Focused test arguments <span className="text-xs opacity-70">one token per line; Python: pytest and allowed paths. Node profile: npm test, npm run build, or npm run build test; exact package scripts resolve to reviewed direct commands.</span><textarea aria-label="Repair test arguments" className="cockpit-input mt-1 w-full font-mono" rows={4} required value={testArgs} onChange={(event) => setTestArgs(event.currentTarget.value)} /></label>
           <label>Evidence references <span className="text-xs opacity-70">optional opaque references, one per line, up to 16</span><textarea aria-label="Repair evidence references" className="cockpit-input mt-1 w-full font-mono" rows={3} value={evidenceRefs} onChange={(event) => setEvidenceRefs(event.currentTarget.value)} /></label>
         </fieldset>
         <div className="mt-3 flex flex-wrap justify-end gap-2"><button type="button" className="cockpit-feedback-button" onClick={requestClose} disabled={submitState === "submitting"}>Cancel</button><button type="submit" className="cockpit-feedback-button" disabled={submitState === "submitting" || !goalRevision || activeGoals.length === 0}>{submitState === "submitting" ? "Submitting…" : pending ? "Retry exact request" : "Create repository repair task"}</button></div>

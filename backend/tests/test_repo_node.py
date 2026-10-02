@@ -1,0 +1,246 @@
+from __future__ import annotations
+import difflib
+import errno
+import json
+import os
+from pathlib import Path
+import shutil
+import signal
+import subprocess
+import threading
+import time
+from dataclasses import replace
+from types import SimpleNamespace
+
+import pytest
+from config.settings import RepoSandboxSettings
+from src.execution.repo_node import NodeRepoRepairExecutor, PROFILE, execution_plan, normalize_selection
+from src.execution.repo_sandbox import RepoSandboxError, RepoSandboxJob
+from src.execution import repo_supervisor as supervisor
+
+NODE = "/tmp/node-v24.15.0-linux-x64/bin/node"
+TYPESCRIPT = "/tmp/seraph-864-operator-work-board/frontend/node_modules/typescript"
+
+
+def make_fixture(tmp_path: Path, *, typescript=False, script=None):
+    workspace=tmp_path/"workspace";workspace.mkdir(mode=0o700)
+    repo=workspace/"repo";(repo/"src").mkdir(parents=True);(repo/"tests").mkdir()
+    if typescript:
+        (repo/"src/app.ts").write_text("export const VALUE: number = 1;\n")
+        (repo/"tests/app.test.js").write_text("const {VALUE}=require('../dist/app.js'); require('node:assert/strict').equal(VALUE,2);\n")
+        (repo/"tsconfig.json").write_text(json.dumps({"compilerOptions":{"target":"ES2020","module":"commonjs","outDir":"dist","rootDir":"src"},"include":["src/*.ts"]}))
+        shutil.copytree(TYPESCRIPT,repo/"node_modules/typescript")
+        version=json.loads((repo/"node_modules/typescript/package.json").read_text())["version"]
+        packages={"node_modules/typescript":{"version":version}}
+        scripts={"build":"tsc --project tsconfig.json","test":"node --test tests/app.test.js"}
+        path="src/app.ts";old="export const VALUE: number = 1;\n";new="export const VALUE: number = 2;\n"
+        args=("npm","run","build","test")
+    else:
+        old="exports.VALUE = 1;\n";new="exports.VALUE = 2;\n";path="src/app.js"
+        (repo/path).write_text(old)
+        (repo/"tests/app.test.js").write_text(script or "const {VALUE}=require('../src/app.js'); require('node:assert/strict').equal(VALUE,2); console.log('NODE_TEST_OK');\n")
+        scripts={"test":"node --test tests/app.test.js"};packages={};args=("npm","test")
+    scripts.update(pretest="node hook.js",posttest="node hook.js",prebuild="node hook.js",postbuild="node hook.js")
+    (repo/"hook.js").write_text("require('node:fs').writeFileSync('hook-ran','BAD');\n")
+    (repo/"package.json").write_text(json.dumps({"name":"bounded-fixture","version":"1.0.0","scripts":scripts}))
+    (repo/"package-lock.json").write_text(json.dumps({"name":"bounded-fixture","lockfileVersion":3,"packages":packages}))
+    config=RepoSandboxSettings(profile=PROFILE,node_runtime_path=NODE,enabled=True)
+    executor=NodeRepoRepairExecutor(config,workspace_dir=workspace)
+    allowed=(path,"tests/app.test.js")
+    snapshot=executor.snapshot_repository(repo,workspace/"preview")
+    patch="".join(difflib.unified_diff(old.splitlines(True),new.splitlines(True),fromfile="a/"+path,tofile="b/"+path)).encode()
+    preflight=executor.preflight({"repository_ref":str(repo),"test_args":args,"allowed_paths":allowed})
+    assert preflight.ok,preflight.reason
+    job=RepoSandboxJob("node-job",str(repo),patch,allowed,args,"authority-node",snapshot.digest,deadline_seconds=30,expected_posture_digest=preflight.posture_digest)
+    return executor,repo,job
+
+
+@pytest.mark.parametrize("typescript",[False,True])
+def test_real_node_and_typescript_staged_execution(tmp_path,typescript):
+    executor,repo,job=make_fixture(tmp_path,typescript=typescript)
+    source=(repo/job.allowed_paths[0]).read_bytes()
+    result=executor.execute_job(job)
+    assert result["status"]=="succeeded",result
+    assert result["manifest"]["cleanup_proven"] is True
+    assert result["manifest"]["process_cleanup"]["oracle"]=="linux_subreaper_waitpid_echild"
+    assert result["manifest"]["source_original_unchanged"] is True
+    assert (repo/job.allowed_paths[0]).read_bytes()==source
+    assert result["outputs"]["diff.patch"]
+    assert not (repo/"hook-ran").exists()
+    assert [command["script"] for command in result["manifest"]["commands"]]==(["build","test"] if typescript else ["test"])
+    assert all(command["argv"][0]==NODE for command in result["manifest"]["commands"])
+    assert result["learning"]=="no_learning"
+
+
+@pytest.mark.parametrize("body",["node --test tests/*.test.js","npm test","npx vitest","node tests/app.test.js && echo bad","NODE_OPTIONS=x node tests/app.test.js","node --watch tests/app.test.js","tsc -b","node ./tests/app.test.js","node --test ../escape.test.js","node tests/app.test.js "])
+def test_unsupported_script_forms_block(tmp_path,body):
+    executor,repo,job=make_fixture(tmp_path)
+    package=json.loads((repo/"package.json").read_text());package["scripts"]["test"]=body
+    (repo/"package.json").write_text(json.dumps(package))
+    assert executor.preflight({"repository_ref":str(repo),"test_args":job.test_args,"allowed_paths":job.allowed_paths}).ok is False
+
+
+@pytest.mark.parametrize("path",["package.json","package-lock.json","src/app.js","tests/app.test.js"])
+def test_execution_input_or_source_drift_invalidates_approval(tmp_path,path):
+    executor,repo,job=make_fixture(tmp_path)
+    (repo/path).write_text((repo/path).read_text()+"\n")
+    with pytest.raises(RepoSandboxError):executor.execute_job(job)
+
+
+def test_dependencies_never_follow_foreign_links(tmp_path):
+    executor,repo,job=make_fixture(tmp_path)
+    (repo/"node_modules").mkdir();outside=tmp_path/"foreign";outside.write_text("secret")
+    (repo/"node_modules/foreign").symlink_to(outside)
+    with pytest.raises(RepoSandboxError):executor.snapshot_repository(repo,executor.workspace_dir/"foreign-preview")
+
+
+def test_running_command_cancel_uses_owned_supervisor(tmp_path):
+    marker=tmp_path/"running"
+    body="require('node:fs').writeFileSync("+json.dumps(str(marker))+",String(process.pid)); setTimeout(()=>{},10000);\n"
+    executor,repo,job=make_fixture(tmp_path,script=body)
+    result=[];errors=[]
+    def run():
+        try:result.append(executor.execute_job(job))
+        except BaseException as exc:errors.append(exc)
+    thread=threading.Thread(target=run);thread.start()
+    deadline=time.monotonic()+10
+    while not marker.exists() and time.monotonic()<deadline:time.sleep(.01)
+    assert marker.exists()
+    child=int(marker.read_text());assert supervisor.start_identity(child)
+    fresh=NodeRepoRepairExecutor(executor.config,workspace_dir=executor.workspace_dir)
+    cancel=fresh.cancel(job_id=job.job_id,authority={"authority_digest":job.authority_digest})
+    assert cancel["status"]=="cancel_requested"
+    thread.join(10)
+    assert not thread.is_alive() and not errors,errors
+    assert result[0]["status"]=="cancelled"
+    assert result[0]["cleanup"]["cleanup_proven"]
+    assert supervisor.start_identity(child) is None
+
+
+def test_platform_and_pid_reuse_fail_closed(monkeypatch):
+    supervisor.platform_ready() # actual assigned uv interpreter / kernel syscalls
+    monkeypatch.setattr(supervisor.sys,"platform","darwin")
+    with pytest.raises(ValueError):supervisor.platform_ready()
+    assert supervisor.exact_signal(os.getpid(),"wrong-start-token",signal.SIGTERM) is False
+
+
+def test_cleanup_expired_budget_never_claims_proof():
+    assert supervisor.cleanup(time.monotonic()-1)["cleanup_proven"] is False
+
+
+@pytest.mark.parametrize("keep_parent",[False,True])
+def test_detached_closed_pipe_descendant_rejected_and_reaped(tmp_path,keep_parent):
+    marker=tmp_path/"detached-pid";sentinel=tmp_path/"late-write"
+    code="import os,time;from pathlib import Path;os.setsid();[os.close(fd) for fd in (0,1,2)];Path("+repr(str(marker))+").write_text(str(os.getpid()));time.sleep(4);Path("+repr(str(sentinel))+").write_text('BAD')"
+    script="const {spawn}=require('node:child_process');const p=spawn('/usr/bin/python3',['-c',"+json.dumps(code)+"],{stdio:'ignore'});p.unref();"+("setTimeout(()=>{},10000);" if keep_parent else "")
+    executor,repo,job=make_fixture(tmp_path,script=script)
+    job=replace(job,deadline_seconds=3)
+    result=executor.execute_job(job)
+    assert result["status"]=="failed"
+    assert result["cleanup"]["cleanup_proven"]
+    if marker.exists():assert supervisor.start_identity(int(marker.read_text())) is None
+    time.sleep(1.1)
+    assert not sentinel.exists()
+
+
+def test_abnormal_supervisor_death_preserves_durable_unknown(tmp_path):
+    running=tmp_path/"running-node"
+    body="require('node:fs').writeFileSync("+json.dumps(str(running))+",String(process.pid));setTimeout(()=>{},2000);"
+    executor,repo,job=make_fixture(tmp_path,script=body)
+    errors=[]
+    def run():
+        try:executor.execute_job(job)
+        except RepoSandboxError as exc:errors.append(exc)
+    thread=threading.Thread(target=run);thread.start()
+    deadline=time.monotonic()+10
+    while not running.exists() and time.monotonic()<deadline:time.sleep(.01)
+    assert running.exists()
+    marker=executor._read_job_marker(job.job_id)
+    assert supervisor.exact_signal(marker["pid"],marker["pid_start_identity"],signal.SIGKILL)
+    thread.join(5)
+    assert not thread.is_alive() and errors
+    fresh=NodeRepoRepairExecutor(executor.config,workspace_dir=executor.workspace_dir)
+    receipt=fresh.reconcile({"job_id":job.job_id,"authority_digest":job.authority_digest})
+    assert receipt["status"]=="unknown_external_effect" and not receipt["cleanup_proven"]
+    assert executor._read_job_marker(job.job_id)["cleanup_proven"] is False
+    with pytest.raises(RepoSandboxError):fresh.execute_job(job)
+    # This deliberately owned fixture self-exits in 2 seconds. No unrelated
+    # host PID is killed to manufacture a restart cleanup receipt.
+    time.sleep(2.2)
+
+
+def test_restart_missing_or_reused_identity_never_signals_unrelated(tmp_path):
+    executor,repo,job=make_fixture(tmp_path)
+    for pid,start in ((99999999,"missing"),(os.getpid(),"reused-start")):
+        executor._write_job_marker(job.job_id,{"job_id":job.job_id,"profile":PROFILE,"authority_digest":job.authority_digest,"attempt_id":"legacy-attempt","pid":pid,"pid_start_identity":start,"cleanup_proven":False,"phase":"worker_started"})
+        fresh=NodeRepoRepairExecutor(executor.config,workspace_dir=executor.workspace_dir)
+        assert fresh.cancel(job_id=job.job_id,authority={"authority_digest":job.authority_digest})["status"]=="unknown_external_effect"
+        assert not fresh.reconcile({"job_id":job.job_id})["cleanup_proven"]
+        assert supervisor.start_identity(os.getpid())
+
+
+def test_actual_pidfd_errno_and_unsupported_architecture(monkeypatch):
+    with pytest.raises(OSError):supervisor.pidfd_open(-1)
+    with pytest.raises(OSError):supervisor.pidfd_send(-1,0)
+    monkeypatch.setattr(supervisor.os,"uname",lambda:SimpleNamespace(machine="armv7l"))
+    with pytest.raises(ValueError):supervisor.platform_ready()
+
+
+def test_selected_node_platform_block_does_not_block_python_core(tmp_path,monkeypatch):
+    executor,repo,job=make_fixture(tmp_path)
+    monkeypatch.setattr(supervisor.sys,"platform","darwin")
+    assert executor.preflight().ok is False
+    from src.execution.repo_sandbox import build_repo_repair_executor,LocalRepoRepairExecutor
+    config=RepoSandboxSettings(enabled=True)
+    assert isinstance(build_repo_repair_executor(config),LocalRepoRepairExecutor)
+    python=LocalRepoRepairExecutor(config,workspace_dir=executor.workspace_dir)
+    assert python.preflight().ok is True
+
+
+def test_node_docker_selection_reports_unverified_posture(tmp_path):
+    executor,repo,job=make_fixture(tmp_path)
+    executor.config=executor.config.model_copy(update={"executor_kind":"docker_rootless"})
+    preflight=executor.preflight()
+    assert not preflight.ok and preflight.reason=="node_docker_profile_unverified"
+    assert preflight.posture["isolation_claim"]=="unverified"
+    assert "host_access" not in preflight.posture
+
+
+@pytest.mark.parametrize("code",[errno.ENOSYS,errno.EPERM])
+def test_kernel_facility_failures_block_without_pid_signal_fallback(monkeypatch,code):
+    def unavailable(pid):raise OSError(code,os.strerror(code))
+    monkeypatch.setattr(supervisor,"pidfd_open",unavailable)
+    with pytest.raises(OSError) as error:supervisor.platform_ready()
+    assert error.value.errno==code
+
+
+def test_node_launch_strips_dynamic_loader_and_runtime_environment(tmp_path,monkeypatch):
+    names=("LD_PRELOAD","LD_LIBRARY_PATH","DYLD_INSERT_LIBRARIES","PYTHONPATH","NODE_OPTIONS","npm_config_node_options")
+    for name in names:monkeypatch.setenv(name,"/tmp/deliberately-nonexistent-owned-input")
+    script="for(const name of "+json.dumps(names)+")if(process.env[name])throw Error(name);console.log('ENV_SCRUB_OK');"
+    executor,repo,job=make_fixture(tmp_path,script=script)
+    result=executor.execute_job(job)
+    assert result["status"]=="succeeded",result
+    assert b"ENV_SCRUB_OK" in result["outputs"]["pytest.stdout"]
+
+
+@pytest.mark.parametrize("field",["pid","pid_start_identity","supervisor_token","process_cleanup"])
+def test_terminal_node_missing_restart_proof_never_adopts_cleanup(tmp_path,field):
+    executor,repo,job=make_fixture(tmp_path)
+    assert executor.execute_job(job)["status"]=="succeeded"
+    marker=executor._read_job_marker(job.job_id)
+    del marker[field]
+    executor._write_job_marker(job.job_id,marker)
+    fresh=NodeRepoRepairExecutor(executor.config,workspace_dir=executor.workspace_dir)
+    receipt=fresh.reconcile({"job_id":job.job_id,"authority_digest":job.authority_digest})
+    assert receipt["status"]=="unknown_external_effect" and receipt["cleanup_proven"] is False
+
+
+def test_node_unknown_exception_mapping_preserves_old_python_behavior():
+    from src.api.workflows import _repo_change_execution_failure_status
+    unknown=RepoSandboxError("owned cleanup unproven",terminal_status="unknown_external_effect")
+    assert _repo_change_execution_failure_status(unknown,{"sandbox_profile":PROFILE})=="unknown_external_effect"
+    assert _repo_change_execution_failure_status(unknown,{"sandbox_profile":"repo-python-pytest-v1"})=="blocked"
+    assert _repo_change_execution_failure_status(unknown,{})=="blocked"
+    failed=RepoSandboxError("test failed",terminal_status="failed")
+    assert _repo_change_execution_failure_status(failed,{"sandbox_profile":"repo-python-pytest-v1"})=="failed"

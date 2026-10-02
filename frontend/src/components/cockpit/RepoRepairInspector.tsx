@@ -140,7 +140,7 @@ function normalizeExecutorMetadata(payload: Record<string, unknown>): Pick<
   if (posture.kind !== undefined && posture.kind !== executorKind) {
     throw new Error("The repair status response has mismatched executor posture metadata.");
   }
-  if (posture.profile !== undefined && posture.profile !== REPO_SANDBOX_PROFILE) {
+  if (posture.profile !== undefined && ![REPO_SANDBOX_PROFILE, "repo-node24-npm-v1"].includes(String(posture.profile))) {
     throw new Error("The repair status response has an unsupported executor profile.");
   }
   const imageDigest = posture.image_digest;
@@ -203,13 +203,28 @@ function normalizeExecutorMetadata(payload: Record<string, unknown>): Pick<
     ...(hostAccess === undefined ? {} : { host_access: hostAccess }),
     local_host_execution_required: effectiveLocalHost ?? executorKind === "local",
   };
+  if (posture.profile === "repo-node24-npm-v1") {
+    if (posture.execution_plan !== undefined) {
+      if (!isRecord(posture.execution_plan) || !Array.isArray(posture.execution_plan.commands) || posture.execution_plan.commands.length > 2) {
+        throw new Error("The Node repair execution plan is malformed.");
+      }
+      const commands = posture.execution_plan.commands;
+      if (commands.some((command) => !isRecord(command) || !["test", "build"].includes(String(command.script)) || typeof command.body !== "string" || command.body.length > 4096 || !Array.isArray(command.argv) || command.argv.length > 10 || command.argv.some((arg) => typeof arg !== "string" || arg.length > 512))) {
+        throw new Error("The Node repair command preview is malformed.");
+      }
+      postureValue.execution_plan = posture.execution_plan;
+    }
+    for (const key of ["node_version", "node_sha256", "npm_version", "dependency_limits", "process_supervision"]) {
+      postureValue[key] = posture[key];
+    }
+  }
   const optionalDigest = payload.executor_posture_digest;
   if (explicitExecutorKind
     ? (typeof optionalDigest !== "string" || !/^[0-9a-f]{64}$/.test(optionalDigest))
     : !isSafeDigest(optionalDigest)) {
     throw new Error("The repair status response has malformed posture digest metadata.");
   }
-  const expectedExecutorProfile = `${executorKind}:${REPO_SANDBOX_PROFILE}`;
+  const expectedExecutorProfile = `${executorKind}:${postureValue.profile}`;
   if (explicitExecutorKind && payload.executor_profile !== expectedExecutorProfile) {
     throw new Error("The repair status response has an unsupported executor profile.");
   }
@@ -862,7 +877,7 @@ export function RepoRepairInspector({
       <div className="mt-2 grid gap-1 text-[11px]">
         <div>Root <span className="font-mono break-all">{projectionForRender.job_id}</span> · authority <span className="font-mono">{safeDigest(projectionForRender.authority_digest)}</span></div>
         <div>Executor: <span className="font-mono">{executorProfile}</span> · posture <span className="font-mono">{safeDigest(projectionForRender.executor_posture_digest)}</span></div>
-        <div>Preflight: {projectionForRender.preflight?.status === "verified" ? "verified" : `blocked or unknown${projectionForRender.preflight && typeof projectionForRender.preflight.reason === "string" ? ` · ${projectionForRender.preflight.reason}` : ""}`}</div>
+        {posture.profile === "repo-node24-npm-v1" ? <div>Recorded job preflight: {typeof projectionForRender.preflight?.status === "string" ? projectionForRender.preflight.status : "blocked"}</div> : <div>Preflight: {projectionForRender.preflight?.status === "verified" ? "verified" : `blocked or unknown${projectionForRender.preflight && typeof projectionForRender.preflight.reason === "string" ? ` · ${projectionForRender.preflight.reason}` : ""}`}</div>}
         <div>Preparation: {preparationReady ? "ready" : "blocked"} · execution: {executionReady ? "ready" : localHostExecution && preparationReady ? "awaiting exact host approval" : "blocked"}</div>
         <div>Posture: isolation {posture.isolation_claim ?? "unknown"} · network {posture.network_isolation ?? "unknown"} · resources {posture.resource_enforcement ?? "unknown"}</div>
         {localHostExecution && <div className="text-amber-200">Trusted host execution: no isolation guarantee. This job may access the host filesystem and network as the Seraph user after the exact approval.</div>}
@@ -907,6 +922,15 @@ export function RepoRepairInspector({
           <div className="mt-1">Patch digest <span className="font-mono">{safeDigest(proposal.patch_sha256)}</span> · model profile {proposal.model_profile_id}</div>
           {approval && <div className="mt-1">Exact approval <span className="font-mono break-all">{approval.approval_id}</span> · {statusLabel(approval.status)}{approval.expires_at ? ` · expires ${new Date(approval.expires_at).toLocaleString()}` : ""}</div>}
           {localHostExecution && <div className="mt-1 text-amber-200">Host permission required: local filesystem and network access, host-user resource consumption, and bounded process execution are visible in the exact approval.</div>}
+          {posture.profile === "repo-node24-npm-v1" && <div className="mt-2" aria-label="Reviewed Node execution inputs">
+            <div>Node {String(posture.node_version ?? "unavailable")} · Linux process supervision · CPU, memory and PID ceilings unenforced.</div>
+            {isRecord(posture.execution_plan) && Array.isArray(posture.execution_plan.commands) && posture.execution_plan.commands.map((command) => isRecord(command) && <div key={String(command.script)} className="mt-1">
+              <div>{String(command.script)}: <code>{String(command.body)}</code></div>
+              <div className="font-mono break-all">Direct argv: {Array.isArray(command.argv) ? command.argv.join(" ") : "unavailable"}</div>
+            </div>)}
+            {isRecord(posture.execution_plan) && <div>Package {safeDigest(String(posture.execution_plan.package_sha256 ?? ""))} · lockfile {safeDigest(String(posture.execution_plan.lockfile_sha256 ?? ""))} · dependencies {safeDigest(String(posture.execution_plan.dependency_manifest_sha256 ?? ""))}</div>}
+            <div>npm and pre/post hooks are not executed. Existing dependencies are privately copied; no downloads.</div>
+          </div>}
           <div className="mt-2 flex flex-wrap gap-2">
             {approval?.status === "pending" && onOpenApprovals && <button type="button" className="cockpit-feedback-button" onClick={onOpenApprovals}>{localHostExecution ? "Approve local tests on this host" : "Review exact approval"}</button>}
             {approval?.status === "approved" && canResume && <button type="button" className="cockpit-feedback-button" onClick={() => void resumeApprovedProposal()} disabled={busy}>Resume approved repair</button>}

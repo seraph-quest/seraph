@@ -710,13 +710,22 @@ def _safe_routine_publication_binding(value: Any) -> dict[str, Any] | None:
     return safe
 
 
-def _safe_durable_authority(value: Any) -> dict[str, Any]:
+def _safe_durable_authority(
+    value: Any, *, repo_node_posture_expectation: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     safe = _safe_structure(value)
     if not isinstance(safe, dict) or not isinstance(value, Mapping):
         return safe if isinstance(safe, dict) else {}
     binding = _safe_routine_publication_binding(value.get("routine_binding"))
     if binding is not None:
         safe["routine_binding"] = binding
+    if value.get("sandbox_profile") == "repo-node24-npm-v1":
+        from src.execution.repo_node import safe_node_posture
+
+        posture = safe_node_posture(value, expected_posture=repo_node_posture_expectation)
+        if posture is None:
+            raise DurableJobIdempotencyConflict("Node posture requires independent selected-executor preflight facts")
+        safe["executor_posture"] = posture
     return safe
 
 
@@ -2103,7 +2112,12 @@ class DurableJobRepository:
                 "routine publication admission child checkpoint is stale"
             )
 
-    async def admit_job(self, spec: DurableJobSpec) -> dict[str, Any]:
+    async def admit_job(
+        self, spec: DurableJobSpec, *, repo_node_posture_expectation: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        # Internal server-only copy of actual selected Node preflight facts.
+        # A separate method argument cannot be supplied by spec/request
+        # serialization and is never persisted as durable authority itself.
         identity = spec.identity
         if not spec.declared_authority:
             raise ValueError("declared_authority is required before admission")
@@ -2153,7 +2167,10 @@ class DurableJobRepository:
             dedupe_key=identity.idempotency_key,
         )
         authority_digest = _digest(spec.declared_authority)
-        safe_authority = _safe_durable_authority(spec.declared_authority)
+        safe_authority = _safe_durable_authority(
+            spec.declared_authority,
+            repo_node_posture_expectation=repo_node_posture_expectation,
+        )
         root_run_identity = identity.job_id
         branch_depth = 0
         native_procedure_leaf = False
@@ -2673,6 +2690,7 @@ class DurableJobRepository:
         owner: str,
         fencing_token: int,
         expected_revision: int | None = None,
+        repo_node_posture_expectation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Bind the durable approval row to a leased job exactly once.
 
@@ -2693,6 +2711,12 @@ class DurableJobRepository:
             current = _json_load(getattr(run, "declared_authority_json", None), {})
             if not isinstance(current, Mapping):
                 raise DurableJobTransitionError("durable authority metadata is malformed")
+            if current.get("sandbox_profile") == "repo-node24-npm-v1":
+                # Check the original complete outer authority before adding
+                # an approval id; a recomputed inner hash cannot repair drift.
+                if _digest(current) != run.authority_digest:
+                    raise DurableJobIdempotencyConflict("Node durable authority digest changed")
+                _safe_durable_authority(current, repo_node_posture_expectation=repo_node_posture_expectation)
             existing_id = _authority_approval_id(current)
             if existing_id:
                 if existing_id == approval_id:
@@ -2721,6 +2745,9 @@ class DurableJobRepository:
             self._assert_lease(run, owner=owner, fencing_token=fencing_token)
             bound_authority = dict(current)
             bound_authority["approval_id"] = approval_id
+            safe_bound_authority = _safe_durable_authority(
+                bound_authority, repo_node_posture_expectation=repo_node_posture_expectation,
+            )
             conditions = [
                 WorkflowRunState.run_identity == job_id,
                 WorkflowRunState.status == "running",
@@ -2735,8 +2762,8 @@ class DurableJobRepository:
                 .execution_options(synchronize_session=False)
                 .where(*conditions)
                 .values(
-                    declared_authority_json=_canonical(_safe_structure(bound_authority)),
-                    approval_context_json=_canonical(_safe_structure(bound_authority)),
+                    declared_authority_json=_canonical(safe_bound_authority),
+                    approval_context_json=_canonical(safe_bound_authority),
                     authority_digest=_digest(bound_authority),
                     updated_at=now,
                     heartbeat_at=now,

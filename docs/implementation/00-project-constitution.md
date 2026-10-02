@@ -77,6 +77,7 @@ The following architecture decisions are normative:
 4. [ADR-004: GPU core and paired Mac edge](./decisions/004-gpu-core-mac-edge-topology.md)
 5. [ADR-005: Epic integration branch workflow](./decisions/005-epic-integration-branch-workflow.md)
 6. [ADR-006: OpenRouter-only inference phase](./decisions/006-openrouter-only-inference-phase.md)
+7. [ADR-007: Bounded Node repair and Linux process supervision](./decisions/007-bounded-node-repair-supervision.md)
 
 Changing a locked decision requires a superseding ADR, a tracked issue, an
 independent Critic/Contrarian review, and updates to every affected active doc.

@@ -10,11 +10,11 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 from pathlib import PurePosixPath
-import resource
 import shutil
 import signal
 import stat
@@ -23,7 +23,7 @@ import sys
 import tarfile
 import threading
 import time
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable, Mapping
 
 
 PROFILE = "repo-python-pytest-v1"
@@ -40,9 +40,115 @@ MAX_WALL_SECONDS = 180
 MAX_ALLOWED_PATHS = 64
 MAX_ALLOWED_PATH_BYTES = 4096
 
+# The local executor invokes the trusted interpreter with ``-I`` and imports
+# pytest before adding the staged checkout to sys.path.  This prevents a
+# staged ``pytest.py``/``pytest`` package from replacing the server-owned test
+# runner while still allowing the tests to import their staged project.
+_LOCAL_PYTEST_BOOTSTRAP = (
+    "import os,sys; import pytest; sys.path.insert(0, os.getcwd()); "
+    "raise SystemExit(pytest.main(sys.argv[1:]))"
+)
+
 
 class WorkerInputError(ValueError):
     """Input was not part of the fixed worker contract."""
+
+
+def _proc_start_identity(pid: int) -> str | None:
+    """Return Linux's process-start token for PID-reuse protection."""
+
+    try:
+        raw = Path(f"/proc/{int(pid)}/stat").read_text(encoding="utf-8")
+        fields = raw.rsplit(")", 1)[1].split()
+        return fields[19] if len(fields) > 19 else None
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+
+
+def _process_group_members(pgid: int) -> dict[int, str | None]:
+    """Read the current members of a server-created process group."""
+
+    members: dict[int, str | None] = {}
+    proc_root = Path("/proc")
+    try:
+        entries = tuple(proc_root.iterdir())
+    except OSError as exc:
+        raise WorkerInputError("process-group inspection is unavailable") from exc
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        try:
+            raw = (entry / "stat").read_text(encoding="utf-8")
+            fields = raw.rsplit(")", 1)[1].split()
+            # After the command name: state, ppid, pgrp, session.
+            if len(fields) < 4 or int(fields[2]) != int(pgid):
+                continue
+            members[pid] = fields[19] if len(fields) > 19 else None
+        except (OSError, UnicodeDecodeError, ValueError, IndexError):
+            # A process can disappear between /proc enumeration and stat read.
+            # Re-read on the next bounded pass; an unreadable live member is
+            # conservatively treated as quiescence failure by the caller.
+            continue
+    return members
+
+
+def _wait_process_group_quiescent(pgid: int, *, deadline_at: float | None) -> None:
+    """Require every ordinary child in the fixed process group to exit."""
+
+    while True:
+        members = _process_group_members(pgid)
+        if not members:
+            return
+        if deadline_at is None:
+            time.sleep(0.01)
+            continue
+        remaining = float(deadline_at) - time.monotonic()
+        if remaining <= 0:
+            raise WorkerInputError("worker process-group cleanup exceeded the wall deadline")
+        time.sleep(min(0.01, remaining))
+
+
+def _terminate_and_reap_process(
+    process: subprocess.Popen[bytes],
+    *,
+    deadline_at: float | None,
+) -> None:
+    """Kill and prove quiescence without adding a fixed post-deadline wait."""
+
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    remaining = 0.25 if deadline_at is None else max(0.0, min(0.25, float(deadline_at) - time.monotonic()))
+    try:
+        process.wait(timeout=remaining)
+    except subprocess.TimeoutExpired as exc:
+        raise WorkerInputError("worker process cleanup is unproven") from exc
+    _wait_process_group_quiescent(process.pid, deadline_at=deadline_at)
+
+
+def _reject_nested_process_group(
+    process: subprocess.Popen[bytes],
+    *,
+    deadline_at: float | None,
+) -> None:
+    """Kill ordinary descendants after the direct worker exits.
+
+    A successful direct exit is insufficient: a test can leave a child in the
+    same process group holding stage files or output pipes.  Kill that group
+    immediately and preserve an unknown outcome if quiescence cannot be
+    proven within the original deadline.
+    """
+
+    if not _process_group_members(process.pid):
+        return
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    _wait_process_group_quiescent(process.pid, deadline_at=deadline_at)
+    raise WorkerInputError("worker left a nested process running")
 
 
 def _descriptor_flags(*, directory: bool = False) -> int:
@@ -80,6 +186,20 @@ def _same_file_identity(left: os.stat_result, right: os.stat_result) -> bool:
         and left.st_dev == right.st_dev
         and left.st_ino == right.st_ino
     )
+
+
+def _pytest_package_identity() -> tuple[str, str]:
+    """Resolve the server-owned pytest package without staged imports."""
+
+    spec = importlib.util.find_spec("pytest")
+    origin = str(spec.origin or "") if spec is not None else ""
+    if not origin or origin in {"built-in", "frozen"}:
+        raise WorkerInputError("trusted pytest package is unavailable")
+    package_path = Path(origin).resolve(strict=True)
+    metadata = package_path.stat()
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+        raise WorkerInputError("trusted pytest package is not a regular file")
+    return str(package_path), hashlib.sha256(package_path.read_bytes()).hexdigest()
 
 
 def _same_file_metadata(left: os.stat_result, right: os.stat_result) -> bool:
@@ -385,10 +505,16 @@ def _run_fixed(
     cwd: Path,
     timeout: float,
     cpu_seconds: int | None = None,
+    allowed_executables: tuple[str, ...] = ("/usr/bin/git", "/usr/local/bin/pytest"),
+    environment: dict[str, str] | None = None,
+    deadline_at: float | None = None,
+    apply_cpu_limit: bool = True,
+    process_observer: Callable[[subprocess.Popen[bytes] | None], None] | None = None,
+    before_spawn: Callable[[], None] | None = None,
 ) -> tuple[int, bytes, bytes, bool]:
-    if not argv or argv[0] not in {"/usr/bin/git", "/usr/local/bin/pytest"}:
+    if not argv or argv[0] not in set(allowed_executables):
         raise WorkerInputError("worker command is not in the fixed profile")
-    env = {
+    env = environment or {
         "PATH": "/usr/local/bin:/usr/bin:/bin",
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
@@ -401,22 +527,36 @@ def _run_fixed(
         "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
         "GIT_CONFIG_NOSYSTEM": "1",
     }
-    def _limit_cpu() -> None:
-        if cpu_seconds is not None:
-            bounded = max(1, min(int(cpu_seconds), 120))
-            resource.setrlimit(resource.RLIMIT_CPU, (bounded, bounded))
-
-    process = subprocess.Popen(
-        argv,
-        cwd=str(cwd),
-        env=env,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        shell=False,
-        start_new_session=True,
-        preexec_fn=_limit_cpu,
-    )
+    # CPU limits are enforced by the selected executor's admission/posture
+    # contract (Docker cgroups where available).  Do not use ``preexec_fn``:
+    # this worker can be invoked from a threaded backend, and running Python
+    # code between fork and exec can deadlock while holding interpreter locks.
+    # Keep the parameters for the fixed worker call shape and manifest, but
+    # make wall deadline the only per-process enforcement performed here.
+    _ = cpu_seconds, apply_cpu_limit
+    popen_kwargs: dict[str, Any] = {
+        "cwd": str(cwd),
+        "env": env,
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "shell": False,
+        "start_new_session": True,
+    }
+    if deadline_at is not None and time.monotonic() >= float(deadline_at):
+        raise WorkerInputError("worker wall deadline expired before process spawn")
+    if before_spawn is not None:
+        try:
+            before_spawn()
+        except BaseException as exc:
+            raise WorkerInputError("worker dispatch fence rejected process spawn") from exc
+    process = subprocess.Popen(argv, **popen_kwargs)
+    if process_observer is not None:
+        try:
+            process_observer(process)
+        except BaseException as exc:
+            _terminate_and_reap_process(process, deadline_at=deadline_at)
+            raise WorkerInputError("worker process identity observation failed") from exc
     stdout_buffer = bytearray()
     stderr_buffer = bytearray()
 
@@ -432,24 +572,69 @@ def _run_fixed(
     stderr_thread = threading.Thread(target=_drain, args=(process.stderr, stderr_buffer), daemon=True)
     stdout_thread.start()
     stderr_thread.start()
+
+    def _join_output_threads() -> None:
+        """Drain child output without extending the trusted wall deadline."""
+
+        def _remaining() -> float:
+            if deadline_at is None:
+                return 5.0
+            return max(0.0, min(5.0, float(deadline_at) - time.monotonic()))
+
+        stdout_thread.join(timeout=_remaining())
+        stderr_thread.join(timeout=_remaining())
+        if stdout_thread.is_alive() or stderr_thread.is_alive():
+            raise WorkerInputError("worker output cleanup exceeded the wall deadline")
+
     try:
-        process.wait(timeout=timeout)
-        stdout_thread.join(timeout=5)
-        stderr_thread.join(timeout=5)
+        if deadline_at is not None:
+            remaining = float(deadline_at) - time.monotonic()
+            if remaining <= 0:
+                _terminate_and_reap_process(process, deadline_at=deadline_at)
+                raise WorkerInputError("worker wall deadline expired before process completion")
+            timeout = min(float(timeout), remaining)
+        process.wait(timeout=max(0.0, float(timeout)))
+        _reject_nested_process_group(process, deadline_at=deadline_at)
+        _join_output_threads()
+        _wait_process_group_quiescent(process.pid, deadline_at=deadline_at)
+        if process_observer is not None:
+            try:
+                process_observer(None)
+            except BaseException as exc:
+                raise WorkerInputError("worker terminal identity observation failed") from exc
         return int(process.returncode or 0), bytes(stdout_buffer), bytes(stderr_buffer), False
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.wait(timeout=5)
-        stdout_thread.join(timeout=5)
-        stderr_thread.join(timeout=5)
+        _terminate_and_reap_process(process, deadline_at=deadline_at)
+        _join_output_threads()
+        _wait_process_group_quiescent(process.pid, deadline_at=deadline_at)
+        if process_observer is not None:
+            try:
+                process_observer(None)
+            except BaseException as exc:
+                raise WorkerInputError("worker terminal identity observation failed") from exc
         return 124, bytes(stdout_buffer), bytes(stderr_buffer), True
 
 
-def _git(cwd: Path, *args: str, timeout: float = 20) -> tuple[int, bytes, bytes, bool]:
-    return _run_fixed(["/usr/bin/git", *args], cwd=cwd, timeout=timeout)
+def _git(
+    cwd: Path,
+    *args: str,
+    timeout: float = 20,
+    environment: dict[str, str] | None = None,
+    deadline_at: float | None = None,
+    apply_cpu_limit: bool = True,
+    process_observer: Callable[[subprocess.Popen[bytes] | None], None] | None = None,
+    before_spawn: Callable[[], None] | None = None,
+) -> tuple[int, bytes, bytes, bool]:
+    return _run_fixed(
+        ["/usr/bin/git", *args],
+        cwd=cwd,
+        timeout=timeout,
+        environment=environment,
+        deadline_at=deadline_at,
+        apply_cpu_limit=apply_cpu_limit,
+        process_observer=process_observer,
+        before_spawn=before_spawn,
+    )
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -459,16 +644,99 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_bytes(encoded + b"\n")
 
 
-def run_job(job_file: Path) -> int:
+def _open_private_output_directory(path: Path) -> int:
+    descriptor = _open_directory_descriptor(path)
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
+            raise WorkerInputError("local worker output directory is not private")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _write_private_output(path: Path, name: str, payload: bytes) -> None:
+    """Write one local output through a held no-follow directory descriptor."""
+
+    if not name or "/" in name or "\\" in name or "\x00" in name:
+        raise WorkerInputError("local worker output name is invalid")
+    directory_fd = _open_private_output_directory(path)
+    file_fd = -1
+    try:
+        file_fd = os.open(
+            name,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_TRUNC
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=directory_fd,
+        )
+        metadata = os.fstat(file_fd)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_nlink != 1
+        ):
+            raise WorkerInputError("local worker output file is not private")
+        offset = 0
+        while offset < len(payload):
+            offset += os.write(file_fd, payload[offset:])
+        os.fsync(file_fd)
+    finally:
+        if file_fd >= 0:
+            os.close(file_fd)
+        os.fsync(directory_fd)
+        os.close(directory_fd)
+
+
+def _write_worker_output_json(output: Path, payload: dict[str, Any], *, private: bool) -> None:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
+    if len(encoded) > MAX_OUTPUT_BYTES:
+        raise WorkerInputError("output JSON limit exceeded")
+    if private:
+        _write_private_output(output, "manifest.json", encoded)
+    else:
+        _write_json(output / "manifest.json", payload)
+
+
+def run_job(
+    job_file: Path,
+    *,
+    workspace_root: Path | None = None,
+    output_root: Path | None = None,
+    backend_kind: str = "docker_rootless",
+    pytest_executable: str = "/usr/local/bin/pytest",
+    environment: dict[str, str] | None = None,
+    process_observer: Callable[[subprocess.Popen[bytes] | None], None] | None = None,
+    before_spawn: Callable[[], None] | None = None,
+    deadline_at: float | None = None,
+    expected_identity: Mapping[str, str] | None = None,
+) -> int:
+    output = Path(output_root or "/out")
     try:
         job = _read_bounded_job_json(job_file)
         if job.get("profile") != PROFILE:
             raise WorkerInputError("unsupported worker profile")
+        if backend_kind not in {"local", "docker_rootless", "docker_rootful"}:
+            raise WorkerInputError("worker backend kind is invalid")
+        if backend_kind != "local" and pytest_executable != "/usr/local/bin/pytest":
+            raise WorkerInputError("Docker worker executable is fixed")
+        if backend_kind == "local" and Path(pytest_executable).absolute() != Path(sys.executable).absolute():
+            raise WorkerInputError("local worker executable is invalid")
         input_root = job_file.parent
         snapshot_root = input_root / "snapshot"
         patch_path = input_root / "patch.diff"
-        workspace = Path("/workspace")
-        output = Path("/out")
+        workspace = Path(workspace_root or "/workspace")
+        if not workspace.is_absolute() or not output.is_absolute():
+            raise WorkerInputError("worker roots must be absolute")
         allowed_paths = _validate_allowed_paths(job.get("allowed_paths"))
         patch_descriptor, _patch_stat = _open_source_regular_file(input_root, "patch.diff")
         try:
@@ -483,7 +751,14 @@ def run_job(job_file: Path) -> int:
         shutil.rmtree(workspace, ignore_errors=True)
         workspace.mkdir(parents=True, exist_ok=True)
         output.mkdir(parents=True, exist_ok=True)
+        wall_seconds = max(1, min(int(job.get("wall_seconds", MAX_WALL_SECONDS)), MAX_WALL_SECONDS))
+        if deadline_at is None:
+            deadline_at = time.monotonic() + wall_seconds
+        elif time.monotonic() >= float(deadline_at):
+            raise WorkerInputError("worker wall deadline expired before staging")
         _copy_snapshot(snapshot_root, workspace)
+        if time.monotonic() >= deadline_at:
+            raise WorkerInputError("worker wall deadline expired during staging")
         base_digest = tree_digest(workspace)
         expected_snapshot_digest = str(job.get("snapshot_digest") or "").strip()
         if not expected_snapshot_digest or expected_snapshot_digest != base_digest:
@@ -492,47 +767,146 @@ def run_job(job_file: Path) -> int:
         if expected_base_digest and expected_base_digest != base_digest:
             raise WorkerInputError("base digest does not match the approved preview")
         worker_image_digest = str(job.get("worker_image_digest") or "").strip()
-        if not worker_image_digest:
+        if backend_kind != "local" and not worker_image_digest:
             raise WorkerInputError("worker image digest is required")
         expected_patch_sha256 = str(job.get("patch_sha256") or "").strip().lower()
         actual_patch_sha256 = hashlib.sha256(patch).hexdigest()
         if expected_patch_sha256 and expected_patch_sha256 != actual_patch_sha256:
             raise WorkerInputError("patch digest does not match the approved artifact")
         cpu_seconds = max(1, min(int(job.get("cpu_seconds", 120)), 120))
-        code, _, git_error, timed_out = _git(workspace, "init", "--initial-branch=main")
+        worker_source_digest = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+        interpreter_entry = Path(sys.executable).absolute()
+        interpreter_target = interpreter_entry.resolve(strict=True)
+        interpreter_digest = hashlib.sha256(interpreter_target.read_bytes()).hexdigest()
+        pytest_package_path = ""
+        pytest_package_digest = ""
+        if backend_kind == "local":
+            pytest_package_path, pytest_package_digest = _pytest_package_identity()
+        pytest_digest = hashlib.sha256(Path(pytest_executable).resolve().read_bytes()).hexdigest()
+        if expected_identity is not None:
+            expected = {
+                "worker_source_sha256": worker_source_digest,
+                "interpreter_sha256": interpreter_digest,
+                "pytest_executable_sha256": pytest_digest,
+                "pytest_package_sha256": pytest_package_digest,
+            }
+            if any(str(expected_identity.get(key) or "") != value for key, value in expected.items()):
+                raise WorkerInputError("local worker runtime identity changed")
+
+        def _remaining_timeout(phase: str) -> float:
+            remaining = float(deadline_at) - time.monotonic()
+            if remaining <= 0:
+                raise WorkerInputError(f"worker wall deadline expired during {phase}")
+            return remaining
+
+        code, _, git_error, timed_out = _git(
+            workspace,
+            "init",
+            "--initial-branch=main",
+            environment=environment,
+            deadline_at=deadline_at,
+            apply_cpu_limit=backend_kind != "local",
+            process_observer=process_observer,
+            before_spawn=before_spawn,
+        )
         if code != 0 or timed_out:
             raise WorkerInputError("git init failed")
-        _git(workspace, "config", "user.email", "seraph-worker@localhost")
-        _git(workspace, "config", "user.name", "Seraph worker")
-        code, _, git_error, timed_out = _git(workspace, "add", "--all")
+        _git(workspace, "config", "user.email", "seraph-worker@localhost", timeout=_remaining_timeout("git config"), environment=environment, deadline_at=deadline_at, apply_cpu_limit=backend_kind != "local", process_observer=process_observer, before_spawn=before_spawn)
+        _git(workspace, "config", "user.name", "Seraph worker", timeout=_remaining_timeout("git config"), environment=environment, deadline_at=deadline_at, apply_cpu_limit=backend_kind != "local", process_observer=process_observer, before_spawn=before_spawn)
+        code, _, git_error, timed_out = _git(
+            workspace,
+            "add",
+            "--all",
+            environment=environment,
+            deadline_at=deadline_at,
+            apply_cpu_limit=backend_kind != "local",
+            process_observer=process_observer,
+            before_spawn=before_spawn,
+        )
         if code != 0 or timed_out:
             raise WorkerInputError("git add failed")
-        code, _, git_error, timed_out = _git(workspace, "commit", "--allow-empty", "-m", "seraph snapshot")
+        code, _, git_error, timed_out = _git(
+            workspace,
+            "commit",
+            "--allow-empty",
+            "-m",
+            "seraph snapshot",
+            environment=environment,
+            deadline_at=deadline_at,
+            apply_cpu_limit=backend_kind != "local",
+            process_observer=process_observer,
+            before_spawn=before_spawn,
+        )
         if code != 0 or timed_out:
             raise WorkerInputError("git baseline failed")
         patch_file = input_root / "patch.diff"
-        code, _, git_error, timed_out = _git(workspace, "apply", "--check", str(patch_file))
+        code, _, git_error, timed_out = _git(
+            workspace,
+            "apply",
+            "--check",
+            str(patch_file),
+            environment=environment,
+            deadline_at=deadline_at,
+            apply_cpu_limit=backend_kind != "local",
+            process_observer=process_observer,
+            before_spawn=before_spawn,
+        )
         if code != 0 or timed_out:
             raise WorkerInputError("patch check failed")
-        code, _, git_error, timed_out = _git(workspace, "apply", "--whitespace=nowarn", str(patch_file))
+        code, _, git_error, timed_out = _git(
+            workspace,
+            "apply",
+            "--whitespace=nowarn",
+            str(patch_file),
+            environment=environment,
+            deadline_at=deadline_at,
+            apply_cpu_limit=backend_kind != "local",
+            process_observer=process_observer,
+            before_spawn=before_spawn,
+        )
         if code != 0 or timed_out:
             raise WorkerInputError("patch apply failed")
+        pytest_argv = [pytest_executable, *test_args]
+        pytest_environment = environment
+        if backend_kind == "local":
+            pytest_argv = [pytest_executable, "-I", "-B", "-c", _LOCAL_PYTEST_BOOTSTRAP, *test_args]
+            pytest_environment = dict(environment or {})
+            pytest_environment.pop("PYTHONPATH", None)
         code, stdout, stderr, timed_out = _run_fixed(
-            ["/usr/local/bin/pytest", *test_args],
+            pytest_argv,
             cwd=workspace,
-            timeout=min(int(job.get("wall_seconds", MAX_WALL_SECONDS)), MAX_WALL_SECONDS),
+            timeout=max(0.01, deadline_at - time.monotonic()),
             cpu_seconds=cpu_seconds,
+            allowed_executables=("/usr/local/bin/pytest", pytest_executable),
+            environment=pytest_environment,
+            deadline_at=deadline_at,
+            apply_cpu_limit=backend_kind != "local",
+            process_observer=process_observer,
+            before_spawn=before_spawn,
         )
         stdout, stdout_truncated = _bounded_bytes(stdout, MAX_STREAM_BYTES)
         stderr, stderr_truncated = _bounded_bytes(stderr, MAX_STREAM_BYTES)
-        (output / "pytest.stdout").write_bytes(stdout)
-        (output / "pytest.stderr").write_bytes(stderr)
+        if backend_kind == "local":
+            _write_private_output(output, "pytest.stdout", stdout)
+            _write_private_output(output, "pytest.stderr", stderr)
+        else:
+            (output / "pytest.stdout").write_bytes(stdout)
+            (output / "pytest.stderr").write_bytes(stderr)
         after_digest = tree_digest(workspace)
         # ``git diff`` omits untracked files.  Stage the bounded post-test
         # workspace before exporting so an approved new file cannot silently
         # disappear from the durable artifact.  The sandbox validates the
         # resulting path set against both the allowlist and patch paths.
-        stage_code, _, stage_error, stage_timed_out = _git(workspace, "add", "--all", timeout=30)
+        stage_code, _, stage_error, stage_timed_out = _git(
+            workspace,
+            "add",
+            "--all",
+            timeout=max(0.01, deadline_at - time.monotonic()),
+            deadline_at=deadline_at,
+            apply_cpu_limit=backend_kind != "local",
+            process_observer=process_observer,
+            before_spawn=before_spawn,
+        )
         if stage_code != 0 or stage_timed_out:
             raise WorkerInputError("changed path staging failed")
         changed_code, changed_paths_raw, changed_error, changed_timed_out = _git(
@@ -544,7 +918,11 @@ def run_job(job_file: Path) -> int:
             "--no-renames",
             "--no-ext-diff",
             "--no-color",
-            timeout=30,
+            timeout=max(0.01, deadline_at - time.monotonic()),
+            deadline_at=deadline_at,
+            apply_cpu_limit=backend_kind != "local",
+            process_observer=process_observer,
+            before_spawn=before_spawn,
         )
         if changed_code != 0 or changed_timed_out:
             raise WorkerInputError("changed path export failed")
@@ -556,16 +934,24 @@ def run_job(job_file: Path) -> int:
             "--binary",
             "--no-ext-diff",
             "--no-color",
-            timeout=30,
+            timeout=max(0.01, deadline_at - time.monotonic()),
+            deadline_at=deadline_at,
+            apply_cpu_limit=backend_kind != "local",
+            process_observer=process_observer,
+            before_spawn=before_spawn,
         )
         if diff_code != 0 or diff_timed_out or len(diff) > MAX_OUTPUT_BYTES:
             raise WorkerInputError("diff export failed or exceeded limit")
         if patch_paths and not diff:
             raise WorkerInputError("diff export is missing approved patch paths")
-        (output / "diff.patch").write_bytes(diff)
+        if backend_kind == "local":
+            _write_private_output(output, "diff.patch", diff)
+        else:
+            (output / "diff.patch").write_bytes(diff)
         diff_sha256 = hashlib.sha256(diff).hexdigest()
         manifest = {
             "profile": PROFILE,
+            "backend_kind": backend_kind,
             "status": "succeeded" if code == 0 and not timed_out and not stdout_truncated and not stderr_truncated else "failed",
             "exit_code": code,
             "timed_out": timed_out,
@@ -574,7 +960,7 @@ def run_job(job_file: Path) -> int:
             "snapshot_digest": expected_snapshot_digest or base_digest,
             "patch_sha256": actual_patch_sha256,
             "worker_image_digest": worker_image_digest,
-            "worker_source_digest": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            "worker_source_digest": worker_source_digest,
             "diff_sha256": diff_sha256,
             "allowed_paths": sorted(allowed_paths),
             "patch_paths": patch_paths,
@@ -584,17 +970,89 @@ def run_job(job_file: Path) -> int:
             "stdout_truncated": stdout_truncated,
             "stderr_truncated": stderr_truncated,
         }
-        _write_json(output / "manifest.json", manifest)
-        _write_json(output / "readback.json", {**manifest})
+        execution_identity = {
+            "schema": "seraph.repo_repair_execution_identity.v1",
+            "backend_kind": backend_kind,
+            "profile": PROFILE,
+            "job_id": str(job.get("job_id") or ""),
+            "authority_digest": str(job.get("authority_digest") or ""),
+            "worker_source_sha256": worker_source_digest,
+        }
+        if backend_kind == "local":
+            execution_identity.update(
+                {
+                    "interpreter_entry_path": str(interpreter_entry),
+                    "interpreter_path": str(interpreter_target),
+                    "interpreter_sha256": interpreter_digest,
+                    "pytest_executable_path": str(Path(pytest_executable).absolute()),
+                    "pytest_executable_sha256": pytest_digest,
+                    "pytest_package_path": pytest_package_path,
+                    "pytest_package_sha256": pytest_package_digest,
+                }
+            )
+        else:
+            execution_identity.update(
+                {
+                    "worker_image_digest": worker_image_digest,
+                    "runtime_binding": "pinned_container_image",
+                }
+            )
+        manifest["execution_identity"] = execution_identity
+        _write_worker_output_json(output, manifest, private=backend_kind == "local")
+        if backend_kind == "local":
+            encoded_readback = json.dumps({**manifest}, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
+            _write_private_output(output, "readback.json", encoded_readback)
+        else:
+            _write_json(output / "readback.json", {**manifest})
         print("SERAPH_EXPORT_READY", flush=True)
         time.sleep(min(float(job.get("export_grace_seconds", 30)), 30.0))
         return 0 if manifest["status"] == "succeeded" else 1
     except (OSError, ValueError, WorkerInputError, json.JSONDecodeError) as exc:
-        output = Path("/out")
         output.mkdir(parents=True, exist_ok=True)
-        _write_json(output / "manifest.json", {"profile": PROFILE, "status": "blocked", "reason": str(exc)})
+        blocked = {"profile": PROFILE, "status": "blocked", "reason": str(exc)}
+        _write_worker_output_json(output, blocked, private=backend_kind == "local")
+        if backend_kind == "local":
+            encoded = json.dumps(blocked, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
+            _write_private_output(output, "readback.json", encoded)
+            _write_private_output(output, "diff.patch", b"")
+            _write_private_output(output, "pytest.stdout", b"")
+            _write_private_output(output, "pytest.stderr", b"")
         print(f"SERAPH_WORKER_BLOCKED: {type(exc).__name__}", file=sys.stderr, flush=True)
         return 2
+
+
+def run_local_job(
+    job_file: Path,
+    *,
+    workspace_root: Path,
+    output_root: Path,
+    pytest_executable: str,
+    environment: dict[str, str],
+    process_observer: Callable[[subprocess.Popen[bytes] | None], None] | None = None,
+    before_spawn: Callable[[], None] | None = None,
+    deadline_at: float | None = None,
+    expected_identity: Mapping[str, str] | None = None,
+) -> int:
+    """Run the fixed worker against server-owned local staged roots.
+
+    This is intentionally a narrow internal wrapper.  Local execution does
+    not invent a Docker image or pretend that this process is isolated; the
+    caller must have already admitted the trusted local posture and supplied
+    private staged roots/environment.
+    """
+
+    return run_job(
+        job_file,
+        workspace_root=workspace_root,
+        output_root=output_root,
+        backend_kind="local",
+        pytest_executable=pytest_executable,
+        environment=environment,
+        process_observer=process_observer,
+        before_spawn=before_spawn,
+        deadline_at=deadline_at,
+        expected_identity=expected_identity,
+    )
 
 
 def main() -> int:

@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-from config.settings import settings
+from config.settings import RepoSandboxSettings, settings
 from src.api.workflows import (
     RepoChangeCancelRequest,
     RepoChangePreviewRequest,
@@ -20,6 +20,9 @@ from src.api.workflows import (
     _repo_change_candidate_plan_matches,
     _repo_change_dispatch_payload,
     _repo_change_dispatch_contract,
+    _repo_change_execution_authority,
+    _preflight_approved_executor_for_cleanup,
+    _build_repo_repair_executor_for_authority,
     _repo_change_local_finalize_pending,
     _repo_change_patch_read_blocked,
     _repo_change_reconcile_verified_local_result,
@@ -35,7 +38,16 @@ from src.api.workflows import (
     retry_repo_change,
     _repo_change_safe_relative,
 )
-from src.execution.repo_sandbox import RepoSandboxError, RepoSandboxLimits, RootlessDockerRepoSandbox
+from src.execution.repo_sandbox import (
+    RepoSandboxError,
+    RepoSandboxLimits,
+    RootfulDockerRepoSandbox,
+    RootlessDockerRepoSandbox,
+    executor_posture_digest,
+    limits_digest,
+)
+from src.work_board.dispatcher import _assert_repo_repair_executor_authority
+from src.workflows.job_runtime import DurableJobError
 
 
 def test_repo_change_request_rejects_unknown_execution_controls():
@@ -60,6 +72,68 @@ def test_repo_change_identity_is_deterministic_and_owner_bound():
     other_owner = _repo_change_job_id("operator:two", "same-key")
     assert first == second
     assert first != other_owner
+
+
+def test_repo_repair_selector_drift_blocks_before_model_contact():
+    posture = {"kind": "docker_rootful", "profile": "repo-python-pytest-v1"}
+    preflight = SimpleNamespace(
+        ok=True,
+        posture=posture,
+        posture_digest=executor_posture_digest(posture),
+        as_receipt=lambda: {"ok": True, "posture": posture, "posture_digest": executor_posture_digest(posture)},
+    )
+    executor = SimpleNamespace(
+        kind="docker_rootful",
+        config=SimpleNamespace(
+            profile="repo-python-pytest-v1",
+            worker_image_digest="",
+            docker_socket="/var/run/docker.sock",
+        ),
+        limits=RepoSandboxLimits(),
+    )
+    with pytest.raises(DurableJobError, match="executor_authority_changed"):
+        _assert_repo_repair_executor_authority(
+            {
+                "executor_kind": "docker_rootless",
+                "executor_profile": "docker_rootless:repo-python-pytest-v1",
+                "executor_posture": {"kind": "docker_rootless", "profile": "repo-python-pytest-v1"},
+                "executor_posture_digest": "a" * 64,
+            },
+            executor,
+            preflight,
+        )
+
+
+def test_repo_repair_cleanup_rejects_fresh_posture_drift(monkeypatch: pytest.MonkeyPatch):
+    expected_posture = {"kind": "docker_rootful", "profile": "repo-python-pytest-v1"}
+
+    class ProbeConfig:
+        def model_copy(self, *, update):
+            return self
+
+    class ProbeExecutor:
+        kind = "docker_rootful"
+
+        def preflight(self, authority):
+            return SimpleNamespace(
+                ok=True,
+                executor_kind="docker_rootful",
+                posture=expected_posture,
+                posture_digest="b" * 64,
+            )
+
+    monkeypatch.setattr(
+        "src.api.workflows.build_repo_repair_executor",
+        lambda *, config: ProbeExecutor(),
+    )
+    with pytest.raises(RepoSandboxError, match="posture changed"):
+        _preflight_approved_executor_for_cleanup(
+            SimpleNamespace(kind="docker_rootful", config=ProbeConfig()),
+            {
+                "executor_kind": "docker_rootful",
+                "executor_posture_digest": "a" * 64,
+            },
+        )
 
 
 def test_repo_change_paths_block_escape():
@@ -202,6 +276,126 @@ def test_dispatch_payload_uses_the_post_claim_attempt_count():
         },
     )
     assert valid and reason == ""
+
+
+def test_cancel_authority_keeps_original_dispatch_attempt_and_fence():
+    job = {
+        "job_id": "repo-change-" + "2" * 32,
+        "declared_authority": {
+            "executor_kind": "local",
+            "attempt_id": "attempt-original",
+            "authority_digest": "a" * 64,
+        },
+        "lease": {"owner": "service:recovery", "fencing_token": 99},
+        "checkpoints": [
+            {
+                "payload": {
+                    "phase": "executor_dispatch_reserved",
+                    "attempt_id": "attempt-original",
+                    "fencing_token": 7,
+                }
+            }
+        ],
+    }
+    authority = _repo_change_execution_authority(job)
+    assert authority["attempt_id"] == "attempt-original"
+    assert authority["fencing_token"] == 7
+    assert authority["fencing_token"] != job["lease"]["fencing_token"]
+
+
+def test_dispatch_contract_recovers_redacted_payload_fence_from_server_envelope():
+    job_id = "repo-change-" + "3" * 32
+    token = RootlessDockerRepoSandbox._server_token(job_id)
+    checkpoint = {
+        "checkpoint_id": "executor_dispatch_reserved",
+        # This top-level receipt field is the server-owned CAS envelope.
+        "fencing_token": 7,
+        "payload": {
+            "phase": "executor_dispatch_reserved",
+            "job_id": job_id,
+            "attempt": 1,
+            "attempt_id": "attempt-original",
+            "fencing_token": "[redacted]",
+            "authority_digest": "a" * 64,
+            "base_digest": "b" * 64,
+            "executor_kind": "local",
+            "process_group_identity": f"{token}-local",
+        },
+    }
+    job = {
+        "job_id": job_id,
+        "attempt_count": 1,
+        "authority_digest": "a" * 64,
+        "declared_authority": {
+            "executor_kind": "local",
+            "attempt_id": "attempt-original",
+        },
+        "checkpoints": [checkpoint],
+    }
+    authority = {
+        "executor_kind": "local",
+        "attempt_id": "attempt-original",
+        "base_digest": "b" * 64,
+    }
+
+    valid, reason, payload = _repo_change_dispatch_contract(job, authority)
+    assert valid and reason == ""
+    assert payload is not None and payload["fencing_token"] == 7
+    assert _repo_change_execution_authority(job, payload)["fencing_token"] == 7
+
+    forged_payload = {**checkpoint["payload"], "fencing_token": 99}
+    forged_job = {
+        **job,
+        "checkpoints": [{**checkpoint, "payload": forged_payload}],
+    }
+    forged_valid, forged_reason, _ = _repo_change_dispatch_contract(forged_job, authority)
+    assert not forged_valid
+    assert forged_reason == "recovery_dispatch_contract_mismatch"
+
+
+def _rootful_executor_authority() -> tuple[RepoSandboxSettings, dict[str, object]]:
+    image = "registry.example/seraph/repo-worker@sha256:" + "a" * 64
+    config = RepoSandboxSettings(
+        executor_kind="docker_rootful",
+        enabled=True,
+        docker_socket="unix:///run/docker.sock",
+        worker_image_digest=image,
+        profile="repo-python-pytest-v1",
+    )
+    executor = RootfulDockerRepoSandbox(config=config)
+    posture = {"kind": "docker_rootful", "profile": config.profile}
+    return config, {
+        "executor_kind": "docker_rootful",
+        "executor_profile": f"docker_rootful:{config.profile}",
+        "sandbox_profile": config.profile,
+        "sandbox_image_digest": image,
+        "sandbox_limits_digest": limits_digest(executor.limits),
+        "sandbox_socket_digest": hashlib.sha256(config.docker_socket.encode()).hexdigest(),
+        "executor_posture": posture,
+        "executor_posture_digest": executor_posture_digest(posture),
+    }
+
+
+def test_approved_rootful_executor_selection_is_provider_free(monkeypatch: pytest.MonkeyPatch):
+    config, authority = _rootful_executor_authority()
+    monkeypatch.setattr(
+        "src.execution.repo_sandbox._effective_repo_sandbox_settings",
+        lambda: config,
+    )
+    selected = _build_repo_repair_executor_for_authority(authority)
+    assert isinstance(selected, RootfulDockerRepoSandbox)
+    assert selected.kind == "docker_rootful"
+
+
+def test_approved_rootful_executor_rejects_mutated_socket_before_contact(monkeypatch: pytest.MonkeyPatch):
+    config, authority = _rootful_executor_authority()
+    monkeypatch.setattr(
+        "src.execution.repo_sandbox._effective_repo_sandbox_settings",
+        lambda: config,
+    )
+    authority["sandbox_socket_digest"] = "f" * 64
+    with pytest.raises(RepoSandboxError, match="socket changed"):
+        _build_repo_repair_executor_for_authority(authority)
 
 
 @pytest.mark.parametrize("existing_status", ["succeeded", "running"])

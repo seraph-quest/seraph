@@ -679,6 +679,62 @@ describe("CockpitView", () => {
     expect(screen.queryByText("Operator terminal", { selector: ".cockpit-window-title" })).not.toBeInTheDocument();
   });
 
+  it("shows the exact local host approval label in the pending approvals pane", async () => {
+    mockCockpitBaselineFetch(fetchMock, {});
+    const baselineFetch = fetchMock.getMockImplementation();
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/auth/session")) {
+        return Promise.resolve(mockResponse({ authenticated: true, principal_id: "operator:one", session_id: "session-1" }));
+      }
+      if (url.includes("/api/approvals/pending")) {
+        return Promise.resolve(mockResponse([{
+          id: "approval-local-1",
+          tool_name: "engineering.repo-repair.v1",
+          risk_level: "high",
+          status: "pending",
+          summary: "Review the local staged repository tests",
+          created_at: "2026-10-01T08:00:00Z",
+          owner_principal_id: "operator:one",
+          operator_session_id: "session-1",
+          session_id: "session-1",
+          expires_at: "2099-01-01T00:00:00Z",
+          approval_scope: { target: { type: "repository", reference: "digest:repo" } },
+          permissions: { required_permissions: ["local_host_execution"] },
+        }]));
+      }
+      return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
+    });
+
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
+    expect(await screen.findByRole("button", { name: "Approve local tests on this host" })).toBeInTheDocument();
+    expect(screen.getByText(/Host permission · no isolation guarantee/i)).toBeInTheDocument();
+  });
+
+  it("does not infer host execution from a local-looking approval summary", async () => {
+    mockCockpitBaselineFetch(fetchMock, {});
+    const baselineFetch = fetchMock.getMockImplementation();
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/approvals/pending")) {
+        return Promise.resolve(mockResponse([{
+          id: "approval-summary-only",
+          tool_name: "engineering.repo-repair.v1",
+          extension_action: "repo_repair.resolve",
+          risk_level: "high",
+          status: "pending",
+          summary: "Review the local staged repository tests",
+          created_at: "2026-10-01T08:00:00Z",
+        }]));
+      }
+      return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
+    });
+
+    renderLegacyCockpit(<CockpitView onSend={() => {}} />);
+    expect(await screen.findByRole("button", { name: "Approve" })).toBeInTheDocument();
+    expect(screen.queryByText(/Host permission · no isolation guarantee/i)).not.toBeInTheDocument();
+  });
+
   it("reads a ninth install approval by exact id instead of substituting the capped list", async () => {
     mockCockpitBaselineFetch(fetchMock, {});
     const baselineFetch = fetchMock.getMockImplementation();

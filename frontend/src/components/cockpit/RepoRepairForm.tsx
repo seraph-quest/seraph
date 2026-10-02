@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 
+import { API_URL } from "../../config/constants";
+import { apiFetch } from "../../lib/api";
 import type { GoalInfo, WorkBoardTask, WorkBoardTaskCreateRequest } from "../../types";
 import {
   createRepoRepairInputArtifact,
@@ -23,6 +25,8 @@ const MAX_EVIDENCE_REFS = 16;
 const MAX_PATH_BYTES = 512;
 const MAX_REFERENCE_BYTES = 512;
 const REQUEST_TIMEOUT_MS = 15_000;
+const EXECUTION_METADATA_TIMEOUT_MS = 10_000;
+const LOCAL_HOST_ACCESS = "explicit_job_approval_required";
 export const REPO_REPAIR_TASK_BODY = "Repository repair request submitted for server-owned inspection and governed execution.";
 const ALLOWED_TEST_FLAGS = new Set(["-q", "-x", "--maxfail=1", "--disable-warnings"]);
 const SECRET_PATH_PARTS = new Set([
@@ -45,6 +49,101 @@ const SECRET_PATH_PARTS = new Set([
 const BINARY_SUFFIXES = new Set([
   ".7z", ".bin", ".bmp", ".class", ".db", ".dll", ".gif", ".ico", ".jar", ".jpeg", ".jpg", ".lock", ".mp3", ".mp4", ".o", ".pdf", ".png", ".pyc", ".so", ".sqlite", ".tar", ".wasm", ".webp", ".zip", ".key", ".pem", ".p12", ".pfx",
 ]);
+
+type RepoRepairExecutorKind = "local" | "docker_rootless" | "docker_rootful";
+
+interface RepoRepairExecutionMetadata {
+  executor_kind: RepoRepairExecutorKind;
+  executor_profile: string;
+  executor_posture: {
+    isolation_claim: string;
+    network_isolation: string;
+    resource_enforcement: string;
+    host_access?: string;
+    local_host_execution_required: boolean;
+  };
+  executor_posture_digest: string;
+  local_host_approval_required: boolean;
+  preparation_ready: boolean;
+  execution_ready: boolean;
+  preflight: { ok?: boolean; status?: string; reason?: string };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function isExecutorKind(value: unknown): value is RepoRepairExecutorKind {
+  return value === "local" || value === "docker_rootless" || value === "docker_rootful";
+}
+
+function boundedMetadata(value: unknown, max = 512): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= max && !value.includes("\u0000");
+}
+
+function parseExecutionMetadata(value: unknown): RepoRepairExecutionMetadata | null {
+  if (!isRecord(value)) return null;
+  const explicit = value.executor_kind !== undefined;
+  const kind: RepoRepairExecutorKind = explicit
+    ? value.executor_kind as RepoRepairExecutorKind
+    : "docker_rootless";
+  if (explicit && !isExecutorKind(value.executor_kind)) return null;
+  const expectedProfile = `${kind}:repo-python-pytest-v1`;
+  if (explicit && value.executor_profile !== expectedProfile) return null;
+  if (!explicit && value.executor_profile !== undefined && value.executor_profile !== expectedProfile) return null;
+  if (!isRecord(value.executor_posture) && explicit) return null;
+  const posture = isRecord(value.executor_posture) ? value.executor_posture : {
+    isolation_claim: "unverified",
+    network_isolation: "unverified",
+    resource_enforcement: "unverified",
+    local_host_execution_required: false,
+  };
+  if (explicit && ["kind", "profile", "isolation_claim", "network_isolation", "resource_enforcement", "limits_digest"].some((key) => !Object.prototype.hasOwnProperty.call(posture, key))) return null;
+  if (posture.kind !== undefined && posture.kind !== kind) return null;
+  if (posture.profile !== undefined && posture.profile !== "repo-python-pytest-v1") return null;
+  if (!boundedMetadata(posture.isolation_claim, 128) || !boundedMetadata(posture.network_isolation, 128) || !boundedMetadata(posture.resource_enforcement, 128)) return null;
+  const hostAccess = posture.host_access;
+  if (hostAccess !== undefined && (!boundedMetadata(hostAccess, 128) || (kind !== "local" || hostAccess !== LOCAL_HOST_ACCESS))) return null;
+  const localHost = posture.local_host_execution_required;
+  const effectiveLocalHost = localHost === undefined && hostAccess === LOCAL_HOST_ACCESS ? true : localHost;
+  if (explicit && typeof effectiveLocalHost !== "boolean") return null;
+  if (localHost !== undefined && typeof localHost !== "boolean") return null;
+  if (kind === "local" && effectiveLocalHost !== true) return null;
+  if (kind !== "local" && effectiveLocalHost !== false) return null;
+  if (hostAccess === LOCAL_HOST_ACCESS && effectiveLocalHost !== true) return null;
+  const digest = value.executor_posture_digest;
+  if (explicit ? (typeof digest !== "string" || !/^[0-9a-f]{64}$/.test(digest)) : (digest !== undefined && digest !== null && (typeof digest !== "string" || !/^[0-9a-f]{64}$/.test(digest)))) return null;
+  const preflight = isRecord(value.preflight) ? value.preflight : null;
+  if (!preflight || (explicit && typeof preflight.status !== "string")) return null;
+  if (preflight.ok !== undefined && typeof preflight.ok !== "boolean") return null;
+  if (preflight.status !== undefined && !boundedMetadata(preflight.status, 128)) return null;
+  if (preflight.reason !== undefined && !boundedMetadata(preflight.reason, 512)) return null;
+  if (explicit && (typeof value.local_host_approval_required !== "boolean"
+    || typeof value.preparation_ready !== "boolean"
+    || typeof value.execution_ready !== "boolean"
+    || value.local_host_approval_required !== effectiveLocalHost
+    || (kind === "local" && value.execution_ready === true))) return null;
+  return {
+    executor_kind: kind,
+    executor_profile: typeof value.executor_profile === "string" ? value.executor_profile : expectedProfile,
+    executor_posture: {
+      isolation_claim: posture.isolation_claim,
+      network_isolation: posture.network_isolation,
+      resource_enforcement: posture.resource_enforcement,
+      ...(hostAccess === undefined ? {} : { host_access: hostAccess }),
+      local_host_execution_required: effectiveLocalHost as boolean,
+    },
+    executor_posture_digest: typeof digest === "string" ? digest : "",
+    local_host_approval_required: explicit ? value.local_host_approval_required as boolean : kind === "local",
+    preparation_ready: explicit ? value.preparation_ready as boolean : preflight.ok === true,
+    execution_ready: explicit ? value.execution_ready as boolean : preflight.ok === true && kind !== "local",
+    preflight: {
+      ok: preflight.ok as boolean | undefined,
+      status: preflight.status as string | undefined,
+      reason: preflight.reason as string | undefined,
+    },
+  };
+}
 
 export interface RepoRepairDraft {
   goalId: string;
@@ -227,6 +326,9 @@ export function RepoRepairForm({
   const [submitState, setSubmitState] = useState<"idle" | "submitting">("idle");
   const [formError, setFormError] = useState<string | null>(null);
   const [submissionReceipt, setSubmissionReceipt] = useState<RepoRepairSubmissionReceipt | null>(null);
+  const [executionMetadata, setExecutionMetadata] = useState<RepoRepairExecutionMetadata | null>(null);
+  const [executionMetadataState, setExecutionMetadataState] = useState<"loading" | "ready" | "unavailable">("loading");
+  const [executionMetadataError, setExecutionMetadataError] = useState<string | null>(null);
   const mountedRef = useRef(true);
   const pendingRef = useRef<PendingRepoRepairSubmission | null>(initialPending);
   const submitControllerRef = useRef<AbortController | null>(null);
@@ -251,6 +353,42 @@ export function RepoRepairForm({
     return () => {
       mountedRef.current = false;
       submitControllerRef.current?.abort();
+    };
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let deadlineExpired = false;
+    const timeout = window.setTimeout(() => {
+      deadlineExpired = true;
+      controller.abort();
+    }, EXECUTION_METADATA_TIMEOUT_MS);
+    setExecutionMetadataState("loading");
+    setExecutionMetadataError(null);
+    void (async () => {
+      try {
+        const response = await apiFetch(`${API_URL}/api/settings/repo-sandbox`, { signal: controller.signal });
+        const payload = await response.json().catch(() => null);
+        if (!response.ok) throw new Error("The effective repository executor receipt is unavailable.");
+        const parsed = parseExecutionMetadata(payload);
+        if (!parsed) throw new Error("The effective repository executor receipt is incomplete or malformed.");
+        if (mountedRef.current && !controller.signal.aborted) {
+          setExecutionMetadata(parsed);
+          setExecutionMetadataState("ready");
+        }
+      } catch (cause) {
+        if (mountedRef.current && (deadlineExpired || !controller.signal.aborted)) {
+          setExecutionMetadata(null);
+          setExecutionMetadataState("unavailable");
+          setExecutionMetadataError(deadlineExpired ? "The effective repository executor receipt timed out." : cause instanceof Error ? cause.message : "The effective repository executor receipt is unavailable.");
+        }
+      } finally {
+        window.clearTimeout(timeout);
+      }
+    })();
+    return () => {
+      window.clearTimeout(timeout);
+      controller.abort();
     };
   }, []);
 
@@ -413,6 +551,22 @@ export function RepoRepairForm({
         {formError && <div className="mt-3 rounded border border-amber-500/40 p-2 text-sm" role="alert">{formError}</div>}
         {submissionReceipt && <div className="mt-3 rounded border border-emerald-500/40 p-2 text-sm" role="status">Input artifact reserved: <span className="font-mono break-all">{submissionReceipt.artifactId}</span> · SHA-256 <span className="font-mono break-all">{submissionReceipt.digest}</span></div>}
         {pending && <div className="mt-3 rounded border border-cyan-500/40 p-2 text-sm" role="status"><div>Exact request is retained for manual reconciliation. No new key or payload will be generated.</div>{pending.artifact && <div className="mt-1 font-mono text-xs break-all">Artifact {pending.artifact.artifact_id} · SHA-256 {pending.artifact.typed_input_digest}</div>}</div>}
+        <section className="mt-3 rounded border border-white/15 bg-black/20 p-2 text-[11px]" aria-label="Repository execution readiness">
+          <div className="font-semibold">Effective repository execution receipt</div>
+          {executionMetadataState === "loading" && <div className="mt-1 text-amber-200">Loading server-owned executor and preflight metadata…</div>}
+          {executionMetadataState === "unavailable" && (
+            <div className="mt-1 text-amber-200">Effective executor unavailable · readiness unknown. The server will decide whether this Todo can proceed.{executionMetadataError ? ` ${executionMetadataError}` : ""}</div>
+          )}
+          {executionMetadataState === "ready" && executionMetadata && (
+            <div className="mt-1 grid gap-1">
+              <div>Effective executor: <span className="font-mono">{executionMetadata.executor_profile}</span></div>
+              <div>Preflight: {executionMetadata.preflight.ok ? "verified" : "blocked or unknown"}{executionMetadata.preflight.reason ? ` · ${executionMetadata.preflight.reason}` : ""}</div>
+              <div>Preparation: {executionMetadata.preparation_ready ? "ready" : "blocked"} · execution: {executionMetadata.execution_ready ? "ready" : executionMetadata.local_host_approval_required && executionMetadata.preparation_ready ? "awaiting exact host approval" : "blocked"}</div>
+              <div>Posture: isolation {executionMetadata.executor_posture.isolation_claim} · network {executionMetadata.executor_posture.network_isolation} · resources {executionMetadata.executor_posture.resource_enforcement}</div>
+              {executionMetadata.local_host_approval_required && <div className="text-amber-200">Local host execution requires the exact per-job approval; this form has no authority to grant it.</div>}
+            </div>
+          )}
+        </section>
         <fieldset disabled={Boolean(pending) || submitState === "submitting"} className="mt-3 grid gap-3">
           <div className="grid gap-3 sm:grid-cols-2">
             <label>Owned active goal<select aria-label="Repair goal" className="cockpit-input mt-1 w-full" required value={goalId} onChange={(event) => setGoalId(event.currentTarget.value)}><option value="">Choose an active goal</option>{activeGoals.map((goal) => <option key={goal.id} value={goal.id}>{goal.title} · revision {goal.revision}</option>)}</select></label>

@@ -11,13 +11,14 @@ import os
 from pathlib import Path
 import stat
 from types import SimpleNamespace
+import uuid
 
 import pytest
 from sqlmodel import select
 
 from config.settings import RepoSandboxSettings, settings
 from src.execution import repo_sandbox as repo_sandbox_module
-from src.execution.repo_sandbox import RootlessDockerRepoSandbox
+from src.execution.repo_sandbox import LocalRepoRepairExecutor, RootlessDockerRepoSandbox, executor_posture_digest
 from src.auth.service import create_session
 from src.db.models import (
     ApprovalRequest,
@@ -36,6 +37,17 @@ from src.db.models import (
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal, canonical_digest
 from src.goals.contracts import GoalAdmissionBudget
 from src.goals.repository import serialize_admission_budget
+from src.model_fabric.configuration import (
+    ModelFabricConfiguration,
+    OpenRouterSetup,
+    openrouter_profile_for_setup,
+    write_model_fabric_configuration,
+)
+from src.model_fabric.contracts import EndpointClass
+from src.model_fabric.proofs import build_model_route_proof
+from src.model_fabric.receipts import RouteReceipt
+from src.model_fabric.repository import model_fabric_repository
+from src.security.trust_contract import EgressClass
 from src.work_board.contracts import (
     WorkBoardInputArtifactCreate,
     WorkBoardOwner,
@@ -58,6 +70,139 @@ from src.workflows.repo_repair import (
 from src.workflows.job_runtime import DurableJobTransitionError, durable_job_repository
 
 
+@pytest.mark.asyncio
+async def test_repo_repair_public_projection_normalizes_minimal_docker_posture():
+    """Public status gets typed labels while retaining raw approval evidence."""
+
+    from src.api.workflows import _safe_repo_repair_projection
+
+    raw_posture = {
+        "kind": "docker_rootful",
+        "profile": "repo-python-pytest-v1",
+        "rootless": None,
+        "limits_digest": None,
+        "image_digest": None,
+    }
+    posture_digest = executor_posture_digest(raw_posture)
+    operator = SimpleNamespace(
+        principal=SimpleNamespace(principal_id="operator:projection"),
+        session_id="session:projection",
+    )
+    projection = await _safe_repo_repair_projection(
+        "job-projection",
+        {
+            "status": "blocked",
+            "failure_reason": "rootful_daemon_unavailable",
+            "declared_authority": {
+                "executor_kind": "docker_rootful",
+                "executor_profile": "docker_rootful:repo-python-pytest-v1",
+                "executor_posture": raw_posture,
+                "executor_posture_digest": posture_digest,
+                "sandbox_profile": "repo-python-pytest-v1",
+                "sandbox_limits_digest": None,
+            },
+            "checkpoints": [
+                {
+                    "checkpoint_id": "repo-repair-preflight:job-projection",
+                    "payload": {
+                        "receipt": {
+                            "ok": False,
+                            "status": "blocked",
+                            "reason": "rootful_daemon_unavailable",
+                            "posture": raw_posture,
+                        }
+                    },
+                }
+            ],
+            "effects": [],
+            "artifacts": [],
+        },
+        operator=operator,
+    )
+
+    assert projection["executor_posture_raw"] == raw_posture
+    assert projection["executor_posture_digest"] == posture_digest
+    assert projection["executor_posture_digest_basis"] == "executor_posture_raw"
+    assert projection["executor_posture"] == {
+        **raw_posture,
+        "kind": "docker_rootful",
+        "profile": "repo-python-pytest-v1",
+        "isolation_claim": "unverified",
+        "network_isolation": "unverified",
+        "resource_enforcement": "unverified",
+        "local_host_execution_required": False,
+    }
+    assert "docker_socket" not in projection
+    assert "worker_image_digest" not in projection
+
+
+async def _configure_governed_openrouter_test_route() -> None:
+    """Install the same route proof required by the real model boundary."""
+
+    setup = OpenRouterSetup(
+        model_ids=("openrouter/anthropic/claude-sonnet-4",),
+        capabilities=("text", "structured_output"),
+        allowed_upstreams=("anthropic",),
+        egress_class=EgressClass.CLOUD_ALLOWED_FULL,
+        cloud_egress_acknowledged=True,
+        spend_ceiling_microusd=25_000,
+        credential_ref="env:OPENROUTER_API_KEY",
+    )
+    write_model_fabric_configuration(
+        ModelFabricConfiguration(
+            profiles=(openrouter_profile_for_setup(setup),),
+            openrouter_setup=setup,
+            status="ready",
+        )
+    )
+    from src.llm_runtime import _provider_profile
+
+    profile = _provider_profile("openrouter")
+    assert profile is not None
+    checked_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    probe_started = checked_at - timedelta(seconds=1)
+    receipt = RouteReceipt(
+        receipt_id=f"repo-repair-producer-probe-{uuid.uuid4().hex}",
+        request_id=f"repo-repair-producer-request-{uuid.uuid4().hex}",
+        route_decision_id=f"repo-repair-producer-decision-{uuid.uuid4().hex}",
+        runtime_path="strategist_agent",
+        workload="background",
+        outcome="succeeded",
+        egress_class=setup.egress_class.value,
+        started_at=probe_started,
+        finished_at=probe_started + timedelta(milliseconds=100),
+        latency_ms=100,
+        actual_profile_id=profile.id,
+        actual_model=profile.model,
+        actual_adapter=profile.transport_adapter,
+        destination_class="remote",
+        trust_decision_id=f"repo-repair-producer-trust-{uuid.uuid4().hex}",
+    )
+    persisted = await model_fabric_repository.persist_route_receipt(receipt)
+    assert persisted.persisted is True
+    for capability, proven_value in (
+        ("text", "present"),
+        ("structured_output", "json"),
+        ("health", "healthy"),
+        ("latency_ms", 100),
+    ):
+        proof = build_model_route_proof(
+            profile=profile,
+            endpoint_class=EndpointClass.REMOTE,
+            adapter=profile.transport_adapter,
+            capability=capability,
+            canary_version="repo-repair-producer-v1",
+            outcome="passed",
+            checked_at=checked_at.timestamp(),
+            expires_at=checked_at.timestamp() + 3600,
+            probe_receipt_id=receipt.receipt_id,
+            probe_receipt_hash=receipt.receipt_hash,
+            proven_value=proven_value,
+        )
+        persisted_proof = await model_fabric_repository.persist_capability_proof(proof)
+        assert persisted_proof.persisted is True
+
+
 def _repair_input(**overrides):
     value = {
         "repository_path": "repo",
@@ -74,7 +219,7 @@ def _repair_input(**overrides):
 def pytest_generate_tests(metafunc):
     if "repo_sandbox_mode" not in metafunc.fixturenames:
         return
-    modes = ["mocked"]
+    modes = ["mocked", "local"]
     if metafunc.config.getoption("--run-real-repo-sandbox"):
         modes.append("real")
     metafunc.parametrize("repo_sandbox_mode", modes, ids=modes)
@@ -265,6 +410,7 @@ async def test_repo_repair_real_input_producer_reaches_private_source_review(
     """
 
     real_sandbox = repo_sandbox_mode == "real"
+    local_sandbox = repo_sandbox_mode == "local"
     effective_sandbox_settings = repo_sandbox_module._effective_repo_sandbox_settings()
     workspace = tmp_path / "workspace"
     (workspace / "repo" / "src").mkdir(parents=True)
@@ -282,6 +428,11 @@ async def test_repo_repair_real_input_producer_reaches_private_source_review(
     monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", False)
     monkeypatch.setattr(settings, "operator_auth_secret", "repo-repair-producer-auth-secret")
     monkeypatch.setattr(settings, "operator_auth_secret_hash", "")
+    monkeypatch.setattr(settings, "openrouter_api_key", "test-key")
+    monkeypatch.setattr(settings, "openrouter_provider_only", True)
+    monkeypatch.setattr(settings, "openrouter_allowed_upstreams", "anthropic")
+    monkeypatch.setattr(settings, "default_model", "openrouter/anthropic/claude-sonnet-4")
+    await _configure_governed_openrouter_test_route()
     if real_sandbox:
         sandbox_settings = effective_sandbox_settings
         if not sandbox_settings.enabled:
@@ -304,9 +455,24 @@ async def test_repo_repair_real_input_producer_reaches_private_source_review(
             )
         preflight_receipt = preflight.as_receipt()
         assert preflight_receipt["support_confirmed"] is True
+    elif local_sandbox:
+        sandbox_settings = RepoSandboxSettings(
+            enabled=True,
+            executor_kind="local",
+            docker_socket="",
+            worker_image_digest="",
+        )
+        workspace.chmod(0o700)
+        monkeypatch.setattr(settings, "repo_sandbox", sandbox_settings)
+        monkeypatch.setattr(
+            repo_sandbox_module,
+            "_effective_repo_sandbox_settings",
+            lambda: sandbox_settings,
+        )
     else:
         sandbox_settings = RepoSandboxSettings(
             enabled=True,
+            executor_kind="docker_rootless",
             docker_socket="unix:///tmp/seraph-repo-repair-docker.sock",
             worker_image_digest="ghcr.io/operator/seraph-repo-python-pytest@sha256:" + "a" * 64,
         )
@@ -334,7 +500,7 @@ async def test_repo_repair_real_input_producer_reaches_private_source_review(
         timezone="UTC",
     )
 
-    if not real_sandbox:
+    if not real_sandbox and not local_sandbox:
         monkeypatch.setattr(
             RootlessDockerRepoSandbox,
             "preflight",
@@ -369,16 +535,6 @@ async def test_repo_repair_real_input_producer_reaches_private_source_review(
             "test_args": ["pytest", "tests/test_app.py"],
             "expected_outcome": "The focused test passes.",
         }
-
-    class _Model:
-        def __init__(self, **_kwargs):
-            pass
-
-        def generate(self, messages, **_kwargs):
-            nonlocal model_calls
-            model_calls += 1
-            prompt = json.loads(messages[1]["content"])
-            return json.dumps(_proposal_for_digest(prompt["source_packet"]["base_snapshot_sha256"]), sort_keys=True)
 
     def governed_transport(**kwargs):
         nonlocal model_calls
@@ -443,8 +599,13 @@ async def test_repo_repair_real_input_producer_reaches_private_source_review(
             "learning": "no_learning",
         }
 
+    # Every mode must traverse the governed transport seam so the durable
+    # remote-inference intent and terminal settlement receipts are real.  The
+    # executor remains the only mode-specific seam below: mocked uses a
+    # deterministic executor receipt, local runs the real host executor, and
+    # real runs the configured rootless executor.
+    monkeypatch.setattr("src.llm_runtime._governed_openai_chat_completion", governed_transport)
     if real_sandbox:
-        monkeypatch.setattr("src.llm_runtime._governed_openai_chat_completion", governed_transport)
         original_execute_job = RootlessDockerRepoSandbox.execute_job
 
         def counted_execute_job(_sandbox, job, *, before_dispatch=None):
@@ -453,13 +614,17 @@ async def test_repo_repair_real_input_producer_reaches_private_source_review(
             return original_execute_job(_sandbox, job, before_dispatch=before_dispatch)
 
         monkeypatch.setattr(RootlessDockerRepoSandbox, "execute_job", counted_execute_job)
+    elif local_sandbox:
+        original_execute_job = LocalRepoRepairExecutor.execute_job
+
+        def counted_local_execute_job(_sandbox, job, *, before_dispatch=None):
+            nonlocal sandbox_calls
+            sandbox_calls += 1
+            return original_execute_job(_sandbox, job, before_dispatch=before_dispatch)
+
+        monkeypatch.setattr(LocalRepoRepairExecutor, "execute_job", counted_local_execute_job)
     else:
-        monkeypatch.setattr("src.workflows.repo_repair.FallbackLiteLLMModel", _Model)
         monkeypatch.setattr(RootlessDockerRepoSandbox, "execute_job", execute_job)
-    monkeypatch.setattr("src.workflows.repo_repair.build_model_kwargs", lambda **_kwargs: {
-        "runtime_profile": "openrouter",
-        "api_base": "https://openrouter.ai/api/v1",
-    })
 
     async with async_db() as db:
         db.add(
@@ -561,13 +726,6 @@ async def test_repo_repair_real_input_producer_reaches_private_source_review(
     job = await durable_job_repository.get_job(attempt.workflow_run_id)
     assert job is not None
     client.cookies.set(settings.operator_auth_cookie_name, token)
-    monkeypatch.setattr(
-        "src.llm_runtime.build_model_kwargs",
-        lambda **_kwargs: {
-            "runtime_profile": "openrouter",
-            "api_base": "https://openrouter.ai/api/v1",
-        },
-    )
     preview_response = await client.get(
         f"/api/workflows/repo-repair/{attempt.workflow_run_id}/source-preview"
     )
@@ -870,6 +1028,174 @@ async def test_repo_repair_reads_shared_schema_one_input_envelope(async_db, tmp_
         )
         assert set(payload) == {"schema_version", "capability_id", "input"}
         assert "capability_version" not in payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_repo_repair_file_db_commits_source_row_before_checkpoint_writer(
+    async_db, tmp_path: Path, monkeypatch
+):
+    """A file-backed SQLite source publication cannot hold two writer locks."""
+
+    workspace = tmp_path / "workspace"
+    (workspace / "repo" / "src").mkdir(parents=True)
+    (workspace / "repo" / "src" / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+    now = datetime.now(timezone.utc)
+    owner = WorkBoardOwner(principal_id="operator:single", session_id="session:file-source-packet")
+    request = _repair_input()
+    task_id = "task:file-source-packet"
+    attempt_id = "attempt:file-source-packet"
+    run_id = "job:file-source-packet"
+    goal_id = "goal:file-source-packet"
+
+    # Commit the canonical producer rows first, matching the production
+    # dispatcher boundary before source inspection begins.
+    async with async_db() as db:
+        await _seed_canonical_repair(
+            db,
+            workspace,
+            request,
+            owner=owner,
+            task_id=task_id,
+            attempt_id=attempt_id,
+            run_id=run_id,
+            goal_id=goal_id,
+            now=now,
+        )
+
+    service = RepoRepairService(
+        sandbox=RootlessDockerRepoSandbox(),
+        secret_scanner=lambda value: value,
+        session_factory=async_db,
+        workspace_dir=str(workspace),
+        clock=lambda: now,
+    )
+    packet = await service.inspect_and_prepare(
+        request,
+        owner=owner,
+        work_board_task_id=task_id,
+        work_board_attempt_id=attempt_id,
+        workflow_run_id=run_id,
+        goal_id=goal_id,
+        goal_revision=1,
+    )
+
+    async with async_db() as db:
+        stored = (
+            await db.execute(
+                select(RepoRepairSourcePacketRow).where(
+                    RepoRepairSourcePacketRow.workflow_run_id == run_id
+                )
+            )
+        ).scalar_one()
+    assert stored.id == packet.packet_id
+    assert stored.state == "verified"
+    assert stored.artifact_sha256 == packet.artifact_sha256
+
+    projection = await durable_job_repository.get_job(run_id)
+    assert projection is not None
+    checkpoints = projection.get("checkpoints")
+    assert isinstance(checkpoints, list)
+    source_receipt = next(
+        item for item in checkpoints
+        if isinstance(item, dict) and item.get("checkpoint_id") == f"repo-repair-source:{run_id}"
+    )
+    assert source_receipt["payload"]["packet_id"] == packet.packet_id
+    assert source_receipt["payload"]["artifact_sha256"] == packet.artifact_sha256
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_repo_repair_source_row_replays_after_checkpoint_writer_failure(
+    async_db, tmp_path: Path, monkeypatch
+):
+    """A post-commit checkpoint failure is recoverable without a new packet."""
+
+    workspace = tmp_path / "workspace"
+    (workspace / "repo" / "src").mkdir(parents=True)
+    (workspace / "repo" / "src" / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+    now = datetime.now(timezone.utc)
+    owner = WorkBoardOwner(principal_id="operator:single", session_id="session:file-source-replay")
+    request = _repair_input()
+    task_id = "task:file-source-replay"
+    attempt_id = "attempt:file-source-replay"
+    run_id = "job:file-source-replay"
+    goal_id = "goal:file-source-replay"
+    async with async_db() as db:
+        await _seed_canonical_repair(
+            db,
+            workspace,
+            request,
+            owner=owner,
+            task_id=task_id,
+            attempt_id=attempt_id,
+            run_id=run_id,
+            goal_id=goal_id,
+            now=now,
+        )
+
+    service = RepoRepairService(
+        sandbox=RootlessDockerRepoSandbox(),
+        secret_scanner=lambda value: value,
+        session_factory=async_db,
+        workspace_dir=str(workspace),
+        clock=lambda: now,
+    )
+    original_checkpoint = service._record_checkpoint
+    failed_once = False
+
+    async def fail_source_checkpoint(**kwargs):
+        nonlocal failed_once
+        if kwargs.get("checkpoint_id") == f"repo-repair-source:{run_id}" and not failed_once:
+            failed_once = True
+            raise RepoRepairError(
+                "repair_checkpoint_unavailable",
+                "simulated source checkpoint writer failure",
+                status_code=503,
+            )
+        return await original_checkpoint(**kwargs)
+
+    monkeypatch.setattr(service, "_record_checkpoint", fail_source_checkpoint)
+    with pytest.raises(RepoRepairError, match="simulated source checkpoint writer failure"):
+        await service.inspect_and_prepare(
+            request,
+            owner=owner,
+            work_board_task_id=task_id,
+            work_board_attempt_id=attempt_id,
+            workflow_run_id=run_id,
+            goal_id=goal_id,
+            goal_revision=1,
+        )
+    assert failed_once is True
+
+    async with async_db() as db:
+        stored = (
+            await db.execute(
+                select(RepoRepairSourcePacketRow).where(
+                    RepoRepairSourcePacketRow.workflow_run_id == run_id
+                )
+            )
+        ).scalar_one()
+    monkeypatch.setattr(service, "_record_checkpoint", original_checkpoint)
+    replay = await service.inspect_and_prepare(
+        request,
+        owner=owner,
+        work_board_task_id=task_id,
+        work_board_attempt_id=attempt_id,
+        workflow_run_id=run_id,
+        goal_id=goal_id,
+        goal_revision=1,
+    )
+    assert replay.packet_id == stored.id
+    projection = await durable_job_repository.get_job(run_id)
+    assert projection is not None
+    assert any(
+        isinstance(item, dict)
+        and item.get("checkpoint_id") == f"repo-repair-source:{run_id}"
+        for item in projection.get("checkpoints", [])
+    )
 
 
 def test_model_output_is_closed_schema_and_digest_bound():

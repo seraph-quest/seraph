@@ -14,6 +14,9 @@ export interface ChatMessage {
   approvalId?: string;
   riskLevel?: string;
   approvalStatus?: "pending" | "approved" | "denied" | "consumed";
+  /** Server-owned approval boundary for trusted local repository execution. */
+  localHostExecutionRequired?: boolean;
+  requiredPermissions?: string[];
   clarificationQuestion?: string;
   clarificationReason?: string;
   clarificationOptions?: string[];
@@ -35,6 +38,8 @@ export interface WSResponse {
   approval_id?: string;
   tool_name?: string;
   risk_level?: string;
+  local_host_execution_required?: boolean;
+  required_permissions?: string[];
   question?: string;
   reason?: string;
   options?: string[];
@@ -525,6 +530,21 @@ export interface WorkBoardTaskDetail {
   revision: number;
 }
 
+export type RepoRepairExecutorKind = "local" | "docker_rootless" | "docker_rootful";
+
+export interface WorkBoardRepoRepairExecutorPosture {
+  kind?: RepoRepairExecutorKind;
+  profile?: string;
+  isolation_claim?: string;
+  network_isolation?: string;
+  resource_enforcement?: string;
+  image_digest?: string | null;
+  limits_digest?: string | null;
+  host_access?: string;
+  local_host_execution_required?: boolean;
+  [key: string]: unknown;
+}
+
 /** Owner-bound, content-free status projection for engineering.repo-repair.v1. */
 export interface WorkBoardRepoRepairProjection {
   job_id: string;
@@ -542,6 +562,15 @@ export interface WorkBoardRepoRepairProjection {
   run_fingerprint: string | null;
   capability_id: "engineering.repo-repair.v1";
   capability_version: string | null;
+  /** Server-selected executor metadata; absent on legacy rootless rows. */
+  executor_kind?: RepoRepairExecutorKind;
+  executor_profile?: string | null;
+  executor_posture?: WorkBoardRepoRepairExecutorPosture | null;
+  executor_posture_digest?: string | null;
+  required_permissions?: string[];
+  local_host_execution_required?: boolean;
+  preparation_ready?: boolean;
+  execution_ready?: boolean;
   limits: Record<string, number>;
   preflight: Record<string, unknown> | null;
   source_packet: {

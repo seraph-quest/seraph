@@ -7,6 +7,7 @@ import os
 import stat
 from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import Literal, Mapping
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict
@@ -34,6 +35,8 @@ from src.execution.repo_sandbox import (
     RepoSandboxError,
     RepoSandboxLimits,
     RootlessDockerRepoSandbox,
+    build_repo_repair_executor,
+    executor_posture_digest,
     _repo_sandbox_settings_path as _shared_repo_sandbox_settings_path,
     limits_digest,
     load_persisted_repo_sandbox_settings,
@@ -105,6 +108,7 @@ class RepoSandboxSettingsRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool | None = None
+    executor_kind: Literal["local", "docker_rootless", "docker_rootful"] | None = None
     docker_socket: str | None = None
     worker_image_digest: str | None = None
     profile: str | None = None
@@ -137,6 +141,108 @@ def _persist_repo_sandbox_settings(value: RepoSandboxSettings) -> None:
     persist_repo_sandbox_settings(value)
 
 
+def _executor_posture_projection(
+    value: RepoSandboxSettings,
+    receipt: Mapping[str, object],
+    *,
+    executor_kind: str,
+    limits_digest_value: str | None,
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Build complete display posture without rewriting the reviewed receipt.
+
+    Docker preflight can be blocked before it has evidence for isolation,
+    network, or resource enforcement.  The settings DTO still needs typed
+    display fields for the operator UI, so fill only missing fields with
+    bounded ``unverified`` labels.  Keep the exact server posture and digest
+    alongside the normalized copy for audit and approval traceability.
+    """
+
+    raw_value = receipt.get("posture")
+    raw_posture = dict(raw_value) if isinstance(raw_value, Mapping) else {}
+    preparation_ready = receipt.get("ok") is True
+    default_isolation = (
+        "none"
+        if executor_kind == "local"
+        else (
+            "rootless_container"
+            if executor_kind == "docker_rootless"
+            else "rootful_container"
+        )
+        if preparation_ready
+        else "unverified"
+    )
+    default_network = (
+        "not_verified"
+        if executor_kind == "local"
+        else "none" if preparation_ready else "unverified"
+    )
+    default_resources = (
+        "admission_and_wall_timeout_only"
+        if executor_kind == "local"
+        else "verified_fixed_limits" if preparation_ready else "unverified"
+    )
+
+    def present(key: str, default: object, *sources: Mapping[str, object]) -> object:
+        for source in sources:
+            if key in source:
+                return source[key]
+        return default
+
+    raw_isolation = present(
+        "isolation_claim",
+        receipt.get("isolation_claim", default_isolation),
+        raw_posture,
+    )
+    raw_network = present(
+        "network_isolation",
+        "none" if raw_posture.get("network") == "none" else receipt.get("network_isolation", default_network),
+        raw_posture,
+    )
+    raw_resources = present(
+        "resource_enforcement",
+        "verified_fixed_limits"
+        if raw_posture.get("resource_controllers") == "verified"
+        else receipt.get("resource_enforcement", default_resources),
+        raw_posture,
+    )
+    # A blocked Docker receipt cannot retain a positive capability claim from
+    # an incomplete or stale posture payload.
+    if executor_kind != "local" and not preparation_ready:
+        raw_isolation = raw_network = raw_resources = "unverified"
+
+    posture = dict(raw_posture)
+    posture.update(
+        {
+            "kind": executor_kind,
+            "profile": str(
+                present(
+                    "profile",
+                    receipt.get("profile") or value.profile or "repo-python-pytest-v1",
+                    raw_posture,
+                )
+            ),
+            "isolation_claim": raw_isolation if isinstance(raw_isolation, str) else default_isolation,
+            "network_isolation": raw_network if isinstance(raw_network, str) else default_network,
+            "resource_enforcement": raw_resources if isinstance(raw_resources, str) else default_resources,
+            "image_digest": present("image_digest", receipt.get("image_digest"), raw_posture),
+            "limits_digest": present("limits_digest", limits_digest_value, raw_posture),
+            "local_host_execution_required": (
+                present(
+                    "local_host_execution_required",
+                    executor_kind == "local",
+                    raw_posture,
+                )
+                if isinstance(
+                    present("local_host_execution_required", None, raw_posture),
+                    bool,
+                )
+                else executor_kind == "local"
+            ),
+        }
+    )
+    return posture, raw_posture
+
+
 def _repo_sandbox_settings_payload(
     value: RepoSandboxSettings,
     *,
@@ -155,20 +261,118 @@ def _repo_sandbox_settings_payload(
         limit_error = str(exc)
     else:
         limit_error = None
+    # The executor worker owns the concrete preflight implementations.  Keep
+    # this API projection compatible with both the pre-M4 rootless class and
+    # the additive executor selector until the worker publishes its factory.
+    executor_kind = str(getattr(value, "executor_kind", "local") or "local")
+    if executor_kind not in {"local", "docker_rootless", "docker_rootful"}:
+        executor_kind = "local"
     try:
-        preflight = RootlessDockerRepoSandbox(value).preflight()
+        executor = build_repo_repair_executor(value)
+        preflight = executor.preflight()
         receipt = preflight.as_receipt()
-    except (TypeError, ValueError, OSError) as exc:
-        receipt = {"status": "blocked", "ok": False, "reason": "settings_invalid", "detail": type(exc).__name__}
+    except (TypeError, ValueError, OSError, RepoSandboxError) as exc:
+        receipt = {
+            "profile": "repo-python-pytest-v1",
+            "executor_kind": executor_kind,
+            "status": "blocked",
+            "ok": False,
+            "reason": "settings_invalid",
+            "operator_visible": True,
+            "detail": type(exc).__name__,
+        }
+    # ``engineering.repo-change.v1`` is the historical strict rootless
+    # capability.  Keep its probe visible as a separate receipt, but never
+    # contact Docker merely because the newly selected local executor is
+    # displayed in settings.
+    if executor_kind == "local":
+        legacy_repo_change_preflight = {
+            "profile": "repo-python-pytest-v1",
+            "executor_kind": "docker_rootless",
+            "status": "not_selected",
+            "ok": False,
+            "reason": "legacy_repo_change_rootless_not_selected",
+            "operator_visible": True,
+            "posture": {
+                "kind": "docker_rootless",
+                "profile": "repo-python-pytest-v1",
+                "isolation_claim": "rootless_container",
+                "network_isolation": "not_verified",
+                "resource_enforcement": "not_verified",
+            },
+        }
+    else:
+        try:
+            legacy_config = value.model_copy(update={"executor_kind": "docker_rootless"})
+            legacy_repo_change_preflight = RootlessDockerRepoSandbox(config=legacy_config).preflight().as_receipt()
+        except (TypeError, ValueError, OSError, RepoSandboxError) as exc:
+            legacy_repo_change_preflight = {
+                "profile": "repo-python-pytest-v1",
+                "executor_kind": "docker_rootless",
+                "status": "blocked",
+                "ok": False,
+                "reason": "legacy_repo_change_preflight_failed",
+                "operator_visible": True,
+                "detail": type(exc).__name__,
+            }
+    if executor_kind == "local" and not bool(value.enabled):
+        # Local execution is deliberately a trusted-host posture.  Preserve
+        # the executor's server-built posture and digest while making the
+        # disabled state explicit; the settings endpoint cannot mint the
+        # per-job local_host_execution permission required at dispatch.
+        receipt = {
+            **receipt,
+            "status": "blocked",
+            "ok": False,
+            "reason": str(receipt.get("reason") or "repo_sandbox_disabled"),
+            "operator_visible": True,
+        }
     if configuration_error:
         receipt = {
+            **receipt,
             "status": "blocked",
             "ok": False,
             "reason": configuration_error,
             "operator_visible": True,
         }
+    posture, raw_posture = _executor_posture_projection(
+        value,
+        receipt,
+        executor_kind=executor_kind,
+        limits_digest_value=digest,
+    )
+    # The digest is the executor's raw server receipt, never the UI-complete
+    # projection.  Keep the basis explicit so a consumer cannot compare a
+    # display-only defaulted posture against an approval digest by accident.
+    posture_digest = str(
+        receipt.get("posture_digest") or executor_posture_digest(raw_posture)
+    )
+    preparation_ready = bool(receipt.get("ok") is True)
+    execution_ready = preparation_ready and executor_kind != "local"
+    if configuration_error:
+        status = "blocked"
+        status_reason = configuration_error
+    elif not preparation_ready:
+        status = "blocked"
+        status_reason = str(receipt.get("reason") or "executor_preparation_blocked")
+    elif executor_kind == "local":
+        # Local preparation is usable on a CPU host, but settings cannot mint
+        # the per-job host permission.  Keep this top-level state blocked so
+        # a strict UI never mistakes preparation for execution authorization.
+        status = "blocked"
+        status_reason = "local_host_approval_required"
+    else:
+        status = "ready"
+        status_reason = None
     return {
         "enabled": bool(value.enabled),
+        "executor_kind": executor_kind,
+        "executor_profile": f"{executor_kind}:repo-python-pytest-v1",
+        "executor_posture": posture,
+        "executor_posture_raw": raw_posture,
+        "executor_posture_digest": posture_digest,
+        "executor_posture_digest_basis": "executor_posture_raw",
+        "local_host_approval_required": executor_kind == "local",
         "docker_socket": value.docker_socket,
         "worker_image_digest": value.worker_image_digest,
         "profile": value.profile,
@@ -176,8 +380,15 @@ def _repo_sandbox_settings_payload(
         "limits_digest": digest,
         "limits_editable": False,
         "preflight": receipt,
+        "legacy_repo_change_preflight": legacy_repo_change_preflight,
+        "preparation_ready": preparation_ready,
+        # A settings document can never contain a job-bound local permission;
+        # callers must obtain the exact approval during repair preparation.
+        "execution_ready": execution_ready,
         "settings_path": str(_repo_sandbox_settings_path()),
-        "status": "ready" if receipt.get("ok") is True else "blocked",
+        "status": status,
+        "status_reason": status_reason,
+        "reason": status_reason,
         "configuration_error": configuration_error or limit_error,
         "operator_visible": True,
     }
@@ -1198,9 +1409,12 @@ async def set_repo_sandbox_settings(body: RepoSandboxSettingsRequest, request: R
         # Disabled settings may be persisted before host provisioning supplies
         # the socket/image selectors.  Keep readiness fail-closed while still
         # allowing an operator to turn the profile off and save that intent.
-        if candidate.enabled or candidate.docker_socket.strip():
+        if candidate.docker_socket.strip():
             RootlessDockerRepoSandbox.validate_socket(candidate.docker_socket)
-        if candidate.enabled or candidate.worker_image_digest.strip():
+        if candidate.worker_image_digest.strip():
+            RootlessDockerRepoSandbox.validate_image_digest(candidate.worker_image_digest)
+        if candidate.executor_kind != "local" and candidate.enabled:
+            RootlessDockerRepoSandbox.validate_socket(candidate.docker_socket)
             RootlessDockerRepoSandbox.validate_image_digest(candidate.worker_image_digest)
         RepoSandboxLimits.from_settings(candidate)
     except (TypeError, ValueError, RepoSandboxError) as exc:

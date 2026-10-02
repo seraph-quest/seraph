@@ -163,6 +163,9 @@ class GpuAdmissionRequest:
     estimated_cost_microusd: int | None = None
     owner_budget_microusd: int | None = None
     uncertain_on_error: bool | None = None
+    # Immutable payload binding for the durable accounting boundary. Model
+    # contents remain outside both the broker and the accounting ledger.
+    data_digest: str = ""
 
     def __post_init__(self) -> None:
         for field_name in ("operation_id", "job_id", "owner_id"):
@@ -238,6 +241,7 @@ class GpuAdmissionRequest:
                 if uncertain_on_error is not None
                 else getattr(context, "uncertain_on_error", None)
             ),
+            data_digest=str(getattr(context, "data_digest", "") or ""),
         )
 
 

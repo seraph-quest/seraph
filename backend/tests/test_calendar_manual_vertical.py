@@ -46,6 +46,7 @@ from src.work_board.dispatcher import WorkBoardDispatcher, registered_executor_i
 from src.work_board.input_artifacts import prepare_input_artifact
 from src.work_board.repository import WorkBoardRepository
 from src.workflows.job_runtime import DurableJobRepository
+from tests.test_inference_accounting import accounting_db
 
 
 def _provider_event() -> dict[str, object]:
@@ -59,13 +60,16 @@ def _provider_event() -> dict[str, object]:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("crash_before_contact", [False, True])
 async def test_calendar_dispatcher_real_durable_two_reads_model_and_readback(
-    async_db,
+    accounting_db,
     monkeypatch,
-    tmp_path,
+    crash_before_contact,
 ):
     """An owned task reaches Done only through the canonical durable root."""
 
+    tmp_path, engine, factory = accounting_db
+    async_db = factory.accounting_sessions
     monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
     monkeypatch.setattr(settings, "deployment_environment", "test")
     monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", False)
@@ -95,6 +99,11 @@ async def test_calendar_dispatcher_real_durable_two_reads_model_and_readback(
             status="ready",
         )
     )
+    await DurableJobRepository().configure_inference_accounting(25_000)
+    from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
+    broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
+    monkeypatch.setattr("src.llm_runtime.gpu_admission_broker", broker)
+    monkeypatch.setattr("src.model_fabric.execution.gpu_admission_broker", broker)
     # Seed the same bounded, hashed capability proofs consumed by the real
     # governed preflight selector.  The test intercepts only the final model
     # transport; it does not replace route admission or its policy decision.
@@ -341,7 +350,7 @@ async def test_calendar_dispatcher_real_durable_two_reads_model_and_readback(
         model_calls.append(dict(kwargs["body"]))
         message = SimpleNamespace(role="assistant", content=json.dumps(model_output))
         response = SimpleNamespace(choices=[SimpleNamespace(message=message)])
-        return response, {"choices": [{"message": {"role": "assistant", "content": json.dumps(model_output)}}]}
+        return response, {"usage": {"cost": "0.0000101"}, "choices": [{"message": {"role": "assistant", "content": json.dumps(model_output)}}]}
 
     monkeypatch.setattr("src.llm_runtime._governed_openai_chat_completion", governed_transport)
     # The provider and model transport remain intercepted, while the real
@@ -352,15 +361,44 @@ async def test_calendar_dispatcher_real_durable_two_reads_model_and_readback(
         jobs=DurableJobRepository(),
         session_provider=async_db,
     )
-    result = await dispatcher._admit_execute_direct(
-        claim,
-        typed_input,
-        runtime_seconds=120,
-    )
+    if crash_before_contact:
+        class WorkerCrash(BaseException):
+            pass
+        original_prepare = broker._prepare_accounting
+        async def crash_after_reservation(request):
+            await original_prepare(request)
+            raise WorkerCrash()
+        monkeypatch.setattr(broker, "_prepare_accounting", crash_after_reservation)
+        with pytest.raises(WorkerCrash):
+            await dispatcher._admit_execute_direct(claim, typed_input, runtime_seconds=120)
+        snapshot_before = await DurableJobRepository().inference_accounting_snapshot()
+        original_reservation = snapshot_before["operations"][0]
+        assert original_reservation["state"] == "reserved"
+        assert model_calls == []
+        async with async_db() as db:
+            run = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == original_reservation["job_id"]))).scalar_one()
+            run.lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        await engine.dispose()
+        recovered = await DurableJobRepository().recover_stale_jobs()
+        assert recovered[0]["status"] == "queued", recovered
+        restarted = RemoteInferenceAdmissionBroker(durable_accounting=True)
+        monkeypatch.setattr("src.llm_runtime.gpu_admission_broker", restarted)
+        monkeypatch.setattr("src.model_fabric.execution.gpu_admission_broker", restarted)
+        dispatcher = WorkBoardDispatcher(repository=repository, jobs=DurableJobRepository(), session_provider=async_db)
+        reconciled = await dispatcher.reconcile_linked_attempts()
+        assert original_reservation["job_id"] in reconciled
+        result = {"completed": True}
+        after = await DurableJobRepository().inference_accounting_snapshot()
+        assert len(after["operations"]) == 1
+        assert after["operations"][0]["operation_id"] == original_reservation["operation_id"]
+        assert after["operations"][0]["sequence"] == original_reservation["sequence"]
+    else:
+        result = await dispatcher._admit_execute_direct(claim, typed_input, runtime_seconds=120)
 
     assert result["completed"] is True
-    assert [method for method, _url in provider_requests] == ["POST", "GET", "GET"]
+    assert [method for method, _url in provider_requests] == (["POST", "GET", "POST", "GET", "GET"] if crash_before_contact else ["POST", "GET", "GET"])
     assert len(model_calls) == 1
+    assert (await DurableJobRepository().inference_accounting_snapshot())["committed_microusd"] == 11
 
     async with async_db() as db:
         receipt = (

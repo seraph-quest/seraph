@@ -21,6 +21,7 @@ interface OpenRouterSetupDraft {
   egressClass: string;
   cloudEgressAcknowledged: boolean;
   spendCeilingMicrousd: string;
+  requestCostBoundMicrousd: string;
   maxQueued: string;
   maxInflight: string;
   maxOutstandingPerOwner: string;
@@ -31,6 +32,8 @@ interface OpenRouterSetupPanelProps {
   setup: OpenRouterSetupStatus | null | undefined;
   stale: boolean;
   onSave: (payload: Record<string, unknown>) => Promise<ModelFabricSettingsStatus>;
+  policyRevision?: number;
+  policyRevoked?: boolean;
 }
 
 function draftFromSetup(setup: OpenRouterSetupStatus | null | undefined): OpenRouterSetupDraft {
@@ -45,6 +48,7 @@ function draftFromSetup(setup: OpenRouterSetupStatus | null | undefined): OpenRo
     egressClass: setup?.egress_class ?? "cloud_allowed_full",
     cloudEgressAcknowledged: setup?.cloud_egress_acknowledged ?? false,
     spendCeilingMicrousd: setup?.spend_ceiling_microusd == null ? "" : String(setup.spend_ceiling_microusd),
+    requestCostBoundMicrousd: setup?.request_cost_bound_microusd == null ? "" : String(setup.request_cost_bound_microusd),
     maxQueued: String(setup?.max_queued ?? 64),
     maxInflight: String(setup?.max_inflight ?? 1),
     maxOutstandingPerOwner: String(setup?.max_outstanding_per_owner ?? 16),
@@ -68,7 +72,7 @@ function inputClass(): string {
   return "min-w-0 border border-retro-text/20 bg-retro-bg px-1 py-0.5 text-retro-text disabled:opacity-40";
 }
 
-export function OpenRouterSetupPanel({ setup, stale, onSave }: OpenRouterSetupPanelProps) {
+export function OpenRouterSetupPanel({ setup, stale, onSave, policyRevision, policyRevoked }: OpenRouterSetupPanelProps) {
   const [draft, setDraft] = useState<OpenRouterSetupDraft>(() => draftFromSetup(setup));
   const [credential, setCredential] = useState("");
   const [saving, setSaving] = useState(false);
@@ -122,6 +126,7 @@ export function OpenRouterSetupPanel({ setup, stale, onSave }: OpenRouterSetupPa
       const maxOutstandingPerOwner = boundedNumber(draft.maxOutstandingPerOwner, "Max outstanding per owner", 1, 16, true);
       const maxRetries = boundedNumber(draft.maxRetries, "Max retries", 0, 2, true);
       const payload: Record<string, unknown> = {
+        expected_policy_revision: policyRevision,
         openrouter: {
           model_ids: modelIds,
           capabilities: draft.capabilities,
@@ -137,6 +142,7 @@ export function OpenRouterSetupPanel({ setup, stale, onSave }: OpenRouterSetupPa
           egress_class: draft.egressClass,
           cloud_egress_acknowledged: draft.cloudEgressAcknowledged,
           spend_ceiling_microusd: spendCeilingMicrousd,
+          request_cost_bound_microusd: draft.requestCostBoundMicrousd.trim() ? boundedNumber(draft.requestCostBoundMicrousd, "Request cost bound", 1, spendCeilingMicrousd, true) : null,
           max_queued: maxQueued,
           max_inflight: maxInflight,
           max_outstanding_per_owner: maxOutstandingPerOwner,
@@ -220,8 +226,10 @@ export function OpenRouterSetupPanel({ setup, stale, onSave }: OpenRouterSetupPa
             zero data retention{hasVisionOrEmbedding ? " (required)" : ""}
           </label>
         </div>
-        <label className="text-retro-text/40 uppercase tracking-wider" htmlFor="openrouter-spend">Spend ceiling (micro USD)</label>
+        <label className="text-retro-text/40 uppercase tracking-wider" htmlFor="openrouter-spend">Deployment monthly ceiling (micro USD)</label>
         <input id="openrouter-spend" aria-label="OpenRouter spend ceiling" type="number" min="1" max="1000000000" value={draft.spendCeilingMicrousd} onChange={(event) => update("spendCeilingMicrousd", event.target.value)} className={inputClass()} placeholder="required" />
+        <label className="text-retro-text/40 uppercase tracking-wider" htmlFor="openrouter-request-bound">Per-request held bound</label>
+        <input id="openrouter-request-bound" aria-label="OpenRouter request cost bound" type="number" min="1" max="1000000000" value={draft.requestCostBoundMicrousd} onChange={(event) => update("requestCostBoundMicrousd", event.target.value)} className={inputClass()} placeholder="blank holds full ceiling" />
         <div className="text-retro-text/40 uppercase tracking-wider">Queue bounds</div>
         <div className="grid grid-cols-4 gap-1">
           <input aria-label="OpenRouter max queued" type="number" min="1" max="64" value={draft.maxQueued} onChange={(event) => update("maxQueued", event.target.value)} className={inputClass()} title="max queued" />
@@ -248,7 +256,7 @@ export function OpenRouterSetupPanel({ setup, stale, onSave }: OpenRouterSetupPa
           onClick={() => void save()}
           className="border border-retro-text/20 px-2 py-1 text-[9px] uppercase tracking-wider text-retro-text/70 hover:text-retro-text disabled:opacity-40"
         >
-          {saving ? "Saving" : "Save OpenRouter setup"}
+          {saving ? "Saving" : policyRevoked ? "Review and re-grant OpenRouter egress" : "Save OpenRouter setup"}
         </button>
         <span className="text-[9px] text-retro-text/40">
           {setup?.credential_configured ? `key configured · fingerprint ${setup.credential_fingerprint ?? "available"}` : "configuration required · no key stored"}

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from src.workspace import (
+    ProductionWorkspace,
     InvalidWorkspaceArchiveError,
     MissingSecretMaterialError,
     ProductionWorkspaceError,
@@ -30,6 +31,7 @@ from src.workspace import (
     restore_workspace,
     write_lifecycle_receipt,
 )
+from src.workspace.production import prepare_lifecycle_directory
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -70,6 +72,14 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="explicitly authorize rollback of the named restore",
     )
+    accounting = subparsers.add_parser("accounting-reconcile", help="repair one retained accounting commit checkpoint under maintenance")
+    accounting.add_argument("--confirm", action="store_true")
+    accounting.add_argument("--period", help="acknowledge only the exact observed current UTC month")
+    accounting.add_argument("--expected-revision", type=int)
+    accounting.add_argument("--policy", action="store_true", help="repair interrupted policy publication as revoked")
+    rebind = subparsers.add_parser("accounting-rebind", help="retain deployment accounting before adopting a different canonical root")
+    rebind.add_argument("--from-root", type=Path, required=True)
+    rebind.add_argument("--confirm", action="store_true")
     return parser
 
 
@@ -221,18 +231,29 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         base_dir=args.base_dir,
         allow_missing=args.command == "status",
     )
+    os.environ["SERAPH_WORKSPACE_LIFECYCLE_PATH"] = str(workspace.lifecycle_directory)
     try:
         if args.command == "status":
             return _status_receipt(workspace)
         if args.command == "identity":
+            try:
+                lifecycle_directory = prepare_lifecycle_directory(workspace)
+                from src.workspace.accounting_witness import assert_deployment_binding
+                assert_deployment_binding(workspace)
+                accounting_status = "ready"
+            except ProductionWorkspaceError:
+                lifecycle_directory, accounting_status = workspace.lifecycle_directory, "blocked"
             return {
                 "schema_version": "seraph.production-workspace-bind-identity.v1",
                 "status": "ready",
                 "bind_identity": workspace.bind_identity_digest,
+                "lifecycle_directory": str(lifecycle_directory),
+                "accounting_continuity_status": accounting_status,
                 "identity_basis": "resolved_configured_path_plus_device_inode",
                 "secret_values_included": False,
             }
         registry = canonical_workspace_registry(workspace.host_root)
+        prepare_lifecycle_directory(workspace)
         with maintenance_fence(workspace):
             if args.command == "backup":
                 destination = _validate_backup_destination(workspace, args.archive)
@@ -259,6 +280,26 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                     registry=registry,
                     reconcile_rollback=reconcile_production_rollback,
                 )
+            elif args.command == "accounting-reconcile":
+                if not args.confirm:
+                    raise WorkspaceLifecycleError("accounting reconciliation requires explicit confirm=True")
+                if args.period:
+                    from src.workspace.accounting_continuity import acknowledge_accounting_period
+                    receipt = acknowledge_accounting_period(root=workspace.host_root, period=args.period,
+                        expected_revision=args.expected_revision, actor="managed_maintenance")
+                elif args.policy:
+                    from src.workspace.accounting_witness import reconcile_policy_checkpoint
+                    receipt = reconcile_policy_checkpoint(workspace.host_root)
+                else:
+                    from src.workspace.accounting_continuity import reconcile_accounting_checkpoint
+                    receipt = reconcile_accounting_checkpoint(root=workspace.host_root, registry=registry)
+            elif args.command == "accounting-rebind":
+                if not args.confirm:
+                    raise WorkspaceLifecycleError("accounting rebind requires explicit confirm=True")
+                from src.workspace.accounting_continuity import rebind_accounting_root
+                source = ProductionWorkspace(host_root=args.from_root.resolve())
+                with maintenance_fence(source):
+                    receipt = rebind_accounting_root(active=source, target=workspace)
             else:  # pragma: no cover - argparse enforces the command set.
                 raise WorkspaceLifecycleError("unsupported workspace lifecycle command")
         receipt["workspace_ownership"] = workspace.receipt()

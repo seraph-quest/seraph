@@ -23,6 +23,8 @@ services:
         --port 8003 --workers 1 --no-server-header
     volumes:
       - ${BACKEND_DATA_PATH_PROD:-./docker-data/prod/backend/data}:/app/data
+      # Managed descriptor; retained outside backup/restore root snapshots.
+      - ${SERAPH_WORKSPACE_LIFECYCLE_PATH:-./docker-data/prod/workspace-lifecycle}:/app/workspace-lifecycle
       - ${BACKEND_LOGS_PATH_PROD:-./docker-data/prod/backend/logs}:/app/logs
       - ./shared:/app/shared:ro
     env_file:
@@ -30,6 +32,7 @@ services:
     environment:
       DEPLOYMENT_ENVIRONMENT: production
       WORKSPACE_DIR: /app/data
+      SERAPH_WORKSPACE_LIFECYCLE_PATH: /app/workspace-lifecycle
       SERAPH_PRODUCTION_MOUNT_CHECK: "true"
       # Set this to the mount source shown by the host/container's
       # /proc/self/mountinfo for /app/data.  Preflight fails closed when the

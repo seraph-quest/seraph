@@ -4,12 +4,19 @@ import logging
 
 from smolagents import tool
 
-from src.approval.runtime import get_current_session_id
+from src.approval.runtime import get_current_session_id, get_current_trust_principal
 from src.audit.repository import audit_repository
 from src.tools.policy import get_current_tool_policy_mode, get_tool_risk_level
 from src.vault.repository import vault_repository
 
 logger = logging.getLogger(__name__)
+
+
+def _owner():
+    principal = get_current_trust_principal()
+    if principal is None or not principal.authenticated or principal.revoked:
+        raise PermissionError("vault_operator_proof_required")
+    return principal.principal_id
 
 
 def _run(coro):
@@ -62,6 +69,7 @@ def store_secret(key: str, value: str, description: str = "") -> str:
         key=key,
         value=value,
         description=description or None,
+        owner_principal_id=_owner(),
     ))
     _log_secret_event(
         event_type="secret_store",
@@ -86,7 +94,7 @@ def get_secret(key: str) -> str:
     Returns:
         A denial or not-found message that never includes the decrypted value.
     """
-    result = _run(vault_repository.get(key))
+    result = _run(vault_repository.get(key, owner_principal_id=_owner()))
     if result is None:
         _log_secret_event(
             event_type="secret_access",
@@ -116,7 +124,7 @@ def list_secrets() -> str:
     Returns:
         Formatted list of stored secret keys with descriptions.
     """
-    keys = _run(vault_repository.list_keys())
+    keys = _run(vault_repository.list_keys(owner_principal_id=_owner()))
     _log_secret_event(
         event_type="secret_list",
         tool_name="list_secrets",
@@ -142,7 +150,7 @@ def delete_secret(key: str) -> str:
     Returns:
         Confirmation message.
     """
-    success = _run(vault_repository.delete(key))
+    success = _run(vault_repository.delete(key, owner_principal_id=_owner()))
     if not success:
         _log_secret_event(
             event_type="secret_delete",

@@ -341,6 +341,11 @@ async def verify_pairing_credential(
     owner_principal_id = str(entry.get("owner_principal_id") or "").strip()
     if not owner_principal_id:
         raise ValueError("pairing_owner_missing")
+    from src.auth.service import authenticate_principal, AuthFailure
+    try:
+        await authenticate_principal(owner_principal_id)
+    except AuthFailure as exc:
+        raise ValueError("pairing_owner_reconnect_required") from exc
     return entry, state
 
 
@@ -528,6 +533,11 @@ async def authenticate_edge_request(
     owner_principal_id = str(entry.get("owner_principal_id") or "").strip()
     if not owner_principal_id:
         raise ValueError("pairing_owner_missing")
+    from src.auth.service import authenticate_principal, AuthFailure
+    try:
+        await authenticate_principal(owner_principal_id)
+    except AuthFailure as exc:
+        raise ValueError("pairing_owner_reconnect_required") from exc
     fingerprint = scoped_credential_fingerprint(presented_credential, credential_scope)
     request = NodePairingRequest(
         device_id=device_id,

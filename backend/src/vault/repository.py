@@ -39,6 +39,7 @@ class VaultRepository:
         key: str,
         value: str,
         description: Optional[str] = None,
+        *, owner_principal_id: str | None = None,
     ) -> Secret:
         """Upsert an encrypted secret."""
         try:
@@ -48,6 +49,10 @@ class VaultRepository:
                 result = await db.execute(select(Secret).where(Secret.key == key))
                 existing = result.scalars().first()
                 if existing:
+                    if existing.revoked_at is not None:
+                        raise PermissionError("vault_secret_revoked")
+                    if existing.owner_principal_id != owner_principal_id:
+                        raise PermissionError("vault_owner_mismatch")
                     existing.encrypted_value = encrypted
                     if description is not None:
                         existing.description = description
@@ -59,6 +64,7 @@ class VaultRepository:
                 else:
                     secret = Secret(
                         key=key,
+                        owner_principal_id=owner_principal_id,
                         encrypted_value=encrypted,
                         description=description,
                     )
@@ -77,11 +83,11 @@ class VaultRepository:
             await _log_vault_event("failed", "store", error=str(exc))
             raise
 
-    async def get(self, key: str) -> Optional[str]:
+    async def get(self, key: str, *, owner_principal_id: str | None = None) -> Optional[str]:
         """Retrieve and decrypt a secret value. Returns None if not found."""
         try:
             async with get_session() as db:
-                result = await db.execute(select(Secret).where(Secret.key == key))
+                result = await db.execute(select(Secret).where(Secret.key == key, Secret.owner_principal_id == owner_principal_id, Secret.revoked_at.is_(None)))
                 secret = result.scalars().first()
                 if not secret:
                     await _log_vault_event("empty_result", "get", reason="missing_secret")
@@ -94,11 +100,11 @@ class VaultRepository:
             await _log_vault_event("failed", "get", error=str(exc))
             raise
 
-    async def list_keys(self) -> list[dict]:
+    async def list_keys(self, *, owner_principal_id: str | None = None) -> list[dict]:
         """List all secret keys with metadata (never values)."""
         try:
             async with get_session() as db:
-                result = await db.execute(select(Secret))
+                result = await db.execute(select(Secret).where(Secret.owner_principal_id == owner_principal_id, Secret.revoked_at.is_(None)))
                 secrets = result.scalars().all()
                 if not secrets:
                     await _log_vault_event("empty_result", "list_keys", reason="empty_vault")
@@ -123,7 +129,7 @@ class VaultRepository:
         """Return decrypted secret values for internal redaction safeguards."""
         try:
             async with get_session() as db:
-                result = await db.execute(select(Secret))
+                result = await db.execute(select(Secret).where(Secret.revoked_at.is_(None)))
                 secrets = result.scalars().all()
                 if not secrets:
                     await _log_vault_event("empty_result", "list_secret_values", reason="empty_vault")
@@ -163,11 +169,11 @@ class VaultRepository:
             await _log_vault_event("failed", "list_secret_values", error=str(exc))
             raise
 
-    async def delete(self, key: str) -> bool:
+    async def delete(self, key: str, *, owner_principal_id: str | None = None) -> bool:
         """Delete a secret by key. Returns True if deleted."""
         try:
             async with get_session() as db:
-                result = await db.execute(select(Secret).where(Secret.key == key))
+                result = await db.execute(select(Secret).where(Secret.key == key, Secret.owner_principal_id == owner_principal_id, Secret.revoked_at.is_(None)))
                 secret = result.scalars().first()
                 if not secret:
                     await _log_vault_event("empty_result", "delete", reason="missing_secret")
@@ -182,10 +188,10 @@ class VaultRepository:
             await _log_vault_event("failed", "delete", error=str(exc))
             raise
 
-    async def exists(self, key: str) -> bool:
+    async def exists(self, key: str, *, owner_principal_id: str | None = None) -> bool:
         """Check if a secret exists."""
         async with get_session() as db:
-            result = await db.execute(select(Secret).where(Secret.key == key))
+            result = await db.execute(select(Secret).where(Secret.key == key, Secret.owner_principal_id == owner_principal_id, Secret.revoked_at.is_(None)))
             return result.scalars().first() is not None
 
 

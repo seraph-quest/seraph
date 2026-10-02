@@ -2238,6 +2238,7 @@ def _memory_record_scope_statement(
     kind: MemoryKind | str | None = None,
     status: MemoryStatus | str | None = MemoryStatus.active,
     cursor: tuple[datetime, str] | None = None,
+    recovered_read_scopes: dict[str, str] | None = None,
 ):
     """Build the owner-fenced SQL scope used by both record reads.
 
@@ -2254,8 +2255,9 @@ def _memory_record_scope_statement(
     if normalized_query is not None and len(normalized_query) > _MEMORY_RECORD_QUERY_MAX_LENGTH:
         raise ValueError("q must be at most 200 characters")
 
+    from src.auth.ownership import read_scope_clause
     conditions = [
-        Memory.source_session_id == normalized_owner,
+        read_scope_clause(Memory.id, Memory.source_session_id, normalized_owner, recovered_read_scopes or {}),
         _canonical_memory_without_tombstone_clause(),
         _canonical_memory_without_deletion_marker_clause(),
         *([Memory.status == normalized_status] if normalized_status is not None else []),
@@ -4864,6 +4866,7 @@ class MemoryRepository:
         query: str | None = None,
         kind: MemoryKind | str | None = None,
         status: MemoryStatus | str = MemoryStatus.active,
+        recovered_read_scopes: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Return an authenticated owner's metadata-first memory page.
 
@@ -4885,6 +4888,7 @@ class MemoryRepository:
             query=normalized_query,
             kind=kind,
             status=status,
+            recovered_read_scopes=recovered_read_scopes,
         )
 
         async with get_session() as db:
@@ -4913,6 +4917,7 @@ class MemoryRepository:
                     kind=kind,
                     status=status,
                     cursor=scan_cursor,
+                    recovered_read_scopes=recovered_read_scopes,
                 ).options(
                     defer(Memory.content),
                     defer(Memory.summary),
@@ -4950,14 +4955,15 @@ class MemoryRepository:
             has_next = len(visible_rows) > normalized_limit or scan_truncated
             page_rows = visible_rows[:normalized_limit]
             source_by_memory: dict[str, list[MemorySource]] = {}
+            truncated_memory_ids = set()
             if page_rows:
-                source_by_memory, truncated_memory_ids = await _load_memory_record_sources(
-                    db,
-                    memory_ids=[memory.id for memory in page_rows],
-                    owner_session_id=str(owner_session_id).strip(),
-                )
-            else:
-                truncated_memory_ids = set()
+                for source_owner in {str(memory.source_session_id) for memory in page_rows}:
+                    sources, truncated = await _load_memory_record_sources(
+                        db, memory_ids=[memory.id for memory in page_rows if memory.source_session_id == source_owner],
+                        owner_session_id=source_owner,
+                    )
+                    source_by_memory.update(sources)
+                    truncated_memory_ids.update(truncated)
             summary_previews = await _load_memory_record_previews(
                 db,
                 memory_ids=[memory.id for memory in page_rows],
@@ -4968,7 +4974,7 @@ class MemoryRepository:
                 await _memory_record_projection(
                     db,
                     memory,
-                    owner_session_id=str(owner_session_id).strip(),
+                    owner_session_id=str(memory.source_session_id).strip(),
                     sources=source_by_memory.get(memory.id, []),
                     sources_truncated=memory.id in truncated_memory_ids,
                     summary_preview=summary_previews.get(memory.id, (None, False)),
@@ -4976,6 +4982,11 @@ class MemoryRepository:
                 )
                 for memory in page_rows
             ]
+            if recovered_read_scopes:
+                from src.auth.ownership import RECOVERED_FIELDS
+                for record in records:
+                    if record["id"] in recovered_read_scopes:
+                        record.update(RECOVERED_FIELDS)
             next_cursor = None
             if has_next and page_rows:
                 if scan_truncated and last_scanned_cursor is not None:

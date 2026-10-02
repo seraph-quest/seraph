@@ -280,7 +280,10 @@ def get_secret_ref(
     if session_id is None:
         return "Secret references require an active session."
 
-    result = _run(vault_repository.get(key))
+    principal = get_current_trust_principal()
+    if principal is None or not principal.authenticated or principal.revoked:
+        return "Secret references require authenticated operator authority."
+    result = _run(vault_repository.get(key, owner_principal_id=principal.principal_id))
     if result is None:
         _log_secret_event(
             event_type="secret_ref_issue",

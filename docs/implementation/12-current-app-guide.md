@@ -302,6 +302,12 @@ keeps an accessible notice directing the operator to review and recreate work
 in the current scope. A separate audited recovery design is required before
 historical scopes can be migrated.
 
+The #900 ownership implementation adds a separately reviewed private continuity
+credential and exact read-only recovery contract, described in
+[Operator ownership and recovery](./19-operator-ownership-and-recovery.md).
+It remains Partial until reviewed integration; it never restores prior grants,
+adopts ambiguous legacy history, or substitutes a retired execution root.
+
 `/api/runtime/status` and `/api/settings/artifact-storage` are the active
 operator receipts. They expose the effective OpenRouter route, consent,
 allow-list, budget, admission state, and disabled local-runtime reason. A

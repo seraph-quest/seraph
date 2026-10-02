@@ -3,6 +3,7 @@ import type { FormEvent, ReactNode } from "react";
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
 import { AUTH_REQUIRED_EVENT } from "../../lib/operatorAuthEvents";
+import { OperatorOwnershipRecovery } from "./OperatorOwnershipRecovery";
 
 type AuthView = "checking" | "login" | "setup" | "unavailable" | "authenticated";
 
@@ -14,6 +15,7 @@ export interface OperatorSession {
   absolute_expires_at: string;
   ownership_continuity: "stable" | "legacy_rebind_required";
   ownership_recovery_action: "review_and_recreate_work_in_current_scope" | null;
+  operator_identity_id?: string | null;
 }
 
 type SessionRead =
@@ -135,18 +137,21 @@ function LoginForm({
   onLogin,
 }: {
   error: string | null;
-  onLogin: (password: string) => Promise<void>;
+  onLogin: (password: string, recoveryCode?: string, startNewScope?: boolean) => Promise<void>;
 }) {
   const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [recoveryCode, setRecoveryCode] = useState("");
+  const [startNewScope, setStartNewScope] = useState(false);
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!password.trim() || submitting) return;
     setSubmitting(true);
     try {
-      await onLogin(password);
+      await onLogin(password, recoveryCode.trim() || undefined, startNewScope);
       setPassword("");
+      setRecoveryCode("");
     } finally {
       setSubmitting(false);
     }
@@ -171,6 +176,9 @@ function LoginForm({
         onChange={(event) => setPassword(event.target.value)}
         className="cockpit-auth-input mt-1 w-full px-2 py-2 text-sm"
       />
+      <label className="cockpit-auth-label mt-3 block" htmlFor="operator-recovery-code">Saved one-time recovery code (new device)</label>
+      <input id="operator-recovery-code" type="password" autoComplete="off" value={recoveryCode} onChange={(event) => setRecoveryCode(event.target.value)} className="cockpit-auth-input mt-1 w-full px-2 py-2 text-sm" disabled={startNewScope} />
+      <label className="mt-3 block text-xs"><input type="checkbox" checked={startNewScope} onChange={(event) => setStartNewScope(event.target.checked)} /> Start a new private scope without historical recovery</label>
       {error && <div role="alert" className="cockpit-auth-error mt-2 text-xs">{error}</div>}
       <button
         type="submit"
@@ -380,7 +388,7 @@ export function OperatorAuthGate({ children }: { children: ReactNode }) {
     return () => window.removeEventListener(AUTH_REQUIRED_EVENT, handleAuthRequired);
   }, [reconcileSession]);
 
-  const login = useCallback(async (password: string) => {
+  const login = useCallback(async (password: string, recoveryCode?: string, startNewScope?: boolean) => {
     logoutFenceRef.current = false;
     const generation = beginGeneration(true);
     loginGenerationRef.current = generation;
@@ -390,7 +398,7 @@ export function OperatorAuthGate({ children }: { children: ReactNode }) {
         method: "POST",
         authRequired: false,
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password }),
+        body: JSON.stringify({ password, ...(recoveryCode ? { recovery_code: recoveryCode } : {}), ...(startNewScope ? { start_new_scope: true } : {}) }),
       }, RECONCILIATION_DEADLINE_MS);
       if (generation !== authGenerationRef.current) return;
       if (response.ok && payload && typeof payload === "object" && (payload as Record<string, unknown>).authenticated === true) {
@@ -410,6 +418,8 @@ export function OperatorAuthGate({ children }: { children: ReactNode }) {
         setLoginError(
           code === "login_rate_limited"
             ? "Too many attempts. Wait a minute and try again."
+            : code === "ownership_proof_invalid"
+              ? "Recovery proof is unavailable. Enter a saved one-time recovery code or start a new private scope."
             : response.ok
               ? "The server session could not be established. Retry."
               : "Invalid operator credentials.",
@@ -524,6 +534,7 @@ export function OperatorAuthGate({ children }: { children: ReactNode }) {
   }
   return (
     <OperatorAuthContext.Provider value={contextValue}>
+      <OperatorOwnershipRecovery key={session.session_id} session={session} onSessionChanged={refreshSession} />
       {session.ownership_continuity === "legacy_rebind_required" && (
         <div
           role="status"

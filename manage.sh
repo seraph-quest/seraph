@@ -675,6 +675,7 @@ function reject_prod_local_stack() {
 }
 
 function start_local_backend() {
+    python3 "$SCRIPT_DIR/scripts/operator_schema_guard.py" "$LOCAL_WORKSPACE_DIR/seraph.db" || return 1
     if local_backend_is_running; then
         local pid
         pid=$(cat "$LOCAL_BACKEND_PID_FILE")

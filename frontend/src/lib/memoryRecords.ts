@@ -86,6 +86,7 @@ function normalizeRecord(value: unknown, detail = false): CanonicalMemoryRecord 
     : record(value.conflict_state) ? value.conflict_state : null;
   return {
     id: value.id,
+    ...(value.ownership_access === "recovered_read_only" ? { ownership_access: "recovered_read_only" as const, execution_block_reason: text(value.execution_block_reason) ?? undefined } : {}),
     kind: value.kind as CanonicalMemoryKind,
     status: value.status as CanonicalMemoryStatus,
     summary: text(value.summary),

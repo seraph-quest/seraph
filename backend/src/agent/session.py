@@ -130,24 +130,9 @@ class SessionManager:
         if not owner_principal_id:
             return
         existing_owner_principal_id = str(session.owner_principal_id or "").strip() or None
-        if existing_owner_principal_id is None:
-            claimed = await db.execute(
-                update(Session)
-                .where(
-                    Session.id == session.id,
-                    Session.owner_principal_id.is_(None),
-                )
-                .values(owner_principal_id=owner_principal_id)
-            )
-            await db.flush()
-            if claimed.rowcount != 1:
-                await db.refresh(session)
-                existing_owner_principal_id = str(session.owner_principal_id or "").strip() or None
-                if existing_owner_principal_id != owner_principal_id:
-                    raise SessionOwnerMismatchError(session.id)
-            else:
-                session.owner_principal_id = owner_principal_id
-        elif existing_owner_principal_id != owner_principal_id:
+        # Existing ownerless records are ambiguous historical data, never a
+        # caller-claimable placeholder. New rows receive their owner at insert.
+        if existing_owner_principal_id != owner_principal_id:
             raise SessionOwnerMismatchError(session.id)
 
     async def get_or_create(

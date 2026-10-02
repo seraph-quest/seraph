@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { FirstResultSetup } from "./FirstResultSetup";
 
 import {
   emptyCockpitHomeSnapshot,
@@ -150,6 +151,7 @@ export function CockpitHome({ onOpenSection, onOpenApprovals, onOpenTask, goalSu
 
   return (
     <section className="cockpit-section-surface cockpit-home" data-testid="cockpit-home" aria-busy={loading}>
+      <FirstResultSetup onOpenSection={onOpenSection} onOpenTask={onOpenTask} />
       <div className="cockpit-section-header">
         <div>
           <div className="cockpit-eyebrow">HOME</div>

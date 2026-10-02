@@ -24,7 +24,7 @@ interface SourceWatchRecord {
   active_job_fence?: number | null;
   sources?: Array<{ source_key?: string; kind?: string; target?: string; priority?: number }>;
   criteria?: { include_terms?: string[]; exclude_terms?: string[] };
-  schedule?: { cron?: string; timezone?: string };
+  schedule?: { cron?: string; timezone?: string; enabled?: boolean; configured_enabled?: boolean };
   last_status?: string | null;
   last_error_code?: string | null;
   baselines?: Array<{ source_key?: string; state?: string; sha256?: string; generation?: number }>;
@@ -119,6 +119,7 @@ function nextRunLabel(cadence: string, dailyHour: number, timezone: string): str
 function scheduleLabel(schedule: SourceWatchRecord["schedule"]): string {
   const cron = schedule?.cron ?? "";
   const timezone = schedule?.timezone ?? "UTC";
+  if (schedule?.enabled === false) return `${schedule.configured_enabled === false ? "manual only" : "schedule paused"} · scheduler disabled · ${timezone}`;
   if (cron === "*/15 * * * *") return `legacy 15-minute cadence · ${timezone}`;
   return `${cron || "custom cadence"} · ${timezone}`;
 }

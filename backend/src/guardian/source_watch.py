@@ -678,6 +678,13 @@ def _validate_schedule(schedule: Mapping[str, Any]) -> tuple[str, str]:
     return cron, timezone_name
 
 
+def _schedule_enabled(schedule: Mapping[str, Any], *, default: bool = True) -> bool:
+    enabled = schedule.get("enabled", default)
+    if type(enabled) is not bool:
+        raise SourceWatchError("schedule_enabled_invalid")
+    return enabled
+
+
 def normalize_source_text(content: str, *, html_content: bool = False) -> str:
     value = str(content or "").replace("\r\n", "\n").replace("\r", "\n")
     if html_content:
@@ -1065,6 +1072,7 @@ class SourceWatchService:
         schedule: Mapping[str, Any],
         write_mode: str,
         reviewed_grant_id: str | None = None,
+        setup_watch_id: str | None = None,
     ) -> dict[str, Any]:
         parsed_sources = parse_sources(sources)
         parsed_criteria = parse_criteria(criteria)
@@ -1073,8 +1081,9 @@ class SourceWatchService:
         if write_mode == "standing_reviewed" and not _text(reviewed_grant_id):
             raise SourceWatchError("standing_grant_required")
         cron, timezone_name = _validate_schedule(schedule)
-        watch_id = str(uuid.uuid4())
-        scheduled_job_id = str(uuid.uuid4())
+        schedule_enabled = _schedule_enabled(schedule)
+        watch_id = setup_watch_id or str(uuid.uuid4())
+        scheduled_job_id = f"setup-job-{watch_id}" if setup_watch_id else str(uuid.uuid4())
         source_json = [
             {
                 "source_key": item.source_key,
@@ -1126,7 +1135,7 @@ class SourceWatchService:
                 plan_revision=1,
                 sources_json=_dump(source_json),
                 criteria_json=_dump(criteria_json),
-                schedule_spec_json=_dump({"cron": cron, "timezone": timezone_name}),
+                schedule_spec_json=_dump({"cron": cron, "timezone": timezone_name, "enabled": schedule_enabled}),
                 read_authority_json=_dump(
                     {
                         "source_keys": [item.source_key for item in parsed_sources],
@@ -1148,7 +1157,7 @@ class SourceWatchService:
             scheduled_job = ScheduledJob(
                 id=scheduled_job_id,
                 name=f"Guardian source watch {watch_id[:8]}",
-                enabled=True,
+                enabled=schedule_enabled,
                 trigger_type="cron",
                 trigger_spec_json=_dump({"cron": cron, "timezone": timezone_name}),
                 action_type="run_source_watch",
@@ -1156,15 +1165,27 @@ class SourceWatchService:
                 session_id=owner_session_id,
                 created_by_session_id=owner_session_id,
             )
-            db.add(watch)
-            db.add(scheduled_job)
-            await db.flush()
+            if setup_watch_id:
+                from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+                inserted = await db.execute(sqlite_insert(GuardianSourceWatch).values(**watch.model_dump()).on_conflict_do_nothing(index_elements=["id"]))
+                watch_created = inserted.rowcount == 1
+                stored = (await db.execute(select(GuardianSourceWatch).where(GuardianSourceWatch.id == watch_id))).scalar_one()
+                for field in ("goal_id", "owner_principal_id", "owner_session_id", "goal_revision", "sources_json", "criteria_json", "write_mode", "scheduled_job_id"):
+                    if getattr(stored, field) != getattr(watch, field):
+                        raise SourceWatchError("setup_journey_payload_conflict")
+                await db.execute(sqlite_insert(ScheduledJob).values(**scheduled_job.model_dump()).on_conflict_do_nothing(index_elements=["id"]))
+            else:
+                watch_created = True
+                db.add(watch)
+                db.add(scheduled_job)
+                await db.flush()
         result = await self.get_watch(
             watch_id,
             owner_principal_id=owner_principal_id,
             owner_session_id=owner_session_id,
         )
-        await _audit_watch_event(result, "created", write_mode=write_mode)
+        if watch_created:
+            await _audit_watch_event(result, "created", write_mode=write_mode)
         return result or {}
 
     async def get_watch(
@@ -1188,6 +1209,7 @@ class SourceWatchService:
             ).scalars().first()
             if watch is None:
                 return None
+            scheduled_job = (await db.execute(select(ScheduledJob).where(ScheduledJob.id == watch.scheduled_job_id))).scalars().first()
             baselines = (
                 await db.execute(
                     select(GuardianSourceBaseline).where(GuardianSourceBaseline.watch_id == watch_id)
@@ -1216,7 +1238,11 @@ class SourceWatchService:
                     if isinstance(item, Mapping)
                 ],
                 "criteria": _safe_export_value(_load(watch.criteria_json, {})),
-                "schedule": _load(watch.schedule_spec_json, {}),
+                "schedule": {
+                    **_load(watch.schedule_spec_json, {}),
+                    "configured_enabled": _schedule_enabled(_load(watch.schedule_spec_json, {})),
+                    "enabled": bool(scheduled_job and scheduled_job.enabled),
+                },
                 "read_authority": _safe_export_value(_load(watch.read_authority_json, {})),
                 "write_authority": _safe_export_value(_load(watch.write_authority_json, {})),
                 "write_mode": watch.write_mode,
@@ -1360,14 +1386,15 @@ class SourceWatchService:
                 raise SourceWatchError("goal_binding_stale")
             if schedule is not None:
                 cron, timezone_name = _validate_schedule(schedule)
-                watch.schedule_spec_json = _dump({"cron": cron, "timezone": timezone_name})
+                schedule_enabled = _schedule_enabled(schedule, default=_schedule_enabled(_load(watch.schedule_spec_json, {})))
+                watch.schedule_spec_json = _dump({"cron": cron, "timezone": timezone_name, "enabled": schedule_enabled})
                 job = (
                     await db.execute(
                         select(ScheduledJob).where(ScheduledJob.id == watch.scheduled_job_id)
                     )
                 ).scalars().first()
                 if job is not None:
-                    job.trigger_spec_json = watch.schedule_spec_json
+                    job.trigger_spec_json = _dump({"cron": cron, "timezone": timezone_name})
                     job.updated_at = _now()
                     db.add(job)
             goal_budget = deserialize_admission_budget(goal)
@@ -1498,6 +1525,11 @@ class SourceWatchService:
                 watch.write_mode = write_mode
             if state is not None:
                 watch.state = state
+            job = (await db.execute(select(ScheduledJob).where(ScheduledJob.id == watch.scheduled_job_id))).scalars().first()
+            if job is not None:
+                job.enabled = watch.state == "active" and _schedule_enabled(_load(watch.schedule_spec_json, {}))
+                job.updated_at = _now()
+                db.add(job)
             watch.plan_revision += 1
             watch.updated_at = _now()
             db.add(watch)

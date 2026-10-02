@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { FirstResultSetup } from "./FirstResultSetup";
+import { AttentionList } from "./AttentionList";
+import { buildCockpitAttention, type AttentionItem, type AttentionOwner } from "../../lib/cockpitAttention";
 
 import {
   emptyCockpitHomeSnapshot,
@@ -13,6 +15,9 @@ export interface CockpitHomeProps {
   onOpenSection: (section: "inbox" | "work" | "goals" | "library" | "connections") => void;
   onOpenApprovals?: () => void;
   onOpenTask?: (taskId: string) => void;
+  onOpenAttention?: (item: AttentionItem) => void;
+  owner?: AttentionOwner | null;
+  focusAttentionId?: string | null;
   goalSummary?: {
     title?: string | null;
     status?: string | null;
@@ -42,7 +47,11 @@ function taskId(task: Record<string, unknown>): string | null {
   return typeof task.id === "string" ? task.id : typeof task.task_id === "string" ? task.task_id : null;
 }
 
-export function CockpitHome({ onOpenSection, onOpenApprovals, onOpenTask, goalSummary }: CockpitHomeProps) {
+export function CockpitHome(props: CockpitHomeProps) {
+  return <CockpitHomeContent key={`${props.owner?.principalId ?? ""}:${props.owner?.sessionId ?? ""}`} {...props} />;
+}
+
+function CockpitHomeContent({ onOpenSection, onOpenApprovals, onOpenTask, onOpenAttention, owner = null, focusAttentionId, goalSummary }: CockpitHomeProps) {
   type HomeResourceKey = keyof CockpitHomeLoadResult["resources"];
   const resourceKeys: HomeResourceKey[] = ["goals", "work", "approvals", "inbox", "continuity", "runtime"];
   const [snapshot, setSnapshot] = useState<CockpitHomeSnapshot>(emptyCockpitHomeSnapshot);
@@ -54,11 +63,8 @@ export function CockpitHome({ onOpenSection, onOpenApprovals, onOpenTask, goalSu
   });
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const retryDelay = useRef(30_000);
   const snapshotRef = useRef(snapshot);
   const controllerRef = useRef<AbortController | null>(null);
-  const retryTimerRef = useRef<number | null>(null);
-  const refreshLoopRef = useRef<(() => void) | null>(null);
   snapshotRef.current = snapshot;
 
   const load = useCallback(async () => {
@@ -79,14 +85,12 @@ export function CockpitHome({ onOpenSection, onOpenApprovals, onOpenTask, goalSu
         return next;
       });
       setError(result.error);
-      retryDelay.current = result.error ? Math.min(retryDelay.current === 30_000 ? 60_000 : 120_000, 120_000) : 30_000;
       return result.error === null;
     } catch (cause) {
       if (cause instanceof DOMException && cause.name === "AbortError") return false;
       if (controller.signal.aborted || controllerRef.current !== controller) return false;
       setError(cause instanceof Error ? cause.message : "Home refresh failed.");
       setResources((current) => Object.fromEntries(Object.keys(current).map((key) => [key, "offline"])) as typeof current);
-      retryDelay.current = Math.min(retryDelay.current === 30_000 ? 60_000 : 120_000, 120_000);
       return false;
     } finally {
       if (!controller.signal.aborted && controllerRef.current === controller) setLoading(false);
@@ -94,40 +98,13 @@ export function CockpitHome({ onOpenSection, onOpenApprovals, onOpenTask, goalSu
   }, []);
 
   const refreshManually = useCallback(() => {
-    retryDelay.current = 30_000;
-    if (retryTimerRef.current !== null) {
-      window.clearTimeout(retryTimerRef.current);
-      retryTimerRef.current = null;
-    }
-    if (refreshLoopRef.current) refreshLoopRef.current();
-    else void load();
+    void load();
   }, [load]);
 
   useEffect(() => {
-    let cancelled = false;
-    const schedule = () => {
-      if (cancelled) return;
-      if (retryTimerRef.current !== null) window.clearTimeout(retryTimerRef.current);
-      retryTimerRef.current = window.setTimeout(() => {
-        retryTimerRef.current = null;
-        void refresh();
-      }, retryDelay.current);
-    };
-    const refresh = async () => {
-      if (cancelled) return;
-      await load();
-      if (!cancelled) schedule();
-    };
-    refreshLoopRef.current = () => void refresh();
-    void refresh();
+    void load();
     return () => {
-      cancelled = true;
-      refreshLoopRef.current = null;
       controllerRef.current?.abort();
-      if (retryTimerRef.current !== null) {
-        window.clearTimeout(retryTimerRef.current);
-        retryTimerRef.current = null;
-      }
     };
   }, [load]);
 
@@ -143,6 +120,7 @@ export function CockpitHome({ onOpenSection, onOpenApprovals, onOpenTask, goalSu
     ? snapshot.inbox?.items.filter((item) => ["pending", "snoozed"].includes(item.state)) ?? []
     : [];
   const inboxCount = attentionItems.length;
+  const unifiedAttention = buildCockpitAttention(snapshot, resources, owner);
   const approvalsCount = snapshot.approvals.length;
   const runningCount = snapshot.work?.tasks.filter((task) => String(task.status) === "running").length ?? 0;
   const queuedCount = snapshot.work?.tasks.filter((task) => ["triage", "todo", "ready"].includes(String(task.status))).length ?? 0;
@@ -189,16 +167,11 @@ export function CockpitHome({ onOpenSection, onOpenApprovals, onOpenTask, goalSu
           <p className="cockpit-home-muted">next eligible · reported in the existing Goals surface</p>
           <button type="button" onClick={() => onOpenSection("goals")}>Open Goals</button>
         </article>
-        <article className="cockpit-home-card">
-          <h3>Needs attention</h3>
-          {attentionItems.slice(0, 3).map((item) => (
-            <button key={item.id} type="button" className="cockpit-home-link" onClick={() => onOpenSection("inbox")}>
-              {item.title} · {item.state}
-            </button>
-          ))}
-          {!resourceConfirmed("inbox") ? <p>Inbox data unavailable.</p> : inboxCount === 0 ? <p>No pending decisions on this page.</p> : null}
-          <button type="button" onClick={() => onOpenSection("inbox")}>Open Inbox</button>
-        </article>
+        <AttentionList items={unifiedAttention} confirmedAt={snapshot.last_confirmed_at} available={resourceConfirmed("inbox")} focusItemId={focusAttentionId} onOpen={(item) => {
+          if (onOpenAttention) onOpenAttention(item);
+          else if (item.taskId && onOpenTask) onOpenTask(item.taskId);
+          else onOpenSection("inbox");
+        }} />
         <article className="cockpit-home-card">
           <h3>Runtime and recovery</h3>
           <p><strong>{runtimeLabel(snapshot.runtime)}</strong></p>

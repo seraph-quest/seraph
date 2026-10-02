@@ -225,6 +225,20 @@ describe("WorkBoardPanel", () => {
     vi.restoreAllMocks();
   });
 
+  it("returns recovered history to its exact origin while all effect controls stay readonly", async () => {
+    const currentTask = task({ ownership_access: "recovered_read_only", status: "blocked", recovery_action: "reconcile_external_effect", block_kind: "unknown_effect" });
+    taskResponse(fetchMock, currentTask);
+    const returnContext = vi.fn(); const goal = vi.fn(); const thread = vi.fn();
+    render(<WorkBoardPanel focusTaskId="task-1" ownerPrincipalId="operator:one" ownerSessionId="operator-session-1" attentionContext={{ taskId: "task-1", origin: "inbox", goalId: "goal-1", threadId: "thread-1" }} onReturnAttention={returnContext} onOpenAttentionGoal={goal} onOpenAttentionThread={thread} />);
+    const returnButton = await screen.findByRole("button", { name: "Return to Inbox decision" });
+    fireEvent.click(screen.getByRole("button", { name: "Open originating goal" })); expect(goal).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "Open originating thread" })); expect(thread).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("button", { name: "Reconcile recorded GitHub effect" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve exact action" })).not.toBeInTheDocument();
+    fireEvent.click(returnButton); expect(returnContext).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+  });
+
   it("carries the server snapshot cursor to the authenticated socket and reconnects from a fresh snapshot", async () => {
     const currentTask = task({ status: "ready", dispatch_rank: 1 });
     taskResponse(fetchMock, currentTask, 42);

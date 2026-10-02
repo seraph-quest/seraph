@@ -6,6 +6,7 @@ import { GoalTree } from "./GoalTree";
 import { GoalForm } from "./GoalForm";
 import { GoalLoopPanel } from "./GoalLoopPanel";
 import type { GoalInfo } from "../../types";
+import { useAttentionGoalFocus } from "../../hooks/useAttentionGoalFocus";
 
 const LEVELS = ["daily", "weekly", "monthly", "quarterly", "annual", "vision"] as const;
 const DOMAINS = ["productivity", "performance", "health", "influence", "growth"] as const;
@@ -56,6 +57,9 @@ export function QuestPanel() {
   const [search, setSearch] = useState("");
   const [filterLevel, setFilterLevel] = useState("");
   const [filterDomain, setFilterDomain] = useState("");
+  const attentionGoalStatus = useAttentionGoalFocus(setSelectedGoalId, () => {
+    setSearch(""); setFilterLevel(""); setFilterDomain(""); setEditingGoal(null);
+  });
 
   useEffect(() => {
     if (questPanelOpen) refresh();
@@ -84,6 +88,7 @@ export function QuestPanel() {
       <div className="border-t border-retro-border/20 my-1" />
 
       <div className="px-1">
+        {attentionGoalStatus && <div role="status" className="mb-2 text-xs">{attentionGoalStatus}</div>}
         <div className="flex items-center justify-between mb-2">
           <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold">
             Active Priorities

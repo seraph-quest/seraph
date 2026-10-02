@@ -14,6 +14,7 @@ import { ArtifactStoragePanel } from "./settings/ArtifactStoragePanel";
 import { CalendarConnectionPanel } from "./settings/CalendarConnectionPanel";
 import { MailConnectionPanel } from "./settings/MailConnectionPanel";
 import { useOptionalOperatorAuth } from "./auth/OperatorAuthGate";
+import { appEventBus } from "../lib/appEventBus";
 
 interface SkillInfo {
   name: string;
@@ -443,6 +444,15 @@ export function SettingsPanel() {
   const [installing, setInstalling] = useState<string | null>(null);
   const [configuringServer, setConfiguringServer] = useState<McpServer | null>(null);
   const [activeSection, setActiveSection] = useState<SettingsSection>("artifacts");
+  useEffect(() => {
+    const inspectAccounting = (event: { principalId: string; sessionId: string }) => {
+      const session = operatorAuth?.session;
+      if (!session || event.principalId !== session.principal_id || event.sessionId !== session.session_id || !(Date.parse(session.absolute_expires_at) > Date.now()) || !(Date.parse(session.idle_expires_at) > Date.now())) return;
+      setActiveSection("artifacts"); setSettingsPanelOpen(true);
+    };
+    appEventBus.on("settings:inspect-accounting", inspectAccounting);
+    return () => appEventBus.off("settings:inspect-accounting", inspectAccounting);
+  }, [operatorAuth?.session, setSettingsPanelOpen]);
   const wasOpenRef = useRef(false);
 
   useLayoutEffect(() => {

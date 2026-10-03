@@ -11,7 +11,7 @@ from sqlalchemy import update
 from sqlmodel import select
 
 from src.db import engine
-from src.db.models import Goal, GitHubFollowthroughConnection, WorkflowRunState
+from src.db.models import Goal, GitHubFollowthroughConnection, WorkflowRunState, OperatorSession
 from src.extensions.github_capacity_closure import LegacyCloseRequest, PublicationCloseRequest
 from src.extensions.github_followthrough import GitHubFollowthroughService, GitHubFollowthroughError
 from src.workflows.job_runtime import durable_job_repository as jobs, DurableJobError
@@ -89,9 +89,62 @@ async def test_actual_legacy_capacity_close_is_atomic_durable_and_permanently_fe
     with pytest.raises(GitHubFollowthroughError):
         await service._reserve_connection(owner_principal_id=read.principal, connection_id=read.original_binding["connection_id"], expected_revision=read.connection_revision, job_id=read.job_id)
     assert await service._release_connection(connection_id=read.original_binding["connection_id"], owner_principal_id=read.principal, job_id=read.job_id, fence=read.connection_fence) is False
+    # Mechanical successor reservation boundary: real canonical SQLite rows,
+    # not proof of admission/consent for a second publication job.
+    async with async_db() as db:
+        await db.execute(update(GitHubFollowthroughConnection).where(GitHubFollowthroughConnection.id == read.original_binding["connection_id"]).values(
+            active_job_id="independent-successor-reservation", active_fence=read.connection_fence+1,
+            revision=read.connection_revision+1))
+        row = await db.get(GitHubFollowthroughConnection, read.original_binding["connection_id"])
+        successor_before = row.model_dump(mode="json")
+    observed = await client.post(f"/api/capabilities/github/jobs/{read.job_id}/reconcile", headers=ORIGIN,
+        json={"acknowledged_readback": True, "expected_connection_revision": read.connection_revision+1, "remote_id": 1})
+    assert observed.status_code == 200, observed.text
+    assert observed.json()["observation_only"] is True and observed.json()["status"] == "unknown_external_effect"
+    assert observed.json()["github_capacity_closure"] == closed["github_capacity_closure"]
+    assert calls == ["GET", "GET"]
+    after_observation = await jobs.get_job(read.job_id)
+    assert after_observation["effects"][:len(closed["effects"])] == closed["effects"]
+    assert after_observation["revision"] == closed["revision"]+1
+    async with async_db() as db:
+        row = await db.get(GitHubFollowthroughConnection, read.original_binding["connection_id"])
+        assert row.model_dump(mode="json") == successor_before
+    # The exact lost-response request still returns history with zero contacts
+    # after READ revision, job revision and reservation have moved forward.
+    repeated = await client.post(f"/api/capabilities/github/jobs/{read.job_id}/close-capacity", json=body, headers=ORIGIN)
+    assert repeated.status_code == 200 and calls == ["GET", "GET"]
     proof = tmp_path / "actual-legacy-capacity-closure.json"
-    proof.write_text(json.dumps({"before": original, "after": closed, "methods": calls, "restart": "actual file SQLite pool reopen"}, sort_keys=True))
+    proof.write_text(json.dumps({"before": original, "after": closed, "post_close_observation": after_observation,
+        "successor_mechanical_boundary": successor_before, "methods": calls, "restart": "actual file SQLite pool reopen"}, sort_keys=True))
     print("ACTUAL_LEGACY_CAPACITY_CLOSURE=" + str(proof))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+@pytest.mark.parametrize("boundary", ["vault_rotation", "stale_read_revision", "root_revoked", "repository_replaced"])
+async def test_closed_get_current_authority_failures_contact_nothing(client, async_db, monkeypatch, tmp_path, boundary):
+    original, read, service, calls, body = await actual_close_case(client, async_db, monkeypatch, tmp_path)
+    closed = await client.post(f"/api/capabilities/github/jobs/{read.job_id}/close-capacity", json=body, headers=ORIGIN)
+    assert closed.status_code == 200, closed.text
+    before = await jobs.get_job(read.job_id)
+    expected_revision = read.connection_revision
+    if boundary == "vault_rotation":
+        from src.vault.repository import vault_repository
+        connection = await service._get_connection_row(read.principal)
+        await vault_repository.store(connection.vault_key, "rotated-fixture-token", owner_principal_id=read.principal)
+    else:
+        async with async_db() as db:
+            if boundary == "root_revoked":
+                await db.execute(update(OperatorSession).where(OperatorSession.id == read.root).values(revoked_at=datetime.now(timezone.utc)))
+            elif boundary == "repository_replaced":
+                await db.execute(update(GitHubFollowthroughConnection).where(GitHubFollowthroughConnection.id == read.original_binding["connection_id"]).values(repository="other/repository"))
+            else:
+                await db.execute(update(GitHubFollowthroughConnection).where(GitHubFollowthroughConnection.id == read.original_binding["connection_id"]).values(revision=read.connection_revision+1))
+    observed = await client.post(f"/api/capabilities/github/jobs/{read.job_id}/reconcile", headers=ORIGIN,
+        json={"acknowledged_readback": True, "expected_connection_revision": expected_revision, "remote_id": 1})
+    assert observed.status_code in {401, 403, 409}, observed.text
+    assert calls == ["GET"]
+    assert await jobs.get_job(read.job_id) == before
 
 
 @pytest.mark.asyncio

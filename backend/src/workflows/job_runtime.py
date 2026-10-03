@@ -5709,8 +5709,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         links to one exact already-contacted effect. General lifecycle and
         artifact APIs keep their existing Goal fences.
         """
-        from src.extensions.github_consent import GitHubReadbackAuthority, GitHubVerifiedReadback
-        if type(read_authority) is not GitHubReadbackAuthority or read_authority.job_id != job_id:
+        from src.extensions.github_consent import GitHubReadbackAuthority, GitHubClosedReadbackAuthority, GitHubVerifiedReadback
+        closed_read = type(read_authority) is GitHubClosedReadbackAuthority
+        if type(read_authority) not in {GitHubReadbackAuthority, GitHubClosedReadbackAuthority} or read_authority.job_id != job_id:
             raise DurableJobLeaseError("canonical GitHub readback authority required")
         if type(artifact_content) is not bytes or not 1 <= len(artifact_content) <= 256 * 1024:
             raise ValueError("GitHub observation artifact bounds invalid")
@@ -5737,7 +5738,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         # All private filesystem work and authentication precedes the write
         # transaction. A staged immutable orphan is harmless on CAS failure.
         from src.workflows.repo_publication import write_file, read_file
-        from src.extensions.github_recovery import check_binding
+        from src.extensions.github_recovery import check_binding, check_closed_binding
         binding = verified_readback.canonical_binding
         if binding.get("minted_job_revision") != expected_revision:
             raise DurableJobLeaseError("GitHub observation protected mint revision changed")
@@ -5751,11 +5752,14 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         async with self._session() as db:
             if getattr(getattr(db.get_bind(), "dialect", None), "name", "") == "sqlite":
                 await db.execute(text("BEGIN IMMEDIATE"))
-            run = await self._fetch(db, job_id)
-            await check_binding(db, run, binding)
+            run = await self._fetch(db, job_id, allow_closed=closed_read)
+            if closed_read:
+                await check_closed_binding(db, run, read_authority, binding=binding)
+            else:
+                await check_binding(db, run, binding)
             if not verified_readback.validates(read_authority, observation["remote_readback"], identity):
                 raise DurableJobLeaseError("GitHub observation protected proof expired or changed")
-            if run.github_capacity_closure_json:
+            if run.github_capacity_closure_json and not closed_read:
                 raise DurableJobLeaseError("GitHub capacity is permanently closed")
             allowed_types = {
                 "github_followthrough_v1": {"github_publication"},
@@ -5775,8 +5779,12 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 raise DurableJobLeaseError("GitHub observation original connection binding changed")
             effects = _effect_ledger_or_raise(run.effect_receipts_json)
             prior = next((item for item in effects if item.get("effect_id") == effect_id), None)
-            if not prior or prior.get("effect_type") != effect_type or prior.get("target_path") != target_path or prior.get("target_digest") != target_digest or prior.get("adapter_idempotency_key") != adapter_idempotency_key or prior.get("status") not in UNRESOLVED_EFFECT_STATUSES:
+            if not prior or prior.get("effect_type") != effect_type or prior.get("target_path") != target_path or prior.get("target_digest") != target_digest or prior.get("adapter_idempotency_key") != adapter_idempotency_key or (prior.get("status") not in UNRESOLVED_EFFECT_STATUSES and not closed_read):
                 raise DurableJobIdempotencyConflict("GitHub observation prior contacted effect missing or changed")
+            if closed_read:
+                history = _json_load(run.github_capacity_closure_json, {})
+                if not any(item.get("identity") == identity and item.get("path") == verified_readback.readback_path for item in history.get("positive_gets", [])):
+                    raise DurableJobLeaseError("GitHub closed observation original positive effect missing")
             prefix = "/repos/" + str(read_authority.original_binding.get("repository") or "") + "/"
             if not target_path.startswith(prefix) or re.fullmatch(r"[0-9a-f]{64}", target_digest or "") is None:
                 raise ValueError("GitHub observation target invalid")
@@ -5823,7 +5831,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     effect_receipts_json=_canonical(_job_effect_ledger(run, effects)),
                     checkpoint_receipts_json=_canonical(_bounded_checkpoint_receipts(checkpoints)),
                     artifact_receipts_json=_canonical(artifacts[-100:]),
-                    github_read_revision_json=_canonical(protected), revision=WorkflowRunState.revision+1))
+                    github_read_revision_json=run.github_read_revision_json if closed_read else _canonical(protected), revision=WorkflowRunState.revision+1))
             if not _rowcount_is_one(updated):
                 raise DurableJobLeaseError("GitHub observation CAS changed")
             try:
@@ -5834,10 +5842,13 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 goal_matches = True
             except DurableJobTransitionError:
                 goal_matches = False
-            refreshed = await self._fetch(db, job_id)
+            if closed_read:
+                goal_matches = False
+            refreshed = await self._fetch(db, job_id, allow_closed=closed_read)
             db.expunge(refreshed)
             return _serialize(refreshed, receipt={"kind": "github_recovery_observation", "observation_only": True,
                 "current_goal_matches": goal_matches, "blocked_current_goal": not goal_matches,
+                "capacity_closed": closed_read,
                 "artifact_id": record["artifact_id"], "content_sha256": artifact_sha256})
 
     async def record_effect(

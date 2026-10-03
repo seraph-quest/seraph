@@ -614,6 +614,8 @@ class RepoPublicationService:
 
     async def reconcile(self, job_id, principal, session, request):
         current = await self.owned(job_id, principal, session)
+        if current.get("github_capacity_closure"):
+            return await self.observe_closed(current, request)
         preview = self.preview(current)
         if current["status"] == "succeeded":
             return await self.view(current)
@@ -761,6 +763,51 @@ class RepoPublicationService:
                 read_authority=authority, proof=proof)
             return await self.view(closed)
 
+    async def observe_closed(self, current, request):
+        from src.execution.repo_publication_supervisor import guard
+        from src.extensions.github_recovery import closed_authority, record_closed_observation
+        from src.extensions.github_capacity_closure import ReadWindow, original_effects, effect_identity
+        from src.workflows.repo_publication_closure import capture_inputs, collect_pr_boundary
+        authority = await closed_authority(current, expected_revision=request.expected_connection_revision)
+        async with db_engine.get_session() as db:
+            run = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == current["job_id"]))).scalars().one()
+            history = json.loads(run.github_capacity_closure_json)
+        remotes = [item for item in original_effects(current) if item["effect_type"] != "repo_publication_local_producer"]
+        self.require(bool(remotes), "publication_closed_local_only_inspection_history")
+        prior = remotes[-1]
+        old_request = PublicationCloseRequest(**history["request"])
+        preview = self.preview(current)
+        stage = Path(canonical_workspace_root(settings.workspace_dir)) / f"artifacts/repo-publication/{current['job_id']}/producer"
+        with guard(stage):
+            inputs = capture_inputs(self, current, preview, old_request)
+            if request.pr_number is not None:
+                self.require(prior["effect_type"] == "repo_publication_pr" and request.pr_number == inputs.pr_number, "pr_number_binding_conflict")
+            window = ReadWindow()
+            snapshot = await authority.validate()
+            async def check():
+                await authority.validate()
+                latest = await self.owned(current["job_id"], authority.principal, authority.root)
+                self.require(latest["revision"] == current["revision"] and latest.get("github_capacity_closure") == current["github_capacity_closure"], "publication_closed_observation_job_changed")
+                window.remaining()
+            async def get(path):
+                response = await self.adapter.request_repo_publication(path, method="GET", token=snapshot.value,
+                    authority_check=check, consent_binding=preview["github_consent"],
+                    owner_principal_id=authority.principal, owner_session_id=authority.root,
+                    readback_authority=authority, read_window=window, timeout_seconds=window.remaining())
+                self.require(response.status_code == 200, "publication_closed_positive_get_required")
+                return json.loads(response.content)
+            boundary = await collect_pr_boundary(inputs, self, get, authority, window) if prior["effect_type"] == "repo_publication_pr" else None
+            _, _, path = inputs.expected(prior)
+            payload = await get(path)
+            identity = effect_identity(current, prior)
+            actual = await self.adapter.verified_get_receipt(read_authority=authority,
+                path=path, payload=payload, effect_identity=identity, publication_inputs=inputs,
+                read_window=window, publication_boundary=boundary)
+            observed = await record_closed_observation(jobs, current, authority, actual, identity)
+            result = await self.view(observed)
+            result.update(observation_only=True, reason_code="publication_capacity_closed_observation_only")
+            return result
+
 
 async def invoke(request, method, *args):
     operator = _operator(request)
@@ -836,3 +883,5 @@ async def reconcile_publication(job_id: str, body: ReconcileRequest, request: Re
         return await RepoPublicationService().reconcile(job_id, _principal_id(operator), _session_id(operator), body)
     except PublicationError as exc:
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=409, detail={"code": "publication_reconcile_proof_unavailable"}) from exc

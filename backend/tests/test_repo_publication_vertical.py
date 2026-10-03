@@ -197,9 +197,17 @@ async def test_authenticated_actual_repair_producer_requires_new_exact_publicati
             repeated = await client.post(f"/api/capabilities/github/repo-publication/jobs/{view['job_id']}/close-capacity", json=close_body, headers=ORIGIN)
             assert repeated.status_code == 200 and repeated.json()["github_capacity_closure"] == closed_view["github_capacity_closure"], repeated.text
             assert transport.calls == after_close
+            observed = await client.post(f"/api/capabilities/github/repo-publication/jobs/{view['job_id']}/reconcile", headers=ORIGIN,
+                json={"acknowledged_readback": True, "expected_connection_revision": after_connection.revision, "pr_number": 1})
+            assert observed.status_code == 200, observed.text
+            assert observed.json()["observation_only"] is True and observed.json()["status"] == "unknown_external_effect"
+            assert observed.json()["github_capacity_closure"] == closed_view["github_capacity_closure"]
+            assert all(call[0] == "GET" for call in transport.calls[len(after_close):])
+            unchanged = await adapter._get_connection_row(flow["owner"].principal_id)
+            assert unchanged.model_dump(mode="json") == after_connection.model_dump(mode="json")
             retained = tmp_path / "actual-goal-stale-publication-capacity-close.json"
             retained.write_text(json.dumps({"publication": closed_view, "original_job": current,
-                "close_request": close_body, "transport_calls": transport.calls}, sort_keys=True))
+                "post_close_observation": observed.json(), "close_request": close_body, "transport_calls": transport.calls}, sort_keys=True))
             print("ACTUAL_GOAL_STALE_PUBLICATION_CAPACITY_CLOSE=" + str(retained))
             return
     assert result["status"] == "succeeded", result

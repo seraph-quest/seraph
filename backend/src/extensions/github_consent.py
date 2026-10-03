@@ -222,6 +222,38 @@ class GitHubReadbackAuthority:
             job_id=self.job_id, connection_fence=self.connection_fence)
 
 
+@dataclass(frozen=True)
+class GitHubClosedReadbackAuthority:
+    """Original closure-bound GET inspection, independent of future reservation."""
+    principal: str
+    root: str
+    job_id: str
+    capability: str
+    connection_revision: int
+    connection_fence: int
+    original_binding: dict
+    closure_id: str
+    history_digest: str
+
+    async def validate(self):
+        from sqlmodel import select
+        from src.db import engine
+        from src.db.models import WorkflowRunState
+        from src.extensions.github_followthrough import GitHubFollowthroughService
+        from src.extensions.github_recovery import check_closed_binding
+        await live_operator(self.principal, self.root)
+        row = await GitHubFollowthroughService()._get_connection_row(self.principal)
+        if row is None or row.id != self.original_binding.get("connection_id") or row.owner_principal_id != self.principal or row.repository != self.original_binding.get("repository") or row.revision != self.connection_revision or row.mode not in {"active", "disabled", "reconcile_only"}:
+            deny("github_closed_readback_connection_changed")
+        snapshot = await vault_repository.snapshot(row.vault_key, owner_principal_id=self.principal)
+        if snapshot is None or snapshot.binding_digest != self.original_binding.get("vault_binding_digest"):
+            deny("github_closed_readback_credential_changed")
+        async with engine.get_session() as db:
+            run = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == self.job_id))).scalars().first()
+            await check_closed_binding(db, run, self, snapshot=snapshot)
+        return snapshot
+
+
 _GET_RECEIPT_SEAL = object()
 
 

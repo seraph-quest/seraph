@@ -103,3 +103,60 @@ async def check_persisted_readback(db, run, *, final=False, reserved=True):
         and all(item.get(key) == value for key, value in expected.items()) for item in effects):
         raise ValueError("github_readback_persisted_effect_changed")
     return receipt
+
+
+async def check_closed_binding(db, run, authority, *, snapshot=None, binding=None):
+    """Pure same-session history/Root/credential checks; never reserve or adopt."""
+    from src.extensions.github_consent import GitHubClosedReadbackAuthority
+    if type(authority) is not GitHubClosedReadbackAuthority or run is None or run.run_identity != authority.job_id or run.job_kind != authority.capability or run.owner_principal_id != authority.principal or run.operator_session_id != authority.root:
+        raise ValueError("github_closed_readback_original_job_changed")
+    history = json.loads(run.github_capacity_closure_json or "null")
+    if not isinstance(history, dict) or history.get("closure_id") != authority.closure_id or history.get("history_digest") != authority.history_digest or history.get("history_digest") != digest({key: value for key, value in history.items() if key != "history_digest"}) or history.get("binding", {}).get("original_write_binding") != authority.original_binding or history.get("binding", {}).get("connection_fence") != authority.connection_fence:
+        raise ValueError("github_closed_readback_history_changed")
+    current = {**history["binding"], "minted_job_revision": run.revision,
+        "read_connection_revision": authority.connection_revision,
+        "closure_id": authority.closure_id, "closure_history_digest": authority.history_digest}
+    if snapshot is not None and current["vault_identity"] != snapshot.identity:
+        raise ValueError("github_closed_readback_credential_changed")
+    if binding is not None and current != binding:
+        raise ValueError("github_closed_readback_revision_changed")
+    await check_binding(db, run, current, reserved=None, board=False)
+    return current
+
+
+async def closed_authority(current, *, expected_revision):
+    """Mint from the durable private closure row; no caller history mapping."""
+    from src.db import engine
+    from src.db.models import WorkflowRunState
+    from src.extensions.github_consent import GitHubClosedReadbackAuthority
+    async with engine.get_session() as db:
+        run = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == current["job_id"]))).scalars().one()
+        history = json.loads(run.github_capacity_closure_json or "null")
+        if not isinstance(history, dict):
+            raise ValueError("github_closed_readback_history_missing")
+        original = history["binding"]["original_write_binding"]
+        authority = GitHubClosedReadbackAuthority(current["owner"]["principal_id"],
+            current["operator_session_id"], run.run_identity, run.job_kind,
+            expected_revision, history["binding"]["connection_fence"], original,
+            history["closure_id"], history["history_digest"])
+    await authority.validate()
+    return authority
+
+
+async def record_closed_observation(repository, current, authority, actual, identity):
+    """Append one actual positive GET diagnostic; never replace adoption proof."""
+    verified_at = actual.observed_at.isoformat()
+    readback_id = "github-closed:" + digest({"closure": authority.closure_id,
+        "effect": identity["effect_id"], "raw": actual.payload_sha256, "time": verified_at})
+    observation = {"schema": "seraph.github-effect-observation.v1", **identity,
+        "readback_id": readback_id, "verified_at": verified_at,
+        "remote_readback": {"readback_path": actual.readback_path,
+            "payload_sha256": actual.payload_sha256, "closure_id": authority.closure_id}}
+    content = json.dumps(observation, sort_keys=True, separators=(",", ":")).encode()
+    import hashlib
+    return await repository.record_github_recovery_observation(current["job_id"],
+        read_authority=authority, verified_readback=actual, expected_revision=current["revision"],
+        expected_attempt_count=current["attempt_count"], expected_authority_digest=current["authority_digest"],
+        **{key: identity[key] for key in ("effect_id", "effect_type", "target_path", "target_digest", "adapter_idempotency_key")},
+        readback_id=readback_id, verified_at=verified_at, artifact_content=content,
+        artifact_sha256=hashlib.sha256(content).hexdigest())

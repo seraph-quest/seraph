@@ -14,6 +14,8 @@ from sqlalchemy import select
 from config.settings import settings
 from src.db.models import WorkBoardAttempt, WorkBoardTask
 from src.memory.procedure_recommendations import ProcedureFeedbackRequest, record_procedure_feedback, stage_procedure_bundle
+from src.memory.procedure_recommendation_job import ProcedureRecommendationRequest, prepare_recommendation, inspect_recommendation
+from src.memory.procedure_preferences import ProcedurePreferenceActionRequest, apply_preference_action, inspect_preference
 from src.work_board.dispatcher import WorkBoardDispatcher
 from src.workflows.job_runtime import DurableJobRepository
 from src.workflows.procedure_service import ProcedureV2InvokeRequest
@@ -75,13 +77,36 @@ async def test_two_real_manual_invocations_yield_verified_feedback_bundle(async_
             projection = bundle.projection()
             assert projection["helpful_count"] == index + 1
             assert projection["status"] == ("no_learning" if index == 0 else "proposed")
+            recommendation_request = ProcedureRecommendationRequest(version=1,
+                expected_routine_revision=revision, goal_id=source["goal_id"], expected_goal_revision=1,
+                request_uuid=str(uuid4()))
+            recommended = await prepare_recommendation(operator, prepared["routine_id"], recommendation_request)
+            assert recommended["job_status"] == "succeeded"
+            assert recommended["status"] == projection["status"]
+            assert bool(recommended["proposal_id"]) == (index == 1)
+            assert (await prepare_recommendation(operator, prepared["routine_id"], recommendation_request))["job_id"] == recommended["job_id"]
+            assert (await inspect_recommendation(operator, prepared["routine_id"], recommended["job_id"]))["bundle_digest"] == bundle.bundle_digest
         assert projection["included_count"] == 2
         assert sorted(item["task_id"] for item in projection["outcomes"]) == sorted(task_ids)
         assert all(item["verified"] and item["readback_id"] and item["artifact_digest"] for item in projection["outcomes"])
         assert projection["evidence_population"] == "matching_manual_invocations_only"
         assert projection["quality_evidence"] == "unmeasured"
         assert projection["memory_status"] == "no_learning"
+        review = await inspect_preference(operator, recommended["proposal_id"])
+        action = ProcedurePreferenceActionRequest(action="accept", expected_revision=review["revision"],
+            expected_preview_text_digest=review["preview_text_digest"], expected_bundle_digest=review["bundle_digest"],
+            acknowledged_selection_only=True, mutation_uuid=str(uuid4()))
+        adopted = await apply_preference_action(operator, review["proposal_id"], action)
+        assert adopted["status"] == "accepted" and adopted["accepted_memory_id"]
+        assert (await apply_preference_action(operator, review["proposal_id"], action))["idempotent_replay"] is True
+        rollback = ProcedurePreferenceActionRequest(action="rollback", expected_revision=adopted["revision"],
+            expected_preview_text_digest=adopted["preview_text_digest"], expected_bundle_digest=adopted["bundle_digest"],
+            acknowledged_selection_only=True, reason="Mechanical test rollback", mutation_uuid=str(uuid4()))
+        rolled_back = await apply_preference_action(operator, review["proposal_id"], rollback)
+        assert rolled_back["status"] == "rolled_back"
         receipt = {"scope": projection["scope"], "outcomes": projection["outcomes"],
+            "recommendation": recommended,
+            "adopted": adopted, "rolled_back": rolled_back,
             "bundle_digest": bundle.bundle_digest, "membership": json.loads(bundle.membership_json),
             "files": json.loads(bundle.files_json), "boundary": "Real SQLite/auth/package/Chromium/native outcomes; fixed public HTTP fixture; no quality improvement claim"}
         proof_path = tmp_path / "native-stage-receipt.json"

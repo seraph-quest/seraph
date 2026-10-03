@@ -45,6 +45,7 @@ async def _setup(async_db, monkeypatch):
         db.add(GuardianRoutineVersion(id="version", routine_id="routine", version=1,
             installed_package_digest="a" * 64, source_provenance_json=canonical({"schema_version": 2,
                 "plan": plan.model_dump(mode="json"), "plan_digest": plan_digest(plan),
+                "source_refs": [{"task_id": "missing-metadata-source"}],
                 "immutable_step_inputs": {"public_browser_check": {
                     "browser_input": model.model_dump(mode="json", exclude_none=True),
                     "browser_input_digest": body, "input_envelope_digest": envelope,

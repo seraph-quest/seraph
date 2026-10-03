@@ -92,6 +92,7 @@ from src.workflows.routine_templates import (
 )
 from src.workflows.routine_steps import RoutineStepContext, github_followthrough, guardian_watch_run
 from src.memory.procedure_recommendations import ProcedureFeedbackRequest
+from src.memory.procedure_recommendation_job import ProcedureRecommendationRequest
 from src.workflows.procedure_contracts import (
     ROUTINE_V2_CAPABILITY_VERSION,
     build_procedure_plan,
@@ -10160,6 +10161,26 @@ async def record_procedure_outcome_feedback(
         async with db_engine.get_session() as db:
             return await record_procedure_feedback(db, operator, routine_id=routine_id,
                 task_id=task_id, request=req)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@routine_router.post("/{routine_id}/recommendations")
+async def prepare_procedure_recommendation(routine_id: str, req: ProcedureRecommendationRequest, request: Request):
+    from src.memory.procedure_recommendation_job import prepare_recommendation
+    operator = _operator(request)
+    try:
+        return await prepare_recommendation(operator, routine_id, req)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@routine_router.get("/{routine_id}/recommendations/{job_id}")
+async def inspect_procedure_recommendation(routine_id: str, job_id: str, request: Request):
+    from src.memory.procedure_recommendation_job import inspect_recommendation
+    operator = _operator(request)
+    try:
+        return await inspect_recommendation(operator, routine_id, job_id)
     except BoardError as exc:
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
 

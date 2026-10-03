@@ -374,11 +374,11 @@ _M5_ROLLBACK_BINDING_SCHEMA_VERSION = "work-board-m5-rollback-binding.v2"
 _M5_SELECTION_BINDING_SCHEMA_VERSION = "work-board-m5-selection-binding.v3"
 
 
-def _m5_rollback_binding_key_id() -> str:
+def _m5_rollback_binding_key_id(*, _signing_key: bytes | None = None) -> str:
     """Return a non-secret identifier for the active rollback signing key."""
 
     return hashlib.sha256(
-        b"seraph-m5-rollback-key-id-v1:" + _effect_mac_key()
+        b"seraph-m5-rollback-key-id-v1:" + (_effect_mac_key() if _signing_key is None else _signing_key)
     ).hexdigest()[:24]
 
 
@@ -391,6 +391,7 @@ def _m5_rollback_binding_mac(
     owner_session_id: str,
     rollback_at: datetime | str,
     rollback_reason: str,
+    _signing_key: bytes | None = None,
 ) -> str:
     """Authenticate one operator rollback marker with existing server key material."""
 
@@ -410,7 +411,7 @@ def _m5_rollback_binding_mac(
         "owner_session_id": str(owner_session_id or "").strip(),
         "rollback_at": normalized_rollback_at,
         "rollback_reason": str(rollback_reason or "")[:500],
-        "key_id": _m5_rollback_binding_key_id(),
+        "key_id": _m5_rollback_binding_key_id(_signing_key=_signing_key),
     }
     if (
         not values["memory_id"]
@@ -426,7 +427,7 @@ def _m5_rollback_binding_mac(
             "version": _M5_ROLLBACK_BINDING_SCHEMA_VERSION,
             "rollback": values,
         },
-        key=_effect_mac_key(),
+        key=_effect_mac_key() if _signing_key is None else _signing_key,
     )
 def _m5_selection_scope(value: Any) -> dict[str, Any] | None:
     """Project the selection fields bound into an accepted M5 memory.
@@ -3460,6 +3461,7 @@ class MemoryRepository:
         expected_content_digest: str,
         expected_proposal_id: str,
         rollback_reason: str,
+        _signing_key: bytes | None = None,
     ) -> Memory:
         """Conditionally suppress an M5 memory inside its caller transaction."""
 
@@ -3484,7 +3486,7 @@ class MemoryRepository:
         if correction_binding is None:
             raise ValueError("correction_target_binding_invalid")
         try:
-            _m5_selection_binding_key_id()
+            _m5_selection_binding_key_id(_signing_key=_signing_key)
         except CapabilityJournalError:
             # A rollback of a memory without a correction target is still a
             # canonical operator action when the selection-MAC key is down.
@@ -3502,6 +3504,7 @@ class MemoryRepository:
                 source_binding=provenance.get("verified_source_binding"),
                 corrects_memory_id=correction_binding["corrects_memory_id"],
                 recovered_from_proposal_id=provenance.get("recovered_from_proposal_id"),
+                _signing_key=_signing_key,
             ):
                 raise ValueError("correction_target_binding_mismatch")
         normalized_rollback_reason = str(rollback_reason or "").strip()
@@ -3569,7 +3572,7 @@ class MemoryRepository:
         provenance["lifecycle_at"] = rollback_at_value
         provenance["lifecycle_reason"] = normalized_rollback_reason
         try:
-            provenance["selection_binding_key_id"] = _m5_selection_binding_key_id()
+            provenance["selection_binding_key_id"] = _m5_selection_binding_key_id(_signing_key=_signing_key)
             provenance["selection_binding_mac"] = _m5_selection_binding_mac(
                 proposal_id=str(provenance.get("proposal_id") or ""),
                 accepted_content_digest=actual_digest,
@@ -3587,6 +3590,7 @@ class MemoryRepository:
                     "corrected_memory_content_digest"
                 ],
                 recovered_from_proposal_id=provenance.get("recovered_from_proposal_id"),
+                _signing_key=_signing_key,
                 lifecycle_state="rolled_back",
                 lifecycle_at=rollback_at_value,
                 lifecycle_reason=normalized_rollback_reason,
@@ -3620,7 +3624,7 @@ class MemoryRepository:
                 # the canonical timestamp above is the field covered by the
                 # MAC.
                 "at": rollback_at_value,
-                "key_id": _m5_rollback_binding_key_id(),
+                "key_id": _m5_rollback_binding_key_id(_signing_key=_signing_key),
             }
             signed_rollback_marker["binding_mac"] = _m5_rollback_binding_mac(
                 memory_id=memory.id,
@@ -3630,6 +3634,7 @@ class MemoryRepository:
                 owner_session_id=owner_session_id,
                 rollback_at=rollback_at_value,
                 rollback_reason=normalized_rollback_reason,
+                _signing_key=_signing_key,
             )
         except (CapabilityJournalError, TypeError, ValueError):
             signed_rollback_marker = None

@@ -195,6 +195,13 @@ async def canonical_procedure_membership(db, scope: ProcedureScope) -> dict[str,
             raise BoardError("procedure_feedback_invalid", "The canonical feedback chain no longer matches this exact procedure")
         chain.append({"event_id": event.event_id, "request_digest": event.mutation_request_digest,
             "supersedes_event_id": expected, "label": metadata["label"], "metadata_digest": digest(metadata)})
+    def job_token(row):
+        fields = _fields(row, ("run_identity", "revision", "fencing_token", "status", "job_kind", "input_digest", "authority_digest", "parent_job_id", "parent_fencing_token", "result_digest"))
+        if fields is not None:
+            for key in ("effect_receipts_json", "artifact_receipts_json", "checkpoint_receipts_json", "declared_authority_json", "arguments_json"):
+                value = bounded_json(getattr(row, key), [] if "receipts" in key else {})
+                fields[key.removesuffix("_json") + "_digest"] = digest(value)
+        return fields
     members = []
     for task in tasks:
         artifact = await db.get(WorkBoardInputArtifact, task.input_artifact_id, populate_existing=True) if task.input_artifact_id else None
@@ -218,13 +225,6 @@ async def canonical_procedure_membership(db, scope: ProcedureScope) -> dict[str,
         leaf_attempt = (await db.execute(select(WorkBoardAttempt).where(
             WorkBoardAttempt.task_id == leaf_task.task_id).order_by(
             WorkBoardAttempt.created_at.desc(), WorkBoardAttempt.attempt_id.desc()).limit(1))).scalar_one_or_none() if leaf_task else None
-        def job_token(row):
-            fields = _fields(row, ("run_identity", "revision", "fencing_token", "status", "job_kind", "input_digest", "authority_digest", "parent_job_id", "parent_fencing_token", "result_digest"))
-            if fields is not None:
-                for key in ("effect_receipts_json", "artifact_receipts_json", "checkpoint_receipts_json", "declared_authority_json", "arguments_json"):
-                    value = bounded_json(getattr(row, key), [] if "receipts" in key else {})
-                    fields[key.removesuffix("_json") + "_digest"] = digest(value)
-            return fields
         chain = feedback[task.task_id]
         members.append({"task": _fields(task, ("task_id", "task_revision", "status", "capability_id", "typed_input_digest", "input_artifact_id", "idempotency_payload_digest")),
             "input": _fields(artifact, ("artifact_id", "revision", "metadata_digest", "payload_sha256", "state", "bound_task_id", "bound_task_revision")),
@@ -234,7 +234,23 @@ async def canonical_procedure_membership(db, scope: ProcedureScope) -> dict[str,
             "leaf_attempt": _fields(leaf_attempt, ("attempt_id", "task_id", "fencing_token", "outcome", "workflow_run_id", "ended_at", "task_revision_at_claim")),
             "leaf_input": _fields(leaf_input, ("artifact_id", "revision", "metadata_digest", "payload_sha256", "state", "bound_task_id", "bound_task_revision")),
             "feedback_count": len(chain), "feedback_tip": chain[-1] if chain else None, "feedback_digest": digest(chain)})
+    version_row = await db.get(GuardianRoutineVersion, scope.version_id, populate_existing=True)
+    provenance = bounded_json(version_row.source_provenance_json, {}) if version_row else {}
+    source_refs = provenance.get("source_refs")
+    if not isinstance(source_refs, list) or len(source_refs) != 1:
+        raise BoardError("procedure_source_binding_invalid", "The fixed version requires its exact original browser source")
+    original_sources = []
+    for ref in source_refs:
+        source_task = (await db.execute(select(WorkBoardTask).where(WorkBoardTask.task_id == ref.get("task_id")))).scalar_one_or_none()
+        source_attempt = (await db.execute(select(WorkBoardAttempt).where(
+            WorkBoardAttempt.task_id == ref.get("task_id")).order_by(
+            WorkBoardAttempt.created_at.desc(), WorkBoardAttempt.attempt_id.desc()).limit(1))).scalar_one_or_none()
+        source_run = (await db.execute(select(WorkflowRunState).where(
+            WorkflowRunState.run_identity == source_attempt.workflow_run_id))).scalar_one_or_none() if source_attempt else None
+        original_sources.append({"task": _fields(source_task, ("task_id", "task_revision", "status", "owner_principal_id", "owner_session_id", "goal_id", "goal_revision", "capability_id", "input_artifact_id", "typed_input_digest")),
+            "attempt": _fields(source_attempt, ("attempt_id", "fencing_token", "outcome", "workflow_run_id", "ended_at")), "run": job_token(source_run)})
     token = {"schema": MEMBERSHIP_SCHEMA, "scope": asdict(scope), "task_count": len(ids), "task_ids": ids,
+        "version_provenance_digest": digest(provenance), "original_sources": original_sources,
         "members": members, "feedback_count": len(events), "feedback_digest": digest(feedback)}
     if len(canonical(token).encode()) > MAX_METADATA_BYTES:
         raise BoardError("procedure_metadata_limit", "The complete inventory exceeds its finite metadata bound")
@@ -391,6 +407,14 @@ async def stage_procedure_bundle(operator: AuthenticatedOperator, *, routine_id:
         if sum(item["bytes"] for item in files.values()) > MAX_PROOF_BYTES:
             raise BoardError("procedure_proof_limit", "Native proof exceeds the aggregate finite limit")
         return raw
+    # Count the original version source output in the same finite file budget.
+    async with db_engine.get_session() as db:
+        for source in descriptor.source_refs:
+            source_run = (await db.execute(select(WorkflowRunState).where(
+                WorkflowRunState.run_identity == source["job_id"]))).scalar_one()
+            for artifact in bounded_json(source_run.artifact_receipts_json, []):
+                if artifact.get("artifact_type") == "browser_artifact":
+                    read(artifact["file_path"], artifact["sha256"])
     async with db_engine.get_session() as db:
         for member in initial["members"]:
             task_id = member["task"]["task_id"]

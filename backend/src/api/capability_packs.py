@@ -110,6 +110,61 @@ def _store() -> CapabilityPackLifecycle:
     return CapabilityPackLifecycle()
 
 
+class FixedFormatterReviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    goal_id: str = Field(min_length=1, max_length=128)
+    goal_revision: int = Field(ge=1)
+    content_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    authority_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+@router.get("/capability-packs/seraph.tool.json-format/profile")
+async def fixed_formatter_profile(request: Request):
+    _operator, principal_id, session_id = _operator_identity(request)
+    from src.execution.tool_package_profile import inspect_runtime, source_package, package_manifest
+    from src.extensions.capability_pack import capability_pack_digest
+    from src.work_board.tool_package_native import runtime_root
+    root = source_package().parent
+    manifest = package_manifest()
+    try:
+        profile = {"status":"available", **inspect_runtime(runtime_root())}
+    except (OSError, ValueError, RuntimeError):
+        profile = {"status":"blocked", "reason":"The optional native Linux x86_64 profile or its exact private dependencies are unavailable; core controls remain usable."}
+    try:
+        lifecycle = _store().status(manifest.id,owner_principal_id=principal_id,session_id=session_id)
+    except CapabilityPackLifecycleError as exc:
+        raise _lifecycle_http_error(exc) from exc
+    return {"pack_id":manifest.id,"manifest":manifest.model_dump(mode="json"),"root_path":str(root),
+        "content_digest":capability_pack_digest(root),"authority_digest":manifest.authority_digest,
+        "profile":profile,"lifecycle":lifecycle,
+        "no_learning":True}
+
+
+@router.post("/capability-packs/seraph.tool.json-format/review")
+async def fixed_formatter_review(req: FixedFormatterReviewRequest, request: Request):
+    _operator, principal_id, session_id = _operator_identity(request)
+    from src.execution.tool_package_profile import source_package, package_manifest
+    from src.extensions.capability_pack import capability_pack_digest
+    from src.db.engine import get_session
+    from src.work_board.repository import WorkBoardRepository, BoardError
+    from src.work_board.contracts import WorkBoardOwner
+    root=source_package().parent
+    manifest=package_manifest()
+    if req.content_digest!=capability_pack_digest(root) or req.authority_digest!=manifest.authority_digest:
+        raise HTTPException(status_code=409,detail={"code":"tool_package_exact_review_changed"})
+    try:
+        async with get_session() as db:
+            await WorkBoardRepository._validate_goal(db,WorkBoardOwner(principal_id=principal_id,session_id=session_id),
+                goal_id=req.goal_id,goal_revision=req.goal_revision)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code,detail={"code":exc.code}) from exc
+    try:
+        return _store().review(manifest,root_path=root,goal_id=req.goal_id,
+            reviewed_by=principal_id,authority_expansion_approved=True)
+    except CapabilityPackLifecycleError as exc:
+        raise _lifecycle_http_error(exc) from exc
+
+
 def _operator_identity(request: Request) -> tuple[Any, str, str]:
     operator = _require_authenticated_capability_operator(request)
     principal_id = str(getattr(operator.principal, "principal_id", "") or "")
@@ -119,6 +174,9 @@ def _operator_identity(request: Request) -> tuple[Any, str, str]:
 def _lifecycle_http_error(exc: Exception) -> HTTPException:
     """Return a redacted error; paths and approval internals never cross API."""
 
+    from src.extensions.capability_pack import CapabilityPackLifecycleBusy
+    if isinstance(exc, CapabilityPackLifecycleBusy):
+        return HTTPException(status_code=409,detail={"code":"capability_pack_lifecycle_busy","recovery":"Retry the exact request after the current short authority commit finishes."})
     message = str(exc).lower()
     # Expiry and CAS races are retryable state conflicts even though their
     # internal messages contain the word approval. Keep binding details redacted.

@@ -24,6 +24,7 @@ from src.db.models import (
     GitHubFollowthroughConnection,
     Goal,
     OperatorSession,
+    Secret,
     WorkBoardAttempt,
     WorkBoardComment,
     WorkBoardEvent,
@@ -1143,7 +1144,7 @@ class WorkBoardRepository:
                 request = request.model_copy(update={"executor_id": expected_executor})
         if (
             request.status is WorkBoardStatus.todo
-            and request.capability_id in {"browser.public-task.v1", "work.research-dossier.v1"}
+            and request.capability_id in {"browser.public-task.v1", "work.research-dossier.v1", "work.json-format.v1"}
             and not request.input_artifact_id
         ):
             raise BoardError(
@@ -1723,11 +1724,12 @@ class WorkBoardRepository:
         return BoardMutation(task, event)
 
     async def require_generic_recovery_allowed(self, db: AsyncSession, task: WorkBoardTask) -> None:
-        if task.capability_id == "work.research-dossier.v1":
+        if task.capability_id in {"work.research-dossier.v1", "work.json-format.v1"}:
             linked = await db.scalar(select(WorkBoardAttempt.attempt_id).where(
                 WorkBoardAttempt.task_id == task.task_id, WorkBoardAttempt.workflow_run_id.is_not(None)).limit(1))
             if linked is not None:
-                raise BoardError("research_original_attempt_required", "Use explicit research recovery on the original attempt", status_code=409)
+                raise BoardError("research_original_attempt_required" if task.capability_id=="work.research-dossier.v1" else "tool_package_original_attempt_required",
+                    "Use explicit capability recovery on the original attempt", status_code=409)
 
     async def action_task(
         self,
@@ -3446,7 +3448,20 @@ class WorkBoardRepository:
         )
         return BoardAttemptProjection(task, attempt, event)
 
-    async def project_attempt(
+    async def project_attempt(self,db,task_id,attempt_id,**kwargs):
+        status=kwargs.get("status")
+        task=await self._find_task(db,task_id)
+        if task is not None and task.capability_id=="work.json-format.v1" and status in {WorkBoardStatus.review,WorkBoardStatus.done}:
+            from src.work_board.tool_package_native import session_authority_guard,stage_readback
+            attempt=await db.get(WorkBoardAttempt,attempt_id,populate_existing=True)
+            run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==attempt.workflow_run_id)) if attempt else None
+            if run is None:raise BoardError("tool_package_readback_required","The original formatter run is unavailable")
+            async with session_authority_guard(db,task,attempt,run) as authority:
+                readback=stage_readback(task,attempt,run)
+                return await self._project_attempt(db,task_id,attempt_id,_tool_stage=(authority,readback),**kwargs)
+        return await self._project_attempt(db,task_id,attempt_id,**kwargs)
+
+    async def _project_attempt(
         self,
         db: AsyncSession,
         task_id: str,
@@ -3467,6 +3482,7 @@ class WorkBoardRepository:
         actor_principal_id: str | None = None,
         actor_session_id: str | None = None,
         now: datetime | None = None,
+        _tool_stage=None,
     ) -> BoardAttemptProjection:
         """Project a reconciled attempt without overriding runtime authority."""
 
@@ -3493,6 +3509,17 @@ class WorkBoardRepository:
                     "The supplied readback is not an independent durable workflow proof",
                 )
         observed_at = now or _now()
+        # Vault redaction can emit its own audit event. Prepare the existing
+        # policy result before taking the Board writer; nesting that audit
+        # writer under BEGIN IMMEDIATE deadlocks SQLite failure projection.
+        original_projection_reason = block_reason or outcome
+        async def vault_binding(session):
+            size,count = (await session.execute(select(func.coalesce(func.sum(func.length(Secret.encrypted_value)),0),func.count(Secret.id)))).one()
+            if size>1_048_576 or count>1_000:return None
+            rows=(await session.execute(select(Secret.id,Secret.encrypted_value,Secret.updated_at).order_by(Secret.id))).all()
+            return hashlib.sha256(_canonical_json([[row[0],row[1],str(row[2])] for row in rows]).encode()).hexdigest()
+        staged_vault_binding = await vault_binding(db) if status is WorkBoardStatus.blocked else None
+        safe_projection_reason = await self._safe_text(original_projection_reason) if status is WorkBoardStatus.blocked else None
         reconciliation_owner_live = False
         if reconciled_github_root is not None:
             # Authentication may persist expiry/revocation. Run it before the
@@ -3504,6 +3531,8 @@ class WorkBoardRepository:
             except AuthFailure:
                 pass
         await _begin_sqlite_immediate(db)
+        if safe_projection_reason is not None and (staged_vault_binding is None or await vault_binding(db)!=staged_vault_binding):
+            safe_projection_reason = "execution_blocked_redaction_state_changed"
         task = await self._find_task(db, task_id)
         if task is None:
             raise BoardNotFound(task_id)
@@ -3689,25 +3718,34 @@ class WorkBoardRepository:
                 "unknown_effect_requires_reconciliation",
                 "An unresolved outcome cannot be projected as Review or Done",
             )
-        if task.capability_id == "work.research-dossier.v1" and status in {WorkBoardStatus.review, WorkBoardStatus.done}:
-            from src.work_board.research_readback import verified_dossier
+        if task.capability_id in {"work.research-dossier.v1", "work.json-format.v1"} and status in {WorkBoardStatus.review, WorkBoardStatus.done}:
             from src.work_board.input_artifacts import consume_input_artifact, resolve_input_artifact_for_task
             from src.workflows.research_guard import assert_research_operator_session
             run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == attempt.workflow_run_id))
             if run is None:
                 raise BoardError("research_readback_required", "The original research root is unavailable", status_code=409)
             await assert_research_operator_session(db, run, now=observed_at)
-            artifact, _raw = await verified_dossier(db, task, attempt, run)
+            if task.capability_id=="work.json-format.v1":
+                from src.work_board.tool_package_native import verified_output, current
+                await current(db,task,attempt,run,staged=_tool_stage[0] if _tool_stage else None)
+                artifact,_raw=verified_output(task,attempt,run,staged=_tool_stage[1] if _tool_stage else None)
+            else:
+                from src.work_board.research_readback import verified_dossier
+                artifact, _raw = await verified_dossier(db, task, attempt, run)
             if artifact["content_sha256"] != proof_digest:
                 raise BoardError("research_readback_required", "The physical dossier differs from this attempt's proof", status_code=409)
-            resolved = await resolve_input_artifact_for_task(db, owner, artifact_id=task.input_artifact_id,
-                goal_id=task.goal_id, goal_revision=task.goal_revision, capability_id=task.capability_id,
-                expected_task_id=task.task_id)
-            if resolved.row.payload_sha256 != task.typed_input_digest or resolved.row.bound_task_revision is None:
+            if task.capability_id=="work.json-format.v1":
+                from src.db.models import WorkBoardInputArtifact
+                input_row=await db.get(WorkBoardInputArtifact,task.input_artifact_id,populate_existing=True)
+            else:
+                resolved=await resolve_input_artifact_for_task(db, owner, artifact_id=task.input_artifact_id,
+                    goal_id=task.goal_id, goal_revision=task.goal_revision, capability_id=task.capability_id,expected_task_id=task.task_id)
+                input_row=resolved.row
+            if input_row is None or input_row.payload_sha256 != task.typed_input_digest or input_row.bound_task_revision is None:
                 raise BoardError("research_input_changed", "The original admitted input binding changed", status_code=409)
-            if resolved.row.state != "consumed":
+            if input_row.state != "consumed":
                 await consume_input_artifact(db, owner, task_id=task.task_id,
-                    task_revision=resolved.row.bound_task_revision, artifact_id=task.input_artifact_id)
+                    task_revision=input_row.bound_task_revision, artifact_id=task.input_artifact_id)
         attempt.outcome = str(outcome)[:128]
         attempt.ended_at = observed_at
         attempt.lease_owner = None
@@ -3764,7 +3802,9 @@ class WorkBoardRepository:
             values.update(
                 {
                     "block_kind": _closed_block_kind(block_kind or "transient"),
-                    "block_reason": await self._safe_text(block_reason or outcome),
+                    "block_reason": (safe_projection_reason if (block_reason or outcome)==original_projection_reason and safe_projection_reason is not None
+                        else (block_reason or outcome) if re.fullmatch(r"[a-z0-9_:.]{1,256}",block_reason or outcome)
+                        else "authority_reconciliation_required"),
                     "block_source_status": WorkBoardStatus.running.value,
                     "completed_at": None,
                 }

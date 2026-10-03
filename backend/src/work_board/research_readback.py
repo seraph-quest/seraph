@@ -65,12 +65,17 @@ def _checkpoint(run, identifier):
 
 async def verified_dossier(db, task, attempt, run):
     """Reopen exact files, child schemas, lineage and the existing cost witness."""
+    if run is None or run.status != "succeeded" or not binds(task, attempt, run):
+        raise ValueError("research completed root binding changed")
+    return await _materialized_dossier(db, task, attempt, run)
+
+
+async def _materialized_dossier(db, task, attempt, run):
+    """Physical proof shared by completed readback and guarded terminal CAS."""
     from src.security.trust_contract import canonical_digest
     from src.work_board.dispatcher import _parse_typed_input
     from src.workflows.job_runtime import DurableJobRepository, _digest
     from src.workflows.inference_accounting import _continuity_lock
-    if run is None or run.status != "succeeded" or not binds(task, attempt, run):
-        raise ValueError("research completed root binding changed")
     inputs = ResearchDossierInput.model_validate(_parse_typed_input(task))
     creation = _checkpoint(run, "research:creation")
     if (creation["board_task_id"] != task.task_id or creation["board_attempt_id"] != attempt.attempt_id
@@ -95,9 +100,22 @@ async def verified_dossier(db, task, attempt, run):
             raise ValueError("research completed child lineage changed")
         ready = _checkpoint(child, "research:prompt-ready")
         output = _checkpoint(child, f"research:artifact:child:{slot}")
-        sources = json.loads(read(ready["source_manifest_path"], ready["source_manifest_sha256"]))
+        from src.workflows.research_sources import canonical_sources_in_db
+        from src.workflows.job_runtime import _serialize
+        from src.work_board.research_artifacts import prompt_messages
+        sources = await canonical_sources_in_db(jobs, db, _serialize(child), inputs, require_current_local=False)
         body = json.loads(read(ready["file_path"], ready["content_sha256"]))
-        if canonical_digest(body) != ready["payload_digest"]:
+        if (canonical_digest(body) != ready["payload_digest"]
+            or body["messages"] != prompt_messages(inputs.question, inputs.perspectives[slot].instruction, sources)
+            or body.get("stream") is not False or type(body.get("max_tokens")) is not int
+            or not 1 <= body["max_tokens"] <= 1024
+            or ready["slot"] != slot or ready["creation_digest"] != creation["creation_digest"]
+            or output["job_id"] != child_id or output["creation_digest"] != creation["creation_digest"]
+            or output["slot"] != slot or output["kind"] != "child" or output["no_learning"] is not True
+            or not any(effect.get("receipt_kind") == "readback" and effect.get("status") == "succeeded"
+                and effect.get("target_path") == output["file_path"]
+                and effect.get("content_sha256") == output["content_sha256"]
+                for effect in json.loads(child.effect_receipts_json))):
             raise ValueError("research exact provider body digest changed")
         row = next((cost for cost in costs if cost.operation_id == "remote:"+child_id), None)
         if (row is None or row.job_id != child_id or row.owner_id != run.owner_principal_id or row.state != "settled"

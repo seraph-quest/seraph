@@ -304,7 +304,7 @@ async def _verified_workflow_readback(
             dossier, _raw = await verified_dossier(db, task, attempt, run)
             if dossier["content_sha256"] != proof["content_sha256"]:
                 return None
-        except (ValueError, TypeError, KeyError, OSError):
+        except (ValueError, TypeError, KeyError, OSError, BoardError):
             return None
     if task.capability_id in {"browser.public-task.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
         # A stored Succeeded label cannot authorize a downstream consumer.

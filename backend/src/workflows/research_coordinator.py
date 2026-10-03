@@ -27,6 +27,7 @@ class _PhaseCompletion:
     binding: tuple
     worker: object
     seal: object = None
+    owned_claims: tuple = ()
 
 
 def _binding_tuple(binding):
@@ -45,7 +46,7 @@ async def start_parent(jobs, *, parent_id, owner, board_task, board_attempt, inp
     return creation, binding
 
 
-async def _prepare_child(jobs, child_id, owner):
+async def _prepare_child(jobs, child_id, owner, owned_claims):
     child = await jobs.get_job(child_id)
     if child["status"] == "paused" and child["failure_reason"] == "research_prompt_ready":
         ready = checkpoint(child, "research:prompt-ready")
@@ -59,6 +60,7 @@ async def _prepare_child(jobs, child_id, owner):
     child = await jobs.claim_job(child_id, owner=owner, lease_seconds=60,
         continue_existing_attempt=bool(child["attempt_count"]))
     fence = child["lease"]["fencing_token"]
+    owned_claims[child_id] = (child_id, owner, fence)
     inputs = await current_inputs(jobs, child["parent_job_id"])
     slot = child["declared_authority"]["research_slot"]
     sources = []
@@ -71,7 +73,7 @@ async def _prepare_child(jobs, child_id, owner):
     await prepare_prompt(jobs, child_id=child_id, owner=owner, fence=fence, sources=sources)
 
 
-async def _execute_child(jobs, child_id, owner):
+async def _execute_child(jobs, child_id, owner, owned_claims):
     child = await jobs.get_job(child_id)
     if child["status"] in {"succeeded", "failed", "blocked", "unknown_external_effect", "cost_liability", "cancelled"}:
         return
@@ -80,23 +82,26 @@ async def _execute_child(jobs, child_id, owner):
     elif child["status"] != "queued":
         raise ValueError("research execution requires exact original pre-contact recovery")
     claimed = await jobs.claim_job(child_id, owner=owner, lease_seconds=60, continue_existing_attempt=True)
+    owned_claims[child_id] = (child_id, owner, claimed["lease"]["fencing_token"])
     await execute_funded_child(jobs, child_id=child_id, owner=owner, fence=claimed["lease"]["fencing_token"])
 
 
 async def continue_parent(jobs, *, parent_id, owner, phase_binding):
     """Issue completion authority only from this actual awaited native path."""
     workers = []
+    owned_claims = {}
     try:
         return await _continue_parent(jobs, parent_id=parent_id, owner=owner,
-            phase_binding=phase_binding, workers=workers)
+            phase_binding=phase_binding, workers=workers, owned_claims=owned_claims)
     except BaseException:
         if all(worker.done() for worker in workers):
             phase_binding["_completion"] = _PhaseCompletion(parent_id, owner,
-                _binding_tuple(phase_binding), asyncio.current_task(), _COMPLETION_SEAL)
+                _binding_tuple(phase_binding), asyncio.current_task(), _COMPLETION_SEAL,
+                tuple(sorted(owned_claims.values())))
         raise
 
 
-async def _continue_parent(jobs, *, parent_id, owner, phase_binding, workers):
+async def _continue_parent(jobs, *, parent_id, owner, phase_binding, workers, owned_claims):
     """At most two source workers, two synthesis callbacks and one assembly."""
     parent = await jobs.get_job(parent_id)
     creation = checkpoint(parent, "research:creation")
@@ -107,7 +112,7 @@ async def _continue_parent(jobs, *, parent_id, owner, phase_binding, workers):
         # Producer slots run first, so a shared source never causes polling or
         # a second network GET. The parent owns neither execution lease here.
         for child_id in creation["child_ids"]:
-            await _prepare_child(jobs, child_id, owner)
+            await _prepare_child(jobs, child_id, owner, owned_claims)
         phase = await resume_parent(jobs, parent_id=parent_id, owner=owner, phase="research_funding")
         phase_binding.update(phase)
         await fund_fixed_group(jobs, parent_id=parent_id, owner=owner, fencing_token=phase["job_fence"])
@@ -119,7 +124,7 @@ async def _continue_parent(jobs, *, parent_id, owner, phase_binding, workers):
         raise ValueError("research parent is outside its exact original child wait")
     # Both slots enter the existing broker; that broker selects priority and
     # enforces the sole remote lane. No parent inference is queued.
-    workers.extend(asyncio.create_task(_execute_child(jobs, child_id, owner)) for child_id in creation["child_ids"])
+    workers.extend(asyncio.create_task(_execute_child(jobs, child_id, owner, owned_claims)) for child_id in creation["child_ids"])
     try:
         results = await asyncio.gather(*workers, return_exceptions=True)
     finally:
@@ -159,7 +164,23 @@ async def _continue_parent(jobs, *, parent_id, owner, phase_binding, workers):
     dossier = await write_verified(jobs, job_id=parent_id, owner=owner, fence=phase["job_fence"],
         creation_digest=creation["creation_digest"], slot=0, kind="dossier", content=dossier_bytes(inputs.question, verified))
     await current_inputs(jobs, parent_id)
+    async def terminal_authority(db, current):
+        from src.workflows.research_sources import current_inputs_in_db, canonical_sources_in_db
+        from src.workflows.job_runtime import _serialize
+        from src.work_board.research_readback import binds, _materialized_dossier
+        admitted = await current_inputs_in_db(jobs, db, parent_id)
+        board = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == phase["task_id"]))
+        attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.attempt_id == phase["attempt_id"]))
+        if (not binds(board, attempt, current) or board.task_revision != phase["task_revision"]
+            or attempt.fencing_token != phase["board_fence"] or attempt.lease_owner != owner
+            or board.status != WorkBoardStatus.running or checkpoint(_serialize(current), "research:phase")["phase"] != "research_assembly"):
+            raise ValueError("research original assembly Board lease changed")
+        for child_id in creation["child_ids"]:
+            child = await jobs._fetch(db, child_id)
+            await canonical_sources_in_db(jobs, db, _serialize(child), admitted)
+        await _materialized_dossier(db, board, attempt, current)
     await jobs.transition_job(parent_id, "succeeded", owner=owner, fencing_token=phase["job_fence"],
+        terminal_authority_check=terminal_authority,
         result={"output_sha256": dossier["content_sha256"], "child_count": len(verified), "no_learning": True},
         result_summary="Literal attributed research dossier; semantic truth unverified; no_learning")
     return {**phase, "dossier": dossier, "manifest": manifest}
@@ -219,6 +240,16 @@ async def freeze_quiescent(jobs, *, parent_id, owner, phase_binding, expected_pa
             or json.loads(row.declared_authority_json).get("parent_creation_digest") != created["creation_digest"])
             for row in rows):
             return False
+        owned = {claim[0]: claim for claim in completion.owned_claims}
+        for child in rows:
+            if child.run_identity == parent_id:
+                continue
+            if child.status == "running" or child.lease_owner is not None or child.lease_expires_at is not None:
+                # A locally completed coordinator may have failed because
+                # another coordinator already owns this child. It has no
+                # authority to close that unrelated actual execution.
+                if owned.get(child.run_identity) != (child.run_identity, child.lease_owner, child.fencing_token):
+                    return False
         for row in rows:
             if row.status in {"succeeded", "cancelled", "unknown_external_effect", "cost_liability"}:
                 continue

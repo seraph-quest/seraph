@@ -529,6 +529,18 @@ class InferenceAccountingRepositoryMixin:
         async with self._session() as db:
             await self._accounting_begin(db)
             account, rows = await self._accounting_rows(db)
+            pending = next((item for item in rows if item.operation_id == operation_id), None)
+            if pending is not None and pending.state == "reserved" and pending.policy_digest == policy_digest:
+                research_run = await self._fetch(db, pending.job_id)
+                if research_run.job_kind == "readonly_research_child":
+                    # The exact source permission/input/body check stays in
+                    # this same serialized contact writer. Completed local
+                    # source readback may acquire the witness lock itself, so
+                    # finish it before acquiring our contact witness lock.
+                    from src.workflows.research_sources import verify_current_prompt_in_db
+                    from src.workflows.job_runtime import _serialize
+                    self._assert_lease(research_run, owner=owner, fencing_token=fencing_token)
+                    await verify_current_prompt_in_db(self, db, _serialize(research_run))
             with _continuity_lock(Path(settings.workspace_dir).resolve()) as workspace:
                 self._assert_accounting_continuity(workspace, account, rows)
                 row = next((item for item in rows if item.operation_id == operation_id), None)

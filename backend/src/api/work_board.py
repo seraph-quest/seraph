@@ -111,7 +111,7 @@ async def read_research_report(request: Request, task_id: str):
         run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == attempt.workflow_run_id))
         try:
             _binding, raw = await verified_dossier(db, task, attempt, run)
-        except (ValueError, TypeError, KeyError, OSError):
+        except (ValueError, TypeError, KeyError, OSError, BoardError):
             raise HTTPException(status_code=409, detail="Research dossier readback requires recovery")
         return Response(content=raw, media_type="text/plain", headers={
             "X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"})

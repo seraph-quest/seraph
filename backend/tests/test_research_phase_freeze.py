@@ -98,3 +98,38 @@ async def test_forged_completion_cannot_freeze_current_phase(accounting_db):
     assert await freeze_quiescent(jobs, parent_id=spec.identity.job_id, owner="research-kernel",
         phase_binding=binding, expected_parent_revision=revision, reason="forged_completion") is False
     assert (await jobs.get_job(spec.identity.job_id))["status"] == "paused"
+
+
+@pytest.mark.asyncio
+async def test_second_completed_coordinator_cannot_freeze_another_native_child_claim(accounting_db):
+    jobs, task, attempt, spec, binding, revision = await closed_phase(accounting_db)
+    child_id = (await jobs.get_job(spec.identity.job_id))["checkpoints"][0]["payload"]["child_ids"][0]
+    await jobs.queue_job(child_id)
+    live = await jobs.claim_job(child_id, owner="other-native-coordinator", lease_seconds=60)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def current_worker_writer():
+        async with accounting_db[2].accounting_sessions() as db:
+            await db.execute(text("BEGIN IMMEDIATE"))
+            current = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == child_id))
+            assert current.lease_owner == "other-native-coordinator" and current.fencing_token == live["lease"]["fencing_token"]
+            entered.set()
+            await asyncio.wait_for(release.wait(), timeout=5)
+
+    writer = asyncio.create_task(current_worker_writer())
+    freezer = None
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        freezer = asyncio.create_task(freeze_quiescent(jobs, parent_id=spec.identity.job_id,
+            owner="research-kernel", phase_binding=binding, expected_parent_revision=revision, reason="unowned_worker"))
+        await asyncio.sleep(0.03)
+        assert not freezer.done()
+    finally:
+        release.set()
+        await asyncio.wait_for(writer, timeout=5)
+    assert await asyncio.wait_for(freezer, timeout=5) is False
+    await accounting_db[1].dispose()
+    unchanged = await jobs.get_job(child_id)
+    assert unchanged["status"] == "running" and unchanged["revision"] == live["revision"]
+    assert unchanged["lease"] == live["lease"]
+    assert (await jobs.get_job(spec.identity.job_id))["status"] == "paused"

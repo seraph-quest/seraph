@@ -127,8 +127,9 @@ async def execute_funded_child(jobs, *, child_id, owner, fence):
     child = await jobs.get_job(child_id)
     await current_inputs(jobs, child["parent_job_id"])
     ready = checkpoint(child, "research:prompt-ready")
-    body = json.loads(read(ready["file_path"], ready["content_sha256"]))
-    sources = json.loads(read(ready["source_manifest_path"], ready["source_manifest_sha256"]))
+    from src.workflows.research_sources import verify_current_prompt_in_db
+    async with jobs._session() as db:
+        body, sources = await verify_current_prompt_in_db(jobs, db, child)
     setup, policy_digest, target = _target()
     if (canonical_digest(body) != ready["payload_digest"] or policy_digest != ready["policy_digest"]
         or body["model"] != target["model_id"] or body["stream"] is not False):
@@ -190,7 +191,15 @@ async def execute_funded_child(jobs, *, child_id, owner, fence):
         raise RuntimeError("research output requires actual settled accounting readback")
     artifact = await write_verified(jobs, job_id=child_id, owner=owner, fence=fence,
         creation_digest=ready["creation_digest"], slot=ready["slot"], kind="child", content=raw, max_bytes=16384)
+    async def terminal_authority(db, current):
+        from src.workflows.job_runtime import _serialize
+        from src.workflows.research_guard import assert_research_parent_current
+        await assert_research_parent_current(db, current)
+        await verify_current_prompt_in_db(jobs, db, _serialize(current))
+        if read(artifact["file_path"], artifact["content_sha256"], max_bytes=16384) != raw:
+            raise ValueError("research actual child output changed before terminal adoption")
     await jobs.transition_job(child_id, "succeeded", owner=owner, fencing_token=fence,
+        terminal_authority_check=terminal_authority,
         result={"output_sha256": artifact["content_sha256"], "operation_id": request.operation_id,
             "actual_cost_microusd": settled["actual_cost_microusd"], "no_learning": True},
         result_summary="Attributed research JSON with physical readback; no_learning")

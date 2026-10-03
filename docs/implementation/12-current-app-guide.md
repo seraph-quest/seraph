@@ -263,6 +263,15 @@ provider, embedding, edge, voice, and Telegram evidence is reported as
 `skipped`/`degraded` until a separately authorised canary supplies a receipt;
 those omissions never become a superiority claim.
 
+Branch-local #920 adds **Send neutral Telegram notice** in the current task's
+inspector. Pair the operator/chat and grant Telegram transit consent in Settings
+first. Explicit status review sends enum metadata; exact denial and cancellation
+use current canonical authority. Sensitive approval and recovery remain in the
+cockpit. Unknown delivery requires visible outbox recovery or an explicit fresh
+notice that retires old controls. The provider-free adapter is **Partial** and
+does not prove live Telegram; the [owning reach contract](./04-presence-and-reach.md#paired-telegram-task-controls-branch-local-920-partial)
+records the bounds and validation surface.
+
 Production API access is authenticated with a server-side, single-operator
 session. Generate a PBKDF2 password hash in the backend environment, store it
 in the deployment secret store as `OPERATOR_AUTH_SECRET_HASH`, and set

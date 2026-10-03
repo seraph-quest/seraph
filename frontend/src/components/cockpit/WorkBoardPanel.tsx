@@ -20,6 +20,7 @@ import { ResearchDossierPanel } from "./ResearchDossierPanel";
 import { JsonFormatterPanel } from "./JsonFormatterPanel";
 import { TaskEffectRecovery } from "./TaskEffectRecovery";
 import { TaskEvidencePanel } from "./TaskEvidencePanel";
+import { TelegramTaskNotice } from "./TelegramTaskNotice";
 import { SpecificationEvidenceReview, specificationScope, retainSpecificationAcceptance } from "./SpecificationEvidenceReview";
 import type { SpecificationReplacement } from "./SpecificationEvidenceReview";
 import { RepoRepairInspector } from "./RepoRepairInspector";
@@ -4109,6 +4110,7 @@ function WorkBoardPanel({
                 metadataConfirmed={Boolean(selectedDetail && !detailLoading && !stale && !detailError)}
                 onRefresh={refreshSelectedTask} onOpenTask={openTask} />}
               <TaskEvidencePanel task={selectedTask} ownerSessionId={ownerSessionId} />
+              <TelegramTaskNotice key={`telegram:${ownerSessionId}:${selectedTask.task_id}`} task={selectedTask} ownerSessionId={ownerSessionId} />
 
               {selectedDetail?.parent_handoffs && selectedDetail.parent_handoffs.length > 0 && (
                 <section className="rounded border border-white/10 p-3" aria-label="Safe parent handoffs">

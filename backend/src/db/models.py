@@ -2616,6 +2616,9 @@ class TelegramTransportOutbox(SQLModel, table=True):
     content_digest: str = Field(index=True)
     kind: str = Field(default="text", index=True)
     attachment_refs_json: str = Field(default="[]")
+    # Private control markup: bearer callbacks never appear in status/audit.
+    task_control_markup_json: Optional[str] = Field(default=None)
+    task_control_markup_digest: Optional[str] = Field(default=None)
     status: str = Field(default="queued", index=True)
     attempt_count: int = Field(default=0, index=True)
     max_attempts: int = Field(default=3, index=True)
@@ -2660,6 +2663,44 @@ class TelegramDeliveryAttempt(SQLModel, table=True):
     error_code: Optional[str] = Field(default=None, index=True)
     started_at: datetime = Field(default_factory=_now, index=True)
     finished_at: Optional[datetime] = Field(default=None, index=True)
+
+
+class TelegramTaskCallback(SQLModel, table=True):
+    """One finite, exact, paired task control; wire nonces remain in outbox only."""
+
+    __tablename__ = "telegram_task_callbacks"
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    nonce_digest: str = Field(unique=True, index=True)
+    owner_principal_id: str = Field(index=True)
+    operator_session_id: str = Field(index=True)
+    pairing_id: str = Field(index=True)
+    transit_reference: str
+    actor_id: int
+    chat_id: int
+    root_digest: str
+    task_id: str = Field(index=True)
+    task_revision: int
+    goal_id: str
+    goal_revision: int
+    outbox_id: str = Field(index=True)
+    effect: str
+    effect_digest: str
+    approval_id: Optional[str] = Field(default=None)
+    approval_digest: Optional[str] = Field(default=None)
+    attempt_id: Optional[str] = Field(default=None)
+    workflow_run_id: Optional[str] = Field(default=None)
+    workflow_binding_digest: Optional[str] = Field(default=None)
+    board_fence: Optional[int] = Field(default=None)
+    lease_owner: Optional[str] = Field(default=None)
+    cancel_event_id: Optional[int] = Field(default=None)
+    status: str = Field(default="pending", index=True)
+    query_id: Optional[str] = Field(default=None, index=True)
+    update_id: Optional[int] = Field(default=None)
+    request_digest: Optional[str] = Field(default=None)
+    result_json: str = Field(default="{}")
+    expires_at: datetime = Field(index=True)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    consumed_at: Optional[datetime] = Field(default=None, index=True)
 
 
 # ─── ScreenObservation ─────────────────────────────────

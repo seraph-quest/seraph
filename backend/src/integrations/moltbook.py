@@ -179,7 +179,9 @@ class MoltbookAdapter:
         if operation != "register":
             if type(key) is not str or KEY.fullmatch(key) is None: raise MoltbookError("moltbook_credential_invalid")
             headers["Authorization"] = "Bearer " + key
-        remaining = (deadline.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds()
+        # SQLite stores naive UTC. Never interpret it using the host timezone.
+        absolute = deadline.replace(tzinfo=deadline.tzinfo or timezone.utc).astimezone(timezone.utc)
+        remaining = (absolute - datetime.now(timezone.utc)).total_seconds()
         if remaining <= 0: raise MoltbookError("moltbook_original_deadline_expired")
         kwargs = {"method": method, "json_body": body, "headers": headers,
             "timeout_seconds": min(15, remaining), "max_bytes": MAX_RESPONSE,

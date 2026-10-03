@@ -141,6 +141,11 @@ async def make_approval(service, owner, job_id, lease, kind):
         if approval_scope(run, value, kind) != scope: raise MoltbookError("moltbook_approval_binding_changed")
         value.update(phase="awaiting_"+kind+"_approval", approval_id=approval.id, approval_kind=kind,
             approval_fingerprint=fingerprint, approval_scope_digest=digest(scope))
+        receipt = {"id": approval.id, "kind": kind, "fingerprint": fingerprint, "scope_digest": digest(scope)}
+        history = value.setdefault("approvals", [])
+        if receipt not in history:
+            if len(history) >= 2: raise MoltbookError("moltbook_original_approval_slot_bound")
+            history.append(receipt)
         save_state(run, value)
         db.add(run)
     return approval.id
@@ -260,14 +265,16 @@ def comments_flat(value):
     return result
 
 
-async def execute_write(service, owner, job_id):
+async def execute_write(service, owner, job_id, *, execution):
     projected = await service.snapshot(owner, job_id)
-    if projected["status"] == "succeeded": return projected
+    if projected["lease"]["fencing_token"] != execution["fencing_token"]:
+        raise MoltbookError("moltbook_original_execution_fence_changed")
     payload, credential, authority, deadline = await load(service, owner, job_id)
     async with engine.get_session() as db:
         run = await service.jobs._fetch(db, job_id)
         value = state(run)
-        if run.status != "paused" or value.get("phase") not in {"awaiting_create_approval", "awaiting_verify_approval"}:
+        if (run.status != "paused" or value.get("phase") != execution["phase"]
+            or value.get("phase") not in {"awaiting_create_approval", "awaiting_verify_approval"}):
             raise MoltbookError("moltbook_explicit_original_recovery_required")
         approval = await db.get(ApprovalRequest, value.get("approval_id"))
         if approval is None or approval.status != "approved": raise MoltbookError("moltbook_exact_approval_pending")
@@ -276,6 +283,15 @@ async def execute_write(service, owner, job_id):
     claimed = await service.jobs.claim_job(job_id, owner=runner, expected_revision=projected["revision"],
         expected_fencing_token=projected["lease"]["fencing_token"], continue_existing_attempt=True, lease_seconds=max(1, (deadline-now()).total_seconds()))
     lease = (runner, claimed["lease"]["fencing_token"])
+    async with engine.get_session() as db:
+        await writer(db); run = await service.jobs._fetch(db, job_id)
+        await service.current(db, owner, run, lease=lease)
+        value = state(run)
+        if value["phase"] != execution["phase"] or any(item["phase"] == execution["phase"] for item in value.get("executions", [])):
+            raise MoltbookError("moltbook_original_execution_phase_changed")
+        value.setdefault("executions", []).append(execution)
+        if len(value["executions"]) > 2: raise MoltbookError("moltbook_original_execution_slot_bound")
+        save_state(run, value); db.add(run)
     adapter = MoltbookAdapter(transport=service.adapter.transport, resolver=service.adapter.resolver)
     worker = asyncio.current_task()
     service._active[job_id] = worker
@@ -290,7 +306,8 @@ async def execute_write(service, owner, job_id):
             if status.get("status") != "claimed": raise MoltbookError("moltbook_current_human_claim_required")
             if payload["operation"] == "create_comment":
                 destination = safe_content((await call(service, adapter, owner, job_id, lease, "post", {"post_id": fields["post_id"]}, credential, deadline)).get("post"))
-                if destination["id"] != fields["post_id"] or destination.get("community") != review["community"]:
+                if (destination["id"] != fields["post_id"] or destination.get("community") != review["community"]
+                    or destination["explicitly_hidden"] or destination["visibility"] in {"pending", "failed"}):
                     raise MoltbookError("moltbook_current_public_target_changed")
                 if "parent_id" in fields:
                     parent = await call(service, adapter, owner, job_id, lease, "comments", {"post_id": fields["post_id"], "sort": "new", "limit": 10}, credential, deadline)

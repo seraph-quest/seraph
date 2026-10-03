@@ -79,6 +79,12 @@ class Cancel(Strict):
     fencing_token: int = Field(ge=0)
 
 
+class Execute(Strict):
+    request_key: str = Field(min_length=1, max_length=128)
+    expected_phase: Literal["unattempted", "awaiting_create_approval", "awaiting_verify_approval"]
+    fencing_token: int = Field(ge=0)
+
+
 def owner(request, *, contact=False, mutation=False):
     operator = _operator(request)
     grants = {getattr(value, "value", value) for value in operator.principal.grants}
@@ -148,8 +154,8 @@ async def answer(request: Request, job_id: str, body: Answer):
 
 
 @router.post("/jobs/{job_id}/execute")
-async def execute(request: Request, job_id: str):
-    return await response(moltbook_service.execute(owner(request, contact=True), job_id))
+async def execute(request: Request, job_id: str, body: Execute):
+    return await response(moltbook_service.execute(owner(request, contact=True), job_id, **body.model_dump()))
 
 
 @router.get("/jobs/{job_id}/output")

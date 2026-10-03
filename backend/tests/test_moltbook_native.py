@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from sqlalchemy import event, select
 
 from tests.test_inference_accounting import accounting_db
+from tests.moltbook_requests import execute, execution_body
 from config.settings import settings
 from src.auth.middleware import OperatorAuthMiddleware
 from src.db.models import Goal, MoltbookConnection, WorkflowRunState
@@ -137,12 +138,12 @@ async def test_actual_owner_import_consent_native_read_reopen(accounting_db, mon
             await db_engine.dispose()
             same = await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/cancel", json=body)
             assert same.status_code == 200 and same.json()["status"] == "cancelled"
-            assert (await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/execute")).status_code == 409
+            assert (await execute(client, job_id)).status_code == 409
             assert calls == []
             assert (await client.get("/api/capabilities/moltbook/connection")).json()["active_job_id"] is None
             return
         if mode == "cancel_running":
-            running = asyncio.create_task(client.post(f"/api/capabilities/moltbook/jobs/{job_id}/execute"))
+            running = asyncio.create_task(execute(client, job_id))
             try:
                 await asyncio.wait_for(started.wait(), 5)
                 original = (await client.get(f"/api/capabilities/moltbook/jobs/{job_id}")).json()
@@ -155,7 +156,7 @@ async def test_actual_owner_import_consent_native_read_reopen(accounting_db, mon
                 assert cancelled.json()["artifacts"] == []
                 await db_engine.dispose()
                 assert (await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/recover")).status_code == 409
-                assert (await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/execute")).status_code == 409
+                assert (await execute(client, job_id)).status_code == 409
                 assert len(calls) == 1
                 assert (await client.get("/api/capabilities/moltbook/connection")).json()["active_job_id"] == job_id
             finally:
@@ -164,7 +165,7 @@ async def test_actual_owner_import_consent_native_read_reopen(accounting_db, mon
                 await asyncio.gather(running, return_exceptions=True)
             return
         if mode in {"written_output", "written_stale_goal"}:
-            failed = await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/execute")
+            failed = await execute(client, job_id)
             assert failed.status_code == 409 and failed.json()["detail"]["code"] == "test_actual_output_written_before_adoption"
             before = (await client.get(f"/api/capabilities/moltbook/jobs/{job_id}")).json()
             assert before["artifacts"] == []
@@ -187,7 +188,7 @@ async def test_actual_owner_import_consent_native_read_reopen(accounting_db, mon
                 row = await db.get(Goal, goal_id); row.revision += 1; db.add(row)
         if mode == "logout":
             assert (await client.post("/api/auth/logout")).status_code == 204
-        executed = await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/execute")
+        executed = await execute(client, job_id)
         if mode == "rate_limited":
             assert executed.status_code == 409 and executed.json()["detail"]["code"] == "moltbook_rate_limited", executed.text
             connection = (await client.get("/api/capabilities/moltbook/connection")).json()
@@ -217,7 +218,7 @@ async def test_actual_owner_import_consent_native_read_reopen(accounting_db, mon
             assert output.json()["no_learning"] is True
             await db_engine.dispose()
             assert (await client.get(f"/api/capabilities/moltbook/jobs/{job_id}")).json()["status"] == "succeeded"
-            assert (await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/execute")).json()["status"] == "succeeded"
+            assert (await execute(client, job_id)).json()["status"] == "succeeded"
             assert len(calls) == 1
         else:
             assert executed.status_code in {401, 409}, executed.text

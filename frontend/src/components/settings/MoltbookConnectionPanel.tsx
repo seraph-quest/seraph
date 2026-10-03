@@ -2,8 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
 import type { GoalInfo } from "../../types";
+import { MoltbookWriteControls } from "./MoltbookWriteControls";
 import { clearMoltbookPending, moltbookRequest, moltbookStorageKey, readMoltbookPending,
-  submitMoltbook, type MoltbookConnection, type MoltbookJob, type MoltbookPending } from "../../lib/moltbook";
+  submitMoltbook, originalExecution, pendingApplied, equalMoltbookBody, type MoltbookConnection, type MoltbookJob, type MoltbookPending } from "../../lib/moltbook";
 
 export function MoltbookConnectionPanel({ ownerPrincipalId, ownerSessionId }: {
   ownerPrincipalId?: string | null; ownerSessionId?: string | null;
@@ -16,6 +17,7 @@ export function MoltbookConnectionPanel({ ownerPrincipalId, ownerSessionId }: {
   const [goals, setGoals] = useState<GoalInfo[]>([]);
   const [goalId, setGoalId] = useState("");
   const [acknowledged, setAcknowledged] = useState(false);
+  const [allowWrites, setAllowWrites] = useState(false);
   const [operation, setOperation] = useState("feed");
   const [postId, setPostId] = useState("");
   const [community, setCommunity] = useState("introductions");
@@ -35,7 +37,7 @@ export function MoltbookConnectionPanel({ ownerPrincipalId, ownerSessionId }: {
     const current = ++generation.current;
     controller.current?.abort(); controller.current = null;
     setBusy(false); setError(null); setConnection(null); setPending(null); setJob(null); setOutput("");
-    setAcknowledged(false); setGoals([]); setKeys([]); setVaultKey(""); setGoalId("");
+    setAcknowledged(false); setAllowWrites(false); setGoals([]); setKeys([]); setVaultKey(""); setGoalId("");
     if (!storageKey) return;
     try { setPending(readMoltbookPending(storageKey)); } catch (failure) { setError(String(failure)); return; }
     const abort = new AbortController(); controller.current = abort;
@@ -71,6 +73,11 @@ export function MoltbookConnectionPanel({ ownerPrincipalId, ownerSessionId }: {
       const local = await localRefresh(abort.signal);
       if (current !== generation.current) return;
       if ("job_id" in result) setJob(result as unknown as MoltbookJob);
+      else if (exact.path.endsWith("/approval")) {
+        const original = await moltbookRequest(`/jobs/${exact.path.split("/")[2]}`, {}, abort.signal);
+        if (current !== generation.current) return;
+        setJob(original as MoltbookJob);
+      }
       setPending(null); setConnection(local);
       if (result.status === "succeeded") {
         const value = await moltbookRequest(`/jobs/${result.job_id}/output`, {}, abort.signal);
@@ -93,7 +100,7 @@ export function MoltbookConnectionPanel({ ownerPrincipalId, ownerSessionId }: {
       const retained = readMoltbookPending(storageKey);
       if (current !== generation.current) return;
       setConnection(value);
-      if (retained?.path === "/connection" && value.setup_request_key === retained.body.request_key) {
+      if (retained?.path === "/connection/consent" && value.consent?.request && equalMoltbookBody(value.consent.request, retained.body)) {
         clearMoltbookPending(storageKey); setPending(null);
       }
       const originalJob = retained?.path.startsWith("/jobs/") ? retained.path.split("/")[2] : job?.job_id ?? value.active_job_id;
@@ -102,8 +109,8 @@ export function MoltbookConnectionPanel({ ownerPrincipalId, ownerSessionId }: {
         if (readback.job_id !== originalJob || readback.no_learning !== true) throw Error("Original job readback mismatch");
         if (current !== generation.current) return;
         setJob(readback);
+        if (retained && pendingApplied(readback, retained)) { clearMoltbookPending(storageKey); setPending(null); }
         if (readback.status === "succeeded") {
-          if (retained?.path === `/jobs/${originalJob}/execute`) { clearMoltbookPending(storageKey); setPending(null); }
           const result = await moltbookRequest(`/jobs/${originalJob}/output`, {}, abort.signal);
           if (current === generation.current) setOutput(JSON.stringify(result, null, 2));
         }
@@ -113,18 +120,12 @@ export function MoltbookConnectionPanel({ ownerPrincipalId, ownerSessionId }: {
   }
   async function allowReads() {
     if (!selectedGoal || !connection?.revision || !acknowledged || busy || pending) return;
-    setBusy(true); setError(null); const current = generation.current;
-    const abort = new AbortController(); controller.current = abort;
-    const timer = window.setTimeout(() => abort.abort(), 15000);
-    try {
-      const value = await moltbookRequest("/connection/consent", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+    await act({ method: "POST", path: "/connection/consent", body: {
+        request_key: crypto.randomUUID(),
         expected_revision: connection.revision, goal_id: selectedGoal.id, goal_revision: selectedGoal.revision,
-        actions: ["inspect", "feed", "post", "comments", "community"], duration_seconds: 300,
+        actions: ["inspect", "feed", "post", "comments", "community", ...(allowWrites ? ["create_post", "create_comment"] : [])], duration_seconds: 300,
         personal_noncommercial: true, no_redistribution: true,
-      }) }, abort.signal) as MoltbookConnection;
-      if (current === generation.current) { setConnection(value); setAcknowledged(false); }
-    } catch (failure) { if (current === generation.current) { setError(`${String(failure)}. Refresh local metadata before another consent request.`); setAcknowledged(false); } }
-    finally { window.clearTimeout(timer); if (current === generation.current) setBusy(false); }
+    } });
   }
   function prepare() {
     if (!selectedGoal || !connection?.revision) return;
@@ -145,15 +146,20 @@ export function MoltbookConnectionPanel({ ownerPrincipalId, ownerSessionId }: {
       <option value="">Choose an active Goal</option>{goals.map(goal => <option key={goal.id} value={goal.id}>{goal.title} · revision {goal.revision}</option>)}</select></label>
     <label className="block"><input type="checkbox" checked={acknowledged} onChange={event => setAcknowledged(event.target.checked)} /> I authorize personal, noncommercial reads for five minutes; I will not redistribute community content.</label>
     <button disabled={busy || !!pending || !connection?.configured || !selectedGoal || !acknowledged || !!connection.active_job_id} onClick={() => void allowReads()}>Allow finite reads for this login and Goal</button>
+    <label className="block"><input type="checkbox" checked={allowWrites} onChange={event => { setAllowWrites(event.target.checked); setAcknowledged(false); }} /> Include public text actions in this finite consent; each write still needs exact approval.</label>
     <p>Consent expires {connection?.consent?.expires_at ?? "before any remote use"}. Remote refresh is always explicit.</p>
+    {connection?.cooldown_until && <p>Provider cooldown until {String(connection.cooldown_until)}. No automatic retry.</p>}
     <label className="block">Read operation <select aria-label="Moltbook read operation" value={operation} onChange={event => setOperation(event.target.value)}>
       <option value="feed">One feed item</option><option value="inspect">Inspect account and claim status</option><option value="community">Inspect public community</option><option value="post">Known post</option><option value="comments">One comment page</option></select></label>
     {(operation === "feed" || operation === "community") && <label className="block">Community <input aria-label="Moltbook community" value={community} onChange={event => setCommunity(event.target.value)} /></label>}
     {(operation === "post" || operation === "comments") && <label className="block">Known post ID <input aria-label="Moltbook post ID" value={postId} onChange={event => setPostId(event.target.value)} /></label>}
     <button disabled={busy || !!pending || !selectedGoal || !!connection?.active_job_id || !connection?.consent?.actions?.includes(operation)} onClick={prepare}>Prepare bounded read</button>
     {job && <div aria-label="Moltbook original job"><p>{job.job_id} · {job.status} · original deadline {job.deadline_at} · attempt {job.attempt_count}</p>
-      <button disabled={busy || !!pending || job.status !== "accepted"} onClick={() => void act({ method: "POST", path: `/jobs/${job.job_id}/execute`, body: {} })}>Run original read</button>
+      <button disabled={busy || !!pending || job.status !== "accepted" || !job.lease} onClick={() => void act(originalExecution(job))}>Run original read</button>
+      <button disabled={busy || !!pending} onClick={() => void act({ method: "POST", path: `/jobs/${job.job_id}/recover`, body: {} })}>Inspect or recover original written output</button>
+      <button disabled={busy || !!pending || !job.lease || ["succeeded", "cancelled"].includes(job.status)} onClick={() => void act({ method: "POST", path: `/jobs/${job.job_id}/cancel`, body: { request_key: crypto.randomUUID(), expected_revision: job.revision, fencing_token: job.lease.fencing_token } })}>Cancel remaining original work</button>
       {!["accepted", "queued", "succeeded"].includes(job.status) && <p>Explicit inspection is required. No contact is replayed or deadline renewed.</p>}</div>}
+    <MoltbookWriteControls key={storageKey} connection={connection} goal={selectedGoal} job={job} busy={busy || !!pending} act={act} />
     {pending && <div role="status"><p>An exact original request remains retained for this login. Inspect its outcome before continuing.</p><button disabled={busy} onClick={() => void act()}>Retry exact retained request</button></div>}
     {output && <pre aria-label="Moltbook literal private output" className="whitespace-pre-wrap">{output}</pre>}
     {error && <p role="alert">{error}</p>}

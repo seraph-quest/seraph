@@ -17,7 +17,7 @@ from sqlmodel import select
 from config.settings import settings
 from src.artifacts.registry import build_artifact_record
 from src.db import engine
-from src.db.models import MoltbookConnection, OperatorSession, Secret, WorkflowRunState
+from src.db.models import ApprovalRequest, MoltbookConnection, OperatorSession, Secret, WorkflowRunState
 from src.goals.repository import deserialize_admission_budget
 from src.integrations.moltbook import (CAPABILITY, JOB_KIND, KEY, MoltbookAdapter,
     MoltbookError, canonical, digest, identifier, route, safe_comments, safe_content, text)
@@ -88,7 +88,7 @@ def connection_view(row):
     return {"configured": True, "id": row.id, "revision": row.revision, "mode": row.mode,
         "account_id": row.account_id, "account_name": row.account_name,
         "active_job_id": row.active_job_id, "cooldown_until": row.cooldown_until, "setup_request_key": row.setup_key,
-        "consent": {key: consent.get(key) for key in ("actions", "expires_at", "goal_id", "goal_revision", "session", "request_key")},
+        "consent": {key: consent.get(key) for key in ("actions", "expires_at", "goal_id", "goal_revision", "session", "request_key", "request")},
         "credential_is_consent": False, "remote_refresh": "explicit_finite_inspect_required", "no_learning": True}
 
 
@@ -202,7 +202,11 @@ class MoltbookService:
                 "goal_id": goal_id, "goal_revision": goal_revision, "actions": sorted(actions),
                 "issued_at": now().isoformat(), "expires_at": expiry.isoformat(), "connection_revision": row.revision,
                 "credential_binding": row.credential_binding, "personal_noncommercial": True,
-                "no_redistribution": True, "request_key": request_key, "request_digest": request_digest}).decode()
+                "no_redistribution": True, "request_key": request_key, "request_digest": request_digest,
+                "request": {"request_key": request_key, "expected_revision": expected_revision,
+                    "goal_id": goal_id, "goal_revision": goal_revision, "actions": actions,
+                    "duration_seconds": duration_seconds, "personal_noncommercial": True,
+                    "no_redistribution": True}}).decode()
             if row.mode == "disabled": row.mode = "pending_claim"
             db.add(row)
             return connection_view(row)
@@ -371,6 +375,53 @@ class MoltbookService:
                 raise MoltbookError("moltbook_job_owner_mismatch", status_code=404)
             from src.workflows.job_runtime import _serialize
             result = _serialize(run)
+            value = {}
+            if run.checkpoint_receipts_json not in (None, "", "[]"):
+                value = state(run)
+                history = value.get("approvals", [])
+                if not isinstance(history, list) or len(history) > 2:
+                    raise MoltbookError("moltbook_original_approval_history_invalid")
+                result["approvals"] = []
+                for entry in history:
+                    prior = await db.get(ApprovalRequest, entry["id"])
+                    if (prior and prior.owner_principal_id == owner.principal_id and prior.operator_session_id == owner.session_id
+                        and prior.fingerprint == entry["fingerprint"]
+                        and digest(json.loads(prior.details_json)["approval_scope"]) == entry["scope_digest"]):
+                        result["approvals"].append({"id": prior.id, "status": prior.status, "scope_digest": entry["scope_digest"]})
+                approval = await db.get(ApprovalRequest, value.get("approval_id")) if value.get("approval_id") else None
+                if (approval and approval.owner_principal_id == owner.principal_id
+                    and approval.operator_session_id == owner.session_id
+                    and approval.fingerprint == value.get("approval_fingerprint")):
+                    result["approval"] = {"id": approval.id, "status": approval.status,
+                        "scope_digest": value.get("approval_scope_digest"), "expires_at": approval.expires_at}
+            authority = json.loads(run.declared_authority_json)
+            connection = await db.get(MoltbookConnection, authority["connection_id"])
+            preview_key = connection.vault_key if connection and connection.credential_binding == authority["vault_binding_digest"] else None
+        # Private input/Vault readback is staged after the SQL read session.
+        # It can expose only the canonical original draft, never credentials or
+        # verification codes. Historical metadata remains inspectable on drift.
+        if authority["operation"] in WRITES:
+            try:
+                if preview_key is None: raise MoltbookError("moltbook_original_credential_changed")
+                credential = await vault_repository.snapshot(preview_key, owner_principal_id=owner.principal_id)
+                raw, truncated = _read_workspace_text_bounded(_safe_resolve(PREFIX+digest(job_id.encode())+".input.enc"), max_bytes=32768)
+                payload = json.loads(decrypt(raw))
+                if (truncated or digest(payload) != authority["payload_digest"] or credential is None
+                    or credential.binding_digest != authority["vault_binding_digest"] or credential.value in canonical(payload).decode()):
+                    raise MoltbookError("moltbook_original_draft_unavailable")
+                result["draft"] = {"operation": payload["operation"], "fields": payload["fields"],
+                    "review": payload["review"], "payload_digest": authority["payload_digest"]}
+                result["admission_request"] = {"operation": payload["operation"], "fields": payload["fields"],
+                    "request_key": result["idempotency"]["key"], "goal_id": result["goal_id"],
+                    "goal_revision": result["goal_revision"], "expected_revision": authority["connection_revision"],
+                    "community_job_id": payload["review"]["job_id"], "community_digest": payload["review"]["artifact_digest"],
+                    "introductions_allowed": True, "public_only": True}
+                if value.get("answer_vault_key"):
+                    answer = await vault_repository.snapshot(value["answer_vault_key"], owner_principal_id=owner.principal_id)
+                    if answer and answer.binding_digest == value.get("answer_binding"):
+                        result["manual_answer"] = text(answer.value, 32)
+            except Exception:
+                result["draft_unavailable"] = "moltbook_original_private_draft_binding_unavailable"
         result.update(no_learning=True, remote_data="untrusted_literal_owner_personal_noncommercial_no_redistribution")
         return result
 
@@ -378,12 +429,26 @@ class MoltbookService:
         from src.integrations.moltbook_mutations import prepare_write
         return await prepare_write(self, owner, **request)
 
-    async def execute(self, owner, job_id):
+    async def execute(self, owner, job_id, *, request_key, expected_phase, fencing_token):
+        identifier(request_key)
         projected = await self.snapshot(owner, job_id)
+        receipts = next((c.get("payload", {}) for c in projected["checkpoints"] if c.get("checkpoint_id") == STATE_ID), {})
+        for receipt in receipts.get("executions", []):
+            if receipt.get("request_key") == request_key:
+                if receipt != {"request_key": request_key, "phase": expected_phase, "fencing_token": fencing_token}:
+                    raise MoltbookError("moltbook_execution_request_idempotency_conflict")
+                # Reconciliation of this exact applied request can never run a
+                # later phase, even when its separate approval now exists.
+                return projected
+        actual_phase = receipts.get("phase", "unattempted")
+        if (projected["lease"]["fencing_token"] != fencing_token or actual_phase != expected_phase
+            or any(r.get("phase") == expected_phase for r in receipts.get("executions", []))):
+            raise MoltbookError("moltbook_original_execution_phase_or_fence_changed")
+        execution = {"request_key": request_key, "phase": expected_phase, "fencing_token": fencing_token}
         if projected["declared_authority"].get("operation") in WRITES:
             from src.integrations.moltbook_mutations import execute_write
-            return await execute_write(self, owner, job_id)
-        return await self.execute_read(owner, job_id)
+            return await execute_write(self, owner, job_id, execution=execution)
+        return await self.execute_read(owner, job_id, execution=execution)
 
     async def approve(self, owner, job_id, **request):
         from src.integrations.moltbook_mutations import approve
@@ -401,9 +466,10 @@ class MoltbookService:
         from src.integrations.moltbook_recovery import recover
         return await recover(self, owner, job_id)
 
-    async def execute_read(self, owner, job_id):
+    async def execute_read(self, owner, job_id, *, execution):
         projected = await self.snapshot(owner, job_id)
-        if projected["status"] == "succeeded": return projected
+        if projected["lease"]["fencing_token"] != execution["fencing_token"]:
+            raise MoltbookError("moltbook_original_execution_fence_changed")
         if projected["status"] == "accepted":
             projected = await self.jobs.queue_job(job_id, expected_revision=projected["revision"])
         if projected["status"] != "queued": raise MoltbookError("moltbook_explicit_recovery_required")
@@ -432,7 +498,8 @@ class MoltbookService:
             await self.current(db, owner, run, lease=lease)
             if run.checkpoint_receipts_json not in (None, "[]", ""):
                 raise MoltbookError("moltbook_original_contact_not_replayable")
-            save_state(run, {"phase": "prepared", "calls": [], "max_contacts": 2 if payload["operation"] == "inspect" else 1})
+            save_state(run, {"phase": "prepared", "calls": [], "executions": [execution],
+                "max_contacts": 2 if payload["operation"] == "inspect" else 1})
             db.add(run)
         task = asyncio.current_task()
         adapter = MoltbookAdapter(transport=self.adapter.transport, resolver=self.adapter.resolver)

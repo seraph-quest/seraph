@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from sqlalchemy import select
 
 from tests.test_inference_accounting import accounting_db
+from tests.moltbook_requests import execute, execution_body
 from config.settings import settings
 from src.auth.middleware import OperatorAuthMiddleware
 from src.db.models import ApprovalRequest, Goal, WorkflowRunState
@@ -19,7 +20,7 @@ from src.vault.repository import vault_repository
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["post", "reply", "accepted_drop", "wrong_author", "hidden"])
+@pytest.mark.parametrize("mode", ["post", "reply", "accepted_drop", "wrong_author", "hidden", "peer_goal", "rotated_key", "stale_community"])
 async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db, monkeypatch, mode):
     from src.api import auth, goals, moltbook
     root, db_engine, factory = accounting_db
@@ -100,33 +101,58 @@ async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db
             prepared = await client.post("/api/capabilities/moltbook/reads", json={"operation": operation, "fields": fields,
                 "request_key": key, "goal_id": goal_id, "goal_revision": 1, "expected_revision": 2})
             assert prepared.status_code == 200, prepared.text
-            result = await client.post(f"/api/capabilities/moltbook/jobs/{prepared.json()['job_id']}/execute")
+            result = await execute(client, prepared.json()['job_id'])
             assert result.status_code == 200 and result.json()["status"] == "succeeded", result.text
             return result.json()
         await read("inspect", {}, "inspect-one")
         community = await read("community", {"community": "introductions"}, "community-one")
         before = len(requests)
+        write_goal, write_revision = goal_id, 2
+        if mode == "peer_goal":
+            other = await client.post("/api/goals", json={"title": "Separate unrelated Goal"})
+            assert other.status_code == 200
+            write_goal = other.json()["id"]
+        if mode == "rotated_key":
+            await vault_repository.store("private-test-moltbook-rotated", "different_private_test_credential", owner_principal_id=principal)
+            changed = await client.put("/api/capabilities/moltbook/connection", json={"vault_key": "private-test-moltbook-rotated",
+                "request_key": "rotate-one", "expected_revision": 2})
+            assert changed.status_code == 200, changed.text
+            write_revision = changed.json()["revision"]
+        if mode == "stale_community":
+            async with factory.accounting_sessions() as db:
+                row = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == community["job_id"]))).scalar_one()
+                row.finished_at = datetime.now(timezone.utc)-timedelta(minutes=6); db.add(row)
         fields = {"post_id": "target-post", "parent_id": "parent-one", "content": "Public operator-authored reply"} if mode == "reply" else {
             "community": "introductions", "title": "Transparent Seraph introduction", "content": "Public operator-authored feedback request"}
         prepared = await client.post("/api/capabilities/moltbook/writes", json={"operation": "create_comment" if mode == "reply" else "create_post",
-            "fields": fields, "request_key": "write-one", "goal_id": goal_id, "goal_revision": 1, "expected_revision": 2,
+            "fields": fields, "request_key": "write-one", "goal_id": write_goal, "goal_revision": 1, "expected_revision": write_revision,
             "community_job_id": community["job_id"], "community_digest": community["artifacts"][0]["content_sha256"],
             "introductions_allowed": True, "public_only": True})
+        if mode in {"peer_goal", "rotated_key", "stale_community"}:
+            assert prepared.status_code == 409 and prepared.json()["detail"]["code"] == "moltbook_current_reviewed_community_required", prepared.text
+            assert len(requests) == before, "stale or peer community proof cannot authorize a new contact"
+            return
         assert prepared.status_code == 200, prepared.text
         original = prepared.json(); job_id = original["job_id"]
         assert original["status"] == "paused" and original["attempt_count"] == 1
         assert len(requests) == before
         def checkpoint(value): return next(p["payload"] for p in value["checkpoints"] if p["checkpoint_id"] == "moltbook:state")
         approval = checkpoint(original)["approval_id"]
-        assert (await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/execute")).status_code == 409
+        assert (await execute(client, job_id)).status_code == 409
         assert (await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/approval", json={"approval_id": approval, "decision": "approved"})).status_code == 200
-        executed = await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/execute")
+        creation_request = await execution_body(client, job_id)
+        assert (await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/execute", json={**creation_request,
+            "expected_phase": "awaiting_verify_approval"})).status_code == 409
+        assert (await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/execute", json={**creation_request,
+            "fencing_token": creation_request["fencing_token"]+1})).status_code == 409
+        assert len(requests) == before
+        executed = await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/execute", json=creation_request)
         if mode == "accepted_drop":
             assert executed.status_code == 409, executed.text
             state = await client.get(f"/api/capabilities/moltbook/jobs/{job_id}")
             assert state.json()["status"] == "unknown_external_effect", state.text
             await db_engine.dispose()
-            assert (await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/execute")).status_code == 409
+            assert (await execute(client, job_id)).status_code == 409
             assert sum(method == "POST" and path == "/api/v1/posts" for method,path,_ in requests) == 1
             assert any(effect["status"] == "intent" for effect in state.json()["effects"])
             return
@@ -141,8 +167,18 @@ async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db
         assert answered.status_code == 200, answered.text
         answer_approval = checkpoint(answered.json())["approval_id"]
         assert answer_approval != approval
+        assert {entry["id"] for entry in answered.json()["approvals"]} == {approval, answer_approval}
+        assert next(entry for entry in answered.json()["approvals"] if entry["id"] == approval)["status"] == "consumed"
         assert (await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/approval", json={"approval_id": answer_approval, "decision": "approved"})).status_code == 200
-        completed = await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/execute")
+        count = len(requests)
+        await db_engine.dispose()
+        reconciled = await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/execute", json=creation_request)
+        assert reconciled.status_code == 200 and checkpoint(reconciled.json())["phase"] == "awaiting_verify_approval"
+        assert len(requests) == count, "old creation request must never advance into approved verification"
+        conflict = await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/execute", json={**creation_request,
+            "expected_phase": "awaiting_verify_approval"})
+        assert conflict.status_code == 409 and len(requests) == count
+        completed = await execute(client, job_id)
         if mode in {"wrong_author", "hidden"}:
             assert completed.status_code == 409, completed.text
             state = (await client.get(f"/api/capabilities/moltbook/jobs/{job_id}")).json()
@@ -159,7 +195,7 @@ async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db
             assert "private_test_moltbook_credential" not in completed.text+output.text
             count = len(requests)
             await db_engine.dispose()
-            assert (await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/execute")).json()["status"] == "succeeded"
+            assert (await execute(client, job_id)).json()["status"] == "succeeded"
             assert len(requests) == count
         assert sum(method == "POST" and path in {"/api/v1/posts", "/api/v1/posts/target-post/comments"} for method,path,_ in requests) == 1
         assert sum(path == "/api/v1/verify" for _,path,_ in requests) == 1

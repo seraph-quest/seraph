@@ -158,8 +158,11 @@ def safe_content(item):
         if name in item: evidence[name] = text(item[name], 128, required=False)
     for name in ("deleted_at", "removed_at"):
         if name in item and item[name] is not None: evidence[name] = text(item[name], 128)
+    if isinstance(community, dict) and "is_private" in community:
+        if type(community["is_private"]) is not bool: raise MoltbookError("moltbook_visibility_unconfirmed")
+        evidence["community_is_private"] = community["is_private"]
     result["visibility_evidence"] = evidence
-    result["explicitly_hidden"] = (any(evidence.get(name) is True for name in ("hidden", "is_hidden", "removed", "is_removed", "deleted", "is_deleted", "is_private"))
+    result["explicitly_hidden"] = (any(evidence.get(name) is True for name in ("hidden", "is_hidden", "removed", "is_removed", "deleted", "is_deleted", "is_private", "community_is_private"))
         or any(evidence.get(name) in {"hidden", "unlisted", "private", "removed", "deleted", "restricted"} for name in ("visibility", "publication_status", "status"))
         or any(name in evidence for name in ("deleted_at", "removed_at")))
     return result
@@ -210,7 +213,8 @@ class MoltbookAdapter:
             raise MoltbookError("moltbook_response_not_json")
         if response.status_code == 429:
             retry = response.headers.get("retry-after", "")
-            raise MoltbookError("moltbook_rate_limited", retry_after=min(int(retry), 172800) if retry.isdecimal() else 60)
+            seconds = (min(int(retry), 172800) if len(retry) <= 6 else 172800) if retry.isascii() and retry.isdecimal() else 60
+            raise MoltbookError("moltbook_rate_limited", retry_after=seconds)
         if not 200 <= response.status_code < 300:
             raise MoltbookError("moltbook_provider_rejected")
         return parse_response(response.content)

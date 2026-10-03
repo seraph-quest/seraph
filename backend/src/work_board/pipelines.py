@@ -165,8 +165,14 @@ async def accept(db: Any, owner: WorkBoardOwner, operation_id: str, request: Any
     budget = deserialize_admission_budget(goal)
     if budget is None or not budget.reviewed_grant:
         raise BoardError("pipeline_goal_budget_required", "Review finite Goal limits before accepting a pipeline", status_code=409)
+    admitted_at = now()
     seconds = min(300, int(budget.max_runtime_seconds))
-    value["deadline_at"] = (now() + timedelta(seconds=seconds)).isoformat()
+    deadline = admitted_at + timedelta(seconds=seconds)
+    if budget.period_expires_at:
+        deadline = min(deadline, utc(budget.period_expires_at))
+    if deadline <= admitted_at:
+        raise BoardError("pipeline_goal_budget_expired", "The current Goal has no remaining grant time", status_code=409)
+    value["deadline_at"] = deadline.isoformat()
     value["admitted_at"] = now().isoformat()
     value["accepted_digest"] = request.expected_digest
     previous = source
@@ -265,7 +271,7 @@ async def stage_revision(db: Any, owner: WorkBoardOwner, operation_id: str, requ
         typed_input_digest=artifact.typed_input_digest, capability_id=CAPABILITIES[0], goal_id=goal.id, goal_revision=goal.revision)
     snapshots = []
     for task in tasks:
-        if task.status != WorkBoardStatus.done and task.status != WorkBoardStatus.running:
+        if task.status not in {WorkBoardStatus.done, WorkBoardStatus.review, WorkBoardStatus.running} and task.block_kind not in {"unknown_effect", "cost_liability", "reconcile_admission_binding"}:
             changed = await db.execute(update(WorkBoardTask).where(WorkBoardTask.task_id == task.task_id,
                 WorkBoardTask.task_revision == task.task_revision, WorkBoardTask.pipeline_operation_id == operation_id)
                 .values(status=WorkBoardStatus.blocked, block_kind="capability", block_reason="pipeline_review_required",
@@ -624,6 +630,7 @@ async def advance(db: Any, owner: WorkBoardOwner, operation_id: str, expected_re
                 task_revision=next_revision, updated_at=now()).execution_options(synchronize_session=False))
         if changed.rowcount != 1:
             raise BoardError("pipeline_materialization_conflict", "The consumer changed before adoption", status_code=409)
+        await db.refresh(consumer)
         current["reservations"][SLOTS[index]]["state"] = "bound"
         current["reservations"][SLOTS[index]]["artifact_ref"] = artifact.artifact_id
         await store(db, row, current)

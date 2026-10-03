@@ -136,6 +136,15 @@ async def test_dispatcher_goal_rejection_commits_operation_and_all_unfinished_fr
         await db.commit()
     from sqlalchemy.ext.asyncio import async_sessionmaker
     with override_session_factory(async_sessionmaker(bind, expire_on_commit=False)):
+        # The original call boundary let the guard rejection escape the
+        # production context manager. Its rollback loses the whole freeze.
+        with pytest.raises(BoardError):
+            async with production_session() as db:
+                await pipelines.task_guard(db, task)
+        async with production_session() as db:
+            _row, value = await pipelines.owned(db, owner, operation["operation_id"])
+            assert not value.get("authority_frozen")
+            assert all(leaf.status != WorkBoardStatus.blocked for leaf in (await db.scalars(select(WorkBoardTask))).all())
         dispatcher = WorkBoardDispatcher(repository=repository, session_provider=production_session)
         error, _reason = await dispatcher._readiness(task)
         assert error == "stale_goal_revision"
@@ -148,10 +157,40 @@ async def test_dispatcher_goal_rejection_commits_operation_and_all_unfinished_fr
             assert not (await db.scalars(select(WorkBoardAttempt))).all()
 
 
+@pytest.mark.asyncio
+async def test_source_revision_preserves_unknown_liability_and_original_deadline(async_db, monkeypatch, tmp_path):
+    from tests.test_browser_task_runtime import _input
+    from src.work_board.pipeline_contracts import PipelineRevisionRequest
+    owner, repository, operation = await setup_operation(async_db, monkeypatch, tmp_path)
+    async with async_db() as db:
+        consumer_task = await repository.get_task(db, owner, operation["steps"][1]["task_id"])
+        consumer_task.status = WorkBoardStatus.blocked
+        consumer_task.block_kind = "unknown_effect"
+        consumer_task.block_reason = "original_unresolved_liability"
+        original_revision = consumer_task.task_revision
+        await db.commit()
+        artifact = await prepare_input_artifact(db, owner, WorkBoardInputArtifactCreate(schema_version=1,
+            capability_id="browser.public-task.v1", goal_id="goal-914", goal_revision=1,
+            input=_input(), idempotency_key="914-replacement-source"))
+        staged = await pipelines.stage_revision(db, owner, operation["operation_id"], PipelineRevisionRequest(
+            expected_revision=operation["revision"], source_input_artifact_id=artifact.artifact_id,
+            idempotency_key="914-unknown-revision"))
+        await db.commit()
+        assert staged["deadline_at"] == operation["deadline_at"]
+        await db.refresh(consumer_task)
+        assert consumer_task.block_kind == "unknown_effect" and consumer_task.block_reason == "original_unresolved_liability"
+        assert consumer_task.task_revision == original_revision
+        with pytest.raises(BoardError) as unsettled:
+            await pipelines.accept(db, owner, operation["operation_id"], PipelineAcceptRequest(
+                expected_revision=staged["revision"], expected_parent_revision=staged["parent_revision"], expected_digest=staged["digest"]))
+        assert unsettled.value.code == "pipeline_quiescence_required"
+
+
 @pytest.mark.skipif(os.environ.get("SERAPH_RUN_REAL_BROWSER_VERTICAL_SLICE") != "1", reason="explicit real Chromium opt-in")
+@pytest.mark.parametrize("recovery", ["original", "current_goal_reuse", "source_replacement"])
 @pytest.mark.parametrize("async_db", ["file"], indirect=True)
 @pytest.mark.asyncio
-async def test_real_chromium_native_browser_to_cpu_dossier_to_plain_report(async_db, monkeypatch, tmp_path):
+async def test_real_chromium_native_browser_to_cpu_dossier_to_plain_report(async_db, monkeypatch, tmp_path, recovery):
     from playwright.async_api import async_playwright
     import src.browser.task_runner as browser_module
     from src.browser.pinned_transport import PinnedBrowserTransport
@@ -175,7 +214,9 @@ async def test_real_chromium_native_browser_to_cpu_dossier_to_plain_report(async
             browser_launcher=launch, transport_factory=lambda: PinnedBrowserTransport(
                 resolver=resolver, injected_fetch=fixture, site_policy=policy)))
         original_deadline = operation["deadline_at"]
-        for index in range(3):
+        recovered = False
+        index = 0
+        while index < 3:
             task_id = operation["steps"][index]["task_id"]
             async with async_db() as db:
                 task = await repository.get_task(db, owner, task_id)
@@ -220,12 +261,106 @@ async def test_real_chromium_native_browser_to_cpu_dossier_to_plain_report(async
                     operation = await pipelines.advance(db, owner, operation["operation_id"], request_revision)
                     replayed = await pipelines.advance(db, owner, operation["operation_id"], request_revision)
                     assert replayed["revision"] == operation["revision"]
+                if index == 0 and not recovered and recovery != "original":
+                    from src.work_board.pipeline_contracts import PipelineReuseRequest, PipelineRevisionRequest
+                    from src.db.models import WorkBoardLink
+                    old_operation_id = operation["operation_id"]
+                    old_producer_id = operation["steps"][0]["task_id"]
+                    old_consumer_id = operation["steps"][1]["task_id"]
+                    old_handoff = await db.scalar(select(WorkBoardHandoff).where(WorkBoardHandoff.child_task_id == old_consumer_id))
+                    old_provenance = (old_handoff.handoff_id, old_handoff.parent_task_id, old_handoff.source_attempt_id, old_handoff.verification_json)
+                    await db.commit()
+                    if recovery == "current_goal_reuse":
+                        goal = await db.get(Goal, "goal-914")
+                        goal.revision += 1
+                        await db.commit()
+                        consumer_task = await repository.get_task(db, owner, old_consumer_id)
+                        error, _ = await dispatcher._readiness(consumer_task)
+                        assert error == "stale_goal_revision"
+                        await db.rollback()
+                        task = await repository.get_task(db, owner, old_producer_id)
+                        operation = await pipelines.read(db, owner, old_operation_id)
+                        preview = await pipelines.reuse_preview(db, owner, old_operation_id, PipelineReuseRequest(
+                            expected_revision=operation["revision"], expected_parent_revision=task.task_revision,
+                            idempotency_key="914-fresh-current-goal-reuse"))
+                        operation = await pipelines.accept(db, owner, preview["operation_id"], PipelineAcceptRequest(
+                            expected_revision=preview["revision"], expected_parent_revision=preview["parent_revision"], expected_digest=preview["digest"]))
+                        assert operation["operation_id"] != old_operation_id
+                        assert operation["steps"][0]["task_id"] == old_producer_id
+                        assert operation["steps"][1]["task_id"] != old_consumer_id
+                        assert task.pipeline_operation_id == old_operation_id
+                        row, fresh = await pipelines.owned(db, owner, operation["operation_id"])
+                        assert old_producer_id not in fresh["all_task_refs"] and old_consumer_id not in fresh["all_task_refs"]
+                        original_deadline = operation["deadline_at"]
+                        operation = await pipelines.advance(db, owner, operation["operation_id"], operation["revision"])
+                    else:
+                        from tests.test_browser_task_runtime import _input
+                        artifact = await prepare_input_artifact(db, owner, WorkBoardInputArtifactCreate(schema_version=1,
+                            capability_id="browser.public-task.v1", goal_id="goal-914", goal_revision=1,
+                            input=_input(), idempotency_key="914-real-replacement-input"))
+                        staged = await pipelines.stage_revision(db, owner, old_operation_id, PipelineRevisionRequest(
+                            expected_revision=operation["revision"], source_input_artifact_id=artifact.artifact_id,
+                            idempotency_key="914-real-replacement-review"))
+                        link = await db.scalar(select(WorkBoardLink).where(WorkBoardLink.child_task_id == old_consumer_id))
+                        assert link.current_handoff_id is None
+                        operation = await pipelines.accept(db, owner, old_operation_id, PipelineAcceptRequest(
+                            expected_revision=staged["revision"], expected_parent_revision=staged["parent_revision"], expected_digest=staged["digest"]))
+                        assert operation["plan_version"] == 2 and operation["deadline_at"] == original_deadline
+                        assert operation["steps"][1]["task_id"] == old_consumer_id
+                        assert link.parent_task_id == operation["steps"][0]["task_id"] != old_producer_id
+                        assert (await db.get(WorkBoardHandoff, old_provenance[0])).verification_json == old_provenance[3]
+                    recovered = True
                 await db.commit()
             assert operation["deadline_at"] == original_deadline
+            if recovery == "source_replacement" and index == 0 and recovered and operation["steps"][0]["task_id"] != task_id:
+                continue
+            index += 1
     async with async_db() as db:
-        assert len((await db.scalars(select(WorkBoardAttempt))).all()) == 3
-        assert len((await db.scalars(select(WorkBoardHandoff))).all()) == 2
+        assert len((await db.scalars(select(WorkBoardAttempt))).all()) == (4 if recovery == "source_replacement" else 3)
+        assert len((await db.scalars(select(WorkBoardHandoff))).all()) == (2 if recovery == "original" else 3)
         final = await repository.get_task(db, owner, operation["steps"][2]["task_id"])
         output = await pipelines.verified_output(db, owner, final)
         text = read_output(output["file_path"], output["content_sha256"]).decode()
         assert "Reference" in text and "Memory: no_learning" in text
+        # An actual completed job label cannot replace current bytes, canonical
+        # identity, or the browser's settled typed cleanup receipt.
+        final_attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == final.task_id))
+        run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == final_attempt.workflow_run_id))
+        original_digest = run.input_digest
+        run.input_digest = "0" * 64
+        assert await review._verified_workflow_readback(db, final, final_attempt) is None
+        run.input_digest = original_digest
+        from pathlib import Path
+        path = Path(settings.workspace_dir) / output["file_path"]
+        actual_bytes = path.read_bytes()
+        try:
+            path.write_bytes(b"altered actual report bytes")
+            with pytest.raises(BoardError) as changed:
+                await pipelines.verified_output(db, owner, final)
+            assert changed.value.code == "pipeline_output_unverified"
+        finally:
+            path.write_bytes(actual_bytes)
+        source_task = await repository.get_task(db, owner, operation["steps"][0]["task_id"])
+        source_attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == source_task.task_id))
+        browser_run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == source_attempt.workflow_run_id))
+        native_kind = browser_run.job_kind
+        browser_run.job_kind = "browser.public-task.v1"
+        assert await review._verified_workflow_readback(db, source_task, source_attempt) is None
+        browser_run.job_kind = native_kind
+        cleanup_effects = browser_run.effect_receipts_json
+        browser_run.effect_receipts_json = json.dumps([effect for effect in json.loads(cleanup_effects)
+            if effect.get("effect_type") != "browser_context_cleanup"])
+        assert await review._verified_workflow_readback(db, source_task, source_attempt) is None
+        browser_run.effect_receipts_json = cleanup_effects
+        await db.commit()
+        from src.work_board.pipeline_contracts import PipelineReuseRequest, PipelineRevisionRequest
+        with pytest.raises(BoardError) as completed:
+            await pipelines.reuse_preview(db, owner, operation["operation_id"], PipelineReuseRequest(
+                expected_revision=operation["revision"], expected_parent_revision=source_task.task_revision,
+                idempotency_key="914-reject-completed-reuse"))
+        assert completed.value.code == "pipeline_completed_consumer"
+        with pytest.raises(BoardError) as completed:
+            await pipelines.stage_revision(db, owner, operation["operation_id"], PipelineRevisionRequest(
+                expected_revision=operation["revision"], source_input_artifact_id="unused",
+                idempotency_key="914-reject-completed-source-change"))
+        assert completed.value.code == "pipeline_completed_consumer"

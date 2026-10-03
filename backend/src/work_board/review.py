@@ -304,6 +304,10 @@ async def _verified_workflow_readback(
         from src.work_board.pipeline_cpu import read_output
         artifacts = _decode_list(run.artifact_receipts_json)
         effects = _decode_list(run.effect_receipts_json)
+        if task.capability_id == "browser.public-task.v1":
+            from src.work_board.dispatcher import _browser_cleanup_receipt_proven
+            if not _browser_cleanup_receipt_proven({"effects": effects}):
+                return None
         matching = [item for item in artifacts if isinstance(item, Mapping)
             and item.get("content_sha256") == proof["content_sha256"] and item.get("exists") is True]
         if len(matching) != 1:

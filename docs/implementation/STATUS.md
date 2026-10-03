@@ -97,6 +97,17 @@ High-risk strategic wording in this status page remains governed by [19. Strateg
 
 ## Current Snapshot
 
+- [ ] #914 reviewed public evidence pipelines remain **Partial**: one fixed
+  native public browser → deterministic CPU dossier → local plain-text report
+  chain, exact plan review, an original finite deadline and attempt counters,
+  independently verified artifact handoffs, durable authority freezes,
+  liability-preserving source revision and exact uncertain-request recovery.
+  The October 3 managed CPU-host journey used actual operator authentication,
+  real public-network Chromium execution and both CPU leaves, with durable
+  input consumption, unchanged deadline and API/UI report readback.
+  Model planning, arbitrary DAGs, publication and PDF/CSV export are outside
+  this capability. See [Current App Guide](./12-current-app-guide.md#reviewed-public-evidence-pipelines-914-branch-local-target)
+  and [ADR-010](./decisions/010-reviewed-artifact-pipelines.md).
 - [ ] Epic #883 M6 #889 reviewed-procedure v2 adds exactly three
   fixed templates (`public-browser-check`, `watch-and-public-browser`, and
   `selected-meeting-prep`) with registered native leaf capabilities, at most

@@ -64,8 +64,8 @@ strict internal `research_dossier` and `readonly_research_child`, never user
 aliases, wildcard service mappings or executable text.
 
 Parent input: operation ID/idempotency key; existing current WorkBoard owner,
-operator session, original LiveRoot and Goal ID/revision; question (UTF-8 <=2 KiB);
-one or two perspective instructions (<=1 KiB each); explicit source IDs assigned
+operator session, original LiveRoot and Goal ID/revision; question (UTF-8 `<=2 KiB`);
+one or two perspective instructions (`<=1 KiB` each); explicit source IDs assigned
 to fixed child slots; permissions and exact local artifact digests/public URLs;
 fixed limits, route/policy/consent revision and aggregate allowance `C`. The server
 canonicalizes and hashes the full immutable admitted input. The model cannot
@@ -83,7 +83,7 @@ Model claim text is attributed synthesis, even after mechanically valid citation
 Invalid citations remain visibly unverified and cannot become adopted claims.
 
 Parent output is a deterministic UTF-8 `text/plain` dossier and a typed source/
-child/adoption manifest, each <=64 KiB. React renders text literally; artifact
+child/adoption manifest, each `<=64 KiB`. React renders text literally; artifact
 responses use `nosniff`. There is no parent model/planner call and no Markdown/HTML
 execution. Contradiction sections list child-declared, cited disagreements; exact
 same-span conflicting assertions can additionally be grouped deterministically.
@@ -103,11 +103,11 @@ implementation cannot silently expand them.
 | Parent execution | Three finite phases: create, fund, assemble; at most two source preparations and two synthesis calls, then one dossier assembly. No agent/tool iteration. |
 | Sources | At most four distinct selected sources total, at most two per child. Shared sources reuse one exact immutable prepared artifact; no implicit discovery. |
 | Public reads | At most four GET intents total, one exact approved URL per source, 20-second transport bound per read; no redirects, retry, subresources or URL selected by prose. |
-| Source size | <=64 KiB raw bytes per source; <=256 KiB aggregate. Text/plain UTF-8 only for this capability version. Other MIME, encoding, cookies or larger body blocks visibly. |
-| Source excerpts | Explicit approved line ranges; <=4 KiB quoted source material per child, with exact normalized-text digest and span digest. No silent truncation or invented span. |
-| Prompt bytes / input tokens | Canonical complete messages <=8 KiB UTF-8, including all system/user/source/perspective/metadata text. No hard native input-token count is claimed; any token estimate is explicitly diagnostic. No tokenizer downloads, counter requests or new service prerequisite. |
-| Output tokens / bytes | Requested provider output limit <=min(1,024,current policy) and <=16 KiB strict child JSON; at most2,048 requested output tokens aggregate. Provider response overflow stops and preserves any contacted cost. |
-| Remote lane / retries | Existing single priority-aware remote lane. One stable model intent per slot; provider contact <=45 seconds, capped by child/parent deadline and current policy. No post-contact retry, fallback provider or automatic re-synthesis. Exact never-contacted recovery can rebind the same intent; it does not add calls or budget. |
+| Source size | `<=64 KiB` raw bytes per source; `<=256 KiB` aggregate. Text/plain UTF-8 only for this capability version. Other MIME, encoding, cookies or larger body blocks visibly. |
+| Source excerpts | Explicit approved line ranges; `<=4 KiB` quoted source material per child, with exact normalized-text digest and span digest. No silent truncation or invented span. |
+| Prompt bytes / input tokens | Canonical complete messages `<=8 KiB` UTF-8, including all system/user/source/perspective/metadata text. No hard native input-token count is claimed; any token estimate is explicitly diagnostic. No tokenizer downloads, counter requests or new service prerequisite. |
+| Output tokens / bytes | Requested provider output limit `<=min(1,024,current policy)` and `<=16 KiB` strict child JSON; at most2,048 requested output tokens aggregate. Provider response overflow stops and preserves any contacted cost. |
+| Remote lane / retries | Existing single priority-aware remote lane. One stable model intent per slot; provider contact `<=45 seconds`, capped by child/parent deadline and current policy. No post-contact retry, fallback provider or automatic re-synthesis. Exact never-contacted recovery can rebind the same intent; it does not add calls or budget. |
 | Source retries | No second network read after a persisted contact marker. Restart adopts exact durable source output, or marks read outcome Unknown/Blocked. |
 | Output storage | Existing private owner-bound workspace, bounded nofollow write/promote/readback; source artifacts plus child outputs and final dossier only. |
 | Cost | `b_i` is the existing trusted server request reservation bound, never a caller estimate or absolute upstream billing cap. At funding `sum(b_i) <= C` and current owner/deployment/Goal allowance checks hold. Actual provider overrun is retained and blocks further contacts, including already funded siblings. |

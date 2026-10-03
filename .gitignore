@@ -364,3 +364,7 @@ backend/data/*
 backend/data/mcp-servers.json
 seraph-quest.github.io/
 .vite/
+
+# Durable local agent workspaces and private validation evidence
+/.agent-worktrees/
+/.agent-evidence/

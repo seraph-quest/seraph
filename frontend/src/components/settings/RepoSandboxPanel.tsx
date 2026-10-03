@@ -25,6 +25,7 @@ interface RepoSandboxPreflight {
 }
 
 interface RepoSandboxPayload {
+  node_runtime_path?: string;
   metadata_available: boolean;
   executor_kind: RepoSandboxExecutorKind;
   executor_profile: string;
@@ -264,6 +265,7 @@ function normalizeRepoSandboxPayload(payload: unknown): RepoSandboxPayload | nul
   }
   return {
     metadata_available: true,
+    ...(typeof payload.node_runtime_path === "string" && payload.node_runtime_path.length <= 512 ? { node_runtime_path: payload.node_runtime_path } : {}),
     executor_kind: executorKind,
     executor_profile: typeof payload.executor_profile === "string" ? payload.executor_profile : expectedExecutorProfile,
     executor_posture: posture,
@@ -468,6 +470,7 @@ export function RepoSandboxPanel() {
           docker_socket: value.docker_socket,
           worker_image_digest: value.worker_image_digest,
           profile: value.profile,
+          ...(value.node_runtime_path === undefined ? {} : { node_runtime_path: value.node_runtime_path }),
         }),
       }, generation);
       if (generationRef.current === generation) {
@@ -518,7 +521,7 @@ export function RepoSandboxPanel() {
               setValue((current) => {
                 const posture = normalizePosture({
                   kind: next,
-                  profile: REPO_SANDBOX_PROFILE,
+                  profile: current.profile,
                   isolation_claim: next === "local" ? "none" : "unverified",
                   network_isolation: next === "local" ? "not_verified" : "unverified",
                   resource_enforcement: next === "local" ? "admission_and_wall_timeout_only" : "unverified",
@@ -529,7 +532,7 @@ export function RepoSandboxPanel() {
                   ...current,
                   metadata_available: false,
                   executor_kind: next,
-                  executor_profile: `${next}:${REPO_SANDBOX_PROFILE}`,
+                  executor_profile: `${next}:${current.profile}`,
                   executor_posture: posture,
                   executor_posture_digest: null,
                   local_host_approval_required: next === "local",
@@ -571,8 +574,23 @@ export function RepoSandboxPanel() {
           }} placeholder="registry.example/seraph-worker@sha256:…" maxLength={512} />
         </label>}
         <label className="text-[10px] text-retro-text">Profile
-          <input className="mt-1 w-full bg-transparent text-[10px] text-retro-text border-b border-retro-text/20 px-0.5 py-1 font-mono outline-none focus:border-retro-highlight" value={value.profile} readOnly aria-readonly="true" />
+          <select aria-label="Repository execution profile" className="cockpit-input mt-1 w-full" value={value.profile} onChange={(event) => {
+            const profile = event.currentTarget.value;
+            if (!(value.executor_kind === "local" ? LOCAL_PROFILES.has(profile) : profile === REPO_SANDBOX_PROFILE)) return;
+            setValue((current) => ({ ...current, profile, metadata_available: false, preparation_ready: false, execution_ready: false }));
+          }}>
+            <option value={REPO_SANDBOX_PROFILE}>Python / pytest (default)</option>
+            <option value="repo-node24-npm-v1">Node 24 / bounded test and build scripts</option>
+            {value.executor_kind === "local" && <option value="repo-python-pytest-publication-v1">Python / pytest for publication</option>}
+          </select>
         </label>
+        {value.profile === "repo-node24-npm-v1" && <label className="text-[10px] text-retro-text">Installed Node 24 executable
+          <input aria-label="Installed Node 24 executable" className="cockpit-input mt-1 w-full font-mono" maxLength={512} value={value.node_runtime_path ?? ""} onChange={(event) => {
+            const node_runtime_path = event.currentTarget.value;
+            setValue((current) => ({ ...current, node_runtime_path, metadata_available: false, preparation_ready: false, execution_ready: false }));
+          }} placeholder="/absolute/path/to/node" />
+          <span>No downloads. Linux supervision required; unavailable profiles block.</span>
+        </label>}
       </div>
       <div className={`mt-3 rounded border p-2 text-[10px] ${value.preflight?.ok ? "border-green-500/40" : "border-yellow-500/40"}`} role="status">
         <div className="font-bold">Effective status: {metadataAvailable ? value.status : "unknown"} · {metadataAvailable ? executorLabel : "executor unavailable"}</div>

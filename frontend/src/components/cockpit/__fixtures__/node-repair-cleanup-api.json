@@ -1,0 +1,711 @@
+{
+  "held": {
+    "job_id": "repo-repair-bfb9cb2351dce8befd56310aaceccc11",
+    "status": "unknown_external_effect",
+    "owner_principal_id": "operator:root:2835a6b7970c45dbb9e164de5aaa9095",
+    "operator_session_id": "eadfe1affea04b1484bd2f06f178e950",
+    "task_id": "eeac80ed63cb402da408697ecb6e23f9",
+    "attempt_id": "618d225b17784be6a7d2788dc51aacf1",
+    "workflow_run_id": "repo-repair-bfb9cb2351dce8befd56310aaceccc11",
+    "goal_id": "goal:native-high",
+    "goal_revision": 1,
+    "revision": 33,
+    "authority_digest": "942e38ad86a8d3628433f3345f3551149f27a4f8b4472761344647460a460aa9",
+    "input_digest": "7cc46ff08050f93894e151b98eab61d9f99ca7d5298116a7b09790840f4868be",
+    "run_fingerprint": "7cc46ff08050f93894e151b98eab61d9f99ca7d5298116a7b09790840f4868be",
+    "capability_id": "engineering.repo-repair.v1",
+    "capability_version": "1",
+    "executor_kind": "local",
+    "executor_profile": "local:repo-node24-npm-v1",
+    "executor_posture": {
+      "dependency_limits": {
+        "aggregate_bytes": 67108864,
+        "file_bytes": 16777216,
+        "files": 512
+      },
+      "execution_plan": {
+        "commands": [
+          {
+            "argv": [
+              "/opt/fixture/node24/bin/node",
+              "--test",
+              "tests/app.test.js"
+            ],
+            "body": "node --test tests/app.test.js",
+            "paths": [
+              "tests/app.test.js"
+            ],
+            "script": "test"
+          }
+        ],
+        "configs": {},
+        "dependency_aliases": {},
+        "dependency_manifest_sha256": "d801aa1fb7ddcc330a5e3173372ea6af4a3d08ec58074478e85aa5603e926658",
+        "lifecycle_hooks_executed": false,
+        "lockfile_sha256": "14e0922d7089bb66341cb7c5657a47f232a6d615833240e17b0015de22fb4971",
+        "output_directory": null,
+        "package_sha256": "398b6220791d034979a409725c5b2bb0d7f739767af74760c703bf6e3e6fe192",
+        "selection": [
+          "npm",
+          "test"
+        ],
+        "snapshot_sha256": "9ec273b40cadec5256111fb33d670698b7420d54e09639e163c80b0f312df221"
+      },
+      "git_sha256": "587ef21868c948b883993e23209b86a72a6ddc06aab1545c697ffc31075acd4a",
+      "host_access": "explicit_job_approval_required",
+      "interpreter_entry_path": "/opt/fixture/python/bin/python",
+      "interpreter_sha256": "0dc3a692fa85fcdb7f1a5877d2adf179809ac417a07ffde2373c832863800a15",
+      "isolation_claim": "none",
+      "kind": "local",
+      "limits_digest": "0425ffcc2f4ca71d09546a199bececabe61fa4cf0747dfa1725a9b4fbaa7bbd8",
+      "network_isolation": "not_verified",
+      "node_path": "/opt/fixture/node24/bin/node",
+      "node_sha256": "d1de76d8edf2fededf6f8b30d244e2c0529ac607923a018283b77e9c74bd932c",
+      "node_version": "v24.15.0",
+      "npm_entry_sha256": "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
+      "npm_executed": false,
+      "npm_package_sha256": "48a06e6aeede3499e391710db82fe948afa7e74ecbf3e819b66121f3cd54666b",
+      "npm_version": "11.12.1",
+      "process_supervision": "linux_per_job_subreaper",
+      "profile": "repo-node24-npm-v1",
+      "resource_enforcement": "admission_and_wall_timeout_only",
+      "supervisor_source_sha256": "cd8e3e27536ff2ce302b1c9033be062a6b8e1742dc9c7b9fca7edd8fe5cbb65a",
+      "unenforced_limits": [
+        "cpu",
+        "memory",
+        "pids"
+      ],
+      "worker_source_sha256": "c16d1117cf47b38f4d2e5226e4c34aace6fec9d31c6514e3a549468618fc3440",
+      "image_digest": null,
+      "local_host_execution_required": true
+    },
+    "executor_posture_raw": {
+      "dependency_limits": {
+        "aggregate_bytes": 67108864,
+        "file_bytes": 16777216,
+        "files": 512
+      },
+      "execution_plan": {
+        "commands": [
+          {
+            "argv": [
+              "/opt/fixture/node24/bin/node",
+              "--test",
+              "tests/app.test.js"
+            ],
+            "body": "node --test tests/app.test.js",
+            "paths": [
+              "tests/app.test.js"
+            ],
+            "script": "test"
+          }
+        ],
+        "configs": {},
+        "dependency_aliases": {},
+        "dependency_manifest_sha256": "d801aa1fb7ddcc330a5e3173372ea6af4a3d08ec58074478e85aa5603e926658",
+        "lifecycle_hooks_executed": false,
+        "lockfile_sha256": "14e0922d7089bb66341cb7c5657a47f232a6d615833240e17b0015de22fb4971",
+        "output_directory": null,
+        "package_sha256": "398b6220791d034979a409725c5b2bb0d7f739767af74760c703bf6e3e6fe192",
+        "selection": [
+          "npm",
+          "test"
+        ],
+        "snapshot_sha256": "9ec273b40cadec5256111fb33d670698b7420d54e09639e163c80b0f312df221"
+      },
+      "git_sha256": "587ef21868c948b883993e23209b86a72a6ddc06aab1545c697ffc31075acd4a",
+      "host_access": "explicit_job_approval_required",
+      "interpreter_entry_path": "/opt/fixture/python/bin/python",
+      "interpreter_sha256": "0dc3a692fa85fcdb7f1a5877d2adf179809ac417a07ffde2373c832863800a15",
+      "isolation_claim": "none",
+      "kind": "local",
+      "limits_digest": "0425ffcc2f4ca71d09546a199bececabe61fa4cf0747dfa1725a9b4fbaa7bbd8",
+      "network_isolation": "not_verified",
+      "node_path": "/opt/fixture/node24/bin/node",
+      "node_sha256": "d1de76d8edf2fededf6f8b30d244e2c0529ac607923a018283b77e9c74bd932c",
+      "node_version": "v24.15.0",
+      "npm_entry_sha256": "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
+      "npm_executed": false,
+      "npm_package_sha256": "48a06e6aeede3499e391710db82fe948afa7e74ecbf3e819b66121f3cd54666b",
+      "npm_version": "11.12.1",
+      "process_supervision": "linux_per_job_subreaper",
+      "profile": "repo-node24-npm-v1",
+      "resource_enforcement": "admission_and_wall_timeout_only",
+      "supervisor_source_sha256": "cd8e3e27536ff2ce302b1c9033be062a6b8e1742dc9c7b9fca7edd8fe5cbb65a",
+      "unenforced_limits": [
+        "cpu",
+        "memory",
+        "pids"
+      ],
+      "worker_source_sha256": "c16d1117cf47b38f4d2e5226e4c34aace6fec9d31c6514e3a549468618fc3440"
+    },
+    "executor_posture_digest": "45f9b8723e8947f0538053d2455dae5d5d60ea431b123f1facdf136ac91a0394",
+    "executor_posture_digest_basis": "executor_posture_raw",
+    "required_permissions": [
+      "local_host_execution"
+    ],
+    "local_host_execution_required": true,
+    "limits": {
+      "max_attempts": 1,
+      "runtime_seconds": 900
+    },
+    "preparation_ready": false,
+    "execution_ready": false,
+    "preflight": {
+      "cgroup_driver": null,
+      "cgroup_version": null,
+      "daemon_reported": {},
+      "executor_kind": "local",
+      "image_digest": null,
+      "ok": true,
+      "operator_visible": true,
+      "posture": {
+        "dependency_limits": {
+          "aggregate_bytes": "[redacted]",
+          "file_bytes": "[redacted]",
+          "files": "[redacted]"
+        },
+        "execution_plan": {
+          "commands": "[redacted]",
+          "configs": "[redacted]",
+          "dependency_aliases": "[redacted]",
+          "dependency_manifest_sha256": "[redacted]",
+          "lifecycle_hooks_executed": "[redacted]",
+          "lockfile_sha256": "[redacted]",
+          "output_directory": "[redacted]",
+          "package_sha256": "[redacted]",
+          "selection": "[redacted]",
+          "snapshot_sha256": "[redacted]"
+        },
+        "git_sha256": "587ef21868c948b883993e23209b86a72a6ddc06aab1545c697ffc31075acd4a",
+        "host_access": "explicit_job_approval_required",
+        "interpreter_entry_path": "/opt/fixture/python/bin/python",
+        "interpreter_sha256": "0dc3a692fa85fcdb7f1a5877d2adf179809ac417a07ffde2373c832863800a15",
+        "isolation_claim": "none",
+        "kind": "local",
+        "limits_digest": "0425ffcc2f4ca71d09546a199bececabe61fa4cf0747dfa1725a9b4fbaa7bbd8",
+        "network_isolation": "not_verified",
+        "node_path": "/opt/fixture/node24/bin/node",
+        "node_sha256": "d1de76d8edf2fededf6f8b30d244e2c0529ac607923a018283b77e9c74bd932c",
+        "node_version": "v24.15.0",
+        "npm_entry_sha256": "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
+        "npm_executed": false,
+        "npm_package_sha256": "48a06e6aeede3499e391710db82fe948afa7e74ecbf3e819b66121f3cd54666b",
+        "npm_version": "11.12.1",
+        "process_supervision": "linux_per_job_subreaper",
+        "profile": "repo-node24-npm-v1",
+        "resource_enforcement": "admission_and_wall_timeout_only",
+        "supervisor_source_sha256": "cd8e3e27536ff2ce302b1c9033be062a6b8e1742dc9c7b9fca7edd8fe5cbb65a",
+        "unenforced_limits": [
+          "[redacted]",
+          "[redacted]",
+          "[redacted]"
+        ],
+        "worker_source_sha256": "c16d1117cf47b38f4d2e5226e4c34aace6fec9d31c6514e3a549468618fc3440"
+      },
+      "posture_digest": "45f9b8723e8947f0538053d2455dae5d5d60ea431b123f1facdf136ac91a0394",
+      "profile": "repo-node24-npm-v1",
+      "reason": "node_local_staging_available",
+      "rootless": null,
+      "status": "blocked",
+      "support_confirmed": false,
+      "evidence_basis": "recorded_job_preflight"
+    },
+    "source_packet": {
+      "packet_id": "ed07f0e40ba75c19baa6ec3179ca86aa",
+      "state": "verified",
+      "repository_ref": "repo",
+      "base_snapshot_sha256": "9ec273b40cadec5256111fb33d670698b7420d54e09639e163c80b0f312df221",
+      "source_manifest_sha256": "9180fec389cd05bdccbb0dff2b53a5a8917a8c40022bc52ea0321f160f83c31f",
+      "artifact_sha256": "3c29c431e6c3432de505a266aa3f4ec01949b0f8b74684cc14f876d2179cf3dc",
+      "revision": 1
+    },
+    "egress": {
+      "consent_id": "028066eba2084f0597900605d3ea2931",
+      "revision": 1,
+      "runtime_path": "strategist_agent",
+      "effective_profile_id": "openrouter",
+      "effective_upstream": "openrouter",
+      "maximum_input_bytes": 65536,
+      "maximum_output_tokens": 4096,
+      "expires_at": "2026-10-03T06:23:07.513547+00:00",
+      "state": "active"
+    },
+    "proposal": {
+      "proposal_id": "343faae17a7c463091362dd530d11bff",
+      "status": "approved",
+      "revision": 2,
+      "base_snapshot_digest": "9ec273b40cadec5256111fb33d670698b7420d54e09639e163c80b0f312df221",
+      "source_digest": "9180fec389cd05bdccbb0dff2b53a5a8917a8c40022bc52ea0321f160f83c31f",
+      "model_profile_id": "openrouter",
+      "patch_sha256": "cd7f8ffddbeee2f281c2a08db8b068ea7687fd7411d9d39b0c947065f788d247",
+      "approval_id": "1b582e83-76eb-5eec-80a9-f4bc897f2f6e",
+      "expires_at": "2026-10-03T06:51:11.276301+00:00",
+      "safe_metadata": {
+        "expected_outcome": "Actual selected tests/build pass.",
+        "memory_status": "no_learning",
+        "sandbox": {
+          "executor_kind": "local",
+          "executor_posture": {
+            "dependency_limits": {
+              "aggregate_bytes": 67108864,
+              "file_bytes": 16777216,
+              "files": 512
+            },
+            "execution_plan": {
+              "commands": [
+                {
+                  "argv": [
+                    "/opt/fixture/node24/bin/node",
+                    "--test",
+                    "tests/app.test.js"
+                  ],
+                  "body": "node --test tests/app.test.js",
+                  "paths": [
+                    "tests/app.test.js"
+                  ],
+                  "script": "test"
+                }
+              ],
+              "configs": {},
+              "dependency_aliases": {},
+              "dependency_manifest_sha256": "d801aa1fb7ddcc330a5e3173372ea6af4a3d08ec58074478e85aa5603e926658",
+              "lifecycle_hooks_executed": false,
+              "lockfile_sha256": "14e0922d7089bb66341cb7c5657a47f232a6d615833240e17b0015de22fb4971",
+              "output_directory": null,
+              "package_sha256": "398b6220791d034979a409725c5b2bb0d7f739767af74760c703bf6e3e6fe192",
+              "selection": [
+                "npm",
+                "test"
+              ],
+              "snapshot_sha256": "9ec273b40cadec5256111fb33d670698b7420d54e09639e163c80b0f312df221"
+            },
+            "git_sha256": "587ef21868c948b883993e23209b86a72a6ddc06aab1545c697ffc31075acd4a",
+            "host_access": "explicit_job_approval_required",
+            "interpreter_entry_path": "/opt/fixture/python/bin/python",
+            "interpreter_sha256": "0dc3a692fa85fcdb7f1a5877d2adf179809ac417a07ffde2373c832863800a15",
+            "isolation_claim": "none",
+            "kind": "local",
+            "limits_digest": "0425ffcc2f4ca71d09546a199bececabe61fa4cf0747dfa1725a9b4fbaa7bbd8",
+            "network_isolation": "not_verified",
+            "node_path": "/opt/fixture/node24/bin/node",
+            "node_sha256": "d1de76d8edf2fededf6f8b30d244e2c0529ac607923a018283b77e9c74bd932c",
+            "node_version": "v24.15.0",
+            "npm_entry_sha256": "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
+            "npm_executed": false,
+            "npm_package_sha256": "48a06e6aeede3499e391710db82fe948afa7e74ecbf3e819b66121f3cd54666b",
+            "npm_version": "11.12.1",
+            "process_supervision": "linux_per_job_subreaper",
+            "profile": "repo-node24-npm-v1",
+            "resource_enforcement": "admission_and_wall_timeout_only",
+            "supervisor_source_sha256": "cd8e3e27536ff2ce302b1c9033be062a6b8e1742dc9c7b9fca7edd8fe5cbb65a",
+            "unenforced_limits": [
+              "cpu",
+              "memory",
+              "pids"
+            ],
+            "worker_source_sha256": "c16d1117cf47b38f4d2e5226e4c34aace6fec9d31c6514e3a549468618fc3440"
+          },
+          "executor_posture_digest": "45f9b8723e8947f0538053d2455dae5d5d60ea431b123f1facdf136ac91a0394",
+          "executor_profile": "local:repo-node24-npm-v1",
+          "local_host_execution_required": true,
+          "required_permissions": [
+            "local_host_execution"
+          ],
+          "sandbox_image_digest": "",
+          "sandbox_limits_digest": "0425ffcc2f4ca71d09546a199bececabe61fa4cf0747dfa1725a9b4fbaa7bbd8",
+          "sandbox_profile": "repo-node24-npm-v1",
+          "sandbox_socket_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "summary": "Fix the approved fixture value."
+      }
+    },
+    "execution": {
+      "artifacts": [],
+      "readback": null,
+      "process_cleanup": {
+        "status": "held",
+        "physical_capacity_released": false,
+        "cleanup_receipt_verified": false,
+        "readback_scope": null
+      },
+      "memory_status": "no_learning",
+      "provider_contacted": true
+    },
+    "approval_id": "1b582e83-76eb-5eec-80a9-f4bc897f2f6e",
+    "approval": {
+      "approval_id": "1b582e83-76eb-5eec-80a9-f4bc897f2f6e",
+      "status": "consumed",
+      "tool_name": "engineering.repo-repair.v1",
+      "action": "repo_repair.resolve",
+      "expires_at": "2026-10-03T06:26:12.661480+00:00",
+      "executor_kind": "local",
+      "executor_profile": "local:repo-node24-npm-v1",
+      "executor_posture_digest": "45f9b8723e8947f0538053d2455dae5d5d60ea431b123f1facdf136ac91a0394",
+      "required_permissions": [
+        "local_host_execution"
+      ],
+      "local_host_execution_required": true
+    },
+    "memory_status": "no_learning",
+    "recovery_action": "reconcile_external_effect",
+    "operator_visible": true
+  },
+  "released": {
+    "job_id": "repo-repair-bfb9cb2351dce8befd56310aaceccc11",
+    "status": "unknown_external_effect",
+    "owner_principal_id": "operator:root:2835a6b7970c45dbb9e164de5aaa9095",
+    "operator_session_id": "eadfe1affea04b1484bd2f06f178e950",
+    "task_id": "eeac80ed63cb402da408697ecb6e23f9",
+    "attempt_id": "618d225b17784be6a7d2788dc51aacf1",
+    "workflow_run_id": "repo-repair-bfb9cb2351dce8befd56310aaceccc11",
+    "goal_id": "goal:native-high",
+    "goal_revision": 1,
+    "revision": 34,
+    "authority_digest": "942e38ad86a8d3628433f3345f3551149f27a4f8b4472761344647460a460aa9",
+    "input_digest": "7cc46ff08050f93894e151b98eab61d9f99ca7d5298116a7b09790840f4868be",
+    "run_fingerprint": "7cc46ff08050f93894e151b98eab61d9f99ca7d5298116a7b09790840f4868be",
+    "capability_id": "engineering.repo-repair.v1",
+    "capability_version": "1",
+    "executor_kind": "local",
+    "executor_profile": "local:repo-node24-npm-v1",
+    "executor_posture": {
+      "dependency_limits": {
+        "aggregate_bytes": 67108864,
+        "file_bytes": 16777216,
+        "files": 512
+      },
+      "execution_plan": {
+        "commands": [
+          {
+            "argv": [
+              "/opt/fixture/node24/bin/node",
+              "--test",
+              "tests/app.test.js"
+            ],
+            "body": "node --test tests/app.test.js",
+            "paths": [
+              "tests/app.test.js"
+            ],
+            "script": "test"
+          }
+        ],
+        "configs": {},
+        "dependency_aliases": {},
+        "dependency_manifest_sha256": "d801aa1fb7ddcc330a5e3173372ea6af4a3d08ec58074478e85aa5603e926658",
+        "lifecycle_hooks_executed": false,
+        "lockfile_sha256": "14e0922d7089bb66341cb7c5657a47f232a6d615833240e17b0015de22fb4971",
+        "output_directory": null,
+        "package_sha256": "398b6220791d034979a409725c5b2bb0d7f739767af74760c703bf6e3e6fe192",
+        "selection": [
+          "npm",
+          "test"
+        ],
+        "snapshot_sha256": "9ec273b40cadec5256111fb33d670698b7420d54e09639e163c80b0f312df221"
+      },
+      "git_sha256": "587ef21868c948b883993e23209b86a72a6ddc06aab1545c697ffc31075acd4a",
+      "host_access": "explicit_job_approval_required",
+      "interpreter_entry_path": "/opt/fixture/python/bin/python",
+      "interpreter_sha256": "0dc3a692fa85fcdb7f1a5877d2adf179809ac417a07ffde2373c832863800a15",
+      "isolation_claim": "none",
+      "kind": "local",
+      "limits_digest": "0425ffcc2f4ca71d09546a199bececabe61fa4cf0747dfa1725a9b4fbaa7bbd8",
+      "network_isolation": "not_verified",
+      "node_path": "/opt/fixture/node24/bin/node",
+      "node_sha256": "d1de76d8edf2fededf6f8b30d244e2c0529ac607923a018283b77e9c74bd932c",
+      "node_version": "v24.15.0",
+      "npm_entry_sha256": "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
+      "npm_executed": false,
+      "npm_package_sha256": "48a06e6aeede3499e391710db82fe948afa7e74ecbf3e819b66121f3cd54666b",
+      "npm_version": "11.12.1",
+      "process_supervision": "linux_per_job_subreaper",
+      "profile": "repo-node24-npm-v1",
+      "resource_enforcement": "admission_and_wall_timeout_only",
+      "supervisor_source_sha256": "cd8e3e27536ff2ce302b1c9033be062a6b8e1742dc9c7b9fca7edd8fe5cbb65a",
+      "unenforced_limits": [
+        "cpu",
+        "memory",
+        "pids"
+      ],
+      "worker_source_sha256": "c16d1117cf47b38f4d2e5226e4c34aace6fec9d31c6514e3a549468618fc3440",
+      "image_digest": null,
+      "local_host_execution_required": true
+    },
+    "executor_posture_raw": {
+      "dependency_limits": {
+        "aggregate_bytes": 67108864,
+        "file_bytes": 16777216,
+        "files": 512
+      },
+      "execution_plan": {
+        "commands": [
+          {
+            "argv": [
+              "/opt/fixture/node24/bin/node",
+              "--test",
+              "tests/app.test.js"
+            ],
+            "body": "node --test tests/app.test.js",
+            "paths": [
+              "tests/app.test.js"
+            ],
+            "script": "test"
+          }
+        ],
+        "configs": {},
+        "dependency_aliases": {},
+        "dependency_manifest_sha256": "d801aa1fb7ddcc330a5e3173372ea6af4a3d08ec58074478e85aa5603e926658",
+        "lifecycle_hooks_executed": false,
+        "lockfile_sha256": "14e0922d7089bb66341cb7c5657a47f232a6d615833240e17b0015de22fb4971",
+        "output_directory": null,
+        "package_sha256": "398b6220791d034979a409725c5b2bb0d7f739767af74760c703bf6e3e6fe192",
+        "selection": [
+          "npm",
+          "test"
+        ],
+        "snapshot_sha256": "9ec273b40cadec5256111fb33d670698b7420d54e09639e163c80b0f312df221"
+      },
+      "git_sha256": "587ef21868c948b883993e23209b86a72a6ddc06aab1545c697ffc31075acd4a",
+      "host_access": "explicit_job_approval_required",
+      "interpreter_entry_path": "/opt/fixture/python/bin/python",
+      "interpreter_sha256": "0dc3a692fa85fcdb7f1a5877d2adf179809ac417a07ffde2373c832863800a15",
+      "isolation_claim": "none",
+      "kind": "local",
+      "limits_digest": "0425ffcc2f4ca71d09546a199bececabe61fa4cf0747dfa1725a9b4fbaa7bbd8",
+      "network_isolation": "not_verified",
+      "node_path": "/opt/fixture/node24/bin/node",
+      "node_sha256": "d1de76d8edf2fededf6f8b30d244e2c0529ac607923a018283b77e9c74bd932c",
+      "node_version": "v24.15.0",
+      "npm_entry_sha256": "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
+      "npm_executed": false,
+      "npm_package_sha256": "48a06e6aeede3499e391710db82fe948afa7e74ecbf3e819b66121f3cd54666b",
+      "npm_version": "11.12.1",
+      "process_supervision": "linux_per_job_subreaper",
+      "profile": "repo-node24-npm-v1",
+      "resource_enforcement": "admission_and_wall_timeout_only",
+      "supervisor_source_sha256": "cd8e3e27536ff2ce302b1c9033be062a6b8e1742dc9c7b9fca7edd8fe5cbb65a",
+      "unenforced_limits": [
+        "cpu",
+        "memory",
+        "pids"
+      ],
+      "worker_source_sha256": "c16d1117cf47b38f4d2e5226e4c34aace6fec9d31c6514e3a549468618fc3440"
+    },
+    "executor_posture_digest": "45f9b8723e8947f0538053d2455dae5d5d60ea431b123f1facdf136ac91a0394",
+    "executor_posture_digest_basis": "executor_posture_raw",
+    "required_permissions": [
+      "local_host_execution"
+    ],
+    "local_host_execution_required": true,
+    "limits": {
+      "max_attempts": 1,
+      "runtime_seconds": 900
+    },
+    "preparation_ready": false,
+    "execution_ready": false,
+    "preflight": {
+      "cgroup_driver": null,
+      "cgroup_version": null,
+      "daemon_reported": {},
+      "executor_kind": "local",
+      "image_digest": null,
+      "ok": true,
+      "operator_visible": true,
+      "posture": {
+        "dependency_limits": {
+          "aggregate_bytes": "[redacted]",
+          "file_bytes": "[redacted]",
+          "files": "[redacted]"
+        },
+        "execution_plan": {
+          "commands": "[redacted]",
+          "configs": "[redacted]",
+          "dependency_aliases": "[redacted]",
+          "dependency_manifest_sha256": "[redacted]",
+          "lifecycle_hooks_executed": "[redacted]",
+          "lockfile_sha256": "[redacted]",
+          "output_directory": "[redacted]",
+          "package_sha256": "[redacted]",
+          "selection": "[redacted]",
+          "snapshot_sha256": "[redacted]"
+        },
+        "git_sha256": "587ef21868c948b883993e23209b86a72a6ddc06aab1545c697ffc31075acd4a",
+        "host_access": "explicit_job_approval_required",
+        "interpreter_entry_path": "/opt/fixture/python/bin/python",
+        "interpreter_sha256": "0dc3a692fa85fcdb7f1a5877d2adf179809ac417a07ffde2373c832863800a15",
+        "isolation_claim": "none",
+        "kind": "local",
+        "limits_digest": "0425ffcc2f4ca71d09546a199bececabe61fa4cf0747dfa1725a9b4fbaa7bbd8",
+        "network_isolation": "not_verified",
+        "node_path": "/opt/fixture/node24/bin/node",
+        "node_sha256": "d1de76d8edf2fededf6f8b30d244e2c0529ac607923a018283b77e9c74bd932c",
+        "node_version": "v24.15.0",
+        "npm_entry_sha256": "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
+        "npm_executed": false,
+        "npm_package_sha256": "48a06e6aeede3499e391710db82fe948afa7e74ecbf3e819b66121f3cd54666b",
+        "npm_version": "11.12.1",
+        "process_supervision": "linux_per_job_subreaper",
+        "profile": "repo-node24-npm-v1",
+        "resource_enforcement": "admission_and_wall_timeout_only",
+        "supervisor_source_sha256": "cd8e3e27536ff2ce302b1c9033be062a6b8e1742dc9c7b9fca7edd8fe5cbb65a",
+        "unenforced_limits": [
+          "[redacted]",
+          "[redacted]",
+          "[redacted]"
+        ],
+        "worker_source_sha256": "c16d1117cf47b38f4d2e5226e4c34aace6fec9d31c6514e3a549468618fc3440"
+      },
+      "posture_digest": "45f9b8723e8947f0538053d2455dae5d5d60ea431b123f1facdf136ac91a0394",
+      "profile": "repo-node24-npm-v1",
+      "reason": "node_local_staging_available",
+      "rootless": null,
+      "status": "blocked",
+      "support_confirmed": false,
+      "evidence_basis": "recorded_job_preflight"
+    },
+    "source_packet": {
+      "packet_id": "ed07f0e40ba75c19baa6ec3179ca86aa",
+      "state": "verified",
+      "repository_ref": "repo",
+      "base_snapshot_sha256": "9ec273b40cadec5256111fb33d670698b7420d54e09639e163c80b0f312df221",
+      "source_manifest_sha256": "9180fec389cd05bdccbb0dff2b53a5a8917a8c40022bc52ea0321f160f83c31f",
+      "artifact_sha256": "3c29c431e6c3432de505a266aa3f4ec01949b0f8b74684cc14f876d2179cf3dc",
+      "revision": 1
+    },
+    "egress": {
+      "consent_id": "028066eba2084f0597900605d3ea2931",
+      "revision": 1,
+      "runtime_path": "strategist_agent",
+      "effective_profile_id": "openrouter",
+      "effective_upstream": "openrouter",
+      "maximum_input_bytes": 65536,
+      "maximum_output_tokens": 4096,
+      "expires_at": "2026-10-03T06:23:07.513547+00:00",
+      "state": "active"
+    },
+    "proposal": {
+      "proposal_id": "343faae17a7c463091362dd530d11bff",
+      "status": "approved",
+      "revision": 2,
+      "base_snapshot_digest": "9ec273b40cadec5256111fb33d670698b7420d54e09639e163c80b0f312df221",
+      "source_digest": "9180fec389cd05bdccbb0dff2b53a5a8917a8c40022bc52ea0321f160f83c31f",
+      "model_profile_id": "openrouter",
+      "patch_sha256": "cd7f8ffddbeee2f281c2a08db8b068ea7687fd7411d9d39b0c947065f788d247",
+      "approval_id": "1b582e83-76eb-5eec-80a9-f4bc897f2f6e",
+      "expires_at": "2026-10-03T06:51:11.276301+00:00",
+      "safe_metadata": {
+        "expected_outcome": "Actual selected tests/build pass.",
+        "memory_status": "no_learning",
+        "sandbox": {
+          "executor_kind": "local",
+          "executor_posture": {
+            "dependency_limits": {
+              "aggregate_bytes": 67108864,
+              "file_bytes": 16777216,
+              "files": 512
+            },
+            "execution_plan": {
+              "commands": [
+                {
+                  "argv": [
+                    "/opt/fixture/node24/bin/node",
+                    "--test",
+                    "tests/app.test.js"
+                  ],
+                  "body": "node --test tests/app.test.js",
+                  "paths": [
+                    "tests/app.test.js"
+                  ],
+                  "script": "test"
+                }
+              ],
+              "configs": {},
+              "dependency_aliases": {},
+              "dependency_manifest_sha256": "d801aa1fb7ddcc330a5e3173372ea6af4a3d08ec58074478e85aa5603e926658",
+              "lifecycle_hooks_executed": false,
+              "lockfile_sha256": "14e0922d7089bb66341cb7c5657a47f232a6d615833240e17b0015de22fb4971",
+              "output_directory": null,
+              "package_sha256": "398b6220791d034979a409725c5b2bb0d7f739767af74760c703bf6e3e6fe192",
+              "selection": [
+                "npm",
+                "test"
+              ],
+              "snapshot_sha256": "9ec273b40cadec5256111fb33d670698b7420d54e09639e163c80b0f312df221"
+            },
+            "git_sha256": "587ef21868c948b883993e23209b86a72a6ddc06aab1545c697ffc31075acd4a",
+            "host_access": "explicit_job_approval_required",
+            "interpreter_entry_path": "/opt/fixture/python/bin/python",
+            "interpreter_sha256": "0dc3a692fa85fcdb7f1a5877d2adf179809ac417a07ffde2373c832863800a15",
+            "isolation_claim": "none",
+            "kind": "local",
+            "limits_digest": "0425ffcc2f4ca71d09546a199bececabe61fa4cf0747dfa1725a9b4fbaa7bbd8",
+            "network_isolation": "not_verified",
+            "node_path": "/opt/fixture/node24/bin/node",
+            "node_sha256": "d1de76d8edf2fededf6f8b30d244e2c0529ac607923a018283b77e9c74bd932c",
+            "node_version": "v24.15.0",
+            "npm_entry_sha256": "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
+            "npm_executed": false,
+            "npm_package_sha256": "48a06e6aeede3499e391710db82fe948afa7e74ecbf3e819b66121f3cd54666b",
+            "npm_version": "11.12.1",
+            "process_supervision": "linux_per_job_subreaper",
+            "profile": "repo-node24-npm-v1",
+            "resource_enforcement": "admission_and_wall_timeout_only",
+            "supervisor_source_sha256": "cd8e3e27536ff2ce302b1c9033be062a6b8e1742dc9c7b9fca7edd8fe5cbb65a",
+            "unenforced_limits": [
+              "cpu",
+              "memory",
+              "pids"
+            ],
+            "worker_source_sha256": "c16d1117cf47b38f4d2e5226e4c34aace6fec9d31c6514e3a549468618fc3440"
+          },
+          "executor_posture_digest": "45f9b8723e8947f0538053d2455dae5d5d60ea431b123f1facdf136ac91a0394",
+          "executor_profile": "local:repo-node24-npm-v1",
+          "local_host_execution_required": true,
+          "required_permissions": [
+            "local_host_execution"
+          ],
+          "sandbox_image_digest": "",
+          "sandbox_limits_digest": "0425ffcc2f4ca71d09546a199bececabe61fa4cf0747dfa1725a9b4fbaa7bbd8",
+          "sandbox_profile": "repo-node24-npm-v1",
+          "sandbox_socket_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "summary": "Fix the approved fixture value."
+      }
+    },
+    "execution": {
+      "artifacts": [],
+      "readback": null,
+      "process_cleanup": {
+        "status": "released",
+        "physical_capacity_released": true,
+        "cleanup_receipt_verified": true,
+        "readback_scope": "process_cleanup_only",
+        "job_id": "repo-repair-bfb9cb2351dce8befd56310aaceccc11",
+        "attempt_id": "618d225b17784be6a7d2788dc51aacf1",
+        "fencing_token": 3,
+        "authority_digest": "942e38ad86a8d3628433f3345f3551149f27a4f8b4472761344647460a460aa9",
+        "process_cleanup_readback_sha256": "a78b0907324b2c65f120bee13596cf37c9e711e6ee68395ac34588f01f22a223"
+      },
+      "memory_status": "no_learning",
+      "provider_contacted": true
+    },
+    "approval_id": "1b582e83-76eb-5eec-80a9-f4bc897f2f6e",
+    "approval": {
+      "approval_id": "1b582e83-76eb-5eec-80a9-f4bc897f2f6e",
+      "status": "consumed",
+      "tool_name": "engineering.repo-repair.v1",
+      "action": "repo_repair.resolve",
+      "expires_at": "2026-10-03T06:21:20.734187+00:00",
+      "executor_kind": "local",
+      "executor_profile": "local:repo-node24-npm-v1",
+      "executor_posture_digest": "45f9b8723e8947f0538053d2455dae5d5d60ea431b123f1facdf136ac91a0394",
+      "required_permissions": [
+        "local_host_execution"
+      ],
+      "local_host_execution_required": true
+    },
+    "memory_status": "no_learning",
+    "recovery_action": "reconcile_external_effect",
+    "operator_visible": true
+  }
+}

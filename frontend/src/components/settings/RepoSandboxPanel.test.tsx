@@ -106,7 +106,7 @@ describe("RepoSandboxPanel", () => {
       executor_posture: { ...localPayload.executor_posture, profile,
         runtime_proof_available: true, publication_runtime_proof_sha256: "c".repeat(64) } }));
     render(<RepoSandboxPanel />);
-    expect(await screen.findByDisplayValue(profile)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText("Repository execution profile")).toHaveValue(profile));
     expect(screen.getByText(/Technical preflight: verified/)).toBeInTheDocument();
   });
   beforeEach(() => vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response(payload))));
@@ -114,6 +114,27 @@ describe("RepoSandboxPanel", () => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+  });
+
+  it("saves the explicit installed Node profile while preserving host approval", async () => {
+    const nodePayload = { ...localPayload, profile: "repo-node24-npm-v1", executor_profile: "local:repo-node24-npm-v1", node_runtime_path: "/opt/node24/bin/node", executor_posture: { ...localPayload.executor_posture, profile: "repo-node24-npm-v1" } };
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(response(localPayload)).mockResolvedValueOnce(response(nodePayload));
+    render(<RepoSandboxPanel />);
+    await screen.findByText(/Technical preflight: verified/);
+    fireEvent.change(screen.getByRole("combobox", { name: "Repository execution profile" }), { target: { value: "repo-node24-npm-v1" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Installed Node 24 executable" }), { target: { value: "/opt/node24/bin/node" } });
+    fireEvent.click(screen.getByRole("button", { name: "save selectors" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ method: "PUT", body: expect.stringContaining('"node_runtime_path":"/opt/node24/bin/node"') })));
+    expect(await screen.findByText(/No isolation guarantee/)).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Repository execution profile" })).toHaveValue("repo-node24-npm-v1");
+  });
+
+  it("shows the selected Node platform failure without selecting Python", async () => {
+    vi.mocked(fetch).mockResolvedValue(response({ ...localPayload, profile: "repo-node24-npm-v1", executor_profile: "local:repo-node24-npm-v1", node_runtime_path: "/opt/node24/bin/node", executor_posture: { ...localPayload.executor_posture, profile: "repo-node24-npm-v1" }, preparation_ready: false, execution_ready: false, preflight: { ok: false, status: "blocked", reason: "Node process supervision requires supported Linux x86_64" } }));
+    render(<RepoSandboxPanel />);
+    expect(await screen.findByText(/supported Linux x86_64/)).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Repository execution profile" })).toHaveValue("repo-node24-npm-v1");
   });
 
   it("keeps backend controls usable when React replays queued input updates", async () => {
@@ -139,7 +160,7 @@ describe("RepoSandboxPanel", () => {
     expect(await screen.findByText(/Effective status: blocked/)).toBeInTheDocument();
     expect(screen.getByText(/resource_controller_unavailable:cpu/)).toBeInTheDocument();
     expect(screen.getByText(/Limits are fixed and non-editable/)).toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "Profile" })).toHaveAttribute("readonly");
+    expect(screen.getByRole("combobox", { name: "Repository execution profile" })).toHaveValue("repo-python-pytest-v1");
   });
 
   it("persists only typed selectors and never offers limit editing", async () => {

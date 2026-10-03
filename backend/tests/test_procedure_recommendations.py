@@ -6,6 +6,8 @@ execution is tested separately before milestone acceptance.
 """
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
+import hashlib
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -21,6 +23,7 @@ from src.db.models import (
 from src.memory.procedure_recommendations import (
     FEEDBACK_KIND, ProcedureFeedbackRequest, assert_membership_unchanged,
     canonical, canonical_procedure_membership, record_procedure_feedback, resolve_scope,
+    digest, bounded_json, read_private_proof, MAX_FILE_BYTES, MAX_METADATA_BYTES,
 )
 from src.work_board.repository import BoardError, _begin_sqlite_immediate
 from src.workflows.procedure_contracts import build_procedure_plan, plan_digest
@@ -199,3 +202,69 @@ async def test_pure_writer_inventory_and_feedback_do_not_open_files(async_db, mo
             result = await record_procedure_feedback(db, operator, routine_id="routine", task_id="manual", request=_request())
             assert result["idempotent_replay"] is False
             assert (await canonical_procedure_membership(db, scope))["feedback_count"] == 1
+
+
+async def test_full_feedback_history_preserves_exact_replay_and_rejects_overflow(async_db, monkeypatch):
+    operator, scope = await _setup(async_db, monkeypatch)
+    original = _request()
+    async with async_db() as db:
+        await _task(db, scope, "manual")
+    async with async_db() as db:
+        result = await record_procedure_feedback(db, operator, routine_id="routine", task_id="manual", request=original)
+    # Near-bound canonical metadata fixtures inherit the real first feedback
+    # shape. They never assert a successful native outcome or learned memory.
+    async with async_db() as db:
+        first = await db.get(WorkBoardEvent, result["event_id"])
+        metadata = bounded_json(first.metadata_json)
+        tip = first.event_id
+        for number in range(99):
+            row = WorkBoardEvent(task_id=first.task_id, owner_principal_id=first.owner_principal_id,
+                owner_session_id=first.owner_session_id, actor_principal_id=first.actor_principal_id,
+                actor_session_id=first.actor_session_id, kind=first.kind,
+                mutation_idempotency_key=str(uuid4()), mutation_request_digest=digest({"fixture_correction": number}),
+                metadata_json=canonical({**metadata, "supersedes_event_id": tip}))
+            db.add(row)
+            await db.flush()
+            tip = row.event_id
+    async with async_db() as db:
+        assert (await canonical_procedure_membership(db, scope))["feedback_count"] == 100
+        assert (await record_procedure_feedback(db, operator, routine_id="routine", task_id="manual", request=original))["idempotent_replay"] is True
+    async with async_db() as db:
+        with pytest.raises(BoardError, match="history is full"):
+            await record_procedure_feedback(db, operator, routine_id="routine", task_id="manual",
+                request=_request(supersedes_event_id=tip, reason="Explicit overflow correction"))
+    async with async_db() as db:
+        assert (await canonical_procedure_membership(db, scope))["feedback_count"] == 100
+        first = await db.get(WorkBoardEvent, result["event_id"])
+        db.add(WorkBoardEvent(task_id=first.task_id, owner_principal_id=first.owner_principal_id,
+            owner_session_id=first.owner_session_id, actor_principal_id=first.actor_principal_id,
+            actor_session_id=first.actor_session_id, kind=first.kind,
+            mutation_idempotency_key=str(uuid4()), mutation_request_digest=digest("unsupported historical overflow"),
+            metadata_json=canonical({**metadata, "supersedes_event_id": tip})))
+    async with async_db() as db:
+        with pytest.raises(BoardError, match="finite bound"):
+            await canonical_procedure_membership(db, scope)
+
+
+async def test_private_proof_and_metadata_bounds_fail_closed(async_db, monkeypatch, tmp_path: Path):
+    tmp_path.chmod(0o700)
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    file = tmp_path / "proof.json"
+    raw = b'{"mechanical_file_fixture":true}'
+    file.write_bytes(raw)
+    file.chmod(0o600)
+    sha = hashlib.sha256(raw).hexdigest()
+    assert read_private_proof("proof.json", sha) == raw
+    file.write_bytes(raw + b" ")
+    with pytest.raises(BoardError, match="changed during staging"):
+        read_private_proof("proof.json", sha)
+    with file.open("wb") as stream:
+        stream.truncate(MAX_FILE_BYTES + 1)
+    with pytest.raises(BoardError, match="finite regular file"):
+        read_private_proof("proof.json", sha)
+    file.unlink()
+    file.symlink_to(tmp_path / "missing-private-proof")
+    with pytest.raises(OSError):
+        read_private_proof("proof.json", sha)
+    with pytest.raises(BoardError, match="metadata"):
+        bounded_json(canonical({"oversized": "x" * MAX_METADATA_BYTES}))

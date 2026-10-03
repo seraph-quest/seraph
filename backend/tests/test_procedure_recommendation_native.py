@@ -5,6 +5,7 @@ approvals, activation, two parent/leaf executions and feedback are production
 paths. No successful native receipt or accepted memory is inserted by tests.
 """
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -12,7 +13,7 @@ import pytest
 from sqlalchemy import select
 
 from config.settings import settings
-from src.db.models import WorkBoardAttempt, WorkBoardTask, Memory, MemoryProposal, WorkBoardEvent
+from src.db.models import WorkBoardAttempt, WorkBoardTask, Memory, MemoryProposal, WorkBoardEvent, OperatorSession, Goal, WorkBoardInputArtifact, WorkflowRunState
 from src.work_board.repository import BoardError
 from src.memory.procedure_recommendations import ProcedureFeedbackRequest, record_procedure_feedback, stage_procedure_bundle
 from src.memory.procedure_recommendation_job import ProcedureRecommendationRequest, prepare_recommendation, inspect_recommendation
@@ -26,7 +27,7 @@ from tests.test_procedure_v2_native_vertical import _activate_v2_routine, _seed_
 pytestmark = [pytest.mark.asyncio, pytest.mark.parametrize("async_db", ["file"], indirect=True)]
 
 
-@pytest.mark.parametrize("barrier", ["normal", "writer_io", "feedback", "phantom", "root_revoked", "package_paused", "cancel", "selection_phantom"])
+@pytest.mark.parametrize("barrier", ["normal", "writer_io", "feedback", "phantom", "root_revoked", "root_expired", "goal_changed", "input_changed", "readback_changed", "finalization_phantom", "package_paused", "cancel", "selection_phantom"])
 async def test_two_real_manual_invocations_yield_verified_feedback_bundle(async_db, monkeypatch, tmp_path: Path, barrier):
     from playwright.async_api import async_playwright
     tmp_path.chmod(0o700)
@@ -95,13 +96,39 @@ async def test_two_real_manual_invocations_yield_verified_feedback_bundle(async_
         assert projection["evidence_population"] == "matching_manual_invocations_only"
         assert projection["quality_evidence"] == "unmeasured"
         assert projection["memory_status"] == "no_learning"
+        if barrier == "finalization_phantom":
+            from src.memory import procedure_recommendation_job as jobs
+            from uuid import uuid5, NAMESPACE_URL
+            real_stage = jobs.stage_procedure_bundle
+            fresh = recommendation_request.model_copy(update={"request_uuid": str(uuid4())})
+            job_id = str(uuid5(NAMESPACE_URL, f"seraph:procedure-recommendation:{owner.principal_id}:{owner.session_id}:{fresh.request_uuid}"))
+            async def stage_then_insert(*args, **kwargs):
+                staged = await real_stage(*args, **kwargs)
+                await routines.invoke_v2(prepared["routine_id"], invocation.model_copy(update={"invocation_uuid": str(uuid4())}),
+                    owner_principal_id=owner.principal_id, owner_session_id=owner.session_id)
+                return staged
+            monkeypatch.setattr(jobs, "stage_procedure_bundle", stage_then_insert)
+            with pytest.raises(BoardError, match="Matching invocation outcomes or feedback changed"):
+                await prepare_recommendation(operator, prepared["routine_id"], fresh)
+            blocked = await jobs.durable_job_repository.get_job(job_id)
+            assert blocked["status"] == "blocked" and blocked["effects"] == []
+            assert not any(item.get("receipt_kind") == "readback" for item in blocked["effects"])
+            async with async_db() as db:
+                assert not (await db.execute(select(Memory))).scalars().all()
+                assert not (await db.execute(select(MemoryProposal).where(MemoryProposal.proposal_job_id == job_id))).scalars().all()
+            path = tmp_path / "native-finalization-barrier-receipt.json"
+            path.write_text(json.dumps({"barrier": barrier, "job_id": job_id, "job_status": blocked["status"],
+                "positive_effects": blocked["effects"], "new_proposal_count": 0, "memory_status": "no_learning",
+                "original_proposal_id": recommended["proposal_id"], "membership": json.loads(bundle.membership_json)}, indent=2))
+            path.chmod(0o600)
+            return
         review = await inspect_preference(operator, recommended["proposal_id"])
         action = ProcedurePreferenceActionRequest(action="accept", expected_revision=review["revision"],
             expected_preview_text_digest=review["preview_text_digest"], expected_bundle_digest=review["bundle_digest"],
             acknowledged_selection_only=True, mutation_uuid=str(uuid4()))
         from src.memory import procedure_preferences as preferences
         from src.db import engine as db_engine
-        if barrier in {"feedback", "phantom", "root_revoked", "package_paused"}:
+        if barrier in {"feedback", "phantom", "root_revoked", "root_expired", "goal_changed", "input_changed", "readback_changed", "package_paused"}:
             real_stage = preferences.stage_procedure_bundle
             async def stage_then_change(*args, **kwargs):
                 staged = await real_stage(*args, **kwargs)
@@ -116,6 +143,24 @@ async def test_two_real_manual_invocations_yield_verified_feedback_bundle(async_
                         owner_principal_id=owner.principal_id, owner_session_id=owner.session_id)
                 elif barrier == "root_revoked":
                     await auth_service.revoke_session(operator.session_id)
+                elif barrier == "root_expired":
+                    async with async_db() as db:
+                        root = await db.get(OperatorSession, operator.session_id)
+                        root.idle_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+                elif barrier == "goal_changed":
+                    async with async_db() as db:
+                        goal = await db.get(Goal, source["goal_id"])
+                        goal.revision += 1
+                elif barrier == "input_changed":
+                    async with async_db() as db:
+                        task = (await db.execute(select(WorkBoardTask).where(WorkBoardTask.task_id == task_ids[-1]))).scalar_one()
+                        artifact = await db.get(WorkBoardInputArtifact, task.input_artifact_id)
+                        artifact.metadata_digest = "d" * 64
+                elif barrier == "readback_changed":
+                    member = next(item for item in json.loads(staged.membership_json)["members"] if item["task"]["task_id"] == task_ids[-1])
+                    async with async_db() as db:
+                        parent = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == member["parent"]["run_identity"]))).scalar_one()
+                        parent.effect_receipts_json = "[]"
                 else:
                     from src.extensions.capability_pack import CapabilityPackLifecycle
                     from src.workflows.routines import _routine_pack_id

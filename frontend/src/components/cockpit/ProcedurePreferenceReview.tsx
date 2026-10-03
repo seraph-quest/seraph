@@ -133,7 +133,9 @@ export function ProcedurePreferenceReview({ ownerPrincipalId, ownerSessionId, sc
       version: scope.version, expected_routine_revision: scope.routineRevision, goal_id: scope.goalId,
       expected_goal_revision: scope.goalRevision, request_uuid: crypto.randomUUID(),
     } })}>Preview outcome recommendation</button>
-    {bound?.recommendation ? <p role="status">{bound.recommendation.status} · {bound.recommendation.reason_code} · memory remains {review?.status === "accepted" ? "adopted" : "no_learning"}</p> : null}
+    {bound?.recommendation ? <p role="status">Saved recommendation receipt: {bound.recommendation.status} · {bound.recommendation.reason_code}.
+      {review ? ` Current review: ${review.status}.` : " This receipt records no_learning and creates no canonical preference."}
+      {review?.status === "rolled_back" ? " The preference is rolled back; historical adoption is retained." : null}</p> : null}
     {bound?.recommendation && ["accepted", "queued", "running", "blocked"].includes(bound.recommendation.job_status)
       && bound.recommendation.job_revision && bound.recommendation.fencing_token !== undefined ?
       <button type="button" disabled={busy || Boolean(bound.pending && bound.pending.kind !== "recommend")}

@@ -114,4 +114,19 @@ describe("explicit procedure preference review", () => {
     expect(procedurePreferences.feedback).toHaveBeenCalledWith(scope, outcomes[0], "harmful", "The check missed an operator requirement", expect.any(String));
     expect(procedurePreferences.act).not.toHaveBeenCalled();
   });
+
+  it("labels the immutable recommendation as saved history beside corrected outcomes and rollback", async () => {
+    render(<ProcedurePreferenceReview {...props} />); await preview();
+    vi.mocked(procedurePreferences.outcomes).mockResolvedValue({ included_count: 2,
+      outcomes: [{ ...outcomes[0], feedback: "harmful", feedback_event_id: 3 }, outcomes[1]],
+      manual_disclosure: manual, quality_disclosure: quality });
+    vi.mocked(procedurePreferences.review).mockResolvedValue({ ...review, status: "rolled_back", revision: 3 });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Check current outcome state" })); });
+    expect(await screen.findByText(/Saved recommendation receipt: proposed/)).toHaveTextContent("Current review: rolled_back");
+    expect(screen.getByText(/historical adoption is retained/)).toBeVisible();
+    expect(screen.getByText(/manual-1/).closest("li")).toHaveTextContent("feedback harmful");
+    expect(screen.queryByLabelText("Adopted Library suggestion")).not.toBeInTheDocument();
+    expect(procedurePreferences.recommend).toHaveBeenCalledTimes(1);
+    expect(procedurePreferences.act).not.toHaveBeenCalled();
+  });
 });

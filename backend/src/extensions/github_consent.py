@@ -254,5 +254,5 @@ class GitHubVerifiedReadback:
     semantic_payload_sha256: str
     canonical_binding: dict
 
-    def validates(self, authority, value, effect_identity):
-        return type(self._seal) is _ProtectedGetSeal and self._seal.origin is _GET_RECEIPT_SEAL and self._seal.identity == _seal_verified_get(self).identity and self.job_id == authority.job_id and self.root == authority.root and self.capability == authority.capability and self.read_authority_digest == digest(authority.__dict__) and self.effect_identity_digest == digest(effect_identity) and 0 <= (datetime.now(timezone.utc)-self.observed_at).total_seconds() <= 30 and value.get("readback_path") == self.readback_path and value.get("payload_sha256") == self.payload_sha256
+    def validates(self, authority, value, effect_identity, *, max_age_seconds=30):
+        return type(self._seal) is _ProtectedGetSeal and self._seal.origin is _GET_RECEIPT_SEAL and self._seal.identity == _seal_verified_get(self).identity and self.job_id == authority.job_id and self.root == authority.root and self.capability == authority.capability and self.read_authority_digest == digest(authority.__dict__) and self.effect_identity_digest == digest(effect_identity) and 0 <= (datetime.now(timezone.utc)-self.observed_at).total_seconds() <= max_age_seconds and value.get("readback_path") == self.readback_path and value.get("payload_sha256") == self.payload_sha256

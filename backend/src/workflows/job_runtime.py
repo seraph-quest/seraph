@@ -1817,6 +1817,9 @@ def _serialize(run: WorkflowRunState, *, receipt: dict[str, Any] | None = None) 
     }
     if receipt is not None:
         payload["receipt"] = receipt
+    if getattr(run, "github_capacity_closure_json", None):
+        from src.extensions.github_capacity_closure import public_closure
+        payload["github_capacity_closure"] = public_closure(run.github_capacity_closure_json)
     return payload
 
 
@@ -3336,6 +3339,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if not isinstance(current, Mapping):
                 continue
             status = _text(current.get("status"))
+            if current.get("github_capacity_closure"):
+                receipts.append(dict(current))
+                continue
             if status in DURABLE_JOB_TERMINAL_STATUSES:
                 receipts.append(dict(current))
                 continue
@@ -5555,6 +5561,136 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             db.expunge(refreshed)
             return _serialize(refreshed, receipt={"kind": "recovery_artifact", "status": "recorded", **receipt})
 
+    async def get_github_capacity_closure(self, job_id, *, request, principal, root):
+        """Exact lost-response lookup; no provider or reservation contact."""
+        from src.extensions.github_consent import live_operator
+        from src.extensions.github_recovery import check_binding
+        await live_operator(principal, root)
+        async with self._session() as db:
+            run = await self._fetch(db, job_id, allow_closed=True)
+            if run.owner_kind != "user" or run.owner_principal_id != principal or run.operator_session_id != root:
+                raise DurableJobLeaseError("GitHub closure original owner/root mismatch")
+            if not run.github_capacity_closure_json:
+                return None
+            existing = _json_load(run.github_capacity_closure_json, {})
+            body = request.model_dump(mode="json")
+            if existing.get("history_digest") != _digest({key: value for key, value in existing.items() if key != "history_digest"}) or existing.get("request") != body or existing.get("request_digest") != _digest(body):
+                raise DurableJobIdempotencyConflict("GitHub capacity already differently closed")
+            await check_binding(db, run, existing["binding"], reserved=None, board=False, ignore_read_revision=True)
+            db.expunge(run)
+            return _serialize(run, receipt={"kind": "github_capacity_closure", "status": "already_recorded", "closure_id": existing["closure_id"], "observation_only": True})
+
+    async def record_github_capacity_closure(self, job_id, *, request, read_authority, proof):
+        """Receipt-only closure and exact reservation CAS in one short session.
+
+        The caller holds the private producer guard through commit. All GET,
+        authentication, terminal inspection and private bytes work precedes
+        BEGIN IMMEDIATE. The old effect/Goal/finance/outcome fields are intact.
+        """
+        from src.extensions.github_capacity_closure import (_CompleteClosureProof,
+            _CLOSURE_SEAL, PublicationCloseRequest, LegacyCloseRequest,
+            original_effects, effect_identity)
+        from src.extensions.github_consent import GitHubReadbackAuthority, GitHubVerifiedReadback
+        from src.extensions.github_recovery import check_binding
+        from src.db.models import GitHubFollowthroughConnection
+        from src.workflows.repo_publication import write_file, read_file
+        import time
+        import uuid
+        if type(proof) is not _CompleteClosureProof or proof._seal is not _CLOSURE_SEAL or type(read_authority) is not GitHubReadbackAuthority or read_authority.job_id != job_id:
+            raise DurableJobLeaseError("protected complete GitHub closure proof required")
+        expected_type = PublicationCloseRequest if proof.original_job.get("job_kind") == "engineering.repo-publication.v1" else LegacyCloseRequest
+        if type(request) is not expected_type or proof.original_job.get("job_id") != job_id:
+            raise DurableJobLeaseError("fixed GitHub closure request kind required")
+        await read_authority.validate()
+        originals = original_effects(proof.original_job)
+        remote = [item for item in originals if item.get("effect_type") != "repo_publication_local_producer"]
+        verified = {}
+        for actual, identity in proof.positive_gets:
+            if type(actual) is not GitHubVerifiedReadback or identity.get("effect_id") in verified or not actual.validates(read_authority,
+                {"readback_path": actual.readback_path, "payload_sha256": actual.payload_sha256}, identity, max_age_seconds=120) or actual.canonical_binding != proof.binding:
+                raise DurableJobLeaseError("GitHub closure actual semantic GET set invalid")
+            verified[identity["effect_id"]] = identity
+        if set(verified) != {item["effect_id"] for item in remote} or any(verified.get(item["effect_id"]) != effect_identity(proof.original_job, item) for item in remote):
+            raise DurableJobLeaseError("GitHub closure complete intent proof missing")
+        if expected_type is PublicationCloseRequest and not isinstance(proof.producer, dict):
+            raise DurableJobLeaseError("GitHub closure actual producer terminal required")
+        if time.monotonic() >= proof.deadline:
+            raise DurableJobLeaseError("GitHub closure whole-operation deadline expired")
+        request_body = request.model_dump(mode="json")
+        request_digest = _digest(request_body)
+        closure_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"seraph:github-capacity-close:{job_id}:{read_authority.root}:{request_digest}"))
+        closed_at = _utc_now().isoformat()
+        get_set = [{"identity": identity, "path": actual.readback_path,
+            "raw_payload_sha256": actual.payload_sha256, "semantic_payload_sha256": actual.semantic_payload_sha256}
+            for actual, identity in proof.positive_gets]
+        value = {"schema": "seraph.github-capacity-closure.v1", "closure_id": closure_id,
+            "job_id": job_id, "native_kind": proof.original_job["job_kind"],
+            "closed_at": closed_at, "observation_only": True, "learning": "no_learning",
+            "job_status": proof.original_job["status"], "original_job_revision": request.expected_job_revision,
+            "request_digest": request_digest, "idempotency_key": request.idempotency_key,
+            "effect_inventory_sha256": proof.effect_inventory_sha256,
+            "positive_get_set_sha256": _digest(get_set), "positive_get_count": len(get_set),
+            "producer": proof.producer, "window": proof.window}
+        content = _canonical(value).encode()
+        if len(content) > 256 * 1024:
+            raise ValueError("GitHub closure private artifact bounds invalid")
+        sha = hashlib.sha256(content).hexdigest()
+        path = f"artifacts/github-capacity-closures/{job_id}/{sha}.json"
+        write_file(path, content)
+        if read_file(path, maximum=256 * 1024) != content:
+            raise ValueError("GitHub closure private bytes readback failed")
+        record = build_artifact_record(file_path=path, artifact_type="github_capacity_closure",
+            producer=proof.original_job["job_kind"], run_id=job_id,
+            session_id=proof.original_job["session_id"], content=content)
+        closure = {**value, "artifact_id": record["artifact_id"], "artifact_sha256": sha,
+            "artifact_path": path, "binding": proof.binding, "request": request_body}
+        closure["history_digest"] = _digest(closure)
+        async with self._session() as db:
+            if getattr(getattr(db.get_bind(), "dialect", None), "name", "") == "sqlite":
+                await db.execute(text("BEGIN IMMEDIATE"))
+            run = await self._fetch(db, job_id, allow_closed=True)
+            if run.github_capacity_closure_json:
+                existing = _json_load(run.github_capacity_closure_json, {})
+                if existing.get("request_digest") != request_digest or existing.get("request") != request_body:
+                    raise DurableJobIdempotencyConflict("GitHub capacity already differently closed")
+                await check_binding(db, run, existing["binding"], reserved=None, board=False, ignore_read_revision=True)
+                return _serialize(run, receipt={"kind": "github_capacity_closure", "status": "already_recorded", "closure_id": existing["closure_id"]})
+            connection = await check_binding(db, run, proof.binding)
+            if run.status not in {"unknown_external_effect", "blocked", "failed"} or run.lease_owner or run.lease_expires_at:
+                raise DurableJobLeaseError("GitHub capacity close requires an unleased recovery job")
+            if type(request.expected_job_revision) is not int or run.revision != request.expected_job_revision or proof.binding["minted_job_revision"] != run.revision or run.revision != proof.original_job["revision"] or request.expected_connection_revision != connection.revision or request.expected_connection_fence != connection.active_fence:
+                raise DurableJobLeaseError("GitHub closure exact revisions/fence changed")
+            if _digest(_effect_ledger_or_raise(run.effect_receipts_json)) != proof.effect_inventory_sha256 or time.monotonic() >= proof.deadline:
+                raise DurableJobLeaseError("GitHub closure inventory or deadline changed")
+            if proof.producer is not None:
+                admission = next((item.get("payload") for item in _json_load(run.checkpoint_receipts_json, []) if item.get("checkpoint_id") == "publication_supervisor_admission"), None)
+                if admission != proof.producer["canonical_admission"]:
+                    raise DurableJobLeaseError("GitHub closure canonical supervisor admission changed")
+            artifact = {key: record[key] for key in ("artifact_id", "artifact_type", "file_path", "producer", "content_sha256", "size_bytes", "exists")}
+            artifact["recorded_at"] = closed_at
+            artifacts = _json_load(run.artifact_receipts_json, []) + [artifact]
+            checkpoint = {"checkpoint_id": "github_capacity_closed:" + closure_id, "safe": True, "recorded_at": closed_at,
+                "payload": {"closure_id": closure_id, "artifact_id": record["artifact_id"], "artifact_sha256": sha,
+                    "request_digest": request_digest, "permanent_execution_fence": True, "observation_only": True}}
+            checkpoints = _json_load(run.checkpoint_receipts_json, []) + [checkpoint]
+            updated = await db.execute(update(WorkflowRunState).execution_options(synchronize_session=False).where(
+                WorkflowRunState.run_identity == job_id, WorkflowRunState.revision == run.revision,
+                WorkflowRunState.status == run.status, WorkflowRunState.lease_owner.is_(None),
+                WorkflowRunState.lease_expires_at.is_(None), WorkflowRunState.github_capacity_closure_json.is_(None)).values(
+                    github_capacity_closure_json=_canonical(closure), artifact_receipts_json=_canonical(artifacts[-100:]),
+                    checkpoint_receipts_json=_canonical(_bounded_checkpoint_receipts(checkpoints)), revision=WorkflowRunState.revision+1))
+            released = await db.execute(update(GitHubFollowthroughConnection).execution_options(synchronize_session=False).where(
+                GitHubFollowthroughConnection.id == connection.id, GitHubFollowthroughConnection.owner_principal_id == read_authority.principal,
+                GitHubFollowthroughConnection.repository == connection.repository, GitHubFollowthroughConnection.vault_key == connection.vault_key,
+                GitHubFollowthroughConnection.revision == request.expected_connection_revision,
+                GitHubFollowthroughConnection.active_job_id == job_id,
+                GitHubFollowthroughConnection.active_fence == request.expected_connection_fence).values(active_job_id=None))
+            if not _rowcount_is_one(updated) or not _rowcount_is_one(released):
+                raise DurableJobLeaseError("GitHub closure atomic reservation CAS changed")
+            refreshed = await self._fetch(db, job_id, allow_closed=True)
+            db.expunge(refreshed)
+            return _serialize(refreshed, receipt={"kind": "github_capacity_closure", "status": "recorded", "closure_id": closure_id, "observation_only": True})
+
     async def record_github_recovery_observation(
         self, job_id: str, *, read_authority, verified_readback,
         expected_revision: int, expected_attempt_count: int,
@@ -6981,7 +7117,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         if persisted_expiry is None or persisted_expiry <= _utc_now():
             raise DurableJobLeaseError("job lease has expired")
 
-    async def _fetch(self, db: Any, job_id: str) -> WorkflowRunState:
+    async def _fetch(self, db: Any, job_id: str, *, allow_closed=False) -> WorkflowRunState:
         # Bulk CAS updates deliberately disable ORM session synchronization so
         # timezone-aware predicates are evaluated by the database. Refresh the
         # identity-map row on every read before serializing the receipt.
@@ -6994,6 +7130,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         ).scalars().first()
         if run is None:
             raise DurableJobNotFound(job_id)
+        if run.github_capacity_closure_json and not allow_closed:
+            raise DurableJobLeaseError("GitHub capacity is permanently closed for this job")
         return run
 
     @staticmethod

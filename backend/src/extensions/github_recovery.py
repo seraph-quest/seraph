@@ -57,7 +57,7 @@ async def capture_binding(db, run, authority, snapshot):
         "vault_identity": snapshot.identity, "board": await board_binding(db, run)}
 
 
-async def check_binding(db, run, binding, *, reserved=True, board=True):
+async def check_binding(db, run, binding, *, reserved=True, board=True, ignore_read_revision=False):
     if not isinstance(binding, dict) or binding.get("schema") != "seraph.github-read-revision.v1" or binding.get("job") != job_binding(run):
         raise ValueError("github_readback_canonical_job_changed")
     authority = json.loads(run.declared_authority_json or "{}")
@@ -72,11 +72,11 @@ async def check_binding(db, run, binding, *, reserved=True, board=True):
     if session is None or session.principal_id != run.owner_principal_id or session.revoked_at is not None or session.replaced_by_id is not None or session.is_bearer_tombstone or utc(session.idle_expires_at) <= now or utc(session.absolute_expires_at) <= now:
         raise ValueError("github_readback_canonical_root_dead")
     connection = await db.get(GitHubFollowthroughConnection, original.get("connection_id"))
-    if connection is None or connection.owner_principal_id != run.owner_principal_id or connection.repository != original.get("repository") or connection.revision != binding.get("read_connection_revision") or connection.mode not in {"active", "disabled", "reconcile_only"}:
+    if connection is None or connection.owner_principal_id != run.owner_principal_id or connection.repository != original.get("repository") or not ignore_read_revision and connection.revision != binding.get("read_connection_revision") or connection.mode not in {"active", "disabled", "reconcile_only"}:
         raise ValueError("github_readback_canonical_connection_changed")
     if reserved and (connection.active_job_id != run.run_identity or connection.active_fence != binding.get("connection_fence")):
         raise ValueError("github_readback_canonical_reservation_changed")
-    if not reserved and (connection.active_job_id not in {None, run.run_identity} or connection.active_fence != binding.get("connection_fence")):
+    if reserved is False and (connection.active_job_id not in {None, run.run_identity} or connection.active_fence != binding.get("connection_fence")):
         raise ValueError("github_readback_canonical_reservation_changed")
     secret = (await db.execute(select(Secret).where(Secret.key == connection.vault_key,
         Secret.owner_principal_id == run.owner_principal_id, Secret.revoked_at.is_(None)))).scalars().first()

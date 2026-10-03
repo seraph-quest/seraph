@@ -7,6 +7,7 @@ import type {
   WorkBoardRepoRepairProjection,
   WorkBoardRepoRepairExecutorPosture,
   WorkBoardRepoRepairSourcePreview,
+  WorkBoardRepoRepairProcessCleanup,
 } from "../../types";
 
 interface RepoRepairInspectorProps {
@@ -301,6 +302,38 @@ function isNullableBoundedString(value: unknown, maxBytes: number): value is str
   return value === null || isBoundedString(value, maxBytes);
 }
 
+function normalizeProcessCleanup(
+  value: unknown,
+  projection: WorkBoardRepoRepairProjection,
+): WorkBoardRepoRepairProcessCleanup | null {
+  if (value === undefined || value === null) return null;
+  const fail = () => { throw new Error("The process cleanup receipt is malformed or belongs to another execution."); };
+  if (!isRecord(value)
+    || projection.status !== "unknown_external_effect"
+    || projection.executor_kind !== "local"
+    || projection.executor_posture?.profile !== "repo-node24-npm-v1") return fail();
+  const baseKeys = ["status", "physical_capacity_released", "cleanup_receipt_verified", "readback_scope"];
+  if (value.status === "held" || value.status === "unverified") {
+    if (Object.keys(value).some((key) => !baseKeys.includes(key))
+      || value.physical_capacity_released !== false || value.cleanup_receipt_verified !== false
+      || value.readback_scope !== null) return fail();
+    return { status: value.status, physical_capacity_released: false, cleanup_receipt_verified: false, readback_scope: null };
+  }
+  const releaseKeys = [...baseKeys, "job_id", "attempt_id", "fencing_token", "authority_digest", "process_cleanup_readback_sha256"];
+  if (value.status !== "released" || Object.keys(value).some((key) => !releaseKeys.includes(key))
+    || value.physical_capacity_released !== true || value.cleanup_receipt_verified !== true
+    || value.readback_scope !== "process_cleanup_only" || value.job_id !== projection.job_id
+    || !isBoundedString(value.job_id, 128) || !isBoundedString(value.attempt_id, 128)
+    || value.attempt_id !== projection.attempt_id || !isSafeNonNegativeInteger(value.fencing_token, Number.MAX_SAFE_INTEGER)
+    || value.fencing_token === 0 || !isSha256Digest(value.authority_digest)
+    || value.authority_digest !== projection.authority_digest || !isSha256Digest(value.process_cleanup_readback_sha256)) return fail();
+  return {
+    status: "released", physical_capacity_released: true, cleanup_receipt_verified: true, readback_scope: "process_cleanup_only",
+    job_id: value.job_id, attempt_id: value.attempt_id, fencing_token: value.fencing_token,
+    authority_digest: value.authority_digest, process_cleanup_readback_sha256: value.process_cleanup_readback_sha256,
+  };
+}
+
 class RepairRequestTimeout extends Error {
   constructor() {
     super("The repair request exceeded its deadline.");
@@ -510,7 +543,9 @@ export function RepoRepairInspector({
     }
     ownerBindingRef.current = binding;
     const executorMetadata = normalizeExecutorMetadata(next as Record<string, unknown>);
-    return { ...(next as WorkBoardRepoRepairProjection), ...executorMetadata };
+    const normalized = { ...(next as WorkBoardRepoRepairProjection), ...executorMetadata };
+    if (!isRecord(normalized.execution)) throw new Error("The repair execution response is malformed.");
+    return { ...normalized, execution: { ...normalized.execution, process_cleanup: normalizeProcessCleanup(normalized.execution.process_cleanup, normalized) } };
   }
 
   async function readProjection(generation: number): Promise<WorkBoardRepoRepairProjection> {
@@ -816,6 +851,40 @@ export function RepoRepairInspector({
     }
   }
 
+  async function recoverProcessCleanup() {
+    const generation = generationRef.current;
+    const current = projection;
+    if (!hasCurrentBinding || !current || current.status !== "unknown_external_effect"
+      || current.executor_kind !== "local" || current.executor_posture?.profile !== "repo-node24-npm-v1"
+      || current.execution.process_cleanup?.physical_capacity_released === true) return;
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    let actionError: string | null = null;
+    try {
+      try {
+        const receipt = await requestJson(`${API_URL}/api/workflows/repo-change/${encodeURIComponent(jobId)}/recover`, { method: "POST" }, generation);
+        if (!isRecord(receipt) || receipt.status !== "unknown_external_effect") {
+          actionError = "Process cleanup remains unverified. Reconcile the original execution and refresh before another explicit recovery attempt.";
+        }
+      } catch (cause) {
+        if (cause instanceof StaleRepairRequest || !isCurrent(generation)) return;
+        actionError = `Recovery response uncertain or rejected: ${cause instanceof Error ? cause.message : "request unavailable"}. Refresh durable status before another explicit recovery attempt.`;
+      }
+      // A lost POST response cannot establish success. Only the safe durable
+      // GET can display released physical capacity; no resume or replay occurs.
+      const refreshed = await refresh(generation);
+      if (!isCurrent(generation)) return;
+      if (refreshed?.execution.process_cleanup?.physical_capacity_released === true) {
+        setNotice("Durable process cleanup verified. Physical capacity released; task, effect and cost liabilities remain Unknown.");
+      } else if (refreshed) {
+        setError(actionError ?? "Process cleanup has no durable verified release. Reconcile the original execution before another explicit recovery attempt.");
+      }
+    } finally {
+      if (isCurrent(generation)) setBusy(false);
+    }
+  }
+
   const projectionForRender = projection
     && hasCurrentBinding
     && projection.job_id === jobId
@@ -864,6 +933,8 @@ export function RepoRepairInspector({
     && ["awaiting_approval", "queued", "running"].includes(status),
   );
   const terminal = ["succeeded", "failed", "cancelled", "blocked", "unknown_external_effect", "cost_liability"].includes(status);
+  const processCleanup = projectionForRender.execution.process_cleanup;
+  const nodeCleanupRecovery = status === "unknown_external_effect" && executorKind === "local" && posture.profile === "repo-node24-npm-v1";
 
   return (
     <section className="rounded border border-cyan-400/30 bg-cyan-950/10 p-3" aria-label="Repository repair execution">
@@ -940,6 +1011,13 @@ export function RepoRepairInspector({
       )}
 
       <div className="mt-3 rounded border border-white/10 p-2">
+        {nodeCleanupRecovery && <div className="mb-3 rounded border border-amber-500/40 p-2" aria-label="Process cleanup recovery">
+          <div className="font-semibold">Process cleanup only</div>
+          <div className="mt-1">{processCleanup?.physical_capacity_released === true ? "Physical capacity released · durable cleanup receipt verified." : processCleanup?.status === "held" ? "Physical capacity held · process cleanup unverified." : "Physical capacity unverified · no verified process cleanup release."}</div>
+          <div className="mt-1">Task, effect and cost liabilities remain Unknown. Reconcile the exact sandbox effect before any retry.</div>
+          {processCleanup?.status === "released" && <div className="mt-1 text-[10px]">Original attempt {processCleanup.attempt_id} · fence {processCleanup.fencing_token} · cleanup digest {safeDigest(processCleanup.process_cleanup_readback_sha256)}</div>}
+          {processCleanup?.physical_capacity_released !== true && <button type="button" className="cockpit-feedback-button mt-2" onClick={() => void recoverProcessCleanup()} disabled={busy || loading}>Recover process cleanup</button>}
+        </div>}
         <div className="font-semibold">Sandbox readback</div>
         {projectionForRender.execution.readback ? (
           <div className="mt-1">{statusLabel(projectionForRender.execution.readback.status)} · {projectionForRender.execution.readback.verified ? "independently verified" : "verification unavailable"} · {projectionForRender.execution.readback.target_path ?? "target unavailable"}</div>

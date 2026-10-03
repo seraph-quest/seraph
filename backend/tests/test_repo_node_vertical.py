@@ -379,6 +379,12 @@ async def test_cancelled_node_physical_cleanup_recovery_and_fresh_job(client,asy
             "cleanup_receipt_verified":False, "readback_scope":None,
         }
         _retained("node-repair-cleanup-held-api.json").write_text(json.dumps(held_projection.json(),indent=2))
+        wrong_token,_=await native.create_session()
+        wrong_cookie={"Cookie":f"{native.settings.operator_auth_cookie_name}={wrong_token}"}
+        wrong_get=await client.get(f"/api/workflows/repo-repair/{job_id}",headers=wrong_cookie)
+        wrong_recover=await client.post(f"/api/workflows/repo-change/{job_id}/recover",
+            headers={**wrong_cookie,"Origin":"http://localhost:3001"})
+        assert wrong_get.status_code==403 and wrong_recover.status_code==403
         for field,value in negatives.items():
             marker_path.write_text(json.dumps({**marker,field:value}))
             blocked=await client.post(f"/api/workflows/repo-change/{job_id}/recover",headers={"Origin":"http://localhost:3001"})
@@ -474,6 +480,26 @@ async def test_cancelled_node_physical_cleanup_recovery_and_fresh_job(client,asy
         assert fresh._read_job_marker(low_id)["cleanup_proven"] is True
         assert len(flow["transport_calls"])==2
         _retained("physical-cleanup-recovery.json").write_text(json.dumps({"first_job":job_id,"first_status":settled["status"],"negative_marker_bindings":list(negatives),"stale_cas_rejected":True,"wrong_root_rejected":True,"changed_goal_and_expired_approval":True,"original_row_unchanged":True,"accounting_unchanged":True,"release":release,"second_job":low_id,"second_status":second["status"],"actual_echild_marker":marker},indent=2))
+        if os.environ.get("SERAPH_TEST_RETAIN_MANAGED_FIXTURE") == "1":
+            # Private, test-owned acceptance handoff only. The managed launcher
+            # uses this exact original fixture workspace/session; it must not
+            # create a fresh owner or extend the original root's lifetime.
+            import sqlite3
+            async with async_db() as db:
+                database_path=db.get_bind().url.database
+            def backup_database():
+                with sqlite3.connect(database_path) as source, sqlite3.connect(flow["workspace"]/"seraph.db") as destination:
+                    source.backup(destination)
+                (flow["workspace"]/"seraph.db").chmod(0o600)
+                shutil.copy2(flow["workspace"]/"seraph.db",_retained("managed-original-fixture.sqlite3"))
+            await asyncio.to_thread(backup_database)
+            handoff=_retained("managed-original-fixture-private.json")
+            handoff.write_text(json.dumps({"workspace":str(flow["workspace"]),"job_id":job_id,
+                "owner_principal_id":flow["owner"].principal_id,"owner_session_id":flow["owner"].session_id,
+                "cookie_name":native.settings.operator_auth_cookie_name,
+                "cookie_token":client.cookies.get(native.settings.operator_auth_cookie_name),
+                "execution_basis":"real Node/fileSQLite/ASGI with intercepted model transport; managed readback pending"},indent=2))
+            handoff.chmod(0o600)
     finally:
         await native._quiesce_tasks(dispatch,timeout=15)
         lane=_QUARANTINED_LANES.get(str(flow["workspace"]))

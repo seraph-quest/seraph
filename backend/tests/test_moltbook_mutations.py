@@ -13,14 +13,14 @@ from tests.test_inference_accounting import accounting_db
 from tests.moltbook_requests import execute, execution_body
 from config.settings import settings
 from src.auth.middleware import OperatorAuthMiddleware
-from src.db.models import ApprovalRequest, Goal, WorkflowRunState, MoltbookConnection
+from src.db.models import ApprovalRequest, Goal, WorkflowRunState, MoltbookConnection, OperatorSession
 from src.integrations.moltbook import MoltbookAdapter
 from src.integrations.moltbook_controls import MoltbookService
 from src.vault.repository import vault_repository
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["post", "reply", "reply_observed", "reply_unlisted", "reply_hidden", "reply_pending", "reply_ambiguous", "accepted_drop", "wrong_author", "hidden", "peer_goal", "rotated_key", "stale_community", "status_rate_limited", "status_unclaimed", "status_rejected", "status_drop"])
+@pytest.mark.parametrize("mode", ["post", "reply", "reply_observed", "reply_unlisted", "reply_hidden", "reply_pending", "reply_ambiguous", "accepted_drop", "wrong_author", "hidden", "peer_goal", "rotated_key", "stale_community", "status_rate_limited", "status_unclaimed", "status_rejected", "status_drop", "status_stale_goal", "status_revoked_root"])
 async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db, monkeypatch, mode):
     from src.api import auth, goals, moltbook
     root, db_engine, factory = accounting_db
@@ -47,6 +47,14 @@ async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db
         path = request.url.path.removeprefix("/api/v1")
         if path == "/agents/me": value = {"agent": {"id": "account-one", "name": "FixtureSeraph"}}
         elif path == "/agents/status":
+            if mode in {"status_stale_goal", "status_revoked_root"} and creation_request_started:
+                async with factory.accounting_sessions() as db:
+                    if mode == "status_stale_goal":
+                        current = await db.get(Goal, goal_id); current.revision += 1; db.add(current)
+                    else:
+                        current = (await db.execute(select(OperatorSession).where(OperatorSession.revoked_at.is_(None)))).scalar_one()
+                        current.revoked_at = datetime.now(timezone.utc); db.add(current)
+                return httpx.Response(429, json={"error": "settled after authority drift"}, headers={"retry-after": "60"})
             if mode == "status_rate_limited" and creation_request_started:
                 return httpx.Response(429, json={"error": "bounded fixture cooldown"}, headers={"retry-after": "60"})
             if mode == "status_rejected" and creation_request_started:
@@ -172,6 +180,20 @@ async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db
         assert len(requests) == before
         creation_request_started = True
         executed = await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/execute", json=creation_request)
+        if mode in {"status_stale_goal", "status_revoked_root"}:
+            assert executed.status_code == 409, executed.text
+            await db_engine.dispose()
+            canonical = await service.jobs.get_job(job_id)
+            assert canonical["status"] == "blocked" and canonical["artifacts"] == []
+            assert checkpoint(canonical)["calls"][-1]["status"] == "received"
+            assert checkpoint(canonical)["calls"][-1]["http_status"] == 429
+            assert "preflight_slot_released" not in checkpoint(canonical)
+            async with factory.accounting_sessions() as db:
+                connection = (await db.execute(select(MoltbookConnection))).scalar_one()
+                assert connection.active_job_id == job_id and connection.cooldown_until is None
+            assert sum(method == "POST" for method,_,_ in requests) == 0
+            assert canonical["deadline_at"] == original["deadline_at"] and canonical["attempt_count"] == 1
+            return
         if mode in {"status_rate_limited", "status_unclaimed", "status_rejected", "status_drop", "reply_unlisted", "reply_hidden", "reply_pending", "reply_ambiguous"}:
             assert executed.status_code == 409, executed.text
             await db_engine.dispose()

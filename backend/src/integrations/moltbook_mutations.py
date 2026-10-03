@@ -20,6 +20,7 @@ from src.vault.repository import secret_binding_digest, vault_repository
 from src.work_board.input_artifacts import _write_payload
 from src.artifacts.registry import build_artifact_record
 from src.workspace import canonical_workspace_root
+from src.work_board.repository import BoardError
 
 
 async def load(service, owner, job_id):
@@ -471,8 +472,9 @@ async def execute_write(service, owner, job_id, *, execution):
                 # Current authority is checked before adding the cooldown,
                 # which deliberately makes further contacts ineligible.
                 try: connection = await service.current(db, owner, run, lease=lease)
-                except MoltbookError: connection = None
-                await service.retain_cooldown(db, owner, run, value, exc, lease)
+                except (MoltbookError, BoardError): connection = None
+                try: await service.retain_cooldown(db, owner, run, value, exc, lease)
+                except BoardError: pass  # Audit remains; stale Goal cannot authorize account mutation.
                 uncertain = bool(value.get("creation_sent")) or any(
                     call.get("status") != "received" for call in value.get("calls", []))
                 if value.get("phase") != "verified_output_ready":

@@ -445,8 +445,40 @@ class RepoPublicationService:
             loop = asyncio.get_running_loop()
             def before_command():
                 asyncio.run_coroutine_threadsafe(self.check(current, preview), loop).result(timeout=15)
-            produced = await asyncio.to_thread(produce, stage, source, preview, patch, before_command)
-            await self.check(current, preview, full_runtime=True)
+            from src.execution.repo_publication_supervisor import guard, admit, run as supervised_run, canonical as supervisor_bytes
+            try:
+                with guard(stage) as (_, directory, guard_fd):
+                    approval = await approval_repository.get(current["declared_authority"]["approval_id"])
+                    approval_expiry = _approval_expiry(approval.expires_at) if approval else None
+                    self.require(approval_expiry is not None and approval_expiry > now(), "publication_approval_not_current")
+                    remaining = min(30.0, (min(
+                        approval_expiry,
+                        datetime.fromisoformat(current["lease"]["expires_at"]).replace(tzinfo=timezone.utc),
+                        datetime.fromisoformat(current["deadline_at"]).replace(tzinfo=timezone.utc),
+                    ) - now()).total_seconds())
+                    admission = admit(stage, source, preview, patch, {
+                        "job_id": job_id, "root": session, "principal": principal,
+                        "attempt": current["attempt_count"], "authority_digest": current["authority_digest"],
+                        "input_digest": current["input_digest"], "run_fingerprint": current["run_fingerprint"],
+                        "fence": current["lease"]["fencing_token"], "goal_id": current["goal_id"],
+                        "goal_revision": current["goal_revision"], "preview_digest": digest(preview),
+                    }, directory=directory, guard_fd=guard_fd, seconds_limit=remaining)
+                    supervisor_binding = admission.checkpoint()
+                    current = await jobs.record_checkpoint(job_id, checkpoint_id="publication_supervisor_admission", state={"admission_sha256": admission.digest}, checkpoint_payload=supervisor_binding, **self.fence(current))
+                    await self.check(current, preview, full_runtime=True)
+                    produced = await asyncio.to_thread(supervised_run, admission, before_command)
+                    await self.check(current, preview, full_runtime=True)
+                    private_proof = produced["supervisor_proof"]
+                    proof_path = str((admission.path.parent / (admission.payload["token"] + ".terminal.json")).relative_to(Path(canonical_workspace_root(settings.workspace_dir))))
+                    proof_bytes = supervisor_bytes(private_proof)
+                    current = await jobs.record_artifact(job_id, file_path=proof_path, artifact_type="repo_publication_supervisor_terminal", content=proof_bytes, **self.fence(current))
+                    current = await jobs.record_checkpoint(job_id, checkpoint_id="publication_supervisor_terminal", state={"quiescent": True}, checkpoint_payload={
+                        "admission_sha256": admission.digest, "proof_path": proof_path,
+                        "proof_sha256": hashlib.sha256(proof_bytes).hexdigest(), "status": private_proof["status"],
+                        "quiescent": True, "stage_output": private_proof["stage_output"],
+                    }, **self.fence(current))
+            except ValueError as exc:
+                raise PublicationError(str(exc).split(":", 1)[0]) from exc
             current = await self.effect(current, "local_producer", str(stage.relative_to(Path(canonical_workspace_root(settings.workspace_dir)))), local_expected, preview, readback=True, details={"local_commit": produced["local_commit"], "tree": produced["tree"]})
             local_checkpoint = {"local_commit": produced["local_commit"], "tree": produced["tree"], "changed_paths": produced["changed_paths"]}
             current = await jobs.record_checkpoint(job_id, checkpoint_id="local_commit", state=local_checkpoint, checkpoint_payload=local_checkpoint, **self.fence(current))

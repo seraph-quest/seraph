@@ -134,6 +134,7 @@ async def test_authenticated_actual_repair_producer_requires_new_exact_publicati
     executed = await client.post(f"/api/capabilities/github/repo-publication/jobs/{view['job_id']}/execute", headers=ORIGIN)
     assert executed.status_code == 200, executed.text
     result = executed.json()
+    assert any(item["artifact_type"] == "repo_publication_supervisor_terminal" for item in result["artifacts"])
     (tmp_path / "publication-execution-readback.json").write_text(json.dumps({"publication": result, "transport_calls": transport.calls}, sort_keys=True))
     print("PUBLICATION_EXECUTION_READBACK=" + str(tmp_path / "publication-execution-readback.json"))
     if scenario != "success":
@@ -141,6 +142,17 @@ async def test_authenticated_actual_repair_producer_requires_new_exact_publicati
         before = list(transport.calls)
         repeated = await client.post(f"/api/capabilities/github/repo-publication/jobs/{view['job_id']}/execute", headers=ORIGIN)
         assert repeated.json()["status"] == "unknown_external_effect" and transport.calls == before
+        # Reopen physical file-backed SQLite connections and replace adapter
+        # process-local capture state before recovery. Only canonical rows and
+        # private producer receipts may survive this boundary.
+        async with async_db() as db:
+            physical_engine = db.bind
+        await physical_engine.dispose()
+        adapter = GitHubFollowthroughService(resolver=resolver, transport=httpx.MockTransport(transport.handler))
+        from src.workflows.job_runtime import durable_job_repository
+        restarted = await durable_job_repository.get_job(view["job_id"])
+        assert restarted["status"] == "unknown_external_effect" and restarted["revision"] == result["revision"]
+        print("ACTUAL_FILE_DB_REOPEN_AND_FRESH_ADAPTER=" + view["job_id"])
         stopped = await client.post("/api/capabilities/github/connection/revoke", json={"expected_revision": connection["revision"]}, headers=ORIGIN)
         assert stopped.status_code == 200, stopped.text
         if scenario == "goal_changed":

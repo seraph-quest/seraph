@@ -166,17 +166,27 @@ def posture() -> dict:
     executable = Path("/usr/bin/git")
     if not executable.is_file():
         raise PublicationError("local_git_unavailable")
-    return {"profile": PROFILE, "executor_kind": "local", "isolation_claim": "none", "git_sha256": hashlib.sha256(executable.read_bytes()).hexdigest(), "network": "disabled", "hooks": "disabled", "filters": "disabled", "max_seconds": 30, "max_output_bytes": MAX_OUTPUT}
+    from src.execution.repo_publication_supervisor import identity
+    return {"profile": PROFILE, "executor_kind": "local", "isolation_claim": "none", "git_sha256": hashlib.sha256(executable.read_bytes()).hexdigest(), "network": "disabled", "hooks": "disabled", "filters": "disabled", "max_seconds": 30, "max_output_bytes": MAX_OUTPUT, "supervisor": identity()}
 
 
-def _bounded_git(command, *, stage, env, data, deadline):
+def _bounded_git(command, *, stage, env, data, deadline, guard_fd=None, process_observer=None):
     """Bound combined output while reading it, including during stdin writes."""
     if time.monotonic() >= deadline:
         raise PublicationError("local_git_deadline")
-    process = subprocess.Popen(command, cwd=stage, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    process = subprocess.Popen(command, cwd=stage, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+                               pass_fds=() if guard_fd is None else (guard_fd,))
     output, total, cursor = bytearray(), 0, 0
     data = data or b""
+    stdout_hash, stderr_hash = hashlib.sha256(), hashlib.sha256()
+    from src.execution.repo_supervisor import start_identity
+    child_identity = {"pid": process.pid, "start": start_identity(process.pid), "group": process.pid,
+                      "argv_sha256": digest(command), "input_sha256": hashlib.sha256(data).hexdigest()}
     try:
+        if process_observer is not None:
+            if not child_identity["start"]:
+                raise PublicationError("local_git_child_identity_unavailable")
+            process_observer({"phase": "started", **child_identity})
         with selectors.DefaultSelector() as selector:
             for stream in (process.stdout, process.stderr):
                 os.set_blocking(stream.fileno(), False)
@@ -209,7 +219,18 @@ def _bounded_git(command, *, stage, env, data, deadline):
                         raise PublicationError("local_git_output_limit")
                     if stream is process.stdout:
                         output.extend(chunk)
-            if process.wait(timeout=max(0.01, deadline - time.monotonic())) != 0:
+                        stdout_hash.update(chunk)
+                    else:
+                        stderr_hash.update(chunk)
+            code = process.wait(timeout=max(0.001, deadline - time.monotonic()))
+            from src.execution.repo_worker import _wait_process_group_quiescent
+            _wait_process_group_quiescent(process.pid, deadline_at=deadline)
+            if process_observer is not None:
+                process_observer({"phase": "terminal", **child_identity, "exit_code": code,
+                                  "direct_reaped": True, "output_drained": True, "group_empty": True,
+                                  "stdout_sha256": stdout_hash.hexdigest(), "stderr_sha256": stderr_hash.hexdigest(),
+                                  "output_bytes": total})
+            if code != 0:
                 raise PublicationError("local_git_failed")
             return bytes(output)
     except BaseException:
@@ -224,17 +245,18 @@ def _bounded_git(command, *, stage, env, data, deadline):
                 stream.close()
 
 
-def produce(stage: Path, source: SourceGit, preview: dict, patch: bytes, before_command) -> dict:
+def _produce_direct(stage: Path, source: SourceGit, preview: dict, patch: bytes, before_command, *, deadline_at=None, guard_fd=None, process_observer=None) -> dict:
     """Only called after a current exact local_host_execution approval."""
     if stage.exists():
         raise PublicationError("local_producer_reconciliation_required")
     stage.mkdir(mode=0o700)
     env = {"PATH": "/usr/bin:/bin", "HOME": str(stage), "LANG": "C.UTF-8", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_TERMINAL_PROMPT": "0", "GIT_NO_REPLACE_OBJECTS": "1", "GIT_AUTHOR_NAME": "Seraph", "GIT_AUTHOR_EMAIL": "seraph@localhost", "GIT_COMMITTER_NAME": "Seraph", "GIT_COMMITTER_EMAIL": "seraph@localhost", "GIT_AUTHOR_DATE": preview["commit_date"], "GIT_COMMITTER_DATE": preview["commit_date"]}
-    deadline = time.monotonic() + 30
+    deadline = time.monotonic() + 30 if deadline_at is None else deadline_at
 
     def git(*args, data=None):
         before_command()
-        return _bounded_git(["/usr/bin/git", "-c", "core.hooksPath=/dev/null", "-c", "core.attributesFile=/dev/null", "-c", "commit.gpgSign=false", "-c", "protocol.allow=never", *args], stage=stage, env=env, data=data, deadline=deadline)
+        return _bounded_git(["/usr/bin/git", "-c", "core.hooksPath=/dev/null", "-c", "core.attributesFile=/dev/null", "-c", "commit.gpgSign=false", "-c", "protocol.allow=never", *args], stage=stage, env=env, data=data, deadline=deadline,
+                            guard_fd=guard_fd, process_observer=process_observer)
 
     git("init", "--template=", "--initial-branch=seraph-publication")
     tree_id, base_files, contents = source.tree(preview["base_commit"])
@@ -267,3 +289,8 @@ def produce(stage: Path, source: SourceGit, preview: dict, patch: bytes, before_
     git("update-ref", "refs/heads/" + preview["branch_name"], commit)
     changed = sorted(path for path in set(contents) | {item["path"] for item in output_files} if next((item for item in base_files if item["path"] == path), None) != next((item for item in output_files if item["path"] == path), None))
     return {"local_commit": commit, "tree": output_tree, "base_tree": tree_id, "files": output_files, "changed_paths": changed, "stage": str(stage)}
+
+
+def produce(stage: Path, source: SourceGit, preview: dict, patch: bytes, before_command) -> dict:
+    """Fixed Git mechanics; production uses the admitted supervisor wrapper."""
+    return _produce_direct(stage, source, preview, patch, before_command)

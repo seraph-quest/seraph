@@ -298,6 +298,14 @@ async def _verified_workflow_readback(
         return None
     if not _workflow_run_binds_board_attempt(task, attempt, run):
         return None
+    if task.capability_id == "work.research-dossier.v1":
+        try:
+            from src.work_board.research_readback import verified_dossier
+            dossier, _raw = await verified_dossier(db, task, attempt, run)
+            if dossier["content_sha256"] != proof["content_sha256"]:
+                return None
+        except (ValueError, TypeError, KeyError, OSError, BoardError):
+            return None
     if task.capability_id in {"browser.public-task.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
         # A stored Succeeded label cannot authorize a downstream consumer.
         # Reopen the exact private output and correlate its settled effect.
@@ -368,6 +376,9 @@ def _workflow_run_binds_board_attempt(
     safe_digest = lambda value: bool(_SAFE_DIGEST.fullmatch(str(value or "").strip()))
 
     capability_id = str(task.capability_id or "").strip()
+    if capability_id == "work.research-dossier.v1":
+        from src.work_board.research_readback import binds
+        return binds(task, attempt, run)
     if capability_id in {"browser.public-task.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
         try:
             from src.work_board.dispatcher import WorkBoardDispatcher, _parse_typed_input, _safe_digest
@@ -1245,6 +1256,7 @@ async def unblock_task(
     # cancellation or pending-admission reconciliation path.
     await _begin_sqlite_immediate(db)
     task = await repository._owned_task(db, owner, task_id)
+    await repository.require_generic_recovery_allowed(db, task)
     if task.status is not WorkBoardStatus.blocked:
         raise BoardError("illegal_transition", "Only blocked tasks can be unblocked", status_code=409)
     if not str(resolution or "").strip():

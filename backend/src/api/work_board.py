@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
-from src.auth.service import AuthenticatedOperator
+from src.auth.service import AuthenticatedOperator, AuthFailure
 from src.approval.repository import approval_repository
 from src.db.engine import get_session
 from src.db.models import (
@@ -23,6 +23,7 @@ from src.db.models import (
     WorkBoardLink,
     WorkBoardStatus,
     WorkBoardTask,
+    WorkflowRunState,
     Goal,
 )
 from src.vault import redaction as vault_redaction
@@ -75,13 +76,14 @@ from src.work_board.time import serialize_utc_datetime
 from src.security.trust_contract import AuthorityGrant
 from src.security.site_policy import _parse_rules
 from config.settings import settings
-from src.workflows.job_runtime import durable_job_repository
+from src.workflows.job_runtime import durable_job_repository, DurableJobError
 from src.workflows.routines import (
     RoutinePublicationRequest,
     RoutineError,
     _job_checkpoint,
     routine_service,
 )
+from src.work_board.research_contracts import ResearchControlRequest
 
 
 router = APIRouter(prefix="/work-board")
@@ -89,6 +91,69 @@ repository = WorkBoardRepository()
 # Use the same managed dispatcher instance as the scheduler so cancellation
 # can reach an inline GoalSnapshot worker admitted by the scheduler pass.
 dispatcher = _dispatcher
+
+
+@router.get("/tasks/{task_id}/research")
+async def read_research_state(request: Request, task_id: str):
+    from src.work_board.research_control import snapshot
+    try:
+        async with get_session() as db:
+            return await snapshot(dispatcher.jobs, db, _owner(_operator(request)), task_id)
+    except BoardError as exc:
+        _raise_board_error(exc)
+    except (DurableJobError, AuthFailure, ValueError, TypeError, KeyError, OSError):
+        raise HTTPException(status_code=409, detail={"code": "research_current_binding_unavailable"})
+
+
+@router.post("/tasks/{task_id}/research/recover")
+async def recover_research(request: Request, task_id: str, body: ResearchControlRequest):
+    try:
+        result = await dispatcher.recover_research(_owner(_operator(request)), task_id, body)
+        async with get_session() as db:
+            from src.work_board.research_control import snapshot
+            return {"recovery": result, "research": await snapshot(dispatcher.jobs, db, _owner(_operator(request)), task_id)}
+    except BoardError as exc:
+        _raise_board_error(exc)
+    except (DurableJobError, AuthFailure, ValueError, TypeError, KeyError, OSError):
+        raise HTTPException(status_code=409, detail={"code": "research_current_authority_or_artifact_required"})
+
+
+@router.post("/tasks/{task_id}/research/cancel")
+async def cancel_research(request: Request, task_id: str, body: ResearchControlRequest):
+    try:
+        result = await dispatcher.cancel_research(_owner(_operator(request)), task_id, body)
+        async with get_session() as db:
+            from src.work_board.research_control import snapshot
+            return {"cancellation": result, "research": await snapshot(dispatcher.jobs, db, _owner(_operator(request)), task_id)}
+    except BoardError as exc:
+        _raise_board_error(exc)
+    except (DurableJobError, AuthFailure, ValueError, TypeError, KeyError, OSError):
+        raise HTTPException(status_code=409, detail={"code": "research_current_cancellation_proof_required"})
+
+
+@router.get("/tasks/{task_id}/research-report")
+async def read_research_report(request: Request, task_id: str):
+    from fastapi import Response
+    from src.work_board.research_readback import verified_dossier
+    operator = _operator(request)
+    async with get_session() as db:
+        task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id,
+            WorkBoardTask.owner_principal_id == operator.principal.principal_id,
+            WorkBoardTask.owner_session_id == operator.session_id,
+            WorkBoardTask.capability_id == "work.research-dossier.v1"))
+        if task is None:
+            raise HTTPException(status_code=404, detail="Research task unavailable")
+        attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == task_id)
+            .order_by(WorkBoardAttempt.created_at.desc(), WorkBoardAttempt.attempt_id.desc()).limit(1))
+        if attempt is None or attempt.ended_at is None or task.status not in {WorkBoardStatus.review, WorkBoardStatus.done}:
+            raise HTTPException(status_code=409, detail="Research dossier requires completed independent readback")
+        run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == attempt.workflow_run_id))
+        try:
+            _binding, raw = await verified_dossier(db, task, attempt, run)
+        except (ValueError, TypeError, KeyError, OSError, BoardError):
+            raise HTTPException(status_code=409, detail="Research dossier readback requires recovery")
+        return Response(content=raw, media_type="text/plain", headers={
+            "X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"})
 
 
 @router.post("/tasks/{task_id}/pipeline-preview")
@@ -855,6 +920,10 @@ def _recovery_action(
 
     status = _json_value(task.status)
     block_kind = str(task.block_kind or "")
+    if task.capability_id == "work.research-dossier.v1" and latest_attempt is not None and latest_attempt.workflow_run_id:
+        # The research inspector owns explicit same-attempt controls. Generic
+        # retry/unblock would discard its immutable original operation.
+        return None
     if status == WorkBoardStatus.running.value:
         # A pending admission has no durable run to cancel.  The dispatcher
         # must reconcile that binding first so the card never advertises a

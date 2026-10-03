@@ -991,7 +991,7 @@ class TelegramTransportAdapter:
                 query = payload.get("callback_query")
                 query_id = query.get("id") if isinstance(query, dict) else None
                 if isinstance(query_id, str) and 1 <= len(query_id) <= 128:
-                    acknowledgment = await controls._ack(query_id, owner_principal_id, operator_session_id)
+                    acknowledgment = await controls._ack(query_id, owner_principal_id, operator_session_id, query.get("data"))
                     if receipt is not None:
                         receipt["ack_status"] = acknowledgment
         owner = _owner(owner_principal_id)

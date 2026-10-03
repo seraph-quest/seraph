@@ -470,19 +470,19 @@ class TelegramTaskControls:
             return await self._reply(db, row, task, result(task, status="cancelled", effect="cancel"))
         return json.loads(row.result_json)
 
-    async def _ack(self, query_id, owner, session):
+    async def _ack(self, query_id, owner, session, nonce_data=None):
         from src.vault.repository import vault_repository
         try:
             async with db_engine.get_session() as db:
-                # Empty spinner dismissal grants no task authority. It can
-                # acknowledge a stale/revoked control, but never borrow another
-                # owner's token or act as a session-recovery route.
-                from src.auth.service import authenticate_principal
-                operator = await authenticate_principal(owner, db=db)
-                pairing = await db.get(TelegramTransportState, "telegram")
-                if (operator.session_id != session or pairing is None
-                    or pairing.owner_principal_id != owner or pairing.operator_session_id != session):
-                    return "unavailable"
+                # Empty dismissal grants no task authority, but is still
+                # egress: current owner/session and finite transit must hold.
+                pairing = await current(db, owner, session)
+                if isinstance(nonce_data, str) and len(nonce_data.encode()) <= 64:
+                    source = await db.scalar(select(TelegramTaskCallback).where(
+                        TelegramTaskCallback.nonce_digest == digest(nonce_data)))
+                    if source is not None and (source.owner_principal_id != owner
+                        or source.operator_session_id != session or source.root_digest != root_digest()):
+                        return "unavailable"
                 secret_ref = pairing.token_secret_ref
             token = await vault_repository.get(secret_ref or "")
             if not token or not hasattr(self.adapter.transport, "answer_callback_query"):

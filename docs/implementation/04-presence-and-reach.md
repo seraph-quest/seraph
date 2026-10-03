@@ -181,6 +181,12 @@ The task inspector can queue and deliver a neutral notice through the existing
 paired Telegram outbox. The notice contains no task title, body, source, goal
 text, or approval arguments. An explicit **Review status (send metadata)**
 callback returns status enums and revision metadata, bounded to 1,024 bytes.
+After the canonical callback transaction commits, the existing transport
+automatically attempts to deliver Review details/buttons and Deny/Cancel
+outcomes through their durable outbox records. The callback and poll receipt
+report canonical decision status, delivery status and spinner acknowledgment
+separately. Delivery uncertainty preserves the decision and the same outbox;
+callback replay cannot resend an Unknown delivery or repeat a task action.
 The current pending approval can expose **Deny this request**; a running task
 can expose **Cancel this attempt**. Approval, retry, unblock and uncertain-effect
 settlement continue in the authenticated cockpit. This boundary is
@@ -196,6 +202,11 @@ paired actor and private chat, root identity, goal/task revisions, proven messag
 delivery and exact approval or original attempt binding. Admission permits at
 most 20 consumed callbacks per minute and an 8,192-byte callback payload.
 Message identifiers alone grant no authority.
+Syntactically valid rejected or stale callback query IDs receive a best-effort
+empty spinner acknowledgment using only the current owner's scoped token,
+active pairing and unexpired transit consent.
+Acknowledgment neither grants task authority nor discloses private reasons;
+revoked or unavailable credentials can still prevent this transport operation.
 
 Deny consumes the nonce and resolves the exact pending approval in one SQLite
 writer, shared with the cockpit approval API. Cancel consumes the nonce and

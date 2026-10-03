@@ -8,11 +8,11 @@ const record=(v:unknown):v is Record<string,unknown>=>Boolean(v)&&typeof v==="ob
 const id=(v:unknown):v is string=>typeof v==="string"&&/^[a-zA-Z0-9_.:-]{1,128}$/.test(v);
 const sha=(v:unknown):v is string=>typeof v==="string"&&/^[a-f0-9]{64}$/.test(v);
 export interface ToolProfile { pack_id:string; manifest:Record<string,unknown>;root_path:string;content_digest:string;authority_digest:string;profile:{status:string;reason?:string};lifecycle:Record<string,unknown>;no_learning:true }
-export interface ToolState {task_id:string;task_revision:number;attempt_id:string;job_id:string;status:string;deadline_at:string;cleanup_proven:boolean;recoverable:boolean;report_available:boolean;cancel_available:boolean;recovery_limit:string;no_learning:true}
+export interface ToolState {task_id:string;task_revision:number;board_fence:number;cancel_receipt:{attempt_id:string;board_fence:number;requested_revision:number;applied:true;cancel_requested_at:string}|null;attempt_id:string;job_id:string;status:string;deadline_at:string;cleanup_proven:boolean;recoverable:boolean;report_available:boolean;cancel_available:boolean;recovery_limit:string;no_learning:true}
 export type ToolPending=
  |{kind:"approve";goal_id:string;goal_revision:number;packet:ToolProfile;step:0|1|2|3;review_id:string|null;approval_id:string|null}
  |{kind:"create";goal_id:string;goal_revision:number;json_text:string;input_key:string;task_key:string;artifact_id:string|null}
- |{kind:"control";task_id:string;action:"recover"|"cancel";revision:number;key:string};
+ |{kind:"control";task_id:string;action:"recover"|"cancel";revision:number;attempt_id:string;board_fence:number;key:string};
 export function toolStorageKey(principal:string,session:string,scope:string){if(!id(principal)||!id(session)||!id(scope))throw Error("Current owner/session required");return `seraph.tool.json.v1:${encodeURIComponent(principal)}:${encodeURIComponent(session)}:${encodeURIComponent(scope)}`;}
 function profile(value:unknown):ToolProfile{
  if(!record(value)||value.pack_id!=="seraph.tool.json-format"||!record(value.manifest)||value.manifest.id!==value.pack_id||value.manifest.version!=="1.0.0"||!sha(value.content_digest)||!sha(value.authority_digest)||typeof value.root_path!=="string"||value.root_path.length>4096||!record(value.profile)||typeof value.profile.status!=="string"||!record(value.lifecycle)||value.no_learning!==true)throw Error("Exact fixed package readback unavailable");return value as unknown as ToolProfile;
@@ -24,7 +24,7 @@ function validate(value:unknown):ToolPending{
  }else if(value.kind==="create"){
   if(Object.keys(value).sort().join()!==["kind","goal_id","goal_revision","json_text","input_key","task_key","artifact_id"].sort().join()||!id(value.goal_id)||!Number.isSafeInteger(value.goal_revision)||Number(value.goal_revision)<1||typeof value.json_text!=="string"||bytes(value.json_text)>32768||!id(value.input_key)||!id(value.task_key)||(value.artifact_id!==null&&!id(value.artifact_id)))throw Error("Retained formatter creation corrupt");JSON.parse(value.json_text);
  }else if(value.kind==="control"){
-  if(Object.keys(value).sort().join()!==["kind","task_id","action","revision","key"].sort().join()||!id(value.task_id)||!["recover","cancel"].includes(String(value.action))||!Number.isSafeInteger(value.revision)||Number(value.revision)<1||!id(value.key))throw Error("Retained formatter control corrupt");
+  if(Object.keys(value).sort().join()!==["kind","task_id","action","revision","attempt_id","board_fence","key"].sort().join()||!id(value.task_id)||!["recover","cancel"].includes(String(value.action))||!Number.isSafeInteger(value.revision)||Number(value.revision)<1||!id(value.key)||!id(value.attempt_id)||!Number.isSafeInteger(value.board_fence)||Number(value.board_fence)<1)throw Error("Retained formatter control corrupt");
  }else throw Error("Unknown retained formatter request");
  return value as unknown as ToolPending;
 }
@@ -51,5 +51,11 @@ export async function submitTool(key:string,pending:ToolPending,signal?:AbortSig
  }
  await request(`/api/work-board/tasks/${pending.task_id}`+(pending.action==="recover"?"/tool-package/recover":"/actions"),pending.action==="recover"?{expected_revision:pending.revision,idempotency_key:pending.key}:{action:"cancel",expected_revision:pending.revision},signal);clear(key);return null;
 }
-export async function readToolState(task:string,signal?:AbortSignal):Promise<ToolState>{if(!id(task))throw Error("Invalid task");const value=await request(`/api/work-board/tasks/${task}/tool-package`,undefined,signal);if(!record(value)||value.task_id!==task||value.no_learning!==true||typeof value.status!=="string"||!Number.isSafeInteger(value.task_revision)||typeof value.cleanup_proven!=="boolean"||typeof value.recoverable!=="boolean"||typeof value.report_available!=="boolean"||typeof value.cancel_available!=="boolean")throw Error("Formatter state unavailable");return value as unknown as ToolState;}
+export function reconcileToolCancel(key:string,state:ToolState):boolean{
+ const pending=readToolPending(key),receipt=state.cancel_receipt;
+ if(!pending||pending.kind!=="control"||pending.action!=="cancel"||!receipt)return false;
+ if(pending.task_id!==state.task_id||pending.attempt_id!==state.attempt_id||pending.board_fence!==state.board_fence||receipt.attempt_id!==pending.attempt_id||receipt.board_fence!==pending.board_fence||receipt.requested_revision!==pending.revision||receipt.applied!==true||!receipt.cancel_requested_at)return false;
+ clear(key);return true;
+}
+export async function readToolState(task:string,signal?:AbortSignal):Promise<ToolState>{if(!id(task))throw Error("Invalid task");const value=await request(`/api/work-board/tasks/${task}/tool-package`,undefined,signal);if(!record(value)||value.task_id!==task||value.no_learning!==true||!Number.isSafeInteger(value.board_fence)||Number(value.board_fence)<1||typeof value.status!=="string"||!Number.isSafeInteger(value.task_revision)||typeof value.cleanup_proven!=="boolean"||typeof value.recoverable!=="boolean"||typeof value.report_available!=="boolean"||typeof value.cancel_available!=="boolean")throw Error("Formatter state unavailable");if(value.cancel_receipt!==null){const c=value.cancel_receipt;if(!record(c)||!id(c.attempt_id)||!Number.isSafeInteger(c.board_fence)||!Number.isSafeInteger(c.requested_revision)||c.applied!==true||typeof c.cancel_requested_at!=="string"||!c.cancel_requested_at)throw Error("Canonical cancellation readback unavailable");}return value as unknown as ToolState;}
 export async function readToolOutput(task:string,signal?:AbortSignal){if(!id(task))throw Error("Invalid task");const response=await apiFetch(`${API_URL}/api/work-board/tasks/${task}/tool-package-output`,{signal});if(!response.ok||!response.headers.get("content-type")?.startsWith("text/plain"))throw Error("Verified literal output unavailable");const text=await response.text();if(bytes(text)>65536)throw Error("Output bound exceeded");return text;}

@@ -20,6 +20,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
+import asyncio
 import hashlib
 import json
 import os
@@ -172,6 +173,10 @@ class CapabilityPackManifestError(CapabilityPackError):
 
 class CapabilityPackLifecycleError(CapabilityPackError):
     """Raised when a lifecycle transition would violate a reviewed binding."""
+
+
+class CapabilityPackLifecycleBusy(CapabilityPackLifecycleError):
+    """Retryable contention; asyncio callers cannot block their event loop."""
 
 
 def _assert_local_execution_target(pack_id: str) -> None:
@@ -2063,23 +2068,36 @@ class CapabilityPackLifecycle:
 
         if fcntl is None:
             raise CapabilityPackLifecycleError("cross-process lifecycle lock is unavailable")
-        with self._lock:
+        try:
+            asyncio.get_running_loop()
+            asynchronous = True
+        except RuntimeError:
+            asynchronous = False
+        if not self._lock.acquire(blocking=not asynchronous):
+            raise CapabilityPackLifecycleBusy("capability_pack_lifecycle_busy")
+        descriptor = None
+        try:
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
             descriptor = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+            os.fchmod(descriptor, 0o600)
+            operation = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
+            if asynchronous:
+                operation |= fcntl.LOCK_NB
             try:
-                try:
-                    os.fchmod(descriptor, 0o600)
-                    operation = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
-                    fcntl.flock(descriptor, operation)
-                except OSError as exc:
-                    raise CapabilityPackLifecycleError("cross-process lifecycle lock could not be acquired") from exc
-                yield
-            finally:
+                fcntl.flock(descriptor, operation)
+            except BlockingIOError as exc:
+                raise CapabilityPackLifecycleBusy("capability_pack_lifecycle_busy") from exc
+            except OSError as exc:
+                raise CapabilityPackLifecycleError("cross-process lifecycle lock could not be acquired") from exc
+            yield
+        finally:
+            if descriptor is not None:
                 try:
                     fcntl.flock(descriptor, fcntl.LOCK_UN)
                 except OSError:
                     pass
                 os.close(descriptor)
+            self._lock.release()
 
     def _empty_state(self) -> dict[str, Any]:
         return {

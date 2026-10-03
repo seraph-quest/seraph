@@ -20,7 +20,7 @@ from src.workflows.job_runtime import DurableJobRepository
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('mode',['positive','goal_revision','logout','cancel','written_recovery','vault_drift','callback_deadline'])
+@pytest.mark.parametrize('mode',['positive','goal_revision','logout','cancel','written_recovery','vault_drift','callback_deadline','lifecycle_pin'])
 async def test_actual_authenticated_review_approval_native_formatter_reopen(accounting_db,monkeypatch,mode):
     from src.api import auth,capability_packs,goals,work_board
     root,engine,factory=accounting_db
@@ -35,9 +35,10 @@ async def test_actual_authenticated_review_approval_native_formatter_reopen(acco
     _reset_login_throttle_for_tests()
     # Explicit existing locally built optional dependency. Missing profile is
     # a skip, never proof of enforcement or native capability readiness.
-    pinned=Path('/home/pawel/repos/seraph/.agent-evidence/916/profile-probe-r10.json')
-    if not pinned.exists():pytest.skip('explicit pinned local profile not prepared')
-    bundle=Path(json.loads(pinned.read_bytes())["fixture_root"])/"runtime"
+    configured=os.environ.get('SERAPH_TEST_TOOL_PACKAGE_RUNTIME')
+    if not configured:pytest.skip('optional locally prepared tool package runtime not supplied')
+    bundle=Path(configured)
+    if not bundle.is_dir():pytest.skip('explicit optional tool package runtime unavailable')
     target=root/"artifacts/tool-package-runtime"/PROFILE
     target.parent.mkdir(parents=True,mode=0o700)
     for parent in (target.parent,target.parent.parent):os.chmod(parent,0o700)
@@ -85,6 +86,49 @@ async def test_actual_authenticated_review_approval_native_formatter_reopen(acco
         jobs=DurableJobRepository();dispatcher=WorkBoardDispatcher(jobs=jobs,session_provider=factory.accounting_sessions)
         monkeypatch.setattr(work_board,'dispatcher',dispatcher)
         from src.work_board import tool_package_native
+        for name in ("stage_authority","current"):
+            original=getattr(tool_package_native,name)
+            async def traced_guard(*args,_original=original,**kwargs):
+                try:return await _original(*args,**kwargs)
+                except Exception:
+                    import traceback
+                    traceback.print_exc()
+                    raise
+            monkeypatch.setattr(tool_package_native,name,traced_guard)
+        # Actual SQLAlchemy connection events distinguish the immediate
+        # writer from an ordinary read transaction. All native physical proof
+        # helpers must run before it, including terminal and recovery paths.
+        from sqlalchemy import event
+        writer_connections=set()
+        def sql_boundary(connection,cursor,statement,parameters,context,many):
+            if statement.strip().upper().startswith('BEGIN IMMEDIATE'):writer_connections.add(id(connection))
+        def sql_finished(connection):writer_connections.discard(id(connection))
+        event.listen(engine.sync_engine,'before_cursor_execute',sql_boundary)
+        event.listen(engine.sync_engine,'commit',sql_finished)
+        event.listen(engine.sync_engine,'rollback',sql_finished)
+        for name in ('runtime_binding','pack_binding','read_output','read_private'):
+            physical=getattr(tool_package_native,name)
+            def pure_guard(*args,_physical=physical,**kwargs):
+                assert not writer_connections,'native physical proof inside SQLite writer'
+                return _physical(*args,**kwargs)
+            monkeypatch.setattr(tool_package_native,name,pure_guard)
+        if mode=='lifecycle_pin':
+            prepared_revoke=await client.post('/api/capability-packs/seraph.tool.json-format/approvals',json={
+                'action':'revoke','goal_id':goal_id,'digest':packet['content_digest'],'version':'1.0.0',
+                'content_digest':packet['content_digest'],'authority_digest':packet['authority_digest']})
+            assert prepared_revoke.status_code==200,prepared_revoke.text
+            revoke_id=prepared_revoke.json()['approval']['approval_id']
+            assert (await client.post('/api/capability-packs/seraph.tool.json-format/approvals/'+revoke_id+'/approve')).status_code==200
+            revoke_body={'approval_id':revoke_id,'digest':packet['content_digest'],'content_digest':packet['content_digest'],
+                'authority_digest':packet['authority_digest'],'reason':'Exact reviewed revoke overlaps actual admission'}
+            writer_entered=asyncio.Event();writer_release=asyncio.Event();held_once=False
+            canonical_current=tool_package_native.current
+            async def held_current(*args,**kwargs):
+                nonlocal held_once
+                if not held_once:
+                    held_once=True;writer_entered.set();await writer_release.wait()
+                return await canonical_current(*args,**kwargs)
+            monkeypatch.setattr(tool_package_native,'current',held_current)
         actual_execute=tool_package_native.execute
         async def traced_execute(*args,**kwargs):
             try:return await actual_execute(*args,**kwargs)
@@ -93,7 +137,7 @@ async def test_actual_authenticated_review_approval_native_formatter_reopen(acco
                 traceback.print_exc()
                 raise
         monkeypatch.setattr(tool_package_native,'execute',traced_execute)
-        if mode in {'goal_revision','logout','cancel','vault_drift','callback_deadline'}:
+        if mode in {'goal_revision','logout','cancel','vault_drift','callback_deadline','lifecycle_pin'}:
             from src.execution import tool_package_runner
             actual_runner=tool_package_runner.execute
             started=asyncio.Event();release=asyncio.Event()
@@ -119,18 +163,35 @@ async def test_actual_authenticated_review_approval_native_formatter_reopen(acco
                 monkeypatch.setattr(WorkBoardRepository,'_safe_text',staticmethod(staged_safe))
             active=asyncio.create_task(dispatcher.run_pass())
             try:
+                if mode=='lifecycle_pin':
+                    await asyncio.wait_for(writer_entered.wait(),timeout=7)
+                    busy=await asyncio.wait_for(client.post('/api/capability-packs/seraph.tool.json-format/revoke',json=revoke_body),timeout=2)
+                    assert busy.status_code==409 and busy.json()['detail']['code']=='capability_pack_lifecycle_busy',busy.text
+                    writer_release.set()
                 await asyncio.wait_for(started.wait(),timeout=7)
-                if mode in {'goal_revision','vault_drift'}:
+                if mode=='lifecycle_pin':
+                    revoked=await client.post('/api/capability-packs/seraph.tool.json-format/revoke',json=revoke_body)
+                    assert revoked.status_code==200,revoked.text
+                elif mode in {'goal_revision','vault_drift'}:
                     changed=await client.patch('/api/goals/'+goal_id,json={'title':'New current Goal revision','expected_revision':1})
                     assert changed.status_code==200,changed.text
                 elif mode=='logout':
                     assert (await client.post('/api/auth/logout')).status_code==204
                 elif mode=='cancel':
+                    before_cancel=await client.get('/api/work-board/tasks/'+task_id+'/tool-package')
+                    assert before_cancel.status_code==200,before_cancel.text
                     detail=await client.get('/api/work-board/tasks/'+task_id)
                     cancelled=await client.post('/api/work-board/tasks/'+task_id+'/actions',json={'action':'cancel','expected_revision':detail.json()['task']['task_revision']})
                     assert cancelled.status_code==200,cancelled.text
+                    after_cancel=await client.get('/api/work-board/tasks/'+task_id+'/tool-package')
+                    assert after_cancel.status_code==200,after_cancel.text
+                    proof=after_cancel.json()['cancel_receipt']
+                    assert proof['applied'] is True and proof['attempt_id']==before_cancel.json()['attempt_id']
+                    assert proof['board_fence']==before_cancel.json()['board_fence']
+                    assert proof['requested_revision']==detail.json()['task']['task_revision']
                 receipt=await asyncio.wait_for(active,timeout=12 if mode=='callback_deadline' else 5)
             finally:
+                if mode=='lifecycle_pin':writer_release.set()
                 release.set()
                 if not active.done():active.cancel()
                 await asyncio.gather(active,return_exceptions=True)
@@ -146,7 +207,7 @@ async def test_actual_authenticated_review_approval_native_formatter_reopen(acco
                 if mode=='vault_drift':
                     assert changed_vault
                     assert task.block_reason=='execution_blocked_redaction_state_changed'
-                (root/'tool-package-authority-negative.json').write_text(json.dumps({'mode':mode,'dispatch':receipt,'native':projection,'task_status':task.status.value,'attempt_id':attempt.attempt_id,'no_learning':True},indent=2))
+                (root/'tool-package-authority-negative.json').write_text(json.dumps({'mode':mode,'dispatch':receipt,'native':projection,'task_status':task.status.value,'attempt_id':attempt.attempt_id,'no_learning':True,**({'busy_status':busy.status_code,'revoked_status':revoked.status_code} if mode=='lifecycle_pin' else {})},indent=2))
             await engine.dispose()
             assert (await jobs.get_job(run.run_identity))['status']!='succeeded'
             return

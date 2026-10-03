@@ -309,7 +309,9 @@ async def _verified_workflow_readback(
     if task.capability_id == "work.json-format.v1":
         try:
             from src.work_board.tool_package_native import verified_output
-            artifact,_raw=verified_output(task,attempt,run)
+            staged=db.info.get("formatter_review_readback")
+            if db.info.get("formatter_review_writer") and staged is None:return None
+            artifact,_raw=verified_output(task,attempt,run,staged=staged)
             if artifact["content_sha256"]!=proof["content_sha256"]:
                 return None
         except (ValueError,TypeError,KeyError,OSError,BoardError):
@@ -748,6 +750,34 @@ async def _finish_event(
     return BoardMutation(task, event)
 
 
+def _formatter_readback_writer(function):
+    # Formatter physical/package readback is staged before these existing
+    # review writers. The final read checks only the exact canonical rows.
+    from functools import wraps
+    @wraps(function)
+    async def wrapped(db,owner,task_id,*args,**kwargs):
+        from src.work_board.tool_package_native import stage_readback
+        repository=kwargs.get("repository") or WorkBoardRepository()
+        task=await repository._owned_task(db,owner,task_id)
+        prior=db.info.get("formatter_review_writer",False)
+        cached=db.info.get("formatter_review_readback")
+        try:
+            if task.capability_id=="work.json-format.v1" and not kwargs.get("transaction_locked"):
+                attempt=await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id==task_id)
+                    .order_by(WorkBoardAttempt.created_at.desc(),WorkBoardAttempt.attempt_id.desc()).limit(1))
+                run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==attempt.workflow_run_id)) if attempt else None
+                if run is not None and run.status=="succeeded":
+                    db.info["formatter_review_readback"]=stage_readback(task,attempt,run)
+            db.info["formatter_review_writer"]=True
+            return await function(db,owner,task_id,*args,**kwargs)
+        finally:
+            db.info["formatter_review_writer"]=prior
+            if cached is None:db.info.pop("formatter_review_readback",None)
+            else:db.info["formatter_review_readback"]=cached
+    return wrapped
+
+
+@_formatter_readback_writer
 async def request_review(
     db: AsyncSession,
     owner: WorkBoardOwner,
@@ -951,6 +981,7 @@ async def request_review(
     return BoardMutation(task, event)
 
 
+@_formatter_readback_writer
 async def request_changes(
     db: AsyncSession,
     owner: WorkBoardOwner,
@@ -1089,6 +1120,7 @@ async def request_changes(
     return mutation
 
 
+@_formatter_readback_writer
 async def complete_review(
     db: AsyncSession,
     owner: WorkBoardOwner,
@@ -1418,6 +1450,7 @@ async def unblock_task(
     )
 
 
+@_formatter_readback_writer
 async def renew_review(
     db: AsyncSession,
     owner: WorkBoardOwner,

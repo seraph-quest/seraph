@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 from datetime import timezone
 from sqlalchemy import select,text,update
-from src.db.models import WorkBoardTask,WorkBoardAttempt,WorkBoardStatus,WorkflowRunState
+from src.db.models import WorkBoardTask,WorkBoardAttempt,WorkBoardStatus,WorkflowRunState,WorkBoardEvent
 from src.work_board.repository import BoardError
 from src.work_board.tool_package_native import (CAPABILITY,cleanup_proven,binds,current,
-    now,verified_output,read_private,canonical,digest,runtime_root,adopt_output)
+    now,verified_output,authority_guard,stage_readback,read_private,canonical,digest,runtime_root,adopt_output)
 from src.execution.tool_package_profile import expected_output,MAX_OUTPUT,ToolPackageBlocked
 from src.workflows.job_runtime import _serialize
 from src.workspace import canonical_workspace_root
@@ -60,13 +60,27 @@ async def snapshot(jobs,db,owner,task_id):
     task,attempt,run=await bound(db,owner,task_id)
     projection=_serialize(run);recoverable=False
     try:
-        await current(db,task,attempt,run,require_lease=False)
-        reserved_output(task,attempt,run)
+        async with authority_guard(jobs,task,attempt) as staged:
+            await current(db,task,attempt,run,require_lease=False,staged=staged)
+            reserved_output(task,attempt,run)
         expiry=run.lease_expires_at
         recoverable=(run.status in {'running','unknown_external_effect','blocked'} and
             (expiry is None or expiry.replace(tzinfo=timezone.utc)<=now()))
     except (ToolPackageBlocked,BoardError,OSError,ValueError,KeyError,TypeError,StopIteration):pass
-    return {'task_id':task_id,'task_revision':task.task_revision,'attempt_id':attempt.attempt_id,
+    cancel_receipt=None
+    if attempt.cancel_requested_at is not None:
+        events=(await db.scalars(select(WorkBoardEvent).where(WorkBoardEvent.task_id==task_id,
+            WorkBoardEvent.owner_principal_id==owner.principal_id,WorkBoardEvent.owner_session_id==owner.session_id,
+            WorkBoardEvent.kind=='attempt.cancel_requested').order_by(WorkBoardEvent.event_id.desc()).limit(32))).all()
+        for event in events:
+            metadata=json.loads(event.metadata_json)
+            if (metadata.get('attempt_id')==attempt.attempt_id and metadata.get('workflow_run_id')==run.run_identity
+                and metadata.get('cancel_key')==f'work-board-cancel:{task_id}:{attempt.attempt_id}'):
+                cancel_receipt={'attempt_id':attempt.attempt_id,'board_fence':attempt.fencing_token,
+                    'requested_revision':metadata['task_revision']-1,'applied':True,
+                    'cancel_requested_at':attempt.cancel_requested_at.isoformat()}
+                break
+    return {'board_fence':attempt.fencing_token,'cancel_receipt':cancel_receipt,'task_id':task_id,'task_revision':task.task_revision,'attempt_id':attempt.attempt_id,
         'job_id':run.run_identity,'status':run.status,'deadline_at':projection['deadline_at'],
         'attempt_count':run.attempt_count,'max_attempts':1,'profile':projection['declared_authority']['runtime']['profile'],
         'cleanup_proven':bool(cleanup_proven(task,attempt,projection)),'recoverable':bool(recoverable),
@@ -77,7 +91,15 @@ async def snapshot(jobs,db,owner,task_id):
 
 async def recover(dispatcher,owner,task_id,request):
     jobs=dispatcher.jobs
-    async with jobs._session() as db:
+    async with jobs._session() as initial:
+        original_task,original_attempt,original_run=await bound(initial,owner,task_id)
+        if original_run.status=='succeeded':
+            verified_output(original_task,original_attempt,original_run)
+            return {'status':'succeeded','replayed':False,'no_learning':True}
+    async with authority_guard(jobs,original_task,original_attempt) as staged:
+      reference,expected=reserved_output(original_task,original_attempt,original_run)
+      original_binding=(original_run.revision,original_run.checkpoint_receipts_json,original_run.effect_receipts_json)
+      async with jobs._session() as db:
         await db.execute(text('BEGIN IMMEDIATE'))
         task,attempt,run=await bound(db,owner,task_id)
         records=json.loads(run.checkpoint_receipts_json)
@@ -85,14 +107,12 @@ async def recover(dispatcher,owner,task_id,request):
         replay=prior and prior.get('idempotency_key')==request.idempotency_key
         if replay and prior['requested_revision']!=request.expected_revision:
             raise BoardError('tool_package_control_conflict','The original recovery request differs')
-        if run.status=='succeeded':
-            verified_output(task,attempt,run)
-            return {'status':'succeeded','replayed':bool(replay),'no_learning':True}
+        if (run.revision,run.checkpoint_receipts_json,run.effect_receipts_json)!=original_binding:
+            raise BoardError('tool_package_recovery_changed','The original cleanup/output reservation changed')
         if task.task_revision!=request.expected_revision:raise BoardError('tool_package_revision_stale','Reload the current formatter task')
         if dispatcher._active_worker_tasks.get((task.task_id,attempt.attempt_id)) is not None:
             raise BoardError('tool_package_execution_active','The actual formatter controller is still active')
-        await current(db,task,attempt,run,require_lease=False)
-        reference,expected=reserved_output(task,attempt,run)
+        await current(db,task,attempt,run,require_lease=False,staged=staged)
         stamp=now();deadline=run.deadline_at.replace(tzinfo=timezone.utc)
         if (run.status not in {'running','unknown_external_effect','blocked'} or
             run.lease_expires_at and run.lease_expires_at.replace(tzinfo=timezone.utc)>stamp):

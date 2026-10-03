@@ -3448,7 +3448,20 @@ class WorkBoardRepository:
         )
         return BoardAttemptProjection(task, attempt, event)
 
-    async def project_attempt(
+    async def project_attempt(self,db,task_id,attempt_id,**kwargs):
+        status=kwargs.get("status")
+        task=await self._find_task(db,task_id)
+        if task is not None and task.capability_id=="work.json-format.v1" and status in {WorkBoardStatus.review,WorkBoardStatus.done}:
+            from src.work_board.tool_package_native import session_authority_guard,stage_readback
+            attempt=await db.get(WorkBoardAttempt,attempt_id,populate_existing=True)
+            run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==attempt.workflow_run_id)) if attempt else None
+            if run is None:raise BoardError("tool_package_readback_required","The original formatter run is unavailable")
+            async with session_authority_guard(db,task,attempt,run) as authority:
+                readback=stage_readback(task,attempt,run)
+                return await self._project_attempt(db,task_id,attempt_id,_tool_stage=(authority,readback),**kwargs)
+        return await self._project_attempt(db,task_id,attempt_id,**kwargs)
+
+    async def _project_attempt(
         self,
         db: AsyncSession,
         task_id: str,
@@ -3469,6 +3482,7 @@ class WorkBoardRepository:
         actor_principal_id: str | None = None,
         actor_session_id: str | None = None,
         now: datetime | None = None,
+        _tool_stage=None,
     ) -> BoardAttemptProjection:
         """Project a reconciled attempt without overriding runtime authority."""
 
@@ -3703,21 +3717,25 @@ class WorkBoardRepository:
             await assert_research_operator_session(db, run, now=observed_at)
             if task.capability_id=="work.json-format.v1":
                 from src.work_board.tool_package_native import verified_output, current
-                await current(db,task,attempt,run)
-                artifact,_raw=verified_output(task,attempt,run)
+                await current(db,task,attempt,run,staged=_tool_stage[0] if _tool_stage else None)
+                artifact,_raw=verified_output(task,attempt,run,staged=_tool_stage[1] if _tool_stage else None)
             else:
                 from src.work_board.research_readback import verified_dossier
                 artifact, _raw = await verified_dossier(db, task, attempt, run)
             if artifact["content_sha256"] != proof_digest:
                 raise BoardError("research_readback_required", "The physical dossier differs from this attempt's proof", status_code=409)
-            resolved = await resolve_input_artifact_for_task(db, owner, artifact_id=task.input_artifact_id,
-                goal_id=task.goal_id, goal_revision=task.goal_revision, capability_id=task.capability_id,
-                expected_task_id=task.task_id)
-            if resolved.row.payload_sha256 != task.typed_input_digest or resolved.row.bound_task_revision is None:
+            if task.capability_id=="work.json-format.v1":
+                from src.db.models import WorkBoardInputArtifact
+                input_row=await db.get(WorkBoardInputArtifact,task.input_artifact_id,populate_existing=True)
+            else:
+                resolved=await resolve_input_artifact_for_task(db, owner, artifact_id=task.input_artifact_id,
+                    goal_id=task.goal_id, goal_revision=task.goal_revision, capability_id=task.capability_id,expected_task_id=task.task_id)
+                input_row=resolved.row
+            if input_row is None or input_row.payload_sha256 != task.typed_input_digest or input_row.bound_task_revision is None:
                 raise BoardError("research_input_changed", "The original admitted input binding changed", status_code=409)
-            if resolved.row.state != "consumed":
+            if input_row.state != "consumed":
                 await consume_input_artifact(db, owner, task_id=task.task_id,
-                    task_revision=resolved.row.bound_task_revision, artifact_id=task.input_artifact_id)
+                    task_revision=input_row.bound_task_revision, artifact_id=task.input_artifact_id)
         attempt.outcome = str(outcome)[:128]
         attempt.ended_at = observed_at
         attempt.lease_owner = None

@@ -1,13 +1,15 @@
 """One fixed reviewed local package through the existing native Work lane."""
 from __future__ import annotations
 import asyncio
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 from sqlalchemy import select, text, update
 
 from config.settings import settings
-from src.db.models import OperatorSession, WorkBoardAttempt, WorkBoardStatus, WorkBoardTask, WorkflowRunState
+from src.db.models import WorkBoardInputArtifact, OperatorSession, WorkBoardAttempt, WorkBoardStatus, WorkBoardTask, WorkflowRunState
 from src.execution.tool_package_profile import (
     CAPABILITY, JOB_KIND, PACKAGE_ID, PROFILE, MAX_OUTPUT, ToolPackageBlocked,
     canonical, digest, expected_output, inspect_runtime, read_private, source_package,
@@ -43,10 +45,12 @@ def job_id(task, attempt):
     return "json-format:"+digest(canonical([task.task_id, attempt.attempt_id]))[:40]
 
 
-def pack_binding(task):
-    lifecycle = CapabilityPackLifecycle()
-    with lifecycle._state_lock(shared=True):
-        state = lifecycle._load()
+def pack_binding(task, *, lifecycle=None, state=None):
+    lifecycle = lifecycle or CapabilityPackLifecycle()
+    if state is None:
+        with lifecycle._state_lock(shared=True):
+            return pack_binding(task,lifecycle=lifecycle,state=bounded_pack_state(lifecycle))
+    if state is not None:
         pointer = state["active"].get(PACKAGE_ID)
         if (not isinstance(pointer, dict) or pointer.get("status") != "active"
             or pointer.get("version") != "1.0.0" or pointer.get("goal_id") != task.goal_id
@@ -93,10 +97,80 @@ def spec_for(task, attempt, inputs, *, deadline):
             "inputs":safe_inputs,"authority":authority})))
 
 
-async def current(db, task, attempt, run, *, require_lease=True):
-    """Exact native + original Board/Root/Goal check in the caller's writer."""
+_STAGE_SEAL = object()
+
+@dataclass(frozen=True)
+class AuthorityStage:
+    seal: object
+    job: str
+    authority_json: str
+    input_binding: tuple
+    pack_state_digest: str
+
+
+def bounded_pack_state(lifecycle):
+    # The existing lifecycle lock pins this file. No file operation is made
+    # from the SQLite writer, and the watcher never hashes the runtime closure.
+    if lifecycle.state_path.exists() and lifecycle.state_path.stat().st_size>16_777_216:
+        raise ToolPackageBlocked("tool_package_lifecycle_state_exceeds_bound")
+    return lifecycle._load()
+
+
+def pack_state_digest(state, authority):
+    pointer=state["active"].get(PACKAGE_ID)
+    package=authority["pack"]
+    return digest(canonical([pointer,state.get("versions",{}).get(PACKAGE_ID,{}).get(package["digest"]),
+        state.get("reviews",{}).get(package["review_id"]),state.get("revoked",{}).get(PACKAGE_ID)]))
+
+
+def input_row_binding(row):
+    return tuple(getattr(row,key) for key in ("artifact_id","owner_principal_id","owner_session_id",
+        "goal_id","goal_revision","capability_id","capability_version","payload_sha256","metadata_digest",
+        "size_bytes","state","bound_task_id","bound_task_revision","revision","expires_at"))
+
+
+async def stage_authority(db,task,attempt,run,*,lifecycle,state,full=True):
     from src.work_board.input_artifacts import resolve_input_artifact_for_task
     from src.work_board.pipelines import root_binding
+    owner=WorkBoardOwner(principal_id=task.owner_principal_id,session_id=task.owner_session_id)
+    authority=json.loads(run.declared_authority_json)
+    if authority["live_root_digest"]!=digest(canonical(root_binding())):
+        raise ToolPackageBlocked("tool_package_original_root_changed")
+    if full:
+        resolved=await resolve_input_artifact_for_task(db,owner,artifact_id=task.input_artifact_id,
+            capability_id=CAPABILITY,goal_id=task.goal_id,goal_revision=task.goal_revision,expected_task_id=task.task_id)
+        row=resolved.row
+        if row.payload_sha256!=task.typed_input_digest:
+            raise ToolPackageBlocked("tool_package_input_changed")
+        if authority["pack"]!=pack_binding(task,lifecycle=lifecycle,state=state) or authority["runtime"]!=runtime_binding():
+            raise ToolPackageBlocked("tool_package_review_or_profile_changed")
+    else:
+        row=await db.get(WorkBoardInputArtifact,task.input_artifact_id,populate_existing=True)
+        if row is None:raise ToolPackageBlocked("tool_package_input_changed")
+    return AuthorityStage(_STAGE_SEAL,run.run_identity,run.declared_authority_json,input_row_binding(row),pack_state_digest(state,authority))
+
+
+@asynccontextmanager
+async def authority_guard(jobs,task,attempt,*,full=True):
+    # One lock order: lifecycle -> staging/read session -> short SQL writer.
+    # Every loop-thread lifecycle lock is nonblocking, so revoke returns busy
+    # instead of blocking the event loop while this guard awaits SQLite.
+    lifecycle=CapabilityPackLifecycle()
+    with lifecycle._state_lock(shared=True):
+        state=bounded_pack_state(lifecycle)
+        async with jobs._session() as db:
+            run=await jobs._fetch(db,job_id(task,attempt))
+            remaining=(run.deadline_at.replace(tzinfo=timezone.utc) if run.deadline_at.tzinfo is None else run.deadline_at)-now()
+            if remaining.total_seconds()<=0:raise ToolPackageBlocked("tool_package_original_deadline_expired")
+            async with asyncio.timeout(remaining.total_seconds()):
+                staged=await stage_authority(db,task,attempt,run,lifecycle=lifecycle,state=state,full=full)
+        absolute=run.deadline_at.replace(tzinfo=timezone.utc) if run.deadline_at.tzinfo is None else run.deadline_at
+        async with asyncio.timeout(max(0,(absolute-now()).total_seconds())):
+            yield staged
+
+
+async def current(db, task, attempt, run, *, require_lease=True, staged=None):
+    """Pure canonical SQL check; physical authority must be staged beforehand."""
     stamp=now()
     owner=WorkBoardOwner(principal_id=task.owner_principal_id,session_id=task.owner_session_id)
     goal=await WorkBoardRepository._validate_goal(db,owner,goal_id=task.goal_id,goal_revision=task.goal_revision)
@@ -111,7 +185,7 @@ async def current(db, task, attempt, run, *, require_lease=True):
         OperatorSession.is_bearer_tombstone.is_(False),OperatorSession.idle_expires_at>stamp,
         OperatorSession.absolute_expires_at>stamp))
     authority=json.loads(run.declared_authority_json)
-    if session is None or authority["live_root_digest"]!=digest(canonical(root_binding())):
+    if session is None:
         raise ToolPackageBlocked("tool_package_original_root_inactive")
     current_task=await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id==task.task_id)
         .execution_options(populate_existing=True))
@@ -129,12 +203,14 @@ async def current(db, task, attempt, run, *, require_lease=True):
             or (current_attempt.lease_expires_at.replace(tzinfo=timezone.utc) if current_attempt.lease_expires_at.tzinfo is None
                 else current_attempt.lease_expires_at)<=stamp))):
         raise ToolPackageBlocked("tool_package_current_attempt_changed")
-    resolved=await resolve_input_artifact_for_task(db,owner,artifact_id=task.input_artifact_id,
-        capability_id=CAPABILITY,goal_id=task.goal_id,goal_revision=task.goal_revision,expected_task_id=task.task_id)
-    if resolved.row.payload_sha256!=task.typed_input_digest:
+    if staged is None or staged.seal is not _STAGE_SEAL or staged.job!=run.run_identity or staged.authority_json!=run.declared_authority_json:
+        raise ToolPackageBlocked("tool_package_staged_authority_required")
+    row=await db.get(WorkBoardInputArtifact,task.input_artifact_id,populate_existing=True)
+    if row is None or input_row_binding(row)!=staged.input_binding or row.payload_sha256!=task.typed_input_digest:
         raise ToolPackageBlocked("tool_package_input_changed")
-    if authority["pack"]!=pack_binding(task) or authority["runtime"]!=runtime_binding():
-        raise ToolPackageBlocked("tool_package_review_or_profile_changed")
+    expiry=row.expires_at.replace(tzinfo=timezone.utc) if row.expires_at.tzinfo is None else row.expires_at
+    if row.state not in {"bound","consumed"} or expiry<=stamp:
+        raise ToolPackageBlocked("tool_package_input_unavailable")
 
 
 def read_output(reference, sha):
@@ -205,13 +281,46 @@ def binds(task, attempt, run):
             and run.authority_digest==digest(canonical(authority)) and authority["board_task_id"]==task.task_id
             and authority["board_attempt_id"]==attempt.attempt_id and authority["capability_id"]==CAPABILITY
             and authority["pack"]["pack_id"]==PACKAGE_ID and authority["pack"]["version"]=="1.0.0"
-            and authority["pack"]["digest"]==capability_pack_digest(source_package().parent)
+            and len(authority["pack"]["digest"])==64
             and authority["runtime"]["profile"]==PROFILE and authority["no_learning"] is True)
     except (OSError,KeyError,TypeError,ValueError):
         return False
 
 
-def verified_output(task, attempt, run):
+@dataclass(frozen=True)
+class ReadbackStage:
+    seal: object
+    binding: tuple
+    artifact: dict
+    raw: bytes
+
+
+def readback_binding(task,attempt,run):
+    return tuple(tuple(str(getattr(row,column.name)) for column in row.__table__.columns) for row in (task,attempt,run))
+
+
+def stage_readback(task,attempt,run):
+    artifact,raw=verified_output(task,attempt,run)
+    return ReadbackStage(_STAGE_SEAL,readback_binding(task,attempt,run),dict(artifact),raw)
+
+
+@asynccontextmanager
+async def session_authority_guard(db,task,attempt,run):
+    lifecycle=CapabilityPackLifecycle()
+    deadline=run.deadline_at.replace(tzinfo=timezone.utc) if run.deadline_at.tzinfo is None else run.deadline_at
+    with lifecycle._state_lock(shared=True):
+        async with asyncio.timeout(max(0,(deadline-now()).total_seconds())):
+            staged=await stage_authority(db,task,attempt,run,lifecycle=lifecycle,state=bounded_pack_state(lifecycle))
+            yield staged
+
+
+def verified_output(task, attempt, run, *, staged=None):
+    if staged is not None:
+        if staged.seal is not _STAGE_SEAL or staged.binding!=readback_binding(task,attempt,run):
+            raise ToolPackageBlocked("tool_package_staged_readback_changed")
+        return dict(staged.artifact),staged.raw
+    if json.loads(run.declared_authority_json)["pack"]["digest"]!=capability_pack_digest(source_package().parent):
+        raise ToolPackageBlocked("tool_package_package_changed")
     if run.status!="succeeded" or not binds(task,attempt,run):
         raise ToolPackageBlocked("tool_package_native_readback_required")
     from src.work_board.dispatcher import _parse_typed_input
@@ -300,7 +409,8 @@ async def execute(task, attempt, inputs, *, jobs, runner, deadline, admission_on
         effect_id="tool-package-process-"+digest(canonical([request["job_id"],request["fence"]]))[:32],
         target_path=reservation["stage_ref"],target_digest=digest(canonical(reservation)),status="intent",
         details={"no_learning":True,"cleanup_required":True},owner=runner,fencing_token=fence)
-    async def before_dispatch(identity):
+    dispatch_committed=asyncio.Event()
+    async def commit_process(identity,staged):
         from src.work_board.repository import BoardError
         denial=None
         async with jobs._session() as db:
@@ -312,7 +422,8 @@ async def execute(task, attempt, inputs, *, jobs, runner, deadline, admission_on
             if any(item.get("checkpoint_id")=="tool-package:process" for item in records):
                 raise ToolPackageBlocked("tool_package_process_already_started")
             try:
-                await current(db,task,attempt,run)
+                if staged is None:raise ToolPackageBlocked("tool_package_external_staging_denied")
+                await current(db,task,attempt,run,staged=staged)
             except (ToolPackageBlocked,BoardError,OSError) as exc:
                 # Preserve this already launched trusted helper's identity
                 # even when current authority denies package admission.
@@ -326,19 +437,37 @@ async def execute(task, attempt, inputs, *, jobs, runner, deadline, admission_on
                 WorkflowRunState.lease_owner==runner,WorkflowRunState.fencing_token==fence)
                 .values(checkpoint_receipts_json=canonical(records).decode(),revision=run.revision+1))
             if changed.rowcount!=1:raise ToolPackageBlocked("tool_package_native_process_cas_changed")
+        return denial
+
+    async def before_dispatch(identity):
+        denial=None
+        try:
+            async with authority_guard(jobs,task,attempt) as staged:
+                denial=await commit_process(identity,staged)
+        except (ToolPackageBlocked,OSError,ValueError) as exc:
+            # This helper already exists. Even a staging denial must durably
+            # bind its actual identity, without granting package dispatch.
+            denial=await commit_process(identity,None) or exc
         if denial is not None:
             raise ToolPackageBlocked("tool_package_current_authority_denied") from denial
         CapabilityPackLifecycle()._set_local_job_status(spec.identity.job_id,status="running",expected_statuses={"accepted","queued"},
             pack_id=PACKAGE_ID,owner_principal_id=task.owner_principal_id,session_id=task.owner_session_id,
             expected_digest=spec.declared_authority["pack"]["digest"])
+        dispatch_committed.set()
+    with CapabilityPackLifecycle()._state_lock(shared=True):
+        admitted_pack_state=pack_state_digest(bounded_pack_state(CapabilityPackLifecycle()),spec.declared_authority)
     worker=asyncio.create_task(isolated_execute(stage,request,before_dispatch=before_dispatch))
     try:
         while not worker.done():
             done,_=await asyncio.wait({worker},timeout=.2)
             if done:break
+            if not dispatch_committed.is_set():continue
             try:
-                async with jobs._session() as db:
-                    await current(db,task,attempt,await jobs._fetch(db,spec.identity.job_id))
+                async with authority_guard(jobs,task,attempt,full=False) as watched:
+                    if watched.pack_state_digest!=admitted_pack_state:
+                        raise ToolPackageBlocked("tool_package_review_changed")
+                    async with jobs._session() as db:
+                        await current(db,task,attempt,await jobs._fetch(db,spec.identity.job_id),staged=watched)
             except Exception:
                 # Current Root/Goal/package revocation stops the actual owning
                 # controller. It must finish its supervisor readback before
@@ -371,12 +500,13 @@ async def adopt_output(jobs,task,attempt,runner,reference,expected,fence):
     await jobs.record_readback(identity,effect_type="tool_package_output",target_path=reference,target_digest=sha,
         content_sha256=sha,readback_id="tool-package-readback-"+sha[:32],verified_at=now().isoformat(),
         status="succeeded",details={"verified":True,"cleanup_proven":True,"no_learning":True},owner=runner,fencing_token=fence)
-    async def terminal(db,run):
-        await current(db,task,attempt,run)
+    async with authority_guard(jobs,task,attempt) as staged:
         if read_output(reference,sha)!=expected:raise ToolPackageBlocked("tool_package_output_changed")
-    finished=await jobs.transition_job(identity,"succeeded",owner=runner,fencing_token=fence,
-        result={"status":"succeeded","no_learning":True,"output_sha256":sha},
-        result_summary="Isolated fixed JSON formatter; exact physical output and process cleanup verified; no_learning",terminal_authority_check=terminal)
+        async def terminal(db,run):
+            await current(db,task,attempt,run,staged=staged)
+        finished=await jobs.transition_job(identity,"succeeded",owner=runner,fencing_token=fence,
+            result={"status":"succeeded","no_learning":True,"output_sha256":sha},
+            result_summary="Isolated fixed JSON formatter; exact physical output and process cleanup verified; no_learning",terminal_authority_check=terminal)
     CapabilityPackLifecycle()._set_local_job_status(identity,status="succeeded",expected_statuses={"running"},
         pack_id=PACKAGE_ID,owner_principal_id=task.owner_principal_id,session_id=task.owner_session_id,
         expected_digest=pack_binding(task)["digest"],details={"no_learning":True,"cleanup_proven":True,"output_sha256":sha})

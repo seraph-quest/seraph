@@ -92,6 +92,18 @@ Blocked. No alternate ABI or trusted local fallback may be substituted.
 
 One stable capability identity; original authenticated live Root/session, active Goal/revision, task/attempt, package active-pointer/content/authority review, profile/dependency digests, input digest, priority and first absolute deadline bind admission, process launch and terminal adoption. No inference, credentials, network or canonical-memory learning. Immutable declared permissions cannot expand through package fields. Exact idempotent duplicate admission reuses the original job, never starts a second process. Package pause/revoke/quarantine/removal and session/Goal changes fence new launch and late artifact adoption; completed verified output remains read-only history.
 
+Physical input, package, runtime and output proofs are staged outside every
+formatter SQLite writer. The short writer checks only the staged binding and
+canonical owner/session/Goal/task/attempt/lease/fence rows. A shared existing
+lifecycle lock is acquired before staging and the writer, and released after
+the bounded commit: the sole order is lifecycle then SQLite. On an asyncio
+event-loop thread, lifecycle locks use nonblocking process and OS acquisition;
+contention returns an explicit retryable busy conflict instead of blocking the
+loop. Admission and adoption retain the original absolute deadline. The
+watcher checks current canonical authority plus the bounded lifecycle pointer
+binding; it does not repeatedly hash the immutable runtime closure. Full
+physical proofs remain mandatory before dispatch and before adoption.
+
 Reserve one output slot before launch. Nofollow/held-directory write/readback verifies regular file, bounded size, exact package/job/fence and output schema/digest before canonical terminal success and WorkBoard input-consumption CAS. Record process disposition/actual cleanup separately from artifact truth. Restart may adopt an exact previously verified complete reserved output only under original identity/permission/deadline and actual cleanup proof; missing process identity/quiescence stays Blocked/Unknown, never automatic replay. Explicit existing controls inspect/reconcile cleanup, cancel and retry only when original budgets permit; never infer cleanup from an empty in-memory registry.
 
 Actual proof plan: authenticated managed manifest review/approval/activation -> create/Ready/run native job -> enforced real package execution -> independently validated physical output/API/literal UI readback -> reload/restart continued use -> revoke/quarantine -> invocation visibly rejected, with explicit no_learning. File SQLite and private original workspace/DB/runtime/process/artifact receipts retained with source hashes. Actual same-profile adversarial variants cover host fake-secret/sentinel reads, credentials/sockets, network including loopback and Unix sockets, fork/exec/namespace escape, CPU spin, allocation, output flood/many-files/symlink attempts, parent death/cancel/restart cleanup, late result, wrong owner/package version/current Goal/root, digest tamper and exact replay. OS enforcement must cause the denial; mocks or fabricated receipts cannot establish containment. A macOS UI/backend blocked receipt does not establish macOS isolated execution.

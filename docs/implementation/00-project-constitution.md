@@ -81,6 +81,7 @@ The following architecture decisions are normative:
 8. [ADR-008: Portable core and consented context](./decisions/008-portable-core-and-consented-context.md)
 9. [ADR-010: Reviewed artifact pipelines](./decisions/010-reviewed-artifact-pipelines.md)
 10. [ADR-012: Finite durable read-only research](./decisions/012-finite-durable-readonly-research.md)
+11. [ADR-013: Fixed reviewed local tool package](./decisions/013-fixed-reviewed-local-tool-package.md)
 
 Changing a locked decision requires a superseding ADR, a tracked issue, an
 independent Critic/Contrarian review, and updates to every affected active doc.

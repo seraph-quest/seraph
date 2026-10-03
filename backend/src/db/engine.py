@@ -1510,6 +1510,11 @@ async def _ensure_work_board_indexes(conn) -> None:
 async def _ensure_work_board_columns(conn) -> None:
     """Additive columns for existing canonical board workspaces."""
 
+    proposal_result = await conn.exec_driver_sql('PRAGMA table_info(work_board_proposals)')
+    proposal_columns = {row[1] for row in proposal_result.fetchall()}
+    if proposal_columns and 'evidence_use_snapshot_json' not in proposal_columns:
+        await conn.exec_driver_sql('ALTER TABLE work_board_proposals ADD COLUMN evidence_use_snapshot_json VARCHAR')
+
     result = await conn.exec_driver_sql("PRAGMA table_info(work_board_events)")
     event_columns = {row[1] for row in result.fetchall()}
     for column in ("mutation_idempotency_key", "mutation_request_digest"):

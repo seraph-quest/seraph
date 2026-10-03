@@ -267,6 +267,7 @@ def _proposal_request_digest(
     task: WorkBoardTask,
     kind: str,
     idempotency_key: str,
+    evidence_snapshot: Any = None,
 ) -> str:
     return _proposal_digest(
         {
@@ -278,6 +279,7 @@ def _proposal_request_digest(
             "idempotency_key": idempotency_key,
             "title_digest": hashlib.sha256((task.title or "").encode("utf-8")).hexdigest(),
             "body_digest": hashlib.sha256((task.body or "").encode("utf-8")).hexdigest(),
+            **({'evidence_snapshot_digest': _proposal_digest(evidence_snapshot)} if evidence_snapshot is not None else {}),
         }
     )
 
@@ -559,6 +561,7 @@ def _failed_pre_contact_admission_matches(
     immutable binding, failure reason, deadline, attempts, and effect ledger
     all agree.  Unknown or provider-shaped failures remain reconciliation-only.
     """
+    from src.memory.evidence_proposal import stored_snapshot
 
     if proposal.provider_contact_started or proposal.provider_contact_state != "not_started":
         return False
@@ -622,6 +625,7 @@ def _failed_pre_contact_admission_matches(
                 task=task,
                 kind=proposal.kind,
                 idempotency_key=proposal.idempotency_key,
+                evidence_snapshot=stored_snapshot(proposal),
             )
             or proposal.input_digest != _proposal_input_digest(task=task, kind=proposal.kind)
         ):
@@ -1659,6 +1663,8 @@ def _proposal_has_staged_output(proposal: WorkBoardProposal) -> bool:
         "proposed_tasks": payload.get("proposed_tasks"),
         "proposed_links": payload.get("proposed_links"),
         "blocked_reason": payload.get("blocked_reason"),
+        **({'evidence_snapshot_digest': payload['evidence_snapshot_digest']}
+           if 'evidence_snapshot_digest' in payload else {}),
     }
     return _proposal_digest(canonical) == proposal.proposal_digest
 
@@ -1755,6 +1761,11 @@ async def create_proposal(
     except BoardError as exc:
         route_id, capability_version = _PROPOSAL_ROUTE, "unavailable"
         route_error = exc.code
+    from src.memory.evidence_proposal import stage_context, recheck_context, stored_snapshot
+    async with get_session() as preflight_db:
+        evidence_task = await repository._owned_task(preflight_db, owner, task_id)
+        staged_evidence, evidence_snapshot = await stage_context(preflight_db, owner,
+            evidence_task, 'proposal-evidence-stage', operator=operator)
     async with get_session() as db:
         # Serialize proposal reservation against dispatcher promotion. A
         # pending or proposed triage request keeps this exact task revision
@@ -1765,6 +1776,7 @@ async def create_proposal(
             raise BoardRevisionConflict(task.task_id, request.expected_revision, task.task_revision)
         if task.status not in {WorkBoardStatus.triage, WorkBoardStatus.todo}:
             raise BoardError("triage_not_allowed", "Specify and Decompose are available only before execution", status_code=409)
+        await recheck_context(db, owner, task, staged_evidence, evidence_snapshot)
         if kind == "decompose":
             await _validate_decompose_source(
                 db,
@@ -1785,6 +1797,7 @@ async def create_proposal(
                 task=task,
                 kind=kind,
                 idempotency_key=request.idempotency_key,
+                evidence_snapshot=evidence_snapshot,
             )
             if existing.request_digest != expected_digest:
                 raise BoardError(
@@ -1868,6 +1881,7 @@ async def create_proposal(
                 task=task,
                 kind=kind,
                 idempotency_key=request.idempotency_key,
+                evidence_snapshot=evidence_snapshot,
             )
             input_digest = _proposal_input_digest(task=task, kind=kind)
             proposal = WorkBoardProposal(
@@ -1879,6 +1893,7 @@ async def create_proposal(
                 kind=kind,
                 idempotency_key=request.idempotency_key,
                 request_digest=request_digest,
+                evidence_use_snapshot_json=json.dumps(evidence_snapshot, sort_keys=True, separators=(',', ':')),
                 capability_id=_PROPOSAL_CAPABILITY,
                 capability_version=capability_version,
                 authority_digest=_authority_digest(owner, task, route_id, capability_version),
@@ -1991,8 +2006,15 @@ async def create_proposal(
                 return _blocked_payload(proposal, "proposal_admission_reconciliation_required")
         job_id, lease_owner, fence = job_binding
         marker_lost = False
+        from src.memory.evidence_proposal import stage_proposal_context
+        async with get_session() as evidence_db:
+            current_proposal = await _get_proposal(evidence_db, owner, proposal_id)
+            current_task = await repository._owned_task(evidence_db, owner, task_snapshot.task_id)
+            contact_staged, contact_snapshot = await stage_proposal_context(evidence_db,
+                owner, current_task, current_proposal)
         async with get_session() as db:
             await _begin_sqlite_immediate(db)
+            proposal = await _get_proposal(db, owner, proposal_id, transaction_locked=True)
             current_task = await repository._owned_task(db, owner, task_snapshot.task_id)
             if (
                 current_task.task_revision != proposal.parent_revision
@@ -2016,11 +2038,13 @@ async def create_proposal(
                     "The governed route or goal authority changed before provider contact",
                     status_code=409,
                 )
-            from src.memory.evidence_working_set import record_evidence_use, verify_evidence_use
+            from src.memory.evidence_working_set import record_evidence_use
 
             prompt_data = json.loads(prepared_prompt[0][1]["content"])
-            await verify_evidence_use(db, owner, task_snapshot.task_id, job_id,
-                                      prompt_data.get("evidence_data"), operator=operator, record_use=False)
+            if stored_snapshot(proposal) != contact_snapshot:
+                raise BoardError('proposal_evidence_stale', 'Canonical proposal evidence changed before contact', status_code=409)
+            await recheck_context(db, owner, current_task, contact_staged, contact_snapshot,
+                prepared_context=prompt_data.get('evidence_data'))
             marker_now = _now()
             claimed = await db.execute(
                 update(WorkBoardProposal)
@@ -2096,6 +2120,7 @@ async def create_proposal(
             "proposed_tasks": tasks,
             "proposed_links": links,
             "blocked_reason": None,
+            **({'evidence_snapshot_digest': _proposal_digest(evidence_snapshot)} if evidence_snapshot is not None else {}),
         }
         digest = _proposal_digest(canonical)
         async with get_session() as db:
@@ -2166,6 +2191,7 @@ async def accept_proposal(
     request: WorkBoardProposalAccept,
 ) -> dict[str, Any]:
     repository = WorkBoardRepository()
+    from src.memory.evidence_proposal import stage_proposal_context, recheck_context, stored_snapshot
     # Recheck capability authority before taking SQLite's immediate writer
     # lock. The provider-free preflight reads the canonical goal and adapter
     # state through their existing repositories; doing those reads under the
@@ -2233,6 +2259,8 @@ async def accept_proposal(
         preview_proposal_json = str(preview_proposal.proposal_json or "")
         authority_preview_revision = preview_proposal.revision
         authority_preview_digest = str(preview_proposal.proposal_digest or "")
+        acceptance_staged, acceptance_snapshot = await stage_proposal_context(preview_db,
+            owner, preview_parent, preview_proposal)
     preview_payload = _decode_json(preview_proposal_json)
     preview_tasks = preview_payload.get("proposed_tasks")
     if not isinstance(preview_tasks, list) or any(not isinstance(item, Mapping) for item in preview_tasks):
@@ -2241,6 +2269,7 @@ async def accept_proposal(
         preview_tasks,
         parent=preview_parent_snapshot,
     )
+    _validate_proposed_typed_inputs(preview_tasks, parent=preview_parent_snapshot)
 
     async with get_session() as db:
         # Serialize the full validation and materialization window.  The
@@ -2286,6 +2315,10 @@ async def accept_proposal(
             raise BoardError("task_not_found", "The proposal parent task no longer exists", status_code=404)
         if parent.task_revision != request.expected_parent_revision or parent.task_revision != proposal.parent_revision:
             raise BoardRevisionConflict(parent.task_id, request.expected_parent_revision, parent.task_revision)
+        if stored_snapshot(proposal) != acceptance_snapshot:
+            raise BoardError('proposal_evidence_stale', 'Proposal evidence changed after physical staging', status_code=409)
+        if proposal.evidence_use_snapshot_json is not None:
+            await recheck_context(db, owner, parent, acceptance_staged, acceptance_snapshot)
         # Re-read the goal revision and owner before task creation.  The
         # repository performs the same check for every child task.
         if parent.goal_revision != proposal.goal_revision:
@@ -2320,7 +2353,10 @@ async def accept_proposal(
         ):
             raise BoardError("proposal_binding_conflict", "The proposal authority binding is stale", status_code=409)
         try:
-            durable_job = await durable_job_repository.get_job(proposal.admission_job_id)
+            # Compare the actual canonical job in this same writer, without
+            # opening another job repository session under SQLite's lock.
+            from src.workflows.job_runtime import _serialize
+            durable_job = _serialize(await durable_job_repository._fetch(db, proposal.admission_job_id))
         except Exception as exc:
             raise BoardError(
                 "proposal_job_reconciliation_required",
@@ -2342,6 +2378,8 @@ async def accept_proposal(
             "proposed_tasks": tasks,
             "proposed_links": links,
             "blocked_reason": payload.get("blocked_reason"),
+            **({'evidence_snapshot_digest': payload['evidence_snapshot_digest']}
+               if 'evidence_snapshot_digest' in payload else {}),
         }
         if proposal.proposal_digest != _proposal_digest(canonical):
             raise BoardError(
@@ -2376,7 +2414,8 @@ async def accept_proposal(
         # Do this before the first child INSERT.  A syntactically safe model
         # reference is not an executable input until the canonical workspace
         # file, digest, envelope, and registered capability schema all pass.
-        _validate_proposed_typed_inputs(tasks, parent=parent)
+        if acceptance_snapshot is not None and payload.get('evidence_snapshot_digest') != _proposal_digest(acceptance_snapshot):
+            raise BoardError('proposal_evidence_stale', 'The output digest does not bind its actual source snapshot', status_code=409)
         await _validate_proposal_authority_preview(
             tasks,
             parent=parent,

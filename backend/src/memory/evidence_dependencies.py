@@ -97,12 +97,14 @@ class StagedEvidence:
     goal_id: str
     goal_revision: int
     goal_status: str
+    context_only: bool = False
 
     def snapshot(self) -> dict[str, Any]:
         value = {'schema': 'work.evidence-execution.v1', 'task_id': self.task_id,
                  'task_revision': self.task_revision, 'task_capability': self.task_capability,
                  'goal_id': self.goal_id, 'goal_revision': self.goal_revision,
                  'goal_status': self.goal_status, 'packet_revision': self.packet_revision,
+                 'context_only': self.context_only,
                  'packet_digest': self.packet_digest,
                  'sources': [{'source_id': item.source_id, 'source_kind': item.source_kind,
                      'canonical_source_id': item.canonical_source_id, 'source_digest': item.source_digest,
@@ -189,9 +191,13 @@ async def _cpu_browser_permission(db, owner: WorkBoardOwner, task: WorkBoardTask
 
 async def canonical_source_token(db, owner: WorkBoardOwner, task: WorkBoardTask,
                                  source_kind: str, canonical_id: str,
-                                 lineage: dict[str, Any] | None = None) -> dict[str, Any]:
+                                 lineage: dict[str, Any] | None = None, *, context_only=False) -> dict[str, Any]:
     """Pure canonical DB checks, safe inside an existing immediate writer."""
-    _require_pair(source_kind, task.capability_id)
+    if context_only:
+        if source_kind not in {'canonical_memory', *PRODUCERS}:
+            raise BoardError('evidence_dependency_unsupported', 'This source cannot supply a reviewed canonical proposal snapshot', status_code=409)
+    else:
+        _require_pair(source_kind, task.capability_id)
     goal = await _goal(db, owner, task)
     identity = {'owner_principal_id': owner.principal_id, 'owner_session_id': owner.session_id,
                 'goal_id': task.goal_id, 'goal_revision': max(int(goal.revision or 1), 1),
@@ -273,10 +279,10 @@ async def canonical_source_token(db, owner: WorkBoardOwner, task: WorkBoardTask,
 
 
 async def stage_packet(db, owner: WorkBoardOwner, task: WorkBoardTask,
-                       packet: dict[str, Any], *, operator=None) -> StagedEvidence:
+                       packet: dict[str, Any], *, operator=None, context_only=False) -> StagedEvidence:
     """Stage existing eligibility, redaction and bounded actual file bytes."""
     from src.memory.evidence_working_set import _digest, _sources
-    if (task.capability_id not in CONSUMERS or len(packet.get('citations', [])) > MAX_DEPENDENCIES
+    if ((not context_only and task.capability_id not in CONSUMERS) or len(packet.get('citations', [])) > MAX_DEPENDENCIES
         or not packet.get('citations')):
         raise BoardError('evidence_dependency_unsupported', 'Select one to sixteen eligible execution sources for a supported consumer', status_code=409)
     goal = await _goal(db, owner, task)
@@ -299,7 +305,7 @@ async def stage_packet(db, owner: WorkBoardOwner, task: WorkBoardTask,
         if _digest('\n'.join(lines[start-1:end]).encode()) != citation['span_digest']:
             raise _changed()
         token = await canonical_source_token(db, owner, task, source['source_kind'], source['identifier'],
-                                             source.get('canonical_binding'))
+                                             source.get('canonical_binding'), context_only=context_only)
         if token.get('upstream_permission') is not None:
             from src.memory.evidence_working_set import _read_file
             for ancestor in token['upstream_permission']['ancestors']:
@@ -314,7 +320,7 @@ async def stage_packet(db, owner: WorkBoardOwner, task: WorkBoardTask,
         resolved.append(ResolvedSource(citation['source_id'], source['source_kind'], source['identifier'],
             citation['source_digest'], citation['span_digest'], start, end, citation['version'], serialized))
     staged = StagedEvidence(task.task_id, task.task_revision, packet['revision'], packet['digest'], tuple(resolved), task.capability_id,
-        goal.id, goal_revision, goal_status)
+        goal.id, goal_revision, goal_status, context_only)
     staged.snapshot()
     return staged
 
@@ -346,10 +352,24 @@ async def recheck_staged(db, owner: WorkBoardOwner, task: WorkBoardTask, staged:
         or metadata.get('packet_revision') != staged.packet_revision
         or metadata.get('packet_digest') != staged.packet_digest):
         raise _changed()
+    if staged.context_only:
+        adopted = await db.scalar(select(WorkBoardEvent).where(
+            WorkBoardEvent.task_id == task.task_id,
+            WorkBoardEvent.owner_principal_id == owner.principal_id,
+            WorkBoardEvent.owner_session_id == owner.session_id,
+            WorkBoardEvent.kind.in_(['task.evidence.adopted', 'task.evidence.revoked'])
+        ).order_by(WorkBoardEvent.event_id.desc()).limit(1))
+        consent = _json(adopted.metadata_json) if adopted else None
+        if (adopted is None or adopted.kind != 'task.evidence.adopted'
+            or not isinstance(consent, dict) or consent.get('packet_revision') != staged.packet_revision
+            or consent.get('packet_digest') != staged.packet_digest
+            or consent.get('task_revision') != staged.task_revision):
+            raise _changed()
     for source in staged.sources:
         expected = source.token()
         current = await canonical_source_token(db, owner, task, source.source_kind,
-                                               source.canonical_source_id, expected.get('lineage'))
+                                               source.canonical_source_id, expected.get('lineage'),
+                                               context_only=staged.context_only)
         if current != expected:
             raise _changed()
 

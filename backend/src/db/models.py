@@ -1680,6 +1680,8 @@ class WorkBoardProposal(SQLModel, table=True):
     status: str = Field(default="pending_inference", index=True)
     proposal_json: str = Field(default="{}")
     proposal_digest: str = Field(default="", index=True)
+    # Server-resolved text-free actually used evidence; NULL is historical.
+    evidence_use_snapshot_json: Optional[str] = Field(default=None)
     estimated_cost: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=_now, index=True)
     expires_at: datetime = Field(index=True)

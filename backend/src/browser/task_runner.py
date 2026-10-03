@@ -2147,17 +2147,21 @@ class BrowserTaskRunner:
             if state.request_receipt_events >= BROWSER_MAX_REQUESTS:
                 self._mark_receipt_limit(state, "receipt_limit")
                 raise self._receipt_limit_error(state)
-            if not state.network_checkpointed:
-                state.network_checkpointed = True
-                await self._checkpoint(
-                    state,
-                    checkpoint_id="network-dispatch",
-                    payload={
-                        "phase": "network_dispatch",
-                        "request_count": state.request_dispatches,
-                        "action_index": state.current_action_index,
-                    },
-                )
+            # Every admitted subrequest repeats the canonical dependency
+            # guard in the same native checkpoint transaction. Updating the
+            # stable marker retains dispatch truth within the existing cap:
+            # at most 32 progress markers plus nine action markers remain.
+            await self._checkpoint(
+                state,
+                checkpoint_id="network-dispatch",
+                payload={
+                    "phase": "network_dispatch",
+                    "request_count": state.request_dispatches,
+                    "request_dispatch_count": state.request_dispatches + 1,
+                    "action_index": state.current_action_index,
+                },
+            )
+            state.network_checkpointed = True
             state.request_dispatches += 1
             state.network_dispatched = True
 
@@ -2180,15 +2184,41 @@ class BrowserTaskRunner:
             state.request_receipts.append(self._safe_request_receipt(receipt))
             state.request_receipt_events += 1
             state.request_count = len(state.request_receipts)
-            await self._checkpoint(
-                state,
-                checkpoint_id=f"network-progress-{state.request_count}",
-                payload={
-                    "phase": "network_progress",
-                    "request_count": state.request_count,
-                    "action_index": state.current_action_index,
-                },
-            )
+            try:
+                await self._checkpoint(
+                    state,
+                    checkpoint_id=f"network-progress-{state.request_count}",
+                    payload={
+                        "phase": "network_progress",
+                        "request_count": state.request_count,
+                        "action_index": state.current_action_index,
+                    },
+                )
+            except Exception as exc:
+                from src.work_board.repository import BoardError
+                if isinstance(exc, BoardError) and exc.code == "evidence_dependency_stale":
+                    # A correction can follow admitted contact. Preserve the
+                    # actual callback as observation only; the rejected guard
+                    # still terminates use. This existing effect path enforces
+                    # the original Goal, deadline, lease, revision and fence.
+                    recorded = await self.jobs.record_effect(
+                        state.job_id,
+                        effect_id=f"browser-network-observation:{state.job_id}:{state.request_count}",
+                        effect_type="browser_network_observation",
+                        status="succeeded",
+                        details={
+                            "observation_only": True,
+                            "request_count": state.request_count,
+                            "request_dispatch_count": state.request_dispatches,
+                            "request_receipt": state.request_receipts[-1],
+                            "memory_status": "no_learning",
+                        },
+                        owner=state.lease_owner,
+                        fencing_token=state.fencing_token,
+                        expected_revision=state.revision,
+                    )
+                    state.revision = int(recorded.get("revision") or state.revision)
+                raise
 
     @staticmethod
     def _mark_receipt_limit(state: "_ExecutionState", code: str) -> None:

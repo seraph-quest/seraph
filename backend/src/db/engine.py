@@ -901,6 +901,10 @@ async def _ensure_telegram_transport_columns(conn) -> None:
     after lease/readback hardening lands.
     """
     definitions = {
+        "telegram_task_callbacks": {
+            "workflow_run_id": "VARCHAR",
+            "workflow_binding_digest": "VARCHAR",
+        },
         "telegram_transport_states": {
             "last_update_at": "DATETIME",
             "last_error": "VARCHAR",

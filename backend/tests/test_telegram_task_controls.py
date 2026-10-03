@@ -1,5 +1,6 @@
 """Actual auth/SQLite/Work/outbox with synthetic Telegram HTTP only."""
 import json
+import asyncio
 from datetime import timedelta
 from unittest.mock import patch
 
@@ -11,12 +12,22 @@ from config.settings import settings
 from src.app import create_app
 from src.approval.repository import approval_repository
 from src.db.models import (ApprovalRequest, TelegramTaskCallback, TelegramTransportOutbox,
-    TelegramTransportState, WorkBoardTask)
+    TelegramTransportState, WorkBoardAttempt, WorkBoardEvent, WorkBoardTask, WorkflowRunState)
 from src.extensions.telegram_task_controls import now
 from src.extensions.telegram_transport import TelegramTransportAdapter
-from tests.test_first_result_setup import authenticated_setup_operator, setup_workspace
+from tests.test_first_result_setup import authenticated_setup_operator, setup_workspace, create_snapshot
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.parametrize("async_db", ["file"], indirect=True)]
+
+
+@pytest.fixture(autouse=True)
+def no_live_http(monkeypatch):
+    async def deny_async(*args, **kwargs):
+        raise AssertionError("Unintercepted live HTTP is forbidden in Telegram control proof")
+    def deny_sync(*args, **kwargs):
+        raise AssertionError("Unintercepted live HTTP is forbidden in Telegram control proof")
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", deny_async)
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", deny_sync)
 
 
 class SyntheticTelegramHTTP:
@@ -215,3 +226,142 @@ async def test_deny_and_nonce_roll_back_together_and_ack_loss_never_replays(clie
     assert replay.status_code == 200 and replay.json()["outbox_id"] == response.json()["outbox_id"]
     assert (await approval_repository.get(approval.id)).status == "denied"
     await boundary.http.aclose()
+
+
+@pytest.mark.parametrize("change", ["authenticated_owner", "root", "large_payload", "rate", "concurrent_nonce"])
+async def test_current_root_owner_and_finite_callback_admission(client, async_db, setup_workspace, monkeypatch, change):
+    boundary, adapter, task, approval = await prepare(client, async_db, monkeypatch)
+    await review(client, boundary, task)
+    deny = callback(boundary, 1, update_id=2, query_id="deny-a")
+    if change == "authenticated_owner":
+        login = await client.post("/api/auth/login", json={"password": "first-result-test-secret", "start_new_scope": True})
+        assert login.status_code == 200, login.text
+    elif change == "root":
+        replacement = setup_workspace / "replacement-root"
+        replacement.mkdir()
+        monkeypatch.setattr(settings, "workspace_dir", str(replacement))
+    elif change == "large_payload":
+        deny["ignored_payload"] = "x" * 8192
+    elif change == "rate":
+        # Drive actual successful Review callbacks; no rate receipt is seeded.
+        for index in range(19):
+            await send_notice(client, task, key=f"rate-{index}")
+            response = await client.post("/api/telegram/updates", json=callback(boundary,
+                len(boundary.messages)-1, update_id=index+2, query_id=f"review-{index}"))
+            assert response.status_code == 200, response.text
+        await send_notice(client, task, key="rate-rejected")
+        deny = callback(boundary, len(boundary.messages)-1, update_id=30, query_id="rate-rejected")
+    elif change == "concurrent_nonce":
+        sibling = {**deny, "callback_query": {**deny["callback_query"], "id": "competing-query"}}
+        responses = await asyncio.gather(client.post("/api/telegram/updates", json=deny),
+            client.post("/api/telegram/updates", json=sibling))
+        assert sum(response.status_code == 200 for response in responses) == 1
+        assert (await approval_repository.get(approval.id)).status == "denied"
+        async with async_db() as db:
+            rows = (await db.execute(select(TelegramTaskCallback).where(TelegramTaskCallback.effect == "deny"))).scalars().all()
+            assert sum(row.status == "consumed" for row in rows) == 1
+        await boundary.http.aclose()
+        return
+    refused = await client.post("/api/telegram/updates", json=deny)
+    assert refused.status_code != 200, refused.text
+    assert (await approval_repository.get(approval.id)).status == "pending"
+    await boundary.http.aclose()
+
+
+@pytest.mark.parametrize("mode", ["cancel", "unknown", "fence_changed"])
+async def test_native_original_cancel_intent_and_restart_readback(client, async_db, setup_workspace, monkeypatch, mode):
+    """Real task admission/child lease, cancellation/cleanup/tree and persisted readback.
+
+    Pause only the native workflow invocation before local effects so the
+    operator can inspect its admitted original attempt. No job/task/effect
+    receipt is seeded. Unknown mode loses the cleanup response after the real
+    durable job tree cancellation, preserving uncertainty rather than replay.
+    """
+    boundary, adapter, _, _ = await prepare(client, async_db, monkeypatch)
+    goal, task = await create_snapshot(client, journey=f"telegram-cancel-{mode.replace('_', '-')}")
+    from src.work_board.dispatcher import WorkBoardDispatcher
+    from src.guardian.goal_snapshot_to_file import GoalSnapshotToFileAdapter, GoalSnapshotToFileService
+    from src.workflows.job_runtime import durable_job_repository
+    dispatcher = WorkBoardDispatcher(session_provider=async_db)
+    monkeypatch.setattr("src.api.work_board.dispatcher", dispatcher)
+    invoked = asyncio.Event()
+    async def pause_native_invocation(self, *args, **kwargs):
+        invoked.set()
+        await asyncio.Event().wait()
+    if mode == "cancel":
+        # Parent admitted/leased, child dispatch not entered: cleanup can prove
+        # cancellation with no child external-effect uncertainty.
+        monkeypatch.setattr(GoalSnapshotToFileService, "run", pause_native_invocation)
+    else:
+        monkeypatch.setattr(GoalSnapshotToFileAdapter, "_invoke_workflow", pause_native_invocation)
+    worker = asyncio.create_task(dispatcher.run_pass())
+    try:
+        await asyncio.wait_for(invoked.wait(), timeout=15)
+        detail = (await client.get(f"/api/work-board/tasks/{task['task_id']}")).json()
+        task = detail["task"]
+        assert task["status"] == "running", detail
+        attempt_id = detail["attempts"][0]["attempt_id"]
+        job_id = detail["attempts"][0]["workflow_run_id"]
+        async with async_db() as db:
+            run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == job_id))
+            children = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.parent_job_id == job_id))).scalars().all()
+            assert run.status == "running" and run.lease_owner and run.fencing_token > 0
+            if mode == "cancel":
+                assert children == []
+            else:
+                assert children and any(child.status == "running" for child in children)
+        await send_notice(client, task)
+        # prepare() has not delivered anything; this is the first notice.
+        review_response = await client.post("/api/telegram/updates", json=callback(boundary, 0))
+        assert review_response.status_code == 200, review_response.text
+        delivered = await client.post(f"/api/telegram/outbox/{review_response.json()['outbox_id']}/deliver")
+        assert delivered.status_code == 200, delivered.text
+        cancel_callback = callback(boundary, 1, update_id=2, query_id="native-cancel")
+        cleanup_calls = []
+        original_cancel_tree = durable_job_repository.cancel_job_tree
+        async def cancel_tree(*args, **kwargs):
+            cleanup_calls.append(args[0])
+            receipt = await original_cancel_tree(*args, **kwargs)
+            if mode == "unknown":
+                raise TimeoutError("synthetic cleanup response loss after actual cancellation")
+            return receipt
+        monkeypatch.setattr(durable_job_repository, "cancel_job_tree", cancel_tree)
+        if mode == "fence_changed":
+            async with async_db() as db:
+                attempt = await db.get(WorkBoardAttempt, attempt_id)
+                attempt.fencing_token += 1
+                db.add(attempt)
+        response = await client.post("/api/telegram/updates", json=cancel_callback)
+        if mode == "fence_changed":
+            assert response.status_code != 200, response.text
+            async with async_db() as db:
+                attempt = await db.get(WorkBoardAttempt, attempt_id)
+                callback_row = await db.scalar(select(TelegramTaskCallback).where(TelegramTaskCallback.effect == "cancel"))
+                assert attempt.cancel_requested_at is None and callback_row.status == "pending"
+            assert cleanup_calls == []
+            return
+        assert response.status_code == 200, response.text
+        assert response.json()["status"] == ("unknown" if mode == "unknown" else "cancelled")
+        assert response.json()["memory_status"] == "no_learning"
+        async with async_db() as db:
+            events = (await db.execute(select(WorkBoardEvent).where(WorkBoardEvent.task_id == task["task_id"],
+                WorkBoardEvent.kind == "attempt.cancel_requested"))).scalars().all()
+            assert len(events) == 1
+            callback_row = await db.scalar(select(TelegramTaskCallback).where(TelegramTaskCallback.effect == "cancel"))
+            assert json.loads(events[0].metadata_json)["request_identity"] == callback_row.id
+            assert callback_row.status == ("cancel_intent" if mode == "unknown" else "consumed")
+        calls_before_restart = list(cleanup_calls)
+        monkeypatch.setattr("src.api.telegram.default_telegram_transport", TelegramTransportAdapter(transport=boundary))
+        client._transport = httpx.ASGITransport(app=create_app())
+        replay = await client.post("/api/telegram/updates", json=cancel_callback)
+        assert replay.status_code == 200, replay.text
+        assert replay.json()["status"] == response.json()["status"]
+        assert cleanup_calls == calls_before_restart
+        readback = (await client.get(f"/api/work-board/tasks/{task['task_id']}")).json()
+        assert readback["task"]["block_kind"] == ("unknown_effect" if mode == "unknown" else "cancelled")
+        assert readback["attempts"][0]["attempt_id"] == attempt_id
+        assert not (setup_workspace / f"artifacts/first-result/telegram-cancel-{mode}.md").exists()
+    finally:
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+        await boundary.http.aclose()

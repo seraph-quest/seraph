@@ -2025,6 +2025,8 @@ class WorkBoardRepository:
                 "task_revision": task.task_revision,
                 "recovery_action": "reconcile_external_effect",
                 "request_identity": request_identity,
+                "board_fence": attempt.fencing_token,
+                "lease_owner": attempt.lease_owner,
             },
             actor_principal_id=actor_principal_id or owner.principal_id,
             actor_session_id=actor_session_id or owner.session_id,

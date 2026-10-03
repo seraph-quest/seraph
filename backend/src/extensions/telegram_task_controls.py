@@ -31,6 +31,7 @@ NOTICE = "A Seraph task needs attention. Review its current status."
 PREFIX = "stc1:"
 TTL_SECONDS = 300
 MAX_DETAIL_BYTES = 1024
+MAX_CALLBACK_BYTES = 8192
 
 
 class TaskControlResult(BaseModel):
@@ -74,7 +75,15 @@ def effect_digest(row):
         row.transit_reference, row.actor_id, row.chat_id, row.root_digest,
         row.task_id, row.task_revision, row.goal_id, row.goal_revision, row.effect,
         row.approval_id, row.approval_digest, row.attempt_id, row.board_fence,
-        row.lease_owner, row.outbox_id, row.nonce_digest, row.expires_at])
+        row.lease_owner, row.workflow_run_id, row.workflow_binding_digest,
+        row.outbox_id, row.nonce_digest, row.expires_at])
+
+
+def workflow_binding_digest(run):
+    return digest([run.run_identity, run.owner_principal_id, run.owner_kind,
+        run.operator_session_id, run.goal_id, run.goal_revision, run.job_kind,
+        run.capability_version, run.input_digest, run.authority_digest,
+        run.declared_authority_json, run.run_fingerprint])
 
 
 async def current(db, owner: str, session: str):
@@ -137,12 +146,14 @@ async def approval_for_task(db, task, approval_id=None):
         # Native job authority provides the canonical link when approval details
         # do not duplicate the board identifier.
         for job_id in job_ids:
-            job = await db.get(WorkflowRunState, job_id)
+            job = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == job_id))
             if job is None or job.owner_principal_id != task.owner_principal_id:
                 continue
             try:
                 authority = json.loads(job.declared_authority_json or "{}")
             except (TypeError, ValueError):
+                continue
+            if not isinstance(authority, dict):
                 continue
             linked = linked or (authority.get("board_task_id") == task.task_id
                 and (authority.get("approval_id") == approval.id
@@ -166,10 +177,16 @@ class TelegramTaskControls:
     async def _mint(self, db, pairing, task, outbox, effect, *, approval=None, attempt=None):
         wire = PREFIX + secrets.token_urlsafe(32)
         expiry = now() + timedelta(seconds=TTL_SECONDS)
+        auth = await db.get(OperatorSession, task.owner_session_id)
         for value in [pairing.pairing_expires_at, pairing.transit_consent_expires_at,
-                      approval.expires_at if approval else None]:
+                      approval.expires_at if approval else None,
+                      auth.idle_expires_at, auth.absolute_expires_at]:
             if value:
                 expiry = min(expiry, aware(value))
+        workflow = await db.scalar(select(WorkflowRunState).where(
+            WorkflowRunState.run_identity == attempt.workflow_run_id)) if attempt else None
+        if attempt and workflow is None:
+            fail("telegram_cancel_binding_changed")
         row = TelegramTaskCallback(nonce_digest=digest(wire),
             owner_principal_id=task.owner_principal_id, operator_session_id=task.owner_session_id,
             pairing_id=pairing.pairing_id, transit_reference=pairing.transit_consent_reference,
@@ -179,6 +196,8 @@ class TelegramTaskControls:
             effect_digest="", approval_id=approval.id if approval else None,
             approval_digest=approval_decision_digest(approval) if approval else None,
             attempt_id=attempt.attempt_id if attempt else None,
+            workflow_run_id=attempt.workflow_run_id if attempt else None,
+            workflow_binding_digest=workflow_binding_digest(workflow) if workflow else None,
             board_fence=attempt.fencing_token if attempt else None,
             lease_owner=attempt.lease_owner if attempt else None, expires_at=expiry)
         row.effect_digest = effect_digest(row)
@@ -278,7 +297,7 @@ class TelegramTaskControls:
                 f"Decision: {payload['status']}. Sensitive details, approval and recovery require the cockpit.")
         if len(text.encode()) > MAX_DETAIL_BYTES:
             fail("telegram_detail_too_large")
-        outbox = TelegramTransportOutbox(idempotency_key=f"telegram-task-result:{row.id}",
+        outbox = TelegramTransportOutbox(idempotency_key=f"telegram-task-result:{row.id}:{payload['status']}",
             payload_digest=digest([row.id, payload]), owner_principal_id=row.owner_principal_id,
             operator_session_id=row.operator_session_id, chat_id=row.chat_id,
             session_id=original.session_id, conversation_id=original.conversation_id,
@@ -314,6 +333,11 @@ class TelegramTaskControls:
         return payload
 
     async def callback(self, payload, *, owner_principal_id, operator_session_id):
+        try:
+            if len(json.dumps(payload, ensure_ascii=True).encode()) > MAX_CALLBACK_BYTES:
+                fail("telegram_callback_too_large")
+        except (TypeError, ValueError, RecursionError):
+            fail("telegram_callback_invalid")
         query = payload.get("callback_query")
         if (not isinstance(query, dict) or not isinstance(query.get("id"), str)
             or not 1 <= len(query["id"]) <= 128 or query.get("inline_message_id")
@@ -382,6 +406,11 @@ class TelegramTaskControls:
                     or guarded.lease_owner != actual_attempt.lease_owner
                     or actual_attempt.cancel_requested_at is not None):
                     fail("telegram_cancel_binding_changed")
+                workflow = await db.scalar(select(WorkflowRunState).where(
+                    WorkflowRunState.run_identity == actual_attempt.workflow_run_id))
+                if (workflow is None or actual_attempt.workflow_run_id != guarded.workflow_run_id
+                    or workflow_binding_digest(workflow) != guarded.workflow_binding_digest):
+                    fail("telegram_cancel_binding_changed")
                 await self._claim(db, guarded, query, payload["update_id"], request_digest)
                 guarded.status = "cancel_intent"
                 guarded.result_json = json.dumps(result(actual_task, status="unknown", effect="cancel"))
@@ -405,16 +434,28 @@ class TelegramTaskControls:
         attempt = await db.scalar(select(WorkBoardAttempt).where(
             WorkBoardAttempt.task_id == task.task_id, WorkBoardAttempt.attempt_id == row.attempt_id))
         if (attempt is None or attempt.cancel_requested_at is None
-            or attempt.fencing_token != row.board_fence or attempt.lease_owner != row.lease_owner):
+            or attempt.fencing_token != row.board_fence
+            or attempt.workflow_run_id != row.workflow_run_id
+            or (attempt.ended_at is None and attempt.lease_owner != row.lease_owner)):
             fail("telegram_cancel_binding_changed")
         events = (await db.execute(select(WorkBoardEvent).where(
             WorkBoardEvent.task_id == task.task_id,
             WorkBoardEvent.kind == "attempt.cancel_requested"))).scalars().all()
-        if not any(json.loads(event.metadata_json or "{}").get("request_identity") == row.id
-                   for event in events):
+        def exact_intent(event):
+            metadata = json.loads(event.metadata_json or "{}")
+            return (metadata.get("request_identity") == row.id
+                and metadata.get("attempt_id") == row.attempt_id
+                and metadata.get("board_fence") == row.board_fence
+                and metadata.get("workflow_run_id") == row.workflow_run_id
+                and metadata.get("lease_owner") == row.lease_owner)
+        if not any(exact_intent(event) for event in events):
             fail("telegram_cancel_intent_unverified")
-        if attempt.ended_at is None or task.block_kind == "unknown_effect":
-            return result(task, status="unknown", effect="cancel")
+        if (attempt.ended_at is None or task.status is not WorkBoardStatus.blocked
+            or task.block_kind != "cancelled" or attempt.outcome != "cancelled"):
+            prior = json.loads(row.result_json)
+            if prior.get("status") == "unknown" and prior.get("outbox_id"):
+                return {**prior, "task_status": task.status.value, "task_revision": task.task_revision}
+            return await self._reply(db, row, task, result(task, status="unknown", effect="cancel"))
         if row.status == "cancel_intent":
             row.status = "consumed"
             return await self._reply(db, row, task, result(task, status="cancelled", effect="cancel"))
@@ -468,3 +509,13 @@ class TelegramTaskControls:
                 approval = await approval_for_task(db, task, row.approval_id)
                 if approval_decision_digest(approval) != row.approval_digest:
                     fail("telegram_approval_binding_changed")
+            if row.effect == "cancel":
+                attempt = await db.get(WorkBoardAttempt, row.attempt_id)
+                workflow = await db.scalar(select(WorkflowRunState).where(
+                    WorkflowRunState.run_identity == row.workflow_run_id))
+                if (attempt is None or attempt.ended_at is not None
+                    or attempt.cancel_requested_at is not None
+                    or attempt.workflow_run_id != row.workflow_run_id
+                    or attempt.fencing_token != row.board_fence or attempt.lease_owner != row.lease_owner
+                    or workflow is None or workflow_binding_digest(workflow) != row.workflow_binding_digest):
+                    fail("telegram_cancel_binding_changed")

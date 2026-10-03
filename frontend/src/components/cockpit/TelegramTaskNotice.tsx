@@ -35,7 +35,9 @@ export function TelegramTaskNotice({ task, ownerSessionId }: {
         if (typeof value.id !== "string" || value.id.length > 128) throw new Error(recovery);
         request.outboxId = value.id;
       }
-      const delivery = await apiFetch(`${API_URL}/api/telegram/outbox/${encodeURIComponent(request.outboxId)}/deliver`, { method: "POST" });
+      const outboxId = request.outboxId;
+      if (typeof outboxId !== "string") throw new Error(recovery);
+      const delivery = await apiFetch(`${API_URL}/api/telegram/outbox/${encodeURIComponent(outboxId)}/deliver`, { method: "POST" });
       if (!delivery.ok) throw new Error(recovery);
       const value = await delivery.json();
       if (captured !== current.current) return;

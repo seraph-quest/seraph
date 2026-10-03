@@ -2644,6 +2644,8 @@ class TelegramTaskCallback(SQLModel, table=True):
     approval_id: Optional[str] = Field(default=None)
     approval_digest: Optional[str] = Field(default=None)
     attempt_id: Optional[str] = Field(default=None)
+    workflow_run_id: Optional[str] = Field(default=None)
+    workflow_binding_digest: Optional[str] = Field(default=None)
     board_fence: Optional[int] = Field(default=None)
     lease_owner: Optional[str] = Field(default=None)
     cancel_event_id: Optional[int] = Field(default=None)

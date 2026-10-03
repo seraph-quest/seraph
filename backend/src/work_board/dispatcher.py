@@ -3855,7 +3855,8 @@ class WorkBoardDispatcher:
                     )
                 )
             ).scalar_one_or_none()
-        return effective_browser_limits(goal)
+        attempts, outstanding = effective_browser_limits(goal)
+        return (attempts, 1) if task.pipeline_operation_id else (attempts, outstanding)
 
     async def _post_claim_readiness(
         self,
@@ -4973,7 +4974,7 @@ class WorkBoardDispatcher:
         authority = projection.get("declared_authority") or {}
         limits = authority.get("limits") or {}
         runtime, attempts, outstanding = (limits.get("runtime_seconds"), limits.get("max_attempts"), limits.get("max_outstanding_jobs"))
-        if type(runtime) is not int or not 1 <= runtime <= 180 or type(attempts) is not int or not 1 <= attempts <= 2 or outstanding != 1:
+        if type(runtime) is not int or not 1 <= runtime <= 180 or type(attempts) is not int or not 1 <= attempts <= 2 or type(outstanding) is not int or not 1 <= outstanding <= 16 or (task.pipeline_operation_id and outstanding != 1):
             raise DurableJobIdempotencyConflict("native browser admitted limits invalid")
         immutable = copy(task)
         immutable.task_revision = int(attempt.task_revision_at_claim) + 1

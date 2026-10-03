@@ -15,6 +15,7 @@ export interface PipelinePending { path: string; body: Record<string, unknown> }
 export interface PipelineStorage { schema_version: 1; operation_id: string | null; pending: PipelinePending | null }
 const MAX_BYTES = 16 * 1024;
 const identifier = /^[a-zA-Z0-9:-]{1,128}$/;
+const safeId = (value: unknown): value is string => typeof value === "string" && identifier.test(value);
 const positive = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v > 0;
 const record = (v: unknown): v is Record<string, unknown> => Boolean(v) && typeof v === "object" && !Array.isArray(v);
 
@@ -27,14 +28,14 @@ function validatePending(value: unknown, task: string, operation: string | null)
   const keys = Object.keys(value.body).sort().join();
   if (!positive(value.body.expected_revision)) return false;
   if (value.path === `/api/work-board/tasks/${task}/pipeline-preview`) {
-    return keys === "expected_revision,idempotency_key,source_input_artifact_id" && identifier.test(String(value.body.source_input_artifact_id)) && identifier.test(String(value.body.idempotency_key));
+    return keys === "expected_revision,idempotency_key,source_input_artifact_id" && safeId(value.body.source_input_artifact_id) && safeId(value.body.idempotency_key);
   }
   if (!operation) return false;
   const prefix = `/api/work-board/pipelines/${operation}/`;
   if (value.path === `${prefix}accept`) return keys === "expected_digest,expected_parent_revision,expected_revision" && positive(value.body.expected_parent_revision) && /^[a-f0-9]{64}$/.test(String(value.body.expected_digest));
   if (value.path === `${prefix}advance` || value.path === `${prefix}quiesce`) return keys === "expected_revision";
-  if (value.path === `${prefix}revision`) return keys === "expected_revision,idempotency_key,source_input_artifact_id" && identifier.test(String(value.body.source_input_artifact_id)) && identifier.test(String(value.body.idempotency_key));
-  if (value.path === `${prefix}reuse-preview`) return keys === "expected_parent_revision,expected_revision,idempotency_key" && positive(value.body.expected_parent_revision) && identifier.test(String(value.body.idempotency_key));
+  if (value.path === `${prefix}revision`) return keys === "expected_revision,idempotency_key,source_input_artifact_id" && safeId(value.body.source_input_artifact_id) && safeId(value.body.idempotency_key);
+  if (value.path === `${prefix}reuse-preview`) return keys === "expected_parent_revision,expected_revision,idempotency_key" && positive(value.body.expected_parent_revision) && safeId(value.body.idempotency_key);
   return false;
 }
 
@@ -64,7 +65,9 @@ export function validatePipeline(value: unknown): ArtifactPipeline {
     || !["proposed", "accepted"].includes(String(value.status)) || value.no_learning !== true
     || !Array.isArray(value.steps) || value.steps.length < 1 || value.steps.length > 3
     || !record(value.source_scope) || typeof value.source_scope.start_url !== "string"
-    || !Array.isArray(value.source_scope.allowed_hosts) || !Array.isArray(value.source_scope.approved_url_prefixes)) throw new Error("Pipeline readback is incomplete.");
+    || !Array.isArray(value.source_scope.allowed_hosts) || !value.source_scope.allowed_hosts.every((host) => typeof host === "string")
+    || !Array.isArray(value.source_scope.approved_url_prefixes) || !value.source_scope.approved_url_prefixes.every((path) => typeof path === "string")
+    || (value.status === "accepted" && (value.steps.length !== 3 || typeof value.deadline_at !== "string" || !Number.isFinite(Date.parse(value.deadline_at))))) throw new Error("Pipeline readback is incomplete.");
   const capabilities = ["browser.public-task.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1"];
   for (const [index, step] of value.steps.entries()) if (!record(step) || step.capability_id !== capabilities[index]
     || typeof step.task_id !== "string" || !identifier.test(step.task_id) || !positive(step.task_revision) || typeof step.status !== "string") throw new Error("Pipeline steps differ from the fixed reviewed chain.");

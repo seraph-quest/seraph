@@ -375,7 +375,8 @@ def _workflow_run_binds_board_attempt(
                     or run.service_id != "service:browser-task" or run.job_kind != "browser_public_task"
                     or type(limits.get("runtime_seconds")) is not int or not 1 <= limits["runtime_seconds"] <= 180
                     or type(limits.get("max_attempts")) is not int or not 1 <= limits["max_attempts"] <= 2
-                    or limits.get("max_outstanding_jobs") != 1):
+                    or type(limits.get("max_outstanding_jobs")) is not int or not 1 <= limits["max_outstanding_jobs"] <= 16
+                    or (task.pipeline_operation_id and limits["max_outstanding_jobs"] != 1)):
                     return False
                 immutable_task = task.model_copy(update={"task_revision": attempt.task_revision_at_claim + 1})
                 projection = {"owner": {"principal_id": run.owner_principal_id, "kind": run.owner_kind, "service_id": run.service_id},

@@ -140,10 +140,13 @@ async def execute(task: WorkBoardTask, attempt: WorkBoardAttempt, inputs: Mappin
     if admission_only or projection.get("status") == "succeeded":
         return {**dict(projection), "job_id": spec.identity.job_id, "admission_only": admission_only, "status": projection.get("status")}
     await validate_current(task, attempt, inputs)
-    projection = await jobs.claim_job(spec.identity.job_id, owner=runner, lease_seconds=30)
+    if projection.get("status") == "accepted":
+        projection = await jobs.queue_job(spec.identity.job_id, expected_revision=projection.get("revision"),
+            reason="evidence_cpu_board_linked")
+    projection = await jobs.claim_job(spec.identity.job_id, owner=runner, lease_seconds=30,
+        expected_revision=projection.get("revision"), expected_fencing_token=projection.get("fencing_token"))
     lease = projection.get("lease") or {}
     fence = int(lease.get("fencing_token") or 0)
-    projection = await jobs.transition_job(spec.identity.job_id, "running", owner=runner, fencing_token=fence)
     try:
         content = output_bytes(task.capability_id, inputs)
         sha = hashlib.sha256(content).hexdigest()

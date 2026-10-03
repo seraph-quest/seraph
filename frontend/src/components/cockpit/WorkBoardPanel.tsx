@@ -4071,7 +4071,7 @@ function WorkBoardPanel({
                 ownerSessionId={ownerSessionId}
               />
 
-              {ownerPrincipalId && ownerSessionId && <ArtifactPipelineReview task={selectedTask}
+              {ownerPrincipalId && ownerSessionId && <ArtifactPipelineReview key={`${ownerPrincipalId}:${ownerSessionId}:${selectedTask.task_id}`} task={selectedTask}
                 ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
                 metadataConfirmed={Boolean(selectedDetail && !detailLoading && !stale && !detailError)}
                 onRefresh={refreshSelectedTask} onOpenTask={openTask} />}

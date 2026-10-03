@@ -96,7 +96,7 @@ async def test_operation_is_metadata_only_exact_owner_root_deadline_and_goal(asy
     assert len(operation["steps"]) == 3
     async with async_db() as db:
         assert not (await db.scalars(select(WorkflowRunState))).all()
-        task = await db.get(WorkBoardTask, operation["steps"][0]["task_id"])
+        task = await _repository.get_task(db, owner, operation["steps"][0]["task_id"])
         await pipelines.task_guard(db, task)
         with pytest.raises(BoardError, match="unavailable"):
             await pipelines.read(db, WorkBoardOwner(principal_id="other", session_id=owner.session_id), operation["operation_id"])
@@ -160,7 +160,11 @@ async def test_real_chromium_native_browser_to_cpu_dossier_to_plain_report(async
                     lease_owner=dispatcher.runner_id, lease_seconds=180 if index == 0 else 30,
                     actor_principal_id=dispatcher.runner_id, actor_session_id=dispatcher.runner_session)
             result = await dispatcher._admit_execute_project(claim)
-            assert result["completed"], result
+            async with async_db() as failure_db:
+                observed = await repository.get_task(failure_db, owner, task_id)
+                attempts = (await failure_db.scalars(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == task_id))).all()
+            assert result["completed"], {"index": index, "result": result, "block_kind": observed.block_kind,
+                "block_reason": observed.block_reason, "attempts": [item.outcome for item in attempts]}
             async with async_db() as db:
                 task = await repository.get_task(db, owner, task_id)
                 assert task.status == WorkBoardStatus.done

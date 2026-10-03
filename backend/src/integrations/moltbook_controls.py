@@ -235,6 +235,9 @@ class MoltbookService:
             or row.active_payload_digest != authority["payload_digest"]
             or row.credential_binding != authority["vault_binding_digest"] or digest(json.loads(row.consent_json)) != authority["consent_digest"]):
             raise MoltbookError("moltbook_connection_authority_changed")
+        if authority["operation"] in WRITES and (row.mode != "active" or row.account_id != authority["account_id"]
+            or row.account_name != authority["account_name"]):
+            raise MoltbookError("moltbook_original_account_changed")
         consent = json.loads(row.consent_json)
         if (consent.get("session") != owner.session_id or consent.get("goal_id") != run.goal_id
             or consent.get("goal_revision") != run.goal_revision or consent.get("connection_revision") != row.revision
@@ -250,15 +253,23 @@ class MoltbookService:
             raise MoltbookError("moltbook_provider_cooldown")
         return row
 
-    async def prepare_read(self, owner, *, operation, fields, request_key, goal_id, goal_revision,
-                           expected_revision, priority=50):
-        if operation not in READS: raise MoltbookError("moltbook_read_operation_required", status_code=422)
+    async def prepare_read(self, owner, **request):
+        if request.get("operation") not in READS:
+            raise MoltbookError("moltbook_read_operation_required", status_code=422)
+        return await self._prepare(owner, **request)
+
+    async def _prepare(self, owner, *, operation, fields, request_key, goal_id, goal_revision,
+                       expected_revision, priority=50, review=None):
+        if operation not in READS | WRITES: raise MoltbookError("moltbook_operation_not_allowed", status_code=422)
         identifier(request_key)
         if type(priority) is not int or not 0 <= priority <= 100: raise MoltbookError("moltbook_priority_invalid", status_code=422)
         if operation == "inspect":
             if fields: raise MoltbookError("moltbook_inspect_shape_invalid", status_code=422)
         else: route(operation, fields)
         payload = {"operation": operation, "fields": fields, "no_learning": True}
+        if operation in WRITES:
+            if not isinstance(review, dict): raise MoltbookError("moltbook_exact_public_target_review_required")
+            payload["review"] = review
         payload_digest = digest(payload)
         job_id = "moltbook:" + digest([owner.principal_id, owner.session_id, request_key])[:40]
         async with engine.get_session() as db:
@@ -268,12 +279,14 @@ class MoltbookService:
             row = await db.scalar(select(MoltbookConnection).where(MoltbookConnection.owner_principal_id == owner.principal_id))
             if row is None or row.revision != expected_revision or row.mode == "disabled":
                 raise MoltbookError("moltbook_connection_revision_changed")
+            if operation in WRITES and (row.mode != "active" or not row.account_id or not row.account_name):
+                raise MoltbookError("moltbook_claimed_account_inspect_required")
             consent = json.loads(row.consent_json)
             if (consent.get("session") != owner.session_id or consent.get("connection_revision") != row.revision
                 or consent.get("goal_id") != goal_id or consent.get("goal_revision") != goal_revision
                 or operation not in consent.get("actions", []) or datetime.fromisoformat(consent["expires_at"]) <= now()):
                 raise MoltbookError("moltbook_current_consent_required")
-            deadline = min(now()+timedelta(seconds=30), datetime.fromisoformat(consent["expires_at"]))
+            deadline = min(now()+timedelta(seconds=300 if operation in WRITES else 30), datetime.fromisoformat(consent["expires_at"]))
             for limit in (goal.due_date,):
                 if limit is not None: deadline = min(deadline, utc(limit))
             if row.active_job_id is not None:
@@ -293,7 +306,11 @@ class MoltbookService:
                 "capability_id": CAPABILITY, "connection_id": row.id, "connection_revision": row.revision,
                 "vault_binding_digest": row.credential_binding, "consent_digest": digest(consent),
                 "payload_digest": payload_digest, "operation": operation,
-                "permissions": ["moltbook_read", "credential_egress", "workspace_write"], "no_learning": True}
+                "account_id": row.account_id, "account_name": row.account_name,
+                "permissions": ["moltbook_read", "credential_egress", "workspace_write"] + (["external_mutation"] if operation in WRITES else []),
+                "no_learning": True}
+            if operation in WRITES:
+                authority["review_digest"] = digest(review)
         # Never regenerate an already persisted ciphertext on exact replay.
         reference = PREFIX + digest(job_id.encode()) + ".input.enc"
         path = canonical_workspace_root(settings.workspace_dir) / reference
@@ -322,6 +339,25 @@ class MoltbookService:
             result = _serialize(run)
         result.update(no_learning=True, remote_data="untrusted_literal_owner_personal_noncommercial_no_redistribution")
         return result
+
+    async def prepare_write(self, owner, **request):
+        from src.integrations.moltbook_mutations import prepare_write
+        return await prepare_write(self, owner, **request)
+
+    async def execute(self, owner, job_id):
+        projected = await self.snapshot(owner, job_id)
+        if projected["declared_authority"].get("operation") in WRITES:
+            from src.integrations.moltbook_mutations import execute_write
+            return await execute_write(self, owner, job_id)
+        return await self.execute_read(owner, job_id)
+
+    async def approve(self, owner, job_id, **request):
+        from src.integrations.moltbook_mutations import approve
+        return await approve(self, owner, job_id, **request)
+
+    async def manual_answer(self, owner, job_id, **request):
+        from src.integrations.moltbook_mutations import manual_answer
+        return await manual_answer(self, owner, job_id, **request)
 
     async def execute_read(self, owner, job_id):
         projected = await self.snapshot(owner, job_id)

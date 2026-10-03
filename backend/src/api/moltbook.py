@@ -48,6 +48,30 @@ class Read(Strict):
     priority: int = Field(default=50, ge=0, le=100)
 
 
+class Write(Strict):
+    operation: Literal["create_post", "create_comment"]
+    fields: dict
+    request_key: str = Field(min_length=1, max_length=128)
+    goal_id: str = Field(min_length=1, max_length=128)
+    goal_revision: int = Field(ge=1)
+    expected_revision: int = Field(ge=1)
+    community_job_id: str = Field(min_length=1, max_length=128)
+    community_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    introductions_allowed: Literal[True]
+    public_only: Literal[True]
+    priority: int = Field(default=50, ge=0, le=100)
+
+
+class Answer(Strict):
+    answer: str = Field(min_length=4, max_length=32)
+    request_key: str = Field(min_length=1, max_length=128)
+
+
+class Decision(Strict):
+    approval_id: str = Field(min_length=1, max_length=128)
+    decision: Literal["approved", "denied"]
+
+
 def owner(request, *, contact=False, mutation=False):
     operator = _operator(request)
     grants = {getattr(value, "value", value) for value in operator.principal.grants}
@@ -101,9 +125,24 @@ async def job(request: Request, job_id: str):
     return await response(moltbook_service.snapshot(owner(request), job_id))
 
 
+@router.post("/writes")
+async def write(request: Request, body: Write):
+    return await response(moltbook_service.prepare_write(owner(request, contact=True, mutation=True), **body.model_dump()))
+
+
+@router.post("/jobs/{job_id}/approval")
+async def approve(request: Request, job_id: str, body: Decision):
+    return await response(moltbook_service.approve(owner(request, mutation=True), job_id, **body.model_dump()))
+
+
+@router.post("/jobs/{job_id}/answer")
+async def answer(request: Request, job_id: str, body: Answer):
+    return await response(moltbook_service.manual_answer(owner(request, mutation=True), job_id, **body.model_dump()))
+
+
 @router.post("/jobs/{job_id}/execute")
 async def execute(request: Request, job_id: str):
-    return await response(moltbook_service.execute_read(owner(request, contact=True), job_id))
+    return await response(moltbook_service.execute(owner(request, contact=True), job_id))
 
 
 @router.get("/jobs/{job_id}/output")

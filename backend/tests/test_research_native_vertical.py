@@ -35,6 +35,15 @@ def real_auth(monkeypatch):
     monkeypatch.setattr(settings, "operator_auth_absolute_seconds", 3600)
     monkeypatch.setattr(settings, "operator_auth_cookie_secure", False)
     monkeypatch.setattr(settings, "openrouter_api_key", "intercepted-provider-boundary-only")
+    # Each accounting_db fixture is a distinct deployment/Root. Its real
+    # process-local broker must also be distinct, as on an actual fresh
+    # launcher. The canonical financial ledger/witness is never reset or
+    # forgiven; every broker still uses production durable accounting.
+    from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
+    broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
+    monkeypatch.setattr("src.model_fabric.remote_inference_admission.remote_inference_admission_broker", broker)
+    monkeypatch.setattr("src.llm_runtime.gpu_admission_broker", broker)
+    monkeypatch.setattr("src.api.model_fabric_settings.remote_inference_admission_broker", broker)
     yield
     _reset_login_throttle_for_tests()
 
@@ -49,8 +58,9 @@ class ResponseBytes(httpx.AsyncByteStream):
 
 
 class ProviderBoundary(httpx.AsyncBaseTransport):
-    def __init__(self, calls):
+    def __init__(self, calls, controls):
         self.calls = calls
+        self.controls = controls
         self.public = httpx.AsyncHTTPTransport(retries=0)
 
     async def handle_async_request(self, request):
@@ -61,6 +71,8 @@ class ProviderBoundary(httpx.AsyncBaseTransport):
             if len(body["messages"]) == 1:
                 content = "CANARY_OK"
             else:
+                if len(self.calls) == 4 and self.controls.get("after_first_contact"):
+                    await self.controls["after_first_contact"]()
                 supplied = json.loads(body["messages"][1]["content"])
                 source = supplied["untrusted_quoted_sources"][0]
                 content = json.dumps({"schema_version": 1, "perspective": supplied["perspective_instruction"],
@@ -70,7 +82,8 @@ class ProviderBoundary(httpx.AsyncBaseTransport):
                     "contradictions": [], "no_learning": True})
             payload = {"id": "intercepted-"+str(len(self.calls)),
                 "choices": [{"message": {"role": "assistant", "content": content}}],
-                "usage": {"cost": "0.000002", "prompt_tokens": 10, "completion_tokens": 10}}
+                "usage": {"cost": "0.000150" if len(self.calls) == 4 and self.controls.get("overrun") else "0.000002",
+                    "prompt_tokens": 10, "completion_tokens": 10}}
             return httpx.Response(200, request=request, headers={"content-type": "application/json"},
                 stream=ResponseBytes(json.dumps(payload).encode()))
         # Every actual provider contact stays intercepted. The only real
@@ -84,8 +97,8 @@ class ProviderBoundary(httpx.AsyncBaseTransport):
 
 
 @pytest.mark.asyncio
-async def test_authenticated_parent_two_children_real_public_source_and_dossier(accounting_db, real_auth, monkeypatch):
-    from src.api import auth, work_board, model_fabric_settings
+async def test_authenticated_parent_two_children_real_public_source_and_dossier(accounting_db, real_auth, monkeypatch, *, scenario="completed"):
+    from src.api import auth, work_board, model_fabric_settings, goals
     from src.model_fabric.configuration import write_model_fabric_configuration
     root, engine, factory = accounting_db
     configured = setup_configuration()
@@ -94,10 +107,11 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
     jobs = DurableJobRepository()
     await jobs.configure_inference_accounting(1000)
     calls = []
+    controls = {"overrun": scenario == "overrun_first_response"}
     original_client = httpx.AsyncClient
     def clients(**kwargs):
         if "transport" not in kwargs:
-            kwargs["transport"] = ProviderBoundary(calls)
+            kwargs["transport"] = ProviderBoundary(calls, controls)
         return original_client(**kwargs)
     monkeypatch.setattr(httpx, "AsyncClient", clients)
     app = FastAPI()
@@ -105,6 +119,7 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
     app.include_router(auth.router, prefix="/api/auth")
     app.include_router(work_board.router, prefix="/api")
     app.include_router(model_fabric_settings.router, prefix="/api")
+    app.include_router(goals.router, prefix="/api")
     headers = {"origin": "http://localhost:3001"}
     async with original_client(transport=httpx.ASGITransport(app=app), base_url="http://test", headers=headers) as client:
         denied = await client.get("/api/work-board/tasks")
@@ -138,11 +153,63 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
             "idempotency_key": "actual-research-task"})
         assert created.status_code == 200, created.text
         task_id = created.json()["task"]["task_id"]
+        async def change_current_authority():
+            if scenario == "revoke_first_response":
+                revoked = await client.post("/api/auth/logout")
+                assert revoked.status_code == 204
+            elif scenario == "goal_change_first_response":
+                changed = await client.patch("/api/goals/actual-research-goal", json={"title": "Changed current Goal", "expected_revision": 1})
+                assert changed.status_code == 200, changed.text
+            elif scenario == "tamper_source_first_response":
+                from src.workflows.research_native import checkpoint
+                async with factory.accounting_sessions() as db:
+                    producer = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.job_kind == "readonly_research_child",
+                        WorkflowRunState.run_identity.like("%:child:0")))
+                    from src.workflows.job_runtime import _serialize
+                    source = checkpoint(_serialize(producer), "research:artifact:source:0")
+                # Actual disposable-fixture attack on the already verified
+                # source file; no canonical hash/receipt is altered to match it.
+                (root/source["file_path"]).write_bytes(b"tampered source after first provider contact")
+        controls["after_first_contact"] = change_current_authority
         dispatcher = WorkBoardDispatcher(jobs=jobs, session_provider=factory.accounting_sessions)
         receipt = await dispatcher.run_pass()
         detail = await client.get("/api/work-board/tasks/"+task_id)
         (root/"research-vertical-private-readback.json").write_text(json.dumps({"label": "real public source; provider HTTP interception only",
-            "task_id": task_id, "receipt": receipt, "detail": detail.json()}, indent=2))
+            "scenario": scenario, "task_id": task_id, "receipt": receipt, "detail": detail.json()}, indent=2))
+        if scenario != "completed":
+            assert receipt["completed"] == 0 and receipt["blocked"] >= 1
+            assert len(calls) == 4  # real first contact; held sibling makes zero provider POSTs
+            await engine.dispose()
+            reopened = await jobs.inference_accounting_snapshot()
+            assert reopened["accounting_continuity_verified"] is True
+            children = [row for row in reopened["operations"] if row["operation_id"].startswith("remote:research:")]
+            assert len(children) == 2
+            contacted = [row for row in children if row["contact_started_at"] is not None]
+            assert len(contacted) == 1 and contacted[0]["state"] == "settled"
+            assert contacted[0]["actual_cost_microusd"] == (150 if scenario == "overrun_first_response" else 2)
+            sibling = next(row for row in children if row["contact_started_at"] is None)
+            if scenario == "overrun_first_response":
+                assert sibling["state"] == "reserved" and sibling["bound_microusd"] == 100
+                assert sibling["recovery_reason"] == "provider_contact_denied"
+            async with factory.accounting_sessions() as db:
+                rows = list((await db.scalars(select(WorkflowRunState).where(WorkflowRunState.job_kind.in_(
+                    ["research_dossier", "readonly_research_child"])))).all())
+                assert len(rows) == 3
+                completed = [row for row in rows if row.status == "succeeded"]
+                if scenario == "overrun_first_response":
+                    # The first exact output completed with known actual debt.
+                    # Overrun freezes unfinished work; it must not erase that
+                    # already completed child's result or unclipped charge.
+                    assert len(completed) == 1 and completed[0].job_kind == "readonly_research_child"
+                    assert completed[0].run_identity.endswith(":child:0") and completed[0].finished_at is not None
+                else:
+                    assert not completed
+                assert next(row for row in rows if row.job_kind == "research_dossier").status != "succeeded"
+                board = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id))
+                assert board.status.value == "blocked"
+            (root/"research-negative-accounting-readback.json").write_text(json.dumps({"scenario": scenario,
+                "provider_post_count": len(calls), "snapshot": reopened}, indent=2))
+            return
         assert receipt["completed"] == 1, detail.json()
         report = await client.get("/api/work-board/tasks/"+task_id+"/research-report")
         assert report.status_code == 200, report.text
@@ -158,3 +225,10 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
             assert len(rows) == 3 and all(row.status == "succeeded" for row in rows)
             attempts = list((await db.scalars(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == task_id))).all())
             assert len(attempts) == 1 and attempts[0].ended_at is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ["revoke_first_response", "goal_change_first_response",
+    "tamper_source_first_response", "overrun_first_response"])
+async def test_current_authority_or_overrun_blocks_prefunded_sibling_and_adoption(accounting_db, real_auth, monkeypatch, scenario):
+    await test_authenticated_parent_two_children_real_public_source_and_dossier(accounting_db, real_auth, monkeypatch, scenario=scenario)

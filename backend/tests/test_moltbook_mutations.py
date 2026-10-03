@@ -20,7 +20,7 @@ from src.vault.repository import vault_repository
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["post", "reply", "reply_observed", "reply_unlisted", "reply_hidden", "reply_pending", "reply_ambiguous", "accepted_drop", "wrong_author", "hidden", "peer_goal", "rotated_key", "stale_community", "status_rate_limited", "status_unclaimed", "status_rejected", "status_drop", "status_stale_goal", "status_revoked_root"])
+@pytest.mark.parametrize("mode", ["post", "reply", "reply_observed", "reply_unlisted", "reply_hidden", "reply_pending", "reply_ambiguous", "accepted_drop", "wrong_author", "hidden", "peer_goal", "rotated_key", "stale_community", "status_rate_limited", "status_rate_html", "status_unclaimed", "status_rejected", "status_drop", "status_stale_goal", "status_revoked_root"])
 async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db, monkeypatch, mode):
     from src.api import auth, goals, moltbook
     root, db_engine, factory = accounting_db
@@ -57,6 +57,8 @@ async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db
                 return httpx.Response(429, json={"error": "settled after authority drift"}, headers={"retry-after": "60"})
             if mode == "status_rate_limited" and creation_request_started:
                 return httpx.Response(429, json={"error": "bounded fixture cooldown"}, headers={"retry-after": "60"})
+            if mode == "status_rate_html" and creation_request_started:
+                return httpx.Response(429, text="bounded non-JSON rate limit", headers={"retry-after": "60"})
             if mode == "status_rejected" and creation_request_started:
                 return httpx.Response(403, json={"error": "bounded fixture denial"})
             if mode == "status_drop" and creation_request_started:
@@ -194,7 +196,7 @@ async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db
             assert sum(method == "POST" for method,_,_ in requests) == 0
             assert canonical["deadline_at"] == original["deadline_at"] and canonical["attempt_count"] == 1
             return
-        if mode in {"status_rate_limited", "status_unclaimed", "status_rejected", "status_drop", "reply_unlisted", "reply_hidden", "reply_pending", "reply_ambiguous"}:
+        if mode in {"status_rate_limited", "status_rate_html", "status_unclaimed", "status_rejected", "status_drop", "reply_unlisted", "reply_hidden", "reply_pending", "reply_ambiguous"}:
             assert executed.status_code == 409, executed.text
             await db_engine.dispose()
             reopened = await client.get(f"/api/capabilities/moltbook/jobs/{job_id}")
@@ -204,7 +206,7 @@ async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db
             assert checkpoint(value)["calls"][-1]["status"] == ("intent" if mode == "status_drop" else "received")
             local = (await client.get("/api/capabilities/moltbook/connection")).json()
             assert local["active_job_id"] == (job_id if mode == "status_drop" else None)
-            if mode == "status_rate_limited":
+            if mode in {"status_rate_limited", "status_rate_html"}:
                 assert local["cooldown_until"]
                 assert checkpoint(value)["calls"][-1]["http_status"] == 429
                 assert checkpoint(value)["calls"][-1]["outcome"] == "failed_read"
@@ -214,7 +216,7 @@ async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db
             retry = await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/execute", json=creation_request)
             assert retry.status_code == 200 and retry.json()["status"] == value["status"], retry.text
             assert len(requests) == count
-            if mode == "status_rate_limited":
+            if mode in {"status_rate_limited", "status_rate_html"}:
                 body = json.loads(prepared.request.content); body["request_key"] = "explicit-new-after-cooldown"
                 denied = await client.post("/api/capabilities/moltbook/writes", json=body)
                 assert denied.status_code == 409 and denied.json()["detail"]["code"] == "moltbook_provider_cooldown", denied.text

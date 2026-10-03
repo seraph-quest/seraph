@@ -216,12 +216,12 @@ class MoltbookAdapter:
         if method == "GET" and self.marker.snapshot()["status"] == "verified":
             self.read_response_receipt = {"operation": operation, "http_status": response.status_code,
                 "response_digest": digest(response.content)}
-        if response.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
-            raise MoltbookError("moltbook_response_not_json")
         if response.status_code == 429:
             retry = response.headers.get("retry-after", "")
             seconds = (min(int(retry), 172800) if len(retry) <= 6 else 172800) if retry.isascii() and retry.isdecimal() else 60
             raise MoltbookError("moltbook_rate_limited", retry_after=seconds)
         if not 200 <= response.status_code < 300:
             raise MoltbookError("moltbook_provider_rejected")
+        if response.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
+            raise MoltbookError("moltbook_response_not_json")
         return parse_response(response.content)

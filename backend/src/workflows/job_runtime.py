@@ -4682,6 +4682,55 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 },
             )
 
+    async def node_process_cleanup_projection(
+        self, job_id: str, *, expected_revision: int, original_dispatch: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Expose recorded physical settlement, never execution/artifact success.
+
+        This is a read-only historical projection. Live goal/approval expiry is
+        deliberately not a reason to erase an already recorded cleanup fact.
+        The canonical reservation parser and original dispatch binding remain
+        the authority; arbitrary checkpoint flags are not public proof.
+        """
+        unverified = {"status": "unverified", "physical_capacity_released": False,
+                      "cleanup_receipt_verified": False, "readback_scope": None}
+        async with self._session() as db:
+            run = await self._fetch(db, job_id)
+            declared = _json_load(run.declared_authority_json, {})
+            if (run.job_kind != "engineering.repo-repair.v1" or run.status != "unknown_external_effect"
+                or declared.get("sandbox_profile") != "repo-node24-npm-v1" or declared.get("executor_kind") != "local"
+                or _revision(run) != expected_revision):
+                return unverified
+            try:
+                reservation = self._repo_repair_reservation_state(run)
+            except DurableJobTransitionError:
+                return unverified
+            dispatches = [item for item in _json_load(run.checkpoint_receipts_json, [])
+                          if isinstance(item, dict) and isinstance(item.get("payload"), dict)
+                          and item["payload"].get("phase") == "executor_dispatch_reserved"]
+            if not dispatches:
+                return unverified
+            envelope = dispatches[-1]
+            dispatch = {**envelope["payload"], "fencing_token": envelope.get("fencing_token")}
+            fence = dispatch.get("fencing_token")
+            attempt_id = _text(declared.get("attempt_id"))
+            digest = _text(run.authority_digest)
+            if (type(fence) is not int or fence <= 0 or fence > 2**53 - 1
+                or not attempt_id or len(attempt_id) > 128 or "\x00" in attempt_id
+                or len(job_id) > 128 or "\x00" in job_id or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+                or dispatch != dict(original_dispatch)
+                or not self._repo_repair_reservation_matches(reservation, job_id=job_id, attempt_id=attempt_id,
+                                                           fence=fence, authority_digest=digest)):
+                return unverified
+            if reservation.get("status") == "held":
+                return {**unverified, "status": "held"}
+            if reservation.get("readback_scope") != "process_cleanup_only":
+                return unverified
+            return {"status": "released", "physical_capacity_released": True, "cleanup_receipt_verified": True,
+                    "readback_scope": "process_cleanup_only", "job_id": job_id, "attempt_id": attempt_id,
+                    "fencing_token": fence, "authority_digest": digest,
+                    "process_cleanup_readback_sha256": reservation["process_cleanup_readback_sha256"]}
+
     async def settle_node_process_cleanup(self, request: NodeProcessCleanupSettlement) -> dict[str, Any]:
         """Release only exact cancelled physical work; retain all task liability."""
         from config.settings import RepoSandboxSettings, settings

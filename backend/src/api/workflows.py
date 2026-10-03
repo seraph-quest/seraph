@@ -8099,6 +8099,23 @@ async def _safe_repo_repair_projection(
                 ),
             }
     status = str(job.get("status") or "blocked")
+    process_cleanup = None
+    if authority.get("sandbox_profile") == "repo-node24-npm-v1" and status == "unknown_external_effect":
+        process_cleanup = {"status": "unverified", "physical_capacity_released": False,
+                           "cleanup_receipt_verified": False, "readback_scope": None}
+        try:
+            from src.workflows.repo_repair import _authority_digest, _proposal_authority_payload
+
+            if proposal is None or _authority_digest(_proposal_authority_payload(proposal)) != proposal.authority_digest:
+                raise RepoSandboxError("repository repair immutable proposal authority changed")
+            cleanup_authority = await _repo_change_recovery_authority(dict(job))
+            dispatch_ok, _, dispatch = _repo_change_dispatch_contract(dict(job), cleanup_authority)
+            if dispatch_ok and dispatch is not None:
+                process_cleanup = await durable_job_repository.node_process_cleanup_projection(
+                    job_id, expected_revision=int(job["revision"]), original_dispatch=dispatch,
+                )
+        except (DurableJobError, RepoSandboxError, OSError, ValueError, TypeError):
+            pass
     reason = str(job.get("failure_reason") or "")
     effects = job.get("effects") if isinstance(job.get("effects"), list) else []
     artifacts = job.get("artifacts") if isinstance(job.get("artifacts"), list) else []
@@ -8223,6 +8240,7 @@ async def _safe_repo_repair_projection(
         "execution": {
             "artifacts": safe_artifacts,
             "readback": readback,
+            "process_cleanup": process_cleanup,
             "memory_status": "no_learning",
             "provider_contacted": proposal is not None,
         },

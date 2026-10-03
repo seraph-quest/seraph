@@ -372,6 +372,13 @@ async def test_cancelled_node_physical_cleanup_recovery_and_fresh_job(client,asy
         marker_path=fresh._job_marker_directory/fresh._job_marker_name(job_id)
         accounting_before=await durable_job_repository.inference_accounting_snapshot()
         task_before_recovery=(await client.get(f"/api/work-board/tasks/{flow['high_task_id']}" )).json()["task"]
+        held_projection=await client.get(f"/api/workflows/repo-repair/{job_id}")
+        assert held_projection.status_code==200,held_projection.text
+        assert held_projection.json()["execution"]["process_cleanup"]=={
+            "status":"held", "physical_capacity_released":False,
+            "cleanup_receipt_verified":False, "readback_scope":None,
+        }
+        _retained("node-repair-cleanup-held-api.json").write_text(json.dumps(held_projection.json(),indent=2))
         for field,value in negatives.items():
             marker_path.write_text(json.dumps({**marker,field:value}))
             blocked=await client.post(f"/api/workflows/repo-change/{job_id}/recover",headers={"Origin":"http://localhost:3001"})
@@ -411,6 +418,42 @@ async def test_cancelled_node_physical_cleanup_recovery_and_fresh_job(client,asy
         repeated=await client.post(f"/api/workflows/repo-change/{job_id}/recover",headers={"Origin":"http://localhost:3001"})
         assert repeated.status_code==200 and repeated.json().get("physical_capacity_released") is True,repeated.text
         assert (await durable_job_repository.get_job(job_id))["revision"]==settled["revision"]
+        # A fresh repository instance reads only the durable row; no POST
+        # result or in-memory cleanup state is used by the Inspector GET.
+        from src.api import workflows as workflows_api
+        from src.workflows.job_runtime import DurableJobRepository
+        restarted_repository=DurableJobRepository()
+        monkeypatch.setattr(workflows_api,"durable_job_repository",restarted_repository)
+        durable_projection=await client.get(f"/api/workflows/repo-repair/{job_id}")
+        assert durable_projection.status_code==200,durable_projection.text
+        inspector=durable_projection.json()
+        cleanup=inspector["execution"]["process_cleanup"]
+        assert cleanup=={"status":"released", "physical_capacity_released":True,"cleanup_receipt_verified":True,
+                         "readback_scope":"process_cleanup_only", "job_id":job_id,"attempt_id":original_dispatch["attempt_id"],
+                         "fencing_token":original_dispatch["fencing_token"],"authority_digest":job["authority_digest"],
+                         "process_cleanup_readback_sha256":release["process_cleanup_readback_sha256"]}
+        assert inspector["status"]=="unknown_external_effect" and inspector["memory_status"]=="no_learning"
+        assert inspector["execution"]["readback"] is None
+        assert not {"supervisor_token","stage_binding","pid","argv","private_path"}.intersection(cleanup)
+        _retained("node-repair-cleanup-released-api.json").write_text(json.dumps(inspector,indent=2))
+        async with async_db() as db:
+            row=(await db.execute(native.select(WorkflowRunState).where(WorkflowRunState.run_identity==job_id))).scalar_one()
+            original_checkpoints=row.checkpoint_receipts_json
+        for bad_field,bad_value in {"job_id":"wrong-job", "attempt_id":"wrong-attempt", "fence":original_dispatch["fencing_token"]+1,
+                                   "authority_digest":"a"*64,"cleanup_receipt_verified":False,"process_cleanup_readback_sha256":"invalid"}.items():
+            history=json.loads(original_checkpoints)
+            next(item for item in history if item["checkpoint_id"]=="repo-repair-execution-release")["payload"][bad_field]=bad_value
+            async with async_db() as db:
+                row=(await db.execute(native.select(WorkflowRunState).where(WorkflowRunState.run_identity==job_id))).scalar_one()
+                row.checkpoint_receipts_json=json.dumps(history)
+                await db.commit()
+            invalid_projection=await client.get(f"/api/workflows/repo-repair/{job_id}")
+            assert invalid_projection.status_code==200,invalid_projection.text
+            assert invalid_projection.json()["execution"]["process_cleanup"]["physical_capacity_released"] is False,bad_field
+        async with async_db() as db:
+            row=(await db.execute(native.select(WorkflowRunState).where(WorkflowRunState.run_identity==job_id))).scalar_one()
+            row.checkpoint_receipts_json=original_checkpoints
+            await db.commit()
         async with async_db() as db:
             row=(await db.execute(native.select(WorkflowRunState).where(WorkflowRunState.run_identity==job_id))).scalar_one()
             assert {field:getattr(row,field) for field in original_row}==original_row

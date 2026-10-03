@@ -38,6 +38,12 @@ export interface ProcedureRecommendation extends ProcedureOutcomeList {
   status: string;
   reason_code: string;
   proposal_id: string | null;
+  job_revision?: number;
+  fencing_token?: number;
+}
+export interface RecommendationCancelRequest extends RecommendationRequest {
+  expected_job_revision: number;
+  expected_fencing_token: number;
 }
 export interface ProcedurePreferenceSelection {
   status: string;
@@ -95,6 +101,8 @@ export const procedurePreferences = {
   selection: (scope: ProcedurePreferenceScope) => request<ProcedurePreferenceSelection>(`${routinePath(scope)}/preference?${query(scope)}`),
   recommend: (scope: ProcedurePreferenceScope, body: RecommendationRequest) => request<ProcedureRecommendation>(`${routinePath(scope)}/recommendations`, body),
   inspectJob: (scope: ProcedurePreferenceScope, jobId: string) => request<ProcedureRecommendation>(`${routinePath(scope)}/recommendations/${encodeURIComponent(jobId)}`),
+  findJob: (scope: ProcedurePreferenceScope, body: RecommendationRequest) => request<{ found: boolean; job: ProcedureRecommendation | null }>(`${routinePath(scope)}/recommendations?${query(scope)}&request_uuid=${encodeURIComponent(body.request_uuid)}`),
+  cancel: (scope: ProcedurePreferenceScope, jobId: string, body: RecommendationCancelRequest) => request<ProcedureRecommendation>(`${routinePath(scope)}/recommendations/${encodeURIComponent(jobId)}/cancel`, body),
   review: (proposalId: string) => request<ProcedurePreferenceReview>(`/api/memory/procedure-preferences/${encodeURIComponent(proposalId)}`),
   act: (proposalId: string, body: ProcedurePreferenceAction) => request<ProcedurePreferenceReview>(`/api/memory/procedure-preferences/${encodeURIComponent(proposalId)}/actions`, body),
   feedback: (scope: ProcedurePreferenceScope, outcome: ProcedureOutcome, label: "helpful" | "harmful", reason: string, mutationUuid: string) => request<{ event_id: number }>(`${routinePath(scope)}/outcomes/${encodeURIComponent(outcome.task_id)}/feedback`, {

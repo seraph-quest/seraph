@@ -2943,6 +2943,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         result_summary: str | None = None,
         approval_resume_receipt: Mapping[str, Any] | None = None,
         terminal_authority_check: Callable[[Any, Any], Awaitable[None]] | None = None,
+        cancellation_authority_check: Callable[[Any, Any], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         if to_status not in DURABLE_JOB_STATUSES:
             raise DurableJobTransitionError(f"unknown durable job status: {to_status}")
@@ -2954,7 +2955,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             from src.memory.evidence_dependencies import stage_run_dependencies, recheck_run_dependencies
             staged_dependencies = None
             preflight_run = await self._fetch(db, job_id)
-            if str(preflight_run.status) in DURABLE_JOB_TERMINAL_STATUSES:
+            if str(preflight_run.status) in DURABLE_JOB_TERMINAL_STATUSES and cancellation_authority_check is None:
                 # Exact historical replay admits no contact/source use. Keep
                 # the original canonical Goal fence, then return the existing
                 # terminal result before inspecting mutable dependencies.
@@ -2974,12 +2975,16 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if dependency_guard:
                 staged_dependencies = await stage_run_dependencies(db, preflight_run)
             await db.rollback()
-            if (terminal_authority_check is not None and to_status in {"succeeded", "degraded"}) or dependency_guard:
+            if (terminal_authority_check is not None and to_status in {"succeeded", "degraded"}) or dependency_guard or cancellation_authority_check is not None:
                 bind = db.get_bind()
                 dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
                 if dialect_name == "sqlite":
                     await db.execute(text("BEGIN IMMEDIATE"))
             run = await self._fetch(db, job_id)
+            if cancellation_authority_check is not None:
+                if to_status != "cancelled":
+                    raise DurableJobTransitionError("cancellation authority applies only to cancellation")
+                await cancellation_authority_check(db, run)
             if dependency_guard:
                 await recheck_run_dependencies(db, run, staged_dependencies)
             if to_status not in {"failed", "cancelled"}:
@@ -3316,6 +3321,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         fencing_token: int | None = None,
         expected_revision: int | None = None,
         reason: str = "operator_cancelled",
+        cancellation_authority_check: Callable[[Any, Any], Awaitable[None]] | None = None,
+        result: Any = None,
     ) -> dict[str, Any]:
         return await self.transition_job(
             job_id,
@@ -3324,6 +3331,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             fencing_token=fencing_token,
             expected_revision=expected_revision,
             reason=reason,
+            cancellation_authority_check=cancellation_authority_check,
+            result=result,
         )
 
     async def cancel_job_tree(

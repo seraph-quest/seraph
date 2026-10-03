@@ -26,7 +26,7 @@ from tests.test_procedure_v2_native_vertical import _activate_v2_routine, _seed_
 pytestmark = [pytest.mark.asyncio, pytest.mark.parametrize("async_db", ["file"], indirect=True)]
 
 
-@pytest.mark.parametrize("barrier", ["normal", "writer_io", "feedback", "phantom", "root_revoked", "package_paused"])
+@pytest.mark.parametrize("barrier", ["normal", "writer_io", "feedback", "phantom", "root_revoked", "package_paused", "cancel", "selection_phantom"])
 async def test_two_real_manual_invocations_yield_verified_feedback_bundle(async_db, monkeypatch, tmp_path: Path, barrier):
     from playwright.async_api import async_playwright
     tmp_path.chmod(0o700)
@@ -186,6 +186,44 @@ async def test_two_real_manual_invocations_yield_verified_feedback_bundle(async_
         assert selection["status"] == "suggested" and selection["suggested_version_id"] == bundle.scope.version_id
         assert selection["review"]["included_count"] == 2
         assert (await apply_preference_action(operator, review["proposal_id"], action))["idempotent_replay"] is True
+        if barrier == "selection_phantom":
+            added, _ = await routines.invoke_v2(prepared["routine_id"], invocation.model_copy(update={"invocation_uuid": str(uuid4())}),
+                owner_principal_id=owner.principal_id, owner_session_id=owner.session_id)
+            stale = await current_procedure_preference(operator, routine_id=prepared["routine_id"], version=1,
+                routine_revision=revision, goal_id=source["goal_id"], goal_revision=1)
+            assert stale["status"] == "blocked" and stale["memory_status"] == "no_learning"
+            async with async_db() as db:
+                assert not (await db.execute(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == added["task_id"]))).scalars().all()
+        if barrier == "cancel":
+            from src.memory import procedure_recommendation_job as jobs
+            from src.memory.procedure_recommendation_job import ProcedureRecommendationCancelRequest, cancel_recommendation
+            from uuid import uuid5, NAMESPACE_URL
+            real_stage = jobs.stage_procedure_bundle
+            cancel_body = None
+            new_request = recommendation_request.model_copy(update={"request_uuid": str(uuid4())})
+            new_job_id = str(uuid5(NAMESPACE_URL, f"seraph:procedure-recommendation:{owner.principal_id}:{owner.session_id}:{new_request.request_uuid}"))
+            async def stage_then_cancel(*args, **kwargs):
+                nonlocal cancel_body
+                staged = await real_stage(*args, **kwargs)
+                running = await inspect_recommendation(operator, prepared["routine_id"], new_job_id)
+                cancel_body = ProcedureRecommendationCancelRequest(**new_request.model_dump(),
+                    expected_job_revision=running["job_revision"], expected_fencing_token=running["fencing_token"])
+                cancelled = await cancel_recommendation(operator, prepared["routine_id"], new_job_id, cancel_body)
+                assert cancelled["job_status"] == "cancelled"
+                return staged
+            monkeypatch.setattr(jobs, "stage_procedure_bundle", stage_then_cancel)
+            cancelled = await prepare_recommendation(operator, prepared["routine_id"], new_request)
+            assert cancelled["job_status"] == "cancelled" and cancelled["memory_status"] == "no_learning"
+            canonical_job = await jobs.durable_job_repository.get_job(new_job_id)
+            assert canonical_job["artifacts"] == [] and canonical_job["effects"] == []
+            assert (await cancel_recommendation(operator, prepared["routine_id"], new_job_id, cancel_body))["job_revision"] == cancelled["job_revision"]
+            with pytest.raises(BoardError, match="another exact request"):
+                await cancel_recommendation(operator, prepared["routine_id"], new_job_id,
+                    cancel_body.model_copy(update={"request_uuid": str(uuid4())}))
+            async with async_db() as db:
+                patterns = (await db.execute(select(Memory))).scalars().all()
+                assert len(patterns) == 1 and patterns[0].id == adopted["accepted_memory_id"]
+                assert (await db.get(MemoryProposal, review["proposal_id"])).status == "accepted"
         rollback = ProcedurePreferenceActionRequest(action="rollback", expected_revision=adopted["revision"],
             expected_preview_text_digest=adopted["preview_text_digest"], expected_bundle_digest=adopted["bundle_digest"],
             acknowledged_selection_only=True, reason="Mechanical test rollback", mutation_uuid=str(uuid4()))

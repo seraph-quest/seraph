@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { procedurePreferences, type ProcedureOutcome, type ProcedureOutcomeList, type ProcedurePreferenceAction,
   type ProcedurePreferenceReview as Review, type ProcedurePreferenceScope, type ProcedurePreferenceSelection,
-  type ProcedureRecommendation, type RecommendationRequest } from "../../lib/procedurePreferences";
+  type ProcedureRecommendation, type RecommendationRequest, type RecommendationCancelRequest } from "../../lib/procedurePreferences";
 
 interface Props {
   ownerPrincipalId: string;
@@ -11,6 +11,7 @@ interface Props {
 }
 type Pending =
   | { kind: "recommend"; body: RecommendationRequest }
+  | { kind: "cancel"; jobId: string; body: RecommendationCancelRequest }
   | { kind: "action"; proposalId: string; body: ProcedurePreferenceAction }
   | { kind: "feedback"; outcome: ProcedureOutcome; label: "helpful" | "harmful"; reason: string; mutationUuid: string };
 interface Stored { pending: Pending | null; jobId: string | null; proposalId: string | null }
@@ -21,7 +22,7 @@ function readStored(key: string): Stored {
   if (!raw) return { pending: null, jobId: null, proposalId: null };
   if (raw.length > 8192) throw new Error("The retained review request exceeds its finite bound.");
   const value = JSON.parse(raw) as Stored;
-  if (!value || typeof value !== "object" || (value.pending !== null && !["recommend", "action", "feedback"].includes(value.pending?.kind))
+  if (!value || typeof value !== "object" || (value.pending !== null && !["recommend", "cancel", "action", "feedback"].includes(value.pending?.kind))
     || (value.jobId !== null && (typeof value.jobId !== "string" || value.jobId.length > 256))
     || (value.proposalId !== null && (typeof value.proposalId !== "string" || value.proposalId.length > 256))) {
     throw new Error("The retained review request is invalid; no action was sent.");
@@ -54,10 +55,11 @@ export function ProcedurePreferenceReview({ ownerPrincipalId, ownerSessionId, sc
     const captured = key;
     const [list, selection] = await Promise.all([procedurePreferences.outcomes(scope), procedurePreferences.selection(scope)]);
     let review = base.proposalId ? await procedurePreferences.review(base.proposalId) : null;
-    const recommendation = base.jobId ? await procedurePreferences.inspectJob(scope, base.jobId) : base.recommendation;
+    const discovered = !base.jobId && base.pending?.kind === "recommend" ? await procedurePreferences.findJob(scope, base.pending.body) : null;
+    const recommendation = base.jobId ? await procedurePreferences.inspectJob(scope, base.jobId) : discovered?.job ?? base.recommendation;
     if (!review && recommendation?.proposal_id) review = await procedurePreferences.review(recommendation.proposal_id);
     if ((review && !isOwned(review)) || (selection.review && !isOwned(selection.review))) throw new Error("The review belongs to a different Root.");
-    if (currentKey.current === captured) setState({ ...base, list, selection, review, recommendation });
+    if (currentKey.current === captured) setState({ ...base, jobId: recommendation?.job_id ?? base.jobId, list, selection, review, recommendation });
   };
   useEffect(() => {
     setAcknowledgment({ key, checked: false }); setReason(""); setNotice(null);
@@ -84,6 +86,9 @@ export function ProcedurePreferenceReview({ ownerPrincipalId, ownerSessionId, sc
       if (pending.kind === "recommend") {
         const result = await procedurePreferences.recommend(scope, pending.body);
         next = { ...next, jobId: result.job_id, proposalId: result.proposal_id, recommendation: result };
+      } else if (pending.kind === "cancel") {
+        const result = await procedurePreferences.cancel(scope, pending.jobId, pending.body);
+        next = { ...next, jobId: result.job_id, recommendation: result };
       } else if (pending.kind === "action") {
         const result = await procedurePreferences.act(pending.proposalId, pending.body);
         if (!isOwned(result)) throw new Error("The action readback belongs to a different Root.");
@@ -129,6 +134,14 @@ export function ProcedurePreferenceReview({ ownerPrincipalId, ownerSessionId, sc
       expected_goal_revision: scope.goalRevision, request_uuid: crypto.randomUUID(),
     } })}>Preview outcome recommendation</button>
     {bound?.recommendation ? <p role="status">{bound.recommendation.status} · {bound.recommendation.reason_code} · memory remains {review?.status === "accepted" ? "adopted" : "no_learning"}</p> : null}
+    {bound?.recommendation && ["accepted", "queued", "running", "blocked"].includes(bound.recommendation.job_status)
+      && bound.recommendation.job_revision && bound.recommendation.fencing_token !== undefined ?
+      <button type="button" disabled={busy || Boolean(bound.pending && bound.pending.kind !== "recommend")}
+        onClick={() => { const job = bound.recommendation!; void send({ kind: "cancel", jobId: job.job_id, body: {
+          version: scope.version, expected_routine_revision: scope.routineRevision, goal_id: scope.goalId,
+          expected_goal_revision: scope.goalRevision, request_uuid: crypto.randomUUID(),
+          expected_job_revision: job.job_revision!, expected_fencing_token: job.fencing_token!,
+        } }); }}>Cancel owned recommendation</button> : null}
     {review ? <div><p>{review.preview_text}</p><p>Review {review.status} · revision {review.revision}</p>
       <label><input type="checkbox" checked={acknowledged} disabled={busy || Boolean(bound?.pending)} onChange={(event) => setAcknowledgment({ key, checked: event.currentTarget.checked })} />I understand this changes future suggestions only and grants no execution authority.</label>
       {review.status === "proposed" ? <><button type="button" disabled={!acknowledged || busy || Boolean(bound?.pending)} onClick={() => act("accept")}>Adopt reviewed preference</button><button type="button" disabled={!acknowledged || busy || Boolean(bound?.pending)} onClick={() => act("reject")}>Reject preference</button></> : null}

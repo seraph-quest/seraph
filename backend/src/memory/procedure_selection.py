@@ -8,6 +8,9 @@ from src.memory.procedure_recommendation_job import preference_scope, recheck_bu
 from src.memory.procedure_preferences import proposal_projection
 from src.memory.repository import _effect_mac_key, _m5_selection_binding_matches, _canonical_memory_deletion_marker
 from src.work_board.repository import BoardError
+from src.workflows.procedure_service import ProcedureV2Error
+from src.extensions.capability_pack import CapabilityPackLifecycleError
+from src.extensions.capability_execution import CapabilityJournalError
 
 
 async def current_procedure_preference(operator, *, routine_id, version, routine_revision, goal_id, goal_revision):
@@ -28,8 +31,8 @@ async def current_procedure_preference(operator, *, routine_id, version, routine
         if not rows:
             return {"status": "none", "reason_code": "no_adopted_procedure_preference", "memory_status": "no_learning"}
         ids = [row.proposal_id for row in rows]
-    signing_key = _effect_mac_key()
     try:
+        signing_key = _effect_mac_key()
         bundle = await stage_procedure_bundle(operator, routine_id=routine_id, version=version,
             routine_revision=routine_revision, goal_id=goal_id, goal_revision=goal_revision)
         with pin_current_package(bundle.scope):
@@ -50,6 +53,7 @@ async def current_procedure_preference(operator, *, routine_id, version, routine
                 if [row.proposal_id for row in current_rows] != ids:
                     return {"status": "blocked", "reason_code": "procedure_preference_changed", "memory_status": "no_learning"}
                 expected_scope = preference_scope(bundle)
+                eligible = []
                 for row in current_rows:
                     if bounded_json(row.memory_scope_json) != expected_scope:
                         continue
@@ -65,13 +69,17 @@ async def current_procedure_preference(operator, *, routine_id, version, routine
                         accepted_content_digest=row.accepted_memory_content_digest, decision_effect=row.decision_effect,
                         memory_scope=expected_scope, source_binding=row, _signing_key=signing_key):
                         continue
-                    return {"status": "suggested", "reason_code": "adopted_reviewed_procedure_preference",
+                    eligible.append({"status": "suggested", "reason_code": "adopted_reviewed_procedure_preference",
                         "memory_status": "accepted", "suggested_version_id": bundle.scope.version_id,
                         "suggested_routine_id": routine_id, "suggested_version": version,
-                        "review": proposal_projection(row)}
+                        "review": proposal_projection(row)})
+                if len(eligible) > 1:
+                    return {"status": "blocked", "reason_code": "procedure_preference_ambiguous", "memory_status": "no_learning"}
+                if eligible:
+                    return eligible[0]
         return {"status": "blocked", "reason_code": "procedure_preference_stale", "memory_status": "no_learning"}
-    except BoardError as exc:
-        return {"status": "blocked", "reason_code": exc.code, "memory_status": "no_learning"}
+    except (BoardError, ProcedureV2Error, CapabilityPackLifecycleError, CapabilityJournalError) as exc:
+        return {"status": "blocked", "reason_code": getattr(exc, "code", "procedure_preference_unavailable"), "memory_status": "no_learning"}
 
 
 def digest_text(text):

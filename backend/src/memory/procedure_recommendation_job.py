@@ -65,6 +65,54 @@ class ProcedureRecommendationRequest(BaseModel):
         return value
 
 
+class ProcedureRecommendationCancelRequest(ProcedureRecommendationRequest):
+    expected_job_revision: int = Field(ge=1)
+    expected_fencing_token: int = Field(ge=0)
+
+
+async def cancel_recommendation(operator, routine_id, job_id, request: ProcedureRecommendationCancelRequest):
+    """Server-owned pure current-Root/Goal callback in the existing cancel CAS."""
+    owner = operator.principal.principal_id
+    body_digest = digest({"owner": owner, "root": operator.session_id, "routine_id": routine_id,
+        "job_id": job_id, **request.model_dump()})
+    staged_fingerprint = None
+    staged_authority = None
+    staged_lease_owner = None
+    async def current(db, run):
+        await assert_current_root(db, operator)
+        await resolve_scope(db, operator, routine_id=routine_id, version=request.version,
+            routine_revision=request.expected_routine_revision, goal_id=request.goal_id,
+            goal_revision=request.expected_goal_revision)
+        authority = bounded_json(run.declared_authority_json, {})
+        if (run.job_kind != JOB_KIND or run.operator_session_id != operator.session_id
+            or run.owner_principal_id != owner or run.fencing_token != request.expected_fencing_token
+            or authority.get("routine_id") != routine_id or authority.get("routine_version") != request.version
+            or run.run_fingerprint != staged_fingerprint or run.declared_authority_json != staged_authority
+            or run.goal_id != request.goal_id or run.goal_revision != request.expected_goal_revision):
+            raise BoardError("procedure_cancel_binding_invalid", "Cancel only the exact current owned recommendation")
+        if run.status == "cancelled":
+            if run.result_digest != digest({"memory_status": "no_learning", "cancel_request_digest": body_digest}):
+                raise BoardError("procedure_request_conflict", "The closed cancellation binds another exact request")
+        elif run.revision != request.expected_job_revision or run.status not in {"accepted", "queued", "running", "blocked"}:
+            raise BoardError("procedure_cancel_stale", "Inspect the exact current job revision before cancellation")
+        elif run.lease_owner != staged_lease_owner or (run.status == "running"
+            and run.lease_owner != f"procedure-recommendation:{job_id}"):
+            raise BoardError("procedure_cancel_binding_invalid", "The exact recommendation lease changed")
+    # Initial inspection admits no cancellation; final authority is rechecked
+    # in the repository's immediate writer below, including exact replay.
+    async with db_engine.get_session() as db:
+        run = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == job_id))).scalar_one_or_none()
+        if run is None:
+            raise BoardError("procedure_job_owner_mismatch", "The exact owned recommendation is unavailable")
+        staged_fingerprint, staged_authority = run.run_fingerprint, run.declared_authority_json
+        staged_lease_owner = run.lease_owner
+        await current(db, run)
+    await durable_job_repository.cancel_job(job_id, owner=staged_lease_owner,
+        fencing_token=request.expected_fencing_token if staged_lease_owner else None, expected_revision=request.expected_job_revision,
+        cancellation_authority_check=current, result={"memory_status": "no_learning", "cancel_request_digest": body_digest})
+    return await inspect_recommendation(operator, routine_id, job_id)
+
+
 def preview_text(bundle: PreparedProcedureBundle) -> str:
     scope = bundle.scope
     return (f"Suggest reviewed public-browser-check procedure {scope.routine_id} version {scope.version} "
@@ -106,6 +154,11 @@ async def inspect_recommendation(operator: AuthenticatedOperator, routine_id: st
         effects = bounded_json(run.effect_receipts_json, [])
         matching = [item for item in artifacts if item.get("artifact_type") == OUTPUT_KIND]
         result = {"job_id": job_id, "job_status": run.status, "job_revision": run.revision,
+            "fencing_token": run.fencing_token, "status": run.status,
+            "capability_id": CAPABILITY_ID, "native_job_kind": JOB_KIND,
+            "typed_input_schema": "procedure-recommendation-request.v1", "typed_output_schema": "procedure-recommendation-output.v1",
+            "permissions": authority.get("permissions", []), "limits": authority.get("limits", {}),
+            "priority": run.priority, "max_attempts": run.max_attempts, "budget_microusd": 0,
             "memory_status": "no_learning", "reason_code": run.error or run.status,
             "deadline_at": _utc(run.deadline_at).isoformat() if run.deadline_at else None}
         if run.status == "succeeded":
@@ -127,8 +180,33 @@ async def inspect_recommendation(operator: AuthenticatedOperator, routine_id: st
     output = bounded_json(read_private_proof(path, sha).decode())
     if output.get("job_id") != job_id or output.get("scope", {}).get("routine_id") != routine_id:
         raise BoardError("procedure_job_output_invalid", "The exact native output binding changed")
+    if positive[0].get("target_digest") != output.get("bundle_digest"):
+        raise BoardError("procedure_job_readback_invalid", "The protected readback names a different exact output bundle")
+    async with db_engine.get_session() as db:
+        await assert_current_root(db, operator)
+        current = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == job_id))).scalar_one()
+        if (current.revision != result["job_revision"] or current.owner_principal_id != operator.principal.principal_id
+            or current.operator_session_id != operator.session_id or current.artifact_receipts_json != run.artifact_receipts_json
+            or current.effect_receipts_json != run.effect_receipts_json):
+            raise BoardError("procedure_job_readback_changed", "The canonical producer changed during physical inspection")
     result.update(output)
     return result
+
+
+async def find_recommendation(operator, routine_id, request: ProcedureRecommendationRequest):
+    """Resolve only the retained exact request; GET never prepares a job."""
+    owner = operator.principal.principal_id
+    binding = {"owner_principal_id": owner, "owner_session_id": operator.session_id,
+        "routine_id": routine_id, **request.model_dump()}
+    job_id = str(uuid5(NAMESPACE_URL, f"seraph:procedure-recommendation:{owner}:{operator.session_id}:{request.request_uuid}"))
+    async with db_engine.get_session() as db:
+        await assert_current_root(db, operator)
+        row = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == job_id))).scalar_one_or_none()
+        if row is None:
+            return {"found": False, "job": None}
+        if row.run_fingerprint != digest(binding):
+            raise BoardError("procedure_request_conflict", "This exact request identity binds different parameters")
+    return {"found": True, "job": await inspect_recommendation(operator, routine_id, job_id)}
 
 
 async def prepare_recommendation(operator: AuthenticatedOperator, routine_id: str,
@@ -177,6 +255,8 @@ async def prepare_recommendation(operator: AuthenticatedOperator, routine_id: st
             # staged and then handed to pure canonical writer callbacks.
             bundle = await stage_procedure_bundle(operator, routine_id=routine_id, version=scope.version,
                 routine_revision=scope.routine_revision, goal_id=scope.goal_id, goal_revision=scope.goal_revision)
+            if (await durable_job_repository.get_job(job_id))["status"] == "cancelled":
+                return await inspect_recommendation(operator, routine_id, job_id)
             with pin_current_package(scope):
                 output = {**bundle.projection(), "job_id": job_id, "proposal_id": None}
                 proposal_id = str(uuid5(NAMESPACE_URL, f"seraph:procedure-preference:{owner}:{operator.session_id}:{bundle.bundle_digest}"))

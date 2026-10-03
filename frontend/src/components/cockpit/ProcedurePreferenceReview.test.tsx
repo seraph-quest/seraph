@@ -24,6 +24,9 @@ beforeEach(() => {
   vi.spyOn(procedurePreferences, "review").mockResolvedValue(review);
   vi.spyOn(procedurePreferences, "act").mockResolvedValue({ ...review, status: "accepted", revision: 2 });
   vi.spyOn(procedurePreferences, "feedback").mockResolvedValue({ event_id: 3 });
+  vi.spyOn(procedurePreferences, "findJob").mockResolvedValue({ found: false, job: null });
+  vi.spyOn(procedurePreferences, "cancel").mockResolvedValue({ job_id: "job", job_status: "cancelled", status: "cancelled",
+    reason_code: "cancelled", proposal_id: null, included_count: 0, outcomes: [], manual_disclosure: manual, quality_disclosure: quality });
 });
 
 async function preview() {
@@ -33,6 +36,27 @@ async function preview() {
 }
 
 describe("explicit procedure preference review", () => {
+  it("discovers a retained active native request using GET and cancels only its displayed revision and fence", async () => {
+    const body = { version: 1, expected_routine_revision: 3, goal_id: "goal", expected_goal_revision: 1,
+      request_uuid: "5c4ad444-aeeb-4fab-802d-b7282bb6b7dd" };
+    const key = `seraph.procedure-preference:${JSON.stringify(["owner", "root", "routine", 1, 3, "goal", 1])}`;
+    sessionStorage.setItem(key, JSON.stringify({ pending: { kind: "recommend", body }, jobId: null, proposalId: null }));
+    const running = { job_id: "job", job_status: "running", status: "running", job_revision: 3, fencing_token: 1,
+      reason_code: "running", proposal_id: null, included_count: 0, outcomes: [], manual_disclosure: manual, quality_disclosure: quality };
+    vi.mocked(procedurePreferences.findJob).mockResolvedValue({ found: true, job: running });
+    vi.mocked(procedurePreferences.inspectJob).mockResolvedValue({ ...running, job_status: "cancelled", status: "cancelled", reason_code: "cancelled" });
+    render(<ProcedurePreferenceReview {...props} />);
+    const cancel = await screen.findByRole("button", { name: "Cancel owned recommendation" });
+    expect(procedurePreferences.findJob).toHaveBeenCalledWith(scope, body);
+    expect(procedurePreferences.recommend).not.toHaveBeenCalled(); expect(procedurePreferences.cancel).not.toHaveBeenCalled();
+    await act(async () => { fireEvent.click(cancel); });
+    expect(procedurePreferences.cancel).toHaveBeenCalledWith(scope, "job", expect.objectContaining({
+      expected_job_revision: 3, expected_fencing_token: 1, goal_id: "goal", expected_goal_revision: 1,
+    }));
+    await screen.findByText(/cancelled · cancelled/);
+    expect(screen.queryByRole("button", { name: "Cancel owned recommendation" })).not.toBeInTheDocument();
+    expect(procedurePreferences.act).not.toHaveBeenCalled();
+  });
   it("discloses the manual-only population and unmeasured quality before adoption and on an adopted suggestion", async () => {
     const selected = vi.fn();
     render(<ProcedurePreferenceReview {...props} onSelectVersion={selected} />);

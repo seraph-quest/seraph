@@ -92,7 +92,7 @@ from src.workflows.routine_templates import (
 )
 from src.workflows.routine_steps import RoutineStepContext, github_followthrough, guardian_watch_run
 from src.memory.procedure_recommendations import ProcedureFeedbackRequest
-from src.memory.procedure_recommendation_job import ProcedureRecommendationRequest
+from src.memory.procedure_recommendation_job import ProcedureRecommendationRequest, ProcedureRecommendationCancelRequest
 from src.workflows.procedure_contracts import (
     ROUTINE_V2_CAPABILITY_VERSION,
     build_procedure_plan,
@@ -10198,12 +10198,33 @@ async def prepare_procedure_recommendation(routine_id: str, req: ProcedureRecomm
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
 
 
+@routine_router.get("/{routine_id}/recommendations")
+async def find_procedure_recommendation(routine_id: str, version: int, expected_routine_revision: int,
+                                       goal_id: str, expected_goal_revision: int, request_uuid: str, request: Request):
+    from src.memory.procedure_recommendation_job import find_recommendation
+    try:
+        req = ProcedureRecommendationRequest(version=version, expected_routine_revision=expected_routine_revision,
+            goal_id=goal_id, expected_goal_revision=expected_goal_revision, request_uuid=request_uuid)
+        return await find_recommendation(_operator(request), routine_id, req)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
 @routine_router.get("/{routine_id}/recommendations/{job_id}")
 async def inspect_procedure_recommendation(routine_id: str, job_id: str, request: Request):
     from src.memory.procedure_recommendation_job import inspect_recommendation
     operator = _operator(request)
     try:
         return await inspect_recommendation(operator, routine_id, job_id)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@routine_router.post("/{routine_id}/recommendations/{job_id}/cancel")
+async def cancel_procedure_recommendation(routine_id: str, job_id: str, req: ProcedureRecommendationCancelRequest, request: Request):
+    from src.memory.procedure_recommendation_job import cancel_recommendation
+    try:
+        return await cancel_recommendation(_operator(request), routine_id, job_id, req)
     except BoardError as exc:
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
 

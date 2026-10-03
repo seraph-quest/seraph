@@ -42,6 +42,7 @@ describe('EvidenceExecutionControls', () => {
     const actual = JSON.parse(sessionStorage.getItem(storageKey)!);
     expect(actual).toMatchObject({ ...request, idempotency_key: expect.any(String) });
     expect(Object.keys(actual)).toHaveLength(7);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Retry exact execution request' })).toBeEnabled());
   });
 
   it('reload only inspects; timeout retains the same UUID and explicit retry uses identical bytes', async () => {
@@ -69,6 +70,7 @@ describe('EvidenceExecutionControls', () => {
     expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Preview execution evidence replacement' })).toBeDisabled();
     expect(fetchMock.mock.calls.filter(([url, init]) => url.endsWith('execution-binding') && init.method === 'POST')).toHaveLength(0);
+    await screen.findByText(/Execution evidence: unbound/);
   });
 
   it('blocks mutation when retained storage exceeds its finite bound or is corrupt', async () => {
@@ -85,5 +87,6 @@ describe('EvidenceExecutionControls', () => {
     rerender(<EvidenceExecutionControls {...props} packetRevision={3} packetDigest={'d'.repeat(64)} />);
     expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
     expect(screen.queryByText(/Exact executor input SHA/)).not.toBeInTheDocument();
+    await screen.findByText(/Execution evidence: unbound/);
   });
 });

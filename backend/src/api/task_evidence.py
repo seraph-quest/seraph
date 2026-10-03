@@ -12,6 +12,7 @@ from src.work_board.repository import BoardError
 from src.memory.evidence_execution import (
     ExecutionPreviewRequest, ExecutionAcceptRequest, preview_execution, accept_execution, inspect_execution,
 )
+from src.memory.evidence_impact import ImpactRequest, inspect_impact, evaluate_impact
 
 router = APIRouter(prefix="/work-board/tasks")
 
@@ -92,5 +93,30 @@ async def inspect_task_execution_evidence(request: Request, task_id: str,
             return await inspect_execution(db, _owner(operator), task_id, pending=pending, operator=operator)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail={'code': 'evidence_request_invalid'}) from exc
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.get('/{task_id}/evidence/affected')
+async def inspect_task_evidence_impact(request: Request,task_id: str,
+    source_id: str = Query(pattern='^[a-f0-9]{64}$'), cursor: str | None = Query(default=None,max_length=2048),
+    pending_request: str | None = Query(default=None,max_length=4096)):
+    operator=_operator(request)
+    try:
+        pending=None if pending_request is None else ImpactRequest.model_validate_json(pending_request)
+        async with get_session() as db:
+            return await inspect_impact(db,_owner(operator),task_id,source_id,cursor,pending=pending)
+    except ValueError as exc:
+        raise HTTPException(status_code=422,detail={'code':'evidence_request_invalid'}) from exc
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.post('/{task_id}/evidence/impact-evaluation')
+async def evaluate_task_evidence_impact(request: Request,task_id: str,body: ImpactRequest):
+    operator=_operator(request)
+    try:
+        async with get_session() as db:
+            return await evaluate_impact(db,_owner(operator),task_id,body,operator=operator)
     except BoardError as exc:
         _raise_board_error(exc)

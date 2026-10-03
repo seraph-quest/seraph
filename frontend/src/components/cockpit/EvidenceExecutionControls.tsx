@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { apiFetch } from '../../lib/api';
+import { EvidenceImpactControls } from './EvidenceImpactControls';
 
 type BindingRequest = {
   expected_task_revision: number; expected_packet_revision: number; expected_packet_digest: string;
@@ -14,6 +15,7 @@ interface Preview {
 interface Inspection {
   task_id: string; task_revision: number; binding_state: 'unbound' | 'bound' | 'stale';
   binding_count: number; applied_result: { task_revision: number; binding_state: string } | null;
+  sources?: { source_id: string }[];
 }
 const hash = /^[a-f0-9]{64}$/;
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
@@ -39,6 +41,7 @@ export function EvidenceExecutionControls({ endpoint, taskId, taskRevision, owne
   const [pending, setPending] = useState<BindingRequest | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [impactSource, setImpactSource] = useState<string | null>(null);
   const scope = `${ownerSessionId ?? ''}:${taskId}:${taskRevision}:${packetRevision}:${packetDigest ?? ''}`;
   const currentScope = useRef(scope); currentScope.current = scope;
   const storageKey = `seraph:evidence-execution:${ownerSessionId ?? ''}:${taskId}`;
@@ -58,7 +61,9 @@ export function EvidenceExecutionControls({ endpoint, taskId, taskRevision, owne
     const value = await call('GET', request ? `?pending_request=${encodeURIComponent(JSON.stringify(request))}` : '') as Inspection;
     if (value.task_id !== taskId || !Number.isSafeInteger(value.task_revision)
       || !['unbound', 'bound', 'stale'].includes(value.binding_state)
-      || !Number.isSafeInteger(value.binding_count) || value.binding_count < 0 || value.binding_count > 16) {
+      || !Number.isSafeInteger(value.binding_count) || value.binding_count < 0 || value.binding_count > 16
+      || (value.sources !== undefined && (!Array.isArray(value.sources) || value.sources.length > 16
+        || value.sources.some(source => !source || !hash.test(source.source_id))))) {
       throw new Error('Execution evidence projection is invalid.');
     }
     if (currentScope.current === expectedScope) setInspection({ scope: expectedScope, value });
@@ -66,7 +71,7 @@ export function EvidenceExecutionControls({ endpoint, taskId, taskRevision, owne
   }
   useEffect(() => {
     let live = true;
-    setPreview(null); setAck(false); setInspection(null); setPending(null); setError(null); setBusy(false);
+    setPreview(null); setAck(false); setInspection(null); setPending(null); setError(null); setBusy(false); setImpactSource(null);
     try {
       const raw = sessionStorage.getItem(storageKey);
       if (raw !== null) {
@@ -150,5 +155,12 @@ export function EvidenceExecutionControls({ endpoint, taskId, taskRevision, owne
         I reviewed this exact packet for execution use; it grants no model or external permission.</label>
       <button disabled={!enabled || busy || !boundAck || Boolean(pending)} onClick={() => void action(accept)}>Accept exact execution binding</button>
     </>}
+    {[...new Set(boundInspection?.sources?.map(source => source.source_id) ?? [])].map(sourceId =>
+      <button key={sourceId} disabled={busy} onClick={() => setImpactSource(sourceId)}>
+        Inspect affected tasks for source {sourceId.slice(0, 12)}
+      </button>)}
+    {impactSource && boundInspection?.sources?.some(source => source.source_id === impactSource) &&
+      <EvidenceImpactControls key={`${scope}:${impactSource}`} endpoint={endpoint} taskId={taskId}
+        taskRevision={taskRevision} ownerSessionId={ownerSessionId} sourceId={impactSource} canEdit={canEdit} />}
   </div>;
 }

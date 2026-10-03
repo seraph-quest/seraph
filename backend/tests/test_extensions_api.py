@@ -2577,6 +2577,91 @@ def test_list_extensions_builds_one_fresh_index_after_governance_sync(extension_
 
 
 @pytest.mark.asyncio
+async def test_metadata_get_projection_overlap_preserves_actual_operator_state_and_mcp_updates(client, extension_runtime, tmp_path, monkeypatch):
+    import asyncio
+    import json
+    from threading import Event, current_thread
+    from src.api import extensions as api, extension_metadata
+    from src.extensions import lifecycle
+    from src.extensions.state import load_extension_state_payload
+    # Local fixture policy forces the real governance-disable path. No
+    # provider contact occurs: MCP entries stay disabled/disconnected.
+    lifecycle.install_extension_path(str(_write_mcp_connector_extension(tmp_path)))
+    lifecycle.install_extension_path(str(_write_installable_extension(tmp_path)))
+    mcp_manager._config["github-packaged"]["enabled"] = True
+    mcp_manager._config["operator-independent"] = {"url": "https://example.com/mcp", "enabled": False, "description": "before"}
+    mcp_manager._save_config()
+    monkeypatch.setattr(lifecycle, "_verified_governance_blocks_runtime_access", lambda extension, state: {"reason": "fixture review required"} if extension.id == "seraph.test-connector" else None)
+    loop = asyncio.get_running_loop()
+    state_saves, config_saves = [], []
+    save_state, save_config = lifecycle._save_state, mcp_manager._save_config
+    def serialized_state(payload):
+        assert asyncio.get_running_loop() is loop and current_thread().name == "MainThread"
+        state_saves.append(1)
+        return save_state(payload)
+    def serialized_config():
+        assert asyncio.get_running_loop() is loop and current_thread().name == "MainThread"
+        config_saves.append(1)
+        return save_config()
+    monkeypatch.setattr(lifecycle, "_save_state", serialized_state)
+    monkeypatch.setattr(mcp_manager, "_save_config", serialized_config)
+    started, release = Event(), Event()
+    project = api.project_extension_metadata
+    def held_projection(snapshot):
+        assert current_thread().name != "MainThread"
+        # No live MCP manager, executable tools, clients or locks occur in
+        # the detached metadata/name scope sent to the worker.
+        from dataclasses import fields, is_dataclass
+        from pydantic import BaseModel
+        def plain(value):
+            if value is None or isinstance(value, (str, int, float, bool, Path)):
+                return
+            if isinstance(value, BaseModel):
+                plain(value.model_dump()); return
+            if is_dataclass(value):
+                for field in fields(value): plain(getattr(value, field.name))
+                return
+            if isinstance(value, dict):
+                for k, v in value.items(): plain(k); plain(v)
+                return
+            if isinstance(value, (tuple, list, set)):
+                for item in value: plain(item)
+                return
+            raise AssertionError(f"non-metadata object transferred: {type(value).__name__}")
+        plain(snapshot)
+        started.set()
+        assert release.wait(3)
+        # Snapshot projection must not rediscover live MCP/tool authority.
+        with patch.object(lifecycle, "_mcp_runtime_index", side_effect=AssertionError("live MCP read in projection")), patch.object(
+            lifecycle, "get_base_tools_and_active_skills", side_effect=AssertionError("live tool authority read in projection")
+        ):
+            return project(snapshot)
+    monkeypatch.setattr(api, "project_extension_metadata", held_projection)
+    old = extension_metadata._pending
+    assert old is None or old.worker_done.wait(2)
+    monkeypatch.setattr(extension_metadata, "_pending", None)
+    get = asyncio.create_task(client.get("/api/extensions"))
+    try:
+        assert await asyncio.to_thread(started.wait, 2)
+        assert state_saves and config_saves and not mcp_manager._config["github-packaged"]["enabled"]
+        configured = await client.post("/api/extensions/seraph.test-installable/configure", json={"config": {"mode": "newer-operator-update"}})
+        assert configured.status_code == 200, configured.json()
+        updated = await client.put("/api/mcp/servers/operator-independent", json={"url": "https://example.com/mcp", "enabled": False, "description": "newer-operator-update"})
+        assert updated.status_code == 200, updated.json()
+        revision = load_extension_state_payload()["revision"]
+    finally:
+        release.set()
+        response = await asyncio.wait_for(get, 4)
+    assert response.status_code == 200, response.json()
+    state = load_extension_state_payload()
+    assert state["revision"] == revision
+    assert state["extensions"]["seraph.test-installable"]["config"] == {"mode": "newer-operator-update"}
+    disk_config = json.loads((extension_runtime / "mcp-servers.json").read_text())
+    assert mcp_manager._config["operator-independent"]["description"] == "newer-operator-update"
+    assert "newer-operator-update" in json.dumps(disk_config)
+
+
+@pytest.mark.asyncio
 async def test_validate_extension_package_path_returns_manifest_report(client, tmp_path):
     package_dir = _write_installable_extension(tmp_path)
     with patch("src.api.extensions.log_integration_event", AsyncMock()) as log_event:

@@ -58,6 +58,8 @@ from src.extensions.lifecycle import (
     install_extension_path,
     list_extension_connectors,
     list_extensions,
+    prepare_extension_metadata,
+    project_extension_metadata,
     quarantine_extension,
     record_extension_review,
     reenter_extension,
@@ -1515,7 +1517,7 @@ async def list_extension_packages():
 
 async def _optional_extension_metadata():
     from src.api.extension_metadata import bounded_extension_metadata
-    return await bounded_extension_metadata(list_extensions)
+    return await bounded_extension_metadata(project_extension_metadata, prepare=prepare_extension_metadata)
 
 
 async def _optional_extension(extension_id: str):

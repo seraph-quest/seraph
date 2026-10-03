@@ -37,6 +37,28 @@ async def test_worker_preserves_heartbeat_and_returns_fresh_build_each_time():
 
 
 @pytest.mark.asyncio
+async def test_prepare_runs_once_on_event_loop_before_detached_worker_and_redacts_failure():
+    prepared, built = [], []
+    loop = asyncio.get_running_loop()
+    def prepare():
+        assert asyncio.get_running_loop() is loop
+        prepared.append(current_thread().name)
+        return {"immutable": "snapshot"}
+    def build(snapshot):
+        built.append(current_thread().name)
+        assert snapshot == {"immutable": "snapshot"}
+        return {"extensions": []}
+    assert await metadata.bounded_extension_metadata(build, prepare=prepare) == {"extensions": []}
+    assert prepared == ["MainThread"] and built[0] != "MainThread"
+    def broken():
+        raise RuntimeError("/private/path secret-token")
+    with pytest.raises(HTTPException) as failure:
+        await metadata.bounded_extension_metadata(build, prepare=broken)
+    assert "secret-token" not in repr(failure.value.detail)
+    assert metadata._pending.worker_done.is_set() and not metadata._pending.submitted
+
+
+@pytest.mark.asyncio
 async def test_abort_and_concurrent_timeout_do_not_submit_another_actual_worker():
     started, release, finished = Event(), Event(), Event()
     calls = []

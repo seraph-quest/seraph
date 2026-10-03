@@ -33,7 +33,7 @@ def _unavailable() -> HTTPException:
         "message": "Optional extension metadata is still loading or unavailable. Retry after the current worker finishes."})
 
 
-async def bounded_extension_metadata(builder: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+async def bounded_extension_metadata(builder: Callable[..., dict[str, Any]], *, prepare: Callable[[], Any] | None = None) -> dict[str, Any]:
     global _pending
     loop = asyncio.get_running_loop()
     with _lock:
@@ -42,9 +42,18 @@ async def bounded_extension_metadata(builder: Callable[[], dict[str, Any]]) -> d
             current = _PendingBuild(loop=loop, worker_done=Event())
             _pending = current
 
+            try:
+                # Synchronous governance/config mutations stay serialized
+                # with existing async API mutations. Only one new pending
+                # worker prepares a fresh immutable projection snapshot.
+                prepared = prepare() if prepare is not None else None
+            except Exception:
+                current.worker_done.set()
+                raise _unavailable() from None
+
             def build():
                 try:
-                    result = builder()
+                    result = builder(prepared) if prepare is not None else builder()
                     if not isinstance(result, dict):
                         raise ValueError("extension metadata shape invalid")
                     return result

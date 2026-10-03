@@ -91,6 +91,7 @@ from src.workflows.routine_templates import (
     validate_generated_files,
 )
 from src.workflows.routine_steps import RoutineStepContext, github_followthrough, guardian_watch_run
+from src.memory.procedure_recommendations import ProcedureFeedbackRequest
 from src.workflows.procedure_contracts import (
     ROUTINE_V2_CAPABILITY_VERSION,
     build_procedure_plan,
@@ -10146,6 +10147,21 @@ async def invoke_procedure_v2(routine_id: str, req: ProcedureV2InvokeRequest, re
         return JSONResponse(status_code=status_code, content=payload)
     except ProcedureV2Error as exc:
         raise _procedure_http_error(exc) from exc
+
+
+@routine_router.post("/{routine_id}/outcomes/{task_id}/feedback")
+async def record_procedure_outcome_feedback(
+    routine_id: str, task_id: str, req: ProcedureFeedbackRequest, request: Request,
+):
+    operator = _operator(request)
+    from src.memory.procedure_recommendations import record_procedure_feedback
+    from src.work_board.repository import BoardError
+    try:
+        async with db_engine.get_session() as db:
+            return await record_procedure_feedback(db, operator, routine_id=routine_id,
+                task_id=task_id, request=req)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
 
 
 @routine_router.post("/{routine_id}/schedule-v2")

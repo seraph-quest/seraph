@@ -434,6 +434,15 @@ execution, memory superiority, or production readiness.
 
 ### Reviewed procedures v2 (M6 #889) {#reviewed-procedures-v2-m6-889-branch-local-target}
 
+[ADR-015](./decisions/015-reviewed-procedure-preferences.md) accepts a narrow
+reviewed-learning target: explicit feedback on matching manual invocations may
+propose a Goal/version-local preference for an existing `public-browser-check`
+version. Preview, adoption and rollback remain explicit, and preference never
+authorizes invocation or scheduling. Scheduled invocations are excluded from
+the evidence population, and deterministic preferences do not establish a
+measured quality improvement. This accepted target is **Planned** pending its
+complete native operator journey and independent implementation review.
+
 The #889 reviewed procedure surface turns verified Work Board outcomes into reusable,
 owner-bound procedures. It has exactly three registered templates:
 

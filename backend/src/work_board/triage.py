@@ -70,6 +70,21 @@ _PROPOSAL_CAPABILITY = "strategist_agent"
 _PROPOSAL_RUNNER = "work-board-proposal"
 _PROPOSAL_ATTEMPT_BUDGET_REASON = "proposal_admission_attempt_budget_exhausted"
 _CAPABILITY_AUTHORITY_REQUIREMENTS: dict[str, str] = {
+    "browser.public-task.v1": (
+        "Current owner session and exact active Goal; reviewed public HTTPS prefixes, site policy, "
+        "typed browser input and finite runtime; current acknowledged execution evidence before every "
+        "navigation/subrequest; isolated browser cleanup, bounded artifact and independent readback."
+    ),
+    "work.evidence-dossier.v1": (
+        "Current owner session and exact active Goal; verified typed public browser input artifact, "
+        "current browser read policy and finite CPU bounds; acknowledged execution evidence before "
+        "source/output use; private artifact bytes and independent readback. No model or external write."
+    ),
+    "work.local-evidence-report.v1": (
+        "Current owner session and exact active Goal; verified typed dossier input artifact and current "
+        "upstream public read policy; finite CPU bounds and acknowledged execution evidence before "
+        "source/output use; private artifact bytes and independent readback. No model or external write."
+    ),
     "workflow.goal-snapshot-to-file": (
         "Operator capability-execute session; active owner-bound goal at the exact revision; "
         "configured success criterion, verifier, and evidence; enabled governed workflow tool; "
@@ -2189,9 +2204,14 @@ async def accept_proposal(
     owner: WorkBoardOwner,
     proposal_id: str,
     request: WorkBoardProposalAccept,
+    *, operator: AuthenticatedOperator | None = None,
 ) -> dict[str, Any]:
     repository = WorkBoardRepository()
     from src.memory.evidence_proposal import stage_proposal_context, recheck_context, stored_snapshot
+    from src.memory.evidence_specification import (
+        stage_specification, recheck_specification, replace_specification_evidence,
+    )
+    from src.memory.evidence_execution import _current_operator
     # Recheck capability authority before taking SQLite's immediate writer
     # lock. The provider-free preflight reads the canonical goal and adapter
     # state through their existing repositories; doing those reads under the
@@ -2199,6 +2219,7 @@ async def accept_proposal(
     # Todo after acceptance, so the dispatcher still owns the final, fresher
     # admission check before any execution claim.
     async with get_session() as preview_db:
+        await _current_operator(preview_db, owner, operator)
         preview_proposal = await _get_proposal(preview_db, owner, proposal_id)
         if preview_proposal.revision != request.expected_proposal_revision:
             raise BoardError(
@@ -2261,6 +2282,12 @@ async def accept_proposal(
         authority_preview_digest = str(preview_proposal.proposal_digest or "")
         acceptance_staged, acceptance_snapshot = await stage_proposal_context(preview_db,
             owner, preview_parent, preview_proposal)
+        staged_payload = _decode_json(preview_proposal_json)
+        staged_tasks = staged_payload.get('proposed_tasks')
+        if not isinstance(staged_tasks, list):
+            raise BoardError('invalid_proposal', 'The proposal has no typed task preview', status_code=409)
+        specification_evidence = await stage_specification(preview_db, owner,
+            preview_parent, preview_proposal.kind, staged_tasks, request)
     preview_payload = _decode_json(preview_proposal_json)
     preview_tasks = preview_payload.get("proposed_tasks")
     if not isinstance(preview_tasks, list) or any(not isinstance(item, Mapping) for item in preview_tasks):
@@ -2277,6 +2304,7 @@ async def accept_proposal(
         # validation would commit stale ORM objects and allow a concurrent
         # acceptance/expiry to win before child creation.
         await _begin_sqlite_immediate(db)
+        await _current_operator(db, owner, operator)
         proposal = await _get_proposal(
             db,
             owner,
@@ -2421,6 +2449,7 @@ async def accept_proposal(
             parent=parent,
             expected_previews=authority_previews,
         )
+        await recheck_specification(db, owner, parent, proposal.kind, tasks, specification_evidence)
         if proposal.kind == "specify":
             if links:
                 raise BoardError(
@@ -2494,6 +2523,7 @@ async def accept_proposal(
                     "task_revision": parent.task_revision,
                 },
             )
+            await replace_specification_evidence(db, owner, parent, proposal, specification_evidence)
             proposal.status = "accepted"
             proposal.revision += 1
             await db.flush()

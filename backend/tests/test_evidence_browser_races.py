@@ -12,6 +12,7 @@ from sqlalchemy import select
 from config.settings import settings
 from src.browser.pinned_transport import PinnedBrowserResponse, PinnedBrowserTransport
 from src.browser.task_runner import BrowserTaskRunner
+from src.api.work_board import _browser_execution_progress
 from src.db.models import Memory, WorkBoardAttempt, WorkBoardEvent, WorkBoardEvidenceDependency, WorkBoardStatus
 from src.memory.evidence_dependencies import canonical_source_token, digest
 from src.work_board.repository import WorkBoardRepository
@@ -91,10 +92,13 @@ async def test_past_contact_stale_receipt_cleanup_unknown_and_no_next_contact(as
         admission_board_task_revision=1,effective_max_attempts=1,effective_max_outstanding_jobs=1)
     assert calls==['https://fixture.example/docs']
     assert result['status']=='unknown_external_effect' and browser.closed
+    assert result['request_count']==1 and len(result['request_receipts'])==1
+    assert result['request_receipts'][0]['status']==200
     native=await jobs.get_job(admitted['job_id'])
     assert native['status']=='unknown_external_effect' and native['attempt_count']==1
     markers=[c for c in native['checkpoints'] if c['checkpoint_id']=='network-dispatch']
     assert len(markers)==1 and markers[0]['payload']['request_dispatch_count']==1
+    assert _browser_execution_progress(native)[1]==1
     assert any(e.get('effect_type')=='browser_context_cleanup' and e['status']=='succeeded' for e in native['effects'])
     observations=[e for e in native['effects'] if e.get('effect_type')=='browser_network_observation']
     if correction_at=='post_response':
@@ -112,3 +116,18 @@ async def test_past_contact_stale_receipt_cleanup_unknown_and_no_next_contact(as
         json.dump({'boundary':'Real native SQLite runner; seeded canonical source/Board; browser facade and HTTP intercepted',
             'correction_at':correction_at,'actual_transport_urls':calls,'browser_closed':browser.closed,
             'result':result,'native':native,'no_learning':True},f,indent=2)
+
+
+def test_primary_progress_observation_excludes_blocked_callbacks_and_possible_dispatch():
+    job='browser-task:current'
+    projection={'job_id':job,'checkpoints':[{'checkpoint_id':'network-dispatch',
+        'payload':{'request_count':0,'request_dispatch_count':2,'action_index':0}}],
+        'effects':[{'effect_id':f'browser-network-observation:{job}:1',
+            'effect_type':'browser_network_observation','status':'succeeded',
+            'details':{'observation_only':True,'request_count':1,'request_receipt':{'status':200}}},
+            {'effect_id':f'browser-network-observation:{job}:2',
+            'effect_type':'browser_network_observation','status':'succeeded',
+            'details':{'observation_only':True,'request_count':2,'request_receipt':{'status':'blocked'}}}]}
+    assert _browser_execution_progress(projection)==(0,1)
+    projection['effects']=projection['effects'][1:]
+    assert _browser_execution_progress(projection)==(0,0)

@@ -520,7 +520,7 @@ describe("WorkBoardPanel M4 review and triage controls", () => {
 
     render(<WorkBoardPanel {...owner} />);
     fireEvent.click(await screen.findByRole("button", { name: "Open task Retryable proposal" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("openrouter_route_unavailable");
+    expect(await screen.findByText("openrouter_route_unavailable")).toHaveAttribute("role", "alert");
     fireEvent.click(screen.getByRole("button", { name: "Retry with new request key" }));
 
     await waitFor(() => expect(proposalPostBody).not.toBeNull());

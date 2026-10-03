@@ -336,6 +336,12 @@ async def recheck_staged(db, owner: WorkBoardOwner, task: WorkBoardTask, staged:
             != (owner.principal_id, owner.session_id)):
         raise _changed()
     task = current_task
+    await _recheck_staged_sources(db, owner, task, staged)
+
+
+async def _recheck_staged_sources(db, owner: WorkBoardOwner, task: WorkBoardTask,
+                                  staged: StagedEvidence) -> None:
+    """Pure sources for a canonical task or server-verified Specify target."""
     goal = await _goal(db, owner, task)
     if (task.goal_id != staged.goal_id
         or max(int(goal.revision or 1), 1) != staged.goal_revision

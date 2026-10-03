@@ -315,6 +315,7 @@ class BrowserTaskError(RuntimeError):
         self.code = code
         self.dispatched = dispatched
         self.cleanup_status = "cleanup_unknown"
+        self.observed_request_receipts: list[dict[str, Any]] = []
 
 
 class BrowserInputError(BrowserTaskError):
@@ -1727,6 +1728,10 @@ class BrowserTaskRunner:
                 )
             with suppress(Exception):
                 transport.cancel_pending_blocking()
+            active_error = sys.exc_info()[1]
+            if isinstance(active_error, BrowserTaskError):
+                active_error.observed_request_receipts = [item for item in state.request_receipts
+                    if type(item.get("status")) is int and 100 <= item["status"] <= 599]
 
     @staticmethod
     async def _close_session_bounded(
@@ -2190,7 +2195,8 @@ class BrowserTaskRunner:
                     checkpoint_id=f"network-progress-{state.request_count}",
                     payload={
                         "phase": "network_progress",
-                        "request_count": state.request_count,
+                        "request_count": sum(type(item.get("status")) is int
+                            and 100 <= item["status"] <= 599 for item in state.request_receipts),
                         "action_index": state.current_action_index,
                     },
                 )
@@ -2923,11 +2929,14 @@ class BrowserTaskRunner:
         error: BrowserTaskError,
     ) -> dict[str, Any]:
         durable_status = "unknown_external_effect" if error.dispatched else "blocked"
+        observed = error.observed_request_receipts
         with suppress(Exception):
             current = await asyncio.wait_for(
                 self.jobs.get_job(job_id),
                 timeout=BROWSER_CLEANUP_TIMEOUT_SECONDS,
             )
+            if not observed and isinstance(current, Mapping):
+                observed = observed_browser_request_receipts(current)
             if isinstance(current, Mapping) and _text(current.get("status")) == "running":
                 lease = current.get("lease") if isinstance(current.get("lease"), Mapping) else {}
                 owner = _text(lease.get("owner"))
@@ -2955,7 +2964,37 @@ class BrowserTaskRunner:
             durable_status=durable_status,
             reason_code=error.code,
             cleanup_status=error.cleanup_status,
+            request_count=len(observed),
+            request_receipts=observed,
         )
+
+
+def observed_browser_request_receipts(projection: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Positive bounded actual callbacks retained after rejected source use.
+
+    A dispatch checkpoint proves admission only. Blocked transport callbacks
+    and arbitrary effects cannot promote it into a received HTTP response.
+    """
+    job_id = _text(projection.get("job_id"))
+    effects = projection.get("effects")
+    if not job_id or not isinstance(effects, list):
+        return []
+    observed = {}
+    for effect in effects[-100:]:
+        if not isinstance(effect, Mapping) or effect.get("effect_type") != "browser_network_observation" or effect.get("status") != "succeeded":
+            continue
+        details = effect.get("details")
+        if not isinstance(details, Mapping) or details.get("observation_only") is not True:
+            continue
+        count = details.get("request_count")
+        receipt = details.get("request_receipt")
+        if (type(count) is not int or not 1 <= count <= BROWSER_MAX_REQUESTS
+            or effect.get("effect_id") != f"browser-network-observation:{job_id}:{count}"
+            or not isinstance(receipt, Mapping) or type(receipt.get("status")) is not int
+            or not 100 <= receipt["status"] <= 599):
+            continue
+        observed[count] = BrowserTaskRunner._safe_request_receipt(receipt)
+    return [observed[count] for count in sorted(observed)]
 
 
 @dataclass(slots=True)

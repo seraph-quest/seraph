@@ -19,6 +19,8 @@ import { ArtifactPipelineReview } from "./ArtifactPipelineReview";
 import { ResearchDossierPanel } from "./ResearchDossierPanel";
 import { TaskEffectRecovery } from "./TaskEffectRecovery";
 import { TaskEvidencePanel } from "./TaskEvidencePanel";
+import { SpecificationEvidenceReview, specificationScope, retainSpecificationAcceptance } from "./SpecificationEvidenceReview";
+import type { SpecificationReplacement } from "./SpecificationEvidenceReview";
 import { RepoRepairInspector } from "./RepoRepairInspector";
 import { validateCalendarExecution } from "../../lib/calendar";
 import type {
@@ -864,6 +866,10 @@ function WorkBoardPanel({
   const [unblockResolution, setUnblockResolution] = useState("");
   const [reviewChangesReason, setReviewChangesReason] = useState("");
   const [proposal, setProposal] = useState<WorkBoardProposal | null>(null);
+  const [proposalEvidence, setProposalEvidence] = useState<{ scope: string; replacement: SpecificationReplacement | null } | null>(null);
+  const updateProposalEvidence = useCallback((scope: string, replacement: SpecificationReplacement | null) => {
+    setProposalEvidence({ scope, replacement });
+  }, []);
   const [proposalBusy, setProposalBusy] = useState(false);
   const [proposalError, setProposalError] = useState<string | null>(null);
   const [routineSourceTaskId, setRoutineSourceTaskId] = useState("");
@@ -2664,9 +2670,14 @@ function WorkBoardPanel({
       ? {
         expected_proposal_revision: proposal.proposal_revision,
         expected_parent_revision: proposal.parent_revision,
+        ...(selectedTask && proposal.kind === "specify" && proposalEvidence?.scope === specificationScope(selectedTask, proposal, ownerSessionId)
+          && proposalEvidence.replacement ? { execution_replacement: proposalEvidence.replacement } : {}),
       }
       : { expected_proposal_revision: proposal.proposal_revision };
     try {
+      const retainedBody = decision === "accept" && selectedTask && proposal.kind === "specify"
+        ? retainSpecificationAcceptance(specificationScope(selectedTask, proposal, ownerSessionId), body as import('./SpecificationEvidenceReview').SpecificationAcceptance)
+        : body;
       const receipt = await requestBoard<{
         proposal_id: string;
         status: string;
@@ -2675,7 +2686,7 @@ function WorkBoardPanel({
       }>(path, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify(retainedBody),
       });
       if (stoppedRef.current
         || proposalSelectionVersionRef.current !== selectionVersion
@@ -3627,10 +3638,15 @@ function WorkBoardPanel({
                       <div className="mt-2 text-amber-200" role="status">A complete server-derived authority preview is missing. Request a fresh proposal before accepting this one.</div>
                     )}
                     {proposal.status === "proposed" && (
+                      <>
+                      {proposal.kind === "specify" && <SpecificationEvidenceReview
+                        key={specificationScope(selectedTask, proposal, ownerSessionId)} task={selectedTask}
+                        proposal={proposal} ownerSessionId={ownerSessionId} onReplacement={updateProposalEvidence} />}
                       <div className="mt-3 flex flex-wrap gap-2">
                         <button type="button" className="cockpit-feedback-button" disabled={proposalBusy || !proposalAuthorityComplete} onClick={() => void decideProposal("accept")}>Accept proposal</button>
                         <button type="button" className="cockpit-feedback-button" disabled={proposalBusy} onClick={() => void decideProposal("reject")}>Reject proposal</button>
                       </div>
+                      </>
                     )}
                     {proposal.status === "pending_inference" && <div className="mt-2 text-amber-200" role="status">The governed proposal request is pending. Refresh or retry the same request only after its durable receipt is reconciled.</div>}
                   </section>

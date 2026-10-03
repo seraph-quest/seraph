@@ -17,7 +17,7 @@ interface Claim {
   memory_id: string | null;
   model_context_allowed: boolean;
 }
-interface Packet {
+export interface Packet {
   revision: number;
   digest: string | null;
   claims: Claim[];
@@ -40,7 +40,7 @@ function validClaims(value: unknown): value is Claim[] {
     && (claim.memory_id === null || typeof claim.memory_id === "string")
     && (claim.confidence === null || (typeof claim.confidence === "number" && Number.isFinite(claim.confidence))));
 }
-function validatedPacket(value: unknown): Packet {
+export function validatedPacket(value: unknown): Packet {
   if (!value || typeof value !== "object") throw new Error(unavailable);
   const packet = value as Packet;
   if (!Number.isInteger(packet.revision) || packet.revision < 0

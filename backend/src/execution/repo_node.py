@@ -527,13 +527,21 @@ class NodeRepoRepairExecutor(LocalRepoRepairExecutor):
                 marker.update(phase="worker_started",pid=process.pid,pid_start_identity=pid_start,supervisor_source_sha256=preflight.posture["supervisor_source_sha256"])
                 with self._active_lock:
                     self._active[job.job_id].update(process=process,pid_start_identity=pid_start)
-                self._write_job_marker(job.job_id,marker)
-                # Durable identity and cancellation fence precede dispatch.
-                current=self._read_job_marker(job.job_id)
-                if current is None or current.get("status")=="cancellation_requested":
-                    exact_signal(process.pid,pid_start,signal.SIGTERM)
-                else:
-                    process.stdin.write((token+"\n").encode());process.stdin.flush()
+                with self._job_marker_lock(job.job_id, timeout_seconds=max(0, deadline-time.monotonic())):
+                    self._write_job_marker_locked(job.job_id,marker)
+                    # The committed cancellation and exact execution binding
+                    # are checked in the same critical section as token write.
+                    current=self._read_job_marker(job.job_id)
+                    expected={"job_id":job.job_id,"authority_digest":job.authority_digest,
+                              "attempt_id":job.attempt_id or "legacy-attempt","fencing_token":job.fencing_token,
+                              "supervisor_token":token,"pid":process.pid,"pid_start_identity":pid_start}
+                    if current is None or any(current.get(key)!=value for key,value in expected.items()) or time.monotonic()>=deadline:
+                        exact_signal(process.pid,pid_start,signal.SIGTERM)
+                        raise RepoSandboxError("Node dispatch binding changed or deadline expired",terminal_status="unknown_external_effect")
+                    if current.get("cancellation_requested") is True or current.get("status")=="cancellation_requested":
+                        process.stdin.write(("cancel:"+token+"\n").encode());process.stdin.flush()
+                    else:
+                        process.stdin.write((token+"\n").encode());process.stdin.flush()
                 process.stdin.close()
                 process.wait(timeout=max(0,deadline-time.monotonic()))
                 result_path=stage/"out"/"supervisor-result.json"
@@ -584,27 +592,28 @@ class NodeRepoRepairExecutor(LocalRepoRepairExecutor):
     def cancel(self, *, job_id: str | None=None, authority: Mapping[str,Any] | None=None, **kwargs:Any) -> dict[str,Any]:
         from src.execution.repo_supervisor import exact_signal
         supplied=authority or {};resolved=job_id or str(supplied.get("job_id") or "")
-        marker=self._read_job_marker(resolved)
-        if marker is None or marker.get("profile")!=PROFILE:
-            return {"status":"unknown_external_effect","reason":"node_supervisor_identity_missing","cleanup_proven":False}
-        for key in ("authority_digest","attempt_id","fencing_token"):
-            if key in supplied and supplied[key]!=marker.get(key):
-                return {"status":"unknown_external_effect","reason":"node_supervisor_authority_changed","cleanup_proven":False}
-        if marker.get("attempt_id")!="legacy-attempt" and "attempt_id" not in supplied:
-            return {"status":"unknown_external_effect","reason":"node_supervisor_attempt_missing","cleanup_proven":False}
-        if marker.get("fencing_token",0)!=0 and "fencing_token" not in supplied:
-            return {"status":"unknown_external_effect","reason":"node_supervisor_fence_missing","cleanup_proven":False}
-        if "fencing_token" in supplied and type(supplied["fencing_token"]) is not int:
-            return {"status":"unknown_external_effect","reason":"node_supervisor_fence_invalid","cleanup_proven":False}
-        self._write_job_marker(resolved,{**marker,"status":"cancellation_requested","phase":"cancel_requested"})
-        pid=marker.get("pid");start=marker.get("pid_start_identity")
-        try:
-            signalled=isinstance(pid,int) and isinstance(start,str) and exact_signal(pid,start,signal.SIGTERM)
-        except (OSError,ValueError):
-            signalled=False
-        if not signalled:
-            return {"status":"unknown_external_effect","reason":"node_supervisor_identity_missing_or_changed","cleanup_proven":False}
-        return {"status":"cancel_requested","cleanup_proven":False,"job_id":resolved}
+        with self._job_marker_lock(resolved):
+            marker=self._read_job_marker(resolved)
+            if marker is None or marker.get("profile")!=PROFILE:
+                return {"status":"unknown_external_effect","reason":"node_supervisor_identity_missing","cleanup_proven":False}
+            for key in ("authority_digest","attempt_id","fencing_token"):
+                if key in supplied and supplied[key]!=marker.get(key):
+                    return {"status":"unknown_external_effect","reason":"node_supervisor_authority_changed","cleanup_proven":False}
+            if marker.get("attempt_id")!="legacy-attempt" and "attempt_id" not in supplied:
+                return {"status":"unknown_external_effect","reason":"node_supervisor_attempt_missing","cleanup_proven":False}
+            if marker.get("fencing_token",0)!=0 and "fencing_token" not in supplied:
+                return {"status":"unknown_external_effect","reason":"node_supervisor_fence_missing","cleanup_proven":False}
+            if "fencing_token" in supplied and type(supplied["fencing_token"]) is not int:
+                return {"status":"unknown_external_effect","reason":"node_supervisor_fence_invalid","cleanup_proven":False}
+            self._write_job_marker_locked(resolved,{**marker,"status":"cancellation_requested","cancellation_requested":True,"phase":"cancel_requested"})
+            pid=marker.get("pid");start=marker.get("pid_start_identity")
+            try:
+                signalled=isinstance(pid,int) and isinstance(start,str) and exact_signal(pid,start,signal.SIGTERM)
+            except (OSError,ValueError):
+                signalled=False
+            if not signalled:
+                return {"status":"unknown_external_effect","reason":"node_supervisor_identity_missing_or_changed","cleanup_proven":False}
+            return {"status":"cancel_requested","cleanup_proven":False,"job_id":resolved}
 
     def reconcile(self, authority: Mapping[str,Any] | None=None) -> dict[str,Any]:
         # A gone supervisor is not proof of empty ancestry. Only the owning

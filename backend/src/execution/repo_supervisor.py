@@ -164,6 +164,7 @@ def run_command(argv: list[str], cwd: Path, env: dict[str,str], deadline: float,
 
 
 def main(request_file: Path) -> int:
+    global CANCELLED
     enable_subreaper()
     signal.signal(signal.SIGTERM,cancel)
     signal.signal(signal.SIGINT,cancel)
@@ -186,10 +187,24 @@ def main(request_file: Path) -> int:
     try:
         while not CANCELLED and time.monotonic()<deadline:
             if selector.select(timeout=.01):
-                if sys.stdin.buffer.readline(256).decode().strip()!=token:raise ValueError("node_dispatch_barrier_missing")
+                received=sys.stdin.buffer.readline(256).decode().strip()
+                if received=="cancel:"+token:
+                    CANCELLED=True
+                elif received!=token:
+                    raise ValueError("node_dispatch_barrier_missing")
                 break
-        else:raise ValueError("node_dispatch_barrier_cancelled_or_expired")
+        else:
+            CANCELLED=True
     finally:selector.close()
+    if CANCELLED:
+        proof=cleanup(deadline)
+        for name in ("diff.patch","pytest.stdout","pytest.stderr","build.stdout","build.stderr"):
+            _write_private_output(output,name,b"")
+        result={"profile":PROFILE,"job_id":job["job_id"],"token":token,"supervisor_pid":os.getpid(),"supervisor_start":identity,
+                "status":"cancelled","reason":"node_cancelled_before_dispatch","commands":[],
+                "diff_sha256":hashlib.sha256(b"").hexdigest(),"cleanup_proven":proof["cleanup_proven"],"process_cleanup":proof}
+        _write_private_output(output,"supervisor-result.json",json.dumps(result,sort_keys=True).encode())
+        return 0 if proof["cleanup_proven"] else 2
     runtime=job["runtime"]
     node=Path(runtime["node_path"])
     npm=node.parent.parent/"lib/node_modules/npm"

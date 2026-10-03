@@ -3122,12 +3122,10 @@ class WorkBoardDispatcher:
                     operator = await authenticate_session(task.owner_session_id, touch=False)
                 except AuthFailure as exc:
                     gate_error(exc.code, "The GitHub owner session is no longer valid")
-                grants = {
-                    _text(getattr(grant, "value", grant))
-                    for grant in (getattr(getattr(operator, "principal", None), "grants", ()) or ())
-                }
-                if AuthorityGrant.EXTERNAL_MUTATION.value not in grants:
-                    gate_error("external_mutation_grant_required", "The GitHub external mutation grant is not current")
+                from src.extensions.github_consent import require_followthrough_consent
+                await require_followthrough_consent(principal=task.owner_principal_id,
+                    root=task.owner_session_id, action=inputs["action"],
+                    repository=connection["repository"], revision=inputs["connection_revision"])
             elif capability == "guardian-routine.v1":
                 from src.workflows.routines import routine_service
 
@@ -4246,12 +4244,10 @@ class WorkBoardDispatcher:
                 if int(connection.get("revision") or 0) != int(inputs["connection_revision"]):
                     return "connection_revision_stale", "The GitHub connection revision changed"
                 operator = await authenticate_session(task.owner_session_id, touch=False)
-                grants = {
-                    _text(getattr(grant, "value", grant))
-                    for grant in (getattr(getattr(operator, "principal", None), "grants", ()) or ())
-                }
-                if AuthorityGrant.EXTERNAL_MUTATION.value not in grants:
-                    return "external_mutation_grant_required", "The external mutation grant is not current"
+                from src.extensions.github_consent import require_followthrough_consent
+                await require_followthrough_consent(principal=task.owner_principal_id,
+                    root=task.owner_session_id, action=inputs["action"],
+                    repository=connection["repository"], revision=inputs["connection_revision"])
                 return None, None
 
             if capability == "guardian-routine.v1":
@@ -4371,12 +4367,10 @@ class WorkBoardDispatcher:
             principal = getattr(operator, "principal", None)
             if _text(getattr(principal, "principal_id", None)) != _text(task.owner_principal_id):
                 return "owner_mismatch", "The procedure owner session belongs to a different operator"
-            grants = {
-                _text(getattr(grant, "value", grant))
-                for grant in (getattr(principal, "grants", ()) or ())
-            }
-            if AuthorityGrant.EXTERNAL_MUTATION.value not in grants:
-                return "external_mutation_grant_required", "The current session has no external mutation grant"
+            from src.extensions.github_consent import require_followthrough_consent
+            await require_followthrough_consent(principal=task.owner_principal_id,
+                root=task.owner_session_id, action=selected_version.get("source_action"),
+                repository=bound_repository or None, revision=connection["revision"])
             return None, None
         except AuthFailure as exc:
             return exc.code, "The procedure owner session is no longer valid"
@@ -5656,23 +5650,20 @@ class WorkBoardDispatcher:
             result["blocked"] = True
         return result
 
-    async def _current_external_mutation_grant(self, task: WorkBoardTask) -> bool:
-        """Re-authenticate the task owner at the GitHub adapter boundary."""
-
+    async def _current_github_consent(self, task: WorkBoardTask, projection=None) -> bool:
+        """Derive exact connection consent; this Boolean is only readiness."""
         try:
-            operator = await authenticate_session(task.owner_session_id, touch=False)
-        except AuthFailure:
+            from src.extensions.github_consent import require_followthrough_consent
+            authority = (projection or {}).get("declared_authority") or {}
+            inputs = _parse_typed_input(task)
+            await require_followthrough_consent(principal=task.owner_principal_id,
+                root=task.owner_session_id, action=authority.get("action") or inputs.get("action"),
+                repository=authority.get("repository"),
+                revision=authority.get("connection_revision") or inputs.get("connection_revision"),
+                binding=authority.get("github_consent") if projection else None)
+            return True
+        except Exception:
             return False
-        principal = getattr(operator, "principal", None)
-        if _text(getattr(operator, "session_id", None)) != _text(task.owner_session_id):
-            return False
-        if _text(getattr(principal, "principal_id", None)) != _text(task.owner_principal_id):
-            return False
-        grants = {
-            _text(getattr(grant, "value", grant))
-            for grant in (getattr(principal, "grants", ()) or ())
-        }
-        return AuthorityGrant.EXTERNAL_MUTATION.value in grants
 
     async def _resume_github_followthrough(
         self,
@@ -5807,7 +5798,7 @@ class WorkBoardDispatcher:
                 "reason_code": "approval_not_current",
                 "recovery_action": "retry_after_prerequisite",
             }
-        if not await self._current_external_mutation_grant(task):
+        if not await self._current_github_consent(task, projection):
             return projection, {
                 "status": "blocked",
                 "reason_code": "external_mutation_grant_required",
@@ -6560,7 +6551,7 @@ class WorkBoardDispatcher:
                 issue_number=inputs.get("issue_number"),
                 idempotency_key=str(attempt_uuid),
             )
-            external_mutation_granted = await self._current_external_mutation_grant(task)
+            external_mutation_granted = await self._current_github_consent(task)
             if not external_mutation_granted:
                 if admission_only:
                     raise BoardError(

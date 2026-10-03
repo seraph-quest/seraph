@@ -8210,8 +8210,6 @@ class RoutineService:
             raise PermissionError("routine runtime parent mismatch")
         if step_id not in {"guardian_watch_run", "github_followthrough"}:
             raise RoutineError("routine_step_not_allowed", status_code=422)
-        if step_id == "github_followthrough" and not context.external_mutation_granted:
-            raise PermissionError("routine follow-through requires external_mutation authority")
         parent = await durable_job_repository.get_job(str(routine_invocation_job_id).strip())
         if (
             not parent
@@ -8238,6 +8236,11 @@ class RoutineService:
                 owner_session_id=context.session_id,
             )
         authority = parent.get("declared_authority") if isinstance(parent.get("declared_authority"), Mapping) else {}
+        if step_id == "github_followthrough":
+            from src.extensions.github_consent import require_followthrough_consent
+            await require_followthrough_consent(principal=context.principal_id, root=context.session_id,
+                action=authority.get("github_action"), repository=authority.get("github_repository"),
+                revision=authority.get("github_connection_revision"))
         routine_id = str(authority.get("routine_id") or "")
         routine_revision = int(authority.get("routine_revision") or 0)
         invocation_uuid = str(authority.get("invocation_uuid") or "")
@@ -8676,9 +8679,6 @@ class RoutineService:
     ) -> dict[str, Any]:
         """Prepare exactly one fixed M3 destination from the persisted watch child."""
 
-        if not external_mutation_granted:
-            raise RoutineError("external_mutation_grant_required", status_code=403)
-
         routine = await self._routine(routine_id, owner_principal_id)
         parent = await durable_job_repository.get_job(job_id)
         if (
@@ -8735,6 +8735,9 @@ class RoutineService:
         target = str(authority.get("github_target") or provenance.get("source_target") or "")
         if action not in {"create_issue", "create_comment"} or not repository or not target:
             raise RoutineError("routine_destination_binding_missing")
+        from src.extensions.github_consent import require_followthrough_consent
+        await require_followthrough_consent(principal=owner_principal_id, root=owner_session_id,
+            action=action, repository=repository, revision=authority.get("github_connection_revision"))
         connection = await GitHubFollowthroughService().get_connection(owner_principal_id)
         if (
             connection.get("mode") != "active"
@@ -9416,7 +9419,16 @@ class RoutineService:
                     )
                 parent_lease = current.get("lease") if isinstance(current.get("lease"), Mapping) else {}
             if m3_job.get("status") in {"awaiting_approval", "queued", "running"}:
-                if not external_mutation_granted:
+                try:
+                    from src.extensions.github_consent import require_followthrough_consent
+                    write_authority = m3_job.get("declared_authority") or {}
+                    await require_followthrough_consent(principal=owner_principal_id, root=owner_session_id,
+                        action=write_authority.get("action"), repository=write_authority.get("repository"),
+                        revision=write_authority.get("connection_revision"), binding=write_authority.get("github_consent"))
+                    github_consent_current = True
+                except Exception:
+                    github_consent_current = False
+                if not github_consent_current:
                     latest = await durable_job_repository.get_job(job_id) or current
                     if latest.get("status") == "running":
                         lease = latest.get("lease") or {}

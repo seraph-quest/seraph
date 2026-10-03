@@ -63,11 +63,13 @@ from src.workflows.manager import workflow_manager
 from src.workflows.loader import scan_workflow_paths, scan_workflows, sanitize_workflow_name
 from src.guardian.source_watch import source_watch_router
 from src.extensions.github_followthrough import github_followthrough_router
+from src.workflows.repo_publication import router as repo_publication_router
 from src.workflows.routines import routine_router
 
 router = APIRouter()
 router.include_router(source_watch_router)
 router.include_router(github_followthrough_router)
+router.include_router(repo_publication_router)
 router.include_router(routine_router)
 
 _DEFAULTS_DIR = os.path.join(os.path.dirname(__file__), "../defaults")

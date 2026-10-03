@@ -5349,6 +5349,126 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             db.expunge(refreshed)
             return _serialize(refreshed, receipt={"kind": "recovery_artifact", "status": "recorded", **receipt})
 
+    async def record_github_recovery_observation(
+        self, job_id: str, *, read_authority, verified_readback,
+        expected_revision: int, expected_attempt_count: int,
+        expected_authority_digest: str, effect_id: str, effect_type: str,
+        target_path: str, target_digest: str, adapter_idempotency_key: str | None,
+        readback_id: str, verified_at: str, artifact_content: bytes,
+        artifact_sha256: str,
+    ) -> dict[str, Any]:
+        """Append verified GitHub evidence without adopting changed Goal authority.
+
+        This seam cannot contact a provider, resume, release a reservation, or
+        finalize a job. Original effects remain intact; the appended readback
+        links to one exact already-contacted effect. General lifecycle and
+        artifact APIs keep their existing Goal fences.
+        """
+        from src.extensions.github_consent import GitHubReadbackAuthority, GitHubVerifiedReadback
+        if type(read_authority) is not GitHubReadbackAuthority or read_authority.job_id != job_id:
+            raise DurableJobLeaseError("canonical GitHub readback authority required")
+        if type(artifact_content) is not bytes or not 1 <= len(artifact_content) <= 256 * 1024:
+            raise ValueError("GitHub observation artifact bounds invalid")
+        if re.fullmatch(r"[0-9a-f]{64}", artifact_sha256 or "") is None or hashlib.sha256(artifact_content).hexdigest() != artifact_sha256:
+            raise ValueError("GitHub observation artifact digest invalid")
+        try:
+            observation = json.loads(artifact_content)
+            verified = datetime.fromisoformat(verified_at.replace("Z", "+00:00"))
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise ValueError("GitHub observation schema invalid") from exc
+        expected = {"schema": "seraph.github-effect-observation.v1", "job_id": job_id,
+            "attempt_count": expected_attempt_count, "authority_digest": expected_authority_digest,
+            "effect_id": effect_id, "effect_type": effect_type, "target_path": target_path,
+            "target_digest": target_digest, "adapter_idempotency_key": adapter_idempotency_key,
+            "readback_id": readback_id, "verified_at": verified_at}
+        if not isinstance(observation, dict) or set(observation) != set(expected) | {"remote_readback"} or any(observation.get(key) != value for key, value in expected.items()) or not isinstance(observation["remote_readback"], dict):
+            raise ValueError("GitHub observation schema or identity invalid")
+        identity = {key: expected[key] for key in ("job_id", "attempt_count", "authority_digest", "effect_id", "effect_type", "target_path", "target_digest", "adapter_idempotency_key")}
+        if type(verified_readback) is not GitHubVerifiedReadback or not verified_readback.validates(read_authority, observation["remote_readback"], identity):
+            raise ValueError("GitHub observation actual adapter GET proof invalid")
+        if not readback_id or len(readback_id) > 200 or verified.tzinfo is None or verified > _utc_now() or (_utc_now()-verified).total_seconds() > 300:
+            raise ValueError("GitHub observation verification identity invalid")
+        await read_authority.validate()
+        async with self._session() as db:
+            if getattr(getattr(db.get_bind(), "dialect", None), "name", "") == "sqlite":
+                await db.execute(text("BEGIN IMMEDIATE"))
+            run = await self._fetch(db, job_id)
+            allowed_types = {
+                "github_followthrough_v1": {"github_publication"},
+                "engineering.repo-publication.v1": {"repo_publication_branch", "repo_publication_pr", "repo_publication_commit", "repo_publication_tree"},
+            }
+            known_blob = run.job_kind == "engineering.repo-publication.v1" and re.fullmatch(r"repo_publication_blob_[0-9a-f]{16}", effect_type or "") is not None
+            if run.job_kind not in allowed_types or read_authority.capability != run.job_kind or (effect_type not in allowed_types[run.job_kind] and not known_blob):
+                raise DurableJobTransitionError("GitHub observation capability or effect invalid")
+            if run.owner_kind != "user" or run.owner_principal_id != read_authority.principal or run.operator_session_id != read_authority.root:
+                raise DurableJobLeaseError("GitHub observation original owner/root mismatch")
+            if run.status not in {"unknown_external_effect", "cost_liability", "blocked", "failed"} or run.lease_owner or run.lease_expires_at:
+                raise DurableJobLeaseError("GitHub observation requires an unleased recovery job")
+            if type(expected_revision) is not int or _revision(run) != expected_revision or type(expected_attempt_count) is not int or run.attempt_count != expected_attempt_count or run.authority_digest != expected_authority_digest:
+                raise DurableJobLeaseError("GitHub observation job revision/attempt/authority changed")
+            authority = _json_load(run.declared_authority_json, {})
+            if authority.get("github_consent") != read_authority.original_binding:
+                raise DurableJobLeaseError("GitHub observation original connection binding changed")
+            effects = _effect_ledger_or_raise(run.effect_receipts_json)
+            prior = next((item for item in effects if item.get("effect_id") == effect_id), None)
+            if not prior or prior.get("effect_type") != effect_type or prior.get("target_path") != target_path or prior.get("target_digest") != target_digest or prior.get("adapter_idempotency_key") != adapter_idempotency_key or prior.get("status") not in UNRESOLVED_EFFECT_STATUSES:
+                raise DurableJobIdempotencyConflict("GitHub observation prior contacted effect missing or changed")
+            prefix = "/repos/" + str(read_authority.original_binding.get("repository") or "") + "/"
+            if not target_path.startswith(prefix) or re.fullmatch(r"[0-9a-f]{64}", target_digest or "") is None:
+                raise ValueError("GitHub observation target invalid")
+            observation_id = effect_id + ":observation:" + artifact_sha256[:16]
+            repeated = next((item for item in effects if item.get("effect_id") == observation_id), None)
+            if repeated:
+                if repeated.get("content_sha256") != artifact_sha256:
+                    raise DurableJobIdempotencyConflict("GitHub observation id already bound")
+                return _serialize(run, receipt={"kind": "github_recovery_observation", "observation_only": True, "status": "already_recorded"})
+            # Immutable private bytes are written with descriptor-relative,
+            # no-follow paths, then registered together with both linkages.
+            from src.workflows.repo_publication import write_file, read_file
+            file_path = f"artifacts/github-observations/{job_id}/{artifact_sha256}.json"
+            write_file(file_path, artifact_content)
+            if read_file(file_path, maximum=256 * 1024) != artifact_content:
+                raise ValueError("GitHub observation private artifact readback failed")
+            record = build_artifact_record(file_path=file_path, artifact_type="github_recovery_observation",
+                producer=run.job_kind, run_id=job_id, session_id=run.session_id, content=artifact_content)
+            recorded_at = _utc_now().isoformat()
+            artifact = {key: record[key] for key in ("artifact_id", "artifact_type", "file_path", "producer", "content_sha256", "size_bytes", "exists")}
+            artifact["recorded_at"] = recorded_at
+            effects.append({"effect_id": observation_id, "receipt_kind": "readback", "effect_type": effect_type,
+                "target_path": target_path, "target_digest": target_digest, "adapter_idempotency_key": adapter_idempotency_key,
+                "status": "succeeded", "content_sha256": artifact_sha256, "readback_id": readback_id,
+                "verified_at": verified_at, "recorded_at": recorded_at,
+                "details": {"observation_only": True, "original_effect_id": effect_id, "artifact_id": record["artifact_id"]}})
+            checkpoints = _json_load(run.checkpoint_receipts_json, [])
+            checkpoints.append({"checkpoint_id": observation_id, "safe": True, "recorded_at": recorded_at,
+                "payload": {"observation_only": True, "original_effect_id": effect_id,
+                    "readback_id": readback_id, "content_sha256": artifact_sha256, "artifact_id": record["artifact_id"]}})
+            artifacts = _json_load(run.artifact_receipts_json, [])
+            artifacts.append(artifact)
+            await read_authority.validate()
+            updated = await db.execute(update(WorkflowRunState).execution_options(synchronize_session=False).where(
+                WorkflowRunState.run_identity == job_id, WorkflowRunState.revision == expected_revision,
+                WorkflowRunState.status == run.status, WorkflowRunState.lease_owner.is_(None),
+                WorkflowRunState.lease_expires_at.is_(None)).values(
+                    effect_receipts_json=_canonical(_bounded_effect_ledger(effects)),
+                    checkpoint_receipts_json=_canonical(_bounded_checkpoint_receipts(checkpoints)),
+                    artifact_receipts_json=_canonical(artifacts[-100:]), revision=WorkflowRunState.revision+1))
+            if not _rowcount_is_one(updated):
+                raise DurableJobLeaseError("GitHub observation CAS changed")
+            try:
+                await _assert_canonical_goal_fence(db, goal_id=run.goal_id,
+                    goal_revision=run.goal_revision, owner_kind=run.owner_kind,
+                    owner_principal_id=run.owner_principal_id, session_id=run.session_id,
+                    authority=run.declared_authority_json)
+                goal_matches = True
+            except DurableJobTransitionError:
+                goal_matches = False
+            refreshed = await self._fetch(db, job_id)
+            db.expunge(refreshed)
+            return _serialize(refreshed, receipt={"kind": "github_recovery_observation", "observation_only": True,
+                "current_goal_matches": goal_matches, "blocked_current_goal": not goal_matches,
+                "artifact_id": record["artifact_id"], "content_sha256": artifact_sha256})
+
     async def record_effect(
         self,
         job_id: str,

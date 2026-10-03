@@ -863,12 +863,17 @@ def _input_artifact_payload(metadata, *, include_details: bool = False) -> dict[
     return payload
 
 
-def _operator_has_external_mutation(operator: AuthenticatedOperator) -> bool:
-    grants = {
-        str(getattr(item, "value", item))
-        for item in (getattr(getattr(operator, "principal", None), "grants", ()) or ())
-    }
-    return AuthorityGrant.EXTERNAL_MUTATION.value in grants
+async def _operator_has_github_consent(operator: AuthenticatedOperator, context: Mapping[str, Any]) -> bool:
+    authority = (context.get("parent") or {}).get("declared_authority") or {}
+    try:
+        from src.extensions.github_consent import require_followthrough_consent
+        await require_followthrough_consent(principal=operator.principal.principal_id,
+            root=operator.session_id, action=authority.get("github_action"),
+            repository=authority.get("github_repository"),
+            revision=authority.get("github_connection_revision"))
+        return True
+    except Exception:
+        return False
 
 
 def _raise_board_error(exc: BoardError) -> None:
@@ -2033,7 +2038,7 @@ async def prepare_work_board_routine_publication(
                 task_id,
                 expected_revision=body.expected_revision,
             )
-        if not _operator_has_external_mutation(operator):
+        if not await _operator_has_github_consent(operator, context):
             safely_blocked = await _block_routine_for_missing_external_authority(context)
             raise BoardError(
                 "external_mutation_grant_required",
@@ -2117,7 +2122,7 @@ async def recover_work_board_routine_publication(
                 task_id,
                 expected_revision=body.expected_revision,
             )
-        if not _operator_has_external_mutation(operator):
+        if not await _operator_has_github_consent(operator, context):
             safely_blocked = await _block_routine_for_missing_external_authority(context)
             raise BoardError(
                 "external_mutation_grant_required",

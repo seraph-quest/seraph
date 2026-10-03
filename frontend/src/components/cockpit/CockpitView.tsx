@@ -11474,7 +11474,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
   async function reconcileGitHubFollowthrough() {
     const jobId = githubFollowthrough?.jobId;
-    if (!jobId) return;
+    const originalOwner = operatorAuth.principalId;
+    const originalRoot = operatorAuth.sessionId;
+    if (!jobId || !originalOwner || !originalRoot) return;
     const suggested = githubFollowthrough.remoteId ? String(githubFollowthrough.remoteId) : "";
     const rawRemoteId = typeof window !== "undefined"
       ? window.prompt("Enter the verified GitHub object ID if it is known; leave blank to receive a durable block.", suggested)
@@ -11484,7 +11486,20 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       setOperatorStatus("GitHub reconciliation cancelled: the remote ID must be a positive integer.");
       return;
     }
-    await refreshGitHubJob(jobId, "/reconcile", remoteId === undefined ? {} : { remote_id: remoteId });
+    if (rawRemoteId === null || !window.confirm("Authorize GET-only readback of this exact publication under the current connection revision? This does not permit another publication.")) return;
+    try {
+      const connection = await loadGithubConnection();
+      const response = await apiFetch(`${API_URL}/api/auth/session`);
+      const current = await response.json();
+      if (!response.ok || current.principal_id !== originalOwner || current.session_id !== originalRoot || !connection || !Number.isSafeInteger(connection.revision) || connection.revision < 1) {
+        setOperatorStatus("GitHub readback blocked: the original login or connection metadata changed.");
+        return;
+      }
+      const { githubReadbackRequest } = await import("../../lib/githubReadback");
+      await refreshGitHubJob(jobId, "/reconcile", githubReadbackRequest(true, connection.revision, remoteId));
+    } catch {
+      setOperatorStatus("GitHub readback metadata unavailable; no reconciliation request was sent.");
+    }
   }
   const latestArtifactLineage = latestArtifact ? resolveArtifactLineage(latestArtifact) : null;
   const artifactSourceMatchesOutcome = Boolean(

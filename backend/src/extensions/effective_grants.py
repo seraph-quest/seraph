@@ -174,8 +174,12 @@ async def inventory(request):
         # remain private; this row describes reviewed mutation mode only.
         gh=(await db.execute(select(GitHubFollowthroughConnection).where(GitHubFollowthroughConnection.owner_principal_id==principal).limit(LIMIT))).scalars().all()
         for c in gh:
+            from src.extensions.github_consent import projection
+            consent = await projection(c, root)
             rows.append(_entry('github',c.id,boundary='external_mutation',purpose='reviewed_followthrough',source='reviewed_evidence',destination='github_repository',
-                state=c.mode,revision=c.revision,controls=['revoke'],jobs=[{'job_id':c.active_job_id,'state':'reserved','kind':'publication'}] if c.active_job_id else []))
+                state=consent['state'],revision=c.revision,expiry=c.consent_expires_at,
+                limits={'actions':','.join(consent['actions']),'root_bound':consent['root_bound'], 'credential_is_consent':False, 'maximum_duration_seconds':3600},
+                controls=['revoke'],jobs=[{'job_id':c.active_job_id,'state':'reserved','kind':'publication'}] if c.active_job_id else []))
     # Paired inventory uses raw owner proof; foreign state yields only a neutral
     # reset requirement, never pairing ids, device names or credentials.
     from src.api.nodes import _node_inventory_for_owner

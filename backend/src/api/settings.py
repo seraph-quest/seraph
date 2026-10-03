@@ -1404,7 +1404,7 @@ async def set_repo_sandbox_settings(body: RepoSandboxSettingsRequest, request: R
         candidate = RepoSandboxSettings.model_validate(
             current.model_dump(mode="json") | updates
         )
-        if candidate.profile != "repo-python-pytest-v1":
+        if candidate.profile not in {"repo-python-pytest-v1", "repo-node24-npm-v1", "repo-python-pytest-publication-v1"}:
             raise ValueError("unsupported_profile")
         # Disabled settings may be persisted before host provisioning supplies
         # the socket/image selectors.  Keep readiness fail-closed while still

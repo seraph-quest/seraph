@@ -78,6 +78,8 @@ The following architecture decisions are normative:
 5. [ADR-005: Epic integration branch workflow](./decisions/005-epic-integration-branch-workflow.md)
 6. [ADR-006: OpenRouter-only inference phase](./decisions/006-openrouter-only-inference-phase.md)
 7. [ADR-008: Portable core and consented context](./decisions/008-portable-core-and-consented-context.md)
+8. [ADR-009: Tested repository publication](./decisions/009-tested-repository-publication.md)
+9. [ADR-011: Finite GitHub connection mutation consent](./decisions/011-finite-github-connection-consent.md)
 
 Changing a locked decision requires a superseding ADR, a tracked issue, an
 independent Critic/Contrarian review, and updates to every affected active doc.

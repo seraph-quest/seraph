@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
+import { RepoPublicationPanel } from "./RepoPublicationPanel";
 import type {
   RepoRepairExecutorKind,
   WorkBoardRepoRepairProjection,
@@ -924,6 +925,7 @@ export function RepoRepairInspector({
         {terminal && status !== "succeeded" && <div className="mt-2 rounded border border-amber-500/40 p-2" role="status">Recovery: {status === "unknown_external_effect" || status === "cost_liability" ? "reconcile the exact sandbox effect before any retry" : projectionForRender.recovery_action.replace(/_/g, " ")}.</div>}
       </div>
       {notice && <div className="mt-2 rounded border border-emerald-500/40 p-2" role="status">{notice}</div>}
+      {status === "succeeded" && hasCurrentBinding && ownerPrincipalId && ownerSessionId && <RepoPublicationPanel repair={projectionForRender} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} onOpenApprovals={onOpenApprovals} />}
       {error && <div className="mt-2 rounded border border-amber-500/40 p-2" role="alert">{error}</div>}
     </section>
   );

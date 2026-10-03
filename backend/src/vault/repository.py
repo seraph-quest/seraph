@@ -1,6 +1,9 @@
 """Async CRUD for the encrypted secret vault."""
 
 import logging
+import hashlib
+import json
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -13,6 +16,12 @@ from src.db.models import Secret
 from src.vault.crypto import encrypt, decrypt
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class SecretSnapshot:
+    value: str = field(repr=False)
+    binding_digest: str
 
 
 async def _log_vault_event(
@@ -33,6 +42,20 @@ async def _log_vault_event(
 
 class VaultRepository:
     """CRUD operations for the Secret table."""
+
+    async def snapshot(self, key: str, *, owner_principal_id: str) -> SecretSnapshot | None:
+        """Read credential and opaque provenance from one owner-scoped row."""
+        async with get_session() as db:
+            secret = (await db.execute(select(Secret).where(Secret.key == key,
+                Secret.owner_principal_id == owner_principal_id,
+                Secret.revoked_at.is_(None)))).scalars().first()
+            if secret is None:
+                return None
+            identity = {"id": secret.id, "owner": secret.owner_principal_id,
+                "updated_at": secret.updated_at.isoformat(),
+                "ciphertext_sha256": hashlib.sha256(secret.encrypted_value.encode()).hexdigest()}
+            binding = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            return SecretSnapshot(decrypt(secret.encrypted_value), binding)
 
     async def store(
         self,

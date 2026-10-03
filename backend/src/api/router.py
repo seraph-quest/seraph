@@ -20,6 +20,7 @@ from src.api.goals import router as goals_router
 from src.api.guardian_inbox import router as guardian_inbox_router
 from src.api.mcp import router as mcp_router
 from src.api.memory import router as memory_router
+from src.api.moltbook import router as moltbook_router
 from src.api.task_evidence import router as task_evidence_router
 from src.api.model_fabric_settings import router as model_fabric_settings_router
 from src.api.nodes import router as nodes_router
@@ -63,6 +64,7 @@ api_router.include_router(tools_router, prefix="/api", tags=["tools"])
 api_router.include_router(telegram_router, prefix="/api", tags=["telegram"])
 api_router.include_router(mcp_router, prefix="/api", tags=["mcp"])
 api_router.include_router(memory_router, prefix="/api", tags=["memory"])
+api_router.include_router(moltbook_router, prefix="/api", tags=["moltbook"])
 api_router.include_router(task_evidence_router, prefix="/api", tags=["task-evidence"])
 api_router.include_router(model_fabric_settings_router, prefix="/api", tags=["settings"])
 api_router.include_router(nodes_router, prefix="/api", tags=["nodes"])

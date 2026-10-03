@@ -99,7 +99,7 @@ Add an explicit capacity-close action to the existing publication recovery panel
 Its separate checkbox starts unchecked and explains that only this job's occupied
 GitHub connection capacity will close; publication remains Unknown or blocked.
 Neither publication approval nor mutation consent acknowledges this action.
-POST /capabilities/github/repo-publication/jobs/{job_id}/close-capacity accepts
+`POST /capabilities/github/repo-publication/jobs/{job_id}/close-capacity` accepts
 only this strict extra-forbidden request:
 
     acknowledged_capacity_close: bool, required and exactly literal True
@@ -172,8 +172,8 @@ If the REST commit identity is unknown, only a supplied locator with full exact
 GET validation or an already recorded matching remote identity is usable;
 otherwise report a blocker rather than search unboundedly or fabricate absence.
 For a PR intent require the exact ready open PR repository/head/base/title/body,
-complete tested tree and changed-path membership. Singular GET /git/ref/heads/
-{branch} verifies a ref; plural /git/refs is POST-only. No omitted-intent route
+complete tested tree and changed-path membership. Singular `GET /git/ref/heads/{branch}`
+verifies a ref; plural /git/refs is POST-only. No omitted-intent route
 may release capacity. Existing observed artifacts and original effects survive.
 
 ### Producer lifetime protocol and guard
@@ -379,8 +379,8 @@ to work.github-followthrough.v1 when canonical declared authority agrees. No
 caller-provided capability selector, alias wildcard or unrelated adapter enters
 this contract. Native kinds retain separate fixed routers:
 
-- publication: POST /capabilities/github/repo-publication/jobs/{job_id}/close-capacity
-- legacy: POST /capabilities/github/jobs/{job_id}/close-capacity
+- publication: `POST /capabilities/github/repo-publication/jobs/{job_id}/close-capacity`
+- legacy: `POST /capabilities/github/jobs/{job_id}/close-capacity`
 
 Both derive and call the same narrowly internal canonical closure transaction,
 permanent fence and exact root/connection/vault/revision/idempotency contracts.

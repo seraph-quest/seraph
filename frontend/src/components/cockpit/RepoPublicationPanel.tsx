@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
-import { publicationKey, publicationRequest, validatePublication } from "../../lib/repoPublication";
+import { publicationKey, publicationRequest, validatePublication, validatePublicationDiscovery } from "../../lib/repoPublication";
 import type { PublicationReceipt } from "../../lib/repoPublication";
 import type { WorkBoardRepoRepairProjection } from "../../types";
 
@@ -15,12 +15,34 @@ export function RepoPublicationPanel({ repair, ownerPrincipalId, ownerSessionId,
   const [form, setForm] = useState({ base_branch: "develop", expected_base_commit: "", branch_name: "feat/", commit_message: "", title: "", body: "" });
   const [prNumber, setPrNumber] = useState("");
   const [readAcknowledged, setReadAcknowledged] = useState(false);
+  const [discovered, setDiscovered] = useState<PublicationReceipt[]>([]);
+  const [nextOffset, setNextOffset] = useState<number | null>(null);
+  const [discoveryOk, setDiscoveryOk] = useState(false);
+  const [scanLimitReached, setScanLimitReached] = useState(false);
   const pending = useRef<Record<string, unknown> | null>(null);
   const scope = `${ownerPrincipalId}\0${ownerSessionId}\0${repair.job_id}`;
   const activeScope = useRef(scope);
   const generation = useRef(0);
   if (activeScope.current !== scope) { activeScope.current = scope; generation.current += 1; }
   const controllers = useRef(new Set<AbortController>());
+
+  async function discover(offset = 0) {
+    const expected = activeScope.current;
+    const expectedGeneration = generation.current;
+    const controller = new AbortController(); controllers.current.add(controller);
+    try {
+      const value = await publicationRequest(`/repairs/${encodeURIComponent(repair.job_id)}/jobs?offset=${offset}`, { method: "GET" }, controller.signal);
+      const page = validatePublicationDiscovery(value, ownerPrincipalId, ownerSessionId, repair.job_id);
+      if (activeScope.current !== expected || generation.current !== expectedGeneration) return;
+      setDiscovered(previous => offset ? [...previous, ...page.jobs.filter(job => !previous.some(old => old.job_id === job.job_id))] : page.jobs);
+      setNextOffset(page.nextOffset); setDiscoveryOk(true); setScanLimitReached(page.scanLimitReached);
+      if (offset === 0 && page.jobs.length) { setReceipt(page.jobs[0]); setPatch(null); setReadAcknowledged(false); }
+    } catch (e) {
+      if (activeScope.current === expected && generation.current === expectedGeneration) {
+        setDiscoveryOk(false); setError(e instanceof Error ? e.message : "Publication recovery discovery unavailable.");
+      }
+    } finally { controllers.current.delete(controller); }
+  }
 
   async function metadata() {
     const expected = activeScope.current;
@@ -39,8 +61,8 @@ export function RepoPublicationPanel({ repair, ownerPrincipalId, ownerSessionId,
   }
 
   useEffect(() => {
-    setReceipt(null); setPatch(null); setConnection(null); setHealthy(false); setBusy(false); setError(null); setReadAcknowledged(false); pending.current = null;
-    void metadata();
+    setReceipt(null); setPatch(null); setConnection(null); setHealthy(false); setBusy(false); setError(null); setReadAcknowledged(false); setDiscovered([]); setNextOffset(null); setDiscoveryOk(false); setScanLimitReached(false); pending.current = null;
+    void metadata(); void discover();
     return () => { for (const controller of controllers.current) controller.abort(); controllers.current.clear(); };
     // This effect invalidates only actual owner/root/repair changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -82,9 +104,15 @@ export function RepoPublicationPanel({ repair, ownerPrincipalId, ownerSessionId,
     <div className="font-semibold">Publish tested repair</div>
     <p className="mt-1">Local Git runs with host-user access. Publication requires a fresh approval for local execution, Git objects, a new branch and a ready PR.</p>
     <div>Repository: {boundConnection?.repository ?? "unavailable"}</div>
+    {discovered.length > 0 && <label className="block">Existing publication<select aria-label="Existing publication" value={receipt?.job_id ?? ""} onChange={event => {
+      const selected = discovered.find(job => job.job_id === event.target.value);
+      if (selected) { setReceipt(selected); setPatch(null); setReadAcknowledged(false); }
+    }}>{discovered.map(job => <option key={job.job_id} value={job.job_id}>{job.job_id} · {job.status.replace(/_/g, " ")}</option>)}</select></label>}
+    {nextOffset !== null && <button type="button" disabled={busy} onClick={() => void discover(nextOffset)}>Load more existing publications</button>}
+    {scanLimitReached && <p role="status">The bounded discovery limit was reached. Inspect the retained jobs before preparing another publication.</p>}
     {!current && <form onSubmit={(event) => { event.preventDefault(); void act("prepare"); }}>
       {Object.entries(form).map(([name, value]) => <label className="mt-2 block" key={name}>{name.replace(/_/g, " ")}<input className="cockpit-input block w-full" aria-label={name.replace(/_/g, " ")} value={value} disabled={busy || Boolean(pending.current)} onChange={(event) => setForm({ ...form, [name]: event.target.value })} /></label>)}
-      <button type="submit" className="cockpit-feedback-button mt-2" disabled={busy || !healthy || !boundConnection?.writable || !repair.proposal}>Prepare exact publication preview</button>
+      <button type="submit" className="cockpit-feedback-button mt-2" disabled={busy || !discoveryOk || scanLimitReached || !healthy || !boundConnection?.writable || !repair.proposal}>Prepare exact publication preview</button>
     </form>}
     {current && <div className="mt-2">
       <div>{current.status.replace(/_/g, " ")} · {current.reason_code ?? "exact preview retained"}</div>
@@ -105,6 +133,7 @@ export function RepoPublicationPanel({ repair, ownerPrincipalId, ownerSessionId,
       {current.status === "succeeded" && <div>Ready PR independently verified. Outcome artifact recorded; no learning.</div>}
     </div>}
     <button type="button" disabled={busy} onClick={() => void metadata()}>Refresh GitHub metadata</button>
+    <button type="button" disabled={busy} onClick={() => void discover()}>Discover original repair publications</button>
     {error && <div role="alert" className="mt-2 text-amber-200">{error}</div>}
   </section>;
 }

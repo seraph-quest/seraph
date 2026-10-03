@@ -20,6 +20,16 @@ export interface PublicationReceipt {
   artifacts: Array<{ file_path: string }>; effects: unknown[];
 }
 
+export function validatePublicationDiscovery(value: unknown, owner: string, root: string, repair: string) {
+  if (!record(value) || value.repair_job_id !== repair || value.owner_principal_id !== owner
+    || value.owner_session_id !== root || value.limit !== 20 || !Array.isArray(value.jobs) || value.jobs.length > 20
+    || !(value.next_offset === null || (Number.isSafeInteger(value.next_offset) && Number(value.next_offset) > 0 && Number(value.next_offset) <= 2000))) {
+    throw new Error("Publication discovery is incomplete; refresh the original repair.");
+  }
+  return { jobs: value.jobs.map(job => validatePublication(job, owner, root, repair)),
+    nextOffset: value.next_offset as number | null, scanLimitReached: value.scan_limit_reached === true };
+}
+
 function record(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }

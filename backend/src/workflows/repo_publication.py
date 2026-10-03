@@ -16,14 +16,14 @@ from pathlib import Path
 import uuid
 from urllib.parse import quote
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Query
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import select, case
 
 from config.settings import settings
 from src.approval.repository import approval_repository, approval_state_revision, fingerprint_tool_call, _approval_timestamp, _approval_expiry
 from src.db import engine as db_engine
-from src.db.models import Goal, RepoRepairProposal, RepoRepairSourcePacket, WorkBoardTask, WorkBoardAttempt
+from src.db.models import Goal, RepoRepairProposal, RepoRepairSourcePacket, WorkBoardTask, WorkBoardAttempt, WorkflowRunState
 from src.execution.repo_publication import PublicationError, SourceGit, branch, digest, equivalent, file_manifest, object_id, oid, posture, produce
 from src.execution.repo_worker import _open_source_regular_file, _open_directory_descriptor, _descriptor_flags
 from src.extensions.github_followthrough import GitHubFollowthroughService, _require_live_owner_session, _operator, _principal_id, _session_id
@@ -129,6 +129,51 @@ class RepoPublicationService:
         if not current or current.get("job_kind") != CAPABILITY or current.get("owner", {}).get("principal_id") != principal or current.get("operator_session_id") != session:
             raise PublicationError("publication_not_found", status_code=404)
         return current
+
+    async def discover(self, repair_job_id, principal, session, *, offset=0):
+        """Bounded original-root GET discovery; no consent or execution follows."""
+        await self.live(principal, session)
+        repair = await jobs.get_job(repair_job_id)
+        if not repair or repair.get("job_kind") != "engineering.repo-repair.v1" or repair.get("owner", {}).get("principal_id") != principal or repair.get("operator_session_id") != session:
+            raise PublicationError("repair_not_found", status_code=404)
+        unresolved = {"unknown_external_effect", "blocked", "failed", "awaiting_approval", "queued", "running"}
+        # Bound the canonical page BEFORE reading private previews. The exact
+        # dependency and original root keep other repairs/owners out of it.
+        async with db_engine.get_session() as db:
+            rows = (await db.execute(select(WorkflowRunState).where(
+                WorkflowRunState.job_kind == CAPABILITY,
+                WorkflowRunState.owner_kind == "user",
+                WorkflowRunState.owner_principal_id == principal,
+                WorkflowRunState.operator_session_id == session,
+                WorkflowRunState.session_id == session,
+                WorkflowRunState.dependencies_json == json.dumps([repair_job_id], separators=(",", ":")),
+            ).order_by(case((WorkflowRunState.status.in_(unresolved), 0), else_=1),
+                WorkflowRunState.run_identity).offset(offset).limit(21))).scalars().all()
+            identities = [row.run_identity for row in rows]
+        result = []
+        rejected = 0
+        for identity in identities[:20]:
+            try:
+                current = await self.owned(identity, principal, session)
+                if current.get("dependencies") != [repair_job_id]:
+                    raise PublicationError("publication_dependency_changed")
+                preview = self.preview(current)
+                binding = (current.get("declared_authority") or {}).get("repair_binding")
+                preview_binding = preview.get("repair_binding")
+                # Canonical authority deliberately redacts the nested private
+                # test-artifact projection. The private preview digest already
+                # binds those bytes; compare its immutable scalar binding here.
+                if not isinstance(binding, dict) or not isinstance(preview_binding, dict) or binding.get("repair_job_id") != repair_job_id or any(preview_binding.get(key) != value for key, value in binding.items() if key != "test_artifacts") or preview.get("owner_principal_id") != principal or preview.get("owner_session_id") != session:
+                    raise PublicationError("publication_discovery_binding_changed")
+                result.append(await self.view(current))
+            except (PublicationError, KeyError, TypeError, ValueError):
+                rejected += 1
+        await self.live(principal, session)
+        return {"repair_job_id": repair_job_id, "owner_principal_id": principal,
+            "owner_session_id": session, "jobs": result, "limit": 20,
+            "next_offset": offset + 20 if len(identities) > 20 and offset < 2000 else None,
+            "scan_limit_reached": len(identities) > 20 and offset >= 2000,
+            "rejected_count": rejected}
 
     async def repair(self, request, principal, session):
         await self.live(principal, session)
@@ -630,6 +675,16 @@ async def get_publication(job_id: str, request: Request):
     operator = _operator(request)
     service = RepoPublicationService()
     return await service.view(await service.owned(job_id, _principal_id(operator), _session_id(operator)))
+
+
+@router.get("/repairs/{repair_job_id}/jobs")
+async def discover_publications(repair_job_id: str, request: Request,
+                                offset: int = Query(default=0, ge=0, le=2000)):
+    operator = _operator(request)
+    try:
+        return await RepoPublicationService().discover(repair_job_id, _principal_id(operator), _session_id(operator), offset=offset)
+    except PublicationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
 
 
 @router.get("/jobs/{job_id}/patch")

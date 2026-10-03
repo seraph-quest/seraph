@@ -115,6 +115,11 @@ async def test_authenticated_actual_repair_producer_requires_new_exact_publicati
     assert view["preview"]["tested_input"]["environment"]["profile"] == PROFILE
     assert view["preview"]["repair_binding"]["repair_job_id"] == flow["job_id"]
     assert transport.calls == []
+    discovered = await client.get(f"/api/capabilities/github/repo-publication/repairs/{flow['job_id']}/jobs")
+    assert discovered.status_code == 200, discovered.text
+    assert discovered.json()["jobs"][0]["job_id"] == view["job_id"]
+    assert discovered.json()["limit"] == 20 and discovered.json()["next_offset"] is None
+    assert transport.calls == []
     repeated = await client.post("/api/capabilities/github/repo-publication/prepare", json=request, headers=ORIGIN)
     assert repeated.status_code == 200 and repeated.json()["job_id"] == view["job_id"]
     execute = await client.post(f"/api/capabilities/github/repo-publication/jobs/{view['job_id']}/execute", headers=ORIGIN)

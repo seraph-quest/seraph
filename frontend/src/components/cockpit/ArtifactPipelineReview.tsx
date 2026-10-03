@@ -87,6 +87,7 @@ export function ArtifactPipelineReview({ task, ownerPrincipalId, ownerSessionId,
       <p className="mt-2 break-all text-xs">Operation {operation.operation_id} · plan {operation.plan_version} · {operation.status} · {operation.deadline_at ? `original deadline ${operation.deadline_at}` : "awaiting review"}</p>
       <p className="break-all text-xs">Source {operation.source_scope.start_url} · hosts {operation.source_scope.allowed_hosts.join(", ")} · allowed paths {operation.source_scope.approved_url_prefixes.join(", ")}</p>
       <p className="break-all text-xs">Review digest {operation.digest}</p>
+      {operation.authority_frozen && <p role="status" className="text-xs">Unfinished work is frozen because its Goal or source permission changed. Review a replacement source or a distinct finite operation; original completed output and unresolved liabilities remain preserved.</p>}
       <ol>{operation.steps.map((step) => <li key={step.task_id}><button onClick={() => onOpenTask(step.task_id)}>{step.capability_id}: {step.status}</button>{step.block_reason && <span> · {step.block_reason}</span>}</li>)}</ol>
       <div className="mt-2 flex flex-wrap gap-2">
         <button disabled={busy || !eligible} onClick={() => void refresh()}>Refresh pipeline</button>

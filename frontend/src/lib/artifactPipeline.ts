@@ -8,6 +8,7 @@ export interface ArtifactPipeline {
   source_scope: { start_url: string; allowed_hosts: string[]; approved_url_prefixes: string[] };
   pending_revision: Record<string, unknown> | null;
   reused_output: Record<string, unknown> | null;
+  authority_frozen?: Record<string, unknown> | null;
   no_learning: true;
 }
 

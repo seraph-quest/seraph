@@ -105,8 +105,11 @@ async def test_operation_is_metadata_only_exact_owner_root_deadline_and_goal(asy
         await db.flush()
         with pytest.raises(BoardError):
             await pipelines.task_guard(db, task)
+        frozen = (await db.scalars(select(WorkBoardTask))).all()
+        assert all(row.status == WorkBoardStatus.blocked for row in frozen)
         goal.revision -= 1
         row, value = await pipelines.owned(db, owner, operation["operation_id"])
+        value["authority_frozen"] = None
         value["deadline_at"] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
         await pipelines.store(db, row, value)
         with pytest.raises(BoardError) as expired:
@@ -174,7 +177,23 @@ async def test_real_chromium_native_browser_to_cpu_dossier_to_plain_report(async
                 assert artifact.state == "consumed"
                 operation = await pipelines.read(db, owner, operation["operation_id"])
                 if index < 2:
-                    operation = await pipelines.advance(db, owner, operation["operation_id"], operation["revision"])
+                    request_revision = operation["revision"]
+                    if index == 0:
+                        # Crash after the durable reservation and before file
+                        # promotion. Exact old request resumes the same key,
+                        # handoff and consumer; no fresh plan/admission.
+                        import src.work_board.input_artifacts as artifacts_module
+                        original_write = artifacts_module._write_payload
+                        with monkeypatch.context() as interrupted:
+                            interrupted.setattr(artifacts_module, "_write_payload", lambda *args: (_ for _ in ()).throw(OSError("injected pre-promotion interruption")))
+                            with pytest.raises(BoardError) as failure:
+                                await pipelines.advance(db, owner, operation["operation_id"], request_revision)
+                            assert failure.value.code == "input_artifact_write_failed"
+                        assert artifacts_module._write_payload is original_write
+                        await db.rollback()
+                    operation = await pipelines.advance(db, owner, operation["operation_id"], request_revision)
+                    replayed = await pipelines.advance(db, owner, operation["operation_id"], request_revision)
+                    assert replayed["revision"] == operation["revision"]
                 await db.commit()
             assert operation["deadline_at"] == original_deadline
     async with async_db() as db:

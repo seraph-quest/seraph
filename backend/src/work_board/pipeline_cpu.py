@@ -125,7 +125,7 @@ def read_output(reference: str, expected_digest: str, *, max_bytes: int = MAX_OU
     return _safe_file_bytes(path, expected_digest=expected_digest, expected_size=size)
 
 
-async def execute(task: WorkBoardTask, attempt: WorkBoardAttempt, inputs: Mapping[str, Any], *, jobs: Any, runner: str, deadline: datetime, admission_only: bool, validate_current: Any) -> Mapping[str, Any]:
+async def execute(task: WorkBoardTask, attempt: WorkBoardAttempt, inputs: Mapping[str, Any], *, jobs: Any, runner: str, deadline: datetime, admission_only: bool, validate_current: Any, validate_terminal: Any) -> Mapping[str, Any]:
     spec = spec_for(task, attempt, inputs, deadline=deadline)
     existing = await jobs.get_job(spec.identity.job_id)
     if existing is None:
@@ -169,7 +169,8 @@ async def execute(task: WorkBoardTask, attempt: WorkBoardAttempt, inputs: Mappin
         await validate_current(task, attempt, inputs)
         finished = await jobs.transition_job(spec.identity.job_id, "succeeded", owner=runner,
             fencing_token=fence, result={"status": "succeeded", "no_learning": True, "output_sha256": sha},
-            result_summary="Deterministic local evidence output independently read back; no_learning")
+            result_summary="Deterministic local evidence output independently read back; no_learning",
+            terminal_authority_check=validate_terminal)
         return {**dict(finished), "job_id": spec.identity.job_id, "status": "succeeded", "memory_status": "no_learning", "admission_only": False}
     except BaseException:
         await jobs.transition_job(spec.identity.job_id, "blocked", owner=runner,

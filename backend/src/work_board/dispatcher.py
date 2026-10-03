@@ -5968,7 +5968,7 @@ class WorkBoardDispatcher:
     ) -> Mapping[str, Any]:
         capability_id = _text(task.capability_id)
         if capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
-            from src.work_board.pipelines import task_guard, validate_cpu_current, utc
+            from src.work_board.pipelines import task_guard, validate_cpu_current, validate_cpu_binding, utc
             from src.work_board.pipeline_cpu import execute
             async with self.session_provider() as pipeline_db:
                 _row, operation = await task_guard(pipeline_db, task, attempt=attempt)
@@ -5976,11 +5976,14 @@ class WorkBoardDispatcher:
             deadline = min(operation_deadline, _now() + timedelta(seconds=min(runtime_seconds, 30)))
             async def check_current(current_task, current_attempt, current_inputs):
                 await validate_cpu_current(current_task, current_attempt, current_inputs, session_provider=self.session_provider)
+            async def check_terminal(db, run):
+                await validate_cpu_binding(db, task, attempt, inputs)
             if not admission_only:
                 self._active_worker_tasks[(task.task_id, attempt.attempt_id)] = asyncio.current_task()
             try:
                 return await execute(task, attempt, inputs, jobs=self.jobs, runner=self.runner_id,
-                    deadline=deadline, admission_only=admission_only, validate_current=check_current)
+                    deadline=deadline, admission_only=admission_only, validate_current=check_current,
+                    validate_terminal=check_terminal)
             finally:
                 if not admission_only:
                     self._active_worker_tasks.pop((task.task_id, attempt.attempt_id), None)

@@ -62,6 +62,7 @@ async def test_prefunded_ordinary_broker_denial_survives_finally_reopen_and_reco
     assert row["bound_microusd"] == 100 and row["payload_digest"] == sibling.request.data_digest
     denial = next(item for item in json.loads(row["evidence_json"]) if item["kind"] == "provider_contact_denied")
     assert denial["reason"] == "provider_charge_exceeded_reservation"
+    assert any(item.get("kind") == "provider_contact_denial_quiesced" for item in json.loads(row["evidence_json"]))
     assert read_lifecycle_receipt(ProductionWorkspace(host_root=root))["inference_accounting"]["revision"] == snapshot["revision"]
     assert (await repository.get_job(sibling.job_id))["status"] == "blocked"
     # Actual stale-running recovery must also retain this held canonical row.
@@ -115,3 +116,77 @@ async def test_contacted_or_forged_denial_preserves_unknown_lane_and_debt(accoun
     assert row["state"] == "unknown" and row["contact_started_at"] is not None
     assert snapshot["unknown_microusd"] == 100
     assert broker._active_operation_id == "forged-denial"
+
+
+async def prepare_denied_broker(repository, monkeypatch, *, seconds=120, run_broker=True):
+    from dataclasses import replace
+    setup_configuration()
+    await repository.configure_inference_accounting(1000)
+    broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
+    first = await broker._prepare_accounting(request("first-slot"))
+    pending = replace(request("held-slot"), deadline_at=__import__("time").time()+seconds)
+    sibling = await broker._prepare_accounting(pending)
+    await broker._contact_accounting(first)
+    await broker._finish_accounting(first, payload={"usage": {"cost": "0.000150"}})
+    calls = []
+    if run_broker:
+        async def prepare(_value):
+            return sibling
+        async def forbidden():
+            calls.append("forbidden")
+        monkeypatch.setattr(broker, "_prepare_accounting", prepare)
+        with pytest.raises(InferenceAccountingError, match="provider_charge_exceeded_reservation"):
+            await broker.execute(sibling.request, forbidden)
+    else:
+        with pytest.raises(InferenceAccountingError, match="provider_charge_exceeded_reservation"):
+            await broker._contact_accounting(sibling)
+    assert calls == []
+    return broker, sibling
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", ["cancel", "expiry"])
+async def test_authorized_quiescent_never_contacted_hold_release_survives_reopen(accounting_db, monkeypatch, terminal):
+    _root, engine, _factory = accounting_db
+    repository = DurableJobRepository()
+    _broker, sibling = await prepare_denied_broker(repository, monkeypatch, seconds=0.3 if terminal == "expiry" else 120)
+    if terminal == "cancel":
+        await repository.cancel_job(sibling.job_id)
+    else:
+        await asyncio.sleep(0.31)
+        await repository.transition_job(sibling.job_id, "failed", reason="deadline_expired")
+    released = await repository.settle_inference_cost(sibling.request.operation_id,
+        reason="expired_before_contact" if terminal == "expiry" else "cancelled_before_contact")
+    assert released["state"] == "released" and released["contact_started_at"] is None
+    await engine.dispose()
+    snapshot = await repository.inference_accounting_snapshot()
+    assert snapshot["accounting_continuity_verified"] is True
+    assert snapshot["reserved_microusd"] == 0 and snapshot["committed_microusd"] == 150
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing", ["actual_terminal", "callback_completion", "current_fence"])
+async def test_denied_hold_release_requires_actual_closed_authority_and_quiescence(accounting_db, monkeypatch, missing):
+    _root, _engine, factory = accounting_db
+    repository = DurableJobRepository()
+    _broker, sibling = await prepare_denied_broker(repository, monkeypatch, run_broker=missing != "callback_completion")
+    if missing != "actual_terminal":
+        await repository.cancel_job(sibling.job_id, **({"owner": sibling.owner, "fencing_token": sibling.fence} if missing == "callback_completion" else {}))
+    if missing == "current_fence":
+        from sqlalchemy import text
+        async with factory.accounting_sessions() as db:
+            await db.execute(text("UPDATE workflow_run_states SET fencing_token=fencing_token+1 WHERE run_identity=:job"), {"job": sibling.job_id})
+    row = await repository.settle_inference_cost(sibling.request.operation_id, reason="cancelled_before_contact")
+    assert row["state"] == "reserved" and row["contact_started_at"] is None
+    snapshot = await repository.inference_accounting_snapshot()
+    assert snapshot["accounting_continuity_verified"] is True
+    assert snapshot["reserved_microusd"] == 100 and snapshot["committed_microusd"] == 150
+
+
+@pytest.mark.asyncio
+async def test_caller_constructed_or_wrong_row_quiescence_proof_is_rejected(accounting_db):
+    from src.workflows.inference_accounting import _DenialQuiescenceProof
+    repository = DurableJobRepository()
+    for proof in ({"callback_completed": True}, _DenialQuiescenceProof(receipt={"job_id": "wrong-row", "callback_completed": True})):
+        with pytest.raises(InferenceAccountingError, match="proof_invalid"):
+            await repository.record_provider_denial_quiescence(proof)

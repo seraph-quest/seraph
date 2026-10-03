@@ -1170,6 +1170,10 @@ def _append_parent_fence_condition(
 ) -> None:
     """Require canonical goal identity and, for children, the live parent fence."""
     _append_goal_fence_condition(conditions, run)
+    if getattr(run, "job_kind", None) == "readonly_research_child":
+        from src.workflows.research_guard import append_research_parent_gate
+        if append_research_parent_gate(conditions, run, now=now):
+            return
     parent_job_id = _text(getattr(run, "parent_job_id", None))
     if not parent_job_id:
         return
@@ -3147,6 +3151,17 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 } else None,
                 "finished_at": now if to_status in DURABLE_JOB_TERMINAL_STATUSES or to_status == "failed" else None,
             }
+            if to_status == "paused" and run.job_kind in {"research_dossier", "readonly_research_child"}:
+                from src.work_board.research_contracts import WAIT_SOURCES, WAIT_CHILDREN, PROMPT_READY
+                permitted = {WAIT_SOURCES, WAIT_CHILDREN} if run.job_kind == "research_dossier" else {PROMPT_READY}
+                checkpoint_id = "research:phase" if run.job_kind == "research_dossier" else "research:prompt-ready"
+                matches = [item.get("payload") for item in _json_load(run.checkpoint_receipts_json, [])
+                    if item.get("checkpoint_id") == checkpoint_id]
+                if reason not in permitted or len(matches) != 1 or not isinstance(matches[0], dict):
+                    raise DurableJobTransitionError("research pause requires its exact typed checkpoint")
+                if run.job_kind == "research_dossier" and matches[0].get("phase") != reason:
+                    raise DurableJobTransitionError("research pause phase differs from its checkpoint")
+                values["failure_reason"] = reason
             if to_status in {
                 "queued",
                 "awaiting_approval",

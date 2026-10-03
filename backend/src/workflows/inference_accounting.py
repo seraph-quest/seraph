@@ -37,17 +37,19 @@ class InferenceAccountingError(RuntimeError):
 
 
 _CONTACT_DENIAL_SEAL = object()
+_DENIAL_QUIESCENCE_SEAL = object()
 
 
 class InferenceProviderContactDenied(InferenceAccountingError):
     """A sealed committed writer result, subsequently bound to its broker handle."""
 
-    def __init__(self, code, *, _seal=None, _binding=None, _witness=None):
+    def __init__(self, code, *, _seal=None, _binding=None, _witness=None, _root_job_id=None, _live_root_digest=None):
         super().__init__(code)
         self._seal = _seal
         self._binding = _binding
         self._witness = _witness
         self._broker_request = None
+        self._root_job_id, self._live_root_digest = _root_job_id, _live_root_digest
 
     def bind_broker_handle(self, handle):
         expected = (handle.request.operation_id, handle.job_id, handle.request.owner_id,
@@ -60,6 +62,26 @@ class InferenceProviderContactDenied(InferenceAccountingError):
 def proven_contact_denial_for_request(error, request) -> bool:
     return (isinstance(error, InferenceProviderContactDenied)
         and error._seal is _CONTACT_DENIAL_SEAL and error._broker_request is request)
+
+
+class _DenialQuiescenceProof:
+    def __init__(self, *, _seal=None, denial=None, receipt=None):
+        self._seal, self.denial, self.receipt = _seal, denial, receipt
+
+
+def _completed_denial_quiescence(denial, request, broker):
+    """Called only by broker teardown with its actual closed operation object."""
+    with broker._condition:
+        operation = broker._operations.get(request.operation_id)
+        if (not proven_contact_denial_for_request(denial, request) or operation is None
+            or operation.request is not request or not operation.callback_completed
+            or operation.status != "failed" or operation.reconciliation_required
+            or broker._active_operation_id == request.operation_id):
+            return None
+        return _DenialQuiescenceProof(_seal=_DENIAL_QUIESCENCE_SEAL, denial=denial,
+            receipt={"operation_id": request.operation_id, "job_id": request.job_id,
+                "owner_id": request.owner_id, "broker_fence": operation.fencing_token,
+                "callback_completed": True, "provider_never_contacted": True})
 
 
 def integer_amount(value: object, *, positive: bool = False) -> int:
@@ -189,6 +211,41 @@ class InferenceAccountingRepositoryMixin:
         if db.get_bind().dialect.name != "sqlite":
             raise InferenceAccountingError("accounting_storage_unsupported")
         await db.execute(text("BEGIN IMMEDIATE"))
+
+    async def record_provider_denial_quiescence(self, proof):
+        """Durable completion proof from the real closed broker callback path."""
+        if (not isinstance(proof, _DenialQuiescenceProof) or proof._seal is not _DENIAL_QUIESCENCE_SEAL
+            or proof.denial._seal is not _CONTACT_DENIAL_SEAL):
+            raise InferenceAccountingError("accounting_quiescence_proof_invalid")
+        binding = proof.denial._binding
+        async with self._session() as db:
+            await self._accounting_begin(db)
+            account, rows = await self._accounting_rows(db)
+            with _continuity_lock(Path(settings.workspace_dir).resolve()) as workspace:
+                self._assert_accounting_continuity(workspace, account, rows)
+                row = next((item for item in rows if item.operation_id == binding[0]), None)
+                if row is None or not _provider_contact_denied(row) or (
+                    row.operation_id, row.job_id, row.owner_id, row.payload_digest,
+                    row.policy_digest, binding[5], row.job_fencing_token) != binding:
+                    raise InferenceAccountingError("accounting_quiescence_binding_invalid")
+                run = await self._fetch(db, row.job_id)
+                from src.workspace import canonical_workspace_root_identity
+                if (run.root_run_identity != proof.denial._root_job_id or run.fencing_token != row.job_fencing_token
+                    or account.deployment_id != proof.denial._witness.get("deployment_id")
+                    or _digest(canonical_workspace_root_identity(settings.workspace_dir)) != proof.denial._live_root_digest):
+                    raise InferenceAccountingError("accounting_quiescence_root_fence_invalid")
+                history = json.loads(row.evidence_json)
+                record = {"kind": "provider_contact_denial_quiesced", "job_id": row.job_id,
+                    "root_job_id": run.root_run_identity, "job_fence": row.job_fencing_token,
+                    **proof.receipt, "memory_status": "no_learning"}
+                if record not in history:
+                    history.append(record)
+                    row.evidence_json = _json(history)
+                    row.revision += 1
+                    row.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                    db.add(row)
+                    await self._persist_accounting_witness(db, workspace, account, rows)
+                return _operation_payload(row)
 
     async def recover_inference_accounting(self, *, now: datetime | None = None, job_id: str | None = None) -> list[dict[str, object]]:
         """Classify stale provider work without replaying ephemeral callbacks."""
@@ -467,6 +524,8 @@ class InferenceAccountingRepositoryMixin:
         result = None
         denial_binding = None
         denial_witness = None
+        denial_root_job_id = None
+        denial_live_root_digest = None
         async with self._session() as db:
             await self._accounting_begin(db)
             account, rows = await self._accounting_rows(db)
@@ -477,6 +536,9 @@ class InferenceAccountingRepositoryMixin:
                     raise InferenceAccountingError("accounting_contact_fence_invalid")
                 run = await self._fetch(db, row.job_id)
                 self._assert_lease(run, owner=owner, fencing_token=fencing_token)
+                if run.job_kind == "readonly_research_child":
+                    from src.workflows.research_guard import assert_research_parent_current
+                    await assert_research_parent_current(db, run)
                 from src.workflows.job_runtime import _assert_canonical_goal_fence
                 await _assert_canonical_goal_fence(db, goal_id=run.goal_id, goal_revision=run.goal_revision,
                     owner_kind=run.owner_kind, owner_principal_id=run.owner_principal_id,
@@ -534,11 +596,15 @@ class InferenceAccountingRepositoryMixin:
                     denial_binding = (row.operation_id, row.job_id, row.owner_id,
                         row.payload_digest, row.policy_digest, owner, fencing_token)
                     denial_witness = _witness(account)
+                    denial_root_job_id = run.root_run_identity
+                    from src.workspace import canonical_workspace_root_identity
+                    denial_live_root_digest = _digest(canonical_workspace_root_identity(settings.workspace_dir))
         # Raising inside the session would roll back the durable denial while
         # its external witness had already advanced. Commit before reporting it.
         if denial:
             raise InferenceProviderContactDenied(denial, _seal=_CONTACT_DENIAL_SEAL,
-                _binding=denial_binding, _witness=denial_witness)
+                _binding=denial_binding, _witness=denial_witness, _root_job_id=denial_root_job_id,
+                _live_root_digest=denial_live_root_digest)
         return result
 
     async def settle_inference_cost(self, operation_id: str, *, payload: object = None,
@@ -580,7 +646,18 @@ class InferenceAccountingRepositoryMixin:
                 if _provider_contact_denied(row) and actual is None:
                     # The broker's finally path must read the canonical held
                     # denial, not infer release from its transient contacted flag.
-                    return _operation_payload(row)
+                    run = await self._fetch(db, row.job_id)
+                    closed = (run.lease_owner is None and run.lease_expires_at is None and run.finished_at is not None
+                        and run.fencing_token == row.job_fencing_token)
+                    terminal_authority = ((reason == "cancelled_before_contact" and run.status == "cancelled")
+                        or (reason == "expired_before_contact" and run.status == "failed"
+                            and run.failure_reason == "deadline_expired" and _utc(row.deadline_at) <= datetime.now(timezone.utc)))
+                    quiesced = any(item.get("kind") == "provider_contact_denial_quiesced"
+                        and item.get("job_id") == row.job_id and item.get("root_job_id") == run.root_run_identity
+                        and item.get("job_fence") == row.job_fencing_token and item.get("provider_never_contacted") is True
+                        and item.get("callback_completed") is True for item in json.loads(row.evidence_json))
+                    if not (closed and terminal_authority and quiesced):
+                        return _operation_payload(row)
                 if row.state == "reserved":
                     # Only callback-never-started cancellation/expiry releases.
                     if reason not in {"cancelled_before_contact", "expired_before_contact", "blocked_before_contact"}:

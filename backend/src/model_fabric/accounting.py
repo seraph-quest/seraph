@@ -74,6 +74,7 @@ class _AccountingHandle:
     sequence: int
     ephemeral: bool
     contacted: bool = False
+    committed_denial: object | None = None
 
 
 class DurableInferenceBrokerMixin:
@@ -113,6 +114,20 @@ class DurableInferenceBrokerMixin:
             binding = current_remote_inference_receipt_binding()
             ephemeral = binding is None or not binding.job_id
             repository = binding.repository if not ephemeral else durable_job_repository
+            if not ephemeral:
+                native = await repository.get_job(binding.job_id)
+                if native["job_kind"] == "readonly_research_child":
+                    if request.job_id != binding.job_id:
+                        raise InferenceAccountingError("accounting_job_binding_invalid")
+                    from src.workflows.research_accounting import rebind_funded_child
+                    reservation = await rebind_funded_child(repository, request=request,
+                        owner=binding.owner, fencing_token=binding.fencing_token,
+                        policy_digest=policy_digest,
+                        profile_id=_profile_bindings.get().get(request.operation_id, setup.profile_id),
+                        bound=bound)
+                    return _AccountingHandle(request, repository, binding.job_id,
+                        binding.owner, binding.fencing_token, policy_digest,
+                        reservation["sequence"], False)
             snapshot = await repository.inference_accounting_snapshot()
             if snapshot["status"] != "ready":
                 raise InferenceAccountingError(str(snapshot.get("reason_code") or "accounting_continuity_unavailable"))
@@ -180,6 +195,7 @@ class DurableInferenceBrokerMixin:
                 owner=handle.owner, fencing_token=handle.fence, policy_digest=digest)
         except InferenceProviderContactDenied as error:
             error.bind_broker_handle(handle)
+            handle.committed_denial = error
             raise
         handle.contacted = True
         # Recheck after the durable transaction's await, before invoking the
@@ -187,6 +203,11 @@ class DurableInferenceBrokerMixin:
         assert_current_inference_policy()
 
     async def _finish_accounting(self, handle, *, payload=None, reason=None):
+        if handle.committed_denial is not None:
+            from src.workflows.inference_accounting import _completed_denial_quiescence
+            proof = _completed_denial_quiescence(handle.committed_denial, handle.request, self)
+            if proof is not None:
+                await handle.repository.record_provider_denial_quiescence(proof)
         row = await handle.repository.settle_inference_cost(handle.request.operation_id,
             payload=payload, reason=reason or ("provider_account_usage" if handle.contacted else "blocked_before_contact"))
         adoption_allowed = True

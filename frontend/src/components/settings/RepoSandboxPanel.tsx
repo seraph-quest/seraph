@@ -82,6 +82,7 @@ const FALLBACK: RepoSandboxPayload = {
 
 const REQUIRED_LIMITS = ["max_cpu_seconds", "max_memory_bytes", "max_pids", "max_wall_seconds"] as const;
 const REPO_SANDBOX_PROFILE = "repo-python-pytest-v1";
+const LOCAL_PROFILES = new Set([REPO_SANDBOX_PROFILE, "repo-node24-npm-v1", "repo-python-pytest-publication-v1"]);
 const PREFLIGHT_STATUSES = new Set(["ready", "blocked", "unknown", "degraded", "not_selected"]);
 const LOCAL_HOST_ACCESS = "explicit_job_approval_required";
 
@@ -128,11 +129,12 @@ function normalizePosture(
   kind: RepoSandboxExecutorKind,
   limitsDigest: string | null,
   requireComplete = false,
+  profile = REPO_SANDBOX_PROFILE,
 ): RepoSandboxPosture | null {
   if (!isRecord(value)) return null;
-  if (requireComplete && (value.kind !== kind || ![REPO_SANDBOX_PROFILE, "repo-node24-npm-v1"].includes(String(value.profile)))) return null;
+  if (requireComplete && (value.kind !== kind || value.profile !== profile)) return null;
   if (value.kind !== undefined && value.kind !== kind) return null;
-  if (value.profile !== undefined && ![REPO_SANDBOX_PROFILE, "repo-node24-npm-v1"].includes(String(value.profile))) return null;
+  if (value.profile !== undefined && value.profile !== profile) return null;
   const imageDigest = value.image_digest;
   if (imageDigest !== null && imageDigest !== undefined && (typeof imageDigest !== "string" || imageDigest.length > 512 || imageDigest.includes("\u0000"))) return null;
   if (kind === "local" && imageDigest !== null && imageDigest !== undefined) return null;
@@ -163,7 +165,7 @@ function normalizePosture(
   if (hostAccess === LOCAL_HOST_ACCESS && effectiveLocalHost !== true) return null;
   return {
     kind,
-    profile: boundedMetadataString(value.profile, REPO_SANDBOX_PROFILE),
+    profile: boundedMetadataString(value.profile, profile),
     isolation_claim: boundedMetadataString(value.isolation_claim, kind === "local" ? "none" : "unverified"),
     network_isolation: boundedMetadataString(value.network_isolation, kind === "local" ? "not_verified" : "unverified"),
     resource_enforcement: boundedMetadataString(value.resource_enforcement, kind === "local" ? "admission_and_wall_timeout_only" : "unverified"),
@@ -206,7 +208,8 @@ function normalizeRepoSandboxPayload(payload: unknown): RepoSandboxPayload | nul
     || typeof payload.worker_image_digest !== "string"
     || payload.worker_image_digest.length > 512
     || payload.worker_image_digest.includes("\u0000")
-    || ![REPO_SANDBOX_PROFILE, "repo-node24-npm-v1"].includes(String(payload.profile))
+    || typeof payload.profile !== "string"
+    || !(executorKind === "local" ? LOCAL_PROFILES.has(payload.profile) : payload.profile === REPO_SANDBOX_PROFILE)
     || payload.limits_editable !== false
     || typeof payload.status !== "string"
     || payload.status.length > 128
@@ -232,13 +235,17 @@ function normalizeRepoSandboxPayload(payload: unknown): RepoSandboxPayload | nul
       limits_digest: payload.limits_digest,
       local_host_execution_required: executorKind === "local",
     }, executorKind, payload.limits_digest)
-    : normalizePosture(payload.executor_posture, executorKind, payload.limits_digest, hasExplicitExecutor);
-  if (!posture || posture.profile !== payload.profile) return null;
+    : normalizePosture(payload.executor_posture, executorKind, payload.limits_digest, hasExplicitExecutor, payload.profile);
+  if (!posture) return null;
   const legacyPreflight = payload.legacy_repo_change_preflight === undefined || payload.legacy_repo_change_preflight === null
     ? null
     : normalizePreflight(payload.legacy_repo_change_preflight);
   if (payload.legacy_repo_change_preflight !== undefined && payload.legacy_repo_change_preflight !== null && !legacyPreflight) return null;
   const expectedExecutorProfile = `${executorKind}:${payload.profile}`;
+  if (payload.profile === "repo-python-pytest-publication-v1" && payload.preparation_ready === true
+    && (!isRecord(payload.executor_posture) || payload.executor_posture.runtime_proof_available !== true
+      || !isSafeDigest(payload.executor_posture.publication_runtime_proof_sha256)
+      || typeof payload.executor_posture.publication_runtime_proof_sha256 !== "string")) return null;
   if (hasExplicitExecutor) {
     if (payload.executor_profile !== expectedExecutorProfile) return null;
     if (typeof payload.executor_posture_digest !== "string" || !/^[0-9a-f]{64}$/.test(payload.executor_posture_digest)) return null;
@@ -569,11 +576,12 @@ export function RepoSandboxPanel() {
         <label className="text-[10px] text-retro-text">Profile
           <select aria-label="Repository execution profile" className="cockpit-input mt-1 w-full" value={value.profile} onChange={(event) => {
             const profile = event.currentTarget.value;
-            if (![REPO_SANDBOX_PROFILE, "repo-node24-npm-v1"].includes(profile)) return;
+            if (!(value.executor_kind === "local" ? LOCAL_PROFILES.has(profile) : profile === REPO_SANDBOX_PROFILE)) return;
             setValue((current) => ({ ...current, profile, metadata_available: false, preparation_ready: false, execution_ready: false }));
           }}>
             <option value={REPO_SANDBOX_PROFILE}>Python / pytest (default)</option>
             <option value="repo-node24-npm-v1">Node 24 / bounded test and build scripts</option>
+            {value.executor_kind === "local" && <option value="repo-python-pytest-publication-v1">Python / pytest for publication</option>}
           </select>
         </label>
         {value.profile === "repo-node24-npm-v1" && <label className="text-[10px] text-retro-text">Installed Node 24 executable

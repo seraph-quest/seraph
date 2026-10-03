@@ -1207,7 +1207,7 @@ class RootlessDockerRepoSandbox:
             raise RepoSandboxError("worker output manifests are invalid", phase="output_exported")
         patch_sha256 = hashlib.sha256(job.patch_bytes).hexdigest()
         required = {
-            "profile": PROFILE,
+            "profile": str(self.config.profile) if self.kind == "local" else PROFILE,
             "base_digest": job.base_digest,
             "snapshot_digest": job.base_digest,
             "patch_sha256": patch_sha256,
@@ -1253,7 +1253,7 @@ class RootlessDockerRepoSandbox:
                 raise RepoSandboxError("worker execution identity receipt is invalid", phase="output_exported")
             expected_identity = {
                 "schema": "seraph.repo_repair_execution_identity.v1",
-                "profile": PROFILE,
+                "profile": required["profile"],
                 "job_id": job.job_id,
                 "authority_digest": job.authority_digest,
                 "backend_kind": str(manifest.get("backend_kind") or ""),
@@ -1984,7 +1984,7 @@ class RootlessDockerRepoSandbox:
         manifest_path = destination / "snapshot-manifest.json"
         manifest_path.write_text(json.dumps(snapshot.manifest(), sort_keys=True), encoding="utf-8")
         job_payload = dict(job)
-        job_payload.update({"profile": PROFILE, "snapshot_digest": snapshot.digest})
+        job_payload.update({"profile": str(self.config.profile) if self.kind == "local" else PROFILE, "snapshot_digest": snapshot.digest})
         (destination / "job.json").write_text(json.dumps(job_payload, sort_keys=True), encoding="utf-8")
         snapshot_target = destination / "snapshot"
         try:
@@ -2497,10 +2497,11 @@ class RootfulDockerRepoSandbox(RootlessDockerRepoSandbox):
 def _local_posture(
     limits: RepoSandboxLimits,
     runtime_identity: Mapping[str, str] | None = None,
+    profile: str = PROFILE,
 ) -> dict[str, Any]:
     posture: dict[str, Any] = {
         "kind": "local",
-        "profile": PROFILE,
+        "profile": profile,
         "isolation_claim": "none",
         "network_isolation": "not_verified",
         "resource_enforcement": "admission_and_wall_timeout_only",
@@ -2516,6 +2517,9 @@ def _local_posture(
                 "pytest_package_sha256": runtime_identity.get("pytest_package_sha256"),
             }
         )
+        if profile == "repo-python-pytest-publication-v1":
+            from src.execution.repo_publication_runtime import posture_projection
+            posture.update(posture_projection(runtime_identity.get("publication_runtime"), runtime_identity.get("publication_configuration_revision")))
     return posture
 
 
@@ -2882,7 +2886,7 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
         deadline_at: float | None = None,
     ) -> RepoSandboxPreflight:
         del authority, deadline_at
-        posture = _local_posture(self.limits)
+        posture = _local_posture(self.limits, profile=str(self.config.profile))
         if not bool(self.config.enabled):
             return RepoSandboxPreflight(
                 False,
@@ -2892,7 +2896,7 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
                 executor_kind="local",
                 posture=posture,
             )
-        if str(self.config.profile) != PROFILE:
+        if str(self.config.profile) not in {PROFILE, "repo-python-pytest-publication-v1"}:
             return RepoSandboxPreflight(
                 False,
                 "blocked",
@@ -2916,9 +2920,9 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
             if not stat.S_ISREG(git_path.stat().st_mode) or not os.access(git_path, os.X_OK):
                 return RepoSandboxPreflight(False, "blocked", "local_git_unavailable", executor_kind="local", posture=posture)
             runtime_identity = self._local_runtime_identity()
-        except (OSError, RepoSandboxError):
+            posture = _local_posture(self.limits, runtime_identity, profile=str(self.config.profile))
+        except (OSError, RepoSandboxError, ValueError):
             return RepoSandboxPreflight(False, "blocked", "local_runtime_unavailable", executor_kind="local", posture=posture)
-        posture = _local_posture(self.limits, runtime_identity)
         return RepoSandboxPreflight(
             True,
             "ready",
@@ -2999,7 +3003,7 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
         package_metadata = package_path.stat()
         if not stat.S_ISREG(package_metadata.st_mode) or package_metadata.st_uid != os.getuid():
             raise RepoSandboxError("local pytest package is not trusted")
-        return {
+        result = {
             "interpreter_entry_path": str(interpreter_entry),
             "interpreter_path": str(interpreter),
             "pytest_executable_path": str(pytest_path),
@@ -3010,6 +3014,14 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
             "pytest_package_sha256": _digest_file(package_path),
             "worker_source_sha256": _digest_file(worker),
         }
+        if str(self.config.profile) == "repo-python-pytest-publication-v1":
+            from src.execution.repo_publication_runtime import capture
+            try:
+                result["publication_runtime"] = capture()["proof"]
+                result["publication_configuration_revision"] = hashlib.sha256(json.dumps(self.config.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            except (OSError, ValueError) as exc:
+                raise RepoSandboxError("publication_runtime_unavailable:" + str(exc)) from exc
+        return result
 
     def _read_private_output(self, output_root: Path, name: str) -> bytes:
         if not name or "/" in name or "\\" in name or "\x00" in name:
@@ -3070,11 +3082,11 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
         pytest_executable = self._local_pytest_executable()
         if pytest_executable is None:
             raise RepoSandboxError("local pytest executable is unavailable")
-        posture = preflight.posture or _local_posture(self.limits)
+        posture = preflight.posture or _local_posture(self.limits, profile=str(self.config.profile))
         posture_digest = preflight.posture_digest or executor_posture_digest(posture)
         receipt_fields = {
             "executor_kind": "local",
-            "profile": PROFILE,
+            "profile": str(self.config.profile),
             "posture": dict(posture),
             "posture_digest": posture_digest,
         }
@@ -3138,7 +3150,7 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
             "authority_digest": job.authority_digest,
             "base_digest": job.base_digest,
             "executor_kind": "local",
-            "profile": PROFILE,
+            "profile": str(self.config.profile),
             "posture_digest": posture_digest,
             "attempt_id": attempt_id,
             "fencing_token": fencing_token,
@@ -3270,7 +3282,7 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
                 )
             cancelled_manifest = {
                 "schema": "seraph.repo_repair_execution.v1",
-                "profile": PROFILE,
+                "profile": str(self.config.profile),
                 "executor_kind": "local",
                 "status": "cancelled",
                 "reason": reason,
@@ -3284,7 +3296,7 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
                     "backend_kind": "local",
                     "job_id": job.job_id,
                     "authority_digest": job.authority_digest,
-                    "profile": PROFILE,
+                    "profile": str(self.config.profile),
                     "executor_kind": "local",
                     "interpreter_entry_path": current_identity["interpreter_entry_path"],
                     "interpreter_path": current_identity["interpreter_path"],
@@ -3387,6 +3399,15 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
                         child.chmod(0o600)
                 mark_phase("input_loaded")
                 environment = self._minimal_env(root)
+                publication_runtime = None
+                if str(self.config.profile) == "repo-python-pytest-publication-v1":
+                    from src.execution.repo_publication_runtime import capture, materialize
+                    captured = capture(deadline_at=deadline_at)
+                    if captured["proof"] != current_identity["publication_runtime"]:
+                        raise RepoSandboxError("publication runtime changed before materialization")
+                    runtime_root = root / "python-runtime"
+                    materialize(runtime_root, captured, deadline_at=deadline_at)
+                    publication_runtime = {"root": runtime_root, "captured": captured, "configuration_revision": current_identity["publication_configuration_revision"]}
                 from src.execution.repo_worker import run_local_job
 
                 # The final owner/fence callback is immediately before the
@@ -3413,6 +3434,7 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
                             "pytest_executable_sha256": current_identity["pytest_executable_sha256"],
                             "pytest_package_sha256": current_identity["pytest_package_sha256"],
                         },
+                        publication_runtime=publication_runtime,
                     )
                 except Exception as exc:
                     # A fresh API/dispatcher instance may have set the exact
@@ -3480,7 +3502,7 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
                 expected_worker_identity = {
                     "schema": "seraph.repo_repair_execution_identity.v1",
                     "backend_kind": "local",
-                    "profile": PROFILE,
+                    "profile": str(self.config.profile),
                     "job_id": job.job_id,
                     "authority_digest": job.authority_digest,
                     "worker_source_sha256": current_identity["worker_source_sha256"],
@@ -3494,6 +3516,14 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
                 }
                 if raw_manifest.get("execution_identity") != expected_worker_identity:
                     raise RepoSandboxError("local worker executable identity is invalid", phase="output_exported")
+                if publication_runtime is not None:
+                    from src.execution.repo_publication_runtime import verify
+                    verify(publication_runtime["root"], publication_runtime["captured"], deadline_at=deadline_at)
+                    if self._local_runtime_identity() != current_identity:
+                        raise RepoSandboxError("publication source runtime changed after quiescence", phase="output_exported")
+                    attestation = raw_manifest.get("publication_test_input")
+                    if attestation != raw_readback.get("publication_test_input") or not isinstance(attestation, dict) or attestation.get("environment", {}).get("runtime_proof") != current_identity["publication_runtime"] or attestation.get("environment_unchanged") is not True:
+                        raise RepoSandboxError("publication tested runtime attestation is invalid", phase="output_exported")
                 diff = worker_outputs["diff.patch"]
                 try:
                     original_after = self.snapshot_repository(job.repository_root, root / "original-after")
@@ -3526,7 +3556,7 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
                     "execution_identity": {
                         "job_id": job.job_id,
                         "authority_digest": job.authority_digest,
-                        "profile": PROFILE,
+                        "profile": str(self.config.profile),
                         "executor_kind": "local",
                         **expected_worker_identity,
                     },
@@ -3731,12 +3761,19 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
                     return {"status": "unknown_external_effect", "reason": "local_process_identity_changed", "cleanup_proven": False}
                 else:
                     process = None
+        # Persist exact cancellation intent before a signal can make the
+        # original observer publish its terminal result. A fresh adapter has
+        # no shared in-memory flag; signalling first loses that fence race.
+        if marker is None:
+            return {"status": "unknown_external_effect", "reason": "local_cancellation_intent_unavailable", "cleanup_proven": False, "job_id": resolved_job_id}
+        try:
+            self._write_job_marker(
+                resolved_job_id,
+                {**marker, "phase": "cancel_requested", "status": "cancellation_requested"},
+            )
+        except (OSError, ValueError, RepoSandboxError):
+            return {"status": "unknown_external_effect", "reason": "local_cancellation_intent_unavailable", "cleanup_proven": False, "job_id": resolved_job_id}
         if active_cancellation_fence:
-            if marker is not None:
-                self._write_job_marker(
-                    resolved_job_id,
-                    {**marker, "phase": "cancel_requested", "status": "cancellation_requested"},
-                )
             return {"status": "cancel_requested", "cleanup_proven": False, "job_id": resolved_job_id}
         try:
             pid = int(process.pid) if process is not None else marker_pid
@@ -3801,11 +3838,6 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
                         "cleanup_proven": False,
                         "job_id": resolved_job_id,
                     }
-        if marker is not None:
-            self._write_job_marker(
-                resolved_job_id,
-                {**marker, "phase": "cancel_requested", "status": "cancellation_requested"},
-            )
         return {"status": "cancel_requested", "cleanup_proven": False, "job_id": resolved_job_id}
 
     def reconcile(self, authority: Mapping[str, Any] | None = None) -> dict[str, Any]:

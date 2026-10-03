@@ -342,6 +342,12 @@ async def _ensure_legacy_columns(conn) -> None:
         "memory_snapshots",
         {"canonical_tombstone_revision": "VARCHAR"},
     )
+    await _add_missing_columns("github_followthrough_connections", {
+        "consent_id": "VARCHAR", "consent_owner_session_id": "VARCHAR",
+        "consent_actions_json": "VARCHAR", "consent_issued_at": "DATETIME",
+        "consent_expires_at": "DATETIME", "consent_connection_revision": "INTEGER",
+        "consent_payload_digest": "VARCHAR", "consent_revoked_at": "DATETIME",
+    })
 
     await _add_missing_columns(
         "guardian_decision_packets",
@@ -634,6 +640,9 @@ async def _ensure_legacy_columns(conn) -> None:
             "checkpoint_receipts_json": "VARCHAR DEFAULT '[]'",
             "artifact_receipts_json": "VARCHAR DEFAULT '[]'",
             "effect_receipts_json": "VARCHAR DEFAULT '[]'",
+            "github_read_revision_json": "VARCHAR",
+            "github_read_observation_history_json": "VARCHAR",
+            "github_capacity_closure_json": "VARCHAR",
             "result_digest": "VARCHAR",
             "result_summary": "VARCHAR",
         },

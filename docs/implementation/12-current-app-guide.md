@@ -575,6 +575,34 @@ Saving selectors never starts Docker or changes host resource limits. A legacy
 settings document without an executor selector remains rootless-only until the
 operator explicitly selects another backend.
 
+The tested-publication integration branch implements the accepted
+[tested repair publication](./decisions/009-tested-repository-publication.md)
+and [finite GitHub consent](./decisions/011-finite-github-connection-consent.md)
+targets. Its selected `repo-python-pytest-publication-v1` profile reports the
+recorded successful preflight from `ok=true`; a `ready` label alone cannot
+establish that proof. Preparation does not approve local host execution, and
+display normalization does not change the raw authority receipt or digest.
+The copied Python environment and fixed Git producer claim no OS isolation.
+
+Publication requires a separate exact preview and approval after the repair's
+verified test readback. GitHub settings separately ask for unchecked consent
+to named actions on the selected repository, credential and current login,
+with a finite expiry. Stopping writes preserves an uncertain job's reservation.
+An explicit current-revision readback acknowledgment permits only destination
+GETs; it does not replay writes or revive the original approval. A changed Goal
+can retain a positive observation while the original task remains Unknown.
+
+The separate unchecked capacity-close control uses complete positive
+destination proof and the original producer's verified quiescence to release
+only the exact connection reservation. It preserves Unknown effects, costs
+and the explicit `no_learning` outcome, and permanently fences the old job
+against new writes. Reload discovers owned history without automatic consent,
+publication, reconciliation or closure. An ambiguously answered close request
+retains its exact body and key; only the server's consistent canonical
+inspection can identify an applied receipt or permit explicit discard of a
+permanently rejected request. These are branch-local capability contracts,
+not a claim of shipped `develop` behavior or live GitHub/provider usefulness.
+
 This remains **Partial**. Intercepted model transport and executor
 mechanics prove request, authority, recovery, and readback contracts only. A
 local technical preflight can make preparation ready, but execution remains
@@ -947,7 +975,7 @@ open the existing approval surface.
 
 Home's branch-local **Needs attention** snapshot deduplicates current-root task approvals, unknown outcomes, blocked or failed work, stale verification, and linked Inbox decisions. It retains last-confirmed metadata and uses explicit refresh. Attention opens the existing task inspector, rechecks the exact approval or owning readback, and returns keyboard focus to its originating Home or Inbox context. Recovered history remains read only. Pending approval timestamps include UTC offsets, so valid approvals retain their expiry instant in browsers in other timezones. Verified GitHub readback converges the original latest attempt only while the original owner, goal and connection authority remain valid; authority changes preserve settled-effect truth and a specific blocked task reason. Cost recovery links to Settings only after the owning API advertises the exact job/goal control. See [Attention and Recovery](./attention-recovery.md).
 
-The rendered Warsaw browser journey is mechanically verified through real ASGI HTTP/WebSocket handlers and retained SQLite/artifacts, with intercepted public-source/GitHub transport and an explicit server-side test permission. Recreating the ASGI app against the same database proves persisted recovery, not a managed-host backend process restart. Production GitHub write-consent creation remains a separate incomplete boundary owned by the tested-publication milestone; this UI does not create that consent. Live external usefulness remains unverified.
+The rendered Warsaw browser journey is mechanically verified through real ASGI HTTP/WebSocket handlers and retained SQLite/artifacts, with intercepted public-source/GitHub transport and an explicit server-side test permission. Recreating that ASGI app against the same database proves persisted recovery. The branch-local tested-publication milestone separately verifies a managed backend restart, native Git production, response-loss recovery and explicit capacity closure against retained SQLite/artifacts, with simulated GitHub HTTP and non-local sockets denied. Governed GitHub Settings creates finite Root-bound write consent; the attention UI does not create it. Readback and capacity closure use separate explicit acknowledgments and preserve Unknown effect, cost and no-learning truth after consent stops or the Goal changes. Live external usefulness remains unverified.
 
 This remains **Partial**; live provider and external-account usefulness remain
 explicitly **external-unverified**.

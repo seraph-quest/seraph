@@ -8047,11 +8047,18 @@ async def _safe_repo_repair_projection(
     executor_kind = str(authority.get("executor_kind") or "docker_rootless")
     raw_posture = authority.get("executor_posture")
     raw_posture = dict(raw_posture) if isinstance(raw_posture, Mapping) else {}
-    preflight_receipt = preflight.get("receipt") if isinstance(preflight, Mapping) else None
+    preflight_receipt = preflight.get("receipt", preflight) if isinstance(preflight, Mapping) else None
+    preparation_ready = isinstance(preflight_receipt, Mapping) and preflight_receipt.get("ok") is True
+    public_preflight = dict(preflight_receipt) if isinstance(preflight_receipt, Mapping) else {
+        "ok": False, "status": "blocked", "reason": "stored_preflight_unavailable",
+    }
+    if authority.get("sandbox_profile") == "repo-node24-npm-v1":
+        public_preflight["status"] = str(public_preflight.get("status") or "blocked")
+        public_preflight["evidence_basis"] = "recorded_job_preflight"
     display_posture, raw_posture = _executor_posture_projection(
         settings.repo_sandbox,
         {
-            "ok": preflight_receipt.get("ok") is True if isinstance(preflight_receipt, Mapping) else False,
+            "ok": preparation_ready,
             "posture": raw_posture,
             "posture_digest": authority.get("executor_posture_digest"),
             "profile": authority.get("sandbox_profile") or raw_posture.get("profile"),
@@ -8188,11 +8195,10 @@ async def _safe_repo_repair_projection(
         "required_permissions": list(authority.get("required_permissions") or []),
         "local_host_execution_required": bool(authority.get("local_host_execution_required")),
         "limits": authority.get("limits") if isinstance(authority.get("limits"), Mapping) else {},
-        **({
-            "preparation_ready": isinstance(preflight_receipt, Mapping) and preflight_receipt.get("ok") is True,
-            "execution_ready": False,
-            "preflight": {**(preflight or {}), "status": (str(preflight_receipt.get("status") or "blocked") if isinstance(preflight_receipt, Mapping) else "blocked"), "evidence_basis": "recorded_job_preflight"},
-        } if authority.get("sandbox_profile") == "repo-node24-npm-v1" else {"preflight": preflight}),
+        "preflight": public_preflight,
+        "preflight_raw": preflight,
+        "preparation_ready": preparation_ready,
+        "execution_ready": preparation_ready and executor_kind != "local",
         "source_packet": (
             {
                 "packet_id": packet.id,

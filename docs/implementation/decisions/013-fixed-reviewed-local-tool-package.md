@@ -43,6 +43,18 @@ Select one native Linux x86_64 `json-python-bwrap-v1` profile using pinned verif
 
 Use an immutable minimal copied runtime closure (interpreter, necessary stdlib and shared libraries) with a dependency/file digest manifest, not whole /usr, home, canonical workspace, vault, daemon socket or arbitrary package trees. Namespace root is constructed only from trusted paths; package/input mounts are read-only. Unshare user/mount/PID/IPC/UTS/network, clear environment, no_new_privs, dropped capabilities, new session, die-with-parent. Never pass `--not-a-security-boundary`. Pass fixed supervisor-produced argv only.
 
+The fixed CPython 3.12.8 runtime uses a trusted minimal C embedding launcher
+with matching headers and libPython. Before isolated initialization, it obtains
+exactly four bytes from native `getrandom(GRND_NONBLOCK)`, with bounded EINTR
+handling and no short-read, sleep, environment or seed fallback. It sets the
+hash seed through isolated PyConfig with fixed program, module search and
+bootstrap paths; environment, site loading and bytecode writes remain disabled.
+No host entropy device or `/dev` bind enters the namespace. Launcher source,
+binary, matching build headers and runtime libraries are digest-bound. The
+trusted bootstrap still closes descriptors and enforces limits and the syscall
+filter before any package code. This startup dependency is accepted by the
+lead; actual runtime and OS proof still require independent cumulative review.
+
 A trusted bootstrap inside the namespace sets hard CPU `<=2` seconds, address-space `<=128` MiB, file-size `<=64` KiB and bounded file descriptors before loading the fixed package. It installs an architecture-specific audited seccomp allowlist BEFORE untrusted package code: no fork/vfork/clone/clone3, exec/execveat, socket/network, mount, ptrace, namespace entry or further policy changes. The bootstrap must be immutable and cannot depend on package-controlled Python import search. Seccomp's startup ordering and actual minimal syscall set are proof gates, not assumed ready.
 
 Single-process restriction plus actual PID-namespace supervisor accounting is the finite process policy; do not claim unavailable cgroup CPU/PID/memory quotas or rely on RLIMIT_NPROC for root-in-user-namespace enforcement. CPU uses a hard time budget rather than a CPU-rate quota. Absolute wall deadline `<=10` seconds from first accepted attempt, one attempt, no renewed deadline on recovery; bounded stdout/stderr `<=8` KiB each, output `<=64` KiB.

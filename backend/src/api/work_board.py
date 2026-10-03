@@ -161,6 +161,16 @@ async def reuse_artifact_pipeline_output(request: Request, operation_id: str, bo
         _raise_board_error(exc)
 
 
+@router.post("/pipelines/{operation_id}/quiesce")
+async def quiesce_artifact_pipeline_revision(request: Request, operation_id: str, body: PipelineAdvanceRequest):
+    owner = _owner(_operator(request))
+    try:
+        return await pipeline_service.quiesce_revision(owner, operation_id, body.expected_revision,
+            dispatcher=dispatcher, session_provider=get_session)
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
 @router.get("/pipelines/{operation_id}/report")
 async def read_artifact_pipeline_report(request: Request, operation_id: str):
     from fastapi.responses import Response

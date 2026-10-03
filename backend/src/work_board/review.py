@@ -380,7 +380,9 @@ def _workflow_run_binds_board_attempt(
                 immutable_task = task.model_copy(update={"task_revision": attempt.task_revision_at_claim + 1})
                 projection = {"owner": {"principal_id": run.owner_principal_id, "kind": run.owner_kind, "service_id": run.service_id},
                     "job_kind": run.job_kind, "capability_version": run.capability_version,
-                    "declared_authority": authority}
+                    "declared_authority": authority, "job_id": run.run_identity,
+                    "session_id": run.session_id, "operator_session_id": run.operator_session_id,
+                    "goal_id": run.goal_id, "goal_revision": run.goal_revision}
                 expected = WorkBoardDispatcher._browser_expected_identity(immutable_task, attempt, inputs, projection,
                     limits["runtime_seconds"], limits["max_attempts"], limits["max_outstanding_jobs"])
                 return (run.run_identity == expected["job_id"] and run.input_digest == expected["input_digest"]

@@ -66,15 +66,24 @@ def output_bytes(capability: str, inputs: Mapping[str, Any]) -> bytes:
         # Parse only the known structural producer envelope. All source text
         # remains quoted data, including instruction-looking strings.
         producer = json.loads(model.quoted_source_data)
-        if not isinstance(producer, dict):
-            raise ValueError("browser output must be a JSON object")
+        if (not isinstance(producer, dict)
+            or set(producer) != {"schema_version", "capability_id", "task_id", "attempt_id", "final_url", "extracts", "checks", "request_count"}
+            or type(producer.get("schema_version")) is not int or producer["schema_version"] != 1
+            or producer.get("capability_id") != "browser.public-task.v1"
+            or producer.get("task_id") != model.producer_task_ref
+            or producer.get("attempt_id") != model.producer_attempt_ref
+            or not isinstance(producer.get("final_url"), str)
+            or not isinstance(producer.get("extracts"), list)
+            or not isinstance(producer.get("checks"), list)
+            or type(producer.get("request_count")) is not int or producer["request_count"] < 0):
+            raise ValueError("browser output differs from the exact producer schema")
         result = canonical_bytes({"schema": "evidence_dossier.v1", "source_sha256": model.producer_sha256,
             "quoted_public_evidence": producer, "no_learning": True})
     elif capability == REPORT:
         if model.producer_schema != "evidence_dossier.v1":
             raise ValueError("report requires the fixed evidence dossier schema")
         producer = json.loads(model.quoted_source_data)
-        if not isinstance(producer, dict) or set(producer) != {"schema", "source_sha256", "quoted_public_evidence", "no_learning"} or producer["schema"] != "evidence_dossier.v1" or producer["no_learning"] is not True:
+        if not isinstance(producer, dict) or set(producer) != {"schema", "source_sha256", "quoted_public_evidence", "no_learning"} or producer["schema"] != "evidence_dossier.v1" or producer["no_learning"] is not True or not isinstance(producer["quoted_public_evidence"], dict) or not isinstance(producer["source_sha256"], str) or len(producer["source_sha256"]) != 64:
             raise ValueError("evidence dossier schema invalid")
         result = ("Local evidence report\n\nUntrusted public source data, quoted verbatim.\n"
             f"Dossier SHA-256: {model.producer_sha256}\nMemory: no_learning\n\n"

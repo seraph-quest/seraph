@@ -5,7 +5,7 @@ import hashlib
 import json
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 PIPELINE_KIND = "public-evidence-pipeline.v1"
 DOSSIER = "work.evidence-dossier.v1"
@@ -45,6 +45,12 @@ class EvidenceConsumerInput(BaseModel):
         if len(value.encode("utf-8")) > MAX_QUOTED_BYTES:
             raise ValueError("quoted source data exceeds the finite input allowance")
         return value
+
+    @model_validator(mode="after")
+    def exact_quoted_digest(self) -> "EvidenceConsumerInput":
+        if hashlib.sha256(self.quoted_source_data.encode("utf-8")).hexdigest() != self.producer_sha256:
+            raise ValueError("quoted source digest differs from the producer")
+        return self
 
 
 class PipelinePreviewRequest(BaseModel):

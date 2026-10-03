@@ -121,7 +121,8 @@ async def preview(db: Any, owner: WorkBoardOwner, task_id: str, request: Any) ->
             "allowed_hosts": source_model.get("allowed_hosts"), "approved_url_prefixes": source_model.get("approved_url_prefixes"),
             "permissions": ["public_https_browser", "workspace_read", "workspace_write"]},
         "limits": {"max_steps": 4, "max_total_seconds": 300, "max_attempts_per_leaf": 2,
-            "max_attempts_total": 6, "browser_seconds": 180, "cpu_seconds": 30, "output_bytes": 65536, "model_cost": 0},
+            "max_attempts_total": 6, "browser_seconds": 180, "cpu_seconds": 30, "output_bytes": 65536,
+            "quoted_input_bytes": MAX_QUOTED_BYTES, "model_cost": 0},
         "steps": [{"slot": SLOTS[0], "task_ref": source.task_id}], "all_task_refs": [source.task_id],
         "versions": [], "reservations": {}, "no_learning": True}
     row = WorkBoardProposal(proposal_id=identifier, owner_principal_id=owner.principal_id,
@@ -272,6 +273,35 @@ async def stage_revision(db: Any, owner: WorkBoardOwner, operation_id: str, requ
     return await read(db, owner, operation_id)
 
 
+async def quiesce_revision(owner: WorkBoardOwner, operation_id: str, expected_revision: int, *, dispatcher: Any, session_provider: Any) -> dict[str, Any]:
+    """Use existing task cancellation; preserve every unresolved liability."""
+    async with session_provider() as db:
+        row, value = await owned(db, owner, operation_id, revision=expected_revision)
+        if not value.get("pending_revision"):
+            raise BoardError("pipeline_revision_required", "Freeze a proposed revision before quiescence", status_code=409)
+        tasks = [await WorkBoardRepository().get_task(db, owner, step["task_ref"]) for step in value["steps"]]
+    for task in tasks:
+        if task.status == WorkBoardStatus.running:
+            await dispatcher.cancel_task(owner, task.task_id, expected_revision=task.task_revision,
+                reason="pipeline_revision_requested")
+    async with session_provider() as db:
+        await _begin_sqlite_immediate(db)
+        row, value = await owned(db, owner, operation_id, revision=expected_revision)
+        snapshots = []
+        for step in value["steps"]:
+            task = await WorkBoardRepository().get_task(db, owner, step["task_ref"])
+            active = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == task.task_id,
+                WorkBoardAttempt.ended_at.is_(None)))
+            if active or task.block_kind in {"unknown_effect", "cost_liability", "reconcile_admission_binding"}:
+                raise BoardError("pipeline_quiescence_required", "Original work remains unresolved; reconcile its exact liability", status_code=409)
+            snapshots.append({"task_ref": task.task_id, "task_revision": task.task_revision})
+        value["pending_revision"]["frozen_tasks"] = snapshots
+        value["pending_revision"]["quiescence_verified"] = True
+        await store(db, row, value)
+        await db.commit()
+        return await read(db, owner, operation_id)
+
+
 async def accept_revision(db: Any, owner: WorkBoardOwner, row: WorkBoardProposal, value: dict[str, Any], request: Any) -> dict[str, Any]:
     from src.work_board.input_artifacts import read_input_artifact_metadata, revoke_input_artifact
     pending = value["pending_revision"]
@@ -369,11 +399,12 @@ async def task_guard(db: Any, task: WorkBoardTask, *, attempt: WorkBoardAttempt 
         reservation = value["reservations"].get(task.pipeline_slot)
         if not isinstance(reservation, Mapping) or reservation.get("state") != "bound" or reservation.get("artifact_ref") != task.input_artifact_id:
             raise BoardError("pipeline_input_changed", "The reviewed consumer reservation changed", status_code=409)
-    counts = await db.execute(select(WorkBoardAttempt.task_id, func.count()).where(
-        WorkBoardAttempt.task_id.in_(value["all_task_refs"])).group_by(WorkBoardAttempt.task_id))
+    counts = await db.execute(select(WorkBoardTask.pipeline_slot, func.count()).join(
+        WorkBoardAttempt, WorkBoardAttempt.task_id == WorkBoardTask.task_id).where(
+        WorkBoardTask.task_id.in_(value["all_task_refs"])).group_by(WorkBoardTask.pipeline_slot))
     counts = dict(counts.all())
     allowance = 0 if attempt is not None else 1
-    if sum(counts.values()) + allowance > 6 or counts.get(task.task_id, 0) + allowance > min(2, budget.max_attempts):
+    if sum(counts.values()) + allowance > 6 or counts.get(task.pipeline_slot, 0) + allowance > min(2, budget.max_attempts):
         raise BoardError("pipeline_attempts_exhausted", "The original finite operation attempt allowance is exhausted", status_code=409)
     return row, value
 
@@ -454,9 +485,9 @@ async def advance(db: Any, owner: WorkBoardOwner, operation_id: str, expected_re
     for index in (1, 2):
         producer = await WorkBoardRepository().get_task(db, owner, value["steps"][index - 1]["task_ref"])
         consumer = await WorkBoardRepository().get_task(db, owner, value["steps"][index]["task_ref"])
-        await task_guard(db, consumer)
         if consumer.input_artifact_id or consumer.status != WorkBoardStatus.triage:
             continue
+        await task_guard(db, consumer)
         if producer.status != WorkBoardStatus.done:
             continue
         output = await verified_output(db, owner, producer)

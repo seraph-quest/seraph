@@ -1334,17 +1334,9 @@ async def test_pre_contact_failed_job_uses_one_no_effect_retry_cas(monkeypatch):
         "capability_version": proposal.capability_version,
         "goal_revision": proposal.goal_revision,
         "input_digest": triage_service._proposal_admission_input_digest(proposal),
-        "authority_digest": proposal.authority_digest,
+        "authority_digest": triage_service._proposal_digest(triage_service._proposal_job_authority(proposal)),
         "run_fingerprint": proposal.request_digest,
-        "declared_authority": {
-            "principal": OWNER.principal_id,
-            "owner_kind": "user",
-            "session_id": OWNER.session_id,
-            "capability_id": proposal.capability_id,
-            "capability_version": proposal.capability_version,
-            "grant_revision": proposal.grant_revision,
-            "finite_authority": True,
-        },
+        "declared_authority": triage_service._proposal_job_authority(proposal),
         "status": "failed",
         "failure_reason": "proposal_binding_conflict",
         "revision": 4,
@@ -1371,6 +1363,15 @@ async def test_pre_contact_failed_job_uses_one_no_effect_retry_cas(monkeypatch):
         "status": "read_back",
         "outcome": "no_external_effect",
     }
+
+    retry.reset_mock()
+    wrong_authority = {**projection, "declared_authority": {
+        **projection["declared_authority"], "allowed_operations": ["work_board_proposal", "extra_operation"]}}
+    assert await triage_service._recover_pre_contact_admission(proposal, wrong_authority) is None
+    missing_grant = {**projection, "declared_authority": {
+        **projection["declared_authority"], "finite_authority": False}}
+    assert await triage_service._recover_pre_contact_admission(proposal, missing_grant) is None
+    retry.assert_not_awaited()
 
     retry.reset_mock()
     unsafe = {**projection, "effects": [{"effect_id": "remote_inference:contact", "status": "intent"}]}
@@ -1440,17 +1441,9 @@ async def test_admit_proposal_job_retries_exact_failed_pre_contact_binding_once(
         "goal_revision": task.goal_revision,
         "input_digest": triage_service._proposal_admission_input_digest(proposal),
         "capability_version": proposal.capability_version,
-        "authority_digest": proposal.authority_digest,
+        "authority_digest": triage_service._proposal_digest(triage_service._proposal_job_authority(proposal)),
         "run_fingerprint": proposal.request_digest,
-        "declared_authority": {
-            "principal": OWNER.principal_id,
-            "owner_kind": "user",
-            "session_id": OWNER.session_id,
-            "capability_id": proposal.capability_id,
-            "capability_version": proposal.capability_version,
-            "grant_revision": proposal.grant_revision,
-            "finite_authority": True,
-        },
+        "declared_authority": triage_service._proposal_job_authority(proposal),
         "status": "failed",
         "failure_reason": "proposal_admission_unavailable",
         "revision": 12,

@@ -502,17 +502,12 @@ def _authority_digest(owner: WorkBoardOwner, task: WorkBoardTask, route_id: str,
     )
 
 
-async def _admit_proposal_job(
-    *,
-    owner: WorkBoardOwner,
-    task: WorkBoardTask,
-    proposal: WorkBoardProposal,
-) -> tuple[str, str, int] | None:
-    """Admit and fence the existing durable job before provider contact."""
-    authority = {
-        "principal": owner.principal_id,
+def _proposal_job_authority(proposal: WorkBoardProposal) -> dict[str, Any]:
+    """Exact native admission authority; its digest differs from policy_digest."""
+    return {
+        "principal": proposal.owner_principal_id,
         "owner_kind": "user",
-        "session_id": owner.session_id,
+        "session_id": proposal.owner_session_id,
         "allowed_operations": ["work_board_proposal", "model_inference"],
         "capability_id": proposal.capability_id,
         "capability_version": proposal.capability_version,
@@ -520,6 +515,16 @@ async def _admit_proposal_job(
         "finite_authority": True,
         "policy_digest": proposal.authority_digest,
     }
+
+
+async def _admit_proposal_job(
+    *,
+    owner: WorkBoardOwner,
+    task: WorkBoardTask,
+    proposal: WorkBoardProposal,
+) -> tuple[str, str, int] | None:
+    """Admit and fence the existing durable job before provider contact."""
+    authority = _proposal_job_authority(proposal)
     spec = DurableJobSpec(
         identity=DurableJobIdentity(
             job_id=proposal.admission_job_id,
@@ -643,13 +648,13 @@ def _failed_pre_contact_admission_matches(
         str(projection.get("capability_version") or "") != str(proposal.capability_version)
         or str(projection.get("goal_revision") or "") != str(proposal.goal_revision)
         or str(projection.get("input_digest") or "") != _proposal_admission_input_digest(proposal)
-        or str(projection.get("authority_digest") or "") != str(proposal.authority_digest)
+        or str(projection.get("authority_digest") or "") != _proposal_digest(_proposal_job_authority(proposal))
         or str(projection.get("run_fingerprint") or "") != str(proposal.request_digest)
         or str(projection.get("failure_reason") or "") not in _PRE_CONTACT_RETRY_REASONS
     ):
         return False
     authority = projection.get("declared_authority")
-    if not isinstance(authority, Mapping):
+    if not isinstance(authority, Mapping) or authority != _proposal_job_authority(proposal):
         return False
     if (
         str(authority.get("principal") or "") != str(proposal.owner_principal_id)
@@ -815,7 +820,8 @@ async def _complete_generated_proposal(owner, proposal_id, expected_digest, *, o
                 or projection["goal_id"] != task.goal_id or projection["goal_revision"] != task.goal_revision
                 or projection["capability_version"] != current.capability_version
                 or projection["input_digest"] != _proposal_admission_input_digest(current)
-                or projection["authority_digest"] != current.authority_digest
+                or projection["authority_digest"] != _proposal_digest(_proposal_job_authority(current))
+                or authority != _proposal_job_authority(current)
                 or projection["run_fingerprint"] != current.request_digest
                 or projection["idempotency"]["scope"] != "work-board-proposal"
                 or projection["idempotency"]["key"] != proposal_id

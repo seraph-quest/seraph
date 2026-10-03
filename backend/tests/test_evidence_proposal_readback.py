@@ -24,7 +24,7 @@ from tests.test_evidence_proposal_snapshot import setup_context
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('async_db',['file'],indirect=True)
-@pytest.mark.parametrize('change',['none','source-race','revoked-root','output-race','busy','policy-race'])
+@pytest.mark.parametrize('change',['none','source-race','revoked-root','output-race','busy','policy-race','native-admit'])
 async def test_generated_output_readback_is_current_fenced_and_pure(async_db,tmp_path,monkeypatch,change):
     tmp_path.chmod(0o700)
     monkeypatch.setattr(settings,'workspace_dir',str(tmp_path))
@@ -46,9 +46,7 @@ async def test_generated_output_readback_is_current_fenced_and_pure(async_db,tmp
             capability_id='strategist_agent',capability_version='fixture-version',grant_revision=task.goal_revision,
             route_id='strategist_agent',authority_digest='a'*64,request_digest='b'*64,
             evidence_use_snapshot_json=json.dumps(snapshot),proposal_json=json.dumps(output),proposal_digest=digest)
-        authority={'principal':owner.principal_id,'owner_kind':'user','session_id':owner.session_id,
-            'capability_id':proposal.capability_id,'capability_version':proposal.capability_version,
-            'grant_revision':task.goal_revision,'finite_authority':True}
+        authority=triage._proposal_job_authority(proposal)
         run=WorkflowRunState(id=proposal.admission_job_id,run_identity=proposal.admission_job_id,root_run_identity=proposal.admission_job_id,
             branch_kind='root',workflow_name='proposal-fixture',
             owner_kind='user',owner_principal_id=owner.principal_id,session_id=owner.session_id,
@@ -57,12 +55,18 @@ async def test_generated_output_readback_is_current_fenced_and_pure(async_db,tmp
             lease_owner='fixture-runner',lease_expires_at=now+timedelta(minutes=3),fencing_token=1,
             deadline_at=now+timedelta(minutes=4),idempotency_scope='work-board-proposal',
             idempotency_key=proposal.proposal_id,input_digest=triage._proposal_admission_input_digest(proposal),
-            authority_digest=proposal.authority_digest,run_fingerprint=proposal.request_digest,
+            authority_digest=triage._proposal_digest(authority),run_fingerprint=proposal.request_digest,
             declared_authority_json=json.dumps(authority),effect_receipts_json='[]')
-        db.add_all([proposal,run,OperatorSession(id=owner.session_id,principal_id=owner.principal_id,
+        db.add_all([proposal,OperatorSession(id=owner.session_id,principal_id=owner.principal_id,
             token_hash='fixture-token',idle_expires_at=now+timedelta(hours=1),absolute_expires_at=now+timedelta(hours=1))])
+        if change!='native-admit':db.add(run)
         await db.commit()
         memory_id=memory.id
+    lease_owner,fence='fixture-runner',1
+    if change=='native-admit':
+        binding=await triage._admit_proposal_job(owner=owner,task=task,proposal=proposal)
+        assert binding is not None
+        _,lease_owner,fence=binding
     operator=SimpleNamespace(session_id=owner.session_id,principal=SimpleNamespace(principal_id=owner.principal_id),
         ownership_continuity='stable',_token_hash='fixture-token')
     lock_path=tmp_path/'policy.lock'
@@ -90,10 +94,10 @@ async def test_generated_output_readback_is_current_fenced_and_pure(async_db,tmp
                 else:(await db.get(WorkBoardProposal,proposal.proposal_id)).proposal_digest='f'*64
                 await db.commit()
         if change=='policy-race':
-            fd=os.open(lock_path,os.O_RDWR)
-            try:
-                with pytest.raises(BlockingIOError):fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
-            finally:os.close(fd)
+            from src.workspace.accounting_witness import publish_policy_configuration
+            # Actual existing publisher hits the held flock before any file
+            # write. Its production lifecycle metadata is a declared fixture.
+            with pytest.raises(BlockingIOError):publish_policy_configuration(tmp_path,{})
         def forbidden(*args,**kwargs):raise AssertionError('Physical read inside readback/terminal writer')
         monkeypatch.setattr('src.memory.evidence_working_set._latest',forbidden)
         monkeypatch.setattr('src.memory.evidence_working_set._read_file',forbidden)
@@ -101,14 +105,15 @@ async def test_generated_output_readback_is_current_fenced_and_pure(async_db,tmp
         return await original(*args,**kwargs)
     monkeypatch.setattr(durable_job_repository,'record_readback',barrier)
     call=triage._complete_generated_proposal(owner,proposal.proposal_id,digest,operator=operator,
-        job_id=proposal.admission_job_id,lease_owner='fixture-runner',fence=1)
+        job_id=proposal.admission_job_id,lease_owner=lease_owner,fence=fence)
     if change in {'source-race','revoked-root','output-race','busy'}:
         with pytest.raises((BoardError,BlockingIOError)):await call
     else:await call
     async with async_db() as reopened:
-        run=await reopened.get(WorkflowRunState,proposal.admission_job_id)
+        from sqlalchemy import select
+        run=await reopened.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==proposal.admission_job_id))
         effects=json.loads(run.effect_receipts_json)
-        positive=change in {'none','policy-race'}
+        positive=change in {'none','policy-race','native-admit'}
         assert run.status==('succeeded' if positive else 'running')
         assert len(effects)==(1 if positive else 0)
         if positive:

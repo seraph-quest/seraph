@@ -16,6 +16,7 @@ import { MailPanel } from "./MailPanel";
 import { WorkBoardMemoryReview } from "./WorkBoardMemoryReview";
 import { TaskApprovalReview } from "./TaskApprovalReview";
 import { ArtifactPipelineReview } from "./ArtifactPipelineReview";
+import { ResearchDossierPanel } from "./ResearchDossierPanel";
 import { TaskEffectRecovery } from "./TaskEffectRecovery";
 import { TaskEvidencePanel } from "./TaskEvidencePanel";
 import { RepoRepairInspector } from "./RepoRepairInspector";
@@ -839,6 +840,7 @@ function WorkBoardPanel({
   const [busyAction, setBusyAction] = useState(false);
   const [createOpen, setCreateOpen] = useState(Boolean(pendingCreateAtMount));
   const [browserTaskOpen, setBrowserTaskOpen] = useState(Boolean(pendingBrowserAtMount));
+  const [researchOpen, setResearchOpen] = useState(false);
   const [browserTaskReceipt, setBrowserTaskReceipt] = useState<BrowserTaskSubmissionReceipt | null>(null);
   const [calendarPrepOpen, setCalendarPrepOpen] = useState(Boolean(pendingCalendarAtMount));
   const [calendarPrepReceipt, setCalendarPrepReceipt] = useState<CalendarPrepResponse | null>(null);
@@ -3134,6 +3136,9 @@ function WorkBoardPanel({
           <button type="button" className="cockpit-feedback-button" onClick={() => { setBrowserTaskReceipt(null); setBrowserTaskOpen(true); }}>
             Public browser task
           </button>
+          <button type="button" className="cockpit-feedback-button" onClick={() => setResearchOpen(true)}>
+            Research dossier
+          </button>
           <button type="button" className="cockpit-feedback-button" onClick={() => { setCalendarPrepReceipt(null); setCalendarPrepOpen(true); }}>
             Calendar meeting prep
           </button>
@@ -3298,7 +3303,7 @@ function WorkBoardPanel({
       )}
 
       {selectedTask && createPortal(
-        <aside hidden={createOpen || browserTaskOpen || calendarPrepOpen || repoRepairOpen} ref={taskDetailPanelRef} role="region" aria-label={`Task details for ${selectedTask.title}`} tabIndex={-1} className="fixed inset-y-0 right-0 z-[190] h-full w-full max-w-2xl overflow-y-auto border-l border-white/15 bg-slate-950 p-4 text-slate-100 shadow-2xl">
+        <aside hidden={createOpen || browserTaskOpen || researchOpen || calendarPrepOpen || repoRepairOpen} ref={taskDetailPanelRef} role="region" aria-label={`Task details for ${selectedTask.title}`} tabIndex={-1} className="fixed inset-y-0 right-0 z-[190] h-full w-full max-w-2xl overflow-y-auto border-l border-white/15 bg-slate-950 p-4 text-slate-100 shadow-2xl">
             <div className="sticky top-0 z-10 -mx-4 -mt-4 mb-4 flex flex-wrap items-center justify-between gap-2 border-b border-white/10 bg-slate-950/95 px-4 py-3 backdrop-blur">
               <div className="min-w-0 flex-1 break-words">
                 <div className="text-[10px] uppercase tracking-wide opacity-70">{STATUS_LABELS[selectedTask.status]} · revision {selectedTask.task_revision}</div>
@@ -4070,6 +4075,10 @@ function WorkBoardPanel({
                 ownerPrincipalId={ownerPrincipalId}
                 ownerSessionId={ownerSessionId}
               />
+              {selectedTask.capability_id === "work.research-dossier.v1" && <ResearchDossierPanel
+                key={`research-inspector:${ownerPrincipalId}:${ownerSessionId}:${selectedTask.task_id}`}
+                task={selectedTask} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
+                onChanged={async () => { await refreshSnapshot(); }} />}
 
               {ownerPrincipalId && ownerSessionId && <ArtifactPipelineReview key={`${ownerPrincipalId}:${ownerSessionId}:${selectedTask.task_id}`} task={selectedTask}
                 ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
@@ -4176,6 +4185,13 @@ function WorkBoardPanel({
           </form>
         </div>
       )}
+      {researchOpen && <ResearchDossierPanel key={`${ownerPrincipalId}:${ownerSessionId}:research-create`}
+        goals={allGoals} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
+        onClose={() => setResearchOpen(false)} onCreated={async (task) => {
+          setResearchOpen(false);
+          await refreshSnapshot();
+          if (!stoppedRef.current) openTask(task.task_id);
+        }} />}
       {browserTaskOpen && (
         <BrowserTaskForm
           key={pendingCreateScope ?? "anonymous"}

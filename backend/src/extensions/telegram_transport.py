@@ -974,8 +974,13 @@ class TelegramTransportAdapter:
     ) -> dict[str, Any]:
         if isinstance(payload, dict) and "callback_query" in payload:
             from src.extensions.telegram_task_controls import TelegramTaskControls
-            return await TelegramTaskControls(self).callback(payload,
-                owner_principal_id=owner_principal_id, operator_session_id=operator_session_id)
+            from src.work_board.repository import BoardError
+            try:
+                return await TelegramTaskControls(self).callback(payload,
+                    owner_principal_id=owner_principal_id, operator_session_id=operator_session_id)
+            except (BoardError, ValueError) as exc:
+                raise TelegramTransportError("telegram_canonical_control_unavailable",
+                    "Task control unavailable. Review the current task in the cockpit.") from exc
         owner = _owner(owner_principal_id)
         operator_session = _session(operator_session_id)
         async with self._lock:

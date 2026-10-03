@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from src.extensions.telegram_transport import TelegramTransportError, default_telegram_transport
 from src.security.trust_contract import AuthorityGrant
@@ -48,6 +48,7 @@ class TelegramReconcileBody(BaseModel):
 
 
 class TelegramTaskNoticeBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     expected_revision: int = Field(ge=1)
     idempotency_key: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9:_-]+$")
 

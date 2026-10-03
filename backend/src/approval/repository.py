@@ -478,10 +478,18 @@ class ApprovalRepository:
             raise ValueError("approval_binding_changed")
         return row
 
-    async def resolve_exact(self, approval_id: str, decision: str, *, expected_digest: str):
+    async def resolve_exact(self, approval_id: str, decision: str, *, expected_digest: str,
+                            owner_principal_id: str, operator_session_id: str):
         from src.work_board.repository import _begin_sqlite_immediate
+        from src.auth.service import authenticate_principal, AuthFailure
         async with get_session() as db:
             await _begin_sqlite_immediate(db)
+            try:
+                operator = await authenticate_principal(owner_principal_id, db=db)
+            except AuthFailure as exc:
+                raise ValueError("approval_authority_changed") from exc
+            if operator.session_id != operator_session_id:
+                raise ValueError("approval_authority_changed")
             row = await self.resolve_exact_in_session(db, approval_id, decision,
                                                      expected_digest=expected_digest)
             if row is not None:

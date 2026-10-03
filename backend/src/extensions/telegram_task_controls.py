@@ -10,18 +10,19 @@ import hashlib
 import hmac
 import json
 import secrets
-import uuid
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, update
 from sqlmodel import select
 
 from config.settings import settings
 from src.approval.repository import approval_decision_digest, approval_repository
 from src.db import engine as db_engine
-from src.db.models import (ApprovalRequest, AuditEvent, Goal, OperatorSession,
+from src.db.models import (ApprovalRequest, AuditEvent, Goal, Message, OperatorSession,
     TelegramTaskCallback, TelegramTransportOutbox, TelegramTransportState,
-    WorkBoardAttempt, WorkBoardStatus, WorkBoardTask, WorkflowRunState)
+    WorkBoardAttempt, WorkBoardEvent, WorkBoardStatus, WorkBoardTask, WorkflowRunState)
 from src.workspace import canonical_workspace_root_identity
 from src.work_board.contracts import WorkBoardOwner
 from src.work_board.repository import _begin_sqlite_immediate
@@ -30,6 +31,17 @@ NOTICE = "A Seraph task needs attention. Review its current status."
 PREFIX = "stc1:"
 TTL_SECONDS = 300
 MAX_DETAIL_BYTES = 1024
+
+
+class TaskControlResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    capability_id: Literal["telegram.task-control.v1"] = "telegram.task-control.v1"
+    status: Literal["reviewed", "denied", "cancelled", "unknown"]
+    effect: Literal["review", "deny", "cancel"]
+    task_status: WorkBoardStatus
+    task_revision: int = Field(ge=1)
+    memory_status: Literal["no_learning"] = "no_learning"
+    cockpit_required_for: list[str] = Field(default_factory=lambda: ["approve", "retry", "unblock", "reconcile"])
 
 
 def digest(value) -> str:
@@ -68,6 +80,15 @@ def effect_digest(row):
 async def current(db, owner: str, session: str):
     """Database-only current authority checks inside the canonical writer."""
     t = now()
+    from src.auth.service import authenticate_principal, AuthFailure
+    from src.security.trust_contract import AuthorityGrant
+    try:
+        operator = await authenticate_principal(owner, db=db)
+    except AuthFailure:
+        fail("telegram_owner_reconnect_required")
+    if (operator.session_id != session or AuthorityGrant.INGRESS not in operator.principal.grants
+        or AuthorityGrant.CAPABILITY_EXECUTE not in operator.principal.grants):
+        fail("telegram_control_forbidden")
     auth = await db.get(OperatorSession, session)
     if (auth is None or auth.principal_id != owner or auth.revoked_at is not None
         or auth.replaced_by_id or auth.is_bearer_tombstone
@@ -110,6 +131,8 @@ async def approval_for_task(db, task, approval_id=None):
             details = json.loads(approval.details_json or "{}")
         except (TypeError, ValueError):
             continue
+        if not isinstance(details, dict):
+            continue
         linked = details.get("work_board_task_id", details.get("board_task_id")) == task.task_id
         # Native job authority provides the canonical link when approval details
         # do not duplicate the board identifier.
@@ -132,9 +155,8 @@ async def approval_for_task(db, task, approval_id=None):
 
 
 def result(task, *, status="reviewed", effect="review"):
-    return {"status": status, "effect": effect, "task_status": task.status.value,
-        "task_revision": task.task_revision, "memory_status": "no_learning",
-        "cockpit_required_for": ["approve", "retry", "unblock", "reconcile"]}
+    return TaskControlResult(status=status, effect=effect, task_status=task.status,
+        task_revision=task.task_revision).model_dump(mode="json")
 
 
 class TelegramTaskControls:
@@ -196,7 +218,7 @@ class TelegramTaskControls:
                 TelegramTaskCallback.status == "pending").values(status="retired"))
             markup = {"inline_keyboard": [[await self._mint(db, pairing, task, outbox, "review")]]}
             outbox.task_control_markup_json = json.dumps(markup, sort_keys=True)
-            outbox.payload_digest = digest([outbox.payload_digest, markup])
+            outbox.task_control_markup_digest = digest(markup)
             db.add(outbox)
         return {**payload, "memory_status": "no_learning"}
 
@@ -212,7 +234,8 @@ class TelegramTaskControls:
             fail("telegram_callback_authority_changed")
         message = query["message"]
         if (query["from"]["id"] != row.actor_id or message["chat"]["id"] != row.chat_id
-            or message["chat"].get("type") != "private" or message.get("date") == 0):
+            or message["chat"].get("type") != "private"
+            or type(message.get("date")) is not int or message["date"] <= 0):
             fail("telegram_callback_actor_mismatch")
         outbox = await db.get(TelegramTransportOutbox, row.outbox_id)
         if (outbox is None or outbox.status != "delivered" or not outbox.external_message_id
@@ -264,14 +287,24 @@ class TelegramTaskControls:
             max_attempts=self.adapter.max_attempts,
             deadline_at=min(aware(row.expires_at), now()+timedelta(seconds=300)))
         db.add(outbox)
+        canonical_message = Message(session_id=original.session_id,
+            conversation_id=original.conversation_id, thread_id=original.thread_id,
+            owner_principal_id=row.owner_principal_id, operator_session_id=row.operator_session_id,
+            channel="telegram", transport="telegram", role="assistant", content=text,
+            correlation_id=outbox.correlation_id, causation_id=original.message_id,
+            metadata_json=json.dumps({"telegram_task_control": payload,
+                "memory_status": "no_learning"}, sort_keys=True))
+        db.add(canonical_message)
+        outbox.message_id = canonical_message.id
         if buttons:
             pairing = await current(db, row.owner_principal_id, row.operator_session_id)
             keyboard = []
             for effect, approval, attempt in buttons:
                 keyboard.append(await self._mint(db, pairing, task, outbox, effect,
                     approval=approval, attempt=attempt))
-            outbox.task_control_markup_json = json.dumps({"inline_keyboard": [keyboard]}, sort_keys=True)
-            outbox.payload_digest = digest([outbox.payload_digest, outbox.task_control_markup_json])
+            markup = {"inline_keyboard": [keyboard]}
+            outbox.task_control_markup_json = json.dumps(markup, sort_keys=True)
+            outbox.task_control_markup_digest = digest(markup)
         payload["outbox_id"] = outbox.id
         row.result_json = json.dumps(payload, sort_keys=True)
         db.add(row)
@@ -308,6 +341,8 @@ class TelegramTaskControls:
                 response = json.loads(row.result_json)
                 if row.status == "cancel_intent":
                     response = await self._cancel_readback(db, row, task)
+                response = {**response, "task_status": task.status.value,
+                            "task_revision": task.task_revision}
             elif row.effect == "review":
                 await self._claim(db, row, query, payload["update_id"], request_digest)
                 buttons = []
@@ -372,6 +407,12 @@ class TelegramTaskControls:
         if (attempt is None or attempt.cancel_requested_at is None
             or attempt.fencing_token != row.board_fence or attempt.lease_owner != row.lease_owner):
             fail("telegram_cancel_binding_changed")
+        events = (await db.execute(select(WorkBoardEvent).where(
+            WorkBoardEvent.task_id == task.task_id,
+            WorkBoardEvent.kind == "attempt.cancel_requested"))).scalars().all()
+        if not any(json.loads(event.metadata_json or "{}").get("request_identity") == row.id
+                   for event in events):
+            fail("telegram_cancel_intent_unverified")
         if attempt.ended_at is None or task.block_kind == "unknown_effect":
             return result(task, status="unknown", effect="cancel")
         if row.status == "cancel_intent":
@@ -388,18 +429,31 @@ class TelegramTaskControls:
             token = await vault_repository.get(secret_ref or "")
             if not token or not hasattr(self.adapter.transport, "answer_callback_query"):
                 return "unavailable"
-            await asyncio.wait_for(self.adapter.transport.answer_callback_query(
+            acknowledgment = await asyncio.wait_for(self.adapter.transport.answer_callback_query(
                 token=token, callback_query_id=query_id), timeout=self.adapter.effect_timeout_seconds)
-            return "acknowledged"
+            return "acknowledged" if isinstance(acknowledgment, dict) and acknowledgment.get("ok") is True else "unknown"
         except Exception:
             return "unknown"
 
     async def validate_delivery(self, db, outbox):
         if not outbox.task_control_markup_json:
             return
+        try:
+            markup = json.loads(outbox.task_control_markup_json)
+        except (TypeError, ValueError):
+            fail("telegram_control_delivery_unbound")
+        if digest(markup) != outbox.task_control_markup_digest:
+            fail("telegram_control_delivery_unbound")
         rows = (await db.execute(select(TelegramTaskCallback).where(
             TelegramTaskCallback.outbox_id == outbox.id))).scalars().all()
         if not rows:
+            fail("telegram_control_delivery_unbound")
+        try:
+            wire_digests = {digest(button["callback_data"])
+                for buttons in markup["inline_keyboard"] for button in buttons}
+        except (KeyError, TypeError):
+            fail("telegram_control_delivery_unbound")
+        if wire_digests != {row.nonce_digest for row in rows}:
             fail("telegram_control_delivery_unbound")
         pairing = await current(db, outbox.owner_principal_id, outbox.operator_session_id)
         for row in rows:

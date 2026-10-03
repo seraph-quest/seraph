@@ -303,7 +303,8 @@ async def approve_request(approval_id: str, request: Request):
     from src.approval.repository import approval_decision_digest
     try:
         request = await approval_repository.resolve_exact(approval_id, "approved",
-            expected_digest=approval_decision_digest(pending))
+            expected_digest=approval_decision_digest(pending),
+            owner_principal_id=operator.principal.principal_id, operator_session_id=operator.session_id)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail={"code": "approval_binding_changed"}) from exc
     if request is None:
@@ -358,7 +359,8 @@ async def deny_request(approval_id: str, request: Request):
     from src.approval.repository import approval_decision_digest
     try:
         request = await approval_repository.resolve_exact(approval_id, "denied",
-            expected_digest=approval_decision_digest(pending))
+            expected_digest=approval_decision_digest(pending),
+            owner_principal_id=operator.principal.principal_id, operator_session_id=operator.session_id)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail={"code": "approval_binding_changed"}) from exc
     if request is None:

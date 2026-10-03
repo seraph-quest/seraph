@@ -907,6 +907,7 @@ async def _ensure_telegram_transport_columns(conn) -> None:
         },
         "telegram_transport_outbox": {
             "task_control_markup_json": "VARCHAR",
+            "task_control_markup_digest": "VARCHAR",
             "lease_owner": "VARCHAR",
             "lease_expires_at": "DATETIME",
             "fencing_token": "INTEGER DEFAULT 0",

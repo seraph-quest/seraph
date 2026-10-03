@@ -2574,6 +2574,7 @@ class TelegramTransportOutbox(SQLModel, table=True):
     attachment_refs_json: str = Field(default="[]")
     # Private control markup: bearer callbacks never appear in status/audit.
     task_control_markup_json: Optional[str] = Field(default=None)
+    task_control_markup_digest: Optional[str] = Field(default=None)
     status: str = Field(default="queued", index=True)
     attempt_count: int = Field(default=0, index=True)
     max_attempts: int = Field(default=3, index=True)

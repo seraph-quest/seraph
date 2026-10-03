@@ -4687,7 +4687,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         from config.settings import RepoSandboxSettings, settings
         from src.db.models import OperatorSession, RepoRepairProposal as RepoRepairProposalRow, RepoRepairSourcePacket as RepoRepairSourcePacketRow
         from src.execution.repo_node import NodeRepoRepairExecutor, PROFILE
-        from src.workflows.repo_repair import _proposal_authority_payload
+        from src.workflows.repo_repair import _proposal_authority_payload, _authority_digest
 
         if type(request) is not NodeProcessCleanupSettlement:
             raise DurableJobTransitionError("Node cleanup settlement request is invalid")
@@ -4719,7 +4719,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 raise DurableJobTransitionError("Node original immutable proposal is missing")
             proposal = proposals[0]
             canonical = _proposal_authority_payload(proposal)
-            if (any(request.authority.get(key) != value for key,value in canonical.items() if value not in (None,"",[],{}))
+            if (_authority_digest(canonical) != proposal.authority_digest
+                or any(request.authority.get(key) != value for key,value in canonical.items() if value not in (None,"",[],{}))
                 or proposal.status not in {"approved","consumed","execution_failed","blocked"}
                 or str(proposal.goal_id or "") != str(run.goal_id or "")
                 or int(proposal.goal_revision) != int(run.goal_revision or 0)):

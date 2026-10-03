@@ -114,3 +114,15 @@ async def test_research_fallback_flag_rejected_before_any_http(monkeypatch):
     with pytest.raises(ProviderProfileConfigurationError):
         await _governed_research_chat_completion(**kwargs)
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_final_policy_check_consumes_original_transfer_deadline(monkeypatch):
+    stream = ResponseStream(b"{}")
+    calls = intercept(monkeypatch, stream)
+    def slow_current_policy():
+        time.sleep(0.04)
+    monkeypatch.setattr("src.model_fabric.accounting.assert_current_inference_policy", slow_current_policy)
+    with pytest.raises(TimeoutError, match="model_fabric_deadline_exceeded"):
+        await _governed_research_chat_completion(**arguments(seconds=0.02))
+    assert calls == []

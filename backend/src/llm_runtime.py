@@ -1650,7 +1650,13 @@ async def _governed_research_chat_completion(
     if api_key:
         headers["authorization"] = f"Bearer {api_key}"
     assert_current_inference_policy()
-    async with asyncio.timeout(remaining):
+    # Final policy work consumes the original deadline; it never grants a
+    # fresh relative timeout before the provider transfer begins.
+    remaining = float(context.deadline_at) - time.time()
+    if remaining <= 0:
+        raise TimeoutError("model_fabric_deadline_exceeded")
+    transfer_deadline = asyncio.get_running_loop().time() + remaining
+    async with asyncio.timeout_at(transfer_deadline):
         async with httpx.AsyncClient(follow_redirects=False, trust_env=False,
                 timeout=httpx.Timeout(remaining)) as client:
             async with client.stream("POST", candidate.endpoint, headers=headers, json=body) as incoming:

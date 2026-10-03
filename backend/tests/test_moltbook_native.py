@@ -13,7 +13,7 @@ from tests.test_inference_accounting import accounting_db
 from tests.moltbook_requests import execute, execution_body
 from config.settings import settings
 from src.auth.middleware import OperatorAuthMiddleware
-from src.db.models import Goal, MoltbookConnection, WorkflowRunState
+from src.db.models import Goal, MoltbookConnection, WorkflowRunState, OperatorSession
 from src.integrations.moltbook import MoltbookAdapter, MoltbookError
 from src.integrations.moltbook_controls import MoltbookService
 from src.vault.repository import vault_repository
@@ -21,7 +21,8 @@ from src.vault.repository import vault_repository
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["positive", "stale_goal", "logout", "adoption_goal",
-    "cancel_unattempted", "cancel_running", "written_output", "written_stale_goal", "rate_limited"])
+    "cancel_unattempted", "cancel_running", "written_output", "written_stale_goal", "rate_limited",
+    "read_rejected", "read_drop", "rate_stale_goal", "rate_revoked_root"])
 async def test_actual_owner_import_consent_native_read_reopen(accounting_db, monkeypatch, mode):
     from src.api import auth, goals, moltbook
     root, db_engine, factory = accounting_db
@@ -44,6 +45,16 @@ async def test_actual_owner_import_consent_native_read_reopen(accounting_db, mon
         assert request.method == "GET"
         if mode == "rate_limited":
             return httpx.Response(429, headers={"retry-after": "120"}, json={"error": "Too many requests"})
+        if mode == "read_rejected": return httpx.Response(403, json={"error": "Explicit read denied"})
+        if mode == "read_drop": raise httpx.ReadError("read response lost", request=request)
+        if mode in {"rate_stale_goal", "rate_revoked_root"}:
+            async with factory.accounting_sessions() as db:
+                if mode == "rate_stale_goal":
+                    current = await db.get(Goal, goal_id); current.revision += 1; db.add(current)
+                else:
+                    current = (await db.execute(select(OperatorSession).where(OperatorSession.revoked_at.is_(None)))).scalar_one()
+                    current.revoked_at = datetime.now(timezone.utc); db.add(current)
+            return httpx.Response(429, headers={"retry-after": "120"}, json={"error": "settled after drift"})
         if mode == "cancel_running":
             started.set()
             await release.wait()
@@ -188,23 +199,44 @@ async def test_actual_owner_import_consent_native_read_reopen(accounting_db, mon
                 row = await db.get(Goal, goal_id); row.revision += 1; db.add(row)
         if mode == "logout":
             assert (await client.post("/api/auth/logout")).status_code == 204
-        executed = await execute(client, job_id)
-        if mode == "rate_limited":
-            assert executed.status_code == 409 and executed.json()["detail"]["code"] == "moltbook_rate_limited", executed.text
-            connection = (await client.get("/api/capabilities/moltbook/connection")).json()
-            assert normalized_deadline(connection["cooldown_until"]) > datetime.now(timezone.utc)+timedelta(seconds=110)
+        original_execution = await execution_body(client, job_id)
+        executed = await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/execute", json=original_execution)
+        if mode in {"rate_limited", "read_rejected", "read_drop", "rate_stale_goal", "rate_revoked_root"}:
+            assert executed.status_code == 409, executed.text
             await db_engine.dispose()
-            assert (await client.get("/api/capabilities/moltbook/connection")).json()["cooldown_until"] == connection["cooldown_until"]
-            body["request_key"] = "read-distinct"
-            blocked = await client.post("/api/capabilities/moltbook/reads", json=body)
-            assert blocked.status_code == 409 and blocked.json()["detail"]["code"] == "moltbook_provider_cooldown"
+            value = await service.jobs.get_job(job_id)
+            checkpoint = next(c["payload"] for c in value["checkpoints"] if c["checkpoint_id"] == "moltbook:state")
+            held = mode in {"read_drop", "rate_stale_goal", "rate_revoked_root"}
+            assert value["status"] == ("unknown_external_effect" if mode == "read_drop" else "blocked")
+            assert value["artifacts"] == [] and value["attempt_count"] == 1
+            assert normalized_deadline(value["deadline_at"]) == normalized_deadline(first_deadline)
+            assert checkpoint["calls"][-1]["status"] == ("intent" if mode == "read_drop" else "received")
             async with factory.accounting_sessions() as db:
                 row = (await db.execute(select(MoltbookConnection))).scalar_one()
-                row.cooldown_until = datetime.now(timezone.utc)-timedelta(seconds=1); db.add(row)
-            # Expiry removes this gate, but never forgives the original unknown
-            # contact or renews its attempt: the outstanding operation is held.
-            blocked = await client.post("/api/capabilities/moltbook/reads", json=body)
-            assert blocked.status_code == 409 and blocked.json()["detail"]["code"] == "moltbook_connection_operation_outstanding"
+                assert row.active_job_id == (job_id if held else None)
+                if mode != "rate_limited": assert row.cooldown_until is None
+            if held:
+                assert "preflight_slot_released" not in checkpoint
+                assert len(calls) == 1
+                return
+            assert checkpoint["calls"][-1]["outcome"] == "failed_read"
+            assert checkpoint["calls"][-1]["http_status"] == (429 if mode == "rate_limited" else 403)
+            replay = await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/execute", json=original_execution)
+            assert replay.status_code == 200 and replay.json()["status"] == "blocked" and len(calls) == 1
+            connection = (await client.get("/api/capabilities/moltbook/connection")).json()
+            if mode == "rate_limited":
+                assert normalized_deadline(connection["cooldown_until"]) > datetime.now(timezone.utc)+timedelta(seconds=110)
+                await db_engine.dispose()
+                assert (await client.get("/api/capabilities/moltbook/connection")).json()["cooldown_until"] == connection["cooldown_until"]
+            body["request_key"] = "read-distinct"
+            if mode == "rate_limited":
+                blocked = await client.post("/api/capabilities/moltbook/reads", json=body)
+                assert blocked.status_code == 409 and blocked.json()["detail"]["code"] == "moltbook_provider_cooldown"
+                async with factory.accounting_sessions() as db:
+                    row = (await db.execute(select(MoltbookConnection))).scalar_one()
+                    row.cooldown_until = datetime.now(timezone.utc)-timedelta(seconds=1); db.add(row)
+            fresh = await client.post("/api/capabilities/moltbook/reads", json=body)
+            assert fresh.status_code == 200 and fresh.json()["job_id"] != job_id, fresh.text
             assert len(calls) == 1
             return
         if mode == "positive":

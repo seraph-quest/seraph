@@ -26,7 +26,7 @@ from src.vault.crypto import decrypt, encrypt
 from src.vault.repository import secret_binding_digest, vault_repository
 from src.work_board.contracts import WorkBoardOwner
 from src.work_board.input_artifacts import _write_payload
-from src.work_board.repository import WorkBoardRepository
+from src.work_board.repository import WorkBoardRepository, BoardError
 from src.workflows.job_runtime import DurableJobIdentity, DurableJobSpec, durable_job_repository
 from src.workspace import canonical_workspace_root
 
@@ -541,7 +541,23 @@ class MoltbookService:
                         value["phase"] = "contact_started"
                         save_state(run, value)
                         db.add(run)
-                response = await adapter.call(operation, fields, key=credential.value, deadline=deadline, before_contact=contact)
+                try:
+                    response = await adapter.call(operation, fields, key=credential.value, deadline=deadline, before_contact=contact)
+                except MoltbookError:
+                    receipt = adapter.read_response_receipt
+                    if receipt is not None and receipt["operation"] == operation and adapter.marker.snapshot()["status"] == "verified":
+                        async with engine.get_session() as db:
+                            await writer(db)
+                            run = await self.jobs._fetch(db, job_id)
+                            self.jobs._assert_lease(run, owner=lease[0], fencing_token=lease[1])
+                            value = state(run)
+                            last = value["calls"][-1]
+                            if last["operation"] != operation or last["status"] != "intent":
+                                raise MoltbookError("moltbook_contact_receipt_changed")
+                            last.update(status="received", outcome="failed_read", http_status=receipt["http_status"],
+                                response_digest=receipt["response_digest"], method="GET")
+                            save_state(run, value); db.add(run)
+                    raise
                 results.append(response)
                 async with engine.get_session() as db:
                     await writer(db)
@@ -611,15 +627,26 @@ class MoltbookService:
                 run = await self.jobs._fetch(db, job_id)
                 if run.status == "running" and run.lease_owner == lease[0] and run.fencing_token == lease[1]:
                     value = state(run)
-                    await self.retain_cooldown(db, owner, run, value, exc, lease)
-                    contacted = bool(value["calls"])
+                    try: connection = await self.current(db, owner, run, lease=lease)
+                    except (MoltbookError, BoardError): connection = None
+                    try: await self.retain_cooldown(db, owner, run, value, exc, lease)
+                    except BoardError: pass
+                    uncertain = any(c["status"] != "received" for c in value["calls"])
                     if value.get("phase") != "verified_output_ready":
-                        value["phase"] = "unknown" if contacted else "blocked_before_contact"
+                        value["phase"] = "unknown" if uncertain else "blocked"
                     value["cleanup"] = adapter.marker.snapshot()
                     if value["cleanup"]["status"] == "verified":
                         value["worker_completed"] = {"fencing_token": lease[1], "transport_closed": True}
+                        if (not uncertain and value.get("phase") != "verified_output_ready" and connection is not None):
+                            # This native kind executes fixed GET routes only.
+                            # Exact authority was checked in this same writer;
+                            # actual awaited transfers have all closed.
+                            connection.active_job_id, connection.active_deadline_at, connection.active_payload_digest = None, None, ""
+                            value["preflight_slot_released"] = {"job_id": job_id, "fencing_token": lease[1],
+                                "payload_digest": authority["payload_digest"], "no_post": True, "transport_closed": True}
+                            db.add(connection)
                     save_state(run, value)
-                    run.status = "unknown_external_effect" if contacted else "blocked"
+                    run.status = "unknown_external_effect" if uncertain else "blocked"
                     run.failure_reason = getattr(exc, "code", "moltbook_transfer_or_authority_failed")
                     run.lease_owner = run.lease_expires_at = None
                     db.add(run)

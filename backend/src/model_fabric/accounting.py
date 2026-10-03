@@ -186,13 +186,10 @@ class DurableInferenceBrokerMixin:
             raise RemoteInferenceBindingError(getattr(exc, "code", "accounting_admission_blocked")) from exc
 
     async def _contact_accounting(self, handle):
-        configured, digest = current_inference_policy()
-        if digest != handle.policy_digest:
-            raise InferenceAccountingError("provider_policy_revision_changed")
         from src.workflows.inference_accounting import InferenceProviderContactDenied
         try:
             await handle.repository.contact_inference_provider(handle.request.operation_id,
-                owner=handle.owner, fencing_token=handle.fence, policy_digest=digest)
+                owner=handle.owner, fencing_token=handle.fence, policy_digest=handle.policy_digest)
         except InferenceProviderContactDenied as error:
             error.bind_broker_handle(handle)
             handle.committed_denial = error

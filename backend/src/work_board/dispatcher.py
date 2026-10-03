@@ -10732,6 +10732,15 @@ class WorkBoardDispatcher:
             if _text(effect.get("effect_type")) == "workflow_output":
                 continue
             details = effect.get("details") if isinstance(effect.get("details"), Mapping) else {}
+            # Fixed GitHub recovery also appends observation-only receipts.
+            # Their private artifact digest is not the canonical semantic
+            # effect proof used by the protected adoption receipt. Select the
+            # actual verified publication effect; the repository independently
+            # rechecks the persisted server READ-revision envelope.
+            if projection.get("job_kind") == "github_followthrough_v1" and (
+                effect.get("effect_type") != "github_publication" or details.get("verified") is not True
+            ):
+                continue
             # ``receipt_kind`` is the typed proof discriminator.  Details or
             # result booleans are intentionally ignored.
             if _text(effect.get("receipt_kind")) != "readback":

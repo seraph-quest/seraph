@@ -1,5 +1,7 @@
 import { API_URL } from "../config/constants";
 import { apiFetch } from "./api";
+import { githubCapacityClosure } from "./githubReadback";
+import type { GitHubCapacityClosure } from "./githubReadback";
 
 export const PUBLICATION_CAPABILITY = "engineering.repo-publication.v1";
 export const PUBLICATION_PERMISSIONS = ["local_host_execution", "github_git_objects_write", "github_new_branch_write", "github_ready_pr_write"];
@@ -17,6 +19,7 @@ export interface PublicationReceipt {
     repair_binding: { repair_job_id: string; patch_artifact_id: string; patch_sha256: string; tested_input_digest: string; repair_executor: string; repair_executor_posture_digest: string };
     tested_input: { test_args: string[]; environment_unchanged: boolean; environment: { available: boolean; runtime_binding: string }; base_files: unknown[]; tested_files: unknown[] };
   };
+  github_capacity_closure?: GitHubCapacityClosure | null;
   artifacts: Array<{ file_path: string }>; effects: unknown[];
 }
 
@@ -40,6 +43,8 @@ export function validatePublication(value: unknown, owner: string, root: string,
   if (!record(value) || value.capability_id !== PUBLICATION_CAPABILITY || !text(value.job_id) || !Number.isInteger(value.revision) || Number(value.revision) <= 0 || !["accepted", "queued", "running", "awaiting_approval", "succeeded", "cancelled", "unknown_external_effect", "blocked", "failed"].includes(String(value.status)) || !sha(value.preview_digest) || value.learning !== "no_learning" || !record(value.preview)) throw new Error("Publication receipt is incomplete; refresh before acting.");
   const p = value.preview;
   if (p.job_id !== value.job_id || p.owner_principal_id !== owner || p.owner_session_id !== root || !record(p.repair_binding) || p.repair_binding.repair_job_id !== repair || !sha(p.repair_binding.patch_sha256) || !sha(p.repair_binding.tested_input_digest) || !record(p.tested_input) || p.tested_input.environment_unchanged !== true || !record(p.tested_input.environment) || p.tested_input.environment.available !== true || !Array.isArray(p.tested_input.test_args) || !p.tested_input.test_args.every(text) || !Array.isArray(p.tested_input.base_files) || !Array.isArray(p.tested_input.tested_files) || !record(p.local_posture) || p.local_posture.isolation_claim !== "none" || !sha(p.local_posture_digest) || !Number.isInteger(p.connection_revision) || !Array.isArray(p.required_permissions) || p.required_permissions.join("\0") !== PUBLICATION_PERMISSIONS.join("\0") || ![p.repository, p.base_branch, p.base_commit, p.base_tree, p.branch_name, p.title, p.body, p.commit_message].every(text) || !Array.isArray(value.artifacts) || !Array.isArray(value.effects) || !text(value.approval_status) || !(value.approval_id === null || text(value.approval_id)) || !(value.approval_expires_at === null || (text(value.approval_expires_at) && Number.isFinite(Date.parse(value.approval_expires_at))))) throw new Error("Publication authority or tested-input receipt is invalid; refresh before acting.");
+  const closure = githubCapacityClosure(value.github_capacity_closure);
+  if (closure && closure.native_kind !== PUBLICATION_CAPABILITY) throw new Error("Publication closure kind mismatch");
   return value as unknown as PublicationReceipt;
 }
 

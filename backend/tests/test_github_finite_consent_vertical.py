@@ -17,11 +17,8 @@ from src.extensions.github_followthrough import GitHubFollowthroughService
 from tests.test_github_connection_consent import active_connection, ORIGIN
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("async_db", ["file"], indirect=True)
-@pytest.mark.parametrize("action,stale_goal", [("create_issue", False), ("create_comment", True)])
-async def test_actual_source_producer_finite_consent_unknown_readback(client, async_db, monkeypatch, tmp_path, action, stale_goal):
-    workspace = tmp_path / "workspace"; workspace.mkdir()
+async def actual_source_dossier(client, monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"; workspace.mkdir(mode=0o700)
     monkeypatch.setattr(settings, "workspace_dir", str(workspace))
     owner, row, _, request = await active_connection(client, monkeypatch)
     request["expected_revision"] = row.revision
@@ -57,6 +54,14 @@ async def test_actual_source_producer_finite_consent_unknown_readback(client, as
         packet = await db.get(GuardianDecisionPacket, packet.id)
         assert packet.status == "succeeded" and packet.verification_status == "passed", produced.text
         dossier_id, dossier_sha = packet.dossier_artifact_id, packet.dossier_sha256
+    return owner, consent.json(), goal, dossier_id, dossier_sha, produced.json()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+@pytest.mark.parametrize("action,stale_goal", [("create_issue", False), ("create_comment", True)])
+async def test_actual_source_producer_finite_consent_unknown_readback(client, async_db, monkeypatch, tmp_path, action, stale_goal):
+    owner, consent, goal, dossier_id, dossier_sha, source_producer = await actual_source_dossier(client, monkeypatch, tmp_path)
     calls, remote = [], {}
     async def resolver(*_args): return ["93.184.216.34"]
     def transport(request):
@@ -70,7 +75,7 @@ async def test_actual_source_producer_finite_consent_unknown_readback(client, as
     service = GitHubFollowthroughService(resolver=resolver, transport=httpx.MockTransport(transport))
     monkeypatch.setattr("src.extensions.github_followthrough.github_followthrough_service", service)
     req = {"conversation_id": owner["session_id"], "goal_id": goal.id, "goal_revision": 1, "dossier_artifact_id": dossier_id, "dossier_sha256": dossier_sha,
-        "connection_revision": consent.json()["revision"], "action": action, "body": "Approved exact observed deadline", "idempotency_key": str(uuid.uuid4())}
+        "connection_revision": consent["revision"], "action": action, "body": "Approved exact observed deadline", "idempotency_key": str(uuid.uuid4())}
     req.update({"title": "Observed deadline"} if action == "create_issue" else {"issue_number": 7})
     prepared = await client.post("/api/capabilities/github/prepare", json=req, headers=ORIGIN)
     assert prepared.status_code == 200, prepared.text
@@ -80,7 +85,7 @@ async def test_actual_source_producer_finite_consent_unknown_readback(client, as
     executed = await client.post(f"/api/capabilities/github/jobs/{job_id}/execute", headers=ORIGIN)
     assert executed.status_code == 200 and executed.json()["status"] == "unknown_external_effect", executed.text
     assert calls == ["POST"]
-    stopped = await client.post("/api/capabilities/github/connection/revoke", json={"expected_revision": consent.json()["revision"]}, headers=ORIGIN)
+    stopped = await client.post("/api/capabilities/github/connection/revoke", json={"expected_revision": consent["revision"]}, headers=ORIGIN)
     assert stopped.status_code == 200, stopped.text
     if stale_goal:
         async with engine.get_session() as db: await db.execute(update(Goal).where(Goal.id == goal.id).values(revision=2))
@@ -94,5 +99,5 @@ async def test_actual_source_producer_finite_consent_unknown_readback(client, as
     else:
         assert result["status"] == "succeeded", result
     proof = tmp_path / f"actual-{action}-finite-consent-recovery.json"
-    proof.write_text(json.dumps({"result": result, "source_producer": produced.json(), "methods": calls}, sort_keys=True))
+    proof.write_text(json.dumps({"result": result, "source_producer": source_producer, "methods": calls}, sort_keys=True))
     print("ACTUAL_FINITE_GITHUB_RECOVERY=" + str(proof))

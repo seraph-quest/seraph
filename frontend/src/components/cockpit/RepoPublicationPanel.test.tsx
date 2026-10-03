@@ -1,3 +1,4 @@
+import "@testing-library/jest-dom/vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RepoPublicationPanel } from "./RepoPublicationPanel";
@@ -10,9 +11,47 @@ function emptyDiscovery() { return response({ repair_job_id: "repair-a", owner_p
 function fill() {
   for (const [name, value] of [["expected base commit", "b".repeat(40)], ["branch name", "feat/fix"], ["commit message", "Fix"], ["title", "Reviewed PR"], ["body", "Reviewed text"]]) fireEvent.change(screen.getByLabelText(name), { target: { value } });
 }
-afterEach(() => { vi.unstubAllGlobals(); });
+afterEach(() => { vi.unstubAllGlobals(); sessionStorage.clear(); });
 
 describe("Tasks publication control", () => {
+  it("requires separate unchecked close consent and retains exact lost-response request across remount", async () => {
+    const fixture = { ...publicationFixture(), status: "unknown_external_effect", approval_status: "consumed" };
+    const bodies: string[] = [];
+    let loseResponse = true;
+    const closed = { ...fixture, revision: fixture.revision + 1, github_capacity_closure: {
+      closure_id: "closure-a", artifact_id: "artifact-a", artifact_sha256: "a".repeat(64),
+      closed_at: "2026-10-03T00:00:00Z", native_kind: "engineering.repo-publication.v1", observation_only: true } };
+    const fetchMock = vi.fn((url: unknown, options?: RequestInit) => {
+      if (String(url).endsWith("/close-capacity")) {
+        bodies.push(String(options?.body));
+        expect(sessionStorage.length).toBe(1);
+        return loseResponse ? Promise.reject(new Error("response lost")) : response(closed);
+      }
+      if (String(url).includes("/repairs/")) return response({ repair_job_id: "repair-a", owner_principal_id: "owner-a", owner_session_id: "root-a", limit: 20, next_offset: null, jobs: [fixture] });
+      if (String(url).endsWith("/patch")) return response({ patch: "diff", patch_sha256: fixture.preview.repair_binding.patch_sha256 });
+      return response({ repository: "acme/example", revision: 2, active_fence: 3, active_job_id: fixture.job_id, mode: "disabled", credential_configured: true });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    let view = render(<RepoPublicationPanel repair={repair} ownerPrincipalId="owner-a" ownerSessionId="root-a" />);
+    const acknowledgment = /I authorize this separate capacity closure/;
+    expect(await screen.findByText("Close publication capacity")).toBeDisabled();
+    fireEvent.click(screen.getByLabelText(acknowledgment));
+    fireEvent.click(screen.getByText("Close publication capacity"));
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    view.unmount(); loseResponse = false;
+    view = render(<RepoPublicationPanel repair={repair} ownerPrincipalId="owner-a" ownerSessionId="root-a" />);
+    expect(await screen.findByText("Close publication capacity")).toBeDisabled();
+    expect(bodies).toHaveLength(1);
+    expect(screen.getByLabelText(acknowledgment)).not.toBeChecked();
+    fireEvent.click(screen.getByLabelText(acknowledgment));
+    fireEvent.click(screen.getByText("Close publication capacity"));
+    await screen.findByText(/Capacity released/);
+    expect(bodies).toHaveLength(2); expect(bodies[1]).toBe(bodies[0]);
+    expect(sessionStorage.length).toBe(0);
+    expect(screen.getByText("Reconcile destination")).toBeTruthy();
+    expect(screen.queryByText(/Ready PR independently verified/)).toBeNull();
+    view.unmount();
+  });
   it("rediscovers the original uncertain job with stopped consent using GET only", async () => {
     const fixture = { ...publicationFixture(), status: "unknown_external_effect", approval_status: "consumed" };
     const fetchMock = vi.fn((url: unknown, _options?: RequestInit) => String(url).includes("/repairs/")

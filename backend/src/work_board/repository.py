@@ -2753,10 +2753,20 @@ class WorkBoardRepository:
 
         observed_at = now or _now()
         lease_seconds = max(1, min(int(lease_seconds), 900))
+        from src.memory.evidence_dependencies import stage_dependencies, recheck_dependencies
+        staged_dependencies = None
+        dependency_error = None
+        preflight_task = await self._find_task(db, task_id)
+        if preflight_task is not None:
+            try:
+                staged_dependencies = await stage_dependencies(db, preflight_task)
+            except (BoardError, OSError, KeyError, TypeError) as exc:
+                dependency_error = exc
         await _begin_sqlite_immediate(db)
         task = await self._find_task(db, task_id)
         if task is None:
             raise BoardNotFound(task_id)
+        await db.refresh(task)
         if task.status is not WorkBoardStatus.ready:
             return None
         if task.task_revision != int(expected_revision):
@@ -2774,6 +2784,9 @@ class WorkBoardRepository:
         # that creates the board claim.  The preflight pass is advisory; a
         # concurrent revision/owner/status change must not launch stale work.
         try:
+            if dependency_error is not None:
+                raise BoardError('evidence_dependency_stale', 'Selected execution evidence requires review')
+            await recheck_dependencies(db, task, staged_dependencies)
             lane_error = _executor_lane_error(task.capability_id, task.executor_id)
             if lane_error is not None:
                 raise BoardError(lane_error[0], lane_error[1])
@@ -2784,7 +2797,8 @@ class WorkBoardRepository:
             if task.capability_id == _BROWSER_CAPABILITY_ID:
                 browser_max_attempts, browser_max_outstanding = effective_browser_limits(live_goal)
         except BoardError as exc:
-            safe_reason = await self._safe_text(exc.message)
+            safe_reason = ("Selected execution evidence requires review"
+                if exc.code.startswith('evidence_dependency_') else await self._safe_text(exc.message))
             await self._cas_task_update(
                 db,
                 owner,
@@ -2804,7 +2818,8 @@ class WorkBoardRepository:
                 task,
                 owner,
                 kind="task.dispatch_blocked",
-                metadata={"status": WorkBoardStatus.blocked.value, "block_kind": _closed_block_kind(exc.code)},
+                metadata={"status": WorkBoardStatus.blocked.value, "block_kind": _closed_block_kind(exc.code),
+                          "reason_code": exc.code, "task_revision": task.task_revision},
                 actor_principal_id=actor_principal_id or lease_owner,
                 actor_session_id=actor_session_id or "work-board-dispatch",
             )
@@ -3521,6 +3536,16 @@ class WorkBoardRepository:
         staged_vault_binding = await vault_binding(db) if status is WorkBoardStatus.blocked else None
         safe_projection_reason = await self._safe_text(original_projection_reason) if status is WorkBoardStatus.blocked else None
         reconciliation_owner_live = False
+        from src.memory.evidence_dependencies import stage_dependencies, recheck_dependencies
+        staged_dependencies = None
+        dependency_error = None
+        if status in {WorkBoardStatus.review, WorkBoardStatus.done}:
+            preflight_task = await self._find_task(db, task_id)
+            if preflight_task is not None:
+                try:
+                    staged_dependencies = await stage_dependencies(db, preflight_task)
+                except (BoardError, OSError, KeyError, TypeError) as exc:
+                    dependency_error = exc
         if reconciled_github_root is not None:
             # Authentication may persist expiry/revocation. Run it before the
             # board write lock, then recheck its row under that lock below.
@@ -3548,6 +3573,9 @@ class WorkBoardRepository:
             raise BoardRevisionConflict(task.task_id, int(expected_revision), task.task_revision)
         if status in {WorkBoardStatus.review, WorkBoardStatus.done}:
             try:
+                if dependency_error is not None:
+                    raise BoardError('evidence_dependency_stale', 'Selected execution evidence requires review')
+                await recheck_dependencies(db, task, staged_dependencies)
                 await self.validate_task_goal(db, owner, task)
             except BoardError as exc:
                 # A long-running attempt cannot turn stale or revoked goal
@@ -3555,9 +3583,10 @@ class WorkBoardRepository:
                 # an explicit recoverable block while preserving the durable
                 # run and its evidence for operator reconciliation.
                 status = WorkBoardStatus.blocked
-                outcome = "goal_authority_stale"
-                block_kind = "capability"
-                block_reason = f"goal_authority_stale:{exc.code}"
+                evidence_stale = exc.code.startswith('evidence_dependency_')
+                outcome = "evidence_dependency_stale" if evidence_stale else "goal_authority_stale"
+                block_kind = "dependency" if evidence_stale else "capability"
+                block_reason = f"{outcome}:{exc.code}"
                 verified_readback = None
         attempt = (
             await db.execute(

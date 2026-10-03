@@ -519,13 +519,17 @@ async def test_decompose_requires_a_complete_todo_source(async_db, monkeypatch, 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('async_db', ['file'], indirect=True)
+@pytest.mark.parametrize('producer_readback', ['exact', 'generic'])
 async def test_accept_specify_applies_to_same_triage_card_without_child_or_link(
     async_db,
     monkeypatch,
     tmp_path,
+    producer_readback,
 ):
     from src.work_board.dispatcher import GOAL_SNAPSHOT_CAPABILITY, REGISTERED_CAPABILITIES, WorkBoardDispatcher, _dispatcher
 
+    tmp_path.chmod(0o700)
     input_path = tmp_path / "inputs" / "specified.json"
     input_path.parent.mkdir(parents=True)
     raw = json.dumps(
@@ -634,27 +638,55 @@ async def test_accept_specify_applies_to_same_triage_card_without_child_or_link(
         db.add(proposal)
         await db.flush()
         proposal_revision = proposal.revision
+        from src.db.models import Session
+        from src.workflows.job_runtime import _serialize
+        authority = triage_service._proposal_job_authority(proposal)
+        output_digest = proposal.proposal_digest
+        receipt = {
+            "receipt_kind": "readback", "effect_type": "work_board_proposal_output",
+            "target_path": f"work-board-proposal:{proposal.proposal_id}",
+            "status": "succeeded", "target_digest": output_digest,
+            "content_sha256": output_digest, "fencing_token": 1,
+            "readback_id": hashlib.sha256(f"{job_id}:1:{output_digest}".encode()).hexdigest(),
+            "verified_at": _now().isoformat(),
+            "details": {"verified": True, "proposal_id": proposal.proposal_id,
+                "proposal_digest": output_digest, "evidence_snapshot_digest": triage_service._proposal_digest(None),
+                "verification_scope": "generated_advisory_output_only", "memory_status": "no_learning"},
+        }
+        if producer_readback == 'generic':
+            receipt['effect_type'] = 'generic_verified_output'
+        effects = [{"effect_id": triage_service._proposal_effect_id(job_id), "status": "succeeded"}, receipt]
+        db.add(Session(id=OWNER.session_id, owner_principal_id=OWNER.principal_id))
+        await db.flush()
+        run = WorkflowRunState(id=job_id, run_identity=job_id, root_run_identity=job_id,
+            branch_kind='root', workflow_name='declared-proposal-fixture', status='succeeded',
+            owner_kind='user', owner_principal_id=OWNER.principal_id, session_id=OWNER.session_id,
+            operator_session_id=OWNER.session_id, goal_id=task.goal_id, goal_revision=task.goal_revision,
+            job_kind=triage_service._PROPOSAL_JOB_KIND, capability_version=proposal.capability_version,
+            fencing_token=1, input_digest=triage_service._proposal_admission_input_digest(proposal),
+            authority_digest=triage_service._proposal_digest(authority), declared_authority_json=json.dumps(authority),
+            run_fingerprint=proposal.request_digest, idempotency_scope='work-board-proposal',
+            idempotency_key=proposal.proposal_id, effect_receipts_json=json.dumps(effects))
+        db.add(run)
+        await db.commit()
+        assert triage_service._proposal_job_is_terminal_success(proposal, _serialize(run), goal_id=task.goal_id) == (producer_readback == 'exact')
     print("M4AUTH:proposal_staged", flush=True)
 
-    monkeypatch.setattr(
-        triage_service.durable_job_repository,
-        "get_job",
-        AsyncMock(
-            return_value={
-                "job_id": job_id,
-                "run_identity": job_id,
-                "status": "succeeded",
-                "effects": [
-                    {
-                        "effect_id": triage_service._proposal_effect_id(job_id),
-                        "status": "succeeded",
-                    }
-                ],
-            }
-        ),
-    )
-
     print("M4AUTH:accept_begin", flush=True)
+    if producer_readback == 'generic':
+        with pytest.raises(BoardError) as rejected:
+            await triage_service.accept_proposal(OWNER, proposal.proposal_id,
+                WorkBoardProposalAccept(expected_proposal_revision=proposal_revision,
+                    expected_parent_revision=expected_revision))
+        assert rejected.value.code == 'proposal_job_reconciliation_required'
+        async with async_db() as reopened:
+            current_task = await reopened.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == task.task_id))
+            current_proposal = await reopened.get(WorkBoardProposal, proposal.proposal_id)
+            current_run = await reopened.get(WorkflowRunState, job_id)
+            assert current_task.status is WorkBoardStatus.triage and current_task.task_revision == expected_revision
+            assert current_proposal.status == 'proposed' and current_proposal.revision == proposal_revision
+            assert current_run.status == 'succeeded' and json.loads(current_run.effect_receipts_json) == effects
+        return
     result = await triage_service.accept_proposal(
         OWNER,
         proposal.proposal_id,
@@ -863,7 +895,9 @@ def test_terminal_proposal_job_requires_matching_effect_identity():
         "status": "succeeded",
         "effects": [matching_effect],
     }
-    assert triage_service._proposal_job_is_terminal_success(proposal, projection)
+    # A matching settled remote operation alone is legacy effect history,
+    # not protected proof that the generated advisory output was verified.
+    assert not triage_service._proposal_job_is_terminal_success(proposal, projection)
     assert not triage_service._proposal_job_is_terminal_success(
         proposal,
         {**projection, "effects": [{"effect_id": "remote_inference:other", "status": "succeeded"}]},
@@ -1334,17 +1368,9 @@ async def test_pre_contact_failed_job_uses_one_no_effect_retry_cas(monkeypatch):
         "capability_version": proposal.capability_version,
         "goal_revision": proposal.goal_revision,
         "input_digest": triage_service._proposal_admission_input_digest(proposal),
-        "authority_digest": proposal.authority_digest,
+        "authority_digest": triage_service._proposal_digest(triage_service._proposal_job_authority(proposal)),
         "run_fingerprint": proposal.request_digest,
-        "declared_authority": {
-            "principal": OWNER.principal_id,
-            "owner_kind": "user",
-            "session_id": OWNER.session_id,
-            "capability_id": proposal.capability_id,
-            "capability_version": proposal.capability_version,
-            "grant_revision": proposal.grant_revision,
-            "finite_authority": True,
-        },
+        "declared_authority": triage_service._proposal_job_authority(proposal),
         "status": "failed",
         "failure_reason": "proposal_binding_conflict",
         "revision": 4,
@@ -1371,6 +1397,15 @@ async def test_pre_contact_failed_job_uses_one_no_effect_retry_cas(monkeypatch):
         "status": "read_back",
         "outcome": "no_external_effect",
     }
+
+    retry.reset_mock()
+    wrong_authority = {**projection, "declared_authority": {
+        **projection["declared_authority"], "allowed_operations": ["work_board_proposal", "extra_operation"]}}
+    assert await triage_service._recover_pre_contact_admission(proposal, wrong_authority) is None
+    missing_grant = {**projection, "declared_authority": {
+        **projection["declared_authority"], "finite_authority": False}}
+    assert await triage_service._recover_pre_contact_admission(proposal, missing_grant) is None
+    retry.assert_not_awaited()
 
     retry.reset_mock()
     unsafe = {**projection, "effects": [{"effect_id": "remote_inference:contact", "status": "intent"}]}
@@ -1440,17 +1475,9 @@ async def test_admit_proposal_job_retries_exact_failed_pre_contact_binding_once(
         "goal_revision": task.goal_revision,
         "input_digest": triage_service._proposal_admission_input_digest(proposal),
         "capability_version": proposal.capability_version,
-        "authority_digest": proposal.authority_digest,
+        "authority_digest": triage_service._proposal_digest(triage_service._proposal_job_authority(proposal)),
         "run_fingerprint": proposal.request_digest,
-        "declared_authority": {
-            "principal": OWNER.principal_id,
-            "owner_kind": "user",
-            "session_id": OWNER.session_id,
-            "capability_id": proposal.capability_id,
-            "capability_version": proposal.capability_version,
-            "grant_revision": proposal.grant_revision,
-            "finite_authority": True,
-        },
+        "declared_authority": triage_service._proposal_job_authority(proposal),
         "status": "failed",
         "failure_reason": "proposal_admission_unavailable",
         "revision": 12,

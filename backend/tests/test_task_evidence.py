@@ -225,16 +225,24 @@ async def test_actual_calendar_private_derived_artifact_revocation_and_no_new_eg
     monkeypatch.setattr(triage, "completion_with_fallback", transport)
     specified = await client.post(f"/api/work-board/tasks/{task.task_id}/specify", json={
         "expected_revision": 1, "idempotency_key": "private-calendar-purpose-proof"})
-    assert specified.status_code == 200, specified.text
-    assert specified.json()["blocked_reason"] == "evidence_source_purpose_consent_required"
+    assert specified.status_code == 403, specified.text
+    assert specified.json()["detail"]["code"] == "evidence_source_purpose_consent_required"
     transport.assert_not_awaited()
     async with async_db() as db:
+        # The pre-writer source guard refuses private model purpose before
+        # admitting a proposal/native job, rather than fabricating a blocked
+        # post-admission provider receipt.
         proposal = (await db.execute(select(WorkBoardProposal).where(
-            WorkBoardProposal.parent_task_id == task.task_id))).scalar_one()
-        assert proposal.provider_contact_started is False
-        assert proposal.provider_contact_state == "not_started"
+            WorkBoardProposal.parent_task_id == task.task_id))).scalar_one_or_none()
+        assert proposal is None
         with pytest.raises(BoardError, match="Private Mail/Calendar"):
             await evidence_for_task_context(db, owner, task.task_id, "no-private-egress")
+        from src.memory.evidence_dependencies import canonical_source_token
+        for consumer in ('browser.public-task.v1','work.evidence-dossier.v1','work.local-evidence-report.v1'):
+            target = WorkBoardTask(**{**task.model_dump(), 'capability_id': consumer})
+            with pytest.raises(BoardError) as unsupported:
+                await canonical_source_token(db, owner, target, 'calendar_meeting_prep_result', record['artifact_id'])
+            assert unsupported.value.code == 'evidence_dependency_unsupported'
         consent = await db.get(CalendarReadConsent, "calendar-consent")
         consent.state = "revoked"
     after = (await client.get(f"/api/work-board/tasks/{task.task_id}/evidence")).json()
@@ -301,6 +309,12 @@ async def test_actual_encrypted_mail_draft_uses_existing_consent_fences(client, 
     async with async_db() as db:
         with pytest.raises(BoardError, match="Private Mail/Calendar"):
             await evidence_for_task_context(db, owner, task.task_id, "never-send-private")
+        from src.memory.evidence_dependencies import canonical_source_token
+        for consumer in ('browser.public-task.v1','work.evidence-dossier.v1','work.local-evidence-report.v1'):
+            target = WorkBoardTask(**{**task.model_dump(), 'capability_id': consumer})
+            with pytest.raises(BoardError) as unsupported:
+                await canonical_source_token(db, owner, target, 'mail_reply_draft', record['artifact_id'])
+            assert unsupported.value.code == 'evidence_dependency_unsupported'
         connection = await db.get(GoogleServiceConnection, "mail-connection")
         connection.state = "revoked"
     after = (await client.get(f"/api/work-board/tasks/{task.task_id}/evidence")).json()

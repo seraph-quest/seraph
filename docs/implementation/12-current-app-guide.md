@@ -1347,10 +1347,17 @@ authority; it never repeats HTTP. Provider cooldowns persist without automatic
 retry. Transport closure does not claim forced termination of system DNS threads.
 
 Independent bounded review required public-list visibility proof and durable
-cooldowns; those fixes control this operator contract. Managed acceptance and
-fresh cumulative review remain pending on this feature branch. This target
-does not claim shipped `develop` behavior, live claimed-account usefulness or
-successful live public outreach.
+cooldowns; those fixes control this operator contract. The October 3 managed
+CPU-host journey used actual authentication, owner Vault, Goal, two exact
+approvals, native jobs, SQLite, private artifacts and literal UI output. Only
+the Moltbook HTTP boundary was intercepted. The same original operation was
+read back after a managed cold restart, expired original consent and an exact
+admission replay, with no new provider contact or deadline renewal. A bounded
+owner/login-scoped job reference supports explicit local refresh after reload;
+it stores no credential, content or verification secret and grants no authority.
+Completed exact admission replay is read-only; new work still requires current
+consent and source review. This target does not claim shipped `develop`
+behavior, live claimed-account usefulness or successful live public outreach.
 
 - Trust effective API/UI state, not a default provider label.
 - Keep settings usable through partial metadata failure and show last-known state.

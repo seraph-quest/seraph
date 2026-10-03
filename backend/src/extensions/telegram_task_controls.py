@@ -424,10 +424,19 @@ class TelegramTaskControls:
                 row = await db.get(TelegramTaskCallback, row_id)
                 task = await task_owned(db, owner_principal_id, operator_session_id, task_id)
                 response = await self._cancel_readback(db, row, task)
-        # Acknowledgment is a transport effect only; never replay a decision if
-        # this call or its response is lost. The durable result exists first.
+        # Reply delivery runs only after the canonical writer and native cleanup
+        # have finished. Its outcome never changes or repeats the decision.
         response = dict(response)
-        response["ack_status"] = await self._ack(query["id"], owner_principal_id, operator_session_id)
+        from src.extensions.telegram_transport import TelegramTransportError
+        try:
+            delivered = await self.adapter.deliver(response["outbox_id"],
+                owner_principal_id=owner_principal_id, operator_session_id=operator_session_id)
+            response["delivery_status"] = delivered["status"]
+        except TelegramTransportError as exc:
+            response["delivery_status"] = "blocked"
+            response["delivery_reason_code"] = exc.code
+        except Exception:
+            response["delivery_status"] = "unknown"
         return response
 
     async def _cancel_readback(self, db, row, task):
@@ -465,7 +474,15 @@ class TelegramTaskControls:
         from src.vault.repository import vault_repository
         try:
             async with db_engine.get_session() as db:
-                pairing = await current(db, owner, session)
+                # Empty spinner dismissal grants no task authority. It can
+                # acknowledge a stale/revoked control, but never borrow another
+                # owner's token or act as a session-recovery route.
+                from src.auth.service import authenticate_principal
+                operator = await authenticate_principal(owner, db=db)
+                pairing = await db.get(TelegramTransportState, "telegram")
+                if (operator.session_id != session or pairing is None
+                    or pairing.owner_principal_id != owner or pairing.operator_session_id != session):
+                    return "unavailable"
                 secret_ref = pairing.token_secret_ref
             token = await vault_repository.get(secret_ref or "")
             if not token or not hasattr(self.adapter.transport, "answer_callback_query"):
@@ -477,6 +494,21 @@ class TelegramTaskControls:
             return "unknown"
 
     async def validate_delivery(self, db, outbox):
+        if (outbox.correlation_id or "").startswith("telegram-control:"):
+            source = await db.get(TelegramTaskCallback, outbox.correlation_id.split(":", 1)[1])
+            if source is None:
+                fail("telegram_control_delivery_unbound")
+            pairing = await current(db, outbox.owner_principal_id, outbox.operator_session_id)
+            task = await task_owned(db, source.owner_principal_id, source.operator_session_id, source.task_id)
+            saved = json.loads(source.result_json)
+            if (source.owner_principal_id != outbox.owner_principal_id
+                or source.operator_session_id != outbox.operator_session_id
+                or source.root_digest != root_digest() or source.pairing_id != pairing.pairing_id
+                or source.transit_reference != pairing.transit_consent_reference
+                or aware(source.expires_at) <= now() or effect_digest(source) != source.effect_digest
+                or saved.get("outbox_id") != outbox.id or saved.get("task_revision") != task.task_revision
+                or saved.get("task_status") != task.status.value):
+                fail("telegram_control_delivery_stale")
         if not outbox.task_control_markup_json:
             return
         try:

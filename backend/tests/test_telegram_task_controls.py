@@ -119,11 +119,14 @@ def callback(boundary, index, *, update_id=1, query_id="query-a", actor=42, chat
 
 async def review(client, boundary, task):
     await send_notice(client, task)
+    boundary.updates.append(callback(boundary, 0))
+    polled = await client.post("/api/telegram/poll", json={"limit": 1, "timeout_seconds": 1})
+    assert polled.status_code == 200, polled.text
+    assert polled.json()["updates"][0]["delivery_status"] == "delivered"
     response = await client.post("/api/telegram/updates", json=callback(boundary, 0))
     assert response.status_code == 200, response.text
     assert response.json()["memory_status"] == "no_learning"
-    delivered = await client.post(f"/api/telegram/outbox/{response.json()['outbox_id']}/deliver")
-    assert delivered.status_code == 200, delivered.text
+    assert response.json()["delivery_status"] == "delivered" and len(boundary.messages) == 2
     return response
 
 
@@ -134,6 +137,8 @@ async def test_actual_http_pairing_task_deny_replay_restart(client, async_db, se
     boundary.updates.append(deny)
     polled = await client.post("/api/telegram/poll", json={"limit": 1, "timeout_seconds": 1})
     assert polled.status_code == 200, polled.text
+    assert polled.json()["updates"][0]["delivery_status"] == "delivered"
+    assert len(boundary.messages) == 3 and "Decision: denied" in boundary.messages[2]["text"]
     assert (await approval_repository.get(approval.id)).status == "denied"
     assert boundary.acks >= 2
     monkeypatch.setattr("src.api.telegram.default_telegram_transport", TelegramTransportAdapter(transport=boundary))
@@ -141,8 +146,11 @@ async def test_actual_http_pairing_task_deny_replay_restart(client, async_db, se
     replay = await client.post("/api/telegram/updates", json=deny)
     assert replay.status_code == 200, replay.text
     assert replay.json()["status"] == "denied"
+    assert len(boundary.messages) == 3
+    acknowledged = boundary.acks
     forged = {**deny, "callback_query": {**deny["callback_query"], "id": "fresh-query"}}
     assert (await client.post("/api/telegram/updates", json=forged)).status_code != 200
+    assert boundary.acks == acknowledged + 1
     detail = await client.get(f"/api/work-board/tasks/{task['task_id']}")
     assert detail.status_code == 200 and detail.json()["task"]["task_id"] == task["task_id"]
     async with async_db() as db:
@@ -182,7 +190,9 @@ async def test_exact_authority_rejects_without_consuming_approval(client, async_
     assert (await approval_repository.get(approval.id)).status == "pending"
     async with async_db() as db:
         row = await db.scalar(select(TelegramTaskCallback).where(TelegramTaskCallback.effect == "deny"))
-        assert row.status == "pending"
+    assert row.status == "pending"
+    if change != "pairing":
+        assert boundary.acks >= 3
     await boundary.http.aclose()
 
 
@@ -225,6 +235,73 @@ async def test_deny_and_nonce_roll_back_together_and_ack_loss_never_replays(clie
     replay = await client.post("/api/telegram/updates", json=deny)
     assert replay.status_code == 200 and replay.json()["outbox_id"] == response.json()["outbox_id"]
     assert (await approval_repository.get(approval.id)).status == "denied"
+    await boundary.http.aclose()
+
+
+@pytest.mark.parametrize("change", ["root", "transit", "response_loss"])
+async def test_callback_outcome_delivery_guard_and_unknown_restart(client, async_db, setup_workspace, monkeypatch, change):
+    boundary, adapter, task, approval = await prepare(client, async_db, monkeypatch)
+    await review(client, boundary, task)
+    deny = callback(boundary, 1, update_id=2, query_id="deny-delivery")
+    original = adapter.deliver
+    async def changed_delivery(*args, **kwargs):
+        # Race after the actual canonical decision commits, before transport
+        # claims the callback-generated outcome; no decision receipt is seeded.
+        if change == "root":
+            replacement = setup_workspace / "delivery-root"
+            replacement.mkdir(exist_ok=True)
+            monkeypatch.setattr(settings, "workspace_dir", str(replacement))
+        elif change == "transit":
+            async with async_db() as db:
+                pairing = await db.get(TelegramTransportState, "telegram")
+                pairing.transit_consent_expires_at = now()-timedelta(seconds=1)
+                db.add(pairing)
+        else:
+            boundary.lose_send = True
+        return await original(*args, **kwargs)
+    monkeypatch.setattr(adapter, "deliver", changed_delivery)
+    response = await client.post("/api/telegram/updates", json=deny)
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "denied"
+    assert response.json()["delivery_status"] == ("unknown" if change == "response_loss" else "blocked")
+    assert response.json()["ack_status"] == "acknowledged"
+    assert (await approval_repository.get(approval.id)).status == "denied"
+    sent = len(boundary.messages)
+    assert sent == (3 if change == "response_loss" else 2)
+    if change == "response_loss":
+        boundary.lose_send = False
+        monkeypatch.setattr("src.api.telegram.default_telegram_transport", TelegramTransportAdapter(transport=boundary))
+        client._transport = httpx.ASGITransport(app=create_app())
+        replay = await client.post("/api/telegram/updates", json=deny)
+        assert replay.status_code == 200 and replay.json()["delivery_status"] == "unknown"
+        assert replay.json()["outbox_id"] == response.json()["outbox_id"]
+        assert len(boundary.messages) == sent
+        async with async_db() as db:
+            outbox = await db.get(TelegramTransportOutbox, response.json()["outbox_id"])
+            assert outbox.status == "unknown" and outbox.attempt_count == 1
+    await boundary.http.aclose()
+
+
+async def test_review_reply_delivery_unknown_blocks_action_without_resend(client, async_db, setup_workspace, monkeypatch):
+    boundary, adapter, task, approval = await prepare(client, async_db, monkeypatch)
+    await send_notice(client, task)
+    boundary.lose_send = True
+    review_callback = callback(boundary, 0)
+    boundary.updates.append(review_callback)
+    response = await client.post("/api/telegram/poll", json={"limit": 1, "timeout_seconds": 1})
+    assert response.status_code == 200, response.text
+    assert response.json()["updates"][0]["status"] == "reviewed"
+    assert response.json()["updates"][0]["delivery_status"] == "unknown"
+    assert len(boundary.messages) == 2
+    action = callback(boundary, 1, update_id=2, query_id="unproven-deny")
+    refused = await client.post("/api/telegram/updates", json=action)
+    assert refused.status_code != 200 and (await approval_repository.get(approval.id)).status == "pending"
+    boundary.lose_send = False
+    monkeypatch.setattr("src.api.telegram.default_telegram_transport", TelegramTransportAdapter(transport=boundary))
+    client._transport = httpx.ASGITransport(app=create_app())
+    replay = await client.post("/api/telegram/updates", json=review_callback)
+    assert replay.status_code == 200 and replay.json()["delivery_status"] == "unknown"
+    assert len(boundary.messages) == 2
     await boundary.http.aclose()
 
 
@@ -314,8 +391,7 @@ async def test_native_original_cancel_intent_and_restart_readback(client, async_
         # prepare() has not delivered anything; this is the first notice.
         review_response = await client.post("/api/telegram/updates", json=callback(boundary, 0))
         assert review_response.status_code == 200, review_response.text
-        delivered = await client.post(f"/api/telegram/outbox/{review_response.json()['outbox_id']}/deliver")
-        assert delivered.status_code == 200, delivered.text
+        assert review_response.json()["delivery_status"] == "delivered" and len(boundary.messages) == 2
         cancel_callback = callback(boundary, 1, update_id=2, query_id="native-cancel")
         cleanup_calls = []
         original_cancel_tree = durable_job_repository.cancel_job_tree
@@ -331,7 +407,14 @@ async def test_native_original_cancel_intent_and_restart_readback(client, async_
                 attempt = await db.get(WorkBoardAttempt, attempt_id)
                 attempt.fencing_token += 1
                 db.add(attempt)
-        response = await client.post("/api/telegram/updates", json=cancel_callback)
+        if mode == "fence_changed":
+            response = await client.post("/api/telegram/updates", json=cancel_callback)
+        else:
+            boundary.updates.append(cancel_callback)
+            polled = await client.post("/api/telegram/poll", json={"limit": 1, "timeout_seconds": 1})
+            assert polled.status_code == 200, polled.text
+            assert polled.json()["updates"][0]["delivery_status"] == "delivered"
+            response = await client.post("/api/telegram/updates", json=cancel_callback)
         if mode == "fence_changed":
             assert response.status_code != 200, response.text
             async with async_db() as db:
@@ -343,6 +426,7 @@ async def test_native_original_cancel_intent_and_restart_readback(client, async_
         assert response.status_code == 200, response.text
         assert response.json()["status"] == ("unknown" if mode == "unknown" else "cancelled")
         assert response.json()["memory_status"] == "no_learning"
+        assert len(boundary.messages) == 3 and f"Decision: {response.json()['status']}" in boundary.messages[2]["text"]
         async with async_db() as db:
             events = (await db.execute(select(WorkBoardEvent).where(WorkBoardEvent.task_id == task["task_id"],
                 WorkBoardEvent.kind == "attempt.cancel_requested"))).scalars().all()
@@ -357,6 +441,7 @@ async def test_native_original_cancel_intent_and_restart_readback(client, async_
         assert replay.status_code == 200, replay.text
         assert replay.json()["status"] == response.json()["status"]
         assert cleanup_calls == calls_before_restart
+        assert len(boundary.messages) == 3
         readback = (await client.get(f"/api/work-board/tasks/{task['task_id']}")).json()
         assert readback["task"]["block_kind"] == ("unknown_effect" if mode == "unknown" else "cancelled")
         assert readback["attempts"][0]["attempt_id"] == attempt_id

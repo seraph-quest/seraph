@@ -134,6 +134,24 @@ async def execute_funded_child(jobs, *, child_id, owner, fence):
     if (canonical_digest(body) != ready["payload_digest"] or policy_digest != ready["policy_digest"]
         or body["model"] != target["model_id"] or body["stream"] is not False):
         raise ValueError("research funded prompt/profile binding changed")
+    reserved_output = checkpoint(child, f"research:artifact:child:{ready['slot']}")
+    if reserved_output is not None:
+        # This exact slot was reserved only after the one actual callback and
+        # settlement returned. Recovery adopts bytes, never calls the provider.
+        snapshot = await jobs.inference_accounting_snapshot(job_id=child_id)
+        settled = next((row for row in snapshot["operations"] if row["operation_id"] == "remote:"+child_id), None)
+        if (snapshot.get("accounting_continuity_verified") is not True or not settled or settled["state"] != "settled"
+            or settled["actual_cost_microusd"] is None or settled["contact_started_at"] is None
+            or settled["payload_digest"] != ready["payload_digest"]
+            or reserved_output["creation_digest"] != ready["creation_digest"]):
+            raise ValueError("research reserved output lacks its original actual settled contact")
+        raw = read(reserved_output["file_path"], reserved_output["content_sha256"], max_bytes=16384)
+        verified_child(raw, sources)
+        artifact = await write_verified(jobs, job_id=child_id, owner=owner, fence=fence,
+            creation_digest=ready["creation_digest"], slot=ready["slot"], kind="child", content=raw, max_bytes=16384)
+        await _adopt_child(jobs, child_id=child_id, owner=owner, fence=fence, artifact=artifact,
+            raw=raw, actual_cost=settled["actual_cost_microusd"])
+        return artifact
     context = await _context(child, body, ready["contact_deadline_at"])
     decision, proofs = await _governed_preflight_target_async(target, context)
     if decision is None or not decision.allowed:
@@ -191,6 +209,13 @@ async def execute_funded_child(jobs, *, child_id, owner, fence):
         raise RuntimeError("research output requires actual settled accounting readback")
     artifact = await write_verified(jobs, job_id=child_id, owner=owner, fence=fence,
         creation_digest=ready["creation_digest"], slot=ready["slot"], kind="child", content=raw, max_bytes=16384)
+    await _adopt_child(jobs, child_id=child_id, owner=owner, fence=fence, artifact=artifact,
+        raw=raw, actual_cost=settled["actual_cost_microusd"])
+    return artifact
+
+
+async def _adopt_child(jobs, *, child_id, owner, fence, artifact, raw, actual_cost):
+    from src.workflows.research_sources import verify_current_prompt_in_db
     async def terminal_authority(db, current):
         from src.workflows.job_runtime import _serialize
         from src.workflows.research_guard import assert_research_parent_current
@@ -200,7 +225,6 @@ async def execute_funded_child(jobs, *, child_id, owner, fence):
             raise ValueError("research actual child output changed before terminal adoption")
     await jobs.transition_job(child_id, "succeeded", owner=owner, fencing_token=fence,
         terminal_authority_check=terminal_authority,
-        result={"output_sha256": artifact["content_sha256"], "operation_id": request.operation_id,
-            "actual_cost_microusd": settled["actual_cost_microusd"], "no_learning": True},
+        result={"output_sha256": artifact["content_sha256"], "operation_id": "remote:"+child_id,
+            "actual_cost_microusd": actual_cost, "no_learning": True},
         result_summary="Attributed research JSON with physical readback; no_learning")
-    return artifact

@@ -76,7 +76,7 @@ async def pause_parent(jobs, *, parent_id, owner, job_fence, board_fence, board_
             "board_fence":attempt.fencing_token,"job_fence":parent.fencing_token,"phase":reason}
 
 
-async def resume_parent(jobs, *, parent_id, owner, phase):
+async def resume_parent(jobs, *, parent_id, owner, phase, expected_binding=None):
     """Fresh leases on the original attempt; neither deadline nor count renews."""
     from src.workflows.job_runtime import DurableJobLeaseError
     from src.model_fabric.effective_policy import current_inference_policy
@@ -88,6 +88,8 @@ async def resume_parent(jobs, *, parent_id, owner, phase):
     async with jobs._session() as db:
         await db.execute(text("BEGIN IMMEDIATE"))
         parent,task,attempt,creation=await _current(jobs,db,parent_id)
+        if expected_binding is not None:
+            await assert_phase_binding(db, parent, expected_binding)
         reason=WAIT_SOURCES if phase == "research_funding" else WAIT_CHILDREN
         authority=json.loads(parent.declared_authority_json)
         if (parent.status != "paused" or parent.failure_reason != reason or task.status != WorkBoardStatus.blocked
@@ -129,3 +131,19 @@ async def resume_parent(jobs, *, parent_id, owner, phase):
         await db.flush()
         return {"task_id":task.task_id,"attempt_id":attempt.attempt_id,"task_revision":task.task_revision,
             "board_fence":attempt.fencing_token,"job_fence":parent.fencing_token,"phase":phase}
+
+
+async def assert_phase_binding(db, parent, binding):
+    """Bind a coordinator to the exact current canonical Board/job phase."""
+    from src.workflows.job_runtime import DurableJobLeaseError
+    task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == binding.get("task_id")))
+    attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.attempt_id == binding.get("attempt_id")))
+    creation = payload_checkpoint(parent, "research:creation")
+    phase = payload_checkpoint(parent, "research:phase")
+    if (task is None or attempt is None or attempt.task_id != task.task_id
+        or attempt.workflow_run_id != parent.run_identity or attempt.ended_at or attempt.cancel_requested_at
+        or task.task_revision != binding.get("task_revision") or attempt.fencing_token != binding.get("board_fence")
+        or parent.fencing_token != binding.get("job_fence") or phase.get("phase") != binding.get("phase")
+        or creation.get("creation_digest") != binding.get("creation_digest")
+        or creation.get("board_task_id") != task.task_id or creation.get("board_attempt_id") != attempt.attempt_id):
+        raise DurableJobLeaseError("research coordinator phase reservation changed")

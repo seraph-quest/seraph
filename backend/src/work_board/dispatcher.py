@@ -3816,7 +3816,8 @@ class WorkBoardDispatcher:
             return min(DEFAULT_RUNTIME_SECONDS, 180) if _text(task.capability_id) == "browser.public-task.v1" else DEFAULT_RUNTIME_SECONDS
         budget = deserialize_admission_budget(goal)
         configured = int(getattr(budget, "max_runtime_seconds", DEFAULT_RUNTIME_SECONDS)) if budget else DEFAULT_RUNTIME_SECONDS
-        hard_cap = 180 if _text(task.capability_id) == "browser.public-task.v1" else MAX_RUNTIME_SECONDS
+        hard_cap = (180 if _text(task.capability_id) == "browser.public-task.v1" else
+            300 if _text(task.capability_id) == "work.research-dossier.v1" else MAX_RUNTIME_SECONDS)
         return max(1, min(configured, hard_cap))
 
     async def _repo_repair_goal_window(self, task: WorkBoardTask) -> datetime | None:
@@ -5382,6 +5383,75 @@ class WorkBoardDispatcher:
                 actor_session_id=self.runner_session,
             )
 
+    async def _complete_research_projection(self, parent_id, completed):
+        from src.work_board.research_artifacts import read
+        projection = await self.jobs.get_job(parent_id)
+        artifact = completed["dossier"]
+        read(artifact["file_path"], artifact["content_sha256"])
+        filtered = {**projection, "effects": [item for item in projection["effects"]
+            if item.get("target_path") == artifact["file_path"] and item.get("content_sha256") == artifact["content_sha256"]]}
+        proof = self._workflow_readback(filtered, parent_id)
+        if proof is None:
+            raise DurableJobError("research_actual_dossier_readback_required")
+        async with self.session_provider() as db:
+            task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == completed["task_id"]))
+            attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.attempt_id == completed["attempt_id"]))
+        await self._project(task, attempt, board_revision=completed["task_revision"],
+            status=WorkBoardStatus.review if task.requires_review else WorkBoardStatus.done,
+            outcome="succeeded", proof=proof,
+            result_refs=[{**proof, "learning": "no_learning", "target_path": artifact["file_path"]}],
+            artifact_refs=projection["artifacts"])
+
+    async def recover_research(self, owner, task_id, request):
+        from src.work_board.research_control import bound, reserve_recovery
+        from src.workflows.research_coordinator import continue_parent, freeze_quiescent
+        async with self.session_provider() as db:
+            task, attempt, parent = await bound(db, owner, task_id)
+            key = (task.task_id, attempt.attempt_id)
+            parent_id = parent.run_identity
+        active = self._active_worker_tasks.get(key)
+        if active is not None and not active.done():
+            return {"in_progress": True, "completed": False}
+        reservation = await reserve_recovery(self.jobs, owner, task_id, request)
+        phase_binding = reservation["binding"]
+        if phase_binding is None:
+            return {"replayed": True, "completed": reservation["completed"]}
+        # No await separates the second local check from registration. The
+        # durable phase generation still fences other processes/coordinators.
+        active = self._active_worker_tasks.get(key)
+        if active is not None and not active.done():
+            return {"in_progress": True, "completed": False}
+        self._active_worker_tasks[key] = asyncio.current_task()
+        try:
+            completed = await continue_parent(self.jobs, parent_id=parent_id, owner=self.runner_id,
+                phase_binding=phase_binding)
+            await self._complete_research_projection(parent_id, completed)
+            return {"completed": True, "replayed": reservation["replayed"]}
+        except BaseException:
+            current = await self.jobs.get_job(parent_id)
+            await asyncio.shield(freeze_quiescent(self.jobs, parent_id=parent_id, owner=self.runner_id,
+                phase_binding=phase_binding, expected_parent_revision=current["revision"],
+                reason="research_execution_requires_recovery"))
+            return {"completed": False, "blocked": True}
+        finally:
+            if self._active_worker_tasks.get(key) is asyncio.current_task():
+                self._active_worker_tasks.pop(key, None)
+
+    async def cancel_research(self, owner, task_id, request):
+        from src.work_board.research_control import request_cancel, finish_cancel
+        reserved = await request_cancel(self.jobs, owner, task_id, request)
+        worker = self._active_worker_tasks.get((task_id, reserved["attempt_id"]))
+        if worker is not None and not worker.done():
+            worker.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(worker), timeout=5)
+            except asyncio.TimeoutError:
+                return {"completed": False, "cancellation_pending": True, "reason": "actual_worker_completion_required"}
+            except asyncio.CancelledError:
+                if not worker.done():
+                    raise
+        return await finish_cancel(self.jobs, owner, task_id, request)
+
     async def _admit_execute_research(self, claim: BoardDispatchClaim, *, runtime_seconds: int) -> dict[str, Any]:
         """Admit the fixed native root before any source or model operation."""
         from src.work_board.research_parent import spec_for, expected_identity
@@ -5413,22 +5483,7 @@ class WorkBoardDispatcher:
                 board_task=task, board_attempt=attempt, inputs=inputs)
             completed = await continue_parent(self.jobs, parent_id=spec.identity.job_id, owner=self.runner_id,
                 phase_binding=phase_binding)
-            projection = await self.jobs.get_job(spec.identity.job_id)
-            artifact = completed["dossier"]
-            read(artifact["file_path"], artifact["content_sha256"])
-            filtered = {**projection, "effects": [item for item in projection["effects"]
-                if item.get("target_path") == artifact["file_path"] and item.get("content_sha256") == artifact["content_sha256"]]}
-            proof = self._workflow_readback(filtered, spec.identity.job_id)
-            if proof is None:
-                raise DurableJobError("research_actual_dossier_readback_required")
-            async with self.session_provider() as db:
-                task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == task.task_id))
-                attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.attempt_id == attempt.attempt_id))
-            await self._project(task, attempt, board_revision=completed["task_revision"],
-                status=WorkBoardStatus.review if task.requires_review else WorkBoardStatus.done,
-                outcome="succeeded", proof=proof,
-                result_refs=[{**proof, "learning": "no_learning", "target_path": artifact["file_path"]}],
-                artifact_refs=projection["artifacts"])
+            await self._complete_research_projection(spec.identity.job_id, completed)
             return {"admitted": True, "completed": True, "blocked": False}
         except BaseException as error:
             # The awaited finite worker group has returned before this writer

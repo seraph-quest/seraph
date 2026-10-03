@@ -172,11 +172,105 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
                 (root/source["file_path"]).write_bytes(b"tampered source after first provider contact")
         controls["after_first_contact"] = change_current_authority
         dispatcher = WorkBoardDispatcher(jobs=jobs, session_provider=factory.accounting_sessions)
+        recovery_scenarios = {"restart_before_sources", "restart_prompt_ready", "restart_funded_queued", "restart_written_outputs", "cancel_funded_queued"}
+        if scenario in recovery_scenarios:
+            from src.workflows import research_coordinator as coordinator
+            from src.workflows.research_accounting import fund_fixed_group
+            from src.workflows.research_native import checkpoint
+            from src.workflows.research_waits import resume_parent, pause_parent
+            from src.workflows import research_provider as provider
+            original_continue = coordinator.continue_parent
+            async def interrupted_process(jobs, *, parent_id, owner, phase_binding):
+                creation = checkpoint(await jobs.get_job(parent_id), "research:creation")
+                if scenario != "restart_before_sources":
+                    for child_id in creation["child_ids"]:
+                        await coordinator._prepare_child(jobs, child_id, owner, {}, phase_binding)
+                if scenario in {"restart_funded_queued", "restart_written_outputs", "cancel_funded_queued"}:
+                    phase = await resume_parent(jobs, parent_id=parent_id, owner=owner,
+                        phase="research_funding", expected_binding=phase_binding)
+                    phase_binding.update(phase)
+                    await fund_fixed_group(jobs, parent_id=parent_id, owner=owner, fencing_token=phase["job_fence"])
+                    phase_binding.update(await pause_parent(jobs, parent_id=parent_id, owner=owner,
+                        job_fence=phase["job_fence"], board_fence=phase["board_fence"],
+                        board_revision=phase["task_revision"], reason="research_wait_children"))
+                    for child_id in creation["child_ids"]:
+                        child = await jobs.get_job(child_id)
+                        await jobs.resume_job(child_id, expected_revision=child["revision"], reason="research_group_funded")
+                    if scenario == "restart_written_outputs":
+                        original_adopt = provider._adopt_child
+                        async def interrupted_adoption(*args, **kwargs):
+                            raise RuntimeError("declared crash boundary after actual reserved child output")
+                        monkeypatch.setattr(provider, "_adopt_child", interrupted_adoption)
+                        try:
+                            for child_id in creation["child_ids"]:
+                                claimed = await jobs.claim_job(child_id, owner=owner, lease_seconds=1,
+                                    continue_existing_attempt=True, claim_authority_check=coordinator._claim_guard(jobs, phase_binding))
+                                with pytest.raises(RuntimeError, match="declared crash boundary"):
+                                    await provider.execute_funded_child(jobs, child_id=child_id, owner=owner,
+                                        fence=claimed["lease"]["fencing_token"])
+                            await __import__("asyncio").sleep(1.1)
+                        finally:
+                            monkeypatch.setattr(provider, "_adopt_child", original_adopt)
+                # A declared process interruption leaves the existing canonical
+                # rows as written. It issues no native quiescence completion seal.
+                raise RuntimeError("declared restart boundary")
+            monkeypatch.setattr(coordinator, "continue_parent", interrupted_process)
         receipt = await dispatcher.run_pass()
+        if scenario in recovery_scenarios:
+            monkeypatch.setattr(coordinator, "continue_parent", original_continue)
+            await engine.dispose()
+            from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
+            fresh_broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
+            monkeypatch.setattr("src.model_fabric.remote_inference_admission.remote_inference_admission_broker", fresh_broker)
+            monkeypatch.setattr("src.llm_runtime.gpu_admission_broker", fresh_broker)
+            monkeypatch.setattr(work_board, "dispatcher", WorkBoardDispatcher(jobs=jobs, session_provider=factory.accounting_sessions))
+            state = await client.get("/api/work-board/tasks/"+task_id+"/research")
+            assert state.status_code == 200, state.text
+            original_state = state.json()
+            action = "cancel" if scenario == "cancel_funded_queued" else "recover"
+            if scenario == "restart_funded_queued":
+                from src.work_board.research_control import reserve_recovery
+                from src.work_board.research_contracts import ResearchControlRequest
+                from src.work_board.contracts import WorkBoardOwner
+                from src.workflows.job_runtime import DurableJobLeaseError
+                original_request = ResearchControlRequest(expected_revision=original_state["task_revision"],
+                    idempotency_key="original-research-control")
+                current_owner = WorkBoardOwner(principal_id=owner["principal_id"], session_id=owner["session_id"])
+                first = await reserve_recovery(jobs, current_owner, task_id, original_request)
+                second = await reserve_recovery(jobs, current_owner, task_id, original_request)
+                assert second["binding"]["task_revision"] > first["binding"]["task_revision"]
+                child_id = original_state["children"][0]["job_id"]
+                with pytest.raises(DurableJobLeaseError, match="phase reservation changed"):
+                    await jobs.claim_job(child_id, owner="stale-same-owner", lease_seconds=1,
+                        continue_existing_attempt=True, claim_authority_check=coordinator._claim_guard(jobs, first["binding"]))
+                assert len(calls) == 3  # stale phase produced no provider request
+            recovered = await client.post("/api/work-board/tasks/"+task_id+"/research/"+action,
+                json={"expected_revision": original_state["task_revision"], "idempotency_key": "original-research-control"})
+            assert recovered.status_code == 200, recovered.text
+            current_state = recovered.json()["research"]
+            assert current_state["parent_id"] == original_state["parent_id"]
+            assert current_state["attempt_id"] == original_state["attempt_id"]
+            assert current_state["deadline_at"] == original_state["deadline_at"]
+            (root/"research-restart-private-readback.json").write_text(json.dumps({"scenario": scenario,
+                "original": original_state, "control": recovered.json(), "provider_post_count": len(calls)}, indent=2))
+            if action == "cancel":
+                assert recovered.json()["cancellation"]["cancelled"] is True
+                assert current_state["status"] == "cancelled" and all(child["status"] == "cancelled" for child in current_state["children"])
+                assert len(calls) == 3 and all(cost["state"] == "released" for cost in current_state["costs"])
+                replay = await client.post("/api/work-board/tasks/"+task_id+"/research/cancel",
+                    json={"expected_revision": original_state["task_revision"], "idempotency_key": "original-research-control"})
+                assert replay.status_code == 200 and replay.json()["cancellation"]["replayed"] is True
+                return
+            assert recovered.json()["recovery"]["completed"] is True, recovered.text
+            replay = await client.post("/api/work-board/tasks/"+task_id+"/research/recover",
+                json={"expected_revision": original_state["task_revision"], "idempotency_key": "original-research-control"})
+            assert replay.status_code == 200 and replay.json()["recovery"]["completed"] is True
+            assert len(calls) == 5  # uncertain-response replay never adds another POST
+            receipt = {"completed": 1}
         detail = await client.get("/api/work-board/tasks/"+task_id)
         (root/"research-vertical-private-readback.json").write_text(json.dumps({"label": "real public source; provider HTTP interception only",
             "scenario": scenario, "task_id": task_id, "receipt": receipt, "detail": detail.json()}, indent=2))
-        if scenario != "completed":
+        if scenario != "completed" and scenario not in recovery_scenarios:
             assert receipt["completed"] == 0 and receipt["blocked"] >= 1
             assert len(calls) == 4  # real first contact; held sibling makes zero provider POSTs
             await engine.dispose()
@@ -231,4 +325,11 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
 @pytest.mark.parametrize("scenario", ["revoke_first_response", "goal_change_first_response",
     "tamper_source_first_response", "overrun_first_response"])
 async def test_current_authority_or_overrun_blocks_prefunded_sibling_and_adoption(accounting_db, real_auth, monkeypatch, scenario):
+    await test_authenticated_parent_two_children_real_public_source_and_dossier(accounting_db, real_auth, monkeypatch, scenario=scenario)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ["restart_before_sources", "restart_prompt_ready", "restart_funded_queued",
+    "restart_written_outputs", "cancel_funded_queued"])
+async def test_explicit_native_recovery_keeps_original_attempt_deadline_and_call_rows(accounting_db, real_auth, monkeypatch, scenario):
     await test_authenticated_parent_two_children_real_public_source_and_dossier(accounting_db, real_auth, monkeypatch, scenario=scenario)

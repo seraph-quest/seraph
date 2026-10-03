@@ -83,6 +83,7 @@ from src.workflows.routines import (
     _job_checkpoint,
     routine_service,
 )
+from src.work_board.research_contracts import ResearchControlRequest
 
 
 router = APIRouter(prefix="/work-board")
@@ -90,6 +91,38 @@ repository = WorkBoardRepository()
 # Use the same managed dispatcher instance as the scheduler so cancellation
 # can reach an inline GoalSnapshot worker admitted by the scheduler pass.
 dispatcher = _dispatcher
+
+
+@router.get("/tasks/{task_id}/research")
+async def read_research_state(request: Request, task_id: str):
+    from src.work_board.research_control import snapshot
+    try:
+        async with get_session() as db:
+            return await snapshot(dispatcher.jobs, db, _owner(_operator(request)), task_id)
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.post("/tasks/{task_id}/research/recover")
+async def recover_research(request: Request, task_id: str, body: ResearchControlRequest):
+    try:
+        result = await dispatcher.recover_research(_owner(_operator(request)), task_id, body)
+        async with get_session() as db:
+            from src.work_board.research_control import snapshot
+            return {"recovery": result, "research": await snapshot(dispatcher.jobs, db, _owner(_operator(request)), task_id)}
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.post("/tasks/{task_id}/research/cancel")
+async def cancel_research(request: Request, task_id: str, body: ResearchControlRequest):
+    try:
+        result = await dispatcher.cancel_research(_owner(_operator(request)), task_id, body)
+        async with get_session() as db:
+            from src.work_board.research_control import snapshot
+            return {"cancellation": result, "research": await snapshot(dispatcher.jobs, db, _owner(_operator(request)), task_id)}
+    except BoardError as exc:
+        _raise_board_error(exc)
 
 
 @router.get("/tasks/{task_id}/research-report")

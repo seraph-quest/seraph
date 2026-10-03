@@ -24,6 +24,11 @@ class ClosedResearchModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
 
+class ResearchControlRequest(ClosedResearchModel):
+    expected_revision: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9:-]+$")
+
+
 class PublicTextSource(ClosedResearchModel):
     kind: Literal["public_https_text"]
     url: str = Field(min_length=1, max_length=2048)

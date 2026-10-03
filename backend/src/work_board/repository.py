@@ -3669,6 +3669,25 @@ class WorkBoardRepository:
                 "unknown_effect_requires_reconciliation",
                 "An unresolved outcome cannot be projected as Review or Done",
             )
+        if task.capability_id == "work.research-dossier.v1" and status in {WorkBoardStatus.review, WorkBoardStatus.done}:
+            from src.work_board.research_readback import verified_dossier
+            from src.work_board.input_artifacts import consume_input_artifact, resolve_input_artifact_for_task
+            from src.workflows.research_guard import assert_research_operator_session
+            run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == attempt.workflow_run_id))
+            if run is None:
+                raise BoardError("research_readback_required", "The original research root is unavailable", status_code=409)
+            await assert_research_operator_session(db, run, now=observed_at)
+            artifact, _raw = await verified_dossier(db, task, attempt, run)
+            if artifact["content_sha256"] != proof_digest:
+                raise BoardError("research_readback_required", "The physical dossier differs from this attempt's proof", status_code=409)
+            resolved = await resolve_input_artifact_for_task(db, owner, artifact_id=task.input_artifact_id,
+                goal_id=task.goal_id, goal_revision=task.goal_revision, capability_id=task.capability_id,
+                expected_task_id=task.task_id)
+            if resolved.row.payload_sha256 != task.typed_input_digest or resolved.row.bound_task_revision is None:
+                raise BoardError("research_input_changed", "The original admitted input binding changed", status_code=409)
+            if resolved.row.state != "consumed":
+                await consume_input_artifact(db, owner, task_id=task.task_id,
+                    task_revision=resolved.row.bound_task_revision, artifact_id=task.input_artifact_id)
         attempt.outcome = str(outcome)[:128]
         attempt.ended_at = observed_at
         attempt.lease_owner = None

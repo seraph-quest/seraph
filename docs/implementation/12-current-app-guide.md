@@ -928,6 +928,18 @@ Gmail usefulness, send operation, and paid model canary remain
 **external-unverified**. See the M7 mail wire contract in issue #890 for the
 exact request, recovery, privacy, and readback boundaries.
 
+### Exact Gmail reply send: accepted architecture
+
+**Planned:** [ADR-016](./decisions/016-exact-gmail-reply-send.md) defines a
+separately imported and explicitly consented reply-read/reply-send credential
+pair, exact scope and mailbox identity verification on every phase, private
+plain-text preview, canonical approval and one native send POST. Independent
+Sent-mailbox readback proves only the sender's Sent state. Unknown sends never
+resend; original-live-session recovery uses a separate finite readonly Goal and
+auxiliary job while preserving original status, deadlines and liability. Legacy
+Mail reads remain separate. Implementation and managed acceptance are pending;
+this paragraph does not claim live Gmail usefulness or Shipped behavior.
+
 ### Reviewed source-change follow-up
 
 Goals expose their success criterion, finite proactive budget, quiet hours, and

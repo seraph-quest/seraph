@@ -433,13 +433,15 @@ async def execute_write(service, owner, job_id, *, execution):
             if run.status == "running" and run.lease_owner == lease[0] and run.fencing_token == lease[1]:
                 value = state(run)
                 await service.retain_cooldown(db, owner, run, value, exc, lease)
+                uncertain = bool(value.get("creation_sent")) or any(
+                    call.get("status") != "received" for call in value.get("calls", []))
                 if value.get("phase") != "verified_output_ready":
-                    value["phase"] = "unknown" if value.get("creation_sent") else "blocked"
+                    value["phase"] = "unknown" if uncertain else "blocked"
                 value["cleanup"] = adapter.marker.snapshot()
                 if value["cleanup"]["status"] == "verified":
                     value["worker_completed"] = {"fencing_token": lease[1], "transport_closed": True}
                 save_state(run, value)
-                run.status = "unknown_external_effect" if value.get("creation_sent") else "blocked"
+                run.status = "unknown_external_effect" if uncertain else "blocked"
                 run.failure_reason = getattr(exc, "code", "moltbook_transfer_or_authority_failed")
                 run.lease_owner = run.lease_expires_at = None
                 db.add(run)

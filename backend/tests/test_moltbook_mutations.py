@@ -20,7 +20,7 @@ from src.vault.repository import vault_repository
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["post", "reply", "accepted_drop", "wrong_author", "hidden", "peer_goal", "rotated_key", "stale_community"])
+@pytest.mark.parametrize("mode", ["post", "reply", "accepted_drop", "wrong_author", "hidden", "peer_goal", "rotated_key", "stale_community", "status_rate_limited"])
 async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db, monkeypatch, mode):
     from src.api import auth, goals, moltbook
     root, db_engine, factory = accounting_db
@@ -36,6 +36,7 @@ async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db
     requests = []
     verified = False
     creation = None
+    creation_request_started = False
     content_id = "original-content-one"
     async def provider(request):
         nonlocal creation, verified
@@ -44,7 +45,10 @@ async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db
         assert request.headers["authorization"] == "Bearer private_test_moltbook_credential"
         path = request.url.path.removeprefix("/api/v1")
         if path == "/agents/me": value = {"agent": {"id": "account-one", "name": "FixtureSeraph"}}
-        elif path == "/agents/status": value = {"status": "claimed"}
+        elif path == "/agents/status":
+            if mode == "status_rate_limited" and creation_request_started:
+                return httpx.Response(429, json={"error": "bounded fixture cooldown"}, headers={"retry-after": "60"})
+            value = {"status": "claimed"}
         elif path == "/submolts/introductions": value = {"submolt": {"id": "community-one", "name": "introductions",
             "is_private": False, "description": "New here? Tell us about yourself!", "rules": "Public introductions allowed"}}
         elif request.method == "POST" and path in {"/posts", "/posts/target-post/comments"}:
@@ -146,7 +150,24 @@ async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db
         assert (await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/execute", json={**creation_request,
             "fencing_token": creation_request["fencing_token"]+1})).status_code == 409
         assert len(requests) == before
+        creation_request_started = True
         executed = await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/execute", json=creation_request)
+        if mode == "status_rate_limited":
+            assert executed.status_code == 409 and executed.json()["detail"]["code"] == "moltbook_rate_limited", executed.text
+            await db_engine.dispose()
+            reopened = await client.get(f"/api/capabilities/moltbook/jobs/{job_id}")
+            value = reopened.json()
+            assert value["status"] == "unknown_external_effect", reopened.text
+            assert checkpoint(value)["creation_sent"] is False
+            assert checkpoint(value)["calls"][-1]["status"] == "intent"
+            local = (await client.get("/api/capabilities/moltbook/connection")).json()
+            assert local["active_job_id"] == job_id and local["cooldown_until"]
+            assert sum(method == "POST" for method,_,_ in requests) == 0
+            count = len(requests)
+            retry = await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/execute", json=creation_request)
+            assert retry.status_code == 200 and retry.json()["status"] == "unknown_external_effect", retry.text
+            assert len(requests) == count
+            return
         if mode == "accepted_drop":
             assert executed.status_code == 409, executed.text
             state = await client.get(f"/api/capabilities/moltbook/jobs/{job_id}")

@@ -10,7 +10,7 @@ title: "Reviewed artifact pipeline reconstruction"
 
 **Tracked work:** [#914](https://github.com/seraph-quest/seraph/issues/914)
 
-**Decision owner:** [ADR-010](../implementation/decisions/010-reviewed-artifact-pipelines.md), pending fresh reconstruction review
+**Decision owner:** [ADR-010](../implementation/decisions/010-reviewed-artifact-pipelines.md), Accepted after fresh independent reconstruction review
 
 ## Provenance and recovery limit
 
@@ -20,8 +20,11 @@ records the lead's accepted fixed three-leaf architecture and independent review
 The previous proposal, ADR draft, review files, uncommitted implementation and
 temporary runtime receipts were lost. Their recorded hashes establish provenance,
 not current file availability or a reconstructed file's identity. This document
-reconstructs the fixed contract for fresh independent confirmation before runtime
-implementation. It does not claim existing execution, integration or Shipped truth.
+reconstructs the fixed contract, independently confirmed and accepted before
+runtime implementation. The separate Luna MAX fidelity review on 2026-10-03
+reported no findings; its SHA-256 is
+`def11bc0b32adb3b163eb238225ed191f4455f7a65b837f8dafc7deceac89855`.
+It does not claim existing execution, integration or Shipped truth.
 
 ## Operator outcome and placement
 

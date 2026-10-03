@@ -4,7 +4,7 @@ title: "ADR-010: Reviewed Artifact Pipelines"
 
 # ADR-010: Reviewed Artifact Pipelines
 
-**Status:** Proposed reconstruction; fresh independent confirmation required before runtime implementation
+**Status:** Accepted
 
 **Decision class:** Target architecture
 
@@ -16,9 +16,12 @@ Existing Work proposals, dependencies, verified handoffs and registered native
 capabilities can support a finite public-source extraction, evidence dossier
 and local report. The earlier accepted decision and independent review are
 recorded in [issue comment 5957707692](https://github.com/seraph-quest/seraph/issues/914#issuecomment-5957707692).
-Its temporary proposal, draft, implementation and receipts were lost. This
-reconstruction requires fresh independent confirmation before implementation;
-it does not claim the old files exist or establish new Shipped behavior.
+Its temporary proposal, draft, implementation and receipts were lost. The
+reconstruction was independently confirmed by a separate Luna MAX fidelity
+review on 2026-10-03 (review SHA-256
+`def11bc0b32adb3b163eb238225ed191f4455f7a65b837f8dafc7deceac89855`),
+with no findings, and accepted by the lead before runtime implementation. This
+does not claim the old files exist or establish new Shipped behavior.
 
 ## Decision
 

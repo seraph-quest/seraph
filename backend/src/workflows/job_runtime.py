@@ -5570,6 +5570,63 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             db.expunge(refreshed)
             return _serialize(refreshed, receipt={"kind": "recovery_artifact", "status": "recorded", **receipt})
 
+    async def inspect_github_capacity_close(self, job_id, *, request, principal, root, native_kind):
+        """Inspect one pending close in a single canonical read snapshot.
+
+        Monotonic revision/fence supersession proves that this exact old CAS
+        cannot apply. A matching snapshot alone proves nothing about an
+        in-flight request, so it remains inconclusive. No GET/provider/file
+        work, mutation or new idempotency ledger occurs in this transaction.
+        """
+        from src.db.models import GitHubFollowthroughConnection, OperatorSession
+        from src.extensions.github_capacity_closure import public_closure
+        from src.extensions.github_consent import live_operator, utc
+        from src.extensions.github_recovery import KINDS, job_binding
+        from src.work_board.repository import _begin_read_snapshot
+        await live_operator(principal, root)
+        if native_kind not in KINDS:
+            raise DurableJobTransitionError("GitHub pending close kind invalid")
+        body = request.model_dump(mode="json")
+        request_digest = _digest(body)
+        async with self._session() as db:
+            await _begin_read_snapshot(db)
+            run = await self._fetch(db, job_id, allow_closed=True)
+            if run.job_kind != native_kind or run.owner_kind != "user" or run.owner_principal_id != principal or run.operator_session_id != root:
+                raise DurableJobLeaseError("GitHub pending close original owner/root mismatch")
+            session = await db.get(OperatorSession, root)
+            now = _utc_now()
+            if session is None or session.principal_id != principal or session.revoked_at is not None or session.replaced_by_id is not None or session.is_bearer_tombstone or utc(session.idle_expires_at) <= now or utc(session.absolute_expires_at) <= now:
+                raise DurableJobLeaseError("GitHub pending close original root dead")
+            authority = _json_load(run.declared_authority_json, {})
+            original = authority.get("github_consent") if isinstance(authority, dict) else None
+            if _digest(authority) != run.authority_digest or not isinstance(original, dict) or original.get("owner_principal_id") != principal or original.get("consent_root_id") != root:
+                raise DurableJobLeaseError("GitHub pending close immutable binding invalid")
+            connection = await db.get(GitHubFollowthroughConnection, original.get("connection_id"))
+            state = "inconclusive"
+            closure = None
+            if run.github_capacity_closure_json:
+                history = _json_load(run.github_capacity_closure_json, {})
+                valid = isinstance(history, dict) and history.get("history_digest") == _digest({key: value for key, value in history.items() if key != "history_digest"})
+                binding = history.get("binding") if isinstance(history, dict) else None
+                if valid and isinstance(binding, dict) and binding.get("original_write_binding") == original and binding.get("job") == job_binding(run) and history.get("native_kind") == native_kind and history.get("observation_only") is True:
+                    if history.get("request") == body and history.get("request_digest") == request_digest:
+                        state = "applied"
+                        closure = public_closure(run.github_capacity_closure_json)
+                    else:
+                        # The permanent old-job write fence makes every
+                        # different close body permanently non-applicable.
+                        state = "permanently_stale_not_applied"
+            elif connection is not None and connection.owner_principal_id == principal and connection.repository == original.get("repository"):
+                if run.revision > request.expected_job_revision or connection.revision > request.expected_connection_revision or connection.active_fence > request.expected_connection_fence:
+                    state = "permanently_stale_not_applied"
+            projection = _serialize(run)
+            projection["pending_capacity_close"] = {
+                "state": state, "job_id": job_id, "job_revision": run.revision,
+                "request": request.model_dump(mode="json", exclude_none=True),
+                "request_digest": request_digest, "closure": closure,
+            }
+            return projection
+
     async def get_github_capacity_closure(self, job_id, *, request, principal, root):
         """Exact lost-response lookup; no provider or reservation contact."""
         from src.extensions.github_consent import live_operator

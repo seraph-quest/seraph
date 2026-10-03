@@ -14,6 +14,81 @@ function fill() {
 afterEach(() => { vi.unstubAllGlobals(); sessionStorage.clear(); });
 
 describe("Tasks publication control", () => {
+  it.each(["inconclusive", "permanently_stale_not_applied", "applied"])("inspects retained %s without automatically sending or discarding a request", async state => {
+    const fixture = { ...publicationFixture(), status: "unknown_external_effect", approval_status: "consumed" };
+    const key = `seraph:github-capacity-close:v1:owner-a:root-a:${fixture.job_id}:engineering.repo-publication.v1`;
+    const body = { acknowledged_capacity_close: true, expected_job_revision: fixture.revision,
+      expected_connection_revision: 2, expected_connection_fence: 3, idempotency_key: "12345678-1234-1234-1234-123456789abc" };
+    sessionStorage.setItem(key, JSON.stringify(body));
+    const closure = { closure_id: "closure-a", artifact_id: "artifact-a", artifact_sha256: "a".repeat(64),
+      closed_at: "2026-10-03T00:00:00Z", native_kind: "engineering.repo-publication.v1", observation_only: true };
+    let inspections = 0;
+    const posts: Record<string, unknown>[] = [];
+    vi.stubGlobal("fetch", vi.fn((url: unknown, options?: RequestInit) => {
+      if (String(url).includes("pending_capacity_close=")) {
+        inspections++;
+        expect(options?.method ?? "GET").toBe("GET");
+        expect(JSON.parse(new URL(String(url), "http://localhost").searchParams.get("pending_capacity_close")!)).toEqual(body);
+        return response({ ...fixture, revision: fixture.revision + 1, github_capacity_closure: state === "applied" ? closure : null,
+          pending_capacity_close: { state, job_id: fixture.job_id, job_revision: fixture.revision + 1,
+            request: body, request_digest: "a".repeat(64), closure: state === "applied" ? closure : null } });
+      }
+      if (String(url).endsWith("/close-capacity")) { posts.push(JSON.parse(String(options?.body))); return Promise.reject(new Error("response lost")); }
+      if (String(url).includes("/repairs/")) return response({ repair_job_id: "repair-a", owner_principal_id: "owner-a", owner_session_id: "root-a", limit: 20, next_offset: null, jobs: [fixture] });
+      return response({ repository: "acme/example", revision: 4, active_fence: 3, active_job_id: fixture.job_id, mode: "disabled", credential_configured: true });
+    }));
+    render(<RepoPublicationPanel repair={repair} ownerPrincipalId="owner-a" ownerSessionId="root-a" />);
+    await screen.findByText("Inspect retained close request");
+    expect(inspections).toBe(0); expect(posts).toHaveLength(0);
+    fireEvent.click(screen.getByText("Inspect retained close request"));
+    if (state === "applied") {
+      await screen.findByText(/Capacity released/); expect(sessionStorage.getItem(key)).toBeNull();
+    } else if (state === "inconclusive") {
+      await screen.findByText(/Closure outcome is inconclusive/);
+      expect(screen.queryByText("Discard rejected request")).toBeNull();
+      expect(sessionStorage.getItem(key)).toBe(JSON.stringify(body));
+    } else {
+      await screen.findByText("Discard rejected request");
+      expect(sessionStorage.getItem(key)).toBe(JSON.stringify(body));
+      fireEvent.click(screen.getByLabelText(/I authorize this separate capacity closure/));
+      fireEvent.click(screen.getByText("Discard rejected request"));
+      await waitFor(() => expect(sessionStorage.getItem(key)).toBeNull());
+      expect(inspections).toBe(2); expect(posts).toHaveLength(0);
+      expect(screen.getByLabelText(/I authorize this separate capacity closure/)).not.toBeChecked();
+      await waitFor(() => expect(screen.getByText("Close publication capacity")).toBeDisabled());
+      fireEvent.click(screen.getByLabelText(/I authorize this separate capacity closure/));
+      fireEvent.click(screen.getByText("Close publication capacity"));
+      await waitFor(() => expect(posts).toHaveLength(1));
+      expect(posts[0].idempotency_key).not.toBe(body.idempotency_key);
+      expect(posts[0].expected_job_revision).toBe(fixture.revision + 1);
+      expect(posts[0].expected_connection_revision).toBe(4);
+    }
+    expect(posts.length).toBe(state === "permanently_stale_not_applied" ? 1 : 0);
+  });
+
+  it("keeps the retained request when inspection response is unavailable or echoes an altered body", async () => {
+    const fixture = { ...publicationFixture(), status: "unknown_external_effect", approval_status: "consumed" };
+    const key = `seraph:github-capacity-close:v1:owner-a:root-a:${fixture.job_id}:engineering.repo-publication.v1`;
+    const body = { acknowledged_capacity_close: true, expected_job_revision: fixture.revision,
+      expected_connection_revision: 2, expected_connection_fence: 3, idempotency_key: "12345678-1234-1234-1234-123456789abc" };
+    sessionStorage.setItem(key, JSON.stringify(body));
+    let altered = false;
+    vi.stubGlobal("fetch", vi.fn((url: unknown) => {
+      if (String(url).includes("pending_capacity_close=")) return altered ? response({ ...fixture,
+        pending_capacity_close: { state: "permanently_stale_not_applied", job_id: fixture.job_id, job_revision: fixture.revision,
+          request: { ...body, expected_job_revision: 999 }, request_digest: "a".repeat(64), closure: null } }) : Promise.reject(new Error("timeout"));
+      if (String(url).includes("/repairs/")) return response({ repair_job_id: "repair-a", owner_principal_id: "owner-a", owner_session_id: "root-a", limit: 20, next_offset: null, jobs: [fixture] });
+      return response({ repository: "acme/example", revision: 2, active_fence: 3, mode: "disabled", credential_configured: true });
+    }));
+    render(<RepoPublicationPanel repair={repair} ownerPrincipalId="owner-a" ownerSessionId="root-a" />);
+    await screen.findByText("Inspect retained close request");
+    fireEvent.click(screen.getByText("Inspect retained close request"));
+    await screen.findByText("timeout");
+    altered = true; fireEvent.click(screen.getByText("Inspect retained close request"));
+    await screen.findByText("Pending close inspection binding changed");
+    expect(sessionStorage.getItem(key)).toBe(JSON.stringify(body));
+    expect(screen.queryByText("Discard rejected request")).toBeNull();
+  });
   it("requires separate unchecked close consent and retains exact lost-response request across remount", async () => {
     const fixture = { ...publicationFixture(), status: "unknown_external_effect", approval_status: "consumed" };
     const bodies: string[] = [];

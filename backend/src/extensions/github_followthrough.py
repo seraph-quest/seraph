@@ -20,7 +20,7 @@ from dataclasses import replace as replace_dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Literal, Mapping
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Query
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import func, update
 from sqlalchemy.exc import IntegrityError
@@ -2117,9 +2117,10 @@ class GitHubFollowthroughService:
         *,
         prepared: PreparedPublication | None = None,
         approval: Mapping[str, Any] | None = None,
+        repair_connection: bool = True,
     ) -> dict[str, Any]:
         connection_release_status = "not_required"
-        if current.get("status") == "succeeded":
+        if repair_connection and current.get("status") == "succeeded":
             try:
                 connection_release_status = await self._repair_terminal_connection_reservation(current)
             except Exception:
@@ -4290,16 +4291,29 @@ async def prepare_github_followthrough(req: PrepareRequest, request: Request):
 
 
 @github_followthrough_router.get("/jobs/{job_id}")
-async def get_github_followthrough_job(job_id: str, request: Request):
+async def get_github_followthrough_job(job_id: str, request: Request,
+                                      pending_capacity_close: str | None = Query(default=None, min_length=2, max_length=2048)):
     try:
         operator = _operator(request)
         await _require_job_session(job_id, operator)
+        if pending_capacity_close is not None:
+            from src.extensions.github_capacity_closure import LegacyCloseRequest
+            try:
+                pending = LegacyCloseRequest.model_validate_json(pending_capacity_close)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail={"code": "pending_capacity_close_invalid"}) from exc
+            current = await durable_job_repository.inspect_github_capacity_close(job_id, request=pending,
+                principal=_principal_id(operator), root=_session_id(operator), native_kind=JOB_KIND)
+            return {**await github_followthrough_service._prepare_job_response(current, repair_connection=False),
+                    "pending_capacity_close": current["pending_capacity_close"]}
         return await github_followthrough_service.get_job(
             owner_principal_id=_principal_id(operator),
             job_id=job_id,
         )
     except GitHubFollowthroughError as exc:
         raise _raise_http(exc) from exc
+    except (DurableJobError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail={"code": "pending_capacity_close_unavailable"}) from exc
 
 
 @github_followthrough_router.post("/jobs/{job_id}/execute")

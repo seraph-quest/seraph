@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
 import { publicationKey, publicationRequest, validatePublication, validatePublicationDiscovery } from "../../lib/repoPublication";
-import { githubCapacityClosePending } from "../../lib/githubReadback";
+import { githubCapacityClosePending, githubCapacityCloseStored, githubCapacityCloseInspection, type GitHubCapacityCloseInspection } from "../../lib/githubReadback";
 import type { PublicationReceipt } from "../../lib/repoPublication";
 import type { WorkBoardRepoRepairProjection } from "../../types";
 
@@ -16,6 +16,7 @@ export function RepoPublicationPanel({ repair, ownerPrincipalId, ownerSessionId,
   const [form, setForm] = useState({ base_branch: "develop", expected_base_commit: "", branch_name: "feat/", commit_message: "", title: "", body: "" });
   const [prNumber, setPrNumber] = useState("");
   const [closeAcknowledged, setCloseAcknowledged] = useState(false);
+  const [closeInspection, setCloseInspection] = useState<(GitHubCapacityCloseInspection & { scope: string }) | null>(null);
   const [remoteCommitId, setRemoteCommitId] = useState("");
   const [readAcknowledged, setReadAcknowledged] = useState(false);
   const [discovered, setDiscovered] = useState<PublicationReceipt[]>([]);
@@ -24,10 +25,39 @@ export function RepoPublicationPanel({ repair, ownerPrincipalId, ownerSessionId,
   const [scanLimitReached, setScanLimitReached] = useState(false);
   const pending = useRef<Record<string, unknown> | null>(null);
   const scope = `${ownerPrincipalId}\0${ownerSessionId}\0${repair.job_id}`;
+  const boundCloseInspection = closeInspection?.scope === scope && closeInspection.job_id === receipt?.job_id ? closeInspection : null;
   const activeScope = useRef(scope);
   const generation = useRef(0);
   if (activeScope.current !== scope) { activeScope.current = scope; generation.current += 1; }
   const controllers = useRef(new Set<AbortController>());
+  useEffect(() => { setCloseInspection(null); setCloseAcknowledged(false); }, [scope, receipt?.job_id]);
+
+  async function inspectClose(discardRejected = false) {
+    if (!receipt) return;
+    const expected = activeScope.current;
+    const expectedGeneration = generation.current;
+    const controller = new AbortController(); controllers.current.add(controller);
+    const timer = setTimeout(() => controller.abort(), 15000);
+    setBusy(true); setError(null); setCloseAcknowledged(false);
+    try {
+      const retained = githubCapacityCloseStored(`${ownerPrincipalId}:${ownerSessionId}:${receipt.job_id}:engineering.repo-publication.v1`);
+      if (!retained) throw new Error("No retained capacity-close request to inspect.");
+      const value = await publicationRequest(`/jobs/${encodeURIComponent(receipt.job_id)}?pending_capacity_close=${encodeURIComponent(JSON.stringify(retained.body))}`, { method: "GET" }, controller.signal);
+      const next = validatePublication(value, ownerPrincipalId, ownerSessionId, repair.job_id);
+      const inspection = githubCapacityCloseInspection((value as Record<string, unknown>).pending_capacity_close, receipt.job_id, retained.body);
+      if (next.revision !== inspection.job_revision) throw new Error("Canonical job inspection changed");
+      if (activeScope.current !== expected || generation.current !== expectedGeneration) return;
+      setReceipt(next); setCloseInspection({ ...inspection, scope: expected });
+      if (inspection.state === "applied") retained.clear();
+      else if (discardRejected && inspection.state === "permanently_stale_not_applied") {
+        retained.clear(); setCloseInspection(null); await metadata();
+      }
+    } catch (e) {
+      if (activeScope.current === expected && generation.current === expectedGeneration) {
+        setCloseInspection(null); setError(e instanceof Error ? e.message : "Pending closure remains uncertain; keep its exact request.");
+      }
+    } finally { clearTimeout(timer); controllers.current.delete(controller); if (activeScope.current === expected && generation.current === expectedGeneration) setBusy(false); }
+  }
 
   async function discover(offset = 0) {
     const expected = activeScope.current;
@@ -87,6 +117,7 @@ export function RepoPublicationPanel({ repair, ownerPrincipalId, ownerSessionId,
         if (!receipt) throw new Error("Refresh the exact publication receipt first.");
         path = `/jobs/${encodeURIComponent(receipt.job_id)}${action === "refresh" ? "" : `/${action}`}`;
         if (action === "close-capacity") {
+          setCloseInspection(null);
           if (!closeAcknowledged || !connection || connection.scope !== expected) throw new Error("Explicit current capacity-close acknowledgment required.");
           closePending = githubCapacityClosePending(`${ownerPrincipalId}:${ownerSessionId}:${receipt.job_id}:engineering.repo-publication.v1`, {
             acknowledged_capacity_close: true, expected_job_revision: receipt.revision,
@@ -141,10 +172,16 @@ export function RepoPublicationPanel({ repair, ownerPrincipalId, ownerSessionId,
       <div>Approval {current.approval_id} · {current.approval_status} · {current.approval_expires_at ?? "expiry unavailable"}</div>
       <div className="mt-2 flex flex-wrap gap-2">
         <button type="button" disabled={busy} onClick={() => void act("refresh")}>Refresh exact job</button>
+        <button type="button" disabled={busy} onClick={() => void inspectClose()}>Inspect retained close request</button>
         {current.approval_status === "pending" && onOpenApprovals && <button type="button" disabled={busy || !healthy || patch === null} onClick={onOpenApprovals}>Review local execution and remote publication approval</button>}
         {canExecute && <button type="button" disabled={busy} onClick={() => void act("execute")}>Execute approved publication</button>}
         {["awaiting_approval", "queued", "running"].includes(current.status) && <button type="button" disabled={busy || !healthy} onClick={() => void act("cancel")}>Cancel publication</button>}
       </div>
+      {boundCloseInspection?.state === "inconclusive" && <p role="status">Closure outcome is inconclusive. Keep the exact request for explicit retry.</p>}
+      {boundCloseInspection?.state === "permanently_stale_not_applied" && <div>
+        <p role="status">The server confirms this exact retained request is permanently stale and was not applied.</p>
+        <button type="button" disabled={busy} onClick={() => void inspectClose(true)}>Discard rejected request</button>
+      </div>}
       {["unknown_external_effect", "blocked", "failed"].includes(current.status) && <div className="mt-2"><p>Remote outcome may be unknown. Reconciliation only reads the exact destination; it never republishes.</p><label>PR number (optional)<input aria-label="PR number" value={prNumber} onChange={(event) => setPrNumber(event.target.value)} /></label><label className="block"><input type="checkbox" checked={readAcknowledged} onChange={event => setReadAcknowledged(event.target.checked)} /> I authorize readback of this exact publication using the current connection revision.</label><button type="button" disabled={busy || !healthy || !readAcknowledged || (Boolean(prNumber) && !/^[1-9][0-9]*$/.test(prNumber))} onClick={() => void act("reconcile")}>Reconcile destination</button></div>}
       {current.github_capacity_closure ? <p role="status">Capacity released. The retained effect, cost and job status remain unchanged; no learning. Check destination remains read-only.</p> : ["unknown_external_effect", "blocked", "failed"].includes(current.status) && <div className="mt-2">
         <p>Close capacity only after complete positive destination proof and trusted local quiescence. Unknown effect and cost remain unchanged.</p>

@@ -28,7 +28,7 @@ from src.execution.repo_publication import PublicationError, SourceGit, branch, 
 from src.execution.repo_worker import _open_source_regular_file, _open_directory_descriptor, _descriptor_flags
 from src.extensions.github_followthrough import GitHubFollowthroughService, _require_live_owner_session, _operator, _principal_id, _session_id
 from src.extensions.github_consent import require_consent, require_readback, GitHubReadbackAuthority, PUBLICATION_ACTIONS, live_operator
-from src.workflows.job_runtime import DurableJobIdentity, DurableJobSpec, durable_job_repository as jobs
+from src.workflows.job_runtime import DurableJobError, DurableJobIdentity, DurableJobSpec, durable_job_repository as jobs
 from src.workspace import canonical_workspace_root
 from src.extensions.github_capacity_closure import PublicationCloseRequest
 
@@ -839,9 +839,21 @@ async def close_publication_capacity(job_id: str, body: PublicationCloseRequest,
 
 
 @router.get("/jobs/{job_id}")
-async def get_publication(job_id: str, request: Request):
+async def get_publication(job_id: str, request: Request,
+                          pending_capacity_close: str | None = Query(default=None, min_length=2, max_length=2048)):
     operator = _operator(request)
     service = RepoPublicationService()
+    if pending_capacity_close is not None:
+        try:
+            pending = PublicationCloseRequest.model_validate_json(pending_capacity_close)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail={"code": "pending_capacity_close_invalid"}) from exc
+        try:
+            current = await jobs.inspect_github_capacity_close(job_id, request=pending,
+                principal=_principal_id(operator), root=_session_id(operator), native_kind=CAPABILITY)
+        except (DurableJobError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail={"code": "pending_capacity_close_unavailable"}) from exc
+        return {**await service.view(current), "pending_capacity_close": current["pending_capacity_close"]}
     return await service.view(await service.owned(job_id, _principal_id(operator), _session_id(operator)))
 
 

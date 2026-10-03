@@ -57,6 +57,13 @@ async def test_actual_remote_prefix_close_requires_positive_complete_inventory(
     body = {"acknowledged_capacity_close": True, "expected_job_revision": original["revision"],
         "expected_connection_revision": row.revision, "expected_connection_fence": row.active_fence,
         "idempotency_key": str(uuid.uuid4())}
+    inspection_path = f"/api/capabilities/github/repo-publication/jobs/{job_id}"
+    calls_before_inspection = list(transport.calls)
+    pending = await client.get(inspection_path, params={"pending_capacity_close": json.dumps(body)})
+    assert pending.status_code == 200 and pending.json()["pending_capacity_close"]["state"] == "inconclusive", pending.text
+    stale_pending = await client.get(inspection_path, params={"pending_capacity_close": json.dumps({**body, "expected_job_revision": original["revision"] - 1})})
+    assert stale_pending.status_code == 200 and stale_pending.json()["pending_capacity_close"]["state"] == "permanently_stale_not_applied", stale_pending.text
+    assert transport.calls == calls_before_inspection
     if lost_path == "/git/commits":
         missing = await client.post(f"/api/capabilities/github/repo-publication/jobs/{job_id}/close-capacity", json=body, headers=ORIGIN)
         assert missing.status_code == 409 and "remote_commit_id_required" in missing.text, missing.text
@@ -78,6 +85,26 @@ async def test_actual_remote_prefix_close_requires_positive_complete_inventory(
     calls_before_retry = list(transport.calls)
     repeated = await client.post(f"/api/capabilities/github/repo-publication/jobs/{job_id}/close-capacity", json=body, headers=ORIGIN)
     assert repeated.status_code == 200 and transport.calls == calls_before_retry
+    await physical_engine.dispose()
+    applied = await client.get(inspection_path, params={"pending_capacity_close": json.dumps(body)})
+    assert applied.status_code == 200 and applied.json()["pending_capacity_close"]["state"] == "applied", applied.text
+    assert applied.json()["pending_capacity_close"]["closure"] == current["github_capacity_closure"]
+    altered = await client.get(inspection_path, params={"pending_capacity_close": json.dumps({**body, "idempotency_key": str(uuid.uuid4())})})
+    assert altered.status_code == 200 and altered.json()["pending_capacity_close"]["state"] == "permanently_stale_not_applied", altered.text
+    invalid = await client.get(inspection_path, params={"pending_capacity_close": json.dumps({**body, "remote_id": 1})})
+    assert invalid.status_code == 422
+    from tests.test_github_connection_consent import login
+    # The native helper installs a domainless cookie as well as the normal
+    # login cookie. Remove that old fixture transport cookie before a real
+    # new login so this negative actually changes the authenticated Root.
+    client.cookies.clear()
+    fresh_owner = await login(client, monkeypatch)
+    assert fresh_owner["session_id"] != flow["owner"].session_id
+    authenticated = await client.get("/api/auth/session")
+    assert authenticated.json()["session_id"] == fresh_owner["session_id"]
+    wrong_root = await client.get(inspection_path, params={"pending_capacity_close": json.dumps(body)})
+    assert wrong_root.status_code == 409, wrong_root.text
+    assert transport.calls == calls_before_retry
     proof = tmp_path / "actual-publication-prefix-close.json"
     proof.write_text(json.dumps({"intercepted_external_http": True, "lost_path": lost_path,
         "lost_response": lost, "original": original, "closed": closed.json(),

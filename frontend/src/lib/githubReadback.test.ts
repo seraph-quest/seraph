@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { githubCapacityClosePending, githubCapacityClosure, githubReadbackRequest } from "./githubReadback";
+import { githubCapacityClosePending, githubCapacityCloseStored, githubCapacityCloseInspection, githubCapacityClosure, githubReadbackRequest } from "./githubReadback";
 
 describe("legacy GitHub exact readback request", () => {
   it("requires fresh explicit acknowledgment and canonical revision", () => {
@@ -47,5 +47,23 @@ describe("finite GitHub capacity closure", () => {
       closed_at: "2026-10-03T00:00:00Z", native_kind: "github_followthrough_v1", observation_only: true };
     expect(githubCapacityClosure(closed)).toEqual(closed);
     expect(() => githubCapacityClosure({ ...closed, observation_only: false })).toThrow();
+  });
+  it("requires exact inspection echo and protects changed retained bytes from an old clear", () => {
+    sessionStorage.clear();
+    expect(githubCapacityCloseStored("inspect")).toBeNull();
+    const pending = githubCapacityClosePending("inspect", body);
+    const result = { state: "permanently_stale_not_applied", job_id: "job", job_revision: 10,
+      request: body, request_digest: "a".repeat(64), closure: null };
+    expect(githubCapacityCloseInspection(result, "job", body).state).toBe(result.state);
+    for (const changed of [{ ...result, job_id: "other" }, { ...result, request: { ...body, remote_id: 8 } },
+      { ...result, state: "applied" }, { ...result, request_digest: "bad" }]) {
+      expect(() => githubCapacityCloseInspection(changed, "job", body)).toThrow();
+    }
+    const key = "seraph:github-capacity-close:v1:inspect";
+    const replacement = JSON.stringify({ ...body, idempotency_key: "87654321-1234-1234-1234-123456789abc" });
+    sessionStorage.setItem(key, replacement);
+    expect(() => pending.clear()).toThrow(/changed/);
+    expect(sessionStorage.getItem(key)).toBe(replacement);
+    sessionStorage.clear();
   });
 });

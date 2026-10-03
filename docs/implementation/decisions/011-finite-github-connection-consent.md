@@ -372,6 +372,26 @@ before proof and prove named permanent blocking, without a fake terminal row.
 
 ### V3 exact legacy follow-through coverage
 
+Retained capacity-close requests have a separate explicit recovery control on
+both owned-job surfaces. Their existing GET inspector accepts the exact pending
+strict request as a query bounded to 2,048 characters, then resolves it from one
+canonical job/closure/connection snapshot under the original current owner and
+live Root. It reports the exact applied closure receipt, permanently stale and
+not applied, or inconclusive. A matching current CAS remains inconclusive:
+another close can commit after that snapshot. Monotonic revision/fence
+supersession or a different valid permanent closure proves that the old exact
+body can never apply. Inspection performs no close, reservation repair, provider
+contact, execution or new ledger mutation.
+
+Only a conclusively rejected result enables the explicit **Discard rejected
+request** control. Discard first repeats the exact GET inspection under current
+owner/Root/job scope; it clears only unchanged retained bytes and resets the
+unchecked acknowledgment. A later separate acknowledgment creates a new UUID
+with current displayed revisions. Exact applied receipts clear only their own
+retained body and show durable closed truth. Timeouts, generic conflicts,
+unavailable or altered inspection responses retain the original request for
+manual exact retry. Reload never closes, discards or rotates a request key.
+
 Supported native kinds are exactly engineering.repo-publication.v1 and
 github_followthrough_v1. Public capability mapping is fixed server-side:
 engineering.repo-publication.v1 stays itself; github_followthrough_v1 maps only

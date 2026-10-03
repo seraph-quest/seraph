@@ -70,6 +70,69 @@ async def actual_close_case(client, async_db, monkeypatch, tmp_path, *, status=2
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_pending_legacy_close_inspection_is_consistent_durable_and_get_only(client, async_db, monkeypatch, tmp_path):
+    from sqlalchemy import text
+    from src.work_board import repository as board_repository
+    from tests.test_github_connection_consent import login
+    original, read, service, calls, body = await actual_close_case(client, async_db, monkeypatch, tmp_path)
+    path = f"/api/capabilities/github/jobs/{read.job_id}"
+    async def inspect(request):
+        result = await client.get(path, params={"pending_capacity_close": json.dumps(request)})
+        assert result.status_code == 200, result.text
+        return result.json()["pending_capacity_close"]
+    assert (await inspect(body))["state"] == "inconclusive" and calls == []
+    stale = {**body, "expected_job_revision": body["expected_job_revision"] - 1}
+    denied = await client.post(path + "/close-capacity", json=stale, headers=ORIGIN)
+    assert denied.status_code == 409 and calls == []
+    rejected = await inspect(stale)
+    assert rejected["state"] == "permanently_stale_not_applied" and rejected["closure"] is None
+    # Permit actual concurrent file-SQLite writer progress while the inspector
+    # holds its real pre-close read snapshot. The hook only orders the race;
+    # the existing real closure adapter/transaction supplies every proof byte.
+    async with async_db() as db:
+        await db.execute(text("PRAGMA journal_mode=WAL"))
+    begin = board_repository._begin_read_snapshot
+    fetch = jobs._fetch
+    performed = []
+    async def snapshot(db):
+        await begin(db)
+        db.info["pending_close_race"] = True
+    async def fetch_then_close(db, job_id, **kwargs):
+        row = await fetch(db, job_id, **kwargs)
+        if db.info.get("pending_close_race") and not performed:
+            performed.append(True)
+            closed = await client.post(path + "/close-capacity", json=body, headers=ORIGIN)
+            assert closed.status_code == 200, closed.text
+        return row
+    with monkeypatch.context() as race:
+        race.setattr(board_repository, "_begin_read_snapshot", snapshot)
+        race.setattr(jobs, "_fetch", fetch_then_close)
+        concurrent = await inspect(body)
+    assert performed and concurrent["state"] == "inconclusive" and concurrent["job_revision"] == original["revision"]
+    assert calls == ["GET"]
+    async with async_db() as db:
+        physical_engine = db.bind
+    await physical_engine.dispose()
+    applied = await inspect(body)
+    assert applied["state"] == "applied" and applied["request"] == body
+    assert applied["closure"] == (await jobs.get_job(read.job_id))["github_capacity_closure"]
+    for altered in [{**body, "idempotency_key": str(uuid.uuid4())}, {**body, "remote_id": 2}]:
+        assert (await inspect(altered))["state"] == "permanently_stale_not_applied"
+    invalid = await client.get(path, params={"pending_capacity_close": json.dumps({**body, "proof": True})})
+    assert invalid.status_code == 422
+    await login(client, monkeypatch)
+    wrong_root = await client.get(path, params={"pending_capacity_close": json.dumps(body)})
+    assert wrong_root.status_code in {403, 409}, wrong_root.text
+    assert calls == ["GET"]
+    proof = tmp_path / "actual-pending-legacy-close-inspection.json"
+    proof.write_text(json.dumps({"inconclusive_during_actual_concurrent_close": concurrent,
+        "rejected": rejected, "applied_after_pool_reopen": applied, "wrong_root_status": wrong_root.status_code,
+        "intercepted_external_http_methods": calls}, sort_keys=True))
+    print("ACTUAL_PENDING_LEGACY_CLOSE_INSPECTION=" + str(proof))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
 async def test_real_legacy_unknown_or_flagged_intent_never_releases(client, async_db, monkeypatch, tmp_path):
     original, read, service, calls, body = await actual_close_case(client, async_db, monkeypatch, tmp_path)
     cases = [{"effect_type": "other_external_write", "status": status, "details": {}}

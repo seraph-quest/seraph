@@ -394,4 +394,35 @@ describe("OutcomeCockpitPanel", () => {
     expect(screen.getByRole("button", { name: "Check destination" })).toBeEnabled();
   });
 
+  it.each(["inconclusive", "permanently_stale_not_applied", "applied"] as const)("separates explicit %s inspection from capacity mutation", state => {
+    const close = vi.fn(), inspect = vi.fn(), discard = vi.fn();
+    const github = { state: "partial_metadata" as const, repository: "acme/example", action: "create_issue" as const,
+      jobId: "job-a", jobRevision: 12, previewBody: "Exact text", recoveryReason: "unknown_external_effect" };
+    const closure = { closure_id: "close-a", artifact_id: "artifact-a", artifact_sha256: "a".repeat(64),
+      closed_at: "2026-10-03T00:00:00Z", native_kind: "github_followthrough_v1" as const, observation_only: true as const };
+    const props = { githubFollowthrough: github, githubCapacityAcknowledgmentScope: "owner:root-a",
+      onCloseGitHubCapacity: close, onInspectGitHubCapacity: inspect, onDiscardRejectedGitHubCapacity: discard };
+    const view = renderFixture({}, props);
+    expect(inspect).not.toHaveBeenCalled(); expect(close).not.toHaveBeenCalled(); expect(discard).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByLabelText(/I authorize separate capacity closure/));
+    fireEvent.click(screen.getByRole("button", { name: "Inspect retained close request" }));
+    expect(inspect).toHaveBeenCalledOnce(); expect(close).not.toHaveBeenCalled();
+    expect(screen.getByLabelText(/I authorize separate capacity closure/)).not.toBeChecked();
+    const result = { state, job_id: "job-a", job_revision: 12, request: {}, request_digest: "a".repeat(64), closure: state === "applied" ? closure : null };
+    view.rerender(<OutcomeCockpitPanel {...fixtureModel()} {...props} githubCapacityCloseInspection={result}
+      githubFollowthrough={state === "applied" ? { ...github, capacityClosure: closure } : github} />);
+    if (state === "applied") {
+      expect(screen.getByText(/Capacity released/)).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Discard rejected request" })).not.toBeInTheDocument();
+    } else if (state === "inconclusive") {
+      expect(screen.getByText(/close outcome is inconclusive/)).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Discard rejected request" })).not.toBeInTheDocument();
+    } else {
+      fireEvent.click(screen.getByLabelText(/I authorize separate capacity closure/));
+      fireEvent.click(screen.getByRole("button", { name: "Discard rejected request" }));
+      expect(discard).toHaveBeenCalledOnce(); expect(close).not.toHaveBeenCalled();
+      expect(screen.getByLabelText(/I authorize separate capacity closure/)).not.toBeChecked();
+    }
+  });
+
 });

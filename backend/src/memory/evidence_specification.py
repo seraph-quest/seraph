@@ -23,7 +23,7 @@ def _identity(task):
     return {key: getattr(task, key) for key in (
         'task_id', 'task_revision', 'owner_principal_id', 'owner_session_id',
         'goal_id', 'goal_revision', 'capability_id', 'typed_input_ref',
-        'typed_input_digest', 'executor_id', 'pipeline_operation_id', 'pipeline_slot')}
+        'typed_input_digest', 'input_artifact_id', 'executor_id', 'pipeline_operation_id', 'pipeline_slot')}
 
 
 def _target(task, item):

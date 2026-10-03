@@ -2212,6 +2212,9 @@ async def accept_proposal(
         stage_specification, recheck_specification, replace_specification_evidence,
     )
     from src.memory.evidence_execution import _current_operator
+    from src.memory.evidence_specification_inputs import (
+        stage_specification_input, recheck_specification_input, bind_specification_input,
+    )
     # Recheck capability authority before taking SQLite's immediate writer
     # lock. The provider-free preflight reads the canonical goal and adapter
     # state through their existing repositories; doing those reads under the
@@ -2288,6 +2291,8 @@ async def accept_proposal(
             raise BoardError('invalid_proposal', 'The proposal has no typed task preview', status_code=409)
         specification_evidence = await stage_specification(preview_db, owner,
             preview_parent, preview_proposal.kind, staged_tasks, request)
+        specification_input = await stage_specification_input(preview_db, owner,
+            preview_parent, preview_proposal.kind, staged_tasks)
     preview_payload = _decode_json(preview_proposal_json)
     preview_tasks = preview_payload.get("proposed_tasks")
     if not isinstance(preview_tasks, list) or any(not isinstance(item, Mapping) for item in preview_tasks):
@@ -2450,6 +2455,7 @@ async def accept_proposal(
             expected_previews=authority_previews,
         )
         await recheck_specification(db, owner, parent, proposal.kind, tasks, specification_evidence)
+        resolved_specification_input = await recheck_specification_input(db, owner, parent, specification_input)
         if proposal.kind == "specify":
             if links:
                 raise BoardError(
@@ -2502,6 +2508,8 @@ async def accept_proposal(
                     "capability_id": capability_id,
                     "typed_input_ref": str(item.get("typed_input_ref") or ""),
                     "typed_input_digest": str(item.get("typed_input_digest") or ""),
+                    **({'input_artifact_id': resolved_specification_input.row.artifact_id}
+                       if resolved_specification_input is not None else {}),
                     "executor_id": expected_executor,
                     "status": WorkBoardStatus.todo,
                     "block_kind": None,
@@ -2524,6 +2532,7 @@ async def accept_proposal(
                 },
             )
             await replace_specification_evidence(db, owner, parent, proposal, specification_evidence)
+            await bind_specification_input(db, owner, parent, specification_input, resolved_specification_input)
             proposal.status = "accepted"
             proposal.revision += 1
             await db.flush()

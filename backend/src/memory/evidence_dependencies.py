@@ -17,7 +17,7 @@ from sqlalchemy import select
 from config.settings import settings
 from src.db.models import (
     Goal, Memory, MemoryKind, MemoryProposal, MemorySource, MemoryStatus, MemoryTombstone,
-    WorkBoardAttempt, WorkBoardEvidenceDependency, WorkBoardStatus, WorkBoardTask,
+    WorkBoardAttempt, WorkBoardEvent, WorkBoardEvidenceDependency, WorkBoardStatus, WorkBoardTask,
     WorkflowRunState,
 )
 from src.work_board.contracts import WorkBoardOwner
@@ -59,6 +59,12 @@ def _changed() -> BoardError:
     return BoardError('evidence_dependency_stale', 'Selected execution evidence changed; inspect and review its replacement', status_code=409)
 
 
+def _require_pair(source_kind: str, consumer: str | None) -> None:
+    if consumer not in CONSUMERS or (source_kind != 'canonical_memory'
+        and PRODUCERS.get(source_kind) != consumer):
+        raise BoardError('evidence_dependency_unsupported', 'This exact source and consumer pairing cannot bind execution', status_code=409)
+
+
 @dataclass(frozen=True)
 class ResolvedSource:
     """Internal staged identity, minted only after the private source reader."""
@@ -87,10 +93,12 @@ class StagedEvidence:
     packet_revision: int
     packet_digest: str
     sources: tuple[ResolvedSource, ...]
+    task_capability: str
 
     def snapshot(self) -> dict[str, Any]:
         value = {'schema': 'work.evidence-execution.v1', 'task_id': self.task_id,
-                 'task_revision': self.task_revision, 'packet_revision': self.packet_revision,
+                 'task_revision': self.task_revision, 'task_capability': self.task_capability,
+                 'packet_revision': self.packet_revision,
                  'packet_digest': self.packet_digest,
                  'sources': [{'source_id': item.source_id, 'source_kind': item.source_kind,
                      'canonical_source_id': item.canonical_source_id, 'source_digest': item.source_digest,
@@ -109,10 +117,73 @@ async def _goal(db, owner: WorkBoardOwner, task: WorkBoardTask) -> Goal:
     return goal
 
 
+async def _cpu_browser_permission(db, owner: WorkBoardOwner, task: WorkBoardTask,
+                                  source_task: WorkBoardTask, run: WorkflowRunState) -> dict[str, Any]:
+    """Only the existing dossier/report chain, at most two fixed parent hops."""
+    from src.memory.evidence_sources import run_has_task_owner
+    from src.memory.evidence_working_set import _verified_receipts
+    from src.security.site_policy import evaluate_site_access
+    from src.work_board.pipeline_contracts import EvidenceConsumerInput
+    from src.workflows.job_runtime import _digest
+    ancestors = []
+    for expected_kind in (['evidence_dossier', 'browser_public_task_result']
+                          if source_task.capability_id == PRODUCERS['evidence_local_report']
+                          else ['browser_public_task_result']):
+        arguments = _json(run.arguments_json)
+        if not isinstance(arguments, dict) or _digest(arguments) != run.input_digest:
+            raise _changed()
+        try:
+            inputs = EvidenceConsumerInput.model_validate(arguments.get('input'))
+        except ValueError as exc:
+            raise _changed() from exc
+        expected_schema = 'evidence_dossier.v1' if expected_kind == 'evidence_dossier' else expected_kind
+        if inputs.producer_schema != expected_schema:
+            raise _changed()
+        parent = (await db.execute(select(WorkBoardTask).where(
+            WorkBoardTask.task_id == inputs.producer_task_ref).execution_options(populate_existing=True))).scalar_one_or_none()
+        attempt = await db.get(WorkBoardAttempt, inputs.producer_attempt_ref, populate_existing=True)
+        if (parent is None or attempt is None or parent.capability_id != PRODUCERS[expected_kind]
+            or parent.archived_at is not None or attempt.task_id != parent.task_id
+            or attempt.ended_at is None or attempt.outcome != 'verified'
+            or (parent.owner_principal_id, parent.owner_session_id, parent.goal_id)
+                != (owner.principal_id, owner.session_id, task.goal_id)):
+            raise _changed()
+        parent_run = (await db.execute(select(WorkflowRunState).where(
+            WorkflowRunState.run_identity == attempt.workflow_run_id).execution_options(populate_existing=True))).scalar_one_or_none()
+        if parent_run is None or parent_run.status != 'succeeded' or not run_has_task_owner(parent, attempt, parent_run):
+            raise _changed()
+        for value in (parent_run.artifact_receipts_json, parent_run.effect_receipts_json):
+            _json(value, maximum=256 * 1024)
+        receipts = [item for item in _verified_receipts(parent_run)
+                    if item.get('artifact_type') == expected_kind
+                    and item.get('content_sha256') == inputs.producer_sha256]
+        if len(receipts) != 1:
+            raise _changed()
+        ancestors.append({'task_id': parent.task_id, 'task_revision': parent.task_revision,
+            'attempt_id': attempt.attempt_id, 'fence': attempt.fencing_token,
+            'run_id': parent_run.run_identity, 'run_revision': parent_run.revision,
+            'receipt_digest': digest(receipts[0]), 'file_path': receipts[0]['file_path'],
+            'content_digest': receipts[0]['content_sha256']})
+        if expected_kind == 'browser_public_task_result':
+            payload = _json(inputs.quoted_source_data)
+            if (not isinstance(payload, dict) or payload.get('task_id') != parent.task_id
+                or payload.get('attempt_id') != attempt.attempt_id
+                or payload.get('capability_id') != 'browser.public-task.v1'
+                or not isinstance(payload.get('final_url'), str)
+                or not evaluate_site_access(payload['final_url'], resolve_dns=False).allowed):
+                raise _changed()
+            return {'ancestors': ancestors, 'url_digest': digest(payload['final_url']),
+                    'policy_digest': digest({'allow': settings.browser_site_allowlist,
+                                            'block': settings.browser_site_blocklist})}
+        source_task, run = parent, parent_run
+    raise _changed()
+
+
 async def canonical_source_token(db, owner: WorkBoardOwner, task: WorkBoardTask,
                                  source_kind: str, canonical_id: str,
                                  lineage: dict[str, Any] | None = None) -> dict[str, Any]:
     """Pure canonical DB checks, safe inside an existing immediate writer."""
+    _require_pair(source_kind, task.capability_id)
     await _goal(db, owner, task)
     identity = {'owner_principal_id': owner.principal_id, 'owner_session_id': owner.session_id,
                 'goal_id': task.goal_id, 'source_kind': source_kind, 'canonical_source_id': canonical_id}
@@ -178,6 +249,8 @@ async def canonical_source_token(db, owner: WorkBoardOwner, task: WorkBoardTask,
     if len(matches) != 1:
         raise _changed()
     receipt = matches[0]
+    upstream_permission = (await _cpu_browser_permission(db, owner, task, source_task, run)
+                           if producer != 'browser.public-task.v1' else None)
     return {**identity, 'lineage': dict(lineage), 'producer': producer,
             'task_revision': source_task.task_revision, 'task_status': source_task.status.value,
             'input_digest': source_task.typed_input_digest, 'attempt_fence': attempt.fencing_token,
@@ -185,8 +258,9 @@ async def canonical_source_token(db, owner: WorkBoardOwner, task: WorkBoardTask,
             'run_authority_digest': run.authority_digest, 'run_input_digest': run.input_digest,
             'readback_digest': digest(run.effect_receipts_json), 'receipt_digest': digest(receipt),
             'file_path': receipt['file_path'], 'content_digest': receipt['content_sha256'],
+            'upstream_permission': upstream_permission,
             'read_policy_digest': digest({'allow': settings.browser_site_allowlist,
-                'block': settings.browser_site_blocklist}) if producer == 'browser.public-task.v1' else None}
+                'block': settings.browser_site_blocklist})}
 
 
 async def stage_packet(db, owner: WorkBoardOwner, task: WorkBoardTask,
@@ -214,6 +288,10 @@ async def stage_packet(db, owner: WorkBoardOwner, task: WorkBoardTask,
             raise _changed()
         token = await canonical_source_token(db, owner, task, source['source_kind'], source['identifier'],
                                              source.get('canonical_binding'))
+        if token.get('upstream_permission') is not None:
+            from src.memory.evidence_working_set import _read_file
+            for ancestor in token['upstream_permission']['ancestors']:
+                _read_file(ancestor['file_path'], ancestor['content_digest'])
         serialized = json.dumps(token, sort_keys=True, separators=(',', ':'))
         if len(serialized.encode()) > MAX_TOKEN_BYTES:
             raise BoardError('evidence_dependency_limit', 'Canonical token exceeds its finite limit', status_code=409)
@@ -223,14 +301,32 @@ async def stage_packet(db, owner: WorkBoardOwner, task: WorkBoardTask,
         seen.add(key)
         resolved.append(ResolvedSource(citation['source_id'], source['source_kind'], source['identifier'],
             citation['source_digest'], citation['span_digest'], start, end, citation['version'], serialized))
-    staged = StagedEvidence(task.task_id, task.task_revision, packet['revision'], packet['digest'], tuple(resolved))
+    staged = StagedEvidence(task.task_id, task.task_revision, packet['revision'], packet['digest'], tuple(resolved), task.capability_id)
     staged.snapshot()
     return staged
 
 
 async def recheck_staged(db, owner: WorkBoardOwner, task: WorkBoardTask, staged: StagedEvidence) -> None:
     """Canonical-only source comparison after the caller acquires its writer."""
-    if task.task_id != staged.task_id:
+    current_task = (await db.execute(select(WorkBoardTask).where(
+        WorkBoardTask.task_id == staged.task_id).execution_options(populate_existing=True))).scalar_one_or_none()
+    if (current_task is None or task.task_id != staged.task_id
+        or current_task.task_revision != staged.task_revision
+        or current_task.capability_id != staged.task_capability
+        or (current_task.owner_principal_id, current_task.owner_session_id)
+            != (owner.principal_id, owner.session_id)):
+        raise _changed()
+    task = current_task
+    event = (await db.execute(select(WorkBoardEvent).where(
+        WorkBoardEvent.task_id == task.task_id,
+        WorkBoardEvent.owner_principal_id == owner.principal_id,
+        WorkBoardEvent.owner_session_id == owner.session_id,
+        WorkBoardEvent.kind == 'task.evidence.updated',
+    ).order_by(WorkBoardEvent.event_id.desc()).limit(1))).scalar_one_or_none()
+    metadata = _json(event.metadata_json) if event is not None else None
+    if (not isinstance(metadata, dict) or type(metadata.get('packet_revision')) is not int
+        or metadata.get('packet_revision') != staged.packet_revision
+        or metadata.get('packet_digest') != staged.packet_digest):
         raise _changed()
     for source in staged.sources:
         expected = source.token()
@@ -247,6 +343,7 @@ async def dependency_rows(db, task: WorkBoardTask) -> list[WorkBoardEvidenceDepe
     if len(rows) > MAX_DEPENDENCIES or (rows and task.capability_id not in CONSUMERS):
         raise BoardError('evidence_dependency_unsupported', 'Persisted execution dependencies are unsupported or over limit', status_code=409)
     for row in rows:
+        _require_pair(row.source_kind, task.capability_id)
         if ((row.owner_principal_id, row.owner_session_id, row.goal_id)
                 != (task.owner_principal_id, task.owner_session_id, task.goal_id)
             or row.source_kind not in {'canonical_memory', *PRODUCERS}

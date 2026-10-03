@@ -437,6 +437,30 @@ def _m5_selection_scope(value: Any) -> dict[str, Any] | None:
     malformed canonical projection fails closed.
     """
 
+    if isinstance(value, dict) and value.get("schema_version") == "procedure_preference.v1":
+        # This fixed schema authenticates an exact reviewed version and its
+        # COMPLETE outcome set. Extra JSON fields never silently become a
+        # signed preference. Ordinary M5 scope bytes remain unchanged below.
+        identities = ("owner_principal_id", "owner_session_id", "goal_id",
+            "routine_id", "version_id", "template_id")
+        revisions = ("goal_revision", "routine_revision", "version")
+        digests = ("source_context_digest", "plan_digest", "package_digest",
+            "copied_input_digest", "membership_digest", "bundle_digest")
+        expected = {"schema_version", "source_task_ids", *identities, *revisions, *digests}
+        if set(value) != expected or value.get("template_id") != "public-browser-check":
+            return None
+        if any(type(value[k]) is not str or not value[k] or len(value[k]) > 256 for k in identities):
+            return None
+        if any(type(value[k]) is not int or value[k] < 1 for k in revisions):
+            return None
+        if any(type(value[k]) is not str or not re.fullmatch(r"[a-f0-9]{64}", value[k]) for k in digests):
+            return None
+        ids = value["source_task_ids"]
+        if (not isinstance(ids, list) or not 1 <= len(ids) <= 20
+            or any(type(i) is not str or not i or len(i) > 256 for i in ids)
+            or ids != sorted(set(ids))):
+            return None
+        return {k: list(value[k]) if k == "source_task_ids" else value[k] for k in sorted(expected)}
     if not isinstance(value, dict) or value.get("schema_version") != _M5_SCOPE_SCHEMA_VERSION:
         return None
     required = {
@@ -566,10 +590,11 @@ def _m5_verified_source_binding(value: Any) -> dict[str, Any] | None:
     return normalized
 
 
-def _m5_selection_binding_key_id() -> str:
+def _m5_selection_binding_key_id(*, _signing_key: bytes | None = None) -> str:
     """Return a non-secret identifier for the active M5 signing key."""
 
-    return hashlib.sha256(b"seraph-m5-selection-key-id-v1:" + _effect_mac_key()).hexdigest()[:24]
+    key = _effect_mac_key() if _signing_key is None else _signing_key
+    return hashlib.sha256(b"seraph-m5-selection-key-id-v1:" + key).hexdigest()[:24]
 
 
 def _m5_selection_binding_mac(
@@ -589,6 +614,7 @@ def _m5_selection_binding_mac(
     lifecycle_state: str = "active",
     lifecycle_at: str | None = None,
     lifecycle_reason: str | None = None,
+    _signing_key: bytes | None = None,
 ) -> str:
     """Authenticate the accepted M5 selection with existing server key material."""
 
@@ -650,7 +676,7 @@ def _m5_selection_binding_mac(
             raise ValueError("M5 rollback lifecycle metadata is invalid")
         payload["lifecycle_at"] = normalized_lifecycle_at
         payload["lifecycle_reason"] = normalized_lifecycle_reason
-    return _mac(payload, key=_effect_mac_key())
+    return _mac(payload, key=_effect_mac_key() if _signing_key is None else _signing_key)
 
 
 def _m5_selection_binding_matches(
@@ -663,6 +689,7 @@ def _m5_selection_binding_matches(
     source_binding: Any,
     corrects_memory_id: str | None = None,
     recovered_from_proposal_id: str | None = None,
+    _signing_key: bytes | None = None,
 ) -> bool:
     """Confirm that an accepted proposal still matches canonical memory.
 
@@ -715,7 +742,7 @@ def _m5_selection_binding_matches(
     if expected_correction_id and canonical_correction["corrected_memory_previous_status"] != "active":
         return False
     try:
-        active_key_id = _m5_selection_binding_key_id()
+        active_key_id = _m5_selection_binding_key_id(_signing_key=_signing_key)
         stored_key_id = provenance.get("selection_binding_key_id")
         if not hmac.compare_digest(
             stored_key_id if isinstance(stored_key_id, str) else "", active_key_id
@@ -737,6 +764,7 @@ def _m5_selection_binding_matches(
             ],
             recovered_from_proposal_id=canonical_recovery_parent,
             lifecycle_state="active",
+            _signing_key=_signing_key,
         )
     except (CapabilityJournalError, TypeError, ValueError):
         return False
@@ -3645,6 +3673,7 @@ class MemoryRepository:
                         MemoryProposal.goal_revision == int(goal_revision),
                         MemoryProposal.source_context_digest == source_context_digest,
                         MemoryProposal.status == MemoryProposalStatus.accepted,
+                        MemoryProposal.schema_version != "procedure_recommendation.v1",
                     )
                     .order_by(MemoryProposal.proposal_id.asc())
                     .limit(max(1, min(int(limit), 3)))

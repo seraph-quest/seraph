@@ -44,7 +44,8 @@ async def canonical_chain(db,owner,task,tmp_path):
                 'operator_owner_principal_id':owner.principal_id,'operator_owner_session_id':owner.session_id,
                 'goal_id':task.goal_id,'goal_revision':task.goal_revision,'board_fencing_token':1,
                 'board_task_revision':2,'input_artifact_id':'browser-input','input_artifact_digest':'a'*64}
-        path='artifacts/work-board/browser/'+name+'.json' if name=='browser' else 'artifacts/work-board/evidence/'+name+'.json'
+        from src.browser.task_runner import browser_artifact_path_for_job
+        path=browser_artifact_path_for_job(name+'-run') if name=='browser' else 'artifacts/work-board/evidence/'+name+'.json'
         full=tmp_path/path;full.parent.mkdir(parents=True,exist_ok=True);full.write_bytes(raw);full.chmod(0o600)
         for parent in full.parents:
             if parent==tmp_path.parent:break
@@ -117,3 +118,62 @@ async def test_derived_cpu_staged_permission_change_blocks_same_writer(async_db,
         monkeypatch.setattr('socket.getaddrinfo',forbidden)
         with pytest.raises(BoardError) as error:await recheck_staged(db,owner,task,staged)
         assert error.value.code=='evidence_dependency_stale'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('async_db', ['file'], indirect=True)
+@pytest.mark.parametrize('kind,capability', [
+    ('canonical_memory', 'browser.public-task.v1'),
+    ('browser_public_task_result', 'browser.public-task.v1'),
+    ('evidence_dossier', DOSSIER), ('evidence_local_report', REPORT),
+])
+@pytest.mark.parametrize('change', ['current', 'goal-revision', 'goal-inactive'])
+async def test_staged_goal_binding_rechecked_after_reopen_in_actual_writer(
+    async_db, monkeypatch, tmp_path, kind, capability, change,
+):
+    from sqlalchemy import select
+    from src.db.models import Goal, GoalStatus
+    monkeypatch.setattr(settings, 'workspace_dir', str(tmp_path))
+    monkeypatch.setattr(settings, 'browser_site_allowlist', 'example.com')
+    monkeypatch.setattr(settings, 'browser_site_blocklist', '')
+    async with async_db() as db:
+        owner, task, _memory, _source = await canonical_fact(db)
+        task.capability_id = capability
+        await db.commit()
+        if kind != 'canonical_memory':
+            await canonical_chain(db, owner, task, tmp_path)
+        sources, _blocked = await _sources(db, owner, task)
+        source = next(item for item in sources if item['source_kind'] == kind)
+        line = source['text'].splitlines()[0]
+        packet = {'revision': 1, 'digest': 'b'*64, 'citations': [{
+            'source_id': source['source_id'], 'source_digest': source['source_digest'],
+            'version': source['version'], 'line_start': 1, 'line_end': 1,
+            'span_digest': digest(line.encode()),
+        }]}
+        staged = await stage_packet(db, owner, task, packet)
+        await db.commit()
+        original_task_revision = task.task_revision
+        goal = await db.get(Goal, task.goal_id)
+        if change == 'goal-revision':
+            goal.revision += 1
+        elif change == 'goal-inactive':
+            goal.status = GoalStatus.completed
+        await db.commit()
+    async with async_db() as reopened:
+        current_task = (await reopened.execute(select(WorkBoardTask).where(
+            WorkBoardTask.task_id == task.task_id))).scalar_one()
+        assert current_task.task_revision == original_task_revision
+        await reopened.commit()
+        await _begin_sqlite_immediate(reopened)
+        def forbidden(*args, **kwargs):
+            raise AssertionError('private I/O inside canonical Goal writer')
+        monkeypatch.setattr('src.memory.evidence_working_set._read_file', forbidden)
+        monkeypatch.setattr('src.vault.crypto.decrypt', forbidden)
+        monkeypatch.setattr('socket.getaddrinfo', forbidden)
+        if change == 'current':
+            await recheck_staged(reopened, owner, current_task, staged)
+        else:
+            with pytest.raises(BoardError) as error:
+                await recheck_staged(reopened, owner, current_task, staged)
+            assert error.value.code == 'evidence_dependency_stale'
+        await reopened.rollback()

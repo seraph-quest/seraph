@@ -42,7 +42,7 @@ async def test_canonical_correction_invalidates_exact_staged_fact_inside_writer(
         assert memory.content not in json.dumps(token)
         staged = StagedEvidence(task.task_id,task.task_revision,1,'b'*64,
             (ResolvedSource('c'*64,'canonical_memory',memory.id,digest(memory.content.encode()),
-                'd'*64,1,1,memory.updated_at.isoformat(),json.dumps(token)),),task.capability_id)
+                'd'*64,1,1,memory.updated_at.isoformat(),json.dumps(token)),),task.capability_id,task.goal_id,task.goal_revision,'active')
         await db.commit()
         if change == 'content': memory.content = 'The operator corrected this fact'
         elif change == 'metadata': memory.metadata_json = json.dumps({'goal_id':task.goal_id,'privacy_boundary':'private'})
@@ -115,7 +115,7 @@ async def test_task_and_packet_snapshot_rechecked_in_same_actual_writer(async_db
         token=await canonical_source_token(db,owner,task,'canonical_memory',memory.id)
         staged=StagedEvidence(task.task_id,task.task_revision,1,'b'*64,
             (ResolvedSource('c'*64,'canonical_memory',memory.id,digest(memory.content.encode()),
-                'd'*64,1,1,memory.updated_at.isoformat(),json.dumps(token)),),task.capability_id)
+                'd'*64,1,1,memory.updated_at.isoformat(),json.dumps(token)),),task.capability_id,task.goal_id,task.goal_revision,'active')
         await db.commit()
         if change=='task-revision':task.task_revision+=1
         elif change=='capability':task.capability_id='work.evidence-dossier.v1'

@@ -94,11 +94,15 @@ class StagedEvidence:
     packet_digest: str
     sources: tuple[ResolvedSource, ...]
     task_capability: str
+    goal_id: str
+    goal_revision: int
+    goal_status: str
 
     def snapshot(self) -> dict[str, Any]:
         value = {'schema': 'work.evidence-execution.v1', 'task_id': self.task_id,
                  'task_revision': self.task_revision, 'task_capability': self.task_capability,
-                 'packet_revision': self.packet_revision,
+                 'goal_id': self.goal_id, 'goal_revision': self.goal_revision,
+                 'goal_status': self.goal_status, 'packet_revision': self.packet_revision,
                  'packet_digest': self.packet_digest,
                  'sources': [{'source_id': item.source_id, 'source_kind': item.source_kind,
                      'canonical_source_id': item.canonical_source_id, 'source_digest': item.source_digest,
@@ -113,6 +117,10 @@ class StagedEvidence:
 async def _goal(db, owner: WorkBoardOwner, task: WorkBoardTask) -> Goal:
     goal = await db.get(Goal, task.goal_id, populate_existing=True)
     if goal is None or (goal.owner_principal_id, goal.owner_session_id) != (owner.principal_id, owner.session_id):
+        raise _changed()
+    current_revision = max(int(goal.revision or 1), 1)
+    status = str(getattr(goal.status, 'value', goal.status) or '')
+    if current_revision != int(task.goal_revision) or status != 'active':
         raise _changed()
     return goal
 
@@ -184,9 +192,10 @@ async def canonical_source_token(db, owner: WorkBoardOwner, task: WorkBoardTask,
                                  lineage: dict[str, Any] | None = None) -> dict[str, Any]:
     """Pure canonical DB checks, safe inside an existing immediate writer."""
     _require_pair(source_kind, task.capability_id)
-    await _goal(db, owner, task)
+    goal = await _goal(db, owner, task)
     identity = {'owner_principal_id': owner.principal_id, 'owner_session_id': owner.session_id,
-                'goal_id': task.goal_id, 'source_kind': source_kind, 'canonical_source_id': canonical_id}
+                'goal_id': task.goal_id, 'goal_revision': max(int(goal.revision or 1), 1),
+                'goal_status': str(getattr(goal.status, 'value', goal.status)), 'source_kind': source_kind, 'canonical_source_id': canonical_id}
     if source_kind == 'canonical_memory':
         memory = await db.get(Memory, canonical_id, populate_existing=True)
         tombstone = (await db.execute(select(MemoryTombstone.id).where(
@@ -270,6 +279,9 @@ async def stage_packet(db, owner: WorkBoardOwner, task: WorkBoardTask,
     if (task.capability_id not in CONSUMERS or len(packet.get('citations', [])) > MAX_DEPENDENCIES
         or not packet.get('citations')):
         raise BoardError('evidence_dependency_unsupported', 'Select one to sixteen eligible execution sources for a supported consumer', status_code=409)
+    goal = await _goal(db, owner, task)
+    goal_revision = max(int(goal.revision or 1), 1)
+    goal_status = str(getattr(goal.status, 'value', goal.status))
     sources, _blocked = await _sources(db, owner, task, operator=operator)
     indexed = {item['source_id']: item for item in sources}
     resolved = []
@@ -301,7 +313,8 @@ async def stage_packet(db, owner: WorkBoardOwner, task: WorkBoardTask,
         seen.add(key)
         resolved.append(ResolvedSource(citation['source_id'], source['source_kind'], source['identifier'],
             citation['source_digest'], citation['span_digest'], start, end, citation['version'], serialized))
-    staged = StagedEvidence(task.task_id, task.task_revision, packet['revision'], packet['digest'], tuple(resolved), task.capability_id)
+    staged = StagedEvidence(task.task_id, task.task_revision, packet['revision'], packet['digest'], tuple(resolved), task.capability_id,
+        goal.id, goal_revision, goal_status)
     staged.snapshot()
     return staged
 
@@ -317,6 +330,11 @@ async def recheck_staged(db, owner: WorkBoardOwner, task: WorkBoardTask, staged:
             != (owner.principal_id, owner.session_id)):
         raise _changed()
     task = current_task
+    goal = await _goal(db, owner, task)
+    if (task.goal_id != staged.goal_id
+        or max(int(goal.revision or 1), 1) != staged.goal_revision
+        or str(getattr(goal.status, 'value', goal.status)) != staged.goal_status):
+        raise _changed()
     event = (await db.execute(select(WorkBoardEvent).where(
         WorkBoardEvent.task_id == task.task_id,
         WorkBoardEvent.owner_principal_id == owner.principal_id,

@@ -27,7 +27,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 
 from config.settings import settings
-from src.approval.repository import approval_repository, fingerprint_tool_call
+from src.approval.repository import approval_repository, fingerprint_tool_call, _approval_expiry
 from src.db import engine as db_engine
 from src.db.models import (
     Goal,
@@ -4767,7 +4767,7 @@ class RoutineService:
             updates={
                 "durable_authority_digest": bound.get("authority_digest"),
                 "authority_digest": bound.get("authority_digest"),
-                "approval_expires_at": approval.expires_at.timestamp() if approval.expires_at else None,
+                "approval_expires_at": _approval_expiry(approval.expires_at).timestamp() if _approval_expiry(approval.expires_at) is not None else None,
             },
         )
         bound_lease = bound.get("lease") if isinstance(bound.get("lease"), Mapping) else {}

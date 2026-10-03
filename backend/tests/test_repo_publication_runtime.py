@@ -136,6 +136,55 @@ def test_source_link_chain_escape_is_unavailable(tmp_path):
         resolve_entry(entry, [root])
 
 
+def test_runtime_capture_reads_descriptor_size_plus_one(tmp_path, monkeypatch):
+    path = tmp_path / "small.py"
+    path.write_bytes(b"VALUE=1\n")
+    real_fdopen = os.fdopen
+    requested = []
+    class Reader:
+        def __init__(self, handle): self.handle = handle
+        def __enter__(self): return self
+        def __exit__(self, *args): self.handle.close()
+        def fileno(self): return self.handle.fileno()
+        def read(self, size):
+            requested.append(size)
+            return self.handle.read(size)
+    monkeypatch.setattr(os, "fdopen", lambda descriptor, mode: Reader(real_fdopen(descriptor, mode)))
+    raw, metadata = _read(path, deadline=time.monotonic() + 5)
+    assert raw == b"VALUE=1\n"
+    assert requested == [metadata.st_size + 1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrapped", [False, True])
+async def test_stored_publication_preflight_projects_exact_profile_without_raw_authority_mutation(wrapped):
+    from types import SimpleNamespace
+    from src.api.workflows import _safe_repo_repair_projection
+    from src.execution.repo_sandbox import executor_posture_digest
+    posture = {"kind": "local", "profile": PROFILE, "isolation_claim": "none",
+        "network_isolation": "not_verified", "resource_enforcement": "admission_and_wall_timeout_only",
+        "image_digest": "", "limits_digest": "a" * 64,
+        "local_host_execution_required": True, "runtime_proof_available": True,
+        "publication_runtime_proof_sha256": "b" * 64}
+    raw_digest = executor_posture_digest(posture)
+    authority = {"executor_kind": "local", "executor_profile": "local:" + PROFILE,
+        "executor_posture": posture, "executor_posture_digest": raw_digest,
+        "sandbox_profile": PROFILE, "sandbox_image_digest": "", "sandbox_limits_digest": "a" * 64,
+        "required_permissions": ["local_host_execution"], "local_host_execution_required": True}
+    receipt = {"ok": True, "status": "ready", "profile": PROFILE, "posture": posture}
+    checkpoint = {"checkpoint_id": "repo-repair-preflight" if not wrapped else "repo-repair-preflight:fixture-repair",
+        "payload": {"receipt": receipt} if wrapped else receipt}
+    job = {"declared_authority": authority, "checkpoints": [checkpoint], "status": "succeeded"}
+    untouched = copy.deepcopy(job)
+    operator = SimpleNamespace(principal=SimpleNamespace(principal_id="fixture-owner"), session_id="fixture-root")
+    result = await _safe_repo_repair_projection("fixture-repair", job, operator=operator)
+    assert result["executor_profile"] == "local:" + PROFILE
+    assert result["preparation_ready"] is True and result["execution_ready"] is False
+    assert result["executor_posture"]["image_digest"] is None
+    assert result["executor_posture_raw"] == posture and result["executor_posture_digest"] == raw_digest
+    assert result["preflight"]["ok"] is True and job == untouched
+
+
 def test_optional_profile_without_loaded_library_proof_does_not_change_default(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"; workspace.mkdir(mode=0o700)
     monkeypatch.setattr("src.execution.repo_publication_runtime.sys.platform", "darwin")

@@ -130,7 +130,10 @@ def _read(path, *, deadline):
         os.close(descriptor)
         raise RuntimeUnavailable("publication_runtime_file_untrusted")
     with os.fdopen(descriptor, "rb") as handle:
-        raw = handle.read(BOUNDS["max_file_bytes"] + 1)
+        # The descriptor already proves a finite ordinary-file size. Reading
+        # that size plus one detects growth without allocating 48 MiB for
+        # every small stdlib/package file in the exposed closure.
+        raw = handle.read(before.st_size + 1)
         if metadata(before) != metadata(os.fstat(handle.fileno())):
             raise RuntimeUnavailable("publication_runtime_file_changed")
     if len(raw) > BOUNDS["max_file_bytes"] or time.monotonic() >= deadline:

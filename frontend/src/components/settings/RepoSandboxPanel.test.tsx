@@ -100,6 +100,15 @@ function response(value: unknown, ok = true) {
 }
 
 describe("RepoSandboxPanel", () => {
+  it.each(["repo-node24-npm-v1", "repo-python-pytest-publication-v1"])("retains the exact selected local profile %s", async (profile) => {
+    vi.mocked(fetch).mockResolvedValue(response({ ...localPayload, profile,
+      executor_profile: `local:${profile}`,
+      executor_posture: { ...localPayload.executor_posture, profile,
+        runtime_proof_available: true, publication_runtime_proof_sha256: "c".repeat(64) } }));
+    render(<RepoSandboxPanel />);
+    expect(await screen.findByDisplayValue(profile)).toBeInTheDocument();
+    expect(screen.getByText(/Technical preflight: verified/)).toBeInTheDocument();
+  });
   beforeEach(() => vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response(payload))));
   afterEach(() => {
     vi.useRealTimers();

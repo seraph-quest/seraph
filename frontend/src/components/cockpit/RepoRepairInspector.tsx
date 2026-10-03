@@ -67,6 +67,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 const REPO_REPAIR_EXECUTOR_KINDS: RepoRepairExecutorKind[] = ["local", "docker_rootless", "docker_rootful"];
 const REPO_SANDBOX_PROFILE = "repo-python-pytest-v1";
+const LOCAL_REPAIR_PROFILES = new Set([REPO_SANDBOX_PROFILE, "repo-node24-npm-v1", "repo-python-pytest-publication-v1"]);
 const LOCAL_HOST_ACCESS = "explicit_job_approval_required";
 
 const POSTURE_VALUES: Record<RepoRepairExecutorKind, {
@@ -141,7 +142,9 @@ function normalizeExecutorMetadata(payload: Record<string, unknown>): Pick<
   if (posture.kind !== undefined && posture.kind !== executorKind) {
     throw new Error("The repair status response has mismatched executor posture metadata.");
   }
-  if (posture.profile !== undefined && posture.profile !== REPO_SANDBOX_PROFILE) {
+  const selectedProfile = posture.profile ?? REPO_SANDBOX_PROFILE;
+  if (typeof selectedProfile !== "string"
+    || !(executorKind === "local" ? LOCAL_REPAIR_PROFILES.has(selectedProfile) : selectedProfile === REPO_SANDBOX_PROFILE)) {
     throw new Error("The repair status response has an unsupported executor profile.");
   }
   const imageDigest = posture.image_digest;
@@ -210,7 +213,7 @@ function normalizeExecutorMetadata(payload: Record<string, unknown>): Pick<
     : !isSafeDigest(optionalDigest)) {
     throw new Error("The repair status response has malformed posture digest metadata.");
   }
-  const expectedExecutorProfile = `${executorKind}:${REPO_SANDBOX_PROFILE}`;
+  const expectedExecutorProfile = `${executorKind}:${selectedProfile}`;
   if (explicitExecutorKind && payload.executor_profile !== expectedExecutorProfile) {
     throw new Error("The repair status response has an unsupported executor profile.");
   }
@@ -224,6 +227,12 @@ function normalizeExecutorMetadata(payload: Record<string, unknown>): Pick<
   };
   const preparationReady = readiness("preparation_ready");
   const executionReady = readiness("execution_ready");
+  if (selectedProfile === "repo-python-pytest-publication-v1" && preparationReady === true
+    && (posture.runtime_proof_available !== true
+      || typeof posture.publication_runtime_proof_sha256 !== "string"
+      || !/^[0-9a-f]{64}$/.test(posture.publication_runtime_proof_sha256))) {
+    throw new Error("The selected publication profile has no verified runtime proof.");
+  }
   if (explicitExecutorKind) {
     if (typeof payload.local_host_execution_required !== "boolean"
       || typeof preparationReady !== "boolean"

@@ -11491,7 +11491,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       const connection = await loadGithubConnection();
       const response = await apiFetch(`${API_URL}/api/auth/session`);
       const current = await response.json();
-      if (!response.ok || current.principal_id !== originalOwner || current.session_id !== originalRoot || !connection || !Number.isSafeInteger(connection.revision) || connection.revision < 1) {
+      if (!response.ok || current.principal_id !== originalOwner || current.session_id !== originalRoot || !connection || typeof connection.revision !== "number" || !Number.isSafeInteger(connection.revision) || connection.revision < 1) {
         setOperatorStatus("GitHub readback blocked: the original login or connection metadata changed.");
         return;
       }

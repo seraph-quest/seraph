@@ -240,6 +240,10 @@ def _executor_posture_projection(
             ),
         }
     )
+    if executor_kind == "local" and posture.get("image_digest") == "":
+        # Empty local image metadata is display absence. Raw approval posture
+        # and its authority digest keep the original server receipt unchanged.
+        posture["image_digest"] = None
     return posture, raw_posture
 
 
@@ -273,7 +277,7 @@ def _repo_sandbox_settings_payload(
         receipt = preflight.as_receipt()
     except (TypeError, ValueError, OSError, RepoSandboxError) as exc:
         receipt = {
-            "profile": "repo-python-pytest-v1",
+            "profile": str(value.profile),
             "executor_kind": executor_kind,
             "status": "blocked",
             "ok": False,
@@ -367,7 +371,7 @@ def _repo_sandbox_settings_payload(
     return {
         "enabled": bool(value.enabled),
         "executor_kind": executor_kind,
-        "executor_profile": f"{executor_kind}:repo-python-pytest-v1",
+        "executor_profile": f"{executor_kind}:{value.profile}",
         "executor_posture": posture,
         "executor_posture_raw": raw_posture,
         "executor_posture_digest": posture_digest,

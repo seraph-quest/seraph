@@ -21,7 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select
 
 from config.settings import settings
-from src.approval.repository import approval_repository, approval_state_revision, fingerprint_tool_call
+from src.approval.repository import approval_repository, approval_state_revision, fingerprint_tool_call, _approval_timestamp, _approval_expiry
 from src.db import engine as db_engine
 from src.db.models import Goal, RepoRepairProposal, RepoRepairSourcePacket, WorkBoardTask, WorkBoardAttempt
 from src.execution.repo_publication import PublicationError, SourceGit, branch, digest, equivalent, file_manifest, object_id, oid, posture, produce
@@ -249,7 +249,7 @@ class RepoPublicationService:
         details = {"action": "repo_publication.publish", "required_permissions": PERMISSIONS, "local_host_execution_required": True, "executor_kind": "local", "executor_posture": local_posture, "executor_posture_digest": preview["local_posture_digest"], "preview_digest": preview_digest, "approval_scope": {"repository": connection.repository, "base_branch": request.base_branch, "base_commit": request.expected_base_commit, "branch_name": request.branch_name, "local_host_execution": local_posture, "remote_effects": PERMISSIONS[1:], "preview_digest": preview_digest, "tested_input_digest": binding["tested_input_digest"]}, "approval_owner_principal_id": principal, "approval_owner_operator_session_id": session, "operator_session_id": session, "approval_conversation_id": session, "durable_job_id": job_id, "durable_owner_kind": "user", "durable_owner_principal_id": principal, "durable_service_id": None, "durable_authority_digest": current["authority_digest"], "durable_goal_id": binding["goal_id"], "durable_goal_revision": binding["goal_revision"], "durable_plan_revision": None, "durable_capability_version": "1", "durable_budget_digest": current["budget_digest"], "approval_expires_at": (now() + timedelta(minutes=5)).timestamp()}
         approval = await approval_repository.get_or_create_pending(session_id=session, tool_name=CAPABILITY, risk_level="high", summary=f"Execute local Git and publish tested patch to {connection.repository}:{request.branch_name} as a ready PR", fingerprint=fingerprint, details=details)
         current = await jobs.bind_approval_id(job_id, approval.id, **self.fence(current))
-        await approval_repository.update_pending_details(approval.id, owner_principal_id=principal, operator_session_id=session, updates={"durable_authority_digest": current["authority_digest"], "durable_approval_id": approval.id, "approval_operator_principal_id": principal, "approval_expires_at": approval.expires_at.timestamp()})
+        await approval_repository.update_pending_details(approval.id, owner_principal_id=principal, operator_session_id=session, updates={"durable_authority_digest": current["authority_digest"], "durable_approval_id": approval.id, "approval_operator_principal_id": principal, "approval_expires_at": _approval_expiry(approval.expires_at).timestamp()})
         current = await jobs.transition_job(job_id, "awaiting_approval", reason="repo_publication_fresh_approval_required", **self.fence(current))
         return await self.view(current)
 
@@ -278,7 +278,7 @@ class RepoPublicationService:
             result = json.loads(raw)
             if result.get("job_id") != current["job_id"] or result.get("preview_digest") != digest(preview) or result.get("verification") != "passed":
                 raise PublicationError("publication_result_unverified")
-        return {"job_id": current["job_id"], "capability_id": CAPABILITY, "revision": current["revision"], "status": current["status"], "reason_code": current.get("failure_reason"), "preview": preview, "preview_digest": digest(preview), "approval_id": approval.id if approval else None, "approval_status": approval.status if approval else "unavailable", "approval_expires_at": approval.expires_at.isoformat() if approval and approval.expires_at else None, "effects": current.get("effects", []), "artifacts": current.get("artifacts", []), "result": result, "learning": "no_learning", "recovery_action": "reconcile" if current["status"] in {"unknown_external_effect", "blocked"} else "inspect"}
+        return {"job_id": current["job_id"], "capability_id": CAPABILITY, "revision": current["revision"], "status": current["status"], "reason_code": current.get("failure_reason"), "preview": preview, "preview_digest": digest(preview), "approval_id": approval.id if approval else None, "approval_status": approval.status if approval else "unavailable", "approval_expires_at": _approval_timestamp(approval.expires_at) if approval else None, "effects": current.get("effects", []), "artifacts": current.get("artifacts", []), "result": result, "learning": "no_learning", "recovery_action": "reconcile" if current["status"] in {"unknown_external_effect", "blocked"} else "inspect"}
 
     async def check(self, current, preview, *, writing=True, full_runtime=False):
         principal, session = preview["owner_principal_id"], preview["owner_session_id"]
@@ -376,7 +376,9 @@ class RepoPublicationService:
             approval = await approval_repository.get(current["declared_authority"]["approval_id"])
             if not approval or approval.status != "approved":
                 return await self.view(current)
-            expires = approval.expires_at.replace(tzinfo=timezone.utc).timestamp()
+            expiry = _approval_expiry(approval.expires_at)
+            self.require(expiry is not None and expiry > now(), "publication_approval_not_current")
+            expires = expiry.timestamp()
             fields = {"approval_id": approval.id, "authority_digest": current["authority_digest"], "goal_id": current["goal_id"], "goal_revision": current["goal_revision"], "plan_revision": current.get("plan_revision"), "capability_version": "1", "owner_kind": "user", "owner_principal_id": principal, "service_id": None, "budget_microusd": 0, "budget_digest": current["budget_digest"], "operator_principal_id": principal, "operator_session_id": session, "expires_at": expires}
             current = await jobs.resume_approved_job(job_id, approval_receipt={**fields, "status": "approved", "authenticated": True}, expected_revision=current["revision"], **fields)
         if current["status"] != "queued":

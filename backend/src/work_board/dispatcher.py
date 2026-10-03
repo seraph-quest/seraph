@@ -478,6 +478,9 @@ def _reject_authority_input_keys(value: Any, *, path: str = "input") -> None:
 
 
 def _typed_input_model(capability_id: str) -> type[BaseModel] | None:
+    if capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+        from src.work_board.pipeline_contracts import EvidenceConsumerInput
+        return EvidenceConsumerInput
     model_type = _TYPED_INPUT_MODELS.get(capability_id)
     if model_type is not None:
         return model_type
@@ -502,6 +505,8 @@ def _typed_input_model(capability_id: str) -> type[BaseModel] | None:
 
 
 REGISTERED_CAPABILITIES: dict[str, CapabilitySpec] = {
+    "work.evidence-dossier.v1": CapabilitySpec("work.evidence-dossier.v1", "1", secret_like=False),
+    "work.local-evidence-report.v1": CapabilitySpec("work.local-evidence-report.v1", "1", secret_like=False),
     GOAL_SNAPSHOT_CAPABILITY: CapabilitySpec(
         GOAL_SNAPSHOT_CAPABILITY,
         GOAL_SNAPSHOT_VERSION,
@@ -3765,6 +3770,16 @@ class WorkBoardDispatcher:
     async def _effective_runtime(self, task: WorkBoardTask) -> int:
         """Resolve the current goal admission deadline, never from card input."""
 
+        if task.pipeline_operation_id:
+            from src.work_board.pipelines import task_guard, utc, now
+            async with self.session_provider() as pipeline_db:
+                _row, operation = await task_guard(pipeline_db, task,
+                    attempt=await pipeline_db.scalar(select(WorkBoardAttempt).where(
+                        WorkBoardAttempt.task_id == task.task_id, WorkBoardAttempt.ended_at.is_(None))))
+            remaining = int((utc(datetime.fromisoformat(operation["deadline_at"])) - now()).total_seconds())
+            hard_cap = 180 if task.capability_id == "browser.public-task.v1" else 30
+            return max(1, min(hard_cap, remaining))
+
         async with self.session_provider() as db:
             goal = (
                 await db.execute(
@@ -3855,6 +3870,16 @@ class WorkBoardDispatcher:
         persisted attempt count; callers cannot provide this context through
         an API input or a public retry request.
         """
+
+        if task.pipeline_operation_id or task.capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+            from src.work_board.pipelines import task_guard
+            try:
+                async with self.session_provider() as pipeline_db:
+                    active = await pipeline_db.scalar(select(WorkBoardAttempt).where(
+                        WorkBoardAttempt.task_id == task.task_id, WorkBoardAttempt.ended_at.is_(None)))
+                    await task_guard(pipeline_db, task, attempt=active)
+            except BoardError as exc:
+                return exc.code, str(exc)
 
         try:
             operator = await authenticate_session(task.owner_session_id, touch=False)
@@ -4084,6 +4109,18 @@ class WorkBoardDispatcher:
 
         capability = _text(task.capability_id)
         try:
+            if capability in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+                from src.work_board.input_artifacts import resolve_input_artifact_for_task
+                from src.work_board.pipelines import task_guard
+                async with self.session_provider() as pipeline_db:
+                    active = await pipeline_db.scalar(select(WorkBoardAttempt).where(
+                        WorkBoardAttempt.task_id == task.task_id, WorkBoardAttempt.ended_at.is_(None)))
+                    await task_guard(pipeline_db, task, attempt=active)
+                    await resolve_input_artifact_for_task(pipeline_db,
+                        WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id),
+                        artifact_id=_text(task.input_artifact_id), capability_id=capability,
+                        goal_id=task.goal_id, goal_revision=task.goal_revision, expected_task_id=task.task_id)
+                return None, None
             if capability == GOAL_SNAPSHOT_CAPABILITY:
                 from src.agent.factory import get_tools
                 from src.workflows.manager import workflow_manager
@@ -5547,6 +5584,17 @@ class WorkBoardDispatcher:
                 return result
             direct_proof = self._direct_readback(adapter_result, projection, job_id)
             if direct_proof is not None:
+                if task.capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+                    from src.work_board.pipeline_cpu import read_output
+                    from src.work_board.pipelines import validate_cpu_current
+                    await validate_cpu_current(task, attempt, inputs, session_provider=self.session_provider)
+                    matching = [item for item in projection.get("artifacts", []) if isinstance(item, Mapping)
+                        and item.get("content_sha256") == direct_proof["content_sha256"] and item.get("exists")]
+                    if len(matching) != 1:
+                        raise BoardError("pipeline_output_unverified", "The CPU output needs exact independent readback")
+                    read_output(matching[0]["file_path"], direct_proof["content_sha256"])
+                    await self._consume_v2_leaf_artifact(task)
+                    adapter_result = {**dict(adapter_result), "artifact_refs": matching}
                 proof = direct_proof
                 target_status = WorkBoardStatus.review if task.requires_review else WorkBoardStatus.done
                 await self._project(
@@ -5868,6 +5916,17 @@ class WorkBoardDispatcher:
         procedure_binding: ProcedureChildBinding | None = None,
     ) -> Mapping[str, Any]:
         capability_id = _text(task.capability_id)
+        if capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+            from src.work_board.pipelines import task_guard, validate_cpu_current, utc
+            from src.work_board.pipeline_cpu import execute
+            async with self.session_provider() as pipeline_db:
+                _row, operation = await task_guard(pipeline_db, task, attempt=attempt)
+            operation_deadline = utc(datetime.fromisoformat(operation["deadline_at"]))
+            deadline = min(operation_deadline, _now() + timedelta(seconds=min(runtime_seconds, 30)))
+            async def check_current(current_task, current_attempt, current_inputs):
+                await validate_cpu_current(current_task, current_attempt, current_inputs, session_provider=self.session_provider)
+            return await execute(task, attempt, inputs, jobs=self.jobs, runner=self.runner_id,
+                deadline=deadline, admission_only=admission_only, validate_current=check_current)
         board_binding = f"{task.task_id}:{attempt.attempt_id}"
         parent_handoffs = self._attempt_parent_handoffs(attempt)
         parent_handoff_digest = _text(getattr(attempt, "parent_handoff_digest", None)) or None
@@ -8351,6 +8410,9 @@ class WorkBoardDispatcher:
 
         capability_id = _text(task.capability_id)
         binding_key = f"{task.task_id}:{attempt.attempt_id}"
+        if capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+            from src.work_board.pipeline_cpu import job_id
+            return job_id(task, attempt), task.owner_principal_id, capability_id, None, binding_key
         if capability_id == "guardian-routine.v2":
             from src.workflows.procedure_v2_runtime import procedure_v2_runtime
 
@@ -8473,6 +8535,9 @@ class WorkBoardDispatcher:
         """Compute the service input digest where the adapter contract is closed."""
 
         capability_id = _text(task.capability_id)
+        if capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+            from src.work_board.pipeline_cpu import spec_for
+            return _safe_digest(spec_for(task, attempt, inputs, deadline=_now()).inputs)
         handoff_binding = WorkBoardDispatcher._direct_handoff_binding(attempt)
         if capability_id == "guardian-routine.v2":
             return _safe_digest(
@@ -8650,6 +8715,9 @@ class WorkBoardDispatcher:
         attempt: WorkBoardAttempt,
         inputs: Mapping[str, Any],
     ) -> str:
+        if task.capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+            from src.work_board.pipeline_cpu import spec_for
+            return _safe_digest(spec_for(task, attempt, inputs, deadline=_now()).declared_authority)
         if _text(task.capability_id) == "calendar.meeting-prep.v1":
             from src.integrations.google_calendar import calendar_authority_digest
 
@@ -8732,6 +8800,9 @@ class WorkBoardDispatcher:
         attempt: WorkBoardAttempt,
         inputs: Mapping[str, Any],
     ) -> str:
+        if task.capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+            from src.work_board.pipeline_cpu import spec_for
+            return spec_for(task, attempt, inputs, deadline=_now()).run_fingerprint
         # Existing governed services use the canonical durable input digest as
         # their run fingerprint when they do not provide a separate one.
         return WorkBoardDispatcher._direct_input_digest(task, attempt, inputs)
@@ -8814,6 +8885,14 @@ class WorkBoardDispatcher:
             raise DurableJobIdempotencyConflict(
                 "adapter admission projection is missing canonical immutable digests"
             )
+        if task.capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+            expected_digests = {
+                "input_digest": WorkBoardDispatcher._direct_input_digest(task, attempt, inputs),
+                "authority_digest": WorkBoardDispatcher._direct_authority_digest(task, attempt, inputs),
+                "run_fingerprint": WorkBoardDispatcher._direct_run_fingerprint(task, attempt, inputs),
+            }
+            if digests != expected_digests:
+                raise DurableJobIdempotencyConflict("CPU evidence immutable admission digest changed")
         if _text(task.capability_id) == "engineering.repo-repair.v1":
             expected_authority = WorkBoardDispatcher._repo_repair_authority_payload(
                 task,

@@ -446,6 +446,48 @@ def _select_exact_approval_rows(
 
 
 class ApprovalRepository:
+    async def resolve_exact_in_session(
+        self, db, approval_id: str, decision: str, *, expected_digest: str,
+    ) -> ApprovalRequest | None:
+        """Resolve the exact inspected approval in the caller's writer transaction.
+
+        The digest covers owner, details, fingerprint, state and expiry. The
+        caller authenticates its authority in this same transaction; this
+        method never opens a second session or consumes approved authority.
+        """
+        if decision not in {"approved", "denied"}:
+            raise ValueError("Invalid approval decision")
+        row = await db.get(ApprovalRequest, approval_id)
+        if row is None:
+            return None
+        if not hmac.compare_digest(approval_decision_digest(row), expected_digest):
+            raise ValueError("approval_binding_changed")
+        if row.status != "pending":
+            return row
+        now = datetime.now(timezone.utc)
+        state = "expired" if _approval_is_expired(row.expires_at, now=now) else decision
+        transition = await db.execute(update(ApprovalRequest)
+            .where(ApprovalRequest.id == approval_id, ApprovalRequest.status == "pending",
+                   ApprovalRequest.fingerprint == row.fingerprint,
+                   ApprovalRequest.details_json == row.details_json if row.details_json is not None
+                   else ApprovalRequest.details_json.is_(None))
+            .values(status=state, resolved_at=now)
+            .execution_options(synchronize_session=False))
+        await db.refresh(row)
+        if transition.rowcount != 1:
+            raise ValueError("approval_binding_changed")
+        return row
+
+    async def resolve_exact(self, approval_id: str, decision: str, *, expected_digest: str):
+        from src.work_board.repository import _begin_sqlite_immediate
+        async with get_session() as db:
+            await _begin_sqlite_immediate(db)
+            row = await self.resolve_exact_in_session(db, approval_id, decision,
+                                                     expected_digest=expected_digest)
+            if row is not None:
+                db.expunge(row)
+            return row
+
     async def get(self, approval_id: str) -> ApprovalRequest | None:
         """Fetch an approval without resolving it."""
 
@@ -1454,6 +1496,15 @@ class ApprovalRepository:
 
 
 approval_repository = ApprovalRepository()
+
+
+def approval_decision_digest(row) -> str:
+    """Exact decision snapshot; raw details are never exposed by this digest."""
+    material = [row.id, row.owner_principal_id, row.operator_session_id, row.session_id,
+                row.conversation_id, row.thread_id, row.fingerprint, row.status,
+                str(row.resolved_at), str(row.expires_at), row.details_json,
+                row.action, row.tool_name, row.risk_level]
+    return hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
 
 
 def approval_state_revision(row) -> int:

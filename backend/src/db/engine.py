@@ -78,6 +78,7 @@ OPERATOR_REQUIRED_TABLES = (
     "telegram_inbound_updates",
     "telegram_transport_outbox",
     "telegram_delivery_attempts",
+    "telegram_task_callbacks",
     "guardian_interventions",
     "strategy_deltas",
     "guardian_source_watches",
@@ -905,6 +906,7 @@ async def _ensure_telegram_transport_columns(conn) -> None:
             "last_error": "VARCHAR",
         },
         "telegram_transport_outbox": {
+            "task_control_markup_json": "VARCHAR",
             "lease_owner": "VARCHAR",
             "lease_expires_at": "DATETIME",
             "fencing_token": "INTEGER DEFAULT 0",

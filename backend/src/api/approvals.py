@@ -300,7 +300,12 @@ async def approve_request(approval_id: str, request: Request):
     if pending is None:
         raise HTTPException(status_code=404, detail="Approval request not found")
     details = _require_approval_owner(request, pending, operator)
-    request = await approval_repository.resolve(approval_id, "approved")
+    from src.approval.repository import approval_decision_digest
+    try:
+        request = await approval_repository.resolve_exact(approval_id, "approved",
+            expected_digest=approval_decision_digest(pending))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail={"code": "approval_binding_changed"}) from exc
     if request is None:
         raise HTTPException(status_code=404, detail="Approval request not found")
     if request.status != "approved":
@@ -350,7 +355,12 @@ async def deny_request(approval_id: str, request: Request):
     if pending is None:
         raise HTTPException(status_code=404, detail="Approval request not found")
     _require_approval_owner(request, pending, operator)
-    request = await approval_repository.resolve(approval_id, "denied")
+    from src.approval.repository import approval_decision_digest
+    try:
+        request = await approval_repository.resolve_exact(approval_id, "denied",
+            expected_digest=approval_decision_digest(pending))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail={"code": "approval_binding_changed"}) from exc
     if request is None:
         raise HTTPException(status_code=404, detail="Approval request not found")
     if request.status != "denied":

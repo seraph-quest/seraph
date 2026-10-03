@@ -1932,6 +1932,7 @@ class WorkBoardRepository:
         actor_principal_id: str | None = None,
         actor_session_id: str | None = None,
         now: datetime | None = None,
+        intent_guard=None,
     ) -> BoardMutation:
         """Persist one operator cancellation intent with a task revision CAS.
 
@@ -1967,6 +1968,11 @@ class WorkBoardRepository:
             )
         if attempt.fencing_token != int(board_fence) or attempt.lease_owner != lease_owner:
             raise BoardError("stale_fence", "The board attempt fence is stale")
+        request_identity = None
+        if intent_guard is not None:
+            # Local database guard only: the nonce and original cancellation
+            # intent must commit together, without a second writer/effect.
+            request_identity = await intent_guard(db, task, attempt)
         if attempt.cancel_requested_at is not None:
             cancel_key = f"work-board-cancel:{task_id}:{attempt_id}"
             latest = (
@@ -2018,6 +2024,7 @@ class WorkBoardRepository:
                 "workflow_run_id": attempt.workflow_run_id,
                 "task_revision": task.task_revision,
                 "recovery_action": "reconcile_external_effect",
+                "request_identity": request_identity,
             },
             actor_principal_id=actor_principal_id or owner.principal_id,
             actor_session_id=actor_session_id or owner.session_id,

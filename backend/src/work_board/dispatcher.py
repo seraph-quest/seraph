@@ -3318,6 +3318,7 @@ class WorkBoardDispatcher:
         *,
         expected_revision: int,
         reason: str = "operator_cancelled",
+        intent_guard=None,
     ) -> BoardAttemptProjection:
         """Persist cancellation, clean up the adapter, then reconcile safely."""
 
@@ -3387,6 +3388,7 @@ class WorkBoardDispatcher:
                 lease_owner=active.lease_owner or self.runner_id,
                 actor_principal_id=self.runner_id,
                 actor_session_id=self.runner_session,
+                intent_guard=intent_guard,
             )
         task = intent.task
 

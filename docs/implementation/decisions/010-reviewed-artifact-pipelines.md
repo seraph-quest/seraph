@@ -103,4 +103,4 @@ ownership through abort/queued cancellation. Mutations retain fresh canonical
 checks; no response/authority cache, removed control, new env switch or deadline
 extension. Verify heartbeat/concurrency/abort/recovery/exception redaction plus
 actual managed UI readiness. Detailed reconstructed proposal and recovery limits
-are in the [research packet](../../research/914-fixed-artifact-pipeline-reconstruction.md).
+are in the [research packet](/research/fixed-artifact-pipeline-reconstruction).

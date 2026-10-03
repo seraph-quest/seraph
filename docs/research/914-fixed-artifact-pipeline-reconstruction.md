@@ -10,7 +10,7 @@ title: "Reviewed artifact pipeline reconstruction"
 
 **Tracked work:** [#914](https://github.com/seraph-quest/seraph/issues/914)
 
-**Decision owner:** [ADR-010](../implementation/decisions/010-reviewed-artifact-pipelines.md), Accepted after fresh independent reconstruction review
+**Decision owner:** [ADR-010](/decisions/reviewed-artifact-pipelines), Accepted after fresh independent reconstruction review
 
 ## Provenance and recovery limit
 

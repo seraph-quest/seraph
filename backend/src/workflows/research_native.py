@@ -48,6 +48,10 @@ async def create_fixed_children(jobs, *, parent_id, runtime_owner, runtime_fence
         authority = json.loads(parent.declared_authority_json)
         if authority.get("live_root_digest") != digest(root_binding()) or authority.get("typed_input_digest") != task.typed_input_digest:
             raise DurableJobLeaseError("research original root/input binding changed")
+        from src.work_board.input_artifacts import _canonical_json
+        import hashlib
+        if hashlib.sha256(_canonical_json(model.model_dump(mode="json"))).hexdigest() != task.typed_input_digest:
+            raise DurableJobLeaseError("research child group must use the exact admitted source input")
         creation = {"schema_version": 1, "board_task_id": task_id, "board_attempt_id": attempt_id,
             "creation_board_fence": board_fence, "creation_job_fence": runtime_fence,
             "parent_input_digest": parent.input_digest, "live_root_digest": authority["live_root_digest"],
@@ -82,6 +86,10 @@ async def create_fixed_children(jobs, *, parent_id, runtime_owner, runtime_fence
                 "creation_board_fence": board_fence, "creation_job_fence": runtime_fence}
             child_inputs = {"parent_input_digest": parent.input_digest, "research_slot": slot,
                 "parent_creation_digest": creation["creation_digest"], "source_slots": model.perspectives[slot].source_slots,
+                "source_manifest_digest": _digest([model.sources[index].model_dump(mode="json") for index in model.perspectives[slot].source_slots]),
+                "source_permission_revision": authority["model_policy_revision"],
+                "model_policy_revision": authority["model_policy_revision"],
+                "slot_allowance_microusd": authority["research_slot_allowance_microusd"],
                 "no_learning": True}
             identity = DurableJobIdentity(job_id=child_id, owner_kind="user", owner_principal_id=parent.owner_principal_id,
                 job_kind=CHILD_KIND, capability_version="1", idempotency_scope="research-child-slot",

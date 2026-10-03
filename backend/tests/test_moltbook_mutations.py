@@ -19,7 +19,7 @@ from src.vault.repository import vault_repository
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["post", "reply", "accepted_drop", "wrong_author"])
+@pytest.mark.parametrize("mode", ["post", "reply", "accepted_drop", "wrong_author", "hidden"])
 async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db, monkeypatch, mode):
     from src.api import auth, goals, moltbook
     root, db_engine, factory = accounting_db
@@ -67,10 +67,12 @@ async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db
                 comments[0]["replies"] = [{"id": content_id, "content": creation["content"], "parent_id": "parent-one",
                     "author": {"id": "account-one"}, "verification_status": "verified"}]
             value = {"comments": comments}
-        elif path == "/posts/"+content_id:
-            value = {"post": {"id": content_id, "title": creation["title"], "content": creation["content"],
+        elif path == "/posts":
+            assert request.method == "GET" and request.url.params["submolt"] == "introductions"
+            value = {"posts": [{"id": content_id, "title": creation["title"], "content": creation["content"],
                 "author": {"id": "wrong-account" if mode == "wrong_author" else "account-one"},
-                "submolt": {"name": "introductions"}, "verification_status": "verified" if verified else "pending"}}
+                "submolt": {"name": "introductions"}, "verification_status": "verified" if verified else "pending",
+                "hidden": mode == "hidden"}]}
         else: raise AssertionError("unexpected fixed provider route: "+path)
         return httpx.Response(200, json=value)
     service = MoltbookService(adapter=MoltbookAdapter(transport=httpx.MockTransport(provider),
@@ -90,7 +92,7 @@ async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db
         async with factory.accounting_sessions() as db: principal = (await db.get(Goal, goal_id)).owner_principal_id
         await vault_repository.store("private-test-moltbook", "private_test_moltbook_credential", owner_principal_id=principal)
         assert (await client.put("/api/capabilities/moltbook/connection", json={"vault_key": "private-test-moltbook", "request_key": "import-one"})).status_code == 200
-        consent = await client.post("/api/capabilities/moltbook/connection/consent", json={"expected_revision": 1,
+        consent = await client.post("/api/capabilities/moltbook/connection/consent", json={"request_key": "consent-one", "expected_revision": 1,
             "goal_id": goal_id, "goal_revision": 1, "actions": ["inspect", "community", "create_post", "create_comment"],
             "duration_seconds": 900, "personal_noncommercial": True, "no_redistribution": True})
         assert consent.status_code == 200, consent.text
@@ -141,7 +143,7 @@ async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db
         assert answer_approval != approval
         assert (await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/approval", json={"approval_id": answer_approval, "decision": "approved"})).status_code == 200
         completed = await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/execute")
-        if mode == "wrong_author":
+        if mode in {"wrong_author", "hidden"}:
             assert completed.status_code == 409, completed.text
             state = (await client.get(f"/api/capabilities/moltbook/jobs/{job_id}")).json()
             assert state["status"] == "unknown_external_effect" and state["artifacts"] == []

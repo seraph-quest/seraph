@@ -48,7 +48,7 @@ async def reviewed_community(service, owner, *, job_id, expected_digest, communi
         or snapshot["goal_id"] != goal_id or snapshot["goal_revision"] != goal_revision
         or binding.get("connection_revision") != revision or len(snapshot["artifacts"]) != 1
         or snapshot["artifacts"][0].get("content_sha256") != expected_digest
-        or not snapshot["finished_at"] or utc(datetime.fromisoformat(snapshot["finished_at"])) < now()-timedelta(minutes=5)):
+        or not snapshot["finished_at"] or not now()-timedelta(minutes=5) <= utc(datetime.fromisoformat(snapshot["finished_at"])) <= now()):
         raise MoltbookError("moltbook_current_reviewed_community_required")
     output = await service.output(owner, job_id)
     data = output.get("data")
@@ -353,14 +353,23 @@ async def execute_write(service, owner, job_id):
         async with engine.get_session() as db:
             run = await service.jobs._fetch(db, job_id); value = state(run)
         if payload["operation"] == "create_post":
-            observed = safe_content((await call(service, adapter, owner, job_id, lease, "post", {"post_id": value["content_id"]}, credential, deadline)).get("post"))
+            # The documented community feed is the public visibility proof.
+            # Exact-ID GET alone may return hidden owner content. One bounded
+            # page, no pagination/retry: absent membership remains unconfirmed.
+            page = await call(service, adapter, owner, job_id, lease, "feed", {"sort": "new", "limit": 1,
+                "community": fields["community"]}, credential, deadline)
+            posts = page.get("posts")
+            if not isinstance(posts, list) or len(posts) > 1: raise MoltbookError("moltbook_public_feed_readback_bound")
+            matches = [safe_content(post) for post in posts if isinstance(post, dict) and post.get("id") == value["content_id"]]
+            if len(matches) != 1: raise MoltbookError("moltbook_public_listing_membership_unconfirmed")
+            observed = matches[0]
         else:
             response = await call(service, adapter, owner, job_id, lease, "comments", {"post_id": fields["post_id"], "sort": "new", "limit": 10}, credential, deadline)
             matches = [c for c in comments_flat(response) if c["id"] == value["content_id"]]
             if len(matches) != 1: raise MoltbookError("moltbook_exact_comment_readback_incomplete")
             observed = matches[0]
         if (observed["id"] != value["content_id"] or observed["author_id"] != authority["account_id"]
-            or observed["content"] != fields["content"] or observed["visibility"] != "verified"
+            or observed["content"] != fields["content"] or observed["visibility"] != "verified" or observed["explicitly_hidden"]
             or (payload["operation"] == "create_post" and (observed.get("title") != fields["title"] or observed.get("community") != fields["community"]))
             or observed.get("parent_id") != fields.get("parent_id")):
             raise MoltbookError("moltbook_exact_visible_verified_readback_required")
@@ -368,6 +377,19 @@ async def execute_write(service, owner, job_id):
             "content_id": value["content_id"], "outcome": "published_verified", "author_id": authority["account_id"],
             "payload_digest": authority["payload_digest"], "no_learning": True, "private_owner_receipt": True})
         output_ref = PREFIX+digest(job_id.encode())+".output.json"
+        readback_receipt = {"effect_id": "moltbook-published:"+value["content_id"], "receipt_kind": "readback",
+            "effect_type": "moltbook_publication", "target_path": value["content_id"], "status": "succeeded",
+            "content_sha256": digest(output), "readback_id": "provider:"+digest(observed), "verified_at": now().isoformat()}
+        async with engine.get_session() as db:
+            await writer(db); run = await service.jobs._fetch(db, job_id)
+            await service.current(db, owner, run, lease=lease)
+            value = state(run)
+            if any(c["status"] != "received" for c in value["calls"]): raise MoltbookError("moltbook_contact_unsettled")
+            value.update(phase="verified_output_ready", verified_output={"output_ref": output_ref,
+                "output_digest": digest(output), "payload_digest": authority["payload_digest"],
+                "artifact_type": "moltbook_private_publication", "terminal_phase": "published_verified",
+                "readback_receipt": readback_receipt}, cleanup=adapter.marker.snapshot())
+            save_state(run, value); db.add(run)
         _write_payload(canonical_workspace_root(settings.workspace_dir)/output_ref, output)
         readback, truncated = _read_workspace_text_bounded(_safe_resolve(output_ref), max_bytes=65536)
         if truncated or readback.encode() != output: raise MoltbookError("moltbook_output_readback_failed")
@@ -381,9 +403,7 @@ async def execute_write(service, owner, job_id):
             value.update(phase="published_verified", output_ref=output_ref, output_digest=digest(output), cleanup=adapter.marker.snapshot())
             save_state(run, value)
             effects = json.loads(run.effect_receipts_json)
-            effects.append({"effect_id": "moltbook-published:"+value["content_id"], "receipt_kind": "readback",
-                "effect_type": "moltbook_publication", "target_path": value["content_id"], "status": "succeeded",
-                "content_sha256": digest(output), "readback_id": "provider:"+digest(observed), "verified_at": now().isoformat()})
+            effects.append(readback_receipt)
             run.effect_receipts_json, run.artifact_receipts_json = canonical(effects).decode(), canonical([artifact]).decode()
             run.status, run.result_digest, run.result_summary = "succeeded", digest(output), "Exact original content independently verified; no learning"
             run.finished_at, run.lease_owner, run.lease_expires_at = now(), None, None
@@ -395,7 +415,12 @@ async def execute_write(service, owner, job_id):
             await writer(db); run = await service.jobs._fetch(db, job_id)
             if run.status == "running" and run.lease_owner == lease[0] and run.fencing_token == lease[1]:
                 value = state(run)
-                value.update(phase="unknown" if value.get("creation_sent") else "blocked", cleanup=adapter.marker.snapshot())
+                await service.retain_cooldown(db, owner, run, value, exc, lease)
+                if value.get("phase") != "verified_output_ready":
+                    value["phase"] = "unknown" if value.get("creation_sent") else "blocked"
+                value["cleanup"] = adapter.marker.snapshot()
+                if value["cleanup"]["status"] == "verified":
+                    value["worker_completed"] = {"fencing_token": lease[1], "transport_closed": True}
                 save_state(run, value)
                 run.status = "unknown_external_effect" if value.get("creation_sent") else "blocked"
                 run.failure_reason = getattr(exc, "code", "moltbook_transfer_or_authority_failed")

@@ -25,6 +25,7 @@ class Setup(Strict):
 
 
 class Consent(Strict):
+    request_key: str = Field(min_length=1, max_length=128)
     expected_revision: int = Field(ge=1)
     goal_id: str = Field(min_length=1, max_length=128)
     goal_revision: int = Field(ge=1)
@@ -70,6 +71,12 @@ class Answer(Strict):
 class Decision(Strict):
     approval_id: str = Field(min_length=1, max_length=128)
     decision: Literal["approved", "denied"]
+
+
+class Cancel(Strict):
+    request_key: str = Field(min_length=1, max_length=128)
+    expected_revision: int = Field(ge=0)
+    fencing_token: int = Field(ge=0)
 
 
 def owner(request, *, contact=False, mutation=False):
@@ -148,3 +155,13 @@ async def execute(request: Request, job_id: str):
 @router.get("/jobs/{job_id}/output")
 async def output(request: Request, job_id: str):
     return await response(moltbook_service.output(owner(request), job_id))
+
+
+@router.post("/jobs/{job_id}/cancel")
+async def cancel(request: Request, job_id: str, body: Cancel):
+    return await response(moltbook_service.cancel(owner(request), job_id, **body.model_dump()))
+
+
+@router.post("/jobs/{job_id}/recover")
+async def recover(request: Request, job_id: str):
+    return await response(moltbook_service.recover(owner(request), job_id))

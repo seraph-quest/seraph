@@ -146,6 +146,22 @@ def safe_content(item):
         result["visibility"] = item["verification_status"]
     elif item.get("verification_status") == "verified": result["visibility"] = "verified"
     else: result["visibility"] = "observed"
+    # No undocumented affirmative provider field is required. Preserve
+    # explicit negative metadata, while public-list membership is proved
+    # separately by the fixed final GET rather than inferred from verification.
+    evidence = {}
+    for name in ("hidden", "is_hidden", "removed", "is_removed", "deleted", "is_deleted", "is_private"):
+        if name in item:
+            if type(item[name]) is not bool: raise MoltbookError("moltbook_visibility_unconfirmed")
+            evidence[name] = item[name]
+    for name in ("visibility", "publication_status", "status"):
+        if name in item: evidence[name] = text(item[name], 128, required=False)
+    for name in ("deleted_at", "removed_at"):
+        if name in item and item[name] is not None: evidence[name] = text(item[name], 128)
+    result["visibility_evidence"] = evidence
+    result["explicitly_hidden"] = (any(evidence.get(name) is True for name in ("hidden", "is_hidden", "removed", "is_removed", "deleted", "is_deleted", "is_private"))
+        or any(evidence.get(name) in {"hidden", "unlisted", "private", "removed", "deleted", "restricted"} for name in ("visibility", "publication_status", "status"))
+        or any(name in evidence for name in ("deleted_at", "removed_at")))
     return result
 
 

@@ -88,7 +88,7 @@ def connection_view(row):
     return {"configured": True, "id": row.id, "revision": row.revision, "mode": row.mode,
         "account_id": row.account_id, "account_name": row.account_name,
         "active_job_id": row.active_job_id, "cooldown_until": row.cooldown_until, "setup_request_key": row.setup_key,
-        "consent": {key: consent.get(key) for key in ("actions", "expires_at", "goal_id", "goal_revision", "session")},
+        "consent": {key: consent.get(key) for key in ("actions", "expires_at", "goal_id", "goal_revision", "session", "request_key")},
         "credential_is_consent": False, "remote_refresh": "explicit_finite_inspect_required", "no_learning": True}
 
 
@@ -158,25 +158,39 @@ class MoltbookService:
             db.add(row)
             return connection_view(row)
 
-    async def consent(self, owner, *, expected_revision, goal_id, goal_revision, actions,
+    async def consent(self, owner, *, request_key, expected_revision, goal_id, goal_revision, actions,
                       duration_seconds, personal_noncommercial, no_redistribution):
+        identifier(request_key)
         if (personal_noncommercial is not True or no_redistribution is not True
             or type(duration_seconds) is not int or not 30 <= duration_seconds <= 3600
             or type(actions) is not list or not actions or len(actions) > 7
             or any(type(a) is not str or a not in READS | WRITES for a in actions)
             or len(set(actions)) != len(actions)):
             raise MoltbookError("moltbook_explicit_consent_invalid", status_code=422)
+        request_digest = digest([owner.principal_id, owner.session_id, expected_revision, goal_id,
+            goal_revision, sorted(actions), duration_seconds, personal_noncommercial, no_redistribution])
         async with engine.get_session() as db:
             await writer(db)
             root = await root_current(db, owner.principal_id, owner.session_id)
             goal = await WorkBoardRepository._validate_goal(db, owner, goal_id=goal_id, goal_revision=goal_revision)
             row = await db.scalar(select(MoltbookConnection).where(MoltbookConnection.owner_principal_id == owner.principal_id))
-            if row is None or row.revision != expected_revision or row.active_job_id:
+            if row is None:
                 raise MoltbookError("moltbook_connection_busy_or_revision_changed")
             secret = await db.scalar(select(Secret).where(Secret.key == row.vault_key,
                 Secret.owner_principal_id == owner.principal_id, Secret.revoked_at.is_(None)))
             if secret is None or secret_binding_digest(secret) != row.credential_binding:
                 raise MoltbookError("moltbook_credential_changed")
+            prior = json.loads(row.consent_json)
+            if prior.get("request_key") == request_key:
+                if (prior.get("request_digest") != request_digest or prior.get("session") != owner.session_id
+                    or prior.get("credential_binding") != row.credential_binding
+                    or prior.get("connection_revision") != row.revision):
+                    raise MoltbookError("moltbook_consent_idempotency_conflict")
+                if datetime.fromisoformat(prior["expires_at"]) <= now():
+                    raise MoltbookError("moltbook_original_consent_expired")
+                return connection_view(row)
+            if row.revision != expected_revision or row.active_job_id:
+                raise MoltbookError("moltbook_connection_busy_or_revision_changed")
             expiry = min(now() + timedelta(seconds=duration_seconds), utc(root.absolute_expires_at), utc(root.idle_expires_at))
             budget = deserialize_admission_budget(goal)
             for limit in (goal.due_date, budget.period_expires_at if budget else None):
@@ -188,7 +202,7 @@ class MoltbookService:
                 "goal_id": goal_id, "goal_revision": goal_revision, "actions": sorted(actions),
                 "issued_at": now().isoformat(), "expires_at": expiry.isoformat(), "connection_revision": row.revision,
                 "credential_binding": row.credential_binding, "personal_noncommercial": True,
-                "no_redistribution": True}).decode()
+                "no_redistribution": True, "request_key": request_key, "request_digest": request_digest}).decode()
             if row.mode == "disabled": row.mode = "pending_claim"
             db.add(row)
             return connection_view(row)
@@ -216,6 +230,8 @@ class MoltbookService:
         if lease:
             self.jobs._assert_lease(run, owner=lease[0], fencing_token=lease[1])
             if run.status != "running": raise MoltbookError("moltbook_job_not_running")
+        if run.checkpoint_receipts_json not in (None, "", "[]") and state(run).get("cancel_request"):
+            raise MoltbookError("moltbook_original_job_cancelled")
         goal = await WorkBoardRepository._validate_goal(db, owner, goal_id=run.goal_id, goal_revision=run.goal_revision)
         budget = deserialize_admission_budget(goal)
         for limit in (goal.due_date, budget.period_expires_at if budget else None):
@@ -258,6 +274,22 @@ class MoltbookService:
             raise MoltbookError("moltbook_read_operation_required", status_code=422)
         return await self._prepare(owner, **request)
 
+    async def retain_cooldown(self, db, owner, run, value, exc, lease):
+        if not isinstance(exc, MoltbookError) or exc.code != "moltbook_rate_limited": return
+        seconds = exc.retry_after
+        if type(seconds) is not int or not 0 <= seconds <= 172800: return
+        expiry = now() + timedelta(seconds=seconds)
+        value["provider_cooldown_until"] = expiry.isoformat()
+        # Persist account cooldown only for the exact current canonical owner,
+        # Root, Goal and credential. Drift still retains this job's audit.
+        try:
+            row = await self.current(db, owner, run, lease=lease)
+        except MoltbookError:
+            return
+        if row.cooldown_until is None or utc(row.cooldown_until) < expiry:
+            row.cooldown_until, row.updated_at = expiry, now()
+            db.add(row)
+
     async def _prepare(self, owner, *, operation, fields, request_key, goal_id, goal_revision,
                        expected_revision, priority=50, review=None):
         if operation not in READS | WRITES: raise MoltbookError("moltbook_operation_not_allowed", status_code=422)
@@ -279,6 +311,8 @@ class MoltbookService:
             row = await db.scalar(select(MoltbookConnection).where(MoltbookConnection.owner_principal_id == owner.principal_id))
             if row is None or row.revision != expected_revision or row.mode == "disabled":
                 raise MoltbookError("moltbook_connection_revision_changed")
+            if row.cooldown_until and utc(row.cooldown_until) > now():
+                raise MoltbookError("moltbook_provider_cooldown")
             if operation in WRITES and (row.mode != "active" or not row.account_id or not row.account_name):
                 raise MoltbookError("moltbook_claimed_account_inspect_required")
             consent = json.loads(row.consent_json)
@@ -359,6 +393,14 @@ class MoltbookService:
         from src.integrations.moltbook_mutations import manual_answer
         return await manual_answer(self, owner, job_id, **request)
 
+    async def cancel(self, owner, job_id, **request):
+        from src.integrations.moltbook_recovery import cancel
+        return await cancel(self, owner, job_id, **request)
+
+    async def recover(self, owner, job_id):
+        from src.integrations.moltbook_recovery import recover
+        return await recover(self, owner, job_id)
+
     async def execute_read(self, owner, job_id):
         projected = await self.snapshot(owner, job_id)
         if projected["status"] == "succeeded": return projected
@@ -393,6 +435,7 @@ class MoltbookService:
             save_state(run, {"phase": "prepared", "calls": [], "max_contacts": 2 if payload["operation"] == "inspect" else 1})
             db.add(run)
         task = asyncio.current_task()
+        adapter = MoltbookAdapter(transport=self.adapter.transport, resolver=self.adapter.resolver)
         self._active[job_id] = task
         try:
             results = []
@@ -410,7 +453,7 @@ class MoltbookService:
                         value["phase"] = "contact_started"
                         save_state(run, value)
                         db.add(run)
-                response = await self.adapter.call(operation, fields, key=credential.value, deadline=deadline, before_contact=contact)
+                response = await adapter.call(operation, fields, key=credential.value, deadline=deadline, before_contact=contact)
                 results.append(response)
                 async with engine.get_session() as db:
                     await writer(db)
@@ -434,6 +477,22 @@ class MoltbookService:
                 "trust": "external_untrusted_literal", "use": "owner_personal_noncommercial_no_redistribution"})
             if len(output) > 65536: raise MoltbookError("moltbook_output_bound")
             output_ref = PREFIX + digest(job_id.encode()) + ".output.json"
+            readback_receipt = {"effect_id": "moltbook-read:"+digest(output),
+                "receipt_kind": "readback", "effect_type": "moltbook_read", "target_path": output_ref,
+                "status": "succeeded", "content_sha256": digest(output), "readback_id": "physical:"+digest(output),
+                "verified_at": now().isoformat(), "details": {"no_learning": True}}
+            async with engine.get_session() as db:
+                await writer(db)
+                run = await self.jobs._fetch(db, job_id)
+                await self.current(db, owner, run, lease=lease)
+                value = state(run)
+                if any(c["status"] != "received" for c in value["calls"]): raise MoltbookError("moltbook_response_unsettled")
+                value.update(phase="verified_output_ready", verified_output={"output_ref": output_ref,
+                    "output_digest": digest(output), "payload_digest": authority["payload_digest"],
+                    "artifact_type": "moltbook_private_read", "terminal_phase": "adopted",
+                    "account_update": normalized if payload["operation"] == "inspect" else None,
+                    "readback_receipt": readback_receipt}, cleanup=adapter.marker.snapshot())
+                save_state(run, value); db.add(run)
             _write_payload(canonical_workspace_root(settings.workspace_dir) / output_ref, output)
             observed, truncated = _read_workspace_text_bounded(_safe_resolve(output_ref), max_bytes=65536)
             if truncated or observed.encode() != output: raise MoltbookError("moltbook_output_readback_failed")
@@ -449,10 +508,7 @@ class MoltbookService:
                 value["output_ref"], value["output_digest"] = output_ref, digest(output)
                 save_state(run, value)
                 run.artifact_receipts_json = canonical([artifact]).decode()
-                run.effect_receipts_json = canonical([{"effect_id": "moltbook-read:"+digest(output),
-                    "receipt_kind": "readback", "effect_type": "moltbook_read", "target_path": output_ref,
-                    "status": "succeeded", "content_sha256": digest(output), "readback_id": "physical:"+digest(output),
-                    "verified_at": now().isoformat(), "details": {"no_learning": True}}]).decode()
+                run.effect_receipts_json = canonical([readback_receipt]).decode()
                 run.status, run.result_digest, run.result_summary = "succeeded", digest(output), "Bounded private Moltbook read verified; no learning"
                 run.finished_at, run.lease_owner, run.lease_expires_at = now(), None, None
                 if payload["operation"] == "inspect":
@@ -467,9 +523,13 @@ class MoltbookService:
                 run = await self.jobs._fetch(db, job_id)
                 if run.status == "running" and run.lease_owner == lease[0] and run.fencing_token == lease[1]:
                     value = state(run)
+                    await self.retain_cooldown(db, owner, run, value, exc, lease)
                     contacted = bool(value["calls"])
-                    value["phase"] = "unknown" if contacted else "blocked_before_contact"
-                    value["cleanup"] = self.adapter.marker.snapshot()
+                    if value.get("phase") != "verified_output_ready":
+                        value["phase"] = "unknown" if contacted else "blocked_before_contact"
+                    value["cleanup"] = adapter.marker.snapshot()
+                    if value["cleanup"]["status"] == "verified":
+                        value["worker_completed"] = {"fencing_token": lease[1], "transport_closed": True}
                     save_state(run, value)
                     run.status = "unknown_external_effect" if contacted else "blocked"
                     run.failure_reason = getattr(exc, "code", "moltbook_transfer_or_authority_failed")

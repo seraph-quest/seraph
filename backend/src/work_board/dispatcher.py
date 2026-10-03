@@ -478,6 +478,9 @@ def _reject_authority_input_keys(value: Any, *, path: str = "input") -> None:
 
 
 def _typed_input_model(capability_id: str) -> type[BaseModel] | None:
+    if capability_id == "work.research-dossier.v1":
+        from src.work_board.research_contracts import ResearchDossierInput
+        return ResearchDossierInput
     if capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
         from src.work_board.pipeline_contracts import EvidenceConsumerInput
         return EvidenceConsumerInput
@@ -505,6 +508,7 @@ def _typed_input_model(capability_id: str) -> type[BaseModel] | None:
 
 
 REGISTERED_CAPABILITIES: dict[str, CapabilitySpec] = {
+    "work.research-dossier.v1": CapabilitySpec("work.research-dossier.v1", "1", secret_like=False),
     "work.evidence-dossier.v1": CapabilitySpec("work.evidence-dossier.v1", "1", secret_like=False),
     "work.local-evidence-report.v1": CapabilitySpec("work.local-evidence-report.v1", "1", secret_like=False),
     GOAL_SNAPSHOT_CAPABILITY: CapabilitySpec(
@@ -4031,9 +4035,9 @@ class WorkBoardDispatcher:
             return "executor_lane_mismatch", "The task executor does not match the registered capability lane"
         if not _text(task.typed_input_ref) or not _text(task.typed_input_digest):
             return "typed_input_missing", "The task has no complete typed input reference"
-        if capability_id == "browser.public-task.v1" and not _text(task.input_artifact_id):
+        if capability_id in {"browser.public-task.v1", "work.research-dossier.v1"} and not _text(task.input_artifact_id):
             return "browser_input_artifact_required", "Public browser tasks require a server-bound input artifact"
-        if capability_id == "browser.public-task.v1":
+        if capability_id in {"browser.public-task.v1", "work.research-dossier.v1"}:
             # Browser inputs are resolved through the owner-bound artifact
             # lifecycle before promotion. This checks the current state,
             # expiry, task/goal/capability binding and bounded nofollow
@@ -4124,6 +4128,24 @@ class WorkBoardDispatcher:
 
         capability = _text(task.capability_id)
         try:
+            if capability == "work.research-dossier.v1":
+                from src.workflows.research_provider import _target
+                from src.model_fabric.caller_context import build_canonical_inference_context
+                from src.llm_runtime import _governed_preflight_target_async
+                operator = await authenticate_session(task.owner_session_id, touch=False)
+                setup, _policy, target = _target()
+                principal = replace(operator.principal, job_id="research-prerequisite:"+task.task_id)
+                context = build_canonical_inference_context("readonly_research_child", payload=inputs,
+                    output_tokens=min(1024, setup.max_output_tokens), timeout_seconds=min(45, setup.timeout_seconds),
+                    principal=principal, session_id=task.owner_session_id, job_id=principal.job_id,
+                    request_id="research-prerequisite:"+task.task_id)
+                decision, _proofs = await _governed_preflight_target_async(target, context)
+                if decision is None or not decision.allowed:
+                    return "research_model_route_unavailable", "The fixed research route needs current governed capability proof"
+                snapshot = await self.jobs.inference_accounting_snapshot()
+                if snapshot["status"] != "ready" or snapshot.get("overrun_max_cost_microusd", 0):
+                    return "research_accounting_blocked", "Resolve existing accounting continuity or provider overrun before research"
+                return None, None
             if capability in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
                 from src.work_board.input_artifacts import resolve_input_artifact_for_task
                 from src.work_board.pipelines import runtime_guard
@@ -4552,6 +4574,8 @@ class WorkBoardDispatcher:
         task, attempt = claim.task, claim.attempt
         result: dict[str, Any] = {"admitted": False, "completed": False, "blocked": False}
         runtime_seconds = await self._effective_runtime(task)
+        if _text(task.capability_id) == "work.research-dossier.v1":
+            return await self._admit_execute_research(claim, runtime_seconds=min(300, runtime_seconds))
         if _text(task.capability_id) == "browser.public-task.v1":
             max_attempts, max_outstanding_jobs = await self._effective_browser_limits(task)
             return await self._admit_execute_browser(
@@ -5357,6 +5381,72 @@ class WorkBoardDispatcher:
                 actor_principal_id=self.runner_id,
                 actor_session_id=self.runner_session,
             )
+
+    async def _admit_execute_research(self, claim: BoardDispatchClaim, *, runtime_seconds: int) -> dict[str, Any]:
+        """Admit the fixed native root before any source or model operation."""
+        from src.work_board.research_parent import spec_for, expected_identity
+        from src.workflows.research_coordinator import start_parent, continue_parent, freeze_quiescent
+        from src.workflows.research_native import checkpoint
+        from src.work_board.research_artifacts import read
+        task, attempt = claim.task, claim.attempt
+        inputs = _parse_typed_input(task)
+        # The immutable original Board attempt bounds first admission and
+        # recovery. A later pass cannot grant another execution window.
+        deadline = _utc_datetime(attempt.started_at) + timedelta(seconds=runtime_seconds)
+        spec = spec_for(task, attempt, inputs, deadline=deadline)
+        projection = await self.jobs.admit_job(spec)
+        expected = expected_identity(task, attempt, spec)
+        async with self.session_provider() as db:
+            linked = await self.repository.link_attempt_workflow_run(db, task.task_id, attempt.attempt_id,
+                workflow_run_id=spec.identity.job_id, expected_revision=task.task_revision,
+                board_fence=attempt.fencing_token, lease_owner=self.runner_id,
+                workflow_projection=projection, expected_identity=expected,
+                actor_principal_id=self.runner_id, actor_session_id=self.runner_session)
+        task, attempt = linked.task, linked.attempt
+        key = (task.task_id, attempt.attempt_id)
+        self._active_worker_tasks[key] = asyncio.current_task()
+        phase_binding = {}
+        try:
+            await self.jobs.queue_job(spec.identity.job_id)
+            parent = await self.jobs.claim_job(spec.identity.job_id, owner=self.runner_id, lease_seconds=30)
+            _creation, phase_binding = await start_parent(self.jobs, parent_id=spec.identity.job_id, owner=self.runner_id,
+                board_task=task, board_attempt=attempt, inputs=inputs)
+            completed = await continue_parent(self.jobs, parent_id=spec.identity.job_id, owner=self.runner_id,
+                phase_binding=phase_binding)
+            projection = await self.jobs.get_job(spec.identity.job_id)
+            artifact = completed["dossier"]
+            read(artifact["file_path"], artifact["content_sha256"])
+            filtered = {**projection, "effects": [item for item in projection["effects"]
+                if item.get("target_path") == artifact["file_path"] and item.get("content_sha256") == artifact["content_sha256"]]}
+            proof = self._workflow_readback(filtered, spec.identity.job_id)
+            if proof is None:
+                raise DurableJobError("research_actual_dossier_readback_required")
+            async with self.session_provider() as db:
+                task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == task.task_id))
+                attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.attempt_id == attempt.attempt_id))
+            await self._project(task, attempt, board_revision=completed["task_revision"],
+                status=WorkBoardStatus.review if task.requires_review else WorkBoardStatus.done,
+                outcome="succeeded", proof=proof,
+                result_refs=[{**proof, "learning": "no_learning", "target_path": artifact["file_path"]}],
+                artifact_refs=projection["artifacts"])
+            return {"admitted": True, "completed": True, "blocked": False}
+        except BaseException as error:
+            # The awaited finite worker group has returned before this writer
+            # freezes unfinished rows. No cancellation success is claimed.
+            import traceback
+            frames = [(Path(frame.filename).name, frame.lineno, frame.name)
+                for frame in traceback.extract_tb(error.__traceback__)[-8:]]
+            logger.warning("research bounded execution blocked: code=%s frames=%s", _safe_error_code(error), frames)
+            parent = await self.jobs.get_job(spec.identity.job_id)
+            if checkpoint(parent, "research:creation") is not None:
+                await asyncio.shield(freeze_quiescent(self.jobs, parent_id=spec.identity.job_id,
+                    owner=self.runner_id, phase_binding=phase_binding, expected_parent_revision=parent["revision"],
+                    reason="research_execution_requires_recovery"))
+            else:
+                await self._project_blocked(claim, "unknown_effect", "research_admission_requires_recovery")
+            return {"admitted": True, "completed": False, "blocked": True}
+        finally:
+            self._active_worker_tasks.pop(key, None)
 
     async def _admit_execute_direct(
         self,

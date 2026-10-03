@@ -50,9 +50,11 @@ async def create_fixed_children(jobs, *, parent_id, runtime_owner, runtime_fence
         authority = json.loads(parent.declared_authority_json)
         if authority.get("live_root_digest") != digest(root_binding()) or authority.get("typed_input_digest") != task.typed_input_digest:
             raise DurableJobLeaseError("research original root/input binding changed")
-        from src.work_board.input_artifacts import _canonical_json
+        from src.work_board.input_artifacts import INPUT_ARTIFACT_SCHEMA_VERSION, _canonical_json
         import hashlib
-        if hashlib.sha256(_canonical_json(model.model_dump(mode="json"))).hexdigest() != task.typed_input_digest:
+        envelope = {"schema_version": INPUT_ARTIFACT_SCHEMA_VERSION, "capability_id": PARENT_CAPABILITY,
+            "input": model.model_dump(mode="json", exclude_none=True)}
+        if hashlib.sha256(_canonical_json(envelope)).hexdigest() != task.typed_input_digest:
             raise DurableJobLeaseError("research child group must use the exact admitted source input")
         creation = {"schema_version": 1, "board_task_id": task_id, "board_attempt_id": attempt_id,
             "creation_board_fence": board_fence, "creation_job_fence": runtime_fence,

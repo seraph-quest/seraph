@@ -11,7 +11,7 @@ from src.db.models import Goal, WorkBoardAttempt, WorkBoardStatus, WorkBoardTask
 from src.goals.contracts import GoalAdmissionBudget
 from src.goals.repository import serialize_admission_budget
 from src.security.trust_contract import canonical_digest
-from src.work_board.input_artifacts import _canonical_json
+from src.work_board.input_artifacts import INPUT_ARTIFACT_SCHEMA_VERSION, _canonical_json
 from src.work_board.research_contracts import ResearchDossierInput, PARENT_CAPABILITY, WAIT_SOURCES, WAIT_CHILDREN, PROMPT_READY
 from src.work_board.research_artifacts import json_bytes, write_verified, read, normalized_source, prompt_messages, verified_child, dossier_bytes
 from src.work_board.research_parent import spec_for
@@ -53,7 +53,8 @@ async def create_kernel(accounting_db):
         capability_id=PARENT_CAPABILITY,status=WorkBoardStatus.running,
         idempotency_key="kernel-task",idempotency_binding="kernel-binding",
         input_artifact_id="kernel-input",typed_input_ref="artifacts/work-board/kernel-input.json",
-        typed_input_digest=hashlib.sha256(_canonical_json(inputs())).hexdigest(),task_revision=1)
+        typed_input_digest=hashlib.sha256(_canonical_json({"schema_version": INPUT_ARTIFACT_SCHEMA_VERSION,
+            "capability_id": PARENT_CAPABILITY, "input": inputs()})).hexdigest(),task_revision=1)
     attempt=WorkBoardAttempt(attempt_id="research-attempt",task_id=task.task_id,
         lease_owner="research-kernel",lease_expires_at=(now+timedelta(seconds=120)).replace(tzinfo=None),
         fencing_token=1,started_at=now.replace(tzinfo=None))

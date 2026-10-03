@@ -23,6 +23,7 @@ from src.db.models import (
     WorkBoardLink,
     WorkBoardStatus,
     WorkBoardTask,
+    WorkflowRunState,
     Goal,
 )
 from src.vault import redaction as vault_redaction
@@ -89,6 +90,31 @@ repository = WorkBoardRepository()
 # Use the same managed dispatcher instance as the scheduler so cancellation
 # can reach an inline GoalSnapshot worker admitted by the scheduler pass.
 dispatcher = _dispatcher
+
+
+@router.get("/tasks/{task_id}/research-report")
+async def read_research_report(request: Request, task_id: str):
+    from fastapi import Response
+    from src.work_board.research_readback import verified_dossier
+    operator = _operator(request)
+    async with get_session() as db:
+        task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id,
+            WorkBoardTask.owner_principal_id == operator.principal.principal_id,
+            WorkBoardTask.owner_session_id == operator.session_id,
+            WorkBoardTask.capability_id == "work.research-dossier.v1"))
+        if task is None:
+            raise HTTPException(status_code=404, detail="Research task unavailable")
+        attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == task_id)
+            .order_by(WorkBoardAttempt.created_at.desc(), WorkBoardAttempt.attempt_id.desc()).limit(1))
+        if attempt is None or attempt.ended_at is None or task.status not in {WorkBoardStatus.review, WorkBoardStatus.done}:
+            raise HTTPException(status_code=409, detail="Research dossier requires completed independent readback")
+        run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == attempt.workflow_run_id))
+        try:
+            _binding, raw = await verified_dossier(db, task, attempt, run)
+        except (ValueError, TypeError, KeyError, OSError):
+            raise HTTPException(status_code=409, detail="Research dossier readback requires recovery")
+        return Response(content=raw, media_type="text/plain", headers={
+            "X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"})
 
 
 @router.post("/tasks/{task_id}/pipeline-preview")

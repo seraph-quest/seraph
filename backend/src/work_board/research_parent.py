@@ -15,6 +15,18 @@ def job_id(task, attempt):
     return "research:"+digest([task.task_id, attempt.attempt_id])[:40]
 
 
+def expected_identity(task, attempt, spec):
+    from src.workflows.job_runtime import _digest
+    return {"job_id": spec.identity.job_id, "job_kind": PARENT_KIND,
+        "owner_kind": "user", "owner_principal_id": task.owner_principal_id,
+        "session_id": task.owner_session_id, "operator_session_id": task.owner_session_id,
+        "capability_id": PARENT_CAPABILITY, "capability_version": "1",
+        "goal_id": task.goal_id, "goal_revision": task.goal_revision,
+        "input_digest": _digest(spec.inputs), "authority_digest": _digest(spec.declared_authority),
+        "run_fingerprint": spec.run_fingerprint, "idempotency_scope": "work-board-attempt",
+        "idempotency_key": f"{task.task_id}:{attempt.attempt_id}"}
+
+
 def spec_for(task, attempt, inputs: Mapping[str, Any], *, deadline: datetime):
     if task.capability_id != PARENT_CAPABILITY or not task.input_artifact_id:
         raise ValueError("research requires its server-bound typed input artifact")

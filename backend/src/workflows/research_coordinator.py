@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 
@@ -16,6 +17,21 @@ from src.workflows.research_provider import execute_funded_child, prepare_prompt
 from src.workflows.research_sources import acquire_source, current_inputs
 from src.workflows.research_waits import pause_parent, resume_parent
 
+_COMPLETION_SEAL = object()
+
+
+@dataclass(frozen=True)
+class _PhaseCompletion:
+    parent_id: str
+    owner: str
+    binding: tuple
+    worker: object
+    seal: object = None
+
+
+def _binding_tuple(binding):
+    return tuple(binding.get(key) for key in ("task_id", "attempt_id", "task_revision", "board_fence", "job_fence", "phase", "creation_digest"))
+
 
 async def start_parent(jobs, *, parent_id, owner, board_task, board_attempt, inputs):
     parent = await jobs.get_job(parent_id)
@@ -23,9 +39,10 @@ async def start_parent(jobs, *, parent_id, owner, board_task, board_attempt, inp
         runtime_fence=parent["lease"]["fencing_token"], task_id=board_task.task_id,
         attempt_id=board_attempt.attempt_id, board_revision=board_task.task_revision,
         board_fence=board_attempt.fencing_token, board_owner=owner, inputs=inputs)
-    await pause_parent(jobs, parent_id=parent_id, owner=owner, job_fence=parent["lease"]["fencing_token"],
+    binding = await pause_parent(jobs, parent_id=parent_id, owner=owner, job_fence=parent["lease"]["fencing_token"],
         board_fence=board_attempt.fencing_token, board_revision=board_task.task_revision, reason=WAIT_SOURCES)
-    return creation
+    binding["creation_digest"] = creation["creation_digest"]
+    return creation, binding
 
 
 async def _prepare_child(jobs, child_id, owner):
@@ -66,7 +83,20 @@ async def _execute_child(jobs, child_id, owner):
     await execute_funded_child(jobs, child_id=child_id, owner=owner, fence=claimed["lease"]["fencing_token"])
 
 
-async def continue_parent(jobs, *, parent_id, owner):
+async def continue_parent(jobs, *, parent_id, owner, phase_binding):
+    """Issue completion authority only from this actual awaited native path."""
+    workers = []
+    try:
+        return await _continue_parent(jobs, parent_id=parent_id, owner=owner,
+            phase_binding=phase_binding, workers=workers)
+    except BaseException:
+        if all(worker.done() for worker in workers):
+            phase_binding["_completion"] = _PhaseCompletion(parent_id, owner,
+                _binding_tuple(phase_binding), asyncio.current_task(), _COMPLETION_SEAL)
+        raise
+
+
+async def _continue_parent(jobs, *, parent_id, owner, phase_binding, workers):
     """At most two source workers, two synthesis callbacks and one assembly."""
     parent = await jobs.get_job(parent_id)
     creation = checkpoint(parent, "research:creation")
@@ -79,20 +109,32 @@ async def continue_parent(jobs, *, parent_id, owner):
         for child_id in creation["child_ids"]:
             await _prepare_child(jobs, child_id, owner)
         phase = await resume_parent(jobs, parent_id=parent_id, owner=owner, phase="research_funding")
+        phase_binding.update(phase)
         await fund_fixed_group(jobs, parent_id=parent_id, owner=owner, fencing_token=phase["job_fence"])
-        await pause_parent(jobs, parent_id=parent_id, owner=owner, job_fence=phase["job_fence"],
+        phase_binding.update(await pause_parent(jobs, parent_id=parent_id, owner=owner, job_fence=phase["job_fence"],
             board_fence=phase["board_fence"], board_revision=phase["task_revision"], reason=WAIT_CHILDREN)
+        )
         parent = await jobs.get_job(parent_id)
     if parent["status"] != "paused" or parent["failure_reason"] != WAIT_CHILDREN:
         raise ValueError("research parent is outside its exact original child wait")
     # Both slots enter the existing broker; that broker selects priority and
     # enforces the sole remote lane. No parent inference is queued.
-    results = await asyncio.gather(*(_execute_child(jobs, child_id, owner)
-        for child_id in creation["child_ids"]), return_exceptions=True)
+    workers.extend(asyncio.create_task(_execute_child(jobs, child_id, owner)) for child_id in creation["child_ids"])
+    try:
+        results = await asyncio.gather(*workers, return_exceptions=True)
+    finally:
+        # Real task completion, including each HTTP response/client finally,
+        # precedes the parent's error path. A cancelled gather alone is not
+        # evidence that its provider callbacks have finished.
+        for worker in workers:
+            if not worker.done():
+                worker.cancel()
+        await asyncio.shield(asyncio.gather(*workers, return_exceptions=True))
     failures = [result for result in results if isinstance(result, BaseException)]
     if failures:
         raise failures[0]
     phase = await resume_parent(jobs, parent_id=parent_id, owner=owner, phase="research_assembly")
+    phase_binding.update(phase)
     inputs = await current_inputs(jobs, parent_id)
     verified = []
     child_refs = []
@@ -123,12 +165,17 @@ async def continue_parent(jobs, *, parent_id, owner):
     return {**phase, "dossier": dossier, "manifest": manifest}
 
 
-async def freeze_quiescent(jobs, *, parent_id, reason):
+async def freeze_quiescent(jobs, *, parent_id, owner, phase_binding, expected_parent_revision, reason):
     """Commit a blocked unfinished group after its awaited workers returned.
 
     This is not cancellation success or cost forgiveness. Contacted unknown
     rows and their debt remain visible, and no row is adopted or retried.
     """
+    completion = phase_binding.get("_completion")
+    if (not isinstance(completion, _PhaseCompletion) or completion.seal is not _COMPLETION_SEAL
+        or completion.parent_id != parent_id or completion.owner != owner
+        or completion.binding != _binding_tuple(phase_binding)):
+        return False
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     async with jobs._session() as db:
         await db.execute(text("BEGIN IMMEDIATE"))
@@ -141,13 +188,47 @@ async def freeze_quiescent(jobs, *, parent_id, reason):
         task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == created["board_task_id"]))
         if attempt is None or task is None or attempt.workflow_run_id != parent_id or task.owner_principal_id != parent.owner_principal_id:
             raise ValueError("research freeze Board binding changed")
+        latest = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == task.task_id)
+            .order_by(WorkBoardAttempt.created_at.desc(), WorkBoardAttempt.attempt_id.desc()).limit(1))
+        phase = next((item["payload"] for item in creation if item.get("checkpoint_id") == "research:phase"), {})
+        waiting = parent.status == "paused" and phase.get("phase") in {WAIT_SOURCES, WAIT_CHILDREN}
+        executing = parent.status == "running" and phase.get("phase") in {"research_funding", "research_assembly"}
+        if (parent.status == "succeeded" or task.status in {WorkBoardStatus.done, WorkBoardStatus.review}
+            or latest is None or latest.attempt_id != attempt.attempt_id or attempt.ended_at
+            or attempt.cancel_requested_at or parent.revision != expected_parent_revision
+            or phase_binding.get("task_id") != task.task_id or phase_binding.get("attempt_id") != attempt.attempt_id
+            or phase_binding.get("task_revision") != task.task_revision
+            or phase_binding.get("board_fence") != attempt.fencing_token
+            or phase_binding.get("job_fence") != parent.fencing_token
+            or phase_binding.get("phase") != phase.get("phase")
+            or phase.get("creation_digest") != created["creation_digest"]
+            or phase_binding.get("creation_digest") != created["creation_digest"]
+            or task.owner_session_id != parent.session_id or not (waiting or executing)
+            or (waiting and (parent.lease_owner or parent.lease_expires_at or attempt.lease_owner or attempt.lease_expires_at
+                or task.status != WorkBoardStatus.blocked or task.block_reason != phase["phase"]))
+            or (executing and (parent.lease_owner != owner or attempt.lease_owner != owner
+                or task.status != WorkBoardStatus.running or parent.lease_expires_at is None
+                or attempt.lease_expires_at is None))):
+            return False
         rows = list((await db.scalars(select(WorkflowRunState).where(
             WorkflowRunState.run_identity.in_([parent_id, *created["child_ids"]])))).all())
+        if len(rows) != 1+len(created["child_ids"]) or any(row.run_identity != parent_id and (
+            row.job_kind != "readonly_research_child" or row.parent_job_id != parent_id
+            or row.parent_fencing_token != created["creation_job_fence"]
+            or row.owner_principal_id != parent.owner_principal_id or row.session_id != parent.session_id
+            or json.loads(row.declared_authority_json).get("parent_creation_digest") != created["creation_digest"])
+            for row in rows):
+            return False
         for row in rows:
             if row.status in {"succeeded", "cancelled", "unknown_external_effect", "cost_liability"}:
                 continue
             cost = await db.scalar(select(InferenceCostReservation).where(InferenceCostReservation.job_id == row.run_identity))
-            row.status = "unknown_external_effect" if cost and cost.state in {"contact_started", "unknown"} else "blocked"
+            records = json.loads(row.checkpoint_receipts_json)
+            uncertain_source = any(item.get("checkpoint_id", "").startswith("research:source-intent:")
+                and item.get("payload", {}).get("kind") == "public_https_text"
+                and not any(other.get("checkpoint_id") == "research:artifact:source:"+str(item["payload"]["source_slot"])
+                    for other in records) for item in records)
+            row.status = "unknown_external_effect" if uncertain_source or (cost and cost.state in {"contact_started", "unknown"}) else "blocked"
             row.failure_reason = reason
             row.lease_owner = row.lease_expires_at = None
             row.fencing_token += 1
@@ -163,3 +244,4 @@ async def freeze_quiescent(jobs, *, parent_id, reason):
         attempt.outcome = reason
         attempt.updated_at = now
         db.add_all([task, attempt])
+        return True

@@ -1143,7 +1143,7 @@ class WorkBoardRepository:
                 request = request.model_copy(update={"executor_id": expected_executor})
         if (
             request.status is WorkBoardStatus.todo
-            and request.capability_id == "browser.public-task.v1"
+            and request.capability_id in {"browser.public-task.v1", "work.research-dossier.v1"}
             and not request.input_artifact_id
         ):
             raise BoardError(

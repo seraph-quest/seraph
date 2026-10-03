@@ -29,6 +29,8 @@ def _target():
     from src.model_fabric.effective_policy import current_inference_policy
     configured, policy_digest = current_inference_policy()
     setup = configured.openrouter_setup
+    if setup.timeout_seconds > 45:
+        raise ValueError("research requires a reviewed provider timeout at most 45 seconds")
     profile = _provider_profile(setup.profile_id)
     if profile is None or profile.provider_kind != "openrouter" or profile.transport_adapter != "openai_compatible_chat":
         raise ValueError("research requires its reviewed fixed OpenRouter chat profile")
@@ -59,7 +61,12 @@ async def _context(child, body, deadline):
         session_id=child["session_id"], job_id=child["job_id"], request_id="remote:"+child["job_id"])
     # The constructor's relative time is never a renewed financial/contact
     # allowance: bind the original absolute deadline recorded below instead.
-    return replace(context, deadline_at=deadline)
+    # Route eligibility describes the original admitted policy ceiling, not
+    # a renewed transfer timeout. Queue/local work consumes deadline_at; the
+    # HTTP helper enforces the strictly smaller remaining absolute window.
+    setup, _policy, _fixed_target = _target()
+    return replace(context, deadline_at=deadline, requirements=replace(context.requirements,
+        max_latency_ms=int(setup.timeout_seconds*1000)))
 
 
 async def prepare_prompt(jobs, *, child_id, owner, fence, sources):

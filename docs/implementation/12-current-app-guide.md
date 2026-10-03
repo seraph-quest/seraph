@@ -1363,7 +1363,16 @@ Definitive failed preflight reads retain their HTTP status and response digest.
 When no creation or verification POST occurred, all read receipts are settled,
 the owning worker has verified awaited transport closure, and current authority
 still matches, the original capacity slot is released. A 429 cooldown remains
-in force: later work requires an explicit new admission after it expires. An
+in force: the complete failed GET receipt and its once-observed bounded cooldown
+are committed atomically; the connection API reports the absolute cooldown
+with an explicit UTC offset. This also holds when another service has requested
+cancellation. That settlement preserves every original authority check except
+the cancellation and existing-cooldown contact fences; it authorizes no contact
+or output adoption. Cancellation releases a settled 429 slot only with matching
+original connection, revision and credential binding plus canonical cooldown
+covering the observed expiry. Stale Goal or Root cannot establish that proof,
+so the slot stays visibly held. Later work requires an explicit new admission
+after the cooldown expires. An
 uncertain transfer or authority drift retains capacity for explicit inspection.
 
 Independent bounded review required public-list visibility proof and durable

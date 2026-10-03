@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime
 
 from src.artifacts.registry import build_artifact_record
 from src.db import engine
 from src.db.models import MoltbookConnection
 from src.integrations.moltbook import JOB_KIND, MoltbookError, canonical, digest, identifier
-from src.integrations.moltbook_controls import PREFIX, now, root_current, save_state, state, writer
+from src.integrations.moltbook_controls import PREFIX, now, root_current, save_state, state, utc, writer
 from src.tools.filesystem_tool import _read_workspace_text_bounded, _safe_resolve
 
 
@@ -83,7 +84,20 @@ async def cancel(service, owner, job_id, *, request_key, expected_revision, fenc
             or original_status in {"accepted", "queued", "paused"}
             or value.get("worker_completed") == {"fencing_token": fencing_token, "transport_closed": True})
         unsettled = any(call.get("status") != "received" for call in value.get("calls", []))
-        if quiescent:
+        authority = json.loads(run.declared_authority_json)
+        row = await db.get(MoltbookConnection, authority["connection_id"])
+        known_rate_limit = any(c.get("status") == "received" and c.get("http_status") == 429
+            and c.get("method") == "GET" for c in value.get("calls", []))
+        cooldown_proven = (not known_rate_limit or (row is not None
+            and row.owner_principal_id == owner.principal_id and row.revision == authority["connection_revision"]
+            and row.credential_binding == authority["vault_binding_digest"]
+            and value.get("provider_cooldown_until") is not None and row.cooldown_until is not None
+            and utc(row.cooldown_until) >= datetime.fromisoformat(value["provider_cooldown_until"])))
+        exact_release = (not known_rate_limit or row is None or row.active_job_id != job_id
+            or row.active_payload_digest == authority["payload_digest"])
+        if quiescent and (not cooldown_proven or not exact_release):
+            receipt["cleanup"] = "settled_rate_limit_cooldown_unproven_capacity_held"
+        elif quiescent:
             receipt["cleanup"] = "completed_original_worker_or_native_wait"
             receipt["quiescent_at"] = now().isoformat()
             if unsettled:
@@ -92,9 +106,8 @@ async def cancel(service, owner, job_id, *, request_key, expected_revision, fenc
             else:
                 run.status, run.finished_at = "cancelled", now()
                 value["phase"] = "cancelled_known_content_retained" if value.get("content_id") else "cancelled"
-                authority = json.loads(run.declared_authority_json)
-                row = await db.get(MoltbookConnection, authority["connection_id"])
-                if row and row.active_job_id == job_id:
+                if row and row.active_job_id == job_id and (not known_rate_limit
+                    or row.active_payload_digest == authority["payload_digest"]):
                     row.active_job_id, row.active_deadline_at, row.active_payload_digest = None, None, ""
                     db.add(row)
             run.lease_owner = run.lease_expires_at = None

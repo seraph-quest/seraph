@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import re
@@ -30,9 +30,10 @@ def digest(value):
 
 
 class MoltbookError(ValueError):
-    def __init__(self, code: str, *, status_code=409, retry_after=None):
+    def __init__(self, code: str, *, status_code=409, retry_after=None, cooldown_until=None):
         super().__init__(code)
         self.code, self.status_code, self.retry_after = code, status_code, retry_after
+        self.cooldown_until = cooldown_until
 
 
 def identifier(value):
@@ -219,7 +220,10 @@ class MoltbookAdapter:
         if response.status_code == 429:
             retry = response.headers.get("retry-after", "")
             seconds = (min(int(retry), 172800) if len(retry) <= 6 else 172800) if retry.isascii() and retry.isdecimal() else 60
-            raise MoltbookError("moltbook_rate_limited", retry_after=seconds)
+            expiry = (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
+            if self.read_response_receipt is not None:
+                self.read_response_receipt["cooldown_until"] = expiry
+            raise MoltbookError("moltbook_rate_limited", retry_after=seconds, cooldown_until=expiry)
         if not 200 <= response.status_code < 300:
             raise MoltbookError("moltbook_provider_rejected")
         if response.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":

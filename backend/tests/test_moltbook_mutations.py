@@ -20,7 +20,7 @@ from src.vault.repository import vault_repository
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["post", "reply", "reply_observed", "reply_unlisted", "reply_hidden", "reply_pending", "reply_ambiguous", "accepted_drop", "wrong_author", "hidden", "peer_goal", "rotated_key", "stale_community", "status_rate_limited", "status_rate_html", "status_unclaimed", "status_rejected", "status_drop", "status_stale_goal", "status_revoked_root"])
+@pytest.mark.parametrize("mode", ["post", "reply", "reply_observed", "reply_unlisted", "reply_hidden", "reply_pending", "reply_ambiguous", "accepted_drop", "wrong_author", "hidden", "peer_goal", "rotated_key", "stale_community", "status_rate_limited", "status_rate_html", "status_unclaimed", "status_rejected", "status_drop", "status_stale_goal", "status_revoked_root", "status_cancel_rate", "status_cancel_rate_stale_goal"])
 async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db, monkeypatch, mode):
     from src.api import auth, goals, moltbook
     root, db_engine, factory = accounting_db
@@ -39,6 +39,7 @@ async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db
     creation_request_started = False
     content_id = "original-content-one"
     reply_mode = mode.startswith("reply")
+    started, release = asyncio.Event(), asyncio.Event()
     async def provider(request):
         nonlocal creation, verified
         requests.append((request.method, request.url.path, request.content))
@@ -47,6 +48,11 @@ async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db
         path = request.url.path.removeprefix("/api/v1")
         if path == "/agents/me": value = {"agent": {"id": "account-one", "name": "FixtureSeraph"}}
         elif path == "/agents/status":
+            if mode.startswith("status_cancel_rate") and creation_request_started:
+                if mode.endswith("stale_goal"):
+                    async with factory.accounting_sessions() as db:
+                        current = await db.get(Goal, goal_id); current.revision += 1; db.add(current)
+                return httpx.Response(429, json={"error": "received before cross-service cancel"}, headers={"retry-after": "60"})
             if mode in {"status_stale_goal", "status_revoked_root"} and creation_request_started:
                 async with factory.accounting_sessions() as db:
                     if mode == "status_stale_goal":
@@ -104,7 +110,13 @@ async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db
                 "hidden": mode == "hidden"}]}
         else: raise AssertionError("unexpected fixed provider route: "+path)
         return httpx.Response(200, json=value)
-    service = MoltbookService(adapter=MoltbookAdapter(transport=httpx.MockTransport(provider),
+    class ClosingBarrier(httpx.MockTransport):
+        async def aclose(self):
+            if mode.startswith("status_cancel_rate") and creation_request_started:
+                started.set()
+                await release.wait()
+            await super().aclose()
+    service = MoltbookService(adapter=MoltbookAdapter(transport=ClosingBarrier(provider),
         resolver=lambda host, port: ["93.184.216.34"]))
     monkeypatch.setattr(moltbook, "moltbook_service", service)
     app = FastAPI(); app.add_middleware(OperatorAuthMiddleware)
@@ -181,6 +193,13 @@ async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db
             "fencing_token": creation_request["fencing_token"]+1})).status_code == 409
         assert len(requests) == before
         creation_request_started = True
+        if mode.startswith("status_cancel_rate"):
+            from tests.test_moltbook_native import assert_cross_service_cancel_rate
+            await assert_cross_service_cancel_rate(client, service, moltbook, monkeypatch, started, release,
+                db_engine, factory, job_id, creation_request, json.loads(prepared.request.content),
+                "/api/capabilities/moltbook/writes", requests, mode.endswith("stale_goal"))
+            assert sum(method == "POST" for method,_,_ in requests) == 0
+            return
         executed = await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/execute", json=creation_request)
         if mode in {"status_stale_goal", "status_revoked_root"}:
             assert executed.status_code == 409, executed.text

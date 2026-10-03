@@ -87,7 +87,7 @@ def connection_view(row):
     consent = json.loads(row.consent_json)
     return {"configured": True, "id": row.id, "revision": row.revision, "mode": row.mode,
         "account_id": row.account_id, "account_name": row.account_name,
-        "active_job_id": row.active_job_id, "cooldown_until": row.cooldown_until, "setup_request_key": row.setup_key,
+        "active_job_id": row.active_job_id, "cooldown_until": utc(row.cooldown_until).isoformat() if row.cooldown_until is not None else None, "setup_request_key": row.setup_key,
         "consent": {key: consent.get(key) for key in ("actions", "expires_at", "goal_id", "goal_revision", "session", "request_key", "request")},
         "credential_is_consent": False, "remote_refresh": "explicit_finite_inspect_required", "no_learning": True}
 
@@ -226,7 +226,7 @@ class MoltbookService:
             # actual worker closes and an exact canonical recovery settles it.
             return connection_view(row)
 
-    async def current(self, db, owner, run, *, lease=None):
+    async def current(self, db, owner, run, *, lease=None, settlement_only=False):
         await root_current(db, owner.principal_id, owner.session_id)
         if (run.owner_principal_id != owner.principal_id or run.operator_session_id != owner.session_id
             or run.job_kind != JOB_KIND or run.capability_version != "1" or utc(run.deadline_at) <= now()):
@@ -234,7 +234,7 @@ class MoltbookService:
         if lease:
             self.jobs._assert_lease(run, owner=lease[0], fencing_token=lease[1])
             if run.status != "running": raise MoltbookError("moltbook_job_not_running")
-        if run.checkpoint_receipts_json not in (None, "", "[]") and state(run).get("cancel_request"):
+        if not settlement_only and run.checkpoint_receipts_json not in (None, "", "[]") and state(run).get("cancel_request"):
             raise MoltbookError("moltbook_original_job_cancelled")
         goal = await WorkBoardRepository._validate_goal(db, owner, goal_id=run.goal_id, goal_revision=run.goal_revision)
         budget = deserialize_admission_budget(goal)
@@ -269,7 +269,7 @@ class MoltbookService:
             Secret.owner_principal_id == owner.principal_id, Secret.revoked_at.is_(None)))
         if secret is None or secret_binding_digest(secret) != authority["vault_binding_digest"]:
             raise MoltbookError("moltbook_credential_changed")
-        if row.cooldown_until and utc(row.cooldown_until) > now():
+        if not settlement_only and row.cooldown_until and utc(row.cooldown_until) > now():
             raise MoltbookError("moltbook_provider_cooldown")
         return row
 
@@ -297,17 +297,16 @@ class MoltbookService:
             raise MoltbookError("moltbook_original_admission_request_conflict")
         return result
 
-    async def retain_cooldown(self, db, owner, run, value, exc, lease):
-        if not isinstance(exc, MoltbookError) or exc.code != "moltbook_rate_limited": return
-        seconds = exc.retry_after
-        if type(seconds) is not int or not 0 <= seconds <= 172800: return
-        expiry = now() + timedelta(seconds=seconds)
+    async def retain_cooldown(self, db, owner, run, value, receipt, lease, *, settlement_only=True):
+        """Settlement only: audit and account cooldown share the failed GET writer."""
+        if receipt.get("http_status") != 429: return
+        expiry = datetime.fromisoformat(receipt["cooldown_until"])
+        # The transport observed this expiry once; finalizers and replay must
+        # never renew it. Audit survives drift, account mutation does not.
         value["provider_cooldown_until"] = expiry.isoformat()
-        # Persist account cooldown only for the exact current canonical owner,
-        # Root, Goal and credential. Drift still retains this job's audit.
         try:
-            row = await self.current(db, owner, run, lease=lease)
-        except MoltbookError:
+            row = await self.current(db, owner, run, lease=lease, settlement_only=settlement_only)
+        except (MoltbookError, BoardError):
             return
         if row.cooldown_until is None or utc(row.cooldown_until) < expiry:
             row.cooldown_until, row.updated_at = expiry, now()
@@ -552,10 +551,12 @@ class MoltbookService:
                             self.jobs._assert_lease(run, owner=lease[0], fencing_token=lease[1])
                             value = state(run)
                             last = value["calls"][-1]
-                            if last["operation"] != operation or last["status"] != "intent":
+                            if (last["operation"] != operation or last["status"] != "intent"
+                                or last["request_digest"] != digest(fields)):
                                 raise MoltbookError("moltbook_contact_receipt_changed")
                             last.update(status="received", outcome="failed_read", http_status=receipt["http_status"],
                                 response_digest=receipt["response_digest"], method="GET")
+                            await self.retain_cooldown(db, owner, run, value, receipt, lease)
                             save_state(run, value); db.add(run)
                     raise
                 results.append(response)
@@ -627,10 +628,10 @@ class MoltbookService:
                 run = await self.jobs._fetch(db, job_id)
                 if run.status == "running" and run.lease_owner == lease[0] and run.fencing_token == lease[1]:
                     value = state(run)
-                    try: connection = await self.current(db, owner, run, lease=lease)
+                    try:
+                        connection = await self.current(db, owner, run, lease=lease, settlement_only=True)
+                        if value.get("cancel_request"): connection = None
                     except (MoltbookError, BoardError): connection = None
-                    try: await self.retain_cooldown(db, owner, run, value, exc, lease)
-                    except BoardError: pass
                     uncertain = any(c["status"] != "received" for c in value["calls"])
                     if value.get("phase") != "verified_output_ready":
                         value["phase"] = "unknown" if uncertain else "blocked"

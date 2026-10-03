@@ -255,7 +255,8 @@ async def call(service, adapter, owner, job_id, lease, operation, fields, creden
                 service.jobs._assert_lease(run, owner=lease[0], fencing_token=lease[1])
                 value = state(run)
                 last = value["calls"][-1]
-                if last["operation"] != operation or last["method"] != "GET" or last["status"] != "intent":
+                if (last["operation"] != operation or last["method"] != "GET" or last["status"] != "intent"
+                    or last["request_digest"] != digest([operation, fields])):
                     raise MoltbookError("moltbook_contact_receipt_changed")
                 last.update(status="received", outcome="failed_read", http_status=receipt["http_status"],
                     response_digest=receipt["response_digest"])
@@ -266,6 +267,7 @@ async def call(service, adapter, owner, job_id, lease, operation, fields, creden
                     verified_at=now().isoformat(), details={"no_learning": True, "read_only": True,
                         "http_status": receipt["http_status"], "transport_closed": True})
                 run.effect_receipts_json = canonical(effects).decode()
+                await service.retain_cooldown(db, owner, run, value, receipt, lease)
                 save_state(run, value); db.add(run)
         raise
     async with engine.get_session() as db:
@@ -469,12 +471,15 @@ async def execute_write(service, owner, job_id, *, execution):
             await writer(db); run = await service.jobs._fetch(db, job_id)
             if run.status == "running" and run.lease_owner == lease[0] and run.fencing_token == lease[1]:
                 value = state(run)
-                # Current authority is checked before adding the cooldown,
-                # which deliberately makes further contacts ineligible.
-                try: connection = await service.current(db, owner, run, lease=lease)
+                try:
+                    connection = await service.current(db, owner, run, lease=lease, settlement_only=True)
+                    if value.get("cancel_request"): connection = None
                 except (MoltbookError, BoardError): connection = None
-                try: await service.retain_cooldown(db, owner, run, value, exc, lease)
-                except BoardError: pass  # Audit remains; stale Goal cannot authorize account mutation.
+                if (isinstance(exc, MoltbookError) and exc.code == "moltbook_rate_limited"
+                    and exc.cooldown_until is not None and value.get("calls", [])
+                    and value["calls"][-1].get("method") == "POST"):
+                    await service.retain_cooldown(db, owner, run, value,
+                        {"http_status": 429, "cooldown_until": exc.cooldown_until}, lease, settlement_only=False)
                 uncertain = bool(value.get("creation_sent")) or any(
                     call.get("status") != "received" for call in value.get("calls", []))
                 if value.get("phase") != "verified_output_ready":

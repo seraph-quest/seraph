@@ -29,6 +29,17 @@ from src.db.session_refs import ensure_sessions_exist
 from src.workflows.inference_accounting import InferenceAccountingRepositoryMixin
 
 
+@dataclass(frozen=True)
+class NodeProcessCleanupSettlement:
+    """Internal original authority request, never a caller-supplied proof."""
+    job_id: str
+    expected_revision: int
+    owner_principal_id: str
+    owner_session_id: str
+    authority: Mapping[str, Any]
+    dispatch: Mapping[str, Any]
+
+
 DURABLE_JOB_RECORD_SCHEMA_VERSION = 2
 
 # A repair execution reservation is a safety boundary rather than ordinary
@@ -4307,7 +4318,14 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 or not _text(payload.get("authority_digest"))
             ):
                 raise DurableJobTransitionError("repository repair reservation identity is malformed")
-            if status == "released" and (
+            if status == "released" and payload.get("readback_scope") == "process_cleanup_only":
+                declared = _json_load(run.declared_authority_json, {})
+                if (run.job_kind != "engineering.repo-repair.v1" or declared.get("sandbox_profile") != "repo-node24-npm-v1"
+                    or payload.get("cleanup_receipt_verified") is not True or payload.get("cleanup_proven") is not True
+                    or _text(payload.get("outcome_status")) != "unknown_external_effect"
+                    or re.fullmatch(r"[0-9a-f]{64}", _text(payload.get("process_cleanup_readback_sha256"))) is None):
+                    raise DurableJobTransitionError("repository repair process cleanup release proof is malformed")
+            elif status == "released" and (
                 payload.get("cleanup_proven") is not True
                 or payload.get("readback_verified") is not True
                 or _text(payload.get("outcome_status")) not in {"succeeded", "degraded", "failed", "cancelled"}
@@ -4663,6 +4681,98 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     "operator_visible": True,
                 },
             )
+
+    async def settle_node_process_cleanup(self, request: NodeProcessCleanupSettlement) -> dict[str, Any]:
+        """Release only exact cancelled physical work; retain all task liability."""
+        from config.settings import RepoSandboxSettings, settings
+        from src.db.models import OperatorSession, RepoRepairProposalRow, RepoRepairSourcePacketRow
+        from src.execution.repo_node import NodeRepoRepairExecutor, PROFILE
+        from src.workflows.repo_repair import _proposal_authority_payload
+
+        if type(request) is not NodeProcessCleanupSettlement:
+            raise DurableJobTransitionError("Node cleanup settlement request is invalid")
+        async with self._session() as db:
+            if db.get_bind().dialect.name == "sqlite":
+                await db.execute(text("BEGIN IMMEDIATE"))
+            run = await self._fetch(db, request.job_id)
+            declared = _json_load(run.declared_authority_json, {})
+            if (run.status != "unknown_external_effect" or run.job_kind != "engineering.repo-repair.v1"
+                or declared.get("sandbox_profile") != PROFILE or declared.get("executor_kind") != "local"
+                or _revision(run) != request.expected_revision
+                or run.owner_principal_id != request.owner_principal_id
+                or (run.operator_session_id or run.session_id) != request.owner_session_id):
+                raise DurableJobLeaseError("Node original cleanup row or revision changed")
+            session = await db.get(OperatorSession, request.owner_session_id)
+            now = _utc_now()
+            if (session is None or session.principal_id != request.owner_principal_id or session.revoked_at is not None
+                or session.replaced_by_id is not None or session.is_bearer_tombstone
+                or _as_utc(session.idle_expires_at) <= now or _as_utc(session.absolute_expires_at) <= now):
+                raise DurableJobTransitionError("Node original operator root is not live")
+            proposals = (await db.execute(select(RepoRepairProposalRow).where(
+                RepoRepairProposalRow.workflow_run_id == request.job_id,
+                RepoRepairProposalRow.owner_principal_id == request.owner_principal_id,
+                RepoRepairProposalRow.owner_session_id == request.owner_session_id,
+                RepoRepairProposalRow.work_board_task_id == declared.get("task_id"),
+                RepoRepairProposalRow.work_board_attempt_id == declared.get("attempt_id"),
+            ))).scalars().all()
+            if len(proposals) != 1:
+                raise DurableJobTransitionError("Node original immutable proposal is missing")
+            proposal = proposals[0]
+            canonical = _proposal_authority_payload(proposal)
+            if (any(request.authority.get(key) != value for key,value in canonical.items() if value not in (None,"",[],{}))
+                or proposal.status not in {"approved","consumed","execution_failed","blocked"}
+                or str(proposal.goal_id or "") != str(run.goal_id or "")
+                or int(proposal.goal_revision) != int(run.goal_revision or 0)):
+                raise DurableJobTransitionError("Node original immutable proposal authority changed")
+            packet = await db.get(RepoRepairSourcePacketRow, proposal.source_packet_id)
+            if (packet is None or packet.state != "verified" or packet.workflow_run_id != request.job_id
+                or packet.owner_principal_id != request.owner_principal_id or packet.owner_session_id != request.owner_session_id
+                or packet.work_board_task_id != proposal.work_board_task_id or packet.work_board_attempt_id != proposal.work_board_attempt_id
+                or packet.base_snapshot_digest != proposal.base_snapshot_digest or packet.source_manifest_digest != proposal.source_digest):
+                raise DurableJobTransitionError("Node original source binding changed")
+            reservation = self._repo_repair_reservation_state(run)
+            if reservation is None or reservation.get("status") != "held":
+                raise DurableJobTransitionError("Node physical reservation is not held")
+            dispatches = [item for item in _json_load(run.checkpoint_receipts_json, [])
+                          if isinstance(item,dict) and isinstance(item.get("payload"),dict)
+                          and item["payload"].get("phase") == "executor_dispatch_reserved"]
+            if not dispatches:
+                raise DurableJobTransitionError("Node original dispatch is missing")
+            envelope = dispatches[-1]
+            dispatch = {**envelope["payload"], "fencing_token": envelope.get("fencing_token")}
+            if (dispatch != dict(request.dispatch) or type(dispatch.get("fencing_token")) is not int
+                or dispatch.get("executor_kind") != "local" or dispatch.get("job_id") != request.job_id
+                or dispatch.get("authority_digest") != run.authority_digest
+                or dispatch.get("attempt") != run.attempt_count or dispatch.get("attempt_id") != proposal.work_board_attempt_id
+                or dispatch.get("base_digest") != proposal.base_snapshot_digest
+                or request.authority.get("base_digest") != proposal.base_snapshot_digest
+                or request.authority.get("profile") != PROFILE or request.authority.get("executor_kind") != "local"
+                or request.authority.get("attempt_id") != proposal.work_board_attempt_id
+                or request.authority.get("fencing_token") != dispatch["fencing_token"]
+                or not self._repo_repair_reservation_matches(reservation, job_id=request.job_id,
+                    attempt_id=proposal.work_board_attempt_id, fence=dispatch["fencing_token"], authority_digest=run.authority_digest)):
+                raise DurableJobLeaseError("Node original dispatch/reservation changed")
+            executor = NodeRepoRepairExecutor(RepoSandboxSettings(profile=PROFILE), workspace_dir=settings.workspace_dir)
+            with executor._job_marker_lock(request.job_id):
+                digest = executor._process_cleanup_readback_locked(job_id=request.job_id, attempt_id=proposal.work_board_attempt_id,
+                    authority_digest=run.authority_digest, fencing_token=dispatch["fencing_token"], authority=request.authority)
+                payload = {**reservation, "status":"released", "outcome_status":"unknown_external_effect",
+                           "cleanup_proven":True, "cleanup_receipt_verified":True, "process_cleanup_readback_sha256":digest,
+                           "readback_scope":"process_cleanup_only", "recorded_at":now.isoformat()}
+                history = _json_load(run.checkpoint_receipts_json, [])
+                history.append({"checkpoint_id":"repo-repair-execution-release", "state_digest":_digest(payload),
+                                "state_keys":sorted(payload), "safe":True, "recorded_at":now.isoformat(),
+                                "fence":dispatch["fencing_token"], "payload":payload})
+                updated = await db.execute(update(WorkflowRunState).execution_options(synchronize_session=False).where(
+                    WorkflowRunState.run_identity == request.job_id, WorkflowRunState.revision == request.expected_revision,
+                    WorkflowRunState.fencing_token == run.fencing_token, WorkflowRunState.status == "unknown_external_effect",
+                ).values(checkpoint_receipts_json=_canonical(_bounded_checkpoint_receipts(history)),
+                         updated_at=now, revision=WorkflowRunState.revision + 1))
+                if not _rowcount_is_one(updated):
+                    raise DurableJobLeaseError("Node physical cleanup CAS is stale")
+            refreshed = await self._fetch(db, request.job_id)
+            db.expunge(refreshed)
+            return _serialize(refreshed, receipt={"kind":"repo_repair_process_cleanup_release", **payload})
 
     async def adopt_routine_publication_child(
         self,

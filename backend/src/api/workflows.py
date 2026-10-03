@@ -9089,6 +9089,35 @@ async def cancel_repo_change(job_id: str, req: RepoChangeCancelRequest, request:
     )
 
 
+async def _repo_change_reconcile_node_process_cleanup(job: dict[str, Any], operator: Any) -> dict[str, Any] | None:
+    """Consume original cancelled ECHILD proof without adopting task output."""
+    declared = job.get("declared_authority") or {}
+    if job.get("job_kind") != "engineering.repo-repair.v1" or declared.get("sandbox_profile") != "repo-node24-npm-v1":
+        return None
+    from src.workflows.job_runtime import NodeProcessCleanupSettlement
+    from src.workflows.repair_capacity import clear_exact_repo_repair_quarantine
+    try:
+        authority = await _repo_change_recovery_authority(job)
+        dispatch_ok, _, dispatch = _repo_change_dispatch_contract(job, authority)
+        if not dispatch_ok or dispatch is None:
+            return None
+        settled = await durable_job_repository.settle_node_process_cleanup(NodeProcessCleanupSettlement(
+            job_id=str(job["job_id"]), expected_revision=int(job["revision"]),
+            owner_principal_id=str(operator.principal.principal_id), owner_session_id=str(operator.session_id),
+            authority=authority, dispatch=dispatch,
+        ))
+        # The repository transaction committed before physical quarantine clear.
+        clear_exact_repo_repair_quarantine(settings.workspace_dir, job_id=str(job["job_id"]),
+            attempt_id=str(dispatch["attempt_id"]), fencing_token=int(dispatch["fencing_token"]),
+            authority_digest=str(job["authority_digest"]))
+        return {"status":"unknown_external_effect", "durable_status":"unknown_external_effect", "job":settled,
+                "recovery":"physical_process_cleanup_reconciled", "readback_scope":"process_cleanup_only",
+                "cleanup_receipt_verified":True, "physical_capacity_released":True,
+                "operator_action":"reconcile_task_and_cost_liability", "learning":"no_learning", "operator_visible":True}
+    except (DurableJobError, RepoSandboxError, OSError, ValueError, TypeError):
+        return None
+
+
 async def _recover_repo_change_after_restart_inner(
     *,
     job: dict[str, Any],
@@ -9107,6 +9136,9 @@ async def _recover_repo_change_after_restart_inner(
     if local_finalized is not None:
         return local_finalized
     if status == "unknown_external_effect":
+        process_cleanup = await _repo_change_reconcile_node_process_cleanup(job, operator)
+        if process_cleanup is not None:
+            return process_cleanup
         return {
             "status": "blocked",
             "durable_status": status,

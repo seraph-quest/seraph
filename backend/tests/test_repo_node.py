@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import replace
@@ -18,11 +19,30 @@ from src.execution.repo_node import NodeRepoRepairExecutor, PROFILE, execution_p
 from src.execution.repo_sandbox import RepoSandboxError, RepoSandboxJob
 from src.execution import repo_supervisor as supervisor
 
-NODE = "/tmp/node-v24.15.0-linux-x64/bin/node"
-TYPESCRIPT = "/tmp/seraph-864-operator-work-board/frontend/node_modules/typescript"
+NODE = os.environ.get("SERAPH_TEST_NODE_RUNTIME") or shutil.which("node") or ""
+TYPESCRIPT = os.environ.get("SERAPH_TEST_TYPESCRIPT_ROOT") or str(Path(__file__).resolve().parents[2]/"frontend/node_modules/typescript")
 
 
-def make_fixture(tmp_path: Path, *, typescript=False, script=None):
+def require_native_platform():
+    try:
+        supervisor.platform_ready()
+    except (ValueError,OSError) as exc:
+        pytest.skip("Optional native Node supervisor unavailable: "+str(exc))
+
+
+def require_native_runtime():
+    require_native_platform()
+    if not NODE:
+        pytest.skip("Optional Node24 runtime missing; set SERAPH_TEST_NODE_RUNTIME")
+    version=subprocess.run([NODE,"--version"],capture_output=True,text=True,timeout=2).stdout.strip()
+    if not version.startswith("v24."):
+        pytest.skip("Optional selected profile requires Node24; found "+version)
+
+
+def make_fixture(tmp_path: Path, *, typescript=False, script=None, native=True):
+    if native: require_native_runtime()
+    if typescript and not (Path(TYPESCRIPT)/"package.json").is_file():
+        pytest.skip("Optional TypeScript dependency missing; set SERAPH_TEST_TYPESCRIPT_ROOT")
     workspace=tmp_path/"workspace";workspace.mkdir(mode=0o700)
     repo=workspace/"repo";(repo/"src").mkdir(parents=True);(repo/"tests").mkdir()
     if typescript:
@@ -50,7 +70,7 @@ def make_fixture(tmp_path: Path, *, typescript=False, script=None):
     snapshot=executor.snapshot_repository(repo,workspace/"preview")
     patch="".join(difflib.unified_diff(old.splitlines(True),new.splitlines(True),fromfile="a/"+path,tofile="b/"+path)).encode()
     preflight=executor.preflight({"repository_ref":str(repo),"test_args":args,"allowed_paths":allowed})
-    assert preflight.ok,preflight.reason
+    if native: assert preflight.ok,preflight.reason
     job=RepoSandboxJob("node-job",str(repo),patch,allowed,args,"authority-node",snapshot.digest,deadline_seconds=30,expected_posture_digest=preflight.posture_digest)
     return executor,repo,job
 
@@ -74,10 +94,8 @@ def test_real_node_and_typescript_staged_execution(tmp_path,typescript):
 
 @pytest.mark.parametrize("body",["node --test tests/*.test.js","npm test","npx vitest","node tests/app.test.js && echo bad","NODE_OPTIONS=x node tests/app.test.js","node --watch tests/app.test.js","tsc -b","node ./tests/app.test.js","node --test ../escape.test.js","node tests/app.test.js "])
 def test_unsupported_script_forms_block(tmp_path,body):
-    executor,repo,job=make_fixture(tmp_path)
-    package=json.loads((repo/"package.json").read_text());package["scripts"]["test"]=body
-    (repo/"package.json").write_text(json.dumps(package))
-    assert executor.preflight({"repository_ref":str(repo),"test_args":job.test_args,"allowed_paths":job.allowed_paths}).ok is False
+    from src.execution.repo_node import canonical_node_command
+    with pytest.raises(RepoSandboxError): canonical_node_command("test",body,NODE or "/missing/node")
 
 
 @pytest.mark.parametrize("path",["package.json","package-lock.json","src/app.js","tests/app.test.js"])
@@ -88,7 +106,7 @@ def test_execution_input_or_source_drift_invalidates_approval(tmp_path,path):
 
 
 def test_dependencies_never_follow_foreign_links(tmp_path):
-    executor,repo,job=make_fixture(tmp_path)
+    executor,repo,job=make_fixture(tmp_path,native=False)
     (repo/"node_modules").mkdir();outside=tmp_path/"foreign";outside.write_text("secret")
     (repo/"node_modules/foreign").symlink_to(outside)
     with pytest.raises(RepoSandboxError):executor.snapshot_repository(repo,executor.workspace_dir/"foreign-preview")
@@ -118,7 +136,6 @@ def test_running_command_cancel_uses_owned_supervisor(tmp_path):
 
 
 def test_platform_and_pid_reuse_fail_closed(monkeypatch):
-    supervisor.platform_ready() # actual assigned uv interpreter / kernel syscalls
     monkeypatch.setattr(supervisor.sys,"platform","darwin")
     with pytest.raises(ValueError):supervisor.platform_ready()
     assert supervisor.exact_signal(os.getpid(),"wrong-start-token",signal.SIGTERM) is False
@@ -170,7 +187,7 @@ def test_abnormal_supervisor_death_preserves_durable_unknown(tmp_path):
 
 
 def test_restart_missing_or_reused_identity_never_signals_unrelated(tmp_path):
-    executor,repo,job=make_fixture(tmp_path)
+    executor,repo,job=make_fixture(tmp_path,native=False)
     for pid,start in ((99999999,"missing"),(os.getpid(),"reused-start")):
         executor._write_job_marker(job.job_id,{"job_id":job.job_id,"profile":PROFILE,"authority_digest":job.authority_digest,"attempt_id":"legacy-attempt","pid":pid,"pid_start_identity":start,"cleanup_proven":False,"phase":"worker_started"})
         fresh=NodeRepoRepairExecutor(executor.config,workspace_dir=executor.workspace_dir)
@@ -180,6 +197,7 @@ def test_restart_missing_or_reused_identity_never_signals_unrelated(tmp_path):
 
 
 def test_actual_pidfd_errno_and_unsupported_architecture(monkeypatch):
+    require_native_platform()
     with pytest.raises(OSError):supervisor.pidfd_open(-1)
     with pytest.raises(OSError):supervisor.pidfd_send(-1,0)
     monkeypatch.setattr(supervisor.os,"uname",lambda:SimpleNamespace(machine="armv7l"))
@@ -187,7 +205,7 @@ def test_actual_pidfd_errno_and_unsupported_architecture(monkeypatch):
 
 
 def test_selected_node_platform_block_does_not_block_python_core(tmp_path,monkeypatch):
-    executor,repo,job=make_fixture(tmp_path)
+    executor,repo,job=make_fixture(tmp_path,native=False)
     monkeypatch.setattr(supervisor.sys,"platform","darwin")
     assert executor.preflight().ok is False
     from src.execution.repo_sandbox import build_repo_repair_executor,LocalRepoRepairExecutor
@@ -198,7 +216,7 @@ def test_selected_node_platform_block_does_not_block_python_core(tmp_path,monkey
 
 
 def test_node_docker_selection_reports_unverified_posture(tmp_path):
-    executor,repo,job=make_fixture(tmp_path)
+    executor,repo,job=make_fixture(tmp_path,native=False)
     executor.config=executor.config.model_copy(update={"executor_kind":"docker_rootless"})
     preflight=executor.preflight()
     assert not preflight.ok and preflight.reason=="node_docker_profile_unverified"
@@ -209,6 +227,9 @@ def test_node_docker_selection_reports_unverified_posture(tmp_path):
 @pytest.mark.parametrize("code",[errno.ENOSYS,errno.EPERM])
 def test_kernel_facility_failures_block_without_pid_signal_fallback(monkeypatch,code):
     def unavailable(pid):raise OSError(code,os.strerror(code))
+    monkeypatch.setattr(supervisor.sys,"platform","linux")
+    monkeypatch.setattr(supervisor.os,"uname",lambda:SimpleNamespace(machine="x86_64"))
+    monkeypatch.setattr(supervisor.Path,"exists",lambda self:True)
     monkeypatch.setattr(supervisor,"pidfd_open",unavailable)
     with pytest.raises(OSError) as error:supervisor.platform_ready()
     assert error.value.errno==code
@@ -244,3 +265,61 @@ def test_node_unknown_exception_mapping_preserves_old_python_behavior():
     assert _repo_change_execution_failure_status(unknown,{})=="blocked"
     failed=RepoSandboxError("test failed",terminal_status="failed")
     assert _repo_change_execution_failure_status(failed,{"sandbox_profile":"repo-python-pytest-v1"})=="failed"
+
+
+def test_private_marker_lock_serializes_competing_process(tmp_path):
+    from src.execution.repo_sandbox import LocalRepoRepairExecutor
+    executor=LocalRepoRepairExecutor(RepoSandboxSettings(),workspace_dir=tmp_path)
+    executor._write_job_marker("locked",{"job_id":"locked","status":"running"})
+    code="from pathlib import Path;from config.settings import RepoSandboxSettings;from src.execution.repo_sandbox import LocalRepoRepairExecutor;import sys; e=LocalRepoRepairExecutor(RepoSandboxSettings(),workspace_dir=Path(sys.argv[1]));\nwith e._job_marker_lock('locked'):\n print('LOCKED',flush=True);sys.stdin.readline()\n"
+    process=subprocess.Popen([sys.executable,"-c",code,str(tmp_path)],cwd=Path(__file__).resolve().parents[1],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    try:
+        assert process.stdout.readline().strip()=="LOCKED"
+        with pytest.raises(RepoSandboxError,match="busy"):
+            with executor._job_marker_lock("locked",timeout_seconds=.05):pass
+    finally:
+        process.communicate("release\n",timeout=5)
+    with executor._job_marker_lock("locked",timeout_seconds=.05):pass
+    metadata=(executor._job_marker_directory/(executor._job_marker_name("locked")+".lock")).stat()
+    assert metadata.st_uid==os.getuid() and metadata.st_mode & 0o777==0o600 and metadata.st_nlink==1
+
+
+def test_cancellation_check_to_rename_competing_process_is_monotonic(tmp_path,monkeypatch):
+    executor=NodeRepoRepairExecutor(RepoSandboxSettings(profile=PROFILE),workspace_dir=tmp_path)
+    executor._write_job_marker("race",{"job_id":"race","profile":PROFILE,"attempt_id":"legacy-attempt","status":"running"})
+    ready=tmp_path/"cancel-ready";done=tmp_path/"cancel-done"
+    code="from pathlib import Path;from config.settings import RepoSandboxSettings;from src.execution.repo_node import NodeRepoRepairExecutor,PROFILE;import sys; e=NodeRepoRepairExecutor(RepoSandboxSettings(profile=PROFILE),workspace_dir=Path(sys.argv[1]));Path(sys.argv[2]).write_text('ready');e.cancel(job_id='race');Path(sys.argv[3]).write_text('done')"
+    process=None;rename=os.rename
+    def interpose(source,target,**kwargs):
+        nonlocal process
+        if target==executor._job_marker_name("race") and process is None:
+            process=subprocess.Popen([sys.executable,"-c",code,str(tmp_path),str(ready),str(done)],cwd=Path(__file__).resolve().parents[1],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+            deadline=time.monotonic()+1
+            while not ready.exists() and time.monotonic()<deadline:time.sleep(.005)
+            assert ready.exists()
+            time.sleep(.05)
+            assert not done.exists(),"Competing cancellation committed while writer held the marker lock"
+        return rename(source,target,**kwargs)
+    monkeypatch.setattr(os,"rename",interpose)
+    executor._write_job_marker("race",{"job_id":"race","profile":PROFILE,"attempt_id":"legacy-attempt","status":"running","phase":"worker_started"})
+    assert process is not None
+    stdout,stderr=process.communicate(timeout=5)
+    assert process.returncode==0,stderr
+    assert done.exists()
+    executor._write_job_marker("race",{"job_id":"race","profile":PROFILE,"attempt_id":"legacy-attempt","status":"running"})
+    marker=executor._read_job_marker("race")
+    assert marker["status"]=="cancellation_requested" and marker["cancellation_requested"] is True
+
+
+def test_committed_predispatch_cancellation_executes_no_node_command(tmp_path):
+    sentinel=tmp_path/"command-started"
+    executor,repo,job=make_fixture(tmp_path,script="require('node:fs').writeFileSync("+json.dumps(str(sentinel))+",'BAD');")
+    def commit_cancel():
+        fresh=NodeRepoRepairExecutor(executor.config,workspace_dir=executor.workspace_dir)
+        fresh.cancel(job_id=job.job_id,authority={"authority_digest":job.authority_digest})
+        assert fresh._read_job_marker(job.job_id)["cancellation_requested"] is True
+    result=executor.execute_job(job,before_dispatch=commit_cancel)
+    assert result["status"]=="cancelled"
+    assert result["manifest"]["commands"]==[] and not sentinel.exists()
+    assert result["manifest"]["process_cleanup"]["oracle"]=="linux_subreaper_waitpid_echild"
+    assert result["cleanup"]["cleanup_proven"] is True

@@ -615,6 +615,33 @@ class NodeRepoRepairExecutor(LocalRepoRepairExecutor):
                 return {"status":"unknown_external_effect","reason":"node_supervisor_identity_missing_or_changed","cleanup_proven":False}
             return {"status":"cancel_requested","cleanup_proven":False,"job_id":resolved}
 
+    def _process_cleanup_readback_locked(self, *, job_id: str, attempt_id: str, authority_digest: str,
+                                         fencing_token: int, authority: Mapping[str, Any]) -> str:
+        """Read physical-only proof under the caller-held private marker lock."""
+        marker=self._read_job_marker(job_id)
+        binding={"executor_kind":"local","job_id":job_id,"attempt_id":attempt_id,
+                 "fencing_token":fencing_token,"authority_digest":authority_digest}
+        token=hashlib.sha256(json.dumps(binding,sort_keys=True,separators=(",",":")).encode()).hexdigest()
+        posture=authority.get("executor_posture")
+        expected_hash=posture.get("supervisor_source_sha256") if isinstance(posture,dict) else None
+        expected={"job_id":job_id,"attempt_id":attempt_id,"authority_digest":authority_digest,
+                  "fencing_token":fencing_token,"profile":PROFILE,"supervisor_token":token,
+                  "stage_binding":binding,"base_digest":authority.get("base_digest"),
+                  "posture_digest":authority.get("executor_posture_digest"),"supervisor_source_sha256":expected_hash,
+                  "cleanup_proven":True,"status":"cancelled","phase":"cleanup_verified"}
+        if marker is None or not isinstance(expected_hash,str) or not re.fullmatch(r"[0-9a-f]{64}",expected_hash) or any(marker.get(key)!=value for key,value in expected.items()):
+            raise RepoSandboxError("Node original cancelled cleanup binding is unproven")
+        result=marker.get("process_cleanup")
+        if not isinstance(result,dict):
+            raise RepoSandboxError("Node original cleanup result is missing")
+        proof=result.get("process_cleanup")
+        if (type(marker.get("pid")) is not int or marker["pid"]<=0 or not isinstance(marker.get("pid_start_identity"),str) or not marker["pid_start_identity"]
+            or any(result.get(key)!=value for key,value in {"profile":PROFILE,"job_id":job_id,"token":token,
+                    "supervisor_pid":marker["pid"],"supervisor_start":marker["pid_start_identity"],"status":"cancelled","cleanup_proven":True}.items())
+            or not isinstance(proof,dict) or proof.get("cleanup_proven") is not True or proof.get("oracle")!="linux_subreaper_waitpid_echild"):
+            raise RepoSandboxError("Node exact supervisor ECHILD readback is unproven")
+        return hashlib.sha256(json.dumps(marker,sort_keys=True,separators=(",",":")).encode()).hexdigest()
+
     def reconcile(self, authority: Mapping[str,Any] | None=None) -> dict[str,Any]:
         # A gone supervisor is not proof of empty ancestry. Only the owning
         # terminal receipt can close cleanup; existing durable adopter checks

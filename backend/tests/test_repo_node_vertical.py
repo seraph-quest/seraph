@@ -13,7 +13,6 @@ from pathlib import Path
 import shutil
 import signal
 import subprocess
-import tempfile
 import time
 from types import SimpleNamespace
 
@@ -27,7 +26,7 @@ from tests import test_repo_repair_local_vertical as native
 from tests.test_repo_node import make_fixture, NODE, PROFILE
 
 
-PROOF_ROOT=Path(tempfile.mkdtemp(prefix=f"seraph-912-integrated-evidence-{os.getpid()}-"))
+PROOF_ROOT=Path(os.environ.get("SERAPH_TEST_EVIDENCE_ROOT") or str(Path(__file__).resolve().parents[2]/".agent-evidence/912"))/f"integrated-{os.getpid()}"
 
 
 def _retained(name):

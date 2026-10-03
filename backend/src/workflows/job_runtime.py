@@ -4731,8 +4731,10 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 or packet.base_snapshot_digest != proposal.base_snapshot_digest or packet.source_manifest_digest != proposal.source_digest):
                 raise DurableJobTransitionError("Node original source binding changed")
             reservation = self._repo_repair_reservation_state(run)
-            if reservation is None or reservation.get("status") != "held":
-                raise DurableJobTransitionError("Node physical reservation is not held")
+            if reservation is None or reservation.get("status") not in {"held","released"}:
+                raise DurableJobTransitionError("Node physical reservation is missing")
+            if reservation.get("status") == "released" and reservation.get("readback_scope") != "process_cleanup_only":
+                raise DurableJobTransitionError("Node physical reservation has a different settlement")
             dispatches = [item for item in _json_load(run.checkpoint_receipts_json, [])
                           if isinstance(item,dict) and isinstance(item.get("payload"),dict)
                           and item["payload"].get("phase") == "executor_dispatch_reserved"]
@@ -4756,6 +4758,12 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             with executor._job_marker_lock(request.job_id):
                 digest = executor._process_cleanup_readback_locked(job_id=request.job_id, attempt_id=proposal.work_board_attempt_id,
                     authority_digest=run.authority_digest, fencing_token=dispatch["fencing_token"], authority=request.authority)
+                if reservation.get("status") == "released":
+                    if reservation.get("process_cleanup_readback_sha256") != digest:
+                        raise DurableJobTransitionError("Node settled cleanup readback changed")
+                    db.expunge(run)
+                    return _serialize(run, receipt={"kind":"repo_repair_process_cleanup_release","status":"deduped",
+                                                   "readback_scope":"process_cleanup_only"})
                 payload = {**reservation, "status":"released", "outcome_status":"unknown_external_effect",
                            "cleanup_proven":True, "cleanup_receipt_verified":True, "process_cleanup_readback_sha256":digest,
                            "readback_scope":"process_cleanup_only", "recorded_at":now.isoformat()}

@@ -534,8 +534,10 @@ class NodeRepoRepairExecutor(LocalRepoRepairExecutor):
                     current=self._read_job_marker(job.job_id)
                     expected={"job_id":job.job_id,"authority_digest":job.authority_digest,
                               "attempt_id":job.attempt_id or "legacy-attempt","fencing_token":job.fencing_token,
-                              "supervisor_token":token,"pid":process.pid,"pid_start_identity":pid_start}
-                    if current is None or any(current.get(key)!=value for key,value in expected.items()) or time.monotonic()>=deadline:
+                              "supervisor_token":token,"pid":process.pid,"pid_start_identity":pid_start,
+                              "profile":PROFILE,"base_digest":job.base_digest,"posture_digest":preflight.posture_digest,
+                              "stage_binding":marker["stage_binding"],"supervisor_source_sha256":preflight.posture["supervisor_source_sha256"]}
+                    if current is None or any(current.get(key)!=value for key,value in expected.items()) or current.get("status") not in {"running","cancellation_requested"} or time.monotonic()>=deadline:
                         exact_signal(process.pid,pid_start,signal.SIGTERM)
                         raise RepoSandboxError("Node dispatch binding changed or deadline expired",terminal_status="unknown_external_effect")
                     if current.get("cancellation_requested") is True or current.get("status")=="cancellation_requested":

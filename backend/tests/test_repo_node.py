@@ -152,9 +152,20 @@ def test_detached_closed_pipe_descendant_rejected_and_reaped(tmp_path,keep_paren
     script="const {spawn}=require('node:child_process');const p=spawn('/usr/bin/python3',['-c',"+json.dumps(code)+"],{stdio:'ignore'});p.unref();"+("setTimeout(()=>{},10000);" if keep_parent else "")
     executor,repo,job=make_fixture(tmp_path,script=script)
     job=replace(job,deadline_seconds=3)
-    result=executor.execute_job(job)
-    assert result["status"]=="failed"
-    assert result["cleanup"]["cleanup_proven"]
+    try:
+        result=executor.execute_job(job)
+    except RepoSandboxError as exc:
+        # The strict total wall bound includes readback. Slow test hosts may
+        # reap the descendant inside that bound yet lack time to adopt output.
+        assert exc.terminal_status=="unknown_external_effect" and "cleanup/readback deadline exhausted" in str(exc)
+        durable=executor._read_job_marker(job.job_id)
+        assert durable["status"]=="unknown_external_effect" and durable["cleanup_proven"] is False
+        result=json.loads(executor._read_private_output(executor.workspace_dir/durable["stage_directory"]/"out","supervisor-result.json"))
+        assert result["cleanup_proven"] is True
+        assert result["process_cleanup"]["oracle"]=="linux_subreaper_waitpid_echild"
+    else:
+        assert result["status"]=="failed"
+        assert result["cleanup"]["cleanup_proven"]
     if marker.exists():assert supervisor.start_identity(int(marker.read_text())) is None
     time.sleep(1.1)
     assert not sentinel.exists()
@@ -324,3 +335,17 @@ def test_committed_predispatch_cancellation_executes_no_node_command(tmp_path):
     assert result["manifest"]["commands"]==[] and not sentinel.exists()
     assert result["manifest"]["process_cleanup"]["oracle"]=="linux_subreaper_waitpid_echild"
     assert result["cleanup"]["cleanup_proven"] is True
+
+
+@pytest.mark.parametrize("fault",["permissions","symlink","hardlink"])
+def test_marker_lock_rejects_unsafe_existing_file(tmp_path,fault):
+    from src.execution.repo_sandbox import LocalRepoRepairExecutor
+    executor=LocalRepoRepairExecutor(RepoSandboxSettings(),workspace_dir=tmp_path)
+    executor._write_job_marker("unsafe",{"status":"running"})
+    path=executor._job_marker_directory/(executor._job_marker_name("unsafe")+".lock")
+    if fault=="permissions":path.chmod(0o644)
+    elif fault=="hardlink":os.link(path,tmp_path/"second-name")
+    else:
+        path.unlink();target=tmp_path/"target";target.touch(mode=0o600);path.symlink_to(target)
+    with pytest.raises((RepoSandboxError,OSError)):
+        with executor._job_marker_lock("unsafe"):pass

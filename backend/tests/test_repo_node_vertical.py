@@ -99,6 +99,11 @@ async def _approve_node_flow(client,flow,*,typescript=False):
     await flow["dispatcher"].run_pass()
     pending=await client.get(f"/api/workflows/repo-repair/{job_id}")
     assert pending.status_code==200,pending.text
+    ready_deadline=time.monotonic()+10
+    while pending.json()["status"] in {"running","queued"} and time.monotonic()<ready_deadline:
+        await asyncio.sleep(.05)
+        pending=await client.get(f"/api/workflows/repo-repair/{job_id}")
+        assert pending.status_code==200,pending.text
     payload=pending.json();assert payload["status"]=="awaiting_approval",payload
     assert payload["executor_profile"]=="local:"+PROFILE
     plan=payload["executor_posture"]["execution_plan"]
@@ -393,6 +398,9 @@ async def test_cancelled_node_physical_cleanup_recovery_and_fresh_job(client,asy
         settled=await durable_job_repository.get_job(job_id)
         release=next(item["payload"] for item in settled["checkpoints"] if item["checkpoint_id"]=="repo-repair-execution-release")
         assert release["process_cleanup_readback_sha256"] and "readback_verified" not in release
+        repeated=await client.post(f"/api/workflows/repo-change/{job_id}/recover",headers={"Origin":"http://localhost:3001"})
+        assert repeated.status_code==200 and repeated.json().get("physical_capacity_released") is True,repeated.text
+        assert (await durable_job_repository.get_job(job_id))["revision"]==settled["revision"]
         async with async_db() as db:
             row=(await db.execute(native.select(WorkflowRunState).where(WorkflowRunState.run_identity==job_id))).scalar_one()
             assert {field:getattr(row,field) for field in original_row}==original_row
@@ -417,3 +425,18 @@ async def test_cancelled_node_physical_cleanup_recovery_and_fresh_job(client,asy
         await native._quiesce_tasks(dispatch,timeout=15)
         lane=_QUARANTINED_LANES.get(str(flow["workspace"]))
         if lane:lane.clear_quarantine()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db",["file"],indirect=True)
+async def test_default_python_authenticated_journey_without_node_dependency(client,async_db,tmp_path,monkeypatch):
+    _prepare_accounting_fixture(tmp_path,monkeypatch)
+    original_transport=native._model_transport
+    def costed_transport(calls):
+        original=original_transport(calls)
+        def transport(**kwargs):
+            response,metadata=original(**kwargs)
+            return response,{**metadata,"id":"gen-python-fixture","usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"cost":"0.000001"}}
+        return transport
+    monkeypatch.setattr(native,"_model_transport",costed_transport)
+    await native.test_local_native_repo_repair_api_vertical(client,async_db,tmp_path,monkeypatch)

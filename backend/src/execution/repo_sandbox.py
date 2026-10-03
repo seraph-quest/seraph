@@ -2714,7 +2714,8 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
                         raise RepoSandboxError("local marker lock is busy") from exc
                     time.sleep(min(.005, max(0, deadline - time.monotonic())))
             named = os.stat(name, dir_fd=directory, follow_symlinks=False)
-            if (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino) or named.st_nlink != 1:
+            if (not stat.S_ISREG(named.st_mode) or named.st_uid != os.getuid() or stat.S_IMODE(named.st_mode) != 0o600
+                or (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino) or named.st_nlink != 1):
                 raise RepoSandboxError("local marker lock identity changed")
             yield
         finally:

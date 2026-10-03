@@ -475,6 +475,8 @@ export interface WorkBoardTask {
   body: string;
   capability_id: string | null;
   input_artifact_id?: string | null;
+  pipeline_operation_id?: string | null;
+  pipeline_slot?: string | null;
   typed_input_ref: string | null;
   typed_input_digest: string | null;
   executor_id: string | null;

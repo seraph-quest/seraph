@@ -73,3 +73,8 @@ class PipelineReuseRequest(BaseModel):
     expected_revision: int = Field(ge=1)
     expected_parent_revision: int = Field(ge=1)
     idempotency_key: str = Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9:-]+$")
+
+
+class PipelineAdvanceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    expected_revision: int = Field(ge=1)

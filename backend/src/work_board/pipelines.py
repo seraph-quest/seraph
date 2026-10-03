@@ -61,9 +61,12 @@ async def owned(db: Any, owner: WorkBoardOwner, operation_id: str, *, revision: 
 
 async def store(db: Any, row: WorkBoardProposal, value: dict[str, Any], *, status: str | None = None) -> None:
     revision = row.revision
+    encoded = canonical_bytes(value)
+    if len(encoded) > 64 * 1024:
+        raise BoardError("pipeline_metadata_limit", "The finite operation metadata allowance is exhausted", status_code=409)
     result = await db.execute(update(WorkBoardProposal).where(WorkBoardProposal.proposal_id == row.proposal_id,
         WorkBoardProposal.revision == revision, WorkBoardProposal.proposal_digest == row.proposal_digest)
-        .values(proposal_json=canonical_bytes(value).decode(), proposal_digest=digest(value), revision=revision + 1,
+        .values(proposal_json=encoded.decode(), proposal_digest=digest(value), revision=revision + 1,
                 status=status or row.status).execution_options(synchronize_session=False))
     if result.rowcount != 1:
         raise BoardError("pipeline_revision_conflict", "The operation changed before its exact update", status_code=409)
@@ -80,6 +83,7 @@ async def read(db: Any, owner: WorkBoardOwner, operation_id: str) -> dict[str, A
             "task_revision": task.task_revision, "status": task.status.value, "block_kind": task.block_kind,
             "block_reason": task.block_reason})
     return {"operation_id": row.proposal_id, "revision": row.revision, "digest": row.proposal_digest,
+        "parent_revision": row.parent_revision,
         "status": row.status, "plan_version": value["plan_version"], "steps": steps,
         "limits": value["limits"], "deadline_at": value.get("deadline_at"),
         "source_scope": value["source_scope"], "no_learning": True,
@@ -114,7 +118,8 @@ async def preview(db: Any, owner: WorkBoardOwner, task_id: str, request: Any) ->
         return await read(db, owner, identifier)
     value = {"kind": PIPELINE_KIND, "plan_version": 1, "live_root": root_binding(),
         "source": binding, "source_scope": {"start_url": source_model.get("start_url"),
-            "allowed_hosts": source_model.get("allowed_hosts"), "permissions": ["public_https_browser", "workspace_read", "workspace_write"]},
+            "allowed_hosts": source_model.get("allowed_hosts"), "approved_url_prefixes": source_model.get("approved_url_prefixes"),
+            "permissions": ["public_https_browser", "workspace_read", "workspace_write"]},
         "limits": {"max_steps": 4, "max_total_seconds": 300, "max_attempts_per_leaf": 2,
             "max_attempts_total": 6, "browser_seconds": 180, "cpu_seconds": 30, "output_bytes": 65536, "model_cost": 0},
         "steps": [{"slot": SLOTS[0], "task_ref": source.task_id}], "all_task_refs": [source.task_id],
@@ -133,6 +138,8 @@ async def preview(db: Any, owner: WorkBoardOwner, task_id: str, request: Any) ->
 async def accept(db: Any, owner: WorkBoardOwner, operation_id: str, request: Any) -> dict[str, Any]:
     await _begin_sqlite_immediate(db)
     row, value = await owned(db, owner, operation_id)
+    if value.get("pending_revision"):
+        return await accept_revision(db, owner, row, value, request)
     if row.status == "accepted" and value.get("accepted_digest") == request.expected_digest:
         return await read(db, owner, operation_id)
     if row.revision != request.expected_revision or row.proposal_digest != request.expected_digest:
@@ -146,12 +153,21 @@ async def accept(db: Any, owner: WorkBoardOwner, operation_id: str, request: Any
     goal = await repository.validate_task_goal(db, owner, source)
     from src.goals.repository import deserialize_admission_budget
     budget = deserialize_admission_budget(goal)
+    if budget is None or not budget.reviewed_grant:
+        raise BoardError("pipeline_goal_budget_required", "Review finite Goal limits before accepting a pipeline", status_code=409)
     seconds = min(300, int(budget.max_runtime_seconds))
     value["deadline_at"] = (now() + timedelta(seconds=seconds)).isoformat()
     value["admitted_at"] = now().isoformat()
     value["accepted_digest"] = request.expected_digest
     previous = source
-    source.pipeline_operation_id, source.pipeline_slot = operation_id, SLOTS[0]
+    if value.get("reused_output"):
+        output = await verified_output(db, owner, source)
+        if output["attempt_id"] != value["reused_output"]["producer_attempt_ref"] or output["content_sha256"] != value["reused_output"]["content_sha256"]:
+            raise BoardError("pipeline_reuse_changed", "The independently verified output changed before fresh review", status_code=409)
+        # The old source stays on its original operation, with all original
+        # attempts, effects, reservations and liabilities. It is never replayed.
+    else:
+        source.pipeline_operation_id, source.pipeline_slot = operation_id, SLOTS[0]
     for slot, capability in zip(SLOTS[1:], CAPABILITIES[1:]):
         created = await repository.create_task(db, owner, WorkBoardTaskCreate(goal_id=source.goal_id,
             goal_revision=source.goal_revision, title="Evidence dossier" if capability == DOSSIER else "Local evidence report",
@@ -172,6 +188,161 @@ async def accept(db: Any, owner: WorkBoardOwner, operation_id: str, request: Any
     return await read(db, owner, operation_id)
 
 
+async def reuse_preview(db: Any, owner: WorkBoardOwner, operation_id: str, request: Any) -> dict[str, Any]:
+    await _begin_sqlite_immediate(db)
+    old, prior = await owned(db, owner, operation_id, revision=request.expected_revision)
+    producer = await WorkBoardRepository().get_task(db, owner, prior["steps"][0]["task_ref"])
+    if producer.task_revision != request.expected_parent_revision:
+        raise BoardError("stale_revision", "The original producer changed before output reuse", status_code=409)
+    # This fixed v1 offers completed browser output for the two unfinished CPU
+    # consumers. Completed consumers require a separately selected operation.
+    consumers = [await WorkBoardRepository().get_task(db, owner, step["task_ref"]) for step in prior["steps"][1:]]
+    if any(task.status in {WorkBoardStatus.done, WorkBoardStatus.review} for task in consumers):
+        raise BoardError("pipeline_completed_consumer", "This recovery requires unfinished consumers", status_code=409)
+    await WorkBoardRepository().validate_task_goal(db, owner, producer)
+    require_source_permission(prior["source_scope"])
+    output = await verified_output(db, owner, producer)
+    identifier = str(uuid.uuid5(uuid.NAMESPACE_URL, f"seraph:pipeline-reuse:{owner.principal_id}:{owner.session_id}:{request.idempotency_key}"))
+    binding = {"prior_operation_ref": old.proposal_id, "producer_task_ref": producer.task_id,
+        "producer_attempt_ref": output["attempt_id"], "content_sha256": output["content_sha256"],
+        "goal_id": producer.goal_id, "goal_revision": producer.goal_revision, "live_root": prior["live_root"]}
+    existing = await db.get(WorkBoardProposal, identifier)
+    if existing is not None:
+        if existing.request_digest != digest(binding):
+            raise BoardError("pipeline_idempotency_conflict", "The fresh operation key belongs to another exact output", status_code=409)
+        return await read(db, owner, identifier)
+    value = {"kind": PIPELINE_KIND, "plan_version": 1, "live_root": prior["live_root"],
+        "source": prior["source"], "source_scope": prior["source_scope"], "limits": prior["limits"],
+        "steps": [{"slot": SLOTS[0], "task_ref": producer.task_id}], "all_task_refs": [],
+        "versions": [], "reservations": {}, "reused_output": binding, "no_learning": True}
+    row = WorkBoardProposal(proposal_id=identifier, owner_principal_id=owner.principal_id, owner_session_id=owner.session_id,
+        parent_task_id=producer.task_id, parent_revision=producer.task_revision, goal_revision=producer.goal_revision,
+        kind=PIPELINE_KIND, idempotency_key=request.idempotency_key, request_digest=digest(binding),
+        capability_id=PIPELINE_KIND, capability_version="1", status="proposed",
+        proposal_json=canonical_bytes(value).decode(), proposal_digest=digest(value), expires_at=now() + timedelta(minutes=5))
+    db.add(row)
+    await db.flush()
+    return await read(db, owner, identifier)
+
+
+async def stage_revision(db: Any, owner: WorkBoardOwner, operation_id: str, request: Any) -> dict[str, Any]:
+    from src.work_board.input_artifacts import read_input_artifact_metadata, resolve_input_artifact_for_copy
+    await _begin_sqlite_immediate(db)
+    row, value = await owned(db, owner, operation_id, revision=request.expected_revision)
+    if row.status != "accepted" or utc(datetime.fromisoformat(value["deadline_at"])) <= now():
+        raise BoardError("pipeline_expired", "A revision cannot renew the original operation deadline", status_code=409)
+    if value.get("pending_revision"):
+        if value["pending_revision"].get("idempotency_key") == request.idempotency_key:
+            return await read(db, owner, operation_id)
+        raise BoardError("pipeline_revision_pending", "The exact pending revision must be resolved first", status_code=409)
+    tasks = [await WorkBoardRepository().get_task(db, owner, step["task_ref"]) for step in value["steps"]]
+    if any(task.status in {WorkBoardStatus.done, WorkBoardStatus.review} for task in tasks[1:]):
+        raise BoardError("pipeline_completed_consumer", "A completed consumer requires a distinct finite operation", status_code=409)
+    goal = await db.scalar(select(Goal).where(Goal.id == tasks[0].goal_id, Goal.owner_principal_id == owner.principal_id,
+        Goal.owner_session_id == owner.session_id))
+    if goal is None or str(getattr(goal.status, "value", goal.status)) != "active":
+        raise BoardError("pipeline_goal_changed", "The current Goal is unavailable", status_code=409)
+    artifact = await read_input_artifact_metadata(db, owner, artifact_id=request.source_input_artifact_id)
+    if artifact.capability_id != CAPABILITIES[0] or artifact.goal_id != goal.id or artifact.goal_revision != goal.revision or artifact.bound_task_id:
+        raise BoardError("pipeline_source_invalid", "Select a fresh current-Goal public-browser input", status_code=409)
+    resolved = await resolve_input_artifact_for_copy(db, owner, typed_input_ref=artifact.typed_input_ref,
+        typed_input_digest=artifact.typed_input_digest, capability_id=CAPABILITIES[0], goal_id=goal.id, goal_revision=goal.revision)
+    snapshots = []
+    for task in tasks:
+        if task.status != WorkBoardStatus.done and task.status != WorkBoardStatus.running:
+            changed = await db.execute(update(WorkBoardTask).where(WorkBoardTask.task_id == task.task_id,
+                WorkBoardTask.task_revision == task.task_revision, WorkBoardTask.pipeline_operation_id == operation_id)
+                .values(status=WorkBoardStatus.blocked, block_kind="capability", block_reason="pipeline_review_required",
+                    block_source_status=task.status.value, task_revision=task.task_revision + 1, updated_at=now())
+                .execution_options(synchronize_session=False))
+            if changed.rowcount != 1:
+                raise BoardError("pipeline_revision_conflict", "An unfinished task changed during freeze", status_code=409)
+            await db.refresh(task)
+        snapshots.append({"task_ref": task.task_id, "task_revision": task.task_revision})
+    # Only current pointers are invalidated. Old immutable handoff rows and
+    # their version/provenance remain addressable for review and recovery.
+    await db.execute(update(WorkBoardLink).where(WorkBoardLink.child_task_id.in_([task.task_id for task in tasks[1:]]))
+        .values(current_handoff_id=None))
+    value["pending_revision"] = {"idempotency_key": request.idempotency_key, "source_input_artifact_id": artifact.artifact_id,
+        "source_sha256": artifact.typed_input_digest, "goal_id": goal.id, "goal_revision": goal.revision,
+        "source_scope": {"start_url": resolved.input["start_url"], "allowed_hosts": resolved.input["allowed_hosts"],
+            "approved_url_prefixes": resolved.input["approved_url_prefixes"], "permissions": value["source_scope"]["permissions"]},
+        "frozen_tasks": snapshots, "proposed_plan_version": value["plan_version"] + 1}
+    await store(db, row, value)
+    return await read(db, owner, operation_id)
+
+
+async def accept_revision(db: Any, owner: WorkBoardOwner, row: WorkBoardProposal, value: dict[str, Any], request: Any) -> dict[str, Any]:
+    from src.work_board.input_artifacts import read_input_artifact_metadata, revoke_input_artifact
+    pending = value["pending_revision"]
+    if row.revision != request.expected_revision or row.proposal_digest != request.expected_digest or row.parent_revision != request.expected_parent_revision:
+        raise BoardError("pipeline_revision_conflict", "Review the exact current pending plan", status_code=409)
+    if utc(datetime.fromisoformat(value["deadline_at"])) <= now():
+        raise BoardError("pipeline_expired", "The original operation cannot gain a new deadline", status_code=409)
+    old_tasks = [await WorkBoardRepository().get_task(db, owner, step["task_ref"]) for step in value["steps"]]
+    if any(task.status in {WorkBoardStatus.done, WorkBoardStatus.review} for task in old_tasks[1:]):
+        raise BoardError("pipeline_completed_consumer", "The consumer completed before revision approval", status_code=409)
+    active = await db.scalar(select(func.count()).select_from(WorkBoardAttempt).where(
+        WorkBoardAttempt.task_id.in_([task.task_id for task in old_tasks]), WorkBoardAttempt.ended_at.is_(None)))
+    if active or any(task.block_kind in {"unknown_effect", "cost_liability", "reconcile_admission_binding"} for task in old_tasks):
+        raise BoardError("pipeline_quiescence_required", "Cancel and reconcile unfinished work before changing its bindings", status_code=409)
+    for task in old_tasks:
+        snapshot = next(item for item in pending["frozen_tasks"] if item["task_ref"] == task.task_id)
+        if task.task_revision != snapshot["task_revision"] and task.status != WorkBoardStatus.done:
+            raise BoardError("pipeline_revision_conflict", "A frozen task changed; read back before continuing", status_code=409)
+    artifact = await read_input_artifact_metadata(db, owner, artifact_id=pending["source_input_artifact_id"])
+    if artifact.typed_input_digest != pending["source_sha256"] or artifact.bound_task_id:
+        raise BoardError("pipeline_source_changed", "The proposed replacement input changed", status_code=409)
+    repository = WorkBoardRepository()
+    created = await repository.create_task(db, owner, WorkBoardTaskCreate(goal_id=pending["goal_id"],
+        goal_revision=pending["goal_revision"], title="Reviewed replacement public source", status=WorkBoardStatus.todo,
+        capability_id=CAPABILITIES[0], input_artifact_id=artifact.artifact_id, priority=old_tasks[0].priority,
+        idempotency_scope="pipeline", idempotency_key=f"{row.proposal_id}:{pending['proposed_plan_version']}:{SLOTS[0]}"))
+    source = created.task
+    source.pipeline_operation_id, source.pipeline_slot = row.proposal_id, SLOTS[0]
+    value["steps"][0] = {"slot": SLOTS[0], "task_ref": source.task_id}
+    value["all_task_refs"].append(source.task_id)
+    previous = source
+    for index, task in enumerate(old_tasks[1:], start=1):
+        attempts = await db.scalar(select(func.count()).select_from(WorkBoardAttempt).where(WorkBoardAttempt.task_id == task.task_id))
+        if attempts:
+            created = await repository.create_task(db, owner, WorkBoardTaskCreate(goal_id=pending["goal_id"],
+                goal_revision=pending["goal_revision"], title=task.title, capability_id=CAPABILITIES[index],
+                status=WorkBoardStatus.triage, priority=task.priority, idempotency_scope="pipeline",
+                idempotency_key=f"{row.proposal_id}:{pending['proposed_plan_version']}:{SLOTS[index]}"))
+            consumer = created.task
+            consumer.pipeline_operation_id, consumer.pipeline_slot = row.proposal_id, SLOTS[index]
+            value["all_task_refs"].append(consumer.task_id)
+            await repository.add_link(db, owner, WorkBoardLinkCreate(parent_task_id=previous.task_id,
+                child_task_id=consumer.task_id, expected_child_revision=consumer.task_revision), acquire_lock=False)
+        else:
+            consumer = task
+            if consumer.input_artifact_id:
+                await revoke_input_artifact(db, owner, artifact_id=consumer.input_artifact_id)
+            link = await db.scalar(select(WorkBoardLink).where(WorkBoardLink.child_task_id == consumer.task_id,
+                WorkBoardLink.parent_task_id == old_tasks[index - 1].task_id))
+            if link is None or link.current_handoff_id:
+                raise BoardError("pipeline_revision_conflict", "The frozen current handoff changed", status_code=409)
+            link.parent_task_id, link.current_handoff_id = previous.task_id, None
+            consumer.input_artifact_id = consumer.typed_input_ref = consumer.typed_input_digest = None
+            consumer.goal_revision = pending["goal_revision"]
+            consumer.status = WorkBoardStatus.triage
+            consumer.block_kind = consumer.block_reason = consumer.block_source_status = None
+            consumer.task_revision += 1
+        value["steps"][index] = {"slot": SLOTS[index], "task_ref": consumer.task_id}
+        previous = consumer
+    value["plan_version"] = pending["proposed_plan_version"]
+    value["source"] = {"task_ref": source.task_id, "task_revision": source.task_revision, "input_ref": artifact.artifact_id,
+        "input_sha256": artifact.typed_input_digest, "goal_id": source.goal_id, "goal_revision": source.goal_revision}
+    value["source_scope"] = pending["source_scope"]
+    value["reservations"] = {}
+    value["versions"].append({"plan_version": value["plan_version"], "source": value["source"], "steps": list(value["steps"]), "review_digest": request.expected_digest})
+    value["pending_revision"] = None
+    value["accepted_digest"] = request.expected_digest
+    await store(db, row, value, status="accepted")
+    return await read(db, owner, row.proposal_id)
+
+
 async def task_guard(db: Any, task: WorkBoardTask, *, attempt: WorkBoardAttempt | None = None) -> tuple[WorkBoardProposal, dict[str, Any]]:
     owner = WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id)
     if not task.pipeline_operation_id:
@@ -179,19 +350,41 @@ async def task_guard(db: Any, task: WorkBoardTask, *, attempt: WorkBoardAttempt 
     row, value = await owned(db, owner, task.pipeline_operation_id)
     if row.status != "accepted" or value.get("pending_revision"):
         raise BoardError("pipeline_review_required", "Changed unfinished work needs exact plan review", status_code=409)
+    require_source_permission(value["source_scope"])
     if not any(step["task_ref"] == task.task_id and step["slot"] == task.pipeline_slot for step in value["steps"]):
         raise BoardError("pipeline_task_stale", "This task is no longer a current operation step", status_code=409)
     deadline = utc(datetime.fromisoformat(value["deadline_at"]))
     if deadline <= now():
         raise BoardError("pipeline_expired", "The original absolute operation deadline expired", status_code=409)
-    await WorkBoardRepository().validate_task_goal(db, owner, task)
+    goal = await WorkBoardRepository().validate_task_goal(db, owner, task)
+    from src.goals.repository import deserialize_admission_budget
+    budget = deserialize_admission_budget(goal)
+    if budget is None or not budget.reviewed_grant:
+        raise BoardError("pipeline_goal_budget_required", "The current Goal no longer grants finite work", status_code=409)
+    if budget.period_expires_at and utc(budget.period_expires_at) <= now():
+        raise BoardError("pipeline_goal_budget_expired", "The current Goal grant expired", status_code=409)
+    if task.pipeline_slot == SLOTS[0] and task.typed_input_digest != value["source"]["input_sha256"]:
+        raise BoardError("pipeline_source_changed", "The reviewed public-source input changed", status_code=409)
+    if task.pipeline_slot in SLOTS[1:] and task.input_artifact_id:
+        reservation = value["reservations"].get(task.pipeline_slot)
+        if not isinstance(reservation, Mapping) or reservation.get("state") != "bound" or reservation.get("artifact_ref") != task.input_artifact_id:
+            raise BoardError("pipeline_input_changed", "The reviewed consumer reservation changed", status_code=409)
     counts = await db.execute(select(WorkBoardAttempt.task_id, func.count()).where(
         WorkBoardAttempt.task_id.in_(value["all_task_refs"])).group_by(WorkBoardAttempt.task_id))
     counts = dict(counts.all())
     allowance = 0 if attempt is not None else 1
-    if sum(counts.values()) + allowance > 6 or counts.get(task.task_id, 0) + allowance > 2:
+    if sum(counts.values()) + allowance > 6 or counts.get(task.task_id, 0) + allowance > min(2, budget.max_attempts):
         raise BoardError("pipeline_attempts_exhausted", "The original finite operation attempt allowance is exhausted", status_code=409)
     return row, value
+
+
+def require_source_permission(scope: Mapping[str, Any]) -> None:
+    from src.security.site_policy import evaluate_site_access
+    hosts = scope.get("allowed_hosts")
+    if not isinstance(hosts, list) or not 1 <= len(hosts) <= 8:
+        raise BoardError("pipeline_source_permission", "The reviewed source scope is invalid", status_code=409)
+    if any(not isinstance(host, str) or not evaluate_site_access(host, resolve_dns=False).allowed for host in hosts):
+        raise BoardError("pipeline_source_permission", "Current source policy no longer permits this output", status_code=409)
 
 
 async def validate_cpu_current(task: WorkBoardTask, attempt: WorkBoardAttempt, inputs: Mapping[str, Any], *, session_provider: Any = get_session) -> None:
@@ -245,7 +438,7 @@ async def verified_output(db: Any, owner: WorkBoardOwner, producer: WorkBoardTas
             and effect.get("target_path") == ref and effect.get("content_sha256") == sha for effect in effects):
             continue
         raw = read_output(ref, sha)
-        if len(raw) > MAX_QUOTED_BYTES:
+        if producer.capability_id != REPORT and len(raw) > MAX_QUOTED_BYTES:
             raise BoardError("pipeline_output_too_large", "The producer exceeds the finite consumer input allowance", status_code=409)
         return {"file_path": ref, "content_sha256": sha, "attempt_id": attempt.attempt_id,
                 "quoted_source_data": raw.decode("utf-8")}

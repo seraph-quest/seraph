@@ -478,6 +478,9 @@ def _reject_authority_input_keys(value: Any, *, path: str = "input") -> None:
 
 
 def _typed_input_model(capability_id: str) -> type[BaseModel] | None:
+    if capability_id == "work.json-format.v1":
+        from src.work_board.tool_package_contracts import JsonFormatInput
+        return JsonFormatInput
     if capability_id == "work.research-dossier.v1":
         from src.work_board.research_contracts import ResearchDossierInput
         return ResearchDossierInput
@@ -508,6 +511,7 @@ def _typed_input_model(capability_id: str) -> type[BaseModel] | None:
 
 
 REGISTERED_CAPABILITIES: dict[str, CapabilitySpec] = {
+    "work.json-format.v1": CapabilitySpec("work.json-format.v1", "1", secret_like=False),
     "work.research-dossier.v1": CapabilitySpec("work.research-dossier.v1", "1", secret_like=False),
     "work.evidence-dossier.v1": CapabilitySpec("work.evidence-dossier.v1", "1", secret_like=False),
     "work.local-evidence-report.v1": CapabilitySpec("work.local-evidence-report.v1", "1", secret_like=False),
@@ -3511,6 +3515,22 @@ class WorkBoardDispatcher:
         capability = _text(task.capability_id)
         receipts: list[dict[str, Any]] = []
         try:
+            if capability == "work.json-format.v1":
+                worker = self._active_worker_tasks.get((task.task_id, attempt.attempt_id))
+                if worker is not None and worker is not asyncio.current_task() and not worker.done():
+                    worker.cancel()
+                    try:
+                        await asyncio.wait_for(asyncio.shield(worker), timeout=5)
+                    except asyncio.CancelledError:
+                        pass
+                    except asyncio.TimeoutError:
+                        return receipts, False
+                from src.work_board.tool_package_native import cleanup_proven
+                latest = await self.jobs.get_job(_text(attempt.workflow_run_id))
+                proven = isinstance(latest, Mapping) and cleanup_proven(task, attempt, latest)
+                receipts.append({"job_id":attempt.workflow_run_id,"status":"cancelled" if proven else "unknown",
+                    "reason_code":"tool_package_reaped" if proven else "tool_package_cleanup_unproven"})
+                return receipts, bool(proven)
             if capability in {"browser.public-task.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
                 worker = self._active_worker_tasks.get((task.task_id, attempt.attempt_id))
                 if worker is not None and worker is not asyncio.current_task() and not worker.done():
@@ -3815,7 +3835,8 @@ class WorkBoardDispatcher:
         budget = deserialize_admission_budget(goal)
         configured = int(getattr(budget, "max_runtime_seconds", DEFAULT_RUNTIME_SECONDS)) if budget else DEFAULT_RUNTIME_SECONDS
         hard_cap = (180 if _text(task.capability_id) == "browser.public-task.v1" else
-            300 if _text(task.capability_id) == "work.research-dossier.v1" else MAX_RUNTIME_SECONDS)
+            300 if _text(task.capability_id) == "work.research-dossier.v1" else
+            10 if _text(task.capability_id) == "work.json-format.v1" else MAX_RUNTIME_SECONDS)
         return max(1, min(configured, hard_cap))
 
     async def _repo_repair_goal_window(self, task: WorkBoardTask) -> datetime | None:
@@ -4034,9 +4055,9 @@ class WorkBoardDispatcher:
             return "executor_lane_mismatch", "The task executor does not match the registered capability lane"
         if not _text(task.typed_input_ref) or not _text(task.typed_input_digest):
             return "typed_input_missing", "The task has no complete typed input reference"
-        if capability_id in {"browser.public-task.v1", "work.research-dossier.v1"} and not _text(task.input_artifact_id):
+        if capability_id in {"browser.public-task.v1", "work.research-dossier.v1", "work.json-format.v1"} and not _text(task.input_artifact_id):
             return "browser_input_artifact_required", "Public browser tasks require a server-bound input artifact"
-        if capability_id in {"browser.public-task.v1", "work.research-dossier.v1"}:
+        if capability_id in {"browser.public-task.v1", "work.research-dossier.v1", "work.json-format.v1"}:
             # Browser inputs are resolved through the owner-bound artifact
             # lifecycle before promotion. This checks the current state,
             # expiry, task/goal/capability binding and bounded nofollow
@@ -4127,6 +4148,12 @@ class WorkBoardDispatcher:
 
         capability = _text(task.capability_id)
         try:
+            if capability == "work.json-format.v1":
+                from src.execution.tool_package_profile import inspect_runtime
+                from src.work_board.tool_package_native import pack_binding, runtime_root
+                pack_binding(task)
+                inspect_runtime(runtime_root())
+                return None, None
             if capability == "work.research-dossier.v1":
                 from src.workflows.research_provider import _target
                 from src.model_fabric.caller_context import build_canonical_inference_context
@@ -5762,6 +5789,17 @@ class WorkBoardDispatcher:
                 result["awaiting_approval"] = True
                 return result
             direct_proof = self._direct_readback(adapter_result, projection, job_id)
+            if task.capability_id == "work.json-format.v1":
+                async with self.session_provider() as cancel_db:
+                    cancelled = await cancel_db.scalar(select(WorkBoardAttempt.cancel_requested_at).where(
+                        WorkBoardAttempt.attempt_id==attempt.attempt_id,WorkBoardAttempt.workflow_run_id==job_id,
+                        WorkBoardAttempt.fencing_token==attempt.fencing_token))
+                if cancelled is not None:
+                    # The explicit cancellation owner awaits this actual
+                    # worker and owns its terminal Board projection. Do not
+                    # race that writer with a second blocked projection.
+                    result["blocked"] = True
+                    return result
             if direct_proof is not None:
                 if task.capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
                     matching = await self._verify_cpu_completion(task, attempt, inputs, projection, direct_proof)
@@ -6100,6 +6138,16 @@ class WorkBoardDispatcher:
         procedure_binding: ProcedureChildBinding | None = None,
     ) -> Mapping[str, Any]:
         capability_id = _text(task.capability_id)
+        if capability_id == "work.json-format.v1":
+            from src.work_board.tool_package_native import execute
+            if not admission_only:
+                self._active_worker_tasks[(task.task_id, attempt.attempt_id)] = asyncio.current_task()
+            try:
+                return await execute(task, attempt, inputs, jobs=self.jobs, runner=self.runner_id,
+                    deadline=_now()+timedelta(seconds=min(runtime_seconds,10)), admission_only=admission_only)
+            finally:
+                if not admission_only:
+                    self._active_worker_tasks.pop((task.task_id, attempt.attempt_id),None)
         if capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
             from src.work_board.pipelines import runtime_guard, validate_cpu_current, validate_cpu_binding, utc
             from src.work_board.pipeline_cpu import execute
@@ -8624,6 +8672,9 @@ class WorkBoardDispatcher:
 
         capability_id = _text(task.capability_id)
         binding_key = f"{task.task_id}:{attempt.attempt_id}"
+        if capability_id == "work.json-format.v1":
+            from src.work_board.tool_package_native import job_id
+            return job_id(task,attempt),task.owner_principal_id,"local_json_format",None,binding_key
         if capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
             from src.work_board.pipeline_cpu import job_id
             return job_id(task, attempt), task.owner_principal_id, capability_id, None, binding_key
@@ -8749,6 +8800,9 @@ class WorkBoardDispatcher:
         """Compute the service input digest where the adapter contract is closed."""
 
         capability_id = _text(task.capability_id)
+        if capability_id == "work.json-format.v1":
+            from src.work_board.tool_package_native import immutable_inputs
+            return _safe_digest(immutable_inputs(task,inputs))
         if capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
             from src.work_board.pipeline_cpu import spec_for
             return _safe_digest(spec_for(task, attempt, inputs, deadline=_now()).inputs)
@@ -8929,6 +8983,9 @@ class WorkBoardDispatcher:
         attempt: WorkBoardAttempt,
         inputs: Mapping[str, Any],
     ) -> str:
+        if task.capability_id == "work.json-format.v1":
+            from src.work_board.tool_package_native import authority_for
+            return _safe_digest(authority_for(task,attempt,inputs))
         if task.capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
             from src.work_board.pipeline_cpu import spec_for
             return _safe_digest(spec_for(task, attempt, inputs, deadline=_now()).declared_authority)
@@ -9014,6 +9071,9 @@ class WorkBoardDispatcher:
         attempt: WorkBoardAttempt,
         inputs: Mapping[str, Any],
     ) -> str:
+        if task.capability_id == "work.json-format.v1":
+            from src.work_board.tool_package_native import spec_for
+            return spec_for(task,attempt,inputs,deadline=_now()).run_fingerprint
         if task.capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
             from src.work_board.pipeline_cpu import spec_for
             return spec_for(task, attempt, inputs, deadline=_now()).run_fingerprint
@@ -9099,7 +9159,7 @@ class WorkBoardDispatcher:
             raise DurableJobIdempotencyConflict(
                 "adapter admission projection is missing canonical immutable digests"
             )
-        if task.capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+        if task.capability_id in {"work.json-format.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
             expected_digests = {
                 "input_digest": WorkBoardDispatcher._direct_input_digest(task, attempt, inputs),
                 "authority_digest": WorkBoardDispatcher._direct_authority_digest(task, attempt, inputs),

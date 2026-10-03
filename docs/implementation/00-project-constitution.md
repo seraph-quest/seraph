@@ -83,6 +83,7 @@ The following architecture decisions are normative:
 10. [ADR-010: Reviewed artifact pipelines](./decisions/010-reviewed-artifact-pipelines.md)
 11. [ADR-011: Finite GitHub consent, recovery and capacity closure](./decisions/011-finite-github-connection-consent.md)
 12. [ADR-012: Finite durable read-only research](./decisions/012-finite-durable-readonly-research.md)
+13. [ADR-013: Fixed reviewed local tool package](./decisions/013-fixed-reviewed-local-tool-package.md)
 
 Changing a locked decision requires a superseding ADR, a tracked issue, an
 independent Critic/Contrarian review, and updates to every affected active doc.

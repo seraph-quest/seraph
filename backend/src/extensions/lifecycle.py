@@ -1416,9 +1416,15 @@ def _validate_extension_candidate_package(
 def _contribution_indexes(
     *,
     state_by_id: dict[str, Any] | None = None,
+    mcp_snapshot=None,
+    observer_snapshot=None,
+    tool_scope=None,
 ) -> dict[str, dict[str, dict[str, Any]]]:
-    base_tools, active_skill_names, _ = get_base_tools_and_active_skills()
-    available_tool_names = [tool.name for tool in base_tools]
+    if tool_scope is None:
+        base_tools, active_skill_names, _ = get_base_tools_and_active_skills()
+        available_tool_names = [tool.name for tool in base_tools]
+    else:
+        available_tool_names, active_skill_names = tool_scope
     skills = {
         os.path.abspath(str(item.get("file_path") or "")): item
         for item in skill_manager.list_skills()
@@ -1442,8 +1448,8 @@ def _contribution_indexes(
         for item in starter_pack_manager.list_packs()
         if isinstance(item.get("file_path"), str)
     }
-    mcp_servers = _mcp_runtime_index()
-    observer_snapshot = _registry().snapshot()
+    mcp_servers = _mcp_runtime_index() if mcp_snapshot is None else mcp_snapshot
+    observer_snapshot = _registry().snapshot() if observer_snapshot is None else observer_snapshot
     enabled_overrides = connector_enabled_overrides(state_by_id)
     channel_adapters = {
         os.path.abspath(item.resolved_path): {
@@ -1948,8 +1954,9 @@ def _contribution_payload(
     return _finalize_contribution_payload(extension, contribution, payload)
 
 
-def _toggle_targets(extension: ExtensionRecord) -> list[dict[str, str]]:
-    indexes = _contribution_indexes()
+def _toggle_targets(extension: ExtensionRecord, *, indexes=None) -> list[dict[str, str]]:
+    if indexes is None:
+        indexes = _contribution_indexes()
     targets: list[dict[str, str]] = []
     for contribution in extension.contributions:
         payload = _contribution_payload(extension, contribution, indexes=indexes)
@@ -2063,14 +2070,16 @@ def _extension_payload(
     load_errors: list[ExtensionLoadErrorRecord],
     doctor_by_id: dict[str, Any],
     state_by_id: dict[str, Any],
+    indexes=None,
 ) -> dict[str, Any]:
-    indexes = _contribution_indexes(state_by_id=state_by_id)
+    if indexes is None:
+        indexes = _contribution_indexes(state_by_id=state_by_id)
     doctor_result = doctor_by_id.get(extension.id)
     issues = []
     if doctor_result is not None:
         issues = [asdict(issue) for issue in doctor_result.issues]
     extension_load_errors = _extension_load_errors_for_extension(extension, load_errors)
-    toggles = _toggle_targets(extension)
+    toggles = _toggle_targets(extension, indexes=indexes)
     state_entry = state_by_id.get(extension.id, {}) if isinstance(state_by_id.get(extension.id), dict) else {}
     lifecycle_state = extension_lifecycle_entry(state_entry, create=False) or {}
     location = _location_for_extension(extension)
@@ -2215,19 +2224,39 @@ def _extension_payload(
 
 
 def list_extensions() -> dict[str, Any]:
+    return project_extension_metadata(prepare_extension_metadata())
+
+
+def prepare_extension_metadata():
+    """Serialize governance/MCP writes before any executor projection."""
     snapshot = _registry().snapshot()
     state_payload = _state_payload()
     for extension in snapshot.extensions:
         _sync_blocked_verified_extension_runtime_access(extension, state_payload=state_payload)
+    base_tools, active_skill_names, _ = get_base_tools_and_active_skills()
+    # Transfer only tool names, never Tool/client/lock objects. MCP runtime
+    # config and tool access stay on the serialized preparation lane.
+    tool_scope = ([tool.name for tool in base_tools], list(active_skill_names))
+    return deepcopy((snapshot, state_payload, _mcp_runtime_index(), tool_scope))
+
+
+def project_extension_metadata(prepared) -> dict[str, Any]:
+    """Project one detached snapshot without governance/config mutations."""
+    snapshot, state_payload, mcp_snapshot, tool_scope = prepared
     doctor = doctor_snapshot(snapshot)
     doctor_by_id = {result.extension_id: result for result in doctor.results}
     state_by_id = extension_state_entries(state_payload)
+    # Governance sync precedes this fresh per-build index. No response or
+    # authority cache survives this list, and mutations still build fresh.
+    indexes = _contribution_indexes(state_by_id=state_by_id, mcp_snapshot=mcp_snapshot,
+        observer_snapshot=snapshot, tool_scope=tool_scope)
     raw_extensions = [
         _extension_payload(
             extension,
             load_errors=snapshot.load_errors,
             doctor_by_id=doctor_by_id,
             state_by_id=state_by_id,
+            indexes=indexes,
         )
         for extension in snapshot.extensions
     ]
@@ -2278,6 +2307,10 @@ def get_extension(extension_id: str) -> dict[str, Any]:
 
 def list_extension_connectors(extension_id: str) -> dict[str, Any]:
     extension = get_extension(extension_id)
+    return extension_connectors_from_payload(extension)
+
+
+def extension_connectors_from_payload(extension: dict[str, Any]) -> dict[str, Any]:
     connectors = [
         contribution
         for contribution in extension["contributions"]
@@ -3316,6 +3349,10 @@ def disable_extension(extension_id: str) -> dict[str, Any]:
 
 def extension_lifecycle_status(extension_id: str) -> dict[str, Any]:
     extension = get_extension(extension_id)
+    return extension_lifecycle_from_payload(extension)
+
+
+def extension_lifecycle_from_payload(extension: dict[str, Any]) -> dict[str, Any]:
     lifecycle = extension.get("lifecycle") if isinstance(extension.get("lifecycle"), dict) else {}
     rollback_snapshots = lifecycle.get("rollback_snapshots")
     quarantine = lifecycle.get("quarantine")

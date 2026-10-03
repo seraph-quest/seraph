@@ -4685,7 +4685,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
     async def settle_node_process_cleanup(self, request: NodeProcessCleanupSettlement) -> dict[str, Any]:
         """Release only exact cancelled physical work; retain all task liability."""
         from config.settings import RepoSandboxSettings, settings
-        from src.db.models import OperatorSession, RepoRepairProposalRow, RepoRepairSourcePacketRow
+        from src.db.models import OperatorSession, RepoRepairProposal as RepoRepairProposalRow, RepoRepairSourcePacket as RepoRepairSourcePacketRow
         from src.execution.repo_node import NodeRepoRepairExecutor, PROFILE
         from src.workflows.repo_repair import _proposal_authority_payload
 

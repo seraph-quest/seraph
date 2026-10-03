@@ -30,7 +30,7 @@ PROOF_ROOT=Path(os.environ.get("SERAPH_TEST_EVIDENCE_ROOT") or str(Path(__file__
 
 
 def _retained(name):
-    PROOF_ROOT.mkdir(mode=0o700,exist_ok=True)
+    PROOF_ROOT.mkdir(mode=0o700,parents=True,exist_ok=True)
     return PROOF_ROOT/name
 
 
@@ -317,3 +317,103 @@ async def test_integrated_original_python_native_vertical(client,async_db,tmp_pa
         return transport
     monkeypatch.setattr(native,"_model_transport",factory)
     await native.test_local_native_repo_repair_api_vertical(client,async_db,tmp_path,monkeypatch)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db",["file"],indirect=True)
+async def test_cancelled_node_physical_cleanup_recovery_and_fresh_job(client,async_db,tmp_path,monkeypatch):
+    from dataclasses import replace
+    from datetime import datetime,timedelta,timezone
+    from src.api.workflows import _repo_change_recovery_authority,_repo_change_dispatch_contract
+    from src.db.models import ApprovalRequest,Goal,WorkflowRunState
+    from src.workflows.job_runtime import NodeProcessCleanupSettlement,DurableJobError
+
+    running=tmp_path/"actual-running"
+    script="require('node:fs').writeFileSync("+json.dumps(str(running))+",String(process.pid));setTimeout(()=>{},3000);"
+    flow=await _prepare_node_flow(client,async_db,tmp_path,monkeypatch,script=script,wall_seconds=30,low_due=True)
+    pending=await _approve_node_flow(client,flow)
+    job_id=flow["job_id"]
+    fresh=NodeRepoRepairExecutor(workspace_dir=flow["workspace"])
+    dispatch=asyncio.create_task(flow["dispatcher"].run_pass())
+    try:
+        deadline=time.monotonic()+15
+        while not running.exists() and time.monotonic()<deadline:await asyncio.sleep(.01)
+        assert running.exists()
+        task=await client.get(f"/api/work-board/tasks/{flow['high_task_id']}")
+        cancelled=await client.post(f"/api/work-board/tasks/{flow['high_task_id']}/actions",json={"action":"cancel","expected_revision":task.json()["task"]["task_revision"]},headers={"Origin":"http://localhost:3001"})
+        assert cancelled.status_code==200,cancelled.text
+        await native._wait_for_task_set(dispatch,timeout=15,description="Cancelled Node durable dispatcher did not settle")
+        job=await durable_job_repository.get_job(job_id)
+        assert job["status"]=="unknown_external_effect",job
+        deadline=time.monotonic()+10
+        while time.monotonic()<deadline:
+            marker=fresh._read_job_marker(job_id)
+            if marker and marker.get("cleanup_proven") is True:break
+            await asyncio.sleep(.01)
+        assert marker["status"]=="cancelled" and marker["cleanup_proven"] is True,marker
+        assert marker["process_cleanup"]["process_cleanup"]["oracle"]=="linux_subreaper_waitpid_echild"
+        assert try_acquire_repo_repair_capacity(flow["workspace"],job_id="unrelated-before-recovery") is None
+        authority=await _repo_change_recovery_authority(job)
+        okay,reason,original_dispatch=_repo_change_dispatch_contract(job,authority)
+        assert okay,reason
+        request=NodeProcessCleanupSettlement(job_id,int(job["revision"]),flow["owner"].principal_id,flow["owner"].session_id,authority,original_dispatch)
+        for bad_request in (replace(request,expected_revision=request.expected_revision-1),replace(request,owner_session_id="different-original-root")):
+            with pytest.raises(DurableJobError):await durable_job_repository.settle_node_process_cleanup(bad_request)
+        negatives={"job_id":"other-job","attempt_id":"other-attempt","authority_digest":"f"*64,
+                   "fencing_token":marker["fencing_token"]+1,"supervisor_token":"wrong-token","pid":os.getpid(),
+                   "pid_start_identity":"reused-start","supervisor_source_sha256":"e"*64,"profile":"repo-python-pytest-v1",
+                   "stage_binding":{},"base_digest":"d"*64,"posture_digest":"c"*64,
+                   "process_cleanup":{**marker["process_cleanup"],"process_cleanup":{"cleanup_proven":True,"oracle":"not_echild"}}}
+        marker_path=fresh._job_marker_directory/fresh._job_marker_name(job_id)
+        accounting_before=await durable_job_repository.inference_accounting_snapshot()
+        task_before_recovery=(await client.get(f"/api/work-board/tasks/{flow['high_task_id']}" )).json()["task"]
+        for field,value in negatives.items():
+            marker_path.write_text(json.dumps({**marker,field:value}))
+            blocked=await client.post(f"/api/workflows/repo-change/{job_id}/recover",headers={"Origin":"http://localhost:3001"})
+            assert blocked.status_code==200,blocked.text
+            assert blocked.json()["status"]=="blocked",(field,blocked.json())
+            assert (await durable_job_repository.get_job(job_id))["revision"]==job["revision"]
+            assert try_acquire_repo_repair_capacity(flow["workspace"],job_id="negative-successor") is None
+        marker_path.write_text(json.dumps(marker))
+        async with async_db() as db:
+            goal=await db.get(Goal,job["goal_id"]);goal.revision+=1
+            approval=await db.get(ApprovalRequest,pending["proposal"]["approval_id"])
+            approval.expires_at=datetime.now(timezone.utc)-timedelta(seconds=1)
+            await db.commit()
+        original_row=None
+        async with async_db() as db:
+            row=(await db.execute(native.select(WorkflowRunState).where(WorkflowRunState.run_identity==job_id))).scalar_one()
+            original_row={field:getattr(row,field) for field in ("status","fencing_token","lease_owner","lease_expires_at","result_digest","result_summary","effect_receipts_json","artifact_receipts_json","declared_authority_json","goal_revision","budget_digest","failure_reason")}
+        recovered=await client.post(f"/api/workflows/repo-change/{job_id}/recover",headers={"Origin":"http://localhost:3001"})
+        assert recovered.status_code==200,recovered.text
+        result=recovered.json()
+        assert result.get("physical_capacity_released") is True,result
+        assert result["status"]=="unknown_external_effect" and result["readback_scope"]=="process_cleanup_only"
+        assert result["cleanup_receipt_verified"] is True
+        settled=await durable_job_repository.get_job(job_id)
+        release=next(item["payload"] for item in settled["checkpoints"] if item["checkpoint_id"]=="repo-repair-execution-release")
+        assert release["process_cleanup_readback_sha256"] and "readback_verified" not in release
+        async with async_db() as db:
+            row=(await db.execute(native.select(WorkflowRunState).where(WorkflowRunState.run_identity==job_id))).scalar_one()
+            assert {field:getattr(row,field) for field in original_row}==original_row
+        assert await durable_job_repository.inference_accounting_snapshot()==accounting_before
+        task_after=await client.get(f"/api/work-board/tasks/{flow['high_task_id']}")
+        assert task_after.json()["task"]["status"]==task_before_recovery["status"]
+        assert task_after.json()["task"]["task_revision"]==task_before_recovery["task_revision"]
+        successor=try_acquire_repo_repair_capacity(flow["workspace"],job_id="physical-successor")
+        assert successor is not None;successor.release()
+        async with async_db() as db:
+            low_attempt=(await db.execute(native.select(native.WorkBoardAttempt).where(native.WorkBoardAttempt.task_id==flow["low_task_id"]))).scalars().first()
+            low_packet=(await db.execute(native.select(native.RepoRepairSourcePacketRow).where(native.RepoRepairSourcePacketRow.work_board_task_id==flow["low_task_id"]))).scalars().first()
+        low_id=str(low_attempt.workflow_run_id);low_job=await durable_job_repository.get_job(low_id)
+        await _approve_node_flow(client,{**flow,"job_id":low_id,"job":low_job,"packet":low_packet})
+        await flow["dispatcher"].run_pass()
+        second=await durable_job_repository.get_job(low_id)
+        assert second["status"]=="succeeded",second
+        assert fresh._read_job_marker(low_id)["cleanup_proven"] is True
+        assert len(flow["transport_calls"])==2
+        _retained("physical-cleanup-recovery.json").write_text(json.dumps({"first_job":job_id,"first_status":settled["status"],"negative_marker_bindings":list(negatives),"stale_cas_rejected":True,"wrong_root_rejected":True,"changed_goal_and_expired_approval":True,"original_row_unchanged":True,"accounting_unchanged":True,"release":release,"second_job":low_id,"second_status":second["status"],"actual_echild_marker":marker},indent=2))
+    finally:
+        await native._quiesce_tasks(dispatch,timeout=15)
+        lane=_QUARANTINED_LANES.get(str(flow["workspace"]))
+        if lane:lane.clear_quarantine()

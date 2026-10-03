@@ -104,3 +104,30 @@ physical slot. Disappearance alone cannot prove cleanup or permit automatic
 replay. Another accepted job may queue and receive approvals, but it cannot
 start its executor while that slot remains held. Use the shown same-root
 recovery action; do not treat a cleared UI or absent PID as proof of success.
+
+Marker updates, cancellation, and the supervisor start barrier share one bounded
+private per-job process lock. A cancellation committed before the start token
+prevents the staged command from starting; the supervisor can still return
+its actual ECHILD cleanup receipt. The cancellation flag remains monotonic.
+
+Same-root recovery can release a cancelled Node job's physical slot separately
+from its unresolved task outcome. It rereads the private marker under that lock
+and revalidates the original native Node job, immutable proposal/source,
+original live operator root, exact dispatch/attempt/authority/fence/token,
+PID/start identity, and originally approved supervisor source hash. Release
+uses the current job revision CAS. Missing or mismatched proof keeps the slot
+held. A changed current Goal or expired execution approval does not authorize
+output adoption or replay, and does not prevent exact physical-only cleanup
+under the original live operator root.
+
+That release records `cleanup_receipt_verified`,
+`process_cleanup_readback_sha256`, and `readback_scope=process_cleanup_only`.
+It does not invent a content readback or exported artifact manifest, resolve
+external or cost liability, or change the task/job's unknown outcome. A fresh
+job still needs its own current Goal bindings, consent, and execution approval.
+
+Optional native test fixtures discover an installed runtime from
+`SERAPH_TEST_NODE_RUNTIME` or PATH, and TypeScript from
+`SERAPH_TEST_TYPESCRIPT_ROOT` or the owning frontend dependency directory.
+Unavailable native prerequisites skip only those optional execution fixtures;
+portable grammar, platform, marker-lock and default Python checks still run.

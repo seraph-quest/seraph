@@ -238,11 +238,12 @@ def test_kernel_facility_failures_block_without_pid_signal_fallback(monkeypatch,
 def test_node_launch_strips_dynamic_loader_and_runtime_environment(tmp_path,monkeypatch):
     names=("LD_PRELOAD","LD_LIBRARY_PATH","DYLD_INSERT_LIBRARIES","PYTHONPATH","NODE_OPTIONS","npm_config_node_options")
     for name in names:monkeypatch.setenv(name,"/tmp/deliberately-nonexistent-owned-input")
-    script="for(const name of "+json.dumps(names)+")if(process.env[name])throw Error(name);console.log('ENV_SCRUB_OK');"
+    sentinel=tmp_path/"environment-scrubbed"
+    script="for(const name of "+json.dumps(names)+")if(process.env[name])throw Error(name);require('node:fs').writeFileSync("+json.dumps(str(sentinel))+",'ENV_SCRUB_OK');"
     executor,repo,job=make_fixture(tmp_path,script=script)
     result=executor.execute_job(job)
     assert result["status"]=="succeeded",result
-    assert b"ENV_SCRUB_OK" in result["outputs"]["pytest.stdout"]
+    assert sentinel.read_text()=="ENV_SCRUB_OK"
 
 
 @pytest.mark.parametrize("field",["pid","pid_start_identity","supervisor_token","process_cleanup"])

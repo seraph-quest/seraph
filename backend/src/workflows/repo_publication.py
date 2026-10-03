@@ -680,7 +680,7 @@ class RepoPublicationService:
         for effect in list(current.get("effects", [])):
             if not str(effect.get("effect_type", "")).startswith("repo_publication_") or effect.get("status") != "intent":
                 continue
-            current = await jobs.record_readback(job_id, effect_id=effect["effect_id"], effect_type=effect["effect_type"], target_path=effect["target_path"], target_digest=effect["target_digest"], content_sha256=effect["target_digest"], status="succeeded", readback_id=effect["effect_id"] + ":reconciled", verified_at=now().isoformat(), details={"verified": True, "pr_number": pr["number"], "remote_rest_commit": commit_id, "reconciliation_owner_id": principal}, expected_revision=current["revision"])
+            current = await jobs.record_readback(job_id, effect_id=effect["effect_id"], effect_type=effect["effect_type"], target_path=effect["target_path"], target_digest=effect["target_digest"], content_sha256=verified.semantic_payload_sha256 if effect["effect_id"] == prior["effect_id"] else effect["target_digest"], status="succeeded", readback_id=effect["effect_id"] + ":reconciled", verified_at=verified_at if effect["effect_id"] == prior["effect_id"] else now().isoformat(), details={"verified": True, "pr_number": pr["number"], "remote_rest_commit": commit_id, "reconciliation_owner_id": principal}, expected_revision=current["revision"])
         local = next((item.get("details", {}).get("local_commit") for item in current.get("effects", []) if item.get("effect_type") == "repo_publication_local_producer"), None)
         current = await self.finalize(current, preview, pr["number"], commit_id, local)
         connection = await self.adapter._get_connection_row(principal)

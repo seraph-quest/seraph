@@ -226,6 +226,20 @@ _GET_RECEIPT_SEAL = object()
 
 
 @dataclass(frozen=True)
+class _ProtectedGetSeal:
+    origin: object
+    identity: str
+
+
+def _seal_verified_get(value):
+    # A copied dataclass with changed fields cannot reuse the actual adapter
+    # capture's seal. All authority-bearing nested dictionaries are bound.
+    identity = {key: item.isoformat() if isinstance(item, datetime) else item
+        for key, item in value.__dict__.items() if key != "_seal"}
+    return _ProtectedGetSeal(_GET_RECEIPT_SEAL, digest(identity))
+
+
+@dataclass(frozen=True)
 class GitHubVerifiedReadback:
     """Opaque evidence minted by the adapter from an actual protected GET."""
     job_id: str
@@ -237,6 +251,8 @@ class GitHubVerifiedReadback:
     effect_identity_digest: str
     observed_at: datetime
     _seal: object
+    semantic_payload_sha256: str
+    canonical_binding: dict
 
     def validates(self, authority, value, effect_identity):
-        return self._seal is _GET_RECEIPT_SEAL and self.job_id == authority.job_id and self.root == authority.root and self.capability == authority.capability and self.read_authority_digest == digest(authority.__dict__) and self.effect_identity_digest == digest(effect_identity) and 0 <= (datetime.now(timezone.utc)-self.observed_at).total_seconds() <= 30 and value.get("readback_path") == self.readback_path and value.get("payload_sha256") == self.payload_sha256
+        return type(self._seal) is _ProtectedGetSeal and self._seal.origin is _GET_RECEIPT_SEAL and self._seal.identity == _seal_verified_get(self).identity and self.job_id == authority.job_id and self.root == authority.root and self.capability == authority.capability and self.read_authority_digest == digest(authority.__dict__) and self.effect_identity_digest == digest(effect_identity) and 0 <= (datetime.now(timezone.utc)-self.observed_at).total_seconds() <= 30 and value.get("readback_path") == self.readback_path and value.get("payload_sha256") == self.payload_sha256

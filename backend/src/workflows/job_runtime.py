@@ -480,6 +480,17 @@ def _bounded_effect_ledger(effects: list[dict[str, Any]], *, limit: int = 100) -
     return unresolved + (settled[-retained_settled:] if retained_settled else [])
 
 
+def _job_effect_ledger(run, effects):
+    # The fixed publication has up to 2,000 finite blob intents. Dropping old
+    # settled rows loses its complete recovery inventory. Other jobs retain
+    # the established generic history policy.
+    if run.job_kind == "engineering.repo-publication.v1":
+        if len(effects) > 4096:
+            raise DurableJobTransitionError("publication complete effect inventory limit")
+        return effects
+    return _bounded_effect_ledger(effects)
+
+
 def _verified_readback_exists(effects: Any) -> bool:
     """Require a capability-specific, positive readback before success."""
     for item in effects if isinstance(effects, list) else []:
@@ -3168,7 +3179,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 values["result_summary"] = _text(result_summary)
             if approval_resume_record is not None:
                 values["effect_receipts_json"] = _canonical(
-                    _bounded_effect_ledger([*(effect_ledger or []), approval_resume_record])
+                    _job_effect_ledger(run, [*(effect_ledger or []), approval_resume_record])
                 )
             conditions = [WorkflowRunState.run_identity == job_id, WorkflowRunState.status == current]
             conditions.append(WorkflowRunState.revision == current_revision)
@@ -5584,10 +5595,29 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         if not readback_id or len(readback_id) > 200 or verified.tzinfo is None or verified > _utc_now() or (_utc_now()-verified).total_seconds() > 300:
             raise ValueError("GitHub observation verification identity invalid")
         await read_authority.validate()
+        # All private filesystem work and authentication precedes the write
+        # transaction. A staged immutable orphan is harmless on CAS failure.
+        from src.workflows.repo_publication import write_file, read_file
+        from src.extensions.github_recovery import check_binding
+        binding = verified_readback.canonical_binding
+        if binding.get("minted_job_revision") != expected_revision:
+            raise DurableJobLeaseError("GitHub observation protected mint revision changed")
+        file_path = f"artifacts/github-observations/{job_id}/{artifact_sha256}.json"
+        write_file(file_path, artifact_content)
+        if read_file(file_path, maximum=256 * 1024) != artifact_content:
+            raise ValueError("GitHub observation private artifact readback failed")
+        record = build_artifact_record(file_path=file_path, artifact_type="github_recovery_observation",
+            producer=read_authority.capability, run_id=job_id,
+            session_id=binding["job"]["session_id"], content=artifact_content)
         async with self._session() as db:
             if getattr(getattr(db.get_bind(), "dialect", None), "name", "") == "sqlite":
                 await db.execute(text("BEGIN IMMEDIATE"))
             run = await self._fetch(db, job_id)
+            await check_binding(db, run, binding)
+            if not verified_readback.validates(read_authority, observation["remote_readback"], identity):
+                raise DurableJobLeaseError("GitHub observation protected proof expired or changed")
+            if run.github_capacity_closure_json:
+                raise DurableJobLeaseError("GitHub capacity is permanently closed")
             allowed_types = {
                 "github_followthrough_v1": {"github_publication"},
                 "engineering.repo-publication.v1": {"repo_publication_branch", "repo_publication_pr", "repo_publication_commit", "repo_publication_tree"},
@@ -5617,15 +5647,6 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 if repeated.get("content_sha256") != artifact_sha256:
                     raise DurableJobIdempotencyConflict("GitHub observation id already bound")
                 return _serialize(run, receipt={"kind": "github_recovery_observation", "observation_only": True, "status": "already_recorded"})
-            # Immutable private bytes are written with descriptor-relative,
-            # no-follow paths, then registered together with both linkages.
-            from src.workflows.repo_publication import write_file, read_file
-            file_path = f"artifacts/github-observations/{job_id}/{artifact_sha256}.json"
-            write_file(file_path, artifact_content)
-            if read_file(file_path, maximum=256 * 1024) != artifact_content:
-                raise ValueError("GitHub observation private artifact readback failed")
-            record = build_artifact_record(file_path=file_path, artifact_type="github_recovery_observation",
-                producer=run.job_kind, run_id=job_id, session_id=run.session_id, content=artifact_content)
             recorded_at = _utc_now().isoformat()
             artifact = {key: record[key] for key in ("artifact_id", "artifact_type", "file_path", "producer", "content_sha256", "size_bytes", "exists")}
             artifact["recorded_at"] = recorded_at
@@ -5640,14 +5661,30 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     "readback_id": readback_id, "content_sha256": artifact_sha256, "artifact_id": record["artifact_id"]}})
             artifacts = _json_load(run.artifact_receipts_json, [])
             artifacts.append(artifact)
-            await read_authority.validate()
+            # The protected envelope is never supplied through an API. Its
+            # exact effect readback is derived from the actual adapter seal.
+            protected = {"schema": "seraph.github-read-revision-receipt.v1",
+                "receipt_id": "github-read:" + _digest({"job": job_id, "readback": readback_id, "artifact": artifact_sha256}),
+                "public_capability": "work.github-followthrough.v1" if run.job_kind == "github_followthrough_v1" else run.job_kind,
+                "binding": binding, "registered_job_revision": expected_revision + 1,
+                "readback_path": verified_readback.readback_path,
+                "raw_payload_sha256": verified_readback.payload_sha256,
+                "semantic_payload_sha256": verified_readback.semantic_payload_sha256,
+                "effect_identity": identity,
+                "effect_readback": {"effect_id": effect_id, "effect_type": effect_type,
+                    "target_path": target_path, "target_digest": target_digest,
+                    "adapter_idempotency_key": adapter_idempotency_key,
+                    "readback_id": readback_id, "verified_at": verified_at,
+                    "content_sha256": verified_readback.semantic_payload_sha256}}
+            protected["receipt_digest"] = _digest(protected)
             updated = await db.execute(update(WorkflowRunState).execution_options(synchronize_session=False).where(
                 WorkflowRunState.run_identity == job_id, WorkflowRunState.revision == expected_revision,
                 WorkflowRunState.status == run.status, WorkflowRunState.lease_owner.is_(None),
                 WorkflowRunState.lease_expires_at.is_(None)).values(
-                    effect_receipts_json=_canonical(_bounded_effect_ledger(effects)),
+                    effect_receipts_json=_canonical(_job_effect_ledger(run, effects)),
                     checkpoint_receipts_json=_canonical(_bounded_checkpoint_receipts(checkpoints)),
-                    artifact_receipts_json=_canonical(artifacts[-100:]), revision=WorkflowRunState.revision+1))
+                    artifact_receipts_json=_canonical(artifacts[-100:]),
+                    github_read_revision_json=_canonical(protected), revision=WorkflowRunState.revision+1))
             if not _rowcount_is_one(updated):
                 raise DurableJobLeaseError("GitHub observation CAS changed")
             try:
@@ -5992,7 +6029,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 .execution_options(synchronize_session=False)
                 .where(*conditions)
                 .values(
-                    effect_receipts_json=_canonical(_bounded_effect_ledger(existing)),
+                    effect_receipts_json=_canonical(_job_effect_ledger(run, existing)),
                     updated_at=now,
                     heartbeat_at=now,
                     revision=WorkflowRunState.revision + 1,
@@ -6240,7 +6277,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 .execution_options(synchronize_session=False)
                 .where(*conditions)
                 .values(
-                    effect_receipts_json=_canonical(_bounded_effect_ledger(effects)),
+                    effect_receipts_json=_canonical(_job_effect_ledger(run, effects)),
                     updated_at=now,
                     heartbeat_at=now,
                     revision=WorkflowRunState.revision + 1,
@@ -6382,7 +6419,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     failure_reason=None,
                     lease_owner=None,
                     lease_expires_at=None,
-                    effect_receipts_json=_canonical(_bounded_effect_ledger(existing_effects)),
+                    effect_receipts_json=_canonical(_job_effect_ledger(run, existing_effects)),
                     finished_at=None,
                     updated_at=now,
                     heartbeat_at=now,
@@ -6424,7 +6461,15 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         """
         if not _text(owner_kind) or not _text(owner_principal_id):
             raise DurableJobLeaseError("recovery owner identity is required")
+        from src.extensions.github_recovery import KINDS, check_persisted_readback
+        preliminary = await self.get_job(job_id)
+        github_recovery = preliminary is not None and preliminary.get("job_kind") in KINDS
+        if github_recovery:
+            from src.extensions.github_consent import live_operator
+            await live_operator(owner_principal_id, preliminary["operator_session_id"])
         async with self._session() as db:
+            if github_recovery and getattr(getattr(db.get_bind(), "dialect", None), "name", "") == "sqlite":
+                await db.execute(text("BEGIN IMMEDIATE"))
             run = await self._fetch(db, job_id)
             await _assert_canonical_goal_fence(
                 db,
@@ -6458,6 +6503,10 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 raise DurableJobTransitionError(
                     "reconciled finalization requires a verified capability readback"
                 )
+            try:
+                protected = await check_persisted_readback(db, run) if github_recovery else None
+            except (ValueError, KeyError, TypeError) as exc:
+                raise DurableJobLeaseError(str(exc)) from exc
             now = _utc_now()
             conditions = [
                 WorkflowRunState.run_identity == job_id,
@@ -6479,6 +6528,11 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 "heartbeat_at": now,
                 "revision": WorkflowRunState.revision + 1,
             }
+            if protected is not None:
+                protected.pop("receipt_digest")
+                protected["finalized_job_revision"] = current_revision + 1
+                protected["receipt_digest"] = _digest(protected)
+                values["github_read_revision_json"] = _canonical(protected)
             if result is not None:
                 values["result_digest"] = _digest(result)
                 values["result_summary"] = _text(result_summary, "reconciled result recorded")
@@ -6619,7 +6673,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 .values(
                     status=target_status,
                     failure_reason=("external_effect_reconciled" if target_status == "failed" else target_status),
-                    effect_receipts_json=_canonical(_bounded_effect_ledger(resolved_effects)),
+                    effect_receipts_json=_canonical(_job_effect_ledger(run, resolved_effects)),
                     lease_owner=None,
                     lease_expires_at=None,
                     updated_at=now,
@@ -6793,7 +6847,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 }
                 if recovery_effects is not None:
                     recovery_values["effect_receipts_json"] = _canonical(
-                        _bounded_effect_ledger(recovery_effects)
+                        _job_effect_ledger(run, recovery_effects)
                     )
                 recovery_conditions = [
                     WorkflowRunState.run_identity == run.run_identity,

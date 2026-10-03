@@ -22,6 +22,22 @@ logger = logging.getLogger(__name__)
 class SecretSnapshot:
     value: str = field(repr=False)
     binding_digest: str
+    identity: dict
+
+
+def secret_identity(secret: Secret) -> dict:
+    """Pure loaded-row provenance; no decrypt, authentication or DB access."""
+    return {"id": secret.id, "owner": secret.owner_principal_id,
+        "key": secret.key,
+        "updated_at": secret.updated_at.isoformat(),
+        "ciphertext_sha256": hashlib.sha256(secret.encrypted_value.encode()).hexdigest()}
+
+
+def secret_binding_digest(secret: Secret) -> str:
+    # Preserve the established immutable consent digest encoding. The
+    # protected READ envelope additionally binds the current exact vault name.
+    identity = {key: value for key, value in secret_identity(secret).items() if key != "key"}
+    return hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 async def _log_vault_event(
@@ -51,11 +67,7 @@ class VaultRepository:
                 Secret.revoked_at.is_(None)))).scalars().first()
             if secret is None:
                 return None
-            identity = {"id": secret.id, "owner": secret.owner_principal_id,
-                "updated_at": secret.updated_at.isoformat(),
-                "ciphertext_sha256": hashlib.sha256(secret.encrypted_value.encode()).hexdigest()}
-            binding = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-            return SecretSnapshot(decrypt(secret.encrypted_value), binding)
+            return SecretSnapshot(decrypt(secret.encrypted_value), secret_binding_digest(secret), secret_identity(secret))
 
     async def store(
         self,

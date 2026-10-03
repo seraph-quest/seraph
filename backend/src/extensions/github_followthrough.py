@@ -727,10 +727,21 @@ class GitHubFollowthroughService:
             service.verify_pr(payload, preview, remote_commit)
         else:
             raise GitHubFollowthroughError("github_get_native_capability_mismatch", status_code=409)
-        await read_authority.validate()
-        return GitHubVerifiedReadback(read_authority.job_id, read_authority.root,
+        snapshot = await read_authority.validate()
+        from src.extensions.github_recovery import capture_binding, check_binding
+        async with db_engine.get_session() as db:
+            run = (await db.execute(select(WorkflowRunState).where(
+                WorkflowRunState.run_identity == read_authority.job_id))).scalars().one()
+            binding = await capture_binding(db, run, read_authority, snapshot)
+            await check_binding(db, run, binding)
+            if run.revision != current["revision"]:
+                raise GitHubFollowthroughError("github_get_original_job_changed", status_code=409)
+        from dataclasses import replace
+        from src.extensions.github_consent import _seal_verified_get
+        verified = GitHubVerifiedReadback(read_authority.job_id, read_authority.root,
             read_authority.capability, path, captured[1], digest(read_authority.__dict__),
-            digest(effect_identity), captured[4], _GET_RECEIPT_SEAL)
+            digest(effect_identity), captured[4], _GET_RECEIPT_SEAL, captured[2], binding)
+        return replace(verified, _seal=_seal_verified_get(verified))
 
     async def request_repo_publication(
         self, path: str, *, method: str, token: str, authority_check,
@@ -4040,7 +4051,7 @@ class GitHubFollowthroughService:
             target_digest=prepared.body_sha256,
             content_sha256=_sha(_dump(payload)),
             readback_id=_publication_readback_id(prepared),
-            verified_at=_now().isoformat(),
+            verified_at=verified_at,
             status="succeeded",
             details={
                 "verified": True,

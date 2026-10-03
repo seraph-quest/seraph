@@ -225,6 +225,23 @@ describe("WorkBoardPanel", () => {
     vi.restoreAllMocks();
   });
 
+  it("keeps one research inspector across refreshed detail reconciliation", async () => {
+    const currentTask = task({ capability_id: "work.research-dossier.v1", status: "done" });
+    taskResponse(fetchMock, currentTask);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const props = { ownerPrincipalId: "operator:one", ownerSessionId: "operator-session-1" };
+    const mounted = render(<WorkBoardPanel {...props} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Bounded task" }));
+    await screen.findByRole("region", { name: "Research dossier inspector" });
+    for (let revision = 0; revision < 3; revision++) {
+      mounted.rerender(<WorkBoardPanel {...props} focusTaskId="task-1" onFocusTaskHandled={() => {}} />);
+      fireEvent.click(screen.getByRole("button", { name: "Refresh board" }));
+      await waitFor(() => expect(screen.getAllByRole("region", { name: "Research dossier inspector" })).toHaveLength(1));
+    }
+    expect(errors.mock.calls.some((args) => args.some((value) => String(value).includes("same key")))).toBe(false);
+    expect(screen.getAllByRole("button", { name: "Refresh research" })).toHaveLength(1);
+  });
+
   it("returns recovered history to its exact origin while all effect controls stay readonly", async () => {
     const currentTask = task({ ownership_access: "recovered_read_only", status: "blocked", recovery_action: "reconcile_external_effect", block_kind: "unknown_effect" });
     taskResponse(fetchMock, currentTask);

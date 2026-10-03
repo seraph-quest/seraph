@@ -1170,6 +1170,10 @@ def _append_parent_fence_condition(
 ) -> None:
     """Require canonical goal identity and, for children, the live parent fence."""
     _append_goal_fence_condition(conditions, run)
+    if getattr(run, "job_kind", None) == "readonly_research_child":
+        from src.workflows.research_guard import append_research_parent_gate
+        if append_research_parent_gate(conditions, run, now=now):
+            return
     parent_job_id = _text(getattr(run, "parent_job_id", None))
     if not parent_job_id:
         return
@@ -3147,6 +3151,17 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 } else None,
                 "finished_at": now if to_status in DURABLE_JOB_TERMINAL_STATUSES or to_status == "failed" else None,
             }
+            if to_status == "paused" and run.job_kind in {"research_dossier", "readonly_research_child"}:
+                from src.work_board.research_contracts import WAIT_SOURCES, WAIT_CHILDREN, PROMPT_READY
+                permitted = {WAIT_SOURCES, WAIT_CHILDREN} if run.job_kind == "research_dossier" else {PROMPT_READY}
+                checkpoint_id = "research:phase" if run.job_kind == "research_dossier" else "research:prompt-ready"
+                matches = [item.get("payload") for item in _json_load(run.checkpoint_receipts_json, [])
+                    if item.get("checkpoint_id") == checkpoint_id]
+                if reason not in permitted or len(matches) != 1 or not isinstance(matches[0], dict):
+                    raise DurableJobTransitionError("research pause requires its exact typed checkpoint")
+                if run.job_kind == "research_dossier" and matches[0].get("phase") != reason:
+                    raise DurableJobTransitionError("research pause phase differs from its checkpoint")
+                values["failure_reason"] = reason
             if to_status in {
                 "queued",
                 "awaiting_approval",
@@ -3623,6 +3638,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         expected_revision: int | None = None,
         expected_fencing_token: int | None = None,
         continue_existing_attempt: bool = False,
+        claim_authority_check=None,
     ) -> dict[str, Any]:
         owner = _text(owner)
         if not owner:
@@ -3633,7 +3649,13 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         if expected_state != "queued":
             raise DurableJobTransitionError("durable job claims require the queued state")
         async with self._session() as db:
+            if claim_authority_check is not None:
+                await db.execute(text("BEGIN IMMEDIATE"))
             run = await self._fetch(db, job_id)
+            if claim_authority_check is not None:
+                if run.job_kind != "readonly_research_child":
+                    raise DurableJobLeaseError("phase-bound claims require a fixed research child")
+                await claim_authority_check(db, run)
             await _assert_canonical_goal_fence(
                 db,
                 goal_id=getattr(run, "goal_id", None),
@@ -3748,7 +3770,12 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                         "operator_visible": True,
                     },
                 )
-            if _job_has_unsafe_effects(effect_ledger):
+            research_resume = False
+            if (run.job_kind == "readonly_research_child" and continue_existing_attempt
+                and claim_authority_check is not None):
+                from src.work_board.research_control import precontact_intent_reusable
+                research_resume = await precontact_intent_reusable(self, db, run, effect_ledger)
+            if _job_has_unsafe_effects(effect_ledger) and not research_resume:
                 recovery_status, recovery_reason = _effect_recovery_state(effect_ledger)
                 recovery_reason = f"queued_{recovery_reason}_requires_reconciliation"
                 recovery_conditions = [
@@ -6087,6 +6114,12 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 if previous.get("status") == "blocked" and previous_details.get("never_contacted") is True and await self._accounting_resume_claim_allowed(db, run):
                     db.expunge(run)
                     return _serialize(run, receipt=previous)
+                if run.job_kind == "readonly_research_child" and previous.get("status") == "intent":
+                    from src.work_board.research_control import precontact_intent_reusable
+                    if (all(previous_details.get(key) == value for key, value in safe_details.items())
+                        and await precontact_intent_reusable(self, db, run, effects)):
+                        db.expunge(run)
+                        return _serialize(run, receipt=previous)
                 raise DurableJobIdempotencyConflict(
                     "remote inference operation identity is already fenced"
                 )

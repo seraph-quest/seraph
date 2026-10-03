@@ -227,6 +227,8 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
             state = await client.get("/api/work-board/tasks/"+task_id+"/research")
             assert state.status_code == 200, state.text
             original_state = state.json()
+            if scenario == "restart_written_outputs":
+                assert original_state["recoverable"] is True  # exact reserved physical output is visible to the Inspector
             action = "cancel" if scenario == "cancel_funded_queued" else "recover"
             if scenario == "restart_funded_queued":
                 from src.work_board.research_control import reserve_recovery
@@ -260,6 +262,10 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
                 replay = await client.post("/api/work-board/tasks/"+task_id+"/research/cancel",
                     json={"expected_revision": original_state["task_revision"], "idempotency_key": "original-research-control"})
                 assert replay.status_code == 200 and replay.json()["cancellation"]["replayed"] is True
+                generic = await client.post("/api/work-board/tasks/"+task_id+"/actions",
+                    json={"action": "unblock", "expected_revision": current_state["task_revision"], "resolution": "Explicitly check original research recovery"})
+                assert generic.status_code == 409 and "research_original_attempt_required" in generic.text
+                assert len(calls) == 3
                 return
             assert recovered.json()["recovery"]["completed"] is True, recovered.text
             replay = await client.post("/api/work-board/tasks/"+task_id+"/research/recover",

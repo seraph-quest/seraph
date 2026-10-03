@@ -1722,6 +1722,13 @@ class WorkBoardRepository:
         )
         return BoardMutation(task, event)
 
+    async def require_generic_recovery_allowed(self, db: AsyncSession, task: WorkBoardTask) -> None:
+        if task.capability_id == "work.research-dossier.v1":
+            linked = await db.scalar(select(WorkBoardAttempt.attempt_id).where(
+                WorkBoardAttempt.task_id == task.task_id, WorkBoardAttempt.workflow_run_id.is_not(None)).limit(1))
+            if linked is not None:
+                raise BoardError("research_original_attempt_required", "Use explicit research recovery on the original attempt", status_code=409)
+
     async def action_task(
         self,
         db: AsyncSession,
@@ -1735,6 +1742,8 @@ class WorkBoardRepository:
             raise BoardRevisionConflict(task.task_id, expected, task.task_revision)
         previous = task.status
         values: dict[str, Any] = {}
+        if request.action.value in {"retry", "unblock"}:
+            await self.require_generic_recovery_allowed(db, task)
         if request.action.value == "promote":
             await self.validate_task_goal(db, owner, task)
             if task.status is WorkBoardStatus.triage:
@@ -2032,6 +2041,7 @@ class WorkBoardRepository:
 
         await _begin_sqlite_immediate(db)
         task = await self._owned_task(db, owner, task_id)
+        await self.require_generic_recovery_allowed(db, task)
         expected = int(expected_revision)
         if task.task_revision != expected:
             raise BoardRevisionConflict(task.task_id, expected, task.task_revision)

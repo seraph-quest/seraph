@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
-from src.auth.service import AuthenticatedOperator
+from src.auth.service import AuthenticatedOperator, AuthFailure
 from src.approval.repository import approval_repository
 from src.db.engine import get_session
 from src.db.models import (
@@ -76,7 +76,7 @@ from src.work_board.time import serialize_utc_datetime
 from src.security.trust_contract import AuthorityGrant
 from src.security.site_policy import _parse_rules
 from config.settings import settings
-from src.workflows.job_runtime import durable_job_repository
+from src.workflows.job_runtime import durable_job_repository, DurableJobError
 from src.workflows.routines import (
     RoutinePublicationRequest,
     RoutineError,
@@ -101,6 +101,8 @@ async def read_research_state(request: Request, task_id: str):
             return await snapshot(dispatcher.jobs, db, _owner(_operator(request)), task_id)
     except BoardError as exc:
         _raise_board_error(exc)
+    except (DurableJobError, AuthFailure, ValueError, TypeError, KeyError, OSError):
+        raise HTTPException(status_code=409, detail={"code": "research_current_binding_unavailable"})
 
 
 @router.post("/tasks/{task_id}/research/recover")
@@ -112,6 +114,8 @@ async def recover_research(request: Request, task_id: str, body: ResearchControl
             return {"recovery": result, "research": await snapshot(dispatcher.jobs, db, _owner(_operator(request)), task_id)}
     except BoardError as exc:
         _raise_board_error(exc)
+    except (DurableJobError, AuthFailure, ValueError, TypeError, KeyError, OSError):
+        raise HTTPException(status_code=409, detail={"code": "research_current_authority_or_artifact_required"})
 
 
 @router.post("/tasks/{task_id}/research/cancel")
@@ -123,6 +127,8 @@ async def cancel_research(request: Request, task_id: str, body: ResearchControlR
             return {"cancellation": result, "research": await snapshot(dispatcher.jobs, db, _owner(_operator(request)), task_id)}
     except BoardError as exc:
         _raise_board_error(exc)
+    except (DurableJobError, AuthFailure, ValueError, TypeError, KeyError, OSError):
+        raise HTTPException(status_code=409, detail={"code": "research_current_cancellation_proof_required"})
 
 
 @router.get("/tasks/{task_id}/research-report")
@@ -914,6 +920,10 @@ def _recovery_action(
 
     status = _json_value(task.status)
     block_kind = str(task.block_kind or "")
+    if task.capability_id == "work.research-dossier.v1" and latest_attempt is not None and latest_attempt.workflow_run_id:
+        # The research inspector owns explicit same-attempt controls. Generic
+        # retry/unblock would discard its immutable original operation.
+        return None
     if status == WorkBoardStatus.running.value:
         # A pending admission has no durable run to cancel.  The dispatcher
         # must reconcile that binding first so the card never advertises a

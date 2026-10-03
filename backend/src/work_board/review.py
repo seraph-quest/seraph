@@ -1253,6 +1253,7 @@ async def unblock_task(
     # cancellation or pending-admission reconciliation path.
     await _begin_sqlite_immediate(db)
     task = await repository._owned_task(db, owner, task_id)
+    await repository.require_generic_recovery_allowed(db, task)
     if task.status is not WorkBoardStatus.blocked:
         raise BoardError("illegal_transition", "Only blocked tasks can be unblocked", status_code=409)
     if not str(resolution or "").strip():

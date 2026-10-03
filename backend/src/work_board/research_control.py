@@ -77,6 +77,35 @@ def binding(task, attempt, parent):
         "phase": phase["phase"], "creation_digest": creation["creation_digest"]}
 
 
+def verified_reserved_output(child, cost, creation, now):
+    """Finite physical candidate proof; current authority is rechecked on POST."""
+    from src.workflows.job_runtime import _serialize
+    try:
+        authority = json.loads(child.declared_authority_json)
+        slot = authority["research_slot"]
+        output = checkpoint(_serialize(child), f"research:artifact:child:{slot}")
+        ready = checkpoint(_serialize(child), "research:prompt-ready")
+        if (child.status != "running" or child.lease_expires_at is None
+            or child.lease_expires_at.replace(tzinfo=timezone.utc) > now or not output or not ready or not cost
+            or cost.state != "settled" or cost.actual_cost_microusd is None or cost.contact_started_at is None
+            or cost.operation_id != "remote:"+child.run_identity or cost.job_id != child.run_identity
+            or cost.owner_id != child.owner_principal_id or cost.payload_digest != ready["payload_digest"]
+            or cost.policy_digest != ready["policy_digest"] or output["job_id"] != child.run_identity
+            or output["kind"] != "child" or output["slot"] != slot or output["schema_version"] != 1
+            or output["creation_digest"] != creation["creation_digest"] or output["no_learning"] is not True
+            or child.run_identity != creation["child_ids"][slot]
+            or authority["parent_creation_digest"] != creation["creation_digest"]):
+            return False
+        sources = json.loads(read(ready["source_manifest_path"], ready["source_manifest_sha256"]))
+        raw = read(output["file_path"], output["content_sha256"], max_bytes=16384)
+        if len(raw) != output["byte_count"]:
+            return False
+        verified_child(raw, sources)
+        return True
+    except (ValueError, TypeError, KeyError, IndexError, OSError):
+        return False
+
+
 async def snapshot(jobs, db, owner, task_id):
     task, attempt, parent = await bound(db, owner, task_id)
     from src.workflows.job_runtime import _serialize
@@ -85,9 +114,11 @@ async def snapshot(jobs, db, owner, task_id):
     costs = list((await db.scalars(select(InferenceCostReservation).where(InferenceCostReservation.job_id.in_(
         [child.run_identity for child in children])))).all())
     safe = parent.status == "paused" and parent.failure_reason in {WAIT_SOURCES, WAIT_CHILDREN} and not attempt.ended_at
-    safe = safe and all(child.status in {"accepted", "queued", "succeeded"} or (
-        child.status == "paused" and child.failure_reason == PROMPT_READY) for child in children)
-    safe = safe and not any(child.lease_owner or child.lease_expires_at for child in children)
+    now = datetime.now(timezone.utc)
+    safe = safe and all((not (child.lease_owner or child.lease_expires_at) and (
+        child.status in {"accepted", "queued", "succeeded"} or child.status == "paused" and child.failure_reason == PROMPT_READY))
+        or (creation and verified_reserved_output(child, next((cost for cost in costs if cost.job_id == child.run_identity), None), creation, now))
+        for child in children)
     safe = safe and not any(cost.state in {"contact_started", "unknown"} or cost.recovery_reason == "provider_contact_denied" for cost in costs)
     return {"task_id": task.task_id, "task_revision": task.task_revision, "attempt_id": attempt.attempt_id,
         "parent_id": parent.run_identity, "status": parent.status, "phase": parent.failure_reason,
@@ -144,15 +175,8 @@ async def reserve_recovery(jobs, owner, task_id, request):
             if child.status == "running":
                 # Output is written only after the actual broker callback and
                 # settlement returned. An expired lease alone is insufficient.
-                output = checkpoint(_serialize(child), f"research:artifact:child:{authority['research_slot']}")
-                ready = checkpoint(_serialize(child), "research:prompt-ready")
-                if (child.lease_expires_at is None or child.lease_expires_at.replace(tzinfo=timezone.utc) > now
-                    or not output or not ready or not cost or cost.state != "settled" or cost.actual_cost_microusd is None
-                    or cost.contact_started_at is None or cost.operation_id != "remote:"+child.run_identity
-                    or cost.payload_digest != ready["payload_digest"] or output["creation_digest"] != creation["creation_digest"]):
+                if not verified_reserved_output(child, cost, creation, now):
                     raise BoardError("research_worker_unproven", "The current worker has no proven completed reserved output", status_code=409)
-                sources = json.loads(read(ready["source_manifest_path"], ready["source_manifest_sha256"]))
-                verified_child(read(output["file_path"], output["content_sha256"], max_bytes=16384), sources)
                 child.status = "queued"
                 child.lease_owner = child.lease_expires_at = None
                 child.fencing_token += 1

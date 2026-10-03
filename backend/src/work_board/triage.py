@@ -1730,7 +1730,8 @@ async def _reconcile_started_proposal(
         # before the proposal row was advanced to ``proposed``.  Promote that
         # exact staged digest only after the exact durable job/effect binding
         # is terminally successful; never call the provider again.
-        if _proposal_job_is_terminal_success(proposal, projection) and _proposal_has_staged_output(proposal):
+        parent = await WorkBoardRepository()._owned_task(db, owner, proposal.parent_task_id)
+        if _proposal_job_is_terminal_success(proposal, projection, goal_id=parent.goal_id) and _proposal_has_staged_output(proposal):
             proposal.status = "proposed"
             proposal.provider_contact_state = "succeeded"
             proposal.revision += 1
@@ -1798,19 +1799,55 @@ def _proposal_job_is_pending(
 def _proposal_job_is_terminal_success(
     proposal: WorkBoardProposal,
     projection: Mapping[str, Any] | None,
+    *, goal_id: str | None = None,
 ) -> bool:
-    """Prove the proposal's exact durable job settled successfully."""
+    """Require the original job and its protected generated-output readback.
+
+    Settled provider effects or generic readbacks do not verify a proposal.
+    This predicate is shared by restart reconciliation and acceptance.
+    """
     if not isinstance(projection, Mapping):
         return False
     if str(projection.get("job_id") or projection.get("run_identity") or "") != str(proposal.admission_job_id):
         return False
     if str(projection.get("status") or "") != "succeeded":
         return False
+    try:
+        authority = _proposal_job_authority(proposal)
+    except (TypeError, ValueError):
+        return False
+    lease = projection.get("lease")
+    fence = lease.get("fencing_token") if isinstance(lease, Mapping) else None
+    if (projection.get("job_kind") != _PROPOSAL_JOB_KIND
+        or projection.get("owner") != {"kind": "user", "principal_id": proposal.owner_principal_id, "service_id": None}
+        or projection.get("session_id") != proposal.owner_session_id
+        or projection.get("operator_session_id") != proposal.owner_session_id
+        or not goal_id or projection.get("goal_id") != goal_id
+        or projection.get("goal_revision") != proposal.goal_revision
+        or projection.get("capability_version") != proposal.capability_version
+        or projection.get("input_digest") != _proposal_admission_input_digest(proposal)
+        or projection.get("authority_digest") != _proposal_digest(authority)
+        or projection.get("declared_authority") != authority
+        or projection.get("run_fingerprint") != proposal.request_digest
+        or not isinstance(projection.get("idempotency"), Mapping)
+        or projection["idempotency"].get("scope") != "work-board-proposal"
+        or projection["idempotency"].get("key") != proposal.proposal_id
+        or type(fence) is not int or fence < 1
+        or not _proposal_has_staged_output(proposal)):
+        return False
+    from src.memory.evidence_proposal import stored_snapshot
+    try:
+        snapshot_digest = _proposal_digest(stored_snapshot(proposal))
+    except BoardError:
+        return False
+    output_digest = proposal.proposal_digest
+    readback_id = hashlib.sha256(f"{proposal.admission_job_id}:{fence}:{output_digest}".encode()).hexdigest()
     effects = projection.get("effects")
     if not isinstance(effects, list) or not effects:
         return False
     expected_digest = str(proposal.effect_id_digest or "")
     matched_effect = False
+    matched_output = 0
     for effect in effects:
         if not isinstance(effect, Mapping) or str(effect.get("status") or "") not in {
             "succeeded",
@@ -1822,9 +1859,32 @@ def _proposal_job_is_terminal_success(
         effect_id = effect.get("effect_id")
         if not effect_digest and isinstance(effect_id, str) and effect_id:
             effect_digest = hashlib.sha256(effect_id.encode("utf-8")).hexdigest()[:16]
-        if expected_digest and effect_digest == expected_digest:
+        if (expected_digest and effect_digest == expected_digest
+            and effect_id == _proposal_effect_id(proposal.admission_job_id)):
             matched_effect = True
-    return matched_effect if expected_digest else True
+        details = effect.get("details")
+        if (effect.get("receipt_kind") == "readback"
+            and effect.get("effect_type") == "work_board_proposal_output"
+            and effect.get("target_path") == f"work-board-proposal:{proposal.proposal_id}"
+            and effect.get("status") == "succeeded"
+            and effect.get("target_digest") == output_digest
+            and effect.get("content_sha256") == output_digest
+            and type(effect.get("fencing_token")) is int and effect.get("fencing_token") == fence
+            and effect.get("readback_id") == readback_id
+            and isinstance(details, Mapping) and details.get("verified") is True
+            and details.get("proposal_id") == proposal.proposal_id
+            and details.get("proposal_digest") == output_digest
+            and details.get("evidence_snapshot_digest") == snapshot_digest
+            and details.get("verification_scope") == "generated_advisory_output_only"
+            and details.get("memory_status") == "no_learning"):
+            try:
+                verified_at = datetime.fromisoformat(str(effect.get("verified_at") or "").replace("Z", "+00:00"))
+            except ValueError:
+                return False
+            if verified_at.tzinfo is None:
+                return False
+            matched_output += 1
+    return matched_output == 1 and (matched_effect if expected_digest else True)
 
 
 def _proposal_has_staged_output(proposal: WorkBoardProposal) -> bool:
@@ -2539,7 +2599,7 @@ async def accept_proposal(
                 "The exact proposal admission cannot be verified before acceptance",
                 status_code=409,
             ) from exc
-        if not _proposal_job_is_terminal_success(proposal, durable_job):
+        if not _proposal_job_is_terminal_success(proposal, durable_job, goal_id=parent.goal_id):
             raise BoardError(
                 "proposal_job_reconciliation_required",
                 "The exact proposal admission has not settled successfully",

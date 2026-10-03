@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import fcntl
 import json
 import os
+from copy import deepcopy
 
 import pytest
 from unittest.mock import AsyncMock
@@ -119,6 +120,30 @@ async def test_generated_output_readback_is_current_fenced_and_pure(async_db,tmp
         if positive:
             assert effects[0]['content_sha256']==digest and effects[0]['details']['verified'] is True
             assert effects[0]['details']['verification_scope']=='generated_advisory_output_only'
+            from src.workflows.job_runtime import _serialize
+            current=await reopened.get(WorkBoardProposal,proposal.proposal_id)
+            projection=_serialize(run)
+            assert triage._proposal_job_is_terminal_success(current,projection,goal_id=task.goal_id)
+            # Generic/legacy success never proves the actual proposal output.
+            for field,value in [('effect_type','generic_output'),('receipt_kind','effect'),
+                ('target_path','work-board-proposal:another'),('target_digest','f'*64),
+                ('content_sha256','f'*64),('fencing_token',fence+1),('readback_id','generic'),
+                ('verified_at',None)]:
+                altered=deepcopy(projection);altered['effects'][0][field]=value
+                assert not triage._proposal_job_is_terminal_success(current,altered,goal_id=task.goal_id),field
+            for field,value in [('verification_scope','generic'),('verified',1),
+                ('proposal_id','another'),('evidence_snapshot_digest','f'*64)]:
+                altered=deepcopy(projection);altered['effects'][0]['details'][field]=value
+                assert not triage._proposal_job_is_terminal_success(current,altered,goal_id=task.goal_id),field
+            altered=deepcopy(projection);altered['declared_authority']['finite_authority']=False
+            assert not triage._proposal_job_is_terminal_success(current,altered,goal_id=task.goal_id)
+            altered=deepcopy(projection);altered['effects'].append(deepcopy(altered['effects'][0]))
+            assert not triage._proposal_job_is_terminal_success(current,altered,goal_id=task.goal_id)
+            # Independent reopened SQLite reconciliation reads the real stored
+            # terminal job. No append, provider replay or completed-row mutation.
+            result=await triage._reconcile_started_proposal(reopened,owner,current)
+            assert result['status']=='proposed'
+            assert run.status=='succeeded' and json.loads(run.effect_receipts_json)==effects
         with (tmp_path/'actual-proposal-readback.json').open('x') as f:
             json.dump({'boundary':__doc__,'change':change,'status':run.status,'effects':effects,
                 'policy_lock_observed':lock_observed,'no_learning':True},f,indent=2)

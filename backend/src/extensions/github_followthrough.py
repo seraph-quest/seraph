@@ -4002,7 +4002,7 @@ class GitHubFollowthroughService:
         from config.settings import settings
         from src.workspace import canonical_workspace_root
         from src.execution.repo_publication_supervisor import guard
-        from src.extensions.github_capacity_closure import (ReadWindow, original_effects,
+        from src.extensions.github_capacity_closure import (ReadWindow, original_effects, stage_observation_inventory,
             effect_identity, _mint_complete_proof)
         current = await durable_job_repository.get_job(job_id)
         if current is None or current.get("job_kind") != JOB_KIND or current.get("owner", {}).get("principal_id") != owner_principal_id or current.get("operator_session_id") != owner_session_id or current.get("declared_authority", {}).get("capability_id") != CAPABILITY_ID:
@@ -4014,6 +4014,7 @@ class GitHubFollowthroughService:
         if current["revision"] != request.expected_job_revision or current["status"] not in {"unknown_external_effect", "blocked", "failed"} or current["lease"].get("owner") or current["lease"].get("expires_at"):
             raise GitHubFollowthroughError("github_capacity_close_unleased_revision_required", status_code=409)
         prepared = await self._read_prepared(current)
+        await stage_observation_inventory(current)
         effects = original_effects(current)
         prior = effects[0]
         recorded_id = (prior.get("details") or {}).get("remote_id")
@@ -4187,12 +4188,13 @@ class GitHubFollowthroughService:
 
     async def observe_closed(self, *, current, request):
         from src.extensions.github_recovery import closed_authority, record_closed_observation
-        from src.extensions.github_capacity_closure import ReadWindow, original_effects, effect_identity
+        from src.extensions.github_capacity_closure import ReadWindow, original_effects, effect_identity, stage_observation_inventory
         authority = await closed_authority(current, expected_revision=request.expected_connection_revision)
         prepared = await self._read_prepared(current)
         async with db_engine.get_session() as db:
             run = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == current["job_id"]))).scalars().one()
             history = _load(run.github_capacity_closure_json, {})
+        await stage_observation_inventory(current)
         prior = original_effects(current)[0]
         positive = next((item for item in history.get("positive_gets", []) if item["identity"]["effect_id"] == prior["effect_id"]), None)
         if positive is None:

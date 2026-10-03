@@ -484,11 +484,20 @@ def _job_effect_ledger(run, effects):
     # The fixed publication has up to 2,000 finite blob intents. Dropping old
     # settled rows loses its complete recovery inventory. Other jobs retain
     # the established generic history policy.
-    if run.job_kind == "engineering.repo-publication.v1":
-        if len(effects) > 4096:
+    if run.job_kind in {"engineering.repo-publication.v1", "github_followthrough_v1"}:
+        if len(effects) > 4096 or len(_canonical(effects).encode()) > 4 * 1024 * 1024:
             raise DurableJobTransitionError("publication complete effect inventory limit")
         return effects
     return _bounded_effect_ledger(effects)
+
+
+def _github_recovery_history(run, history, *, kind):
+    """Fixed native histories append within a finite cap; never evict proof."""
+    if run.job_kind in {"engineering.repo-publication.v1", "github_followthrough_v1"}:
+        if not isinstance(history, list) or len(history) > 4096 or len(_canonical(history).encode()) > 4 * 1024 * 1024:
+            raise DurableJobTransitionError("GitHub " + kind + " history bound reached")
+        return history
+    return _bounded_checkpoint_receipts(history) if kind == "checkpoint" else history[-100:]
 
 
 def _verified_readback_exists(effects: Any) -> bool:
@@ -4281,7 +4290,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 .execution_options(synchronize_session=False)
                 .where(*checkpoint_conditions)
                 .values(
-                    checkpoint_receipts_json=_canonical(_bounded_checkpoint_receipts(existing)),
+                    checkpoint_receipts_json=_canonical(_github_recovery_history(run, existing, kind="checkpoint")),
                     updated_at=now,
                     heartbeat_at=now,
                     revision=WorkflowRunState.revision + 1,
@@ -4552,7 +4561,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     WorkflowRunState.lease_expires_at > now,
                 )
                 .values(
-                    checkpoint_receipts_json=_canonical(_bounded_checkpoint_receipts(existing)),
+                    checkpoint_receipts_json=_canonical(_github_recovery_history(run, existing, kind="checkpoint")),
                     updated_at=now,
                     heartbeat_at=now,
                     revision=WorkflowRunState.revision + 1,
@@ -4678,7 +4687,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     WorkflowRunState.status.in_(("succeeded", "degraded", "failed", "cancelled")),
                 )
                 .values(
-                    checkpoint_receipts_json=_canonical(_bounded_checkpoint_receipts(existing)),
+                    checkpoint_receipts_json=_canonical(_github_recovery_history(run, existing, kind="checkpoint")),
                     updated_at=now,
                     revision=WorkflowRunState.revision + 1,
                 )
@@ -4841,7 +4850,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 updated = await db.execute(update(WorkflowRunState).execution_options(synchronize_session=False).where(
                     WorkflowRunState.run_identity == request.job_id, WorkflowRunState.revision == request.expected_revision,
                     WorkflowRunState.fencing_token == run.fencing_token, WorkflowRunState.status == "unknown_external_effect",
-                ).values(checkpoint_receipts_json=_canonical(_bounded_checkpoint_receipts(history)),
+                ).values(checkpoint_receipts_json=_canonical(_github_recovery_history(run, history, kind="checkpoint")),
                          updated_at=now, revision=WorkflowRunState.revision + 1))
                 if not _rowcount_is_one(updated):
                     raise DurableJobLeaseError("Node physical cleanup CAS is stale")
@@ -5362,7 +5371,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 .execution_options(synchronize_session=False)
                 .where(*conditions)
                 .values(
-                    checkpoint_receipts_json=_canonical(_bounded_checkpoint_receipts(existing)),
+                    checkpoint_receipts_json=_canonical(_github_recovery_history(run, existing, kind="checkpoint")),
                     updated_at=now,
                     heartbeat_at=now,
                     revision=WorkflowRunState.revision + 1,
@@ -5459,7 +5468,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 .execution_options(synchronize_session=False)
                 .where(*conditions)
                 .values(
-                    artifact_receipts_json=_canonical(existing[-100:]),
+                    artifact_receipts_json=_canonical(_github_recovery_history(run, existing, kind="artifact")),
                     updated_at=now,
                     heartbeat_at=now,
                     revision=WorkflowRunState.revision + 1,
@@ -5549,7 +5558,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 .execution_options(synchronize_session=False)
                 .where(*conditions)
                 .values(
-                    artifact_receipts_json=_canonical(existing[-100:]),
+                    artifact_receipts_json=_canonical(_github_recovery_history(run, existing, kind="artifact")),
                     updated_at=now,
                     heartbeat_at=now,
                     revision=WorkflowRunState.revision + 1,
@@ -5680,8 +5689,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 WorkflowRunState.run_identity == job_id, WorkflowRunState.revision == run.revision,
                 WorkflowRunState.status == run.status, WorkflowRunState.lease_owner.is_(None),
                 WorkflowRunState.lease_expires_at.is_(None), WorkflowRunState.github_capacity_closure_json.is_(None)).values(
-                    github_capacity_closure_json=_canonical(closure), artifact_receipts_json=_canonical(artifacts[-100:]),
-                    checkpoint_receipts_json=_canonical(_bounded_checkpoint_receipts(checkpoints)), revision=WorkflowRunState.revision+1))
+                    github_capacity_closure_json=_canonical(closure), artifact_receipts_json=_canonical(_github_recovery_history(run, artifacts, kind="artifact")),
+                    checkpoint_receipts_json=_canonical(_github_recovery_history(run, checkpoints, kind="checkpoint")), revision=WorkflowRunState.revision+1))
             released = await db.execute(update(GitHubFollowthroughConnection).execution_options(synchronize_session=False).where(
                 GitHubFollowthroughConnection.id == connection.id, GitHubFollowthroughConnection.owner_principal_id == read_authority.principal,
                 GitHubFollowthroughConnection.repository == connection.repository, GitHubFollowthroughConnection.vault_key == connection.vault_key,
@@ -5811,6 +5820,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             # The protected envelope is never supplied through an API. Its
             # exact effect readback is derived from the actual adapter seal.
             protected = {"schema": "seraph.github-read-revision-receipt.v1",
+                "observation_id": observation_id,
+                "observation_artifact_id": record["artifact_id"],
+                "observation_artifact_sha256": artifact_sha256,
                 "receipt_id": "github-read:" + _digest({"job": job_id, "readback": readback_id, "artifact": artifact_sha256}),
                 "public_capability": "work.github-followthrough.v1" if run.job_kind == "github_followthrough_v1" else run.job_kind,
                 "binding": binding, "registered_job_revision": expected_revision + 1,
@@ -5824,13 +5836,21 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     "readback_id": readback_id, "verified_at": verified_at,
                     "content_sha256": verified_readback.semantic_payload_sha256}}
             protected["receipt_digest"] = _digest(protected)
+            observation_history = _json_load(run.github_read_observation_history_json, [])
+            if not isinstance(observation_history, list) or len(observation_history) >= 4096:
+                raise DurableJobLeaseError("GitHub protected observation history bounds invalid")
+            observation_history = observation_history + [protected]
+            history_json = _canonical(observation_history)
+            if len(history_json.encode()) > 4 * 1024 * 1024:
+                raise DurableJobLeaseError("GitHub protected observation history bytes invalid")
             updated = await db.execute(update(WorkflowRunState).execution_options(synchronize_session=False).where(
                 WorkflowRunState.run_identity == job_id, WorkflowRunState.revision == expected_revision,
                 WorkflowRunState.status == run.status, WorkflowRunState.lease_owner.is_(None),
                 WorkflowRunState.lease_expires_at.is_(None)).values(
                     effect_receipts_json=_canonical(_job_effect_ledger(run, effects)),
-                    checkpoint_receipts_json=_canonical(_bounded_checkpoint_receipts(checkpoints)),
-                    artifact_receipts_json=_canonical(artifacts[-100:]),
+                    checkpoint_receipts_json=_canonical(_github_recovery_history(run, checkpoints, kind="checkpoint")),
+                    artifact_receipts_json=_canonical(_github_recovery_history(run, artifacts, kind="artifact")),
+                    github_read_observation_history_json=history_json,
                     github_read_revision_json=run.github_read_revision_json if closed_read else _canonical(protected), revision=WorkflowRunState.revision+1))
             if not _rowcount_is_one(updated):
                 raise DurableJobLeaseError("GitHub observation CAS changed")

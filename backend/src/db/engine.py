@@ -640,6 +640,7 @@ async def _ensure_legacy_columns(conn) -> None:
             "artifact_receipts_json": "VARCHAR DEFAULT '[]'",
             "effect_receipts_json": "VARCHAR DEFAULT '[]'",
             "github_read_revision_json": "VARCHAR",
+            "github_read_observation_history_json": "VARCHAR",
             "github_capacity_closure_json": "VARCHAR",
             "result_digest": "VARCHAR",
             "result_summary": "VARCHAR",

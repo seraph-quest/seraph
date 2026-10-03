@@ -275,6 +275,17 @@ observation requires its own literal True acknowledgment and exact current read
 revision, with the same whole-operation GET bounds. Discovery/GET projections
 do not automatically acknowledge, prepare, execute, reconcile or close.
 
+The accepted cumulative review corrections make the two fixed native GitHub
+jobs' effect, artifact, checkpoint and protected READ observation histories
+append-only within 4,096 entries and 4 MiB per canonical history. Overflow
+blocks the append before CAS; it never evicts preview, producer, closure or
+earlier execution evidence. Unknown or missing effect kinds block closure at
+every status, including succeeded and failed. Observation flags alone do not
+exclude an intent: exclusions require the same job's protected server-minted
+READ journal, exact original-effect binding and registered private artifact
+bytes, staged before the transaction with a 256-KiB per-artifact and 16-MiB
+aggregate capture bound. Missing or unsupported historical proof stays blocked.
+
 ### Durable operator projection and proof
 
 Existing exact-owner/root repair/publication discovery and remount projections

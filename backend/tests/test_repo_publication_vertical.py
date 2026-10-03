@@ -180,6 +180,26 @@ async def test_authenticated_actual_repair_producer_requires_new_exact_publicati
                 "expected_connection_revision": connection_row.revision,
                 "expected_connection_fence": connection_row.active_fence,
                 "idempotency_key": str(uuid.uuid4()), "pr_number": 1}
+            from src.db.models import WorkflowRunState
+            # Real canonical ledger injections test the inventory boundary;
+            # they do not supply actual adapter or producer proof.
+            canonical_effects = list(current["effects"])
+            for status in ("succeeded", "failed", "intent", "dispatched", "unknown"):
+                injected = canonical_effects + [{"effect_id": "possible-unrecognized-contact",
+                    "effect_type": "other_external_write", "status": status,
+                    "details": {"observation_only": True}}]
+                async with engine.get_session() as db:
+                    await db.execute(update(WorkflowRunState).where(WorkflowRunState.run_identity == current["job_id"]).values(effect_receipts_json=json.dumps(injected)))
+                injected_before = await durable_job_repository.get_job(current["job_id"])
+                no_contact = list(transport.calls)
+                rejected = await client.post(f"/api/capabilities/github/repo-publication/jobs/{view['job_id']}/close-capacity", json=close_body, headers=ORIGIN)
+                assert rejected.status_code == 409, rejected.text
+                assert await durable_job_repository.get_job(current["job_id"]) == injected_before
+                assert transport.calls == no_contact
+                reserved = await adapter._get_connection_row(flow["owner"].principal_id)
+                assert reserved.active_job_id == current["job_id"] and reserved.active_fence == connection_row.active_fence
+            async with engine.get_session() as db:
+                await db.execute(update(WorkflowRunState).where(WorkflowRunState.run_identity == current["job_id"]).values(effect_receipts_json=json.dumps(canonical_effects)))
             before_close = list(transport.calls)
             closed = await client.post(f"/api/capabilities/github/repo-publication/jobs/{view['job_id']}/close-capacity", json=close_body, headers=ORIGIN)
             assert closed.status_code == 200, closed.text

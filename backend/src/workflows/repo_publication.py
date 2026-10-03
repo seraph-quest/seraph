@@ -693,7 +693,7 @@ class RepoPublicationService:
 
     async def close_capacity(self, job_id, principal, session, request):
         from src.execution.repo_publication_supervisor import guard
-        from src.extensions.github_capacity_closure import (ReadWindow, original_effects,
+        from src.extensions.github_capacity_closure import (ReadWindow, original_effects, stage_observation_inventory,
             effect_identity, _mint_complete_proof)
         from src.extensions.github_recovery import capture_binding, check_binding
         from src.workflows.repo_publication_closure import capture_inputs, collect_pr_boundary
@@ -711,6 +711,7 @@ class RepoPublicationService:
         with guard(stage) as (_, _, guard_fd):
             window = ReadWindow()
             snapshot = await authority.validate()
+            await stage_observation_inventory(current)
             async with db_engine.get_session() as db:
                 run = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == job_id))).scalars().one()
                 binding = await capture_binding(db, run, authority, snapshot)
@@ -766,12 +767,13 @@ class RepoPublicationService:
     async def observe_closed(self, current, request):
         from src.execution.repo_publication_supervisor import guard
         from src.extensions.github_recovery import closed_authority, record_closed_observation
-        from src.extensions.github_capacity_closure import ReadWindow, original_effects, effect_identity
+        from src.extensions.github_capacity_closure import ReadWindow, original_effects, effect_identity, stage_observation_inventory
         from src.workflows.repo_publication_closure import capture_inputs, collect_pr_boundary
         authority = await closed_authority(current, expected_revision=request.expected_connection_revision)
         async with db_engine.get_session() as db:
             run = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == current["job_id"]))).scalars().one()
             history = json.loads(run.github_capacity_closure_json)
+        await stage_observation_inventory(current)
         remotes = [item for item in original_effects(current) if item["effect_type"] != "repo_publication_local_producer"]
         self.require(bool(remotes), "publication_closed_local_only_inspection_history")
         prior = remotes[-1]

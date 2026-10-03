@@ -1770,6 +1770,7 @@ class WorkflowRunState(SQLModel, table=True):
     # Protected, server-minted GitHub GET authority. Never accepted from a
     # caller mapping or exposed as an execution grant.
     github_read_revision_json: Optional[str] = Field(default=None)
+    github_read_observation_history_json: Optional[str] = Field(default=None)
     github_capacity_closure_json: Optional[str] = Field(default=None)
     result_digest: Optional[str] = Field(default=None)
     result_summary: Optional[str] = Field(default=None)

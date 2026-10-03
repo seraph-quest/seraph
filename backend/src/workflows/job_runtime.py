@@ -2909,6 +2909,20 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             from src.memory.evidence_dependencies import stage_run_dependencies, recheck_run_dependencies
             staged_dependencies = None
             preflight_run = await self._fetch(db, job_id)
+            if str(preflight_run.status) in DURABLE_JOB_TERMINAL_STATUSES:
+                # Exact historical replay admits no contact/source use. Keep
+                # the original canonical Goal fence, then return the existing
+                # terminal result before inspecting mutable dependencies.
+                if to_status not in {'failed', 'cancelled'}:
+                    await _assert_canonical_goal_fence(db, goal_id=preflight_run.goal_id,
+                        goal_revision=preflight_run.goal_revision, owner_kind=preflight_run.owner_kind,
+                        owner_principal_id=preflight_run.owner_principal_id, session_id=preflight_run.session_id,
+                        authority=preflight_run.declared_authority_json)
+                if str(preflight_run.status) != to_status:
+                    raise DurableJobTransitionError(f'terminal job cannot transition {preflight_run.status} -> {to_status}')
+                db.expunge(preflight_run)
+                return _serialize(preflight_run, receipt={'kind': 'transition', 'status': 'deduped',
+                    'terminal_noop': True, 'revision': _revision(preflight_run)})
             dependency_guard = (preflight_run.job_kind in {'browser_public_task',
                 'work.evidence-dossier.v1', 'work.local-evidence-report.v1'}
                 and to_status in {'queued', 'running', 'succeeded', 'degraded'})
@@ -3662,6 +3676,13 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         async with self._session() as db:
             from src.memory.evidence_dependencies import stage_run_dependencies, recheck_run_dependencies
             preflight_run = await self._fetch(db, job_id)
+            if str(preflight_run.status) in DURABLE_JOB_TERMINAL_STATUSES:
+                await _assert_canonical_goal_fence(db, goal_id=preflight_run.goal_id,
+                    goal_revision=preflight_run.goal_revision, owner_kind=preflight_run.owner_kind,
+                    owner_principal_id=preflight_run.owner_principal_id, session_id=preflight_run.session_id,
+                    authority=preflight_run.declared_authority_json)
+                db.expunge(preflight_run)
+                return _serialize(preflight_run, receipt={'kind': 'claim', 'status': 'terminal_noop'})
             dependency_guard = preflight_run.job_kind in {'browser_public_task',
                 'work.evidence-dossier.v1', 'work.local-evidence-report.v1'}
             staged_dependencies = await stage_run_dependencies(db, preflight_run) if dependency_guard else None

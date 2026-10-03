@@ -1,5 +1,5 @@
 """Private task evidence inspection; generic task/event projections stay safe."""
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.api.work_board import _operator, _owner, _raise_board_error
@@ -10,7 +10,7 @@ from src.memory.evidence_working_set import (
 )
 from src.work_board.repository import BoardError
 from src.memory.evidence_execution import (
-    ExecutionPreviewRequest, ExecutionAcceptRequest, preview_execution, accept_execution,
+    ExecutionPreviewRequest, ExecutionAcceptRequest, preview_execution, accept_execution, inspect_execution,
 )
 
 router = APIRouter(prefix="/work-board/tasks")
@@ -78,5 +78,19 @@ async def bind_task_execution_evidence(request: Request, task_id: str, body: Exe
     try:
         async with get_session() as db:
             return await accept_execution(db, _owner(operator), task_id, body, operator=operator)
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.get('/{task_id}/evidence/execution-binding')
+async def inspect_task_execution_evidence(request: Request, task_id: str,
+    pending_request: str | None = Query(default=None, max_length=2048)):
+    operator = _operator(request)
+    try:
+        pending = None if pending_request is None else ExecutionAcceptRequest.model_validate_json(pending_request)
+        async with get_session() as db:
+            return await inspect_execution(db, _owner(operator), task_id, pending=pending, operator=operator)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={'code': 'evidence_request_invalid'}) from exc
     except BoardError as exc:
         _raise_board_error(exc)

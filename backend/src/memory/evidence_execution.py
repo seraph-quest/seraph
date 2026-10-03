@@ -196,3 +196,28 @@ async def accept_execution(db, owner, task_id, request, *, operator=None):
     db.add(event)
     await db.flush()
     return result
+
+
+async def inspect_execution(db, owner, task_id, *, pending=None, operator=None):
+    """Pure current projection and exact applied-event inspection after reload."""
+    task = await WorkBoardRepository().get_task(db, owner, task_id)
+    rows = await dependency_rows(db, task)
+    state = 'unbound' if not rows else 'bound'
+    reason = None
+    if rows:
+        try:
+            physical = await stage_dependencies(db, task)
+            await recheck_dependencies(db, task, physical)
+        except (BoardError, OSError, KeyError, TypeError):
+            state, reason = 'stale', 'evidence_dependency_stale'
+    applied = None
+    if pending is not None:
+        request_digest = digest({'task_id': task_id, 'mutation': 'execution-evidence',
+            'request': pending.model_dump()})
+        applied = await _prior(db, owner, pending, request_digest)
+    return {'task_id': task.task_id, 'task_revision': task.task_revision,
+        'binding_state': state, 'binding_count': len(rows), 'reason_code': reason,
+        'applied_result': applied, 'executor_input_digest': task.typed_input_digest,
+        'sources': [{'source_id': row.source_id, 'source_digest': row.source_digest,
+                     'span_digest': row.span_digest} for row in rows],
+        'memory_status': 'no_learning'}

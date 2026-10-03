@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
 import type { WorkBoardTask } from "../../types";
+import { EvidenceExecutionControls } from './EvidenceExecutionControls';
 
 interface Claim {
   source_id: string;
@@ -136,6 +137,8 @@ export function TaskEvidencePanel({ task, ownerSessionId }: {
       {packet && <>
         <p>Packet revision {packet.revision} · {packet.claims.length} source spans</p>
         {packet.digest && <details><summary>Packet digest</summary><code>{packet.digest}</code></details>}
+        <EvidenceExecutionControls endpoint={endpoint} taskId={task.task_id} taskRevision={task.task_revision}
+          ownerSessionId={ownerSessionId} canEdit={canEdit} packetRevision={packet.revision} packetDigest={packet.digest} />
         {packet.invalidated_count > 0 && <p role="status">{packet.invalidated_count} stale or revoked spans removed. Refresh before task use.</p>}
         {packet.blocked_sources.length > 0 && <details><summary>Blocked sources</summary>
           {packet.blocked_sources.map((reason) => <p key={reason}>{reason}</p>)}</details>}

@@ -703,7 +703,8 @@ class GitHubFollowthroughService:
                 digest(json.loads(response.content)), digest(readback_authority.__dict__), _now())
         return response
 
-    async def verified_get_receipt(self, *, read_authority, path, payload, effect_identity):
+    async def verified_get_receipt(self, *, read_authority, path, payload, effect_identity,
+                                   publication_inputs=None, read_window=None, publication_boundary=None):
         """Mint only actual GET bytes matching canonical original effect intent."""
         from src.extensions.github_consent import GitHubVerifiedReadback, _GET_RECEIPT_SEAL, digest
         await read_authority.validate()
@@ -744,12 +745,19 @@ class GitHubFollowthroughService:
             from src.execution.repo_publication import file_manifest, equivalent
             service = RepoPublicationService(adapter=self)
             preview = service.preview(current)
-            original = {"title": preview["title"], "body": preview["body"], "head": preview["branch_name"], "base": preview["base_branch"], "draft": False}
-            remote_commit = next((item.get("details", {}).get("remote_identity") for item in reversed(current.get("effects", [])) if item.get("effect_type") == "repo_publication_commit" and item.get("receipt_kind") == "readback" and item.get("status") == "succeeded"), None)
-            if prior.get("effect_type") != "repo_publication_pr" or prior.get("target_path") != f"/repos/{preview['repository']}/pulls" or prior.get("target_digest") != digest(original) or path != f"/repos/{preview['repository']}/pulls/{service.positive(payload.get('number'))}" or not remote_commit:
-                raise GitHubFollowthroughError("github_get_original_payload_mismatch", status_code=409)
-            equivalent(file_manifest(Path(canonical_workspace_root(settings.workspace_dir)) / f"artifacts/repo-publication/{current['job_id']}/producer"), preview["tested_input"]["tested_files"])
-            service.verify_pr(payload, preview, remote_commit)
+            if publication_inputs is not None:
+                from src.workflows.repo_publication_closure import _PublicationClosureInputs
+                from src.extensions.github_capacity_closure import ReadWindow
+                if type(publication_inputs) is not _PublicationClosureInputs or type(read_window) is not ReadWindow:
+                    raise GitHubFollowthroughError("github_publication_closure_inputs_invalid", status_code=409)
+                publication_inputs.validate_intent(current, prior, path, payload, service, read_window, publication_boundary)
+            else:
+                original = {"title": preview["title"], "body": preview["body"], "head": preview["branch_name"], "base": preview["base_branch"], "draft": False}
+                remote_commit = next((item.get("details", {}).get("remote_identity") for item in reversed(current.get("effects", [])) if item.get("effect_type") == "repo_publication_commit" and item.get("receipt_kind") == "readback" and item.get("status") == "succeeded"), None)
+                if prior.get("effect_type") != "repo_publication_pr" or prior.get("target_path") != f"/repos/{preview['repository']}/pulls" or prior.get("target_digest") != digest(original) or path != f"/repos/{preview['repository']}/pulls/{service.positive(payload.get('number'))}" or not remote_commit:
+                    raise GitHubFollowthroughError("github_get_original_payload_mismatch", status_code=409)
+                equivalent(file_manifest(Path(canonical_workspace_root(settings.workspace_dir)) / f"artifacts/repo-publication/{current['job_id']}/producer"), preview["tested_input"]["tested_files"])
+                service.verify_pr(payload, preview, remote_commit)
         else:
             raise GitHubFollowthroughError("github_get_native_capability_mismatch", status_code=409)
         snapshot = await read_authority.validate()

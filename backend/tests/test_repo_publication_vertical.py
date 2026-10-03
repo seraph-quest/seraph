@@ -172,6 +172,35 @@ async def test_authenticated_actual_repair_producer_requires_new_exact_publicati
             proof = tmp_path / "actual-goal-blocked-publication-observation.json"
             proof.write_text(json.dumps({"publication": result, "transport_calls": transport.calls}, sort_keys=True))
             print("ACTUAL_GOAL_BLOCKED_PUBLICATION_OBSERVATION=" + str(proof))
+            current = await durable_job_repository.get_job(view["job_id"])
+            from src.extensions.github_capacity_closure import PublicationCloseRequest
+            connection_row = await adapter._get_connection_row(flow["owner"].principal_id)
+            close_body = {"acknowledged_capacity_close": True,
+                "expected_job_revision": current["revision"],
+                "expected_connection_revision": connection_row.revision,
+                "expected_connection_fence": connection_row.active_fence,
+                "idempotency_key": str(uuid.uuid4()), "pr_number": 1}
+            before_close = list(transport.calls)
+            closed = await client.post(f"/api/capabilities/github/repo-publication/jobs/{view['job_id']}/close-capacity", json=close_body, headers=ORIGIN)
+            assert closed.status_code == 200, closed.text
+            closed_view = closed.json()
+            assert closed_view["status"] == "unknown_external_effect"
+            assert closed_view["revision"] == current["revision"] + 1
+            assert closed_view["github_capacity_closure"]["observation_only"] is True
+            assert closed_view["effects"] == current["effects"]
+            after_connection = await adapter._get_connection_row(flow["owner"].principal_id)
+            assert after_connection.active_job_id is None
+            assert after_connection.active_fence == connection_row.active_fence
+            assert all(call[0] == "GET" for call in transport.calls[len(before_close):])
+            after_close = list(transport.calls)
+            await physical_engine.dispose()
+            repeated = await client.post(f"/api/capabilities/github/repo-publication/jobs/{view['job_id']}/close-capacity", json=close_body, headers=ORIGIN)
+            assert repeated.status_code == 200 and repeated.json()["github_capacity_closure"] == closed_view["github_capacity_closure"], repeated.text
+            assert transport.calls == after_close
+            retained = tmp_path / "actual-goal-stale-publication-capacity-close.json"
+            retained.write_text(json.dumps({"publication": closed_view, "original_job": current,
+                "close_request": close_body, "transport_calls": transport.calls}, sort_keys=True))
+            print("ACTUAL_GOAL_STALE_PUBLICATION_CAPACITY_CLOSE=" + str(retained))
             return
     assert result["status"] == "succeeded", result
     assert result["result"]["learning"] == "no_learning", result

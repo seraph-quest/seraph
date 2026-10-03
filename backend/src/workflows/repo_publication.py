@@ -30,6 +30,7 @@ from src.extensions.github_followthrough import GitHubFollowthroughService, _req
 from src.extensions.github_consent import require_consent, require_readback, GitHubReadbackAuthority, PUBLICATION_ACTIONS, live_operator
 from src.workflows.job_runtime import DurableJobIdentity, DurableJobSpec, durable_job_repository as jobs
 from src.workspace import canonical_workspace_root
+from src.extensions.github_capacity_closure import PublicationCloseRequest
 
 CAPABILITY = "engineering.repo-publication.v1"
 PERMISSIONS = ["local_host_execution", "github_git_objects_write", "github_new_branch_write", "github_ready_pr_write"]
@@ -323,7 +324,7 @@ class RepoPublicationService:
             result = json.loads(raw)
             if result.get("job_id") != current["job_id"] or result.get("preview_digest") != digest(preview) or result.get("verification") != "passed":
                 raise PublicationError("publication_result_unverified")
-        return {"job_id": current["job_id"], "capability_id": CAPABILITY, "revision": current["revision"], "status": current["status"], "reason_code": current.get("failure_reason"), "preview": preview, "preview_digest": digest(preview), "approval_id": approval.id if approval else None, "approval_status": approval.status if approval else "unavailable", "approval_expires_at": _approval_timestamp(approval.expires_at) if approval else None, "effects": current.get("effects", []), "artifacts": current.get("artifacts", []), "result": result, "learning": "no_learning", "recovery_action": "reconcile" if current["status"] in {"unknown_external_effect", "blocked"} else "inspect"}
+        return {"job_id": current["job_id"], "capability_id": CAPABILITY, "revision": current["revision"], "status": current["status"], "reason_code": current.get("failure_reason"), "preview": preview, "preview_digest": digest(preview), "approval_id": approval.id if approval else None, "approval_status": approval.status if approval else "unavailable", "approval_expires_at": _approval_timestamp(approval.expires_at) if approval else None, "effects": current.get("effects", []), "artifacts": current.get("artifacts", []), "result": result, "learning": "no_learning", "github_capacity_closure": current.get("github_capacity_closure"), "recovery_action": "observe" if current.get("github_capacity_closure") else "reconcile" if current["status"] in {"unknown_external_effect", "blocked"} else "inspect"}
 
     async def check(self, current, preview, *, writing=True, full_runtime=False):
         principal, session = preview["owner_principal_id"], preview["owner_session_id"]
@@ -688,6 +689,78 @@ class RepoPublicationService:
             await self.adapter._release_connection(connection_id=connection.id, owner_principal_id=principal, job_id=job_id, fence=connection.active_fence)
         return await self.view(current)
 
+    async def close_capacity(self, job_id, principal, session, request):
+        from src.execution.repo_publication_supervisor import guard
+        from src.extensions.github_capacity_closure import (ReadWindow, original_effects,
+            effect_identity, _mint_complete_proof)
+        from src.extensions.github_recovery import capture_binding, check_binding
+        from src.workflows.repo_publication_closure import capture_inputs, collect_pr_boundary
+        current = await self.owned(job_id, principal, session)
+        repeated = await jobs.get_github_capacity_closure(job_id, request=request,
+            principal=principal, root=session)
+        if repeated is not None:
+            return await self.view(repeated)
+        self.require(current["revision"] == request.expected_job_revision and current["status"] in {"unknown_external_effect", "blocked", "failed"} and not current["lease"].get("owner") and not current["lease"].get("expires_at"), "publication_capacity_close_unleased_revision_required")
+        preview = self.preview(current)
+        authority = GitHubReadbackAuthority(principal, session, job_id, CAPABILITY,
+            request.expected_connection_revision, request.expected_connection_fence,
+            preview["github_consent"])
+        stage = Path(canonical_workspace_root(settings.workspace_dir)) / f"artifacts/repo-publication/{job_id}/producer"
+        with guard(stage) as (_, _, guard_fd):
+            window = ReadWindow()
+            snapshot = await authority.validate()
+            async with db_engine.get_session() as db:
+                run = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == job_id))).scalars().one()
+                binding = await capture_binding(db, run, authority, snapshot)
+                await check_binding(db, run, binding)
+            # Positive terminal inspection precedes every external contact;
+            # prefix completion may close a local-only interrupted attempt.
+            _mint_complete_proof(current=current, binding=binding, positive_gets=[], guard_fd=guard_fd, window=window)
+            remote = [item for item in original_effects(current) if item["effect_type"] != "repo_publication_local_producer"]
+            inputs = capture_inputs(self, current, preview, request) if remote else None
+            async def check():
+                await authority.validate()
+                latest = await self.owned(job_id, principal, session)
+                self.require(latest["revision"] == current["revision"] and latest["effects"] == current["effects"] and latest["lease"] == current["lease"] and latest["authority_digest"] == current["authority_digest"], "publication_capacity_job_changed")
+                window.remaining()
+            async def get(path):
+                await check()
+                response = await self.adapter.request_repo_publication(path, method="GET",
+                    token=snapshot.value, authority_check=check,
+                    consent_binding=preview["github_consent"], owner_principal_id=principal,
+                    owner_session_id=session, readback_authority=authority, read_window=window,
+                    timeout_seconds=window.remaining())
+                self.require(response.status_code == 200, "publication_capacity_positive_get_required")
+                try:
+                    payload = json.loads(response.content)
+                except (ValueError, TypeError):
+                    raise PublicationError("publication_capacity_invalid_response") from None
+                return payload
+            boundary = None
+            if any(item["effect_type"] == "repo_publication_pr" for item in remote):
+                # Validate immutable body and required exact locators before GET.
+                for item in remote:
+                    target, body, _ = inputs.expected(item)
+                    self.require(item["target_path"] == target and item["target_digest"] == digest(body), "publication_closure_original_intent_changed")
+                boundary = await collect_pr_boundary(inputs, self, get, authority, window)
+            positives = []
+            for item in remote:
+                target, body, path = inputs.expected(item)
+                self.require(item["target_path"] == target and item["target_digest"] == digest(body), "publication_closure_original_intent_changed")
+                payload = await get(path)
+                identity = effect_identity(current, item)
+                actual = await self.adapter.verified_get_receipt(read_authority=authority,
+                    path=path, payload=payload, effect_identity=identity,
+                    publication_inputs=inputs, read_window=window, publication_boundary=boundary)
+                self.require(actual.canonical_binding == binding, "publication_capacity_binding_changed")
+                positives.append((actual, identity))
+            await check()
+            proof = _mint_complete_proof(current=current, binding=binding,
+                positive_gets=positives, guard_fd=guard_fd, window=window)
+            closed = await jobs.record_github_capacity_closure(job_id, request=request,
+                read_authority=authority, proof=proof)
+            return await self.view(closed)
+
 
 async def invoke(request, method, *args):
     operator = _operator(request)
@@ -700,6 +773,20 @@ async def invoke(request, method, *args):
 @router.post("/prepare")
 async def prepare_publication(body: PrepareRequest, request: Request):
     return await invoke(request, "prepare", body)
+
+
+@router.post("/jobs/{job_id}/close-capacity")
+async def close_publication_capacity(job_id: str, body: PublicationCloseRequest, request: Request):
+    from src.workflows.job_runtime import DurableJobError
+    from src.extensions.github_followthrough import GitHubFollowthroughError
+    try:
+        operator = _operator(request)
+        return await RepoPublicationService().close_capacity(job_id, _principal_id(operator), _session_id(operator), body)
+    except PublicationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
+    except (DurableJobError, GitHubFollowthroughError, ValueError, OSError) as exc:
+        code = getattr(exc, "code", "publication_capacity_close_unproved")
+        raise HTTPException(status_code=409, detail={"code": code}) from exc
 
 
 @router.get("/jobs/{job_id}")

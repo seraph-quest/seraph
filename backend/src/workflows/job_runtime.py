@@ -5643,15 +5643,18 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             producer=proof.original_job["job_kind"], run_id=job_id,
             session_id=proof.original_job["session_id"], content=content)
         closure = {**value, "artifact_id": record["artifact_id"], "artifact_sha256": sha,
+            "positive_gets": get_set,
             "artifact_path": path, "binding": proof.binding, "request": request_body}
         closure["history_digest"] = _digest(closure)
+        if len(_canonical(closure).encode()) > 4 * 1024 * 1024:
+            raise DurableJobLeaseError("GitHub closure canonical proof set bounds invalid")
         async with self._session() as db:
             if getattr(getattr(db.get_bind(), "dialect", None), "name", "") == "sqlite":
                 await db.execute(text("BEGIN IMMEDIATE"))
             run = await self._fetch(db, job_id, allow_closed=True)
             if run.github_capacity_closure_json:
                 existing = _json_load(run.github_capacity_closure_json, {})
-                if existing.get("request_digest") != request_digest or existing.get("request") != request_body:
+                if existing.get("history_digest") != _digest({key: value for key, value in existing.items() if key != "history_digest"}) or existing.get("request_digest") != request_digest or existing.get("request") != request_body:
                     raise DurableJobIdempotencyConflict("GitHub capacity already differently closed")
                 await check_binding(db, run, existing["binding"], reserved=None, board=False, ignore_read_revision=True)
                 return _serialize(run, receipt={"kind": "github_capacity_closure", "status": "already_recorded", "closure_id": existing["closure_id"]})

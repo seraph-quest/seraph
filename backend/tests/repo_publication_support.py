@@ -47,6 +47,24 @@ class GitDataTransport:
             return identity
         return encode(nested)
 
+    def recursive_tree(self, identity, prefix=""):
+        """Return GitHub's actual recursive tree shape, including directories."""
+        kind, raw = self.objects[identity]
+        assert kind == "tree"
+        entries, cursor = [], 0
+        while cursor < len(raw):
+            end = raw.index(b"\0", cursor)
+            mode, name = raw[cursor:end].split(b" ", 1)
+            child = raw[end + 1:end + 21].hex()
+            cursor = end + 21
+            path = prefix + name.decode()
+            directory = mode == b"40000"
+            entries.append({"path": path, "mode": "040000" if directory else mode.decode(),
+                "type": "tree" if directory else "blob", "sha": child})
+            if directory:
+                entries.extend(self.recursive_tree(child, path + "/"))
+        return entries
+
     def handler(self, request):
         assert request.url.host == "api.github.com"
         assert request.headers["X-GitHub-Api-Version"] == "2026-03-10"
@@ -87,7 +105,7 @@ class GitDataTransport:
                 ref = body["ref"].removeprefix("refs/heads/")
                 assert ref not in self.refs, "a second branch POST is forbidden"
                 self.refs[ref] = body["sha"]
-                return httpx.Response(201, json={"ref": body["ref"], "object": {"sha": body["sha"]}})
+                return httpx.Response(201, json={"ref": body["ref"], "object": {"type": "commit", "sha": body["sha"]}})
             if path == "/pulls":
                 assert not self.pulls, "a second PR POST is forbidden"
                 value = {**body, "number": 1, "state": "open", "head": {"ref": body["head"], "sha": self.refs[body["head"]], "repo": {"full_name": self.repository}}, "base": {"ref": body["base"], "sha": self.base, "repo": {"full_name": self.repository}}}
@@ -99,7 +117,7 @@ class GitDataTransport:
         assert request.method == "GET"
         if path.startswith("/git/ref/heads/"):
             ref = path.removeprefix("/git/ref/heads/")
-            return httpx.Response(200 if ref in self.refs else 404, json={"ref": "refs/heads/" + ref, "object": {"sha": self.refs.get(ref)}})
+            return httpx.Response(200 if ref in self.refs else 404, json={"ref": "refs/heads/" + ref, "object": {"type": "commit", "sha": self.refs.get(ref)}})
         if path.startswith("/git/blobs/"):
             identity = path.rsplit("/", 1)[-1]
             kind, raw = self.objects[identity]
@@ -107,7 +125,7 @@ class GitDataTransport:
             return httpx.Response(200, json={"sha": identity, "encoding": "base64", "content": base64.b64encode(raw).decode(), "size": len(raw)})
         if path.startswith("/git/trees/"):
             identity = path.rsplit("/", 1)[-1]
-            return httpx.Response(200, json={"sha": identity, "truncated": False, "tree": self.trees[identity]})
+            return httpx.Response(200, json={"sha": identity, "truncated": False, "tree": self.recursive_tree(identity)})
         if path.startswith("/git/commits/"):
             return httpx.Response(200, json=self.commits[path.rsplit("/", 1)[-1]])
         if path == "/pulls":

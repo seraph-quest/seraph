@@ -1332,6 +1332,23 @@ async def _invoke_governed_proposal(
         reset_runtime_context(tokens)
 
 
+async def _claim_proposal_contact(db, proposal_id: str, marker_now: datetime):
+    # SQLite returns naive UTC datetimes. The expiry predicate belongs in SQL;
+    # ORM synchronization must not compare that value with aware UTC in Python.
+    return await db.execute(
+        update(WorkBoardProposal)
+        .where(
+            WorkBoardProposal.proposal_id == proposal_id,
+            WorkBoardProposal.status == "pending_inference",
+            WorkBoardProposal.provider_contact_started.is_(False),
+            WorkBoardProposal.provider_contact_state == "not_started",
+            WorkBoardProposal.expires_at > marker_now,
+        )
+        .values(provider_contact_started=True, provider_contact_state="started")
+        .execution_options(synchronize_session=False)
+    )
+
+
 async def _expire_proposal_if_due(
     db,
     proposal: WorkBoardProposal,
@@ -2087,17 +2104,7 @@ async def create_proposal(
             await recheck_context(db, owner, current_task, contact_staged, contact_snapshot,
                 prepared_context=prompt_data.get('evidence_data'))
             marker_now = _now()
-            claimed = await db.execute(
-                update(WorkBoardProposal)
-                .where(
-                    WorkBoardProposal.proposal_id == proposal_id,
-                    WorkBoardProposal.status == "pending_inference",
-                    WorkBoardProposal.provider_contact_started.is_(False),
-                    WorkBoardProposal.provider_contact_state == "not_started",
-                    WorkBoardProposal.expires_at > marker_now,
-                )
-                .values(provider_contact_started=True, provider_contact_state="started")
-            )
+            claimed = await _claim_proposal_contact(db, proposal_id, marker_now)
             if int(claimed.rowcount or 0) != 1:
                 current = await _get_proposal(db, owner, proposal_id)
                 if current.provider_contact_started or current.provider_contact_state != "not_started":

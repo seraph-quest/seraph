@@ -189,8 +189,10 @@ class MoltbookAdapter:
         # Explicit constructor seams only; no environment/config network hook.
         self.transport, self.resolver = transport, resolver
         self.marker = _TransportLifecycleMarker()
+        self.read_response_receipt = None
 
     async def call(self, operation, fields, *, key=None, deadline, before_contact=None):
+        self.read_response_receipt = None
         method, path, body = route(operation, fields)
         if body is not None and len(canonical(body)) > (4096 if operation == "register" else MAX_REQUEST):
             raise MoltbookError("moltbook_request_too_large", status_code=422)
@@ -209,6 +211,11 @@ class MoltbookAdapter:
         if self.resolver is not None: kwargs["resolver"] = self.resolver
         async with asyncio.timeout(remaining):
             response = await request_pinned_https(ORIGIN + path, **kwargs)
+        # Only a returned bounded response after awaited transport closure is
+        # definitive read evidence. Exceptions during transfer leave no receipt.
+        if method == "GET" and self.marker.snapshot()["status"] == "verified":
+            self.read_response_receipt = {"operation": operation, "http_status": response.status_code,
+                "response_digest": digest(response.content)}
         if response.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
             raise MoltbookError("moltbook_response_not_json")
         if response.status_code == 429:

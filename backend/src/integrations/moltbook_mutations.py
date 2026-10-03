@@ -243,7 +243,30 @@ async def call(service, adapter, owner, job_id, lease, operation, fields, creden
             run.effect_receipts_json = canonical(effects).decode()
             save_state(run, value)
             db.add(run)
-    result = await adapter.call(operation, fields, key=credential.value, deadline=deadline, before_contact=contact)
+    try:
+        result = await adapter.call(operation, fields, key=credential.value, deadline=deadline, before_contact=contact)
+    except MoltbookError:
+        receipt = adapter.read_response_receipt
+        if receipt is not None and receipt["operation"] == operation and adapter.marker.snapshot()["status"] == "verified":
+            async with engine.get_session() as db:
+                await writer(db)
+                run = await service.jobs._fetch(db, job_id)
+                service.jobs._assert_lease(run, owner=lease[0], fencing_token=lease[1])
+                value = state(run)
+                last = value["calls"][-1]
+                if last["operation"] != operation or last["method"] != "GET" or last["status"] != "intent":
+                    raise MoltbookError("moltbook_contact_receipt_changed")
+                last.update(status="received", outcome="failed_read", http_status=receipt["http_status"],
+                    response_digest=receipt["response_digest"])
+                effects = json.loads(run.effect_receipts_json)
+                matching = [e for e in effects if e["effect_id"] == last["effect_id"]]
+                if len(matching) != 1: raise MoltbookError("moltbook_contact_effect_invalid")
+                matching[0].update(status="failed", content_sha256=receipt["response_digest"],
+                    verified_at=now().isoformat(), details={"no_learning": True, "read_only": True,
+                        "http_status": receipt["http_status"], "transport_closed": True})
+                run.effect_receipts_json = canonical(effects).decode()
+                save_state(run, value); db.add(run)
+        raise
     async with engine.get_session() as db:
         await writer(db)
         run = await service.jobs._fetch(db, job_id)
@@ -311,8 +334,15 @@ async def execute_write(service, owner, job_id, *, execution):
             status = await call(service, adapter, owner, job_id, lease, "status", {}, credential, deadline)
             if status.get("status") != "claimed": raise MoltbookError("moltbook_current_human_claim_required")
             if payload["operation"] == "create_comment":
-                destination = safe_content((await call(service, adapter, owner, job_id, lease, "post", {"post_id": fields["post_id"]}, credential, deadline)).get("post"))
-                if (destination["id"] != fields["post_id"] or destination.get("community") != review["community"]
+                page = await call(service, adapter, owner, job_id, lease, "feed", {"sort": "new", "limit": 10,
+                    "community": review["community"]}, credential, deadline)
+                posts = page.get("posts")
+                if not isinstance(posts, list) or len(posts) > 10:
+                    raise MoltbookError("moltbook_public_target_feed_bound")
+                matches = [safe_content(post) for post in posts if isinstance(post, dict) and post.get("id") == fields["post_id"]]
+                if len(matches) != 1: raise MoltbookError("moltbook_public_target_membership_unconfirmed")
+                destination = matches[0]
+                if (destination.get("community") != review["community"]
                     or destination["explicitly_hidden"] or destination["visibility"] in {"pending", "failed"}):
                     raise MoltbookError("moltbook_current_public_target_changed")
                 if "parent_id" in fields:
@@ -438,6 +468,10 @@ async def execute_write(service, owner, job_id, *, execution):
             await writer(db); run = await service.jobs._fetch(db, job_id)
             if run.status == "running" and run.lease_owner == lease[0] and run.fencing_token == lease[1]:
                 value = state(run)
+                # Current authority is checked before adding the cooldown,
+                # which deliberately makes further contacts ineligible.
+                try: connection = await service.current(db, owner, run, lease=lease)
+                except MoltbookError: connection = None
                 await service.retain_cooldown(db, owner, run, value, exc, lease)
                 uncertain = bool(value.get("creation_sent")) or any(
                     call.get("status") != "received" for call in value.get("calls", []))
@@ -446,6 +480,15 @@ async def execute_write(service, owner, job_id, *, execution):
                 value["cleanup"] = adapter.marker.snapshot()
                 if value["cleanup"]["status"] == "verified":
                     value["worker_completed"] = {"fencing_token": lease[1], "transport_closed": True}
+                    if (not uncertain and not value.get("creation_sent") and not value.get("verification_sent")
+                        and all(c.get("method") == "GET" and c.get("status") == "received" for c in value.get("calls", []))
+                        and connection is not None):
+                        # The owning worker is here only after all awaited
+                        # transfers have closed. No external mutation existed.
+                        connection.active_job_id, connection.active_deadline_at, connection.active_payload_digest = None, None, ""
+                        value["preflight_slot_released"] = {"job_id": job_id, "fencing_token": lease[1],
+                            "payload_digest": authority["payload_digest"], "no_post": True, "transport_closed": True}
+                        db.add(connection)
                 save_state(run, value)
                 run.status = "unknown_external_effect" if uncertain else "blocked"
                 run.failure_reason = getattr(exc, "code", "moltbook_transfer_or_authority_failed")

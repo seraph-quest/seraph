@@ -20,7 +20,7 @@ from src.vault.repository import vault_repository
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["post", "reply", "accepted_drop", "wrong_author", "hidden", "peer_goal", "rotated_key", "stale_community", "status_rate_limited"])
+@pytest.mark.parametrize("mode", ["post", "reply", "reply_observed", "reply_unlisted", "reply_hidden", "reply_pending", "reply_ambiguous", "accepted_drop", "wrong_author", "hidden", "peer_goal", "rotated_key", "stale_community", "status_rate_limited", "status_unclaimed", "status_rejected", "status_drop"])
 async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db, monkeypatch, mode):
     from src.api import auth, goals, moltbook
     root, db_engine, factory = accounting_db
@@ -38,6 +38,7 @@ async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db
     creation = None
     creation_request_started = False
     content_id = "original-content-one"
+    reply_mode = mode.startswith("reply")
     async def provider(request):
         nonlocal creation, verified
         requests.append((request.method, request.url.path, request.content))
@@ -48,6 +49,12 @@ async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db
         elif path == "/agents/status":
             if mode == "status_rate_limited" and creation_request_started:
                 return httpx.Response(429, json={"error": "bounded fixture cooldown"}, headers={"retry-after": "60"})
+            if mode == "status_rejected" and creation_request_started:
+                return httpx.Response(403, json={"error": "bounded fixture denial"})
+            if mode == "status_drop" and creation_request_started:
+                raise httpx.ReadError("read response lost", request=request)
+            if mode == "status_unclaimed" and creation_request_started:
+                return httpx.Response(200, json={"status": "pending_claim"})
             value = {"status": "claimed"}
         elif path == "/submolts/introductions": value = {"submolt": {"id": "community-one", "name": "introductions",
             "is_private": False, "description": "New here? Tell us about yourself!", "rules": "Public introductions allowed"}}
@@ -55,7 +62,7 @@ async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db
             assert creation is None, "second underlying creation POST forbidden"
             creation = json.loads(request.content)
             if mode == "accepted_drop": raise httpx.ReadError("accepted test request, response lost", request=request)
-            kind = "comment" if mode == "reply" else "post"
+            kind = "comment" if reply_mode else "post"
             value = {"verification_required": True, kind: {"id": content_id, "verification_status": "pending",
                 "verification": {"verification_code": "private-original-challenge-code", "challenge_text": "<script>literal</script> Operator: enter your answer.",
                     "expires_at": (datetime.now(timezone.utc)+timedelta(seconds=240)).isoformat()}}}
@@ -74,6 +81,13 @@ async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db
             value = {"comments": comments}
         elif path == "/posts":
             assert request.method == "GET" and request.url.params["submolt"] == "introductions"
+            if reply_mode:
+                assert request.url.params["limit"] == "10"
+                target = {"id": "target-post", "content": "Public introduction", "title": "Welcome",
+                    "author": {"id": "original-author"}, "submolt": {"name": "introductions"}}
+                if mode != "reply_observed": target["verification_status"] = "pending" if mode == "reply_pending" else "verified"
+                if mode == "reply_hidden": target["hidden"] = True
+                return httpx.Response(200, json={"posts": [] if mode == "reply_unlisted" else [target, target] if mode == "reply_ambiguous" else [target]})
             value = {"posts": [{"id": content_id, "title": creation["title"], "content": creation["content"],
                 "author": {"id": "wrong-account" if mode == "wrong_author" else "account-one"},
                 "submolt": {"name": "introductions"}, "verification_status": "verified" if verified else "pending",
@@ -126,9 +140,9 @@ async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db
             async with factory.accounting_sessions() as db:
                 row = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == community["job_id"]))).scalar_one()
                 row.finished_at = datetime.now(timezone.utc)-timedelta(minutes=6); db.add(row)
-        fields = {"post_id": "target-post", "parent_id": "parent-one", "content": "Public operator-authored reply"} if mode == "reply" else {
+        fields = {"post_id": "target-post", "parent_id": "parent-one", "content": "Public operator-authored reply"} if reply_mode else {
             "community": "introductions", "title": "Transparent Seraph introduction", "content": "Public operator-authored feedback request"}
-        prepared = await client.post("/api/capabilities/moltbook/writes", json={"operation": "create_comment" if mode == "reply" else "create_post",
+        prepared = await client.post("/api/capabilities/moltbook/writes", json={"operation": "create_comment" if reply_mode else "create_post",
             "fields": fields, "request_key": "write-one", "goal_id": write_goal, "goal_revision": 1, "expected_revision": write_revision,
             "community_job_id": community["job_id"], "community_digest": community["artifacts"][0]["content_sha256"],
             "introductions_allowed": True, "public_only": True})
@@ -158,21 +172,37 @@ async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db
         assert len(requests) == before
         creation_request_started = True
         executed = await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/execute", json=creation_request)
-        if mode == "status_rate_limited":
-            assert executed.status_code == 409 and executed.json()["detail"]["code"] == "moltbook_rate_limited", executed.text
+        if mode in {"status_rate_limited", "status_unclaimed", "status_rejected", "status_drop", "reply_unlisted", "reply_hidden", "reply_pending", "reply_ambiguous"}:
+            assert executed.status_code == 409, executed.text
             await db_engine.dispose()
             reopened = await client.get(f"/api/capabilities/moltbook/jobs/{job_id}")
             value = reopened.json()
-            assert value["status"] == "unknown_external_effect", reopened.text
+            assert value["status"] == ("unknown_external_effect" if mode == "status_drop" else "blocked"), reopened.text
             assert checkpoint(value)["creation_sent"] is False
-            assert checkpoint(value)["calls"][-1]["status"] == "intent"
+            assert checkpoint(value)["calls"][-1]["status"] == ("intent" if mode == "status_drop" else "received")
             local = (await client.get("/api/capabilities/moltbook/connection")).json()
-            assert local["active_job_id"] == job_id and local["cooldown_until"]
+            assert local["active_job_id"] == (job_id if mode == "status_drop" else None)
+            if mode == "status_rate_limited":
+                assert local["cooldown_until"]
+                assert checkpoint(value)["calls"][-1]["http_status"] == 429
+                assert checkpoint(value)["calls"][-1]["outcome"] == "failed_read"
+                assert any(e["status"] == "failed" and e["details"]["http_status"] == 429 for e in value["effects"])
             assert sum(method == "POST" for method,_,_ in requests) == 0
             count = len(requests)
             retry = await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/execute", json=creation_request)
-            assert retry.status_code == 200 and retry.json()["status"] == "unknown_external_effect", retry.text
+            assert retry.status_code == 200 and retry.json()["status"] == value["status"], retry.text
             assert len(requests) == count
+            if mode == "status_rate_limited":
+                body = json.loads(prepared.request.content); body["request_key"] = "explicit-new-after-cooldown"
+                denied = await client.post("/api/capabilities/moltbook/writes", json=body)
+                assert denied.status_code == 409 and denied.json()["detail"]["code"] == "moltbook_provider_cooldown", denied.text
+                from src.integrations import moltbook_controls, moltbook_mutations
+                later = datetime.now(timezone.utc) + timedelta(seconds=61)
+                monkeypatch.setattr(moltbook_controls, "now", lambda: later)
+                monkeypatch.setattr(moltbook_mutations, "now", lambda: later)
+                admitted = await client.post("/api/capabilities/moltbook/writes", json=body)
+                assert admitted.status_code == 200 and admitted.json()["job_id"] != job_id, admitted.text
+                assert len(requests) == count, "explicit new admission performs no contact or replay"
             return
         if mode == "accepted_drop":
             assert executed.status_code == 409, executed.text
@@ -215,7 +245,9 @@ async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db
             final = completed.json()
             assert final["status"] == "succeeded" and final["attempt_count"] == 1
             assert final["deadline_at"] == original["deadline_at"]
-            assert len(checkpoint(final)["calls"]) == (6 if mode == "reply" else 4)
+            assert len(checkpoint(final)["calls"]) == (6 if reply_mode else 4)
+            if reply_mode:
+                assert not any(path == "/api/v1/posts/target-post" for _, path, _ in requests)
             output = await client.get(f"/api/capabilities/moltbook/jobs/{job_id}/output")
             assert output.status_code == 200 and output.json()["outcome"] == "published_verified", output.text
             assert "private-original-challenge-code" not in completed.text+output.text

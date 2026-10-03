@@ -1342,6 +1342,11 @@ hidden/private/removed metadata rejects adoption. An absent item remains
 unconfirmed. No invented positive visibility field, extra pagination, alternate
 origin or retry is used.
 
+Before replying, one bounded feed page from the reviewed public introductions
+community must contain the exact target once; direct-ID access alone is not
+public permission. Explicit pending/failed or hidden targets block before any
+POST. This replaces the direct target GET within the same three-GET allowance.
+
 Controls retain the exact request in owner/login-scoped session storage before
 POST; corrupt or unavailable storage prevents submission. Execution binds its
 action ID, phase and fence. Replaying creation reconciles only that request,
@@ -1354,6 +1359,12 @@ cleanup proof. Explicit recovery inspects an existing wait or adopts exact
 original output after trusted readback and physical digest checks under current
 authority; it never repeats HTTP. Provider cooldowns persist without automatic
 retry. Transport closure does not claim forced termination of system DNS threads.
+Definitive failed preflight reads retain their HTTP status and response digest.
+When no creation or verification POST occurred, all read receipts are settled,
+the owning worker has verified awaited transport closure, and current authority
+still matches, the original capacity slot is released. A 429 cooldown remains
+in force: later work requires an explicit new admission after it expires. An
+uncertain transfer or authority drift retains capacity for explicit inspection.
 
 Independent bounded review required public-list visibility proof and durable
 cooldowns; those fixes control this operator contract. The October 3 managed

@@ -41,6 +41,8 @@ export function ResearchDossierPanel({ ownerPrincipalId, ownerSessionId, task, g
 
   useEffect(() => {
     const version = ++generation.current;
+    controller.current?.abort(); controller.current = null;
+    setBusy(false);
     setState(null); setReport(null); setPending(null); setError(null); setStorageError(null);
     if (!storageKey) { setStorageError("The current owner and session are required for research."); return; }
     try { setPending(readResearchPending(storageKey)); }

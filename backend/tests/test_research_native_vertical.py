@@ -107,7 +107,7 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
     jobs = DurableJobRepository()
     await jobs.configure_inference_accounting(1000)
     calls = []
-    controls = {"overrun": scenario == "overrun_first_response"}
+    controls = {"overrun": scenario in {"overrun_first_response", "cancel_held_denial"}}
     original_client = httpx.AsyncClient
     def clients(**kwargs):
         if "transport" not in kwargs:
@@ -172,6 +172,49 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
                 (root/source["file_path"]).write_bytes(b"tampered source after first provider contact")
         controls["after_first_contact"] = change_current_authority
         dispatcher = WorkBoardDispatcher(jobs=jobs, session_provider=factory.accounting_sessions)
+        if scenario == "cancel_active_provider":
+            import asyncio
+            contacted = asyncio.Event()
+            completed = asyncio.Event()
+            async def hold_actual_provider_contact():
+                contacted.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    completed.set()
+            controls["after_first_contact"] = hold_actual_provider_contact
+            monkeypatch.setattr(work_board, "dispatcher", dispatcher)
+            running = asyncio.create_task(dispatcher.run_pass())
+            try:
+                await asyncio.wait_for(contacted.wait(), timeout=40)
+                state = await client.get("/api/work-board/tasks/"+task_id+"/research")
+                assert state.status_code == 200, state.text
+                original = state.json()
+                assert any(child["lease_present"] for child in original["children"])
+                result = await client.post("/api/work-board/tasks/"+task_id+"/research/cancel",
+                    json={"expected_revision": original["task_revision"], "idempotency_key": "actual-contact-cancel"})
+                assert result.status_code == 200, result.text
+                assert completed.is_set() and running.done()
+                assert result.json()["cancellation"]["cancelled"] is False
+                assert result.json()["cancellation"]["unknown_liability_preserved"] is True
+                assert len(calls) == 4  # three canaries and exactly one real research POST
+                await engine.dispose()
+                current = await jobs.inference_accounting_snapshot()
+                costs = [row for row in current["operations"] if row["operation_id"].startswith("remote:research:")]
+                assert current["accounting_continuity_verified"] is True and len(costs) == 2
+                contact = next(row for row in costs if row["contact_started_at"] is not None)
+                assert contact["state"] == "unknown" and contact["actual_cost_microusd"] is None
+                recovery = await client.post("/api/work-board/tasks/"+task_id+"/research/recover",
+                    json={"expected_revision": result.json()["research"]["task_revision"], "idempotency_key": "no-contact-replay"})
+                assert recovery.status_code == 409 and len(calls) == 4
+                (root/"research-contact-cancel-readback.json").write_text(json.dumps({"original": original,
+                    "cancellation": result.json(), "accounting": current, "provider_post_count": len(calls),
+                    "actual_callback_completed": completed.is_set(), "recovery_status": recovery.status_code}, indent=2))
+            finally:
+                if not running.done():
+                    running.cancel()
+                await asyncio.gather(running, return_exceptions=True)
+            return
         recovery_scenarios = {"restart_before_sources", "restart_prompt_ready", "restart_funded_queued", "restart_written_outputs", "cancel_funded_queued"}
         if scenario in recovery_scenarios:
             from src.workflows import research_coordinator as coordinator
@@ -286,9 +329,9 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
             assert len(children) == 2
             contacted = [row for row in children if row["contact_started_at"] is not None]
             assert len(contacted) == 1 and contacted[0]["state"] == "settled"
-            assert contacted[0]["actual_cost_microusd"] == (150 if scenario == "overrun_first_response" else 2)
+            assert contacted[0]["actual_cost_microusd"] == (150 if scenario in {"overrun_first_response", "cancel_held_denial"} else 2)
             sibling = next(row for row in children if row["contact_started_at"] is None)
-            if scenario == "overrun_first_response":
+            if scenario in {"overrun_first_response", "cancel_held_denial"}:
                 assert sibling["state"] == "reserved" and sibling["bound_microusd"] == 100
                 assert sibling["recovery_reason"] == "provider_contact_denied"
             async with factory.accounting_sessions() as db:
@@ -296,7 +339,7 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
                     ["research_dossier", "readonly_research_child"])))).all())
                 assert len(rows) == 3
                 completed = [row for row in rows if row.status == "succeeded"]
-                if scenario == "overrun_first_response":
+                if scenario in {"overrun_first_response", "cancel_held_denial"}:
                     # The first exact output completed with known actual debt.
                     # Overrun freezes unfinished work; it must not erase that
                     # already completed child's result or unclipped charge.
@@ -309,6 +352,22 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
                 assert board.status.value == "blocked"
             (root/"research-negative-accounting-readback.json").write_text(json.dumps({"scenario": scenario,
                 "provider_post_count": len(calls), "snapshot": reopened}, indent=2))
+            if scenario == "cancel_held_denial":
+                monkeypatch.setattr(work_board, "dispatcher", dispatcher)
+                original = (await client.get("/api/work-board/tasks/"+task_id+"/research")).json()
+                result = await client.post("/api/work-board/tasks/"+task_id+"/research/cancel",
+                    json={"expected_revision": original["task_revision"], "idempotency_key": "held-denial-cancel"})
+                assert result.status_code == 200, result.text
+                assert result.json()["cancellation"]["cancelled"] is True
+                await engine.dispose()
+                settled = await jobs.inference_accounting_snapshot()
+                current_costs = [row for row in settled["operations"] if row["operation_id"].startswith("remote:research:")]
+                assert settled["accounting_continuity_verified"] is True
+                assert next(row for row in current_costs if row["contact_started_at"] is not None)["actual_cost_microusd"] == 150
+                assert next(row for row in current_costs if row["contact_started_at"] is None)["state"] == "released"
+                assert len(calls) == 4
+                (root/"research-denial-cancel-readback.json").write_text(json.dumps({"original": original,
+                    "cancellation": result.json(), "accounting": settled, "provider_post_count": len(calls)}, indent=2))
             return
         assert receipt["completed"] == 1, detail.json()
         report = await client.get("/api/work-board/tasks/"+task_id+"/research-report")
@@ -338,4 +397,10 @@ async def test_current_authority_or_overrun_blocks_prefunded_sibling_and_adoptio
 @pytest.mark.parametrize("scenario", ["restart_before_sources", "restart_prompt_ready", "restart_funded_queued",
     "restart_written_outputs", "cancel_funded_queued"])
 async def test_explicit_native_recovery_keeps_original_attempt_deadline_and_call_rows(accounting_db, real_auth, monkeypatch, scenario):
+    await test_authenticated_parent_two_children_real_public_source_and_dossier(accounting_db, real_auth, monkeypatch, scenario=scenario)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ["cancel_active_provider", "cancel_held_denial"])
+async def test_actual_research_cancel_preserves_contacted_debt_and_releases_proven_denial(accounting_db, real_auth, monkeypatch, scenario):
     await test_authenticated_parent_two_children_real_public_source_and_dossier(accounting_db, real_auth, monkeypatch, scenario=scenario)

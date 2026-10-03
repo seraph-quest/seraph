@@ -70,3 +70,30 @@ it("renders actual injection bytes as literal report text", async () => {
   expect(mounted.container.querySelector("script")).toBeNull();
   expect((globalThis as unknown as Record<string, unknown>).researchInjected).toBeUndefined();
 });
+
+it("clears inflight UI ownership when the task scope changes and retains the original request", async () => {
+  let finish: ((response: Response) => void) | undefined;
+  let originalSignal: AbortSignal | undefined;
+  vi.mocked(apiFetch).mockImplementation(async (url, options) => {
+    if (options?.method === "POST") {
+      originalSignal = options.signal as AbortSignal;
+      return new Promise<Response>((resolve) => { finish = resolve; });
+    }
+    const currentTask = String(url).includes("second-task") ? "second-task" : task.task_id;
+    return new Response(JSON.stringify({ ...state, task_id: currentTask,
+      parent_id: currentTask === "second-task" ? "research:second-parent" : state.parent_id }));
+  });
+  const mounted = render(<ResearchDossierPanel {...props} />);
+  await waitFor(() => expect(screen.getByRole("button", { name: "Recover original research" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "Recover original research" }));
+  await waitFor(() => expect(finish).toBeDefined());
+  const originalRequest = readResearchPending(key);
+  mounted.rerender(<ResearchDossierPanel {...props} task={{ ...task, task_id: "second-task" }} />);
+  await waitFor(() => expect(screen.getByRole("button", { name: "Recover original research" })).toBeEnabled());
+  expect(originalSignal?.aborted).toBe(true);
+  expect(readResearchPending(key)).toEqual(originalRequest);
+  expect(readResearchPending(researchStorageKey("operator:one", "session-one", "second-task"))).toBeNull();
+  finish?.(new Response(JSON.stringify({ recovery: { completed: false }, research: state })));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Recover original research" })).toBeEnabled());
+  expect(screen.getByText(/Parent research:second-parent/)).toBeInTheDocument();
+});

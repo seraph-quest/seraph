@@ -492,21 +492,83 @@ async def execute(task, attempt, inputs, *, jobs, runner, deadline, admission_on
 
 
 async def adopt_output(jobs,task,attempt,runner,reference,expected,fence):
+    """Stage produced bytes, then atomically authorize their positive adoption.
+
+    Produced files are private audit evidence until the same pure writer has
+    authorized the original attempt and committed artifact/readback/success.
+    """
     from src.work_board.input_artifacts import _write_payload
-    identity=job_id(task,attempt);sha=digest(expected);actual=expected
-    _write_payload(canonical_workspace_root(settings.workspace_dir)/reference,actual)
-    if read_output(reference,sha)!=expected:raise ToolPackageBlocked("tool_package_output_readback_failed")
-    await jobs.record_artifact(identity,file_path=reference,artifact_type="tool_package_json",content=actual,owner=runner,fencing_token=fence)
-    await jobs.record_readback(identity,effect_type="tool_package_output",target_path=reference,target_digest=sha,
-        content_sha256=sha,readback_id="tool-package-readback-"+sha[:32],verified_at=now().isoformat(),
-        status="succeeded",details={"verified":True,"cleanup_proven":True,"no_learning":True},owner=runner,fencing_token=fence)
+    from src.artifacts.registry import build_artifact_record
+    from src.workflows.job_runtime import (
+        _append_parent_fence_condition, _assert_canonical_goal_fence, _digest,
+        _effect_ledger_or_raise, _job_has_unsafe_effects, _serialize,
+        _verified_readback_exists,
+    )
+    identity=job_id(task,attempt);sha=digest(expected)
     async with authority_guard(jobs,task,attempt) as staged:
-        if read_output(reference,sha)!=expected:raise ToolPackageBlocked("tool_package_output_changed")
-        async def terminal(db,run):
+        # All filesystem/runtime/lifecycle proof is outside BEGIN IMMEDIATE.
+        _write_payload(canonical_workspace_root(settings.workspace_dir)/reference,expected)
+        if read_output(reference,sha)!=expected:
+            raise ToolPackageBlocked("tool_package_output_changed")
+        record=build_artifact_record(file_path=reference,artifact_type="tool_package_json",
+            producer=JOB_KIND,run_id=identity,session_id=task.owner_session_id,content=expected)
+        artifact={key:record[key] for key in ("artifact_id","artifact_type","file_path","producer",
+            "content_sha256","size_bytes","exists")}
+        async with jobs._session() as db:
+            if db.get_bind().dialect.name=="sqlite":await db.execute(text("BEGIN IMMEDIATE"))
+            run=await jobs._fetch(db,identity)
             await current(db,task,attempt,run,staged=staged)
-        finished=await jobs.transition_job(identity,"succeeded",owner=runner,fencing_token=fence,
-            result={"status":"succeeded","no_learning":True,"output_sha256":sha},
-            result_summary="Isolated fixed JSON formatter; exact physical output and process cleanup verified; no_learning",terminal_authority_check=terminal)
+            await _assert_canonical_goal_fence(db,goal_id=run.goal_id,goal_revision=run.goal_revision,
+                owner_kind=run.owner_kind,owner_principal_id=run.owner_principal_id,
+                session_id=run.session_id,authority=run.declared_authority_json)
+            jobs._assert_lease(run,owner=runner,fencing_token=fence)
+            if run.status!="running" or not binds(task,attempt,run):
+                raise ToolPackageBlocked("tool_package_adoption_binding_changed")
+            projection=_serialize(run)
+            reservations=[item.get("payload") for item in projection["checkpoints"]
+                if item.get("checkpoint_id")=="tool-package:reservation"]
+            if (not cleanup_proven(task,attempt,projection) or len(reservations)!=1
+                or reservations[0].get("file_path")!=reference
+                or reservations[0].get("content_sha256")!=sha or reservations[0].get("fence")!=fence):
+                raise ToolPackageBlocked("tool_package_exact_artifact_cleanup_required")
+            effects=_effect_ledger_or_raise(run.effect_receipts_json)
+            if _job_has_unsafe_effects(effects):
+                raise ToolPackageBlocked("tool_package_unresolved_effect")
+            stamp=now();artifact["recorded_at"]=stamp.isoformat()
+            readback={"effect_id":"eff_"+_digest({"job_id":identity,"receipt_kind":"readback",
+                "effect_type":"tool_package_output","target_path":reference,"target_digest":sha,
+                "adapter_idempotency_key":""})[:24],"receipt_kind":"readback",
+                "effect_type":"tool_package_output","target_path":reference,"target_digest":sha,
+                "approval_id":None,"adapter_idempotency_key":None,"status":"succeeded",
+                "content_sha256":sha,"readback_id":"tool-package-readback-"+sha[:32],
+                "verified_at":stamp.isoformat(),"recorded_at":stamp.isoformat(),"fencing_token":fence,
+                "details":{"verified":True,"cleanup_proven":True,"no_learning":True}}
+            if any(item.get("effect_id")==readback["effect_id"] for item in effects):
+                raise ToolPackageBlocked("tool_package_output_receipt_already_present")
+            effects.append(readback)
+            if not _verified_readback_exists(effects):
+                raise ToolPackageBlocked("tool_package_output_readback_required")
+            artifacts=json.loads(run.artifact_receipts_json)
+            if not isinstance(artifacts,list) or any(not isinstance(item,dict) for item in artifacts):
+                raise ToolPackageBlocked("tool_package_artifact_history_invalid")
+            artifacts=[item for item in artifacts if item.get("artifact_id")!=artifact["artifact_id"]]+[artifact]
+            conditions=[WorkflowRunState.run_identity==identity,WorkflowRunState.status=="running",
+                WorkflowRunState.revision==run.revision,WorkflowRunState.lease_owner==runner,
+                WorkflowRunState.lease_expires_at>stamp,WorkflowRunState.fencing_token==fence,
+                WorkflowRunState.deadline_at>stamp]
+            _append_parent_fence_condition(conditions,run,now=stamp)
+            changed=await db.execute(update(WorkflowRunState).execution_options(synchronize_session=False)
+                .where(*conditions).values(status="succeeded",artifact_receipts_json=canonical(artifacts).decode(),
+                    effect_receipts_json=canonical(effects).decode(),updated_at=stamp,heartbeat_at=stamp,
+                    revision=run.revision+1,failure_reason=None,finished_at=stamp,lease_owner=None,
+                    lease_expires_at=None,result_digest=_digest({"status":"succeeded","no_learning":True,"output_sha256":sha}),
+                    result_summary="Isolated fixed JSON formatter; exact physical output and process cleanup verified; no_learning"))
+            if changed.rowcount!=1:raise ToolPackageBlocked("tool_package_adoption_cas_changed")
+            refreshed=await jobs._fetch(db,identity)
+            db.expunge(refreshed)
+            finished=_serialize(refreshed,receipt={"kind":"transition","status":"recorded",
+                "from":"running","to":"succeeded","fencing_token":fence,
+                "revision":refreshed.revision,"operator_visible":True})
     CapabilityPackLifecycle()._set_local_job_status(identity,status="succeeded",expected_statuses={"running"},
         pack_id=PACKAGE_ID,owner_principal_id=task.owner_principal_id,session_id=task.owner_session_id,
         expected_digest=pack_binding(task)["digest"],details={"no_learning":True,"cleanup_proven":True,"output_sha256":sha})

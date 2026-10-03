@@ -20,7 +20,7 @@ from src.workflows.job_runtime import DurableJobRepository
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('mode',['positive','goal_revision','logout','cancel','written_recovery','vault_drift','callback_deadline','lifecycle_pin'])
+@pytest.mark.parametrize('mode',['positive','goal_revision','logout','cancel','written_recovery','vault_drift','callback_deadline','lifecycle_pin','adopt_goal','adopt_revoke','adopt_cancel'])
 async def test_actual_authenticated_review_approval_native_formatter_reopen(accounting_db,monkeypatch,mode):
     from src.api import auth,capability_packs,goals,work_board
     root,engine,factory=accounting_db
@@ -112,7 +112,7 @@ async def test_actual_authenticated_review_approval_native_formatter_reopen(acco
                 assert not writer_connections,'native physical proof inside SQLite writer'
                 return _physical(*args,**kwargs)
             monkeypatch.setattr(tool_package_native,name,pure_guard)
-        if mode=='lifecycle_pin':
+        if mode in {'lifecycle_pin','adopt_revoke'}:
             prepared_revoke=await client.post('/api/capability-packs/seraph.tool.json-format/approvals',json={
                 'action':'revoke','goal_id':goal_id,'digest':packet['content_digest'],'version':'1.0.0',
                 'content_digest':packet['content_digest'],'authority_digest':packet['authority_digest']})
@@ -128,7 +128,7 @@ async def test_actual_authenticated_review_approval_native_formatter_reopen(acco
                 if not held_once:
                     held_once=True;writer_entered.set();await writer_release.wait()
                 return await canonical_current(*args,**kwargs)
-            monkeypatch.setattr(tool_package_native,'current',held_current)
+            if mode=='lifecycle_pin':monkeypatch.setattr(tool_package_native,'current',held_current)
         actual_execute=tool_package_native.execute
         async def traced_execute(*args,**kwargs):
             try:return await actual_execute(*args,**kwargs)
@@ -137,6 +137,62 @@ async def test_actual_authenticated_review_approval_native_formatter_reopen(acco
                 traceback.print_exc()
                 raise
         monkeypatch.setattr(tool_package_native,'execute',traced_execute)
+        if mode in {'adopt_goal','adopt_revoke','adopt_cancel'}:
+            # Actual helper success and canonical ECHILD cleanup precede the
+            # correction. No synthetic output/process/readback is supplied.
+            produced=asyncio.Event();adopt_release=asyncio.Event()
+            actual_adopt=tool_package_native.adopt_output
+            async def held_adoption(*args,**kwargs):
+                produced.set();await adopt_release.wait()
+                return await actual_adopt(*args,**kwargs)
+            monkeypatch.setattr(tool_package_native,'adopt_output',held_adoption)
+            active=asyncio.create_task(dispatcher.run_pass())
+            try:
+                await asyncio.wait_for(produced.wait(),timeout=7)
+                async with factory.accounting_sessions() as db:
+                    original_attempt=await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id==task_id))
+                    original_run=await jobs.get_job(original_attempt.workflow_run_id)
+                    assert original_run['status']=='running' and not original_run['artifacts']
+                    assert tool_package_native.cleanup_proven(
+                        await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id==task_id)),original_attempt,original_run)
+                if mode=='adopt_goal':
+                    corrected=await client.patch('/api/goals/'+goal_id,json={'title':'Corrected after actual helper','expected_revision':1})
+                    assert corrected.status_code==200,corrected.text
+                elif mode=='adopt_revoke':
+                    corrected=await client.post('/api/capability-packs/seraph.tool.json-format/revoke',json=revoke_body)
+                    assert corrected.status_code==200,corrected.text
+                else:
+                    detail=await client.get('/api/work-board/tasks/'+task_id)
+                    corrected=await client.post('/api/work-board/tasks/'+task_id+'/actions',json={
+                        'action':'cancel','expected_revision':detail.json()['task']['task_revision']})
+                    assert corrected.status_code==200,corrected.text
+                adopt_release.set()
+                outcome=(await asyncio.wait_for(asyncio.gather(active,return_exceptions=True),timeout=5))[0]
+                if mode=='adopt_cancel' and isinstance(outcome,asyncio.CancelledError):
+                    receipt={'worker':'cancelled by canonical cancellation owner after actual helper cleanup'}
+                elif isinstance(outcome,BaseException):raise outcome
+                else:receipt=outcome
+            finally:
+                adopt_release.set()
+                if not active.done():active.cancel()
+                await asyncio.gather(active,return_exceptions=True)
+            await engine.dispose()
+            async with factory.accounting_sessions() as db:
+                task=await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id==task_id))
+                attempt=await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id==task_id))
+                run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==attempt.workflow_run_id))
+                projection=await jobs.get_job(run.run_identity)
+                assert run.status!='succeeded' and task.status.value!='done'
+                assert not projection['artifacts']
+                assert not any(effect.get('effect_type')=='tool_package_output' and effect.get('status')=='succeeded'
+                    for effect in projection['effects'])
+                assert tool_package_native.cleanup_proven(task,attempt,projection)
+                assert run.attempt_count==1
+                (root/'tool-package-post-helper-negative.json').write_text(json.dumps({'mode':mode,
+                    'actual_helper_before_correction':original_run,'native_after_reopen':projection,
+                    'correction_status':corrected.status_code,'task_status':task.status.value,
+                    'dispatch':receipt,'no_adopted_success':True,'no_learning':True},indent=2))
+            return
         if mode in {'goal_revision','logout','cancel','vault_drift','callback_deadline','lifecycle_pin'}:
             from src.execution import tool_package_runner
             actual_runner=tool_package_runner.execute
@@ -183,6 +239,22 @@ async def test_actual_authenticated_review_approval_native_formatter_reopen(acco
                     detail=await client.get('/api/work-board/tasks/'+task_id)
                     cancelled=await client.post('/api/work-board/tasks/'+task_id+'/actions',json={'action':'cancel','expected_revision':detail.json()['task']['task_revision']})
                     assert cancelled.status_code==200,cancelled.text
+                    after_cancel=await client.get('/api/work-board/tasks/'+task_id+'/tool-package')
+                    assert after_cancel.status_code==200,after_cancel.text
+                    from src.db.models import WorkBoardEvent
+                    async with factory.accounting_sessions() as history:
+                        original_event=await history.scalar(select(WorkBoardEvent).where(
+                            WorkBoardEvent.task_id==task_id,WorkBoardEvent.kind=='attempt.cancel_requested'))
+                        for index in range(40):
+                            metadata=json.loads(original_event.metadata_json)
+                            metadata.update(attempt_id=f'other-attempt-{index}',workflow_run_id=f'other-run-{index}',
+                                cancel_key=f'work-board-cancel:{task_id}:other-attempt-{index}')
+                            history.add(WorkBoardEvent(task_id=task_id,
+                                owner_principal_id=original_event.owner_principal_id,
+                                owner_session_id=original_event.owner_session_id,
+                                actor_principal_id=original_event.actor_principal_id,
+                                actor_session_id=original_event.actor_session_id,
+                                kind='attempt.cancel_requested',metadata_json=json.dumps(metadata)))
                     after_cancel=await client.get('/api/work-board/tasks/'+task_id+'/tool-package')
                     assert after_cancel.status_code==200,after_cancel.text
                     proof=after_cancel.json()['cancel_receipt']

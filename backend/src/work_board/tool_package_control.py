@@ -71,7 +71,11 @@ async def snapshot(jobs,db,owner,task_id):
     if attempt.cancel_requested_at is not None:
         events=(await db.scalars(select(WorkBoardEvent).where(WorkBoardEvent.task_id==task_id,
             WorkBoardEvent.owner_principal_id==owner.principal_id,WorkBoardEvent.owner_session_id==owner.session_id,
-            WorkBoardEvent.kind=='attempt.cancel_requested').order_by(WorkBoardEvent.event_id.desc()).limit(32))).all()
+            WorkBoardEvent.kind=='attempt.cancel_requested',
+            WorkBoardEvent.metadata_json.contains(json.dumps(f'work-board-cancel:{task_id}:{attempt.attempt_id}')),
+            WorkBoardEvent.metadata_json.contains(json.dumps(attempt.attempt_id)),
+            WorkBoardEvent.metadata_json.contains(json.dumps(run.run_identity)))
+            .order_by(WorkBoardEvent.event_id.desc()).limit(1))).all()
         for event in events:
             metadata=json.loads(event.metadata_json)
             if (metadata.get('attempt_id')==attempt.attempt_id and metadata.get('workflow_run_id')==run.run_identity

@@ -1134,7 +1134,7 @@ finished output with actual reap proof under the original Root/Goal/permission
 and unexpired deadline. It creates no process, attempt or renewed allowance.
 Missing ownership, uncertain cleanup, an active lease or an expired original
 deadline stays Blocked/Unknown with an explicit reason. Produced but unadopted
-bytes may remain private audit evidence; they do not authorize Done or learning.
+bytes may remain private audit evidence; they do not authorize Done or learning. Positive artifact and verified-output receipts commit together with native success only after the same writer rechecks current Root, Goal, attempt, lease and cancellation authority. Physical output and artifact metadata are staged before that writer; a late correction retains cleanup and produced audit bytes without adopted success.
 Pause/revoke/quarantine fence new work and late adoption; completed verified
 output remains read-only history.
 

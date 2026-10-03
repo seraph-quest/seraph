@@ -203,6 +203,7 @@ def test_abnormal_supervisor_death_preserves_durable_unknown(tmp_path):
 
 
 def test_restart_missing_or_reused_identity_never_signals_unrelated(tmp_path):
+    require_native_platform()  # This receipt inspects an actual Linux PID/start identity.
     executor,repo,job=make_fixture(tmp_path,native=False)
     for pid,start in ((99999999,"missing"),(os.getpid(),"reused-start")):
         executor._write_job_marker(job.job_id,{"job_id":job.job_id,"profile":PROFILE,"authority_digest":job.authority_digest,"attempt_id":"legacy-attempt","pid":pid,"pid_start_identity":start,"cleanup_proven":False,"phase":"worker_started"})

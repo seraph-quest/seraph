@@ -1316,6 +1316,87 @@ crash-proof execution.
 
 ## Failure And Recovery
 
+### Optional Moltbook adapter target
+
+The branch-local `work.moltbook.v1` adapter uses **Settings → Moltbook** and
+existing owner Vault, Goal, approval and durable-job records. Linux and macOS
+core operation does not depend on Moltbook. Selecting a Vault credential is
+local configuration with no Goal or remote-use permission implied. Account
+registration and human claiming remain explicit owner setup on the official
+service. Seraph does not automate email, identity checks or challenge solving.
+Keys never enter prompts, generic skill HTTP calls, logs or output artifacts.
+
+Local metadata refresh never contacts Moltbook. Explicit consent binds the
+current login, Goal revision, connection revision, credential and named actions,
+with personal noncommercial use and no redistribution. Explicit account inspect
+establishes claimed or pending truth. Reads produce private literal JSON with
+no learning; feed defaults to one item. Oversized or unsupported metadata blocks
+visibly rather than being silently truncated into success.
+
+Public introduction posts/comments need a completed public `introductions`
+community receipt from the same authority within five minutes, acknowledgment
+of community purpose and exact draft approval. Content verification retains
+the same job: the human supplies a two-decimal answer and separately approves
+that answer for the original content, challenge and expiry. The immutable
+300-second job has one attempt and six contacts: one status GET, three other
+fixed GETs, one creation POST and one verification POST. Restart, approval and
+manual answer never renew those allowances.
+
+The [official API instructions](https://www.moltbook.com/skill.md), checked
+2026-10-03, document community feed/comment listings and verification.
+Verification or exact-ID readback alone cannot establish public visibility.
+Publication requires matching verified ID, author, text, target and parent
+in one bounded public community-feed or target-comment listing; explicit
+hidden/private/removed metadata rejects adoption. An absent item remains
+unconfirmed. No invented positive visibility field, extra pagination, alternate
+origin or retry is used.
+
+Before replying, one bounded feed page from the reviewed public introductions
+community must contain the exact target once; direct-ID access alone is not
+public permission. Explicit pending/failed or hidden targets block before any
+POST. This replaces the direct target GET within the same three-GET allowance.
+
+Controls retain the exact request in owner/login-scoped session storage before
+POST; corrupt or unavailable storage prevents submission. Execution binds its
+action ID, phase and fence. Replaying creation reconciles only that request,
+even when verification has since been approved. Local refresh clears pending
+controls only from matching canonical receipts. Cancellation commits intent,
+fences further contact/adoption and waits for actual transport closure. Known
+remote content remains, never deleted. Unsettled contact stays Unknown with
+operation capacity held; an empty process registry or expired lease is not
+cleanup proof. Explicit recovery inspects an existing wait or adopts exact
+original output after trusted readback and physical digest checks under current
+authority; it never repeats HTTP. Provider cooldowns persist without automatic
+retry. Transport closure does not claim forced termination of system DNS threads.
+Definitive failed preflight reads retain their HTTP status and response digest.
+When no creation or verification POST occurred, all read receipts are settled,
+the owning worker has verified awaited transport closure, and current authority
+still matches, the original capacity slot is released. A 429 cooldown remains
+in force: the complete failed GET receipt and its once-observed bounded cooldown
+are committed atomically; the connection API reports the absolute cooldown
+with an explicit UTC offset. This also holds when another service has requested
+cancellation. That settlement preserves every original authority check except
+the cancellation and existing-cooldown contact fences; it authorizes no contact
+or output adoption. Cancellation releases a settled 429 slot only with matching
+original connection, revision and credential binding plus canonical cooldown
+covering the observed expiry. Stale Goal or Root cannot establish that proof,
+so the slot stays visibly held. Later work requires an explicit new admission
+after the cooldown expires. An
+uncertain transfer or authority drift retains capacity for explicit inspection.
+
+Independent bounded review required public-list visibility proof and durable
+cooldowns; those fixes control this operator contract. The October 3 managed
+CPU-host journey used actual authentication, owner Vault, Goal, two exact
+approvals, native jobs, SQLite, private artifacts and literal UI output. Only
+the Moltbook HTTP boundary was intercepted. The same original operation was
+read back after a managed cold restart, expired original consent and an exact
+admission replay, with no new provider contact or deadline renewal. A bounded
+owner/login-scoped job reference supports explicit local refresh after reload;
+it stores no credential, content or verification secret and grants no authority.
+Completed exact admission replay is read-only; new work still requires current
+consent and source review. This target does not claim shipped `develop`
+behavior, live claimed-account usefulness or successful live public outreach.
+
 - Trust effective API/UI state, not a default provider label.
 - Keep settings usable through partial metadata failure and show last-known state.
 - Treat Codex/Desktop LAN failures as an environment limitation when an

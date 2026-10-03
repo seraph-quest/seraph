@@ -1948,8 +1948,9 @@ def _contribution_payload(
     return _finalize_contribution_payload(extension, contribution, payload)
 
 
-def _toggle_targets(extension: ExtensionRecord) -> list[dict[str, str]]:
-    indexes = _contribution_indexes()
+def _toggle_targets(extension: ExtensionRecord, *, indexes=None) -> list[dict[str, str]]:
+    if indexes is None:
+        indexes = _contribution_indexes()
     targets: list[dict[str, str]] = []
     for contribution in extension.contributions:
         payload = _contribution_payload(extension, contribution, indexes=indexes)
@@ -2063,14 +2064,16 @@ def _extension_payload(
     load_errors: list[ExtensionLoadErrorRecord],
     doctor_by_id: dict[str, Any],
     state_by_id: dict[str, Any],
+    indexes=None,
 ) -> dict[str, Any]:
-    indexes = _contribution_indexes(state_by_id=state_by_id)
+    if indexes is None:
+        indexes = _contribution_indexes(state_by_id=state_by_id)
     doctor_result = doctor_by_id.get(extension.id)
     issues = []
     if doctor_result is not None:
         issues = [asdict(issue) for issue in doctor_result.issues]
     extension_load_errors = _extension_load_errors_for_extension(extension, load_errors)
-    toggles = _toggle_targets(extension)
+    toggles = _toggle_targets(extension, indexes=indexes)
     state_entry = state_by_id.get(extension.id, {}) if isinstance(state_by_id.get(extension.id), dict) else {}
     lifecycle_state = extension_lifecycle_entry(state_entry, create=False) or {}
     location = _location_for_extension(extension)
@@ -2222,12 +2225,16 @@ def list_extensions() -> dict[str, Any]:
     doctor = doctor_snapshot(snapshot)
     doctor_by_id = {result.extension_id: result for result in doctor.results}
     state_by_id = extension_state_entries(state_payload)
+    # Governance sync precedes this fresh per-build index. No response or
+    # authority cache survives this list, and mutations still build fresh.
+    indexes = _contribution_indexes(state_by_id=state_by_id)
     raw_extensions = [
         _extension_payload(
             extension,
             load_errors=snapshot.load_errors,
             doctor_by_id=doctor_by_id,
             state_by_id=state_by_id,
+            indexes=indexes,
         )
         for extension in snapshot.extensions
     ]
@@ -2278,6 +2285,10 @@ def get_extension(extension_id: str) -> dict[str, Any]:
 
 def list_extension_connectors(extension_id: str) -> dict[str, Any]:
     extension = get_extension(extension_id)
+    return extension_connectors_from_payload(extension)
+
+
+def extension_connectors_from_payload(extension: dict[str, Any]) -> dict[str, Any]:
     connectors = [
         contribution
         for contribution in extension["contributions"]
@@ -3316,6 +3327,10 @@ def disable_extension(extension_id: str) -> dict[str, Any]:
 
 def extension_lifecycle_status(extension_id: str) -> dict[str, Any]:
     extension = get_extension(extension_id)
+    return extension_lifecycle_from_payload(extension)
+
+
+def extension_lifecycle_from_payload(extension: dict[str, Any]) -> dict[str, Any]:
     lifecycle = extension.get("lifecycle") if isinstance(extension.get("lifecycle"), dict) else {}
     rollback_snapshots = lifecycle.get("rollback_snapshots")
     quarantine = lifecycle.get("quarantine")

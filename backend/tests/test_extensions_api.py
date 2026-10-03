@@ -2551,6 +2551,31 @@ async def test_list_extensions_includes_bundled_core_capabilities(client, extens
     assert managed["toggleable_contribution_types"] == ["managed_connectors"]
 
 
+def test_list_extensions_builds_one_fresh_index_after_governance_sync(extension_runtime):
+    from src.extensions import lifecycle
+    original = lifecycle._contribution_indexes
+    sync = lifecycle._sync_blocked_verified_extension_runtime_access
+    events = []
+    def observe_sync(*args, **kwargs):
+        events.append("governance")
+        return sync(*args, **kwargs)
+    def observe_index(*args, **kwargs):
+        events.append("index")
+        return original(*args, **kwargs)
+    with patch.object(lifecycle, "_contribution_indexes", side_effect=observe_index), patch.object(
+        lifecycle, "_sync_blocked_verified_extension_runtime_access", side_effect=observe_sync
+    ), patch.object(lifecycle, "get_base_tools_and_active_skills", return_value=([], [], "approval")):
+        first = lifecycle.list_extensions()
+        assert len(first["extensions"]) > 1
+        assert events.count("index") == 1
+        assert events[-1] == "index"
+        events.clear()
+        second = lifecycle.list_extensions()
+        assert second["extensions"]
+        assert events.count("index") == 1
+        assert events[-1] == "index"
+
+
 @pytest.mark.asyncio
 async def test_validate_extension_package_path_returns_manifest_report(client, tmp_path):
     package_dir = _write_installable_extension(tmp_path)
@@ -2649,7 +2674,8 @@ async def test_extension_diagnostics_drilldown_returns_404_for_unknown_extension
 async def test_extension_diagnostics_drilldown_redacts_path_and_secret_fields(client):
     with (
         patch(
-            "src.api.extensions.get_extension",
+            "src.api.extensions._optional_extension",
+            new_callable=AsyncMock,
             return_value={
                 "id": "seraph.test-installable",
                 "display_name": "Test Installable",
@@ -2679,7 +2705,7 @@ async def test_extension_diagnostics_drilldown_redacts_path_and_secret_fields(cl
             },
         ),
         patch(
-            "src.api.extensions.extension_lifecycle_status",
+            "src.api.extensions.extension_lifecycle_from_payload",
             return_value={
                 "lifecycle": {"last_event": "install"},
                 "rollback": {"available": False, "snapshots": []},

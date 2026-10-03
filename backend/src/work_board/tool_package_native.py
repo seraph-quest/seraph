@@ -359,19 +359,25 @@ async def execute(task, attempt, inputs, *, jobs, runner, deadline, admission_on
         return {**finished,"admission_only":False,"reason_code":"tool_package_execution_failed" if cleanup else "tool_package_cleanup_required"}
     actual=read_private(stage,"out/result.json",MAX_OUTPUT)
     if actual!=expected:raise ToolPackageBlocked("tool_package_output_readback_failed")
+    return await adopt_output(jobs,task,attempt,runner,reference,expected,fence)
+
+
+async def adopt_output(jobs,task,attempt,runner,reference,expected,fence):
+    from src.work_board.input_artifacts import _write_payload
+    identity=job_id(task,attempt);sha=digest(expected);actual=expected
     _write_payload(canonical_workspace_root(settings.workspace_dir)/reference,actual)
     if read_output(reference,sha)!=expected:raise ToolPackageBlocked("tool_package_output_readback_failed")
-    await jobs.record_artifact(spec.identity.job_id,file_path=reference,artifact_type="tool_package_json",content=actual,owner=runner,fencing_token=fence)
-    await jobs.record_readback(spec.identity.job_id,effect_type="tool_package_output",target_path=reference,target_digest=sha,
+    await jobs.record_artifact(identity,file_path=reference,artifact_type="tool_package_json",content=actual,owner=runner,fencing_token=fence)
+    await jobs.record_readback(identity,effect_type="tool_package_output",target_path=reference,target_digest=sha,
         content_sha256=sha,readback_id="tool-package-readback-"+sha[:32],verified_at=now().isoformat(),
         status="succeeded",details={"verified":True,"cleanup_proven":True,"no_learning":True},owner=runner,fencing_token=fence)
     async def terminal(db,run):
         await current(db,task,attempt,run)
         if read_output(reference,sha)!=expected:raise ToolPackageBlocked("tool_package_output_changed")
-    finished=await jobs.transition_job(spec.identity.job_id,"succeeded",owner=runner,fencing_token=fence,
+    finished=await jobs.transition_job(identity,"succeeded",owner=runner,fencing_token=fence,
         result={"status":"succeeded","no_learning":True,"output_sha256":sha},
         result_summary="Isolated fixed JSON formatter; exact physical output and process cleanup verified; no_learning",terminal_authority_check=terminal)
-    CapabilityPackLifecycle()._set_local_job_status(spec.identity.job_id,status="succeeded",expected_statuses={"running"},
+    CapabilityPackLifecycle()._set_local_job_status(identity,status="succeeded",expected_statuses={"running"},
         pack_id=PACKAGE_ID,owner_principal_id=task.owner_principal_id,session_id=task.owner_session_id,
-        expected_digest=spec.declared_authority["pack"]["digest"],details={"no_learning":True,"cleanup_proven":True,"output_sha256":sha})
+        expected_digest=pack_binding(task)["digest"],details={"no_learning":True,"cleanup_proven":True,"output_sha256":sha})
     return {**finished,"admission_only":False,"artifact_refs":finished.get("artifacts",[]),"memory_status":"no_learning"}

@@ -24,6 +24,7 @@ from src.db.models import (
     GitHubFollowthroughConnection,
     Goal,
     OperatorSession,
+    Secret,
     WorkBoardAttempt,
     WorkBoardComment,
     WorkBoardEvent,
@@ -3494,6 +3495,17 @@ class WorkBoardRepository:
                     "The supplied readback is not an independent durable workflow proof",
                 )
         observed_at = now or _now()
+        # Vault redaction can emit its own audit event. Prepare the existing
+        # policy result before taking the Board writer; nesting that audit
+        # writer under BEGIN IMMEDIATE deadlocks SQLite failure projection.
+        original_projection_reason = block_reason or outcome
+        async def vault_binding(session):
+            size,count = (await session.execute(select(func.coalesce(func.sum(func.length(Secret.encrypted_value)),0),func.count(Secret.id)))).one()
+            if size>1_048_576 or count>1_000:return None
+            rows=(await session.execute(select(Secret.id,Secret.encrypted_value,Secret.updated_at).order_by(Secret.id))).all()
+            return hashlib.sha256(_canonical_json([[row[0],row[1],str(row[2])] for row in rows]).encode()).hexdigest()
+        staged_vault_binding = await vault_binding(db) if status is WorkBoardStatus.blocked else None
+        safe_projection_reason = await self._safe_text(original_projection_reason) if status is WorkBoardStatus.blocked else None
         reconciliation_owner_live = False
         if reconciled_github_root is not None:
             # Authentication may persist expiry/revocation. Run it before the
@@ -3506,6 +3518,8 @@ class WorkBoardRepository:
             except AuthFailure:
                 pass
         await _begin_sqlite_immediate(db)
+        if safe_projection_reason is not None and (staged_vault_binding is None or await vault_binding(db)!=staged_vault_binding):
+            safe_projection_reason = "execution_blocked_redaction_state_changed"
         task = await self._find_task(db, task_id)
         if task is None:
             raise BoardNotFound(task_id)
@@ -3760,7 +3774,9 @@ class WorkBoardRepository:
             values.update(
                 {
                     "block_kind": _closed_block_kind(block_kind or "transient"),
-                    "block_reason": await self._safe_text(block_reason or outcome),
+                    "block_reason": (safe_projection_reason if (block_reason or outcome)==original_projection_reason and safe_projection_reason is not None
+                        else (block_reason or outcome) if re.fullmatch(r"[a-z0-9_:.]{1,256}",block_reason or outcome)
+                        else "authority_reconciliation_required"),
                     "block_source_status": WorkBoardStatus.running.value,
                     "completed_at": None,
                 }

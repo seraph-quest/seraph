@@ -5795,6 +5795,17 @@ class WorkBoardDispatcher:
                 result["awaiting_approval"] = True
                 return result
             direct_proof = self._direct_readback(adapter_result, projection, job_id)
+            if task.capability_id == "work.json-format.v1":
+                async with self.session_provider() as cancel_db:
+                    cancelled = await cancel_db.scalar(select(WorkBoardAttempt.cancel_requested_at).where(
+                        WorkBoardAttempt.attempt_id==attempt.attempt_id,WorkBoardAttempt.workflow_run_id==job_id,
+                        WorkBoardAttempt.fencing_token==attempt.fencing_token))
+                if cancelled is not None:
+                    # The explicit cancellation owner awaits this actual
+                    # worker and owns its terminal Board projection. Do not
+                    # race that writer with a second blocked projection.
+                    result["blocked"] = True
+                    return result
             if direct_proof is not None:
                 if task.capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
                     matching = await self._verify_cpu_completion(task, attempt, inputs, projection, direct_proof)

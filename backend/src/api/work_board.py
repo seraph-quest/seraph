@@ -72,6 +72,7 @@ from src.work_board import review as review_service
 from src.work_board import triage as triage_service
 from src.work_board import pipelines as pipeline_service
 from src.work_board.pipeline_contracts import PipelinePreviewRequest, PipelineAcceptRequest, PipelineAdvanceRequest, PipelineRevisionRequest, PipelineReuseRequest, REPORT
+from src.work_board.tool_package_contracts import ToolPackageRecoverRequest
 from src.work_board.time import serialize_utc_datetime
 from src.security.trust_contract import AuthorityGrant
 from src.security.site_policy import _parse_rules
@@ -91,6 +92,49 @@ repository = WorkBoardRepository()
 # Use the same managed dispatcher instance as the scheduler so cancellation
 # can reach an inline GoalSnapshot worker admitted by the scheduler pass.
 dispatcher = _dispatcher
+
+
+@router.get("/tasks/{task_id}/tool-package")
+async def read_tool_package_state(request: Request, task_id: str):
+    from src.work_board.tool_package_control import snapshot
+    try:
+        async with get_session() as db:
+            return await snapshot(dispatcher.jobs,db,_owner(_operator(request)),task_id)
+    except BoardError as exc:
+        _raise_board_error(exc)
+    except (DurableJobError,ValueError,TypeError,KeyError,OSError):
+        raise HTTPException(status_code=409,detail={"code":"tool_package_original_binding_required"})
+
+
+@router.post("/tasks/{task_id}/tool-package/recover")
+async def recover_tool_package(request: Request,task_id: str,body: ToolPackageRecoverRequest):
+    from src.work_board.tool_package_control import recover,snapshot
+    try:
+        owner=_owner(_operator(request));result=await recover(dispatcher,owner,task_id,body)
+        async with get_session() as db:
+            return {"recovery":result,"tool_package":await snapshot(dispatcher.jobs,db,owner,task_id)}
+    except BoardError as exc:
+        _raise_board_error(exc)
+    except (DurableJobError,ValueError,TypeError,KeyError,OSError):
+        raise HTTPException(status_code=409,detail={"code":"tool_package_current_reserved_output_and_cleanup_required"})
+
+
+@router.get("/tasks/{task_id}/tool-package-output")
+async def read_tool_package_output(request: Request,task_id: str):
+    from fastapi import Response
+    from src.work_board.tool_package_control import bound
+    from src.work_board.tool_package_native import verified_output
+    try:
+        async with get_session() as db:
+            task,attempt,run=await bound(db,_owner(_operator(request)),task_id)
+            if attempt.ended_at is None or task.status not in {WorkBoardStatus.done,WorkBoardStatus.review}:
+                raise BoardError('tool_package_readback_pending','Independent formatter readback is not complete')
+            _artifact,raw=verified_output(task,attempt,run)
+        return Response(content=raw,media_type='text/plain',headers={'X-Content-Type-Options':'nosniff','Cache-Control':'no-store'})
+    except BoardError as exc:
+        _raise_board_error(exc)
+    except (ValueError,TypeError,KeyError,OSError):
+        raise HTTPException(status_code=409,detail={"code":"tool_package_output_readback_required"})
 
 
 @router.get("/tasks/{task_id}/research")
@@ -920,7 +964,7 @@ def _recovery_action(
 
     status = _json_value(task.status)
     block_kind = str(task.block_kind or "")
-    if task.capability_id == "work.research-dossier.v1" and latest_attempt is not None and latest_attempt.workflow_run_id:
+    if task.capability_id in {"work.research-dossier.v1","work.json-format.v1"} and latest_attempt is not None and latest_attempt.workflow_run_id:
         # The research inspector owns explicit same-attempt controls. Generic
         # retry/unblock would discard its immutable original operation.
         return None

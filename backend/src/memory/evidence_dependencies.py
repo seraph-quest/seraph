@@ -379,3 +379,125 @@ async def dependency_rows(db, task: WorkBoardTask) -> list[WorkBoardEvidenceDepe
     if len(json.dumps([row.resolved_token_json for row in rows]).encode()) > MAX_SNAPSHOT_BYTES:
         raise BoardError('evidence_dependency_limit', 'Persisted evidence exceeds its finite snapshot limit', status_code=409)
     return rows
+
+
+def _row_binding(row: WorkBoardEvidenceDependency) -> dict[str, Any]:
+    return {key: getattr(row, key) for key in (
+        'dependency_id', 'source_kind', 'canonical_source_id', 'source_id',
+        'source_digest', 'span_digest', 'resolved_token_json', 'packet_revision',
+        'packet_digest', 'binding_task_revision', 'executor_input_digest',
+        'pipeline_operation_id', 'pipeline_slot')}
+
+
+@dataclass(frozen=True)
+class StagedDependencies:
+    task_id: str
+    task_revision: int
+    rows_digest: str
+
+
+async def stage_dependencies(db, task: WorkBoardTask) -> StagedDependencies:
+    """Physical validation before admission; no transaction writer is held."""
+    from src.memory.evidence_working_set import _read_file
+    rows = await dependency_rows(db, task)
+    for row in rows:
+        token = _json(row.resolved_token_json, maximum=MAX_TOKEN_BYTES)
+        if row.source_kind in PRODUCERS:
+            _read_file(token['file_path'], token['content_digest'])
+            for ancestor in (token.get('upstream_permission') or {}).get('ancestors', []):
+                _read_file(ancestor['file_path'], ancestor['content_digest'])
+    return StagedDependencies(task.task_id, task.task_revision, digest([_row_binding(row) for row in rows]))
+
+
+async def recheck_dependencies(db, task: WorkBoardTask, staged: StagedDependencies | None) -> None:
+    """Pure-row guard, called inside the existing claim/checkpoint writer."""
+    rows = await dependency_rows(db, task)
+    if not rows:
+        if staged is not None and staged.rows_digest != digest([]):
+            raise _changed()
+        return
+    if (staged is None or staged.task_id != task.task_id
+        or staged.task_revision != task.task_revision
+        or staged.rows_digest != digest([_row_binding(row) for row in rows])):
+        raise _changed()
+    owner = WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id)
+    await _goal(db, owner, task)
+    # A refreshed packet alone cannot renew an acknowledged execution binding.
+    event = (await db.execute(select(WorkBoardEvent).where(
+        WorkBoardEvent.task_id == task.task_id,
+        WorkBoardEvent.owner_principal_id == owner.principal_id,
+        WorkBoardEvent.owner_session_id == owner.session_id,
+        WorkBoardEvent.kind == 'task.evidence.updated').order_by(WorkBoardEvent.event_id.desc()).limit(1))).scalar_one_or_none()
+    packet = _json(event.metadata_json) if event else None
+    for row in rows:
+        if (not isinstance(packet, dict) or packet.get('packet_revision') != row.packet_revision
+            or packet.get('packet_digest') != row.packet_digest):
+            raise _changed()
+        expected = _json(row.resolved_token_json, maximum=MAX_TOKEN_BYTES)
+        current = await canonical_source_token(db, owner, task, row.source_kind,
+            row.canonical_source_id, expected.get('lineage'))
+        if current != expected:
+            raise _changed()
+
+
+async def _run_task(db, run):
+    capability = {'browser_public_task': 'browser.public-task.v1',
+        'work.evidence-dossier.v1': 'work.evidence-dossier.v1',
+        'work.local-evidence-report.v1': 'work.local-evidence-report.v1'}.get(run.job_kind)
+    if capability is None:
+        return None
+    attempts = list((await db.execute(select(WorkBoardAttempt).where(
+        WorkBoardAttempt.workflow_run_id == run.run_identity).limit(2))).scalars())
+    if not attempts:
+        # Admission precedes the immutable Board/native link. Resolve only the
+        # fixed server-generated task:attempt idempotency binding in that gap.
+        key = str(run.idempotency_key or '')
+        parts = key.split(':')
+        if len(parts) != 2:
+            return None
+        candidate = await db.get(WorkBoardAttempt, parts[1], populate_existing=True)
+        attempts = [candidate] if candidate and candidate.task_id == parts[0] else []
+    if not attempts:
+        return None
+    if len(attempts) != 1:
+        raise _changed()
+    attempt = attempts[0]
+    task = (await db.execute(select(WorkBoardTask).where(
+        WorkBoardTask.task_id == attempt.task_id).execution_options(populate_existing=True))).scalar_one_or_none()
+    if task is not None and not await dependency_rows(db, task):
+        return None  # Unbound legacy execution retains its existing contract.
+    declared = _json(run.declared_authority_json, maximum=256 * 1024)
+    principal = (declared.get('operator_owner_principal_id')
+        if run.job_kind == 'browser_public_task' else run.owner_principal_id)
+    if (task is None or task.capability_id != capability
+        or task.owner_principal_id != principal
+        or task.owner_session_id != run.operator_session_id
+        or task.goal_id != run.goal_id or task.goal_revision != run.goal_revision):
+        raise _changed()
+    return task
+
+
+async def stage_run_dependencies(db, run):
+    task = await _run_task(db, run)
+    return await stage_dependencies(db, task) if task is not None else None
+
+
+async def recheck_run_dependencies(db, run, staged):
+    task = await _run_task(db, run)
+    if task is None:
+        if staged is not None:
+            raise _changed()
+        return
+    try:
+        await recheck_dependencies(db, task, staged)
+    except BoardError:
+        # Keep the actual attempt/effect/cost state. The rejected contact or
+        # use still has a durable neutral receipt even when the caller raises.
+        db.add(WorkBoardEvent(task_id=task.task_id, owner_principal_id=task.owner_principal_id,
+            owner_session_id=task.owner_session_id, actor_principal_id=task.owner_principal_id,
+            actor_session_id=task.owner_session_id, kind='task.evidence.execution_stale',
+            metadata_json=json.dumps({'job_id': run.run_identity, 'task_revision': task.task_revision,
+                                     'reason_code': 'evidence_dependency_stale', 'no_learning': True})))
+        await db.flush()
+        await db.commit()
+        raise

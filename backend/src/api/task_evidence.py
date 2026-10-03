@@ -9,6 +9,9 @@ from src.memory.evidence_working_set import (
     adopt_evidence, read_evidence, refresh_evidence,
 )
 from src.work_board.repository import BoardError
+from src.memory.evidence_execution import (
+    ExecutionPreviewRequest, ExecutionAcceptRequest, preview_execution, accept_execution,
+)
 
 router = APIRouter(prefix="/work-board/tasks")
 
@@ -57,3 +60,23 @@ async def inspect_task_evidence_source(request: Request, task_id: str, source_id
 @router.post("/{task_id}/evidence/adoption", response_model=EvidencePacketResponse)
 async def adopt_task_evidence(request: Request, task_id: str, body: EvidenceAdoptionRequest):
     return await _call(request, task_id, body)
+
+
+@router.post('/{task_id}/evidence/execution-preview')
+async def preview_task_execution_evidence(request: Request, task_id: str, body: ExecutionPreviewRequest):
+    operator = _operator(request)
+    try:
+        async with get_session() as db:
+            return await preview_execution(db, _owner(operator), task_id, body, operator=operator)
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.post('/{task_id}/evidence/execution-binding')
+async def bind_task_execution_evidence(request: Request, task_id: str, body: ExecutionAcceptRequest):
+    operator = _operator(request)
+    try:
+        async with get_session() as db:
+            return await accept_execution(db, _owner(operator), task_id, body, operator=operator)
+    except BoardError as exc:
+        _raise_board_error(exc)

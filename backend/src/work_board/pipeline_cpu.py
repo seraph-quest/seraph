@@ -148,6 +148,13 @@ async def execute(task: WorkBoardTask, attempt: WorkBoardAttempt, inputs: Mappin
     lease = projection.get("lease") or {}
     fence = int(lease.get("fencing_token") or 0)
     try:
+        # This current-source guard and use-admission receipt commit together;
+        # a prior advisory validation alone cannot order canonical correction.
+        await jobs.record_checkpoint(spec.identity.job_id,
+            checkpoint_id='evidence-cpu-source-use', state={'phase': 'source_use_admitted'},
+            checkpoint_payload={'phase': 'source_use_admitted', 'no_learning': True},
+            owner=runner, fencing_token=fence, expected_revision=projection.get('revision'))
+        await validate_current(task, attempt, inputs)
         content = output_bytes(task.capability_id, inputs)
         sha = hashlib.sha256(content).hexdigest()
         suffix = "txt" if task.capability_id == REPORT else "json"

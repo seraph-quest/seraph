@@ -84,6 +84,14 @@ the owning guide records its bounded SQLite proof and remaining StrategyDelta,
 multi-process, production-restore, and semantic-quality limits. It is not
 Shipped `develop` truth until the reviewed milestone change lands.
 
+Branch-local #920 adds neutral paired Telegram task notices, explicit bounded
+status review, exact pending-approval denial and original-attempt cancellation.
+Nonce consumption and each canonical decision/intent share the same writer;
+delivery ambiguity and native cancellation uncertainty remain separate Unknown
+states. Provider-free SQLite/HTTP and managed cockpit receipts validate this
+**Partial** implementation. Live Telegram remains unverified; see
+[Presence and Reach](./04-presence-and-reach.md#paired-telegram-task-controls-branch-local-920-partial).
+
 ## Legend
 
 - `[x]` shipped on `develop`

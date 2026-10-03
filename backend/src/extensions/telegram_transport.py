@@ -102,7 +102,9 @@ class InjectedTelegramTransport(Protocol):
         limit: int,
     ) -> object: ...
 
-    async def send_message(self, *, token: str, chat_id: int, text: str, idempotency_key: str) -> object: ...
+    async def send_message(self, *, token: str, chat_id: int, text: str, idempotency_key: str, reply_markup: dict | None = None) -> object: ...
+
+    async def answer_callback_query(self, *, token: str, callback_query_id: str) -> object: ...
 
     async def send_voice(
         self,
@@ -176,7 +178,7 @@ class RecordingTelegramTransport:
             return response
         return {"status_code": 200, "message_id": f"recorded:{uuid.uuid4().hex[:12]}"}
 
-    async def send_message(self, *, token: str, chat_id: int, text: str, idempotency_key: str) -> object:
+    async def send_message(self, *, token: str, chat_id: int, text: str, idempotency_key: str, reply_markup: dict | None = None) -> object:
         self.requests.append({
             "method": "sendMessage",
             "chat_id": chat_id,
@@ -190,6 +192,11 @@ class RecordingTelegramTransport:
             text=text,
             token_present=bool(token),
         )
+
+    async def answer_callback_query(self, *, token: str, callback_query_id: str) -> object:
+        # Callback data and query identifiers never enter transport telemetry.
+        self.requests.append({"method": "answerCallbackQuery", "token_present": bool(token)})
+        return {"ok": True}
 
     async def send_voice(
         self,
@@ -801,6 +808,9 @@ class TelegramTransportAdapter:
                     "status": receipt.get("status"),
                     "reason_code": receipt.get("reason_code"),
                     "idempotency_key": receipt.get("idempotency_key"),
+                    "delivery_status": receipt.get("delivery_status"),
+                    "delivery_reason_code": receipt.get("delivery_reason_code"),
+                    "ack_status": receipt.get("ack_status"),
                 }
             except TelegramTransportError as exc:
                 # A malformed or stale item must not terminate the whole
@@ -965,6 +975,25 @@ class TelegramTransportAdapter:
         owner_principal_id: str,
         operator_session_id: str,
     ) -> dict[str, Any]:
+        if isinstance(payload, dict) and "callback_query" in payload:
+            from src.extensions.telegram_task_controls import TelegramTaskControls
+            from src.work_board.repository import BoardError
+            controls = TelegramTaskControls(self)
+            receipt = None
+            try:
+                receipt = await controls.callback(payload,
+                    owner_principal_id=owner_principal_id, operator_session_id=operator_session_id)
+                return receipt
+            except (BoardError, ValueError) as exc:
+                raise TelegramTransportError("telegram_canonical_control_unavailable",
+                    "Task control unavailable. Review the current task in the cockpit.") from exc
+            finally:
+                query = payload.get("callback_query")
+                query_id = query.get("id") if isinstance(query, dict) else None
+                if isinstance(query_id, str) and 1 <= len(query_id) <= 128:
+                    acknowledgment = await controls._ack(query_id, owner_principal_id, operator_session_id, query.get("data"))
+                    if receipt is not None:
+                        receipt["ack_status"] = acknowledgment
         owner = _owner(owner_principal_id)
         operator_session = _session(operator_session_id)
         async with self._lock:
@@ -1408,6 +1437,9 @@ class TelegramTransportAdapter:
                 if state is None or state.owner_principal_id != owner or state.operator_session_id != operator_session:
                     raise TelegramTransportError("telegram_authority_mismatch", "Telegram pairing belongs to another operator session")
                 await self._assert_active_row(state, current=current)
+                if row.task_control_markup_json or (row.correlation_id or "").startswith("telegram-control:"):
+                    from src.extensions.telegram_task_controls import TelegramTaskControls
+                    await TelegramTaskControls(self).validate_delivery(db, row)
                 token = await vault_repository.get(state.token_secret_ref or "")
                 if not token:
                     raise TelegramTransportError("telegram_token_unavailable", "Scoped Telegram token is unavailable")
@@ -1465,6 +1497,7 @@ class TelegramTransportAdapter:
                 content = row.content
                 key = row.idempotency_key
                 kind = row.kind
+                task_markup = json.loads(row.task_control_markup_json) if row.task_control_markup_json else None
         # Never hold a database transaction across injected user code.  The
         # lease/fence makes this safe across adapter instances.
         try:
@@ -1480,13 +1513,11 @@ class TelegramTransportAdapter:
                     timeout=self.effect_timeout_seconds,
                 )
             else:
+                arguments = {"token": token, "chat_id": row.chat_id, "text": content, "idempotency_key": key}
+                if task_markup is not None:
+                    arguments["reply_markup"] = task_markup
                 response = await asyncio.wait_for(
-                    self.transport.send_message(
-                        token=token,
-                        chat_id=row.chat_id,
-                        text=content,
-                        idempotency_key=key,
-                    ),
+                    self.transport.send_message(**arguments),
                     timeout=self.effect_timeout_seconds,
                 )
             response_code, external_message_id = self._response(response)

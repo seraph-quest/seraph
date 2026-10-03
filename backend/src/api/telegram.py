@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from src.extensions.telegram_transport import TelegramTransportError, default_telegram_transport
 from src.security.trust_contract import AuthorityGrant
@@ -45,6 +45,12 @@ class TelegramOutboundBody(BaseModel):
 class TelegramReconcileBody(BaseModel):
     resolution: Literal["retry", "delivered"]
     external_message_id: str | int | None = Field(default=None, max_length=256)
+
+
+class TelegramTaskNoticeBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_revision: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9:_-]+$")
 
 
 def _operator(request: Request) -> tuple[str, str, object]:
@@ -141,6 +147,19 @@ async def receive_telegram_update(payload: dict[str, Any], request: Request) -> 
             owner_principal_id=owner,
             operator_session_id=session,
         )
+    except TelegramTransportError as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/telegram/tasks/{task_id}/notice")
+async def telegram_task_notice(task_id: str, body: TelegramTaskNoticeBody, request: Request):
+    """Explicit neutral notice; an ID or chat message never grants task authority."""
+    from src.extensions.telegram_task_controls import TelegramTaskControls
+    owner, session, _ = _operator(request)
+    try:
+        return await TelegramTaskControls(default_telegram_transport).notice(task_id,
+            owner_principal_id=owner, operator_session_id=session,
+            expected_revision=body.expected_revision, idempotency_key=body.idempotency_key)
     except TelegramTransportError as exc:
         raise _error(exc) from exc
 

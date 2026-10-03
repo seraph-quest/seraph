@@ -1686,6 +1686,8 @@ class WorkBoardRepository:
             "assignee_id",
             "scheduled_at",
         }
+        if task.pipeline_operation_id and (authority_fields | {"priority"}).intersection(safe_changes):
+            raise BoardError("pipeline_review_required", "Change unfinished pipeline scope through exact plan review", status_code=409)
         if (
             authority_fields.intersection(safe_changes)
             and task.status is WorkBoardStatus.blocked

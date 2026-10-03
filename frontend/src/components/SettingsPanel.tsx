@@ -12,6 +12,7 @@ import { WorkflowPanel } from "./settings/WorkflowPanel";
 import { SourceWatchPanel } from "./settings/SourceWatchPanel";
 import { ArtifactStoragePanel } from "./settings/ArtifactStoragePanel";
 import { CalendarConnectionPanel } from "./settings/CalendarConnectionPanel";
+import { GitHubConnectionPanel } from "./settings/GitHubConnectionPanel";
 import { RepoSandboxPanel } from "./settings/RepoSandboxPanel";
 import { MailConnectionPanel } from "./settings/MailConnectionPanel";
 import { useOptionalOperatorAuth } from "./auth/OperatorAuthGate";
@@ -138,7 +139,7 @@ interface McpServer {
   auth_hint: string;
 }
 
-type SettingsSection = "artifacts" | "general" | "native" | "repo-sandbox" | "policies" | "audit" | "workflows" | "guardian" | "calendar" | "mail" | "skills" | "discover" | "mcp";
+type SettingsSection = "artifacts" | "general" | "native" | "repo-sandbox" | "policies" | "audit" | "workflows" | "guardian" | "calendar" | "mail" | "github" | "skills" | "discover" | "mcp";
 
 const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string }> = [
   { id: "artifacts", label: "Screenshot/VLM" },
@@ -150,6 +151,7 @@ const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string }> = [
   { id: "workflows", label: "Workflows" },
   { id: "guardian", label: "Guardian" },
   { id: "calendar", label: "Calendar" },
+  { id: "github", label: "GitHub" },
   { id: "mail", label: "Mail" },
   { id: "skills", label: "Skills" },
   { id: "discover", label: "Discover" },
@@ -750,6 +752,11 @@ export function SettingsPanel() {
 
           {activeSection === "calendar" && <CalendarConnectionPanel
             service="calendar_readonly"
+            ownerPrincipalId={operatorAuth?.session.principal_id ?? null}
+            ownerSessionId={operatorAuth?.session.session_id ?? null}
+          />}
+
+          {activeSection === "github" && <GitHubConnectionPanel
             ownerPrincipalId={operatorAuth?.session.principal_id ?? null}
             ownerSessionId={operatorAuth?.session.session_id ?? null}
           />}

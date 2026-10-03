@@ -3498,10 +3498,9 @@ class WorkBoardRepository:
             # Authentication may persist expiry/revocation. Run it before the
             # board write lock, then recheck its row under that lock below.
             from src.auth.service import AuthFailure, authenticate_session
-            from src.security.trust_contract import AuthorityGrant
             try:
                 operator = await authenticate_session(str(reconciled_github_root.get("session_id") or ""), touch=False)
-                reconciliation_owner_live = operator.principal.principal_id == reconciled_github_root.get("owner", {}).get("principal_id") and AuthorityGrant.EXTERNAL_MUTATION in operator.principal.grants
+                reconciliation_owner_live = operator.principal.principal_id == reconciled_github_root.get("owner", {}).get("principal_id")
             except AuthFailure:
                 pass
         await _begin_sqlite_immediate(db)
@@ -3571,10 +3570,21 @@ class WorkBoardRepository:
             authority = json.loads(root.declared_authority_json or "{}")
             if root.job_kind != "github_followthrough_v1" or authority.get("capability_id") != "work.github-followthrough.v1":
                 raise BoardError("reconciliation_binding_mismatch", "The durable root is not this GitHub capability")
-            connection = await db.get(GitHubFollowthroughConnection, authority.get("connection_id"))
+            # The supplied projection only identifies a candidate. Authority
+            # comes from the adapter's persisted protected READ-revision
+            # envelope, checked against this same canonical DB session.
+            from src.extensions.github_recovery import check_persisted_readback
+            protected_live = False
+            try:
+                protected = await check_persisted_readback(db, root, final=True, reserved=False)
+                exact = protected["effect_readback"]
+                protected_live = all(proof.get(key) == exact.get(key) for key in
+                    ("readback_id", "content_sha256", "verified_at"))
+            except (ValueError, KeyError, TypeError):
+                pass
             current_session = await db.get(OperatorSession, owner.session_id)
             live = reconciliation_owner_live and current_session is not None and current_session.principal_id == owner.principal_id and current_session.revoked_at is None and current_session.replaced_by_id is None and not current_session.is_bearer_tombstone and _utc_datetime(current_session.idle_expires_at) > _now() and _utc_datetime(current_session.absolute_expires_at) > _now()
-            if not live or connection is None or connection.owner_principal_id != owner.principal_id or connection.mode not in {"active", "reconcile_only"} or connection.revision != authority.get("connection_revision"):
+            if not live or not protected_live:
                 status = WorkBoardStatus.blocked
                 outcome = block_reason = "reconciliation_authority_changed"
                 block_kind = "capability"

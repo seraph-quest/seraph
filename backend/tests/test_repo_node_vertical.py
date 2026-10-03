@@ -381,6 +381,16 @@ async def test_cancelled_node_physical_cleanup_recovery_and_fresh_job(client,asy
             assert try_acquire_repo_repair_capacity(flow["workspace"],job_id="negative-successor") is None
         marker_path.write_text(json.dumps(marker))
         async with async_db() as db:
+            proposal_row=(await db.execute(native.select(native.RepoRepairProposalRow).where(native.RepoRepairProposalRow.workflow_run_id==job_id))).scalar_one()
+            proposal_digest=proposal_row.authority_digest
+            proposal_row.authority_digest="f"*64
+            await db.commit()
+        digest_blocked=await client.post(f"/api/workflows/repo-change/{job_id}/recover",headers={"Origin":"http://localhost:3001"})
+        assert digest_blocked.status_code==200 and digest_blocked.json()["status"]=="blocked",digest_blocked.text
+        assert (await durable_job_repository.get_job(job_id))["revision"]==job["revision"]
+        async with async_db() as db:
+            proposal_row=(await db.execute(native.select(native.RepoRepairProposalRow).where(native.RepoRepairProposalRow.workflow_run_id==job_id))).scalar_one()
+            proposal_row.authority_digest=proposal_digest
             goal=await db.get(Goal,job["goal_id"]);goal.revision+=1
             approval=await db.get(ApprovalRequest,pending["proposal"]["approval_id"])
             approval.expires_at=datetime.now(timezone.utc)-timedelta(seconds=1)

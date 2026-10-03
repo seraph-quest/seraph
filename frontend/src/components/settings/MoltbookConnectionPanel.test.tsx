@@ -127,4 +127,25 @@ describe("fixed Moltbook owner controls", () => {
     expect(pendingApplied({ ...job, job_id: "moltbook:"+"b".repeat(40) }, pending)).toBe(false);
     expect(pendingApplied(job, { ...pending, body: { ...pending.body, fencing_token: 2 } })).toBe(false);
   });
+  it("inspects a completed original job after reload only in its original owner and login scope", async () => {
+    const key = moltbookStorageKey("owner-one", "root-one");
+    sessionStorage.setItem(key.replace("seraph.moltbook.v1:", "seraph.moltbook.job.v1:"), jobId);
+    const fetch = vi.fn((url: unknown) => response(String(url).endsWith(`/jobs/${jobId}/output`)
+      ? { no_learning: true, data: "<script>quoted only</script>" }
+      : String(url).endsWith(`/jobs/${jobId}`) ? { job_id: jobId, status: "succeeded", no_learning: true,
+        lease: { fencing_token: 3 }, attempt_count: 1, checkpoints: [] } : metadata(String(url))));
+    vi.stubGlobal("fetch", fetch);
+    const view = render(<MoltbookConnectionPanel ownerPrincipalId="owner-one" ownerSessionId="root-one" />);
+    await screen.findByText(/pending claim/);
+    expect(fetch.mock.calls.some(([url]) => String(url).includes(`/jobs/${jobId}`))).toBe(false);
+    fireEvent.click(screen.getByText("Refresh local metadata and original job"));
+    await screen.findByLabelText("Moltbook literal private output");
+    expect(document.querySelector("script")).toBeNull();
+    view.rerender(<MoltbookConnectionPanel ownerPrincipalId="owner-one" ownerSessionId="root-two" />);
+    await waitFor(() => expect(screen.queryByLabelText("Moltbook original job")).toBeNull());
+    const before = fetch.mock.calls.length;
+    fireEvent.click(screen.getByText("Refresh local metadata and original job"));
+    await waitFor(() => expect(fetch.mock.calls.length).toBeGreaterThan(before));
+    expect(fetch.mock.calls.slice(before).some(([url]) => String(url).includes(`/jobs/${jobId}`))).toBe(false);
+  });
 });

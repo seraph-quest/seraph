@@ -8,6 +8,7 @@ export function MoltbookWriteControls({ connection, goal, job, busy, act }: {
 }) {
   const [reviewId, setReviewId] = useState("");
   const [reviewDigest, setReviewDigest] = useState("");
+  const [reviewedAt, setReviewedAt] = useState<string | null>(null);
   const [operation, setOperation] = useState("create_post");
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
@@ -18,6 +19,7 @@ export function MoltbookWriteControls({ connection, goal, job, busy, act }: {
   useEffect(() => {
     if (job?.status === "succeeded" && job.declared_authority?.operation === "community" && job.artifacts?.length === 1) {
       setReviewId(job.job_id); setReviewDigest(job.artifacts[0].content_sha256);
+      setReviewedAt(job.finished_at ?? null);
     }
   }, [job]);
   const checkpoint = job?.checkpoints.find(value => value.checkpoint_id === "moltbook:state")?.payload;
@@ -33,8 +35,11 @@ export function MoltbookWriteControls({ connection, goal, job, busy, act }: {
   }
   return <section aria-label="Moltbook approved public text" className="space-y-2">
     <p>Public text is limited to a reviewed introductions community. Review a fresh community read first. Each creation and manual verification requires a separate exact approval.</p>
-    <label className="block">Completed community job <input aria-label="Reviewed Moltbook community job" value={reviewId} onChange={event => setReviewId(event.target.value)} /></label>
-    <label className="block">Community artifact digest <input aria-label="Reviewed Moltbook community digest" value={reviewDigest} onChange={event => setReviewDigest(event.target.value)} /></label>
+    {reviewId && <p>Reviewed public introductions source · account {connection?.account_name || "not inspected"} · Goal {goal?.title || "select the original Goal"} · read at {reviewedAt || "inspect source metadata"}. Source freshness and original bindings are checked before preparation; no background refresh occurs.</p>}
+    <details><summary>Original community receipt diagnostics</summary>
+      <label className="block">Completed community job <input aria-label="Reviewed Moltbook community job" value={reviewId} onChange={event => setReviewId(event.target.value)} /></label>
+      <label className="block">Community artifact digest <input aria-label="Reviewed Moltbook community digest" value={reviewDigest} onChange={event => setReviewDigest(event.target.value)} /></label>
+    </details>
     <label className="block">Public text kind <select aria-label="Moltbook write kind" value={operation} onChange={event => setOperation(event.target.value)}><option value="create_post">Introduction post</option><option value="create_comment">Comment or reply</option></select></label>
     {operation === "create_post" ? <label className="block">Title <input aria-label="Moltbook draft title" maxLength={300} value={title} onChange={event => setTitle(event.target.value)} /></label>
       : <><label className="block">Target post ID <input aria-label="Moltbook target post" value={post} onChange={event => setPost(event.target.value)} /></label><label className="block">Parent comment ID (optional) <input aria-label="Moltbook parent comment" value={parent} onChange={event => setParent(event.target.value)} /></label></>}

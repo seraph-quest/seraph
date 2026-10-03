@@ -4,7 +4,7 @@ import { apiFetch } from "../../lib/api";
 import type { GoalInfo } from "../../types";
 import { MoltbookWriteControls } from "./MoltbookWriteControls";
 import { clearMoltbookPending, moltbookRequest, moltbookStorageKey, readMoltbookPending,
-  submitMoltbook, originalExecution, pendingApplied, equalMoltbookBody, type MoltbookConnection, type MoltbookJob, type MoltbookPending } from "../../lib/moltbook";
+  submitMoltbook, originalExecution, pendingApplied, equalMoltbookBody, readMoltbookLastJob, type MoltbookConnection, type MoltbookJob, type MoltbookPending } from "../../lib/moltbook";
 
 export function MoltbookConnectionPanel({ ownerPrincipalId, ownerSessionId }: {
   ownerPrincipalId?: string | null; ownerSessionId?: string | null;
@@ -103,7 +103,7 @@ export function MoltbookConnectionPanel({ ownerPrincipalId, ownerSessionId }: {
       if (retained?.path === "/connection/consent" && value.consent?.request && equalMoltbookBody(value.consent.request, retained.body)) {
         clearMoltbookPending(storageKey); setPending(null);
       }
-      const originalJob = retained?.path.startsWith("/jobs/") ? retained.path.split("/")[2] : job?.job_id ?? value.active_job_id;
+      const originalJob = retained?.path.startsWith("/jobs/") ? retained.path.split("/")[2] : job?.job_id ?? value.active_job_id ?? readMoltbookLastJob(storageKey);
       if (originalJob) {
         const readback = await moltbookRequest(`/jobs/${originalJob}`, {}, abort.signal) as MoltbookJob;
         if (readback.job_id !== originalJob || readback.no_learning !== true) throw Error("Original job readback mismatch");

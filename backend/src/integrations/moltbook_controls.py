@@ -276,7 +276,26 @@ class MoltbookService:
     async def prepare_read(self, owner, **request):
         if request.get("operation") not in READS:
             raise MoltbookError("moltbook_read_operation_required", status_code=422)
-        return await self._prepare(owner, **request)
+        replay = await self.replayed_admission(owner, request)
+        if replay is not None: return replay
+        admitted = await self._prepare(owner, **request)
+        return await self.snapshot(owner, admitted["job_id"])
+
+    async def replayed_admission(self, owner, request):
+        """Exact existing admission readback; never admission or execution."""
+        identifier(request["request_key"])
+        job_id = "moltbook:" + digest([owner.principal_id, owner.session_id, request["request_key"]])[:40]
+        async with engine.get_session() as db:
+            await root_current(db, owner.principal_id, owner.session_id)
+            prior = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == job_id))
+            if prior is None: return None
+        # The snapshot independently verifies the immutable encrypted input
+        # outside SQL and is scoped to the exact active original Root.
+        result = await self.snapshot(owner, job_id)
+        expected = {key: value for key, value in request.items() if key != "priority"}
+        if (result.get("admission_request") != expected or result["priority"] != request.get("priority", 50)):
+            raise MoltbookError("moltbook_original_admission_request_conflict")
+        return result
 
     async def retain_cooldown(self, db, owner, run, value, exc, lease):
         if not isinstance(exc, MoltbookError) or exc.code != "moltbook_rate_limited": return
@@ -371,7 +390,8 @@ class MoltbookService:
         async with engine.get_session() as db:
             await root_current(db, owner.principal_id, owner.session_id)
             run = await self.jobs._fetch(db, job_id)
-            if run.owner_principal_id != owner.principal_id or run.operator_session_id != owner.session_id or run.job_kind != JOB_KIND:
+            if (run.owner_principal_id != owner.principal_id or run.operator_session_id != owner.session_id
+                or run.job_kind != JOB_KIND or run.capability_version != "1"):
                 raise MoltbookError("moltbook_job_owner_mismatch", status_code=404)
             from src.workflows.job_runtime import _serialize
             result = _serialize(run)
@@ -400,7 +420,7 @@ class MoltbookService:
         # Private input/Vault readback is staged after the SQL read session.
         # It can expose only the canonical original draft, never credentials or
         # verification codes. Historical metadata remains inspectable on drift.
-        if authority["operation"] in WRITES:
+        if authority["operation"] in READS | WRITES:
             try:
                 if preview_key is None: raise MoltbookError("moltbook_original_credential_changed")
                 credential = await vault_repository.snapshot(preview_key, owner_principal_id=owner.principal_id)
@@ -409,13 +429,14 @@ class MoltbookService:
                 if (truncated or digest(payload) != authority["payload_digest"] or credential is None
                     or credential.binding_digest != authority["vault_binding_digest"] or credential.value in canonical(payload).decode()):
                     raise MoltbookError("moltbook_original_draft_unavailable")
-                result["draft"] = {"operation": payload["operation"], "fields": payload["fields"],
-                    "review": payload["review"], "payload_digest": authority["payload_digest"]}
                 result["admission_request"] = {"operation": payload["operation"], "fields": payload["fields"],
                     "request_key": result["idempotency"]["key"], "goal_id": result["goal_id"],
-                    "goal_revision": result["goal_revision"], "expected_revision": authority["connection_revision"],
-                    "community_job_id": payload["review"]["job_id"], "community_digest": payload["review"]["artifact_digest"],
-                    "introductions_allowed": True, "public_only": True}
+                    "goal_revision": result["goal_revision"], "expected_revision": authority["connection_revision"]}
+                if authority["operation"] in WRITES:
+                    result["draft"] = {"operation": payload["operation"], "fields": payload["fields"],
+                        "review": payload["review"], "payload_digest": authority["payload_digest"]}
+                    result["admission_request"].update(community_job_id=payload["review"]["job_id"],
+                        community_digest=payload["review"]["artifact_digest"], introductions_allowed=True, public_only=True)
                 if value.get("answer_vault_key"):
                     answer = await vault_repository.snapshot(value["answer_vault_key"], owner_principal_id=owner.principal_id)
                     if answer and answer.binding_digest == value.get("answer_binding"):

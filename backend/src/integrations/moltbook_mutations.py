@@ -70,13 +70,19 @@ async def prepare_write(service, owner, *, operation, fields, request_key, goal_
     if operation not in WRITES or introductions_allowed is not True or public_only is not True:
         raise MoltbookError("moltbook_exact_public_write_review_required", status_code=422)
     route(operation, fields)
+    replay = await service.replayed_admission(owner, {"operation": operation, "fields": fields,
+        "request_key": request_key, "goal_id": goal_id, "goal_revision": goal_revision,
+        "expected_revision": expected_revision, "community_job_id": community_job_id,
+        "community_digest": community_digest, "introductions_allowed": introductions_allowed,
+        "public_only": public_only, "priority": priority})
+    if replay is not None: return replay
     community = fields.get("community", "introductions")
     review = await reviewed_community(service, owner, job_id=community_job_id, expected_digest=community_digest,
         community=community, goal_id=goal_id, goal_revision=goal_revision, revision=expected_revision)
     review.update(introductions_allowed=True, public_only=True)
     admitted = await service._prepare(owner, operation=operation, fields=fields, request_key=request_key,
         goal_id=goal_id, goal_revision=goal_revision, expected_revision=expected_revision, priority=priority, review=review)
-    if admitted["status"] != "accepted": return admitted
+    if admitted["status"] != "accepted": return await service.snapshot(owner, admitted["job_id"])
     job_id = admitted["job_id"]
     queued = await service.jobs.queue_job(job_id, expected_revision=admitted["revision"])
     runner = "moltbook-prepare:" + uuid.uuid4().hex

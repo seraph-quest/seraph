@@ -13,7 +13,7 @@ from tests.test_inference_accounting import accounting_db
 from tests.moltbook_requests import execute, execution_body
 from config.settings import settings
 from src.auth.middleware import OperatorAuthMiddleware
-from src.db.models import ApprovalRequest, Goal, WorkflowRunState
+from src.db.models import ApprovalRequest, Goal, WorkflowRunState, MoltbookConnection
 from src.integrations.moltbook import MoltbookAdapter
 from src.integrations.moltbook_controls import MoltbookService
 from src.vault.repository import vault_repository
@@ -104,7 +104,7 @@ async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db
         async def read(operation, fields, key):
             prepared = await client.post("/api/capabilities/moltbook/reads", json={"operation": operation, "fields": fields,
                 "request_key": key, "goal_id": goal_id, "goal_revision": 1, "expected_revision": 2})
-            assert prepared.status_code == 200, prepared.text
+            assert prepared.status_code == 200 and prepared.json()["no_learning"] is True, prepared.text
             result = await execute(client, prepared.json()['job_id'])
             assert result.status_code == 200 and result.json()["status"] == "succeeded", result.text
             return result.json()
@@ -138,6 +138,12 @@ async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db
             return
         assert prepared.status_code == 200, prepared.text
         original = prepared.json(); job_id = original["job_id"]
+        replay = await client.post("/api/capabilities/moltbook/writes", json=json.loads(prepared.request.content))
+        assert replay.status_code == 200, replay.text
+        assert replay.json()["job_id"] == job_id and replay.json()["no_learning"] is True
+        assert replay.json()["draft"]["fields"] == fields and replay.json()["approval"]["status"] == "pending"
+        assert replay.json()["deadline_at"] == original["deadline_at"] and replay.json()["attempt_count"] == 1
+        assert len(requests) == before
         assert original["status"] == "paused" and original["attempt_count"] == 1
         assert len(requests) == before
         def checkpoint(value): return next(p["payload"] for p in value["checkpoints"] if p["checkpoint_id"] == "moltbook:state")
@@ -218,5 +224,33 @@ async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db
             await db_engine.dispose()
             assert (await execute(client, job_id)).json()["status"] == "succeeded"
             assert len(requests) == count
+        if mode == "post":
+            async with factory.accounting_sessions() as db:
+                row = (await db.execute(select(MoltbookConnection).where(MoltbookConnection.owner_principal_id == principal))).scalar_one()
+                consent_data = json.loads(row.consent_json)
+                consent_data["expires_at"] = (datetime.now(timezone.utc)-timedelta(seconds=1)).isoformat()
+                row.consent_json=json.dumps(consent_data);db.add(row)
+                old_community = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == community["job_id"]))).scalar_one()
+                old_community.finished_at=datetime.now(timezone.utc)-timedelta(minutes=6);db.add(old_community)
+            await db_engine.dispose()
+            request_body=json.loads(prepared.request.content);count=len(requests)
+            historical=await client.post("/api/capabilities/moltbook/writes",json=request_body)
+            assert historical.status_code==200 and historical.json()["status"]=="succeeded",historical.text
+            assert historical.json()["draft"]["fields"]==fields and historical.json()["deadline_at"]==final["deadline_at"]
+            assert historical.json()["attempt_count"]==1 and len(requests)==count
+            for changed in ({"fields":{**fields,"content":"Different original body"}}, {"priority":49}, {"goal_id":"different-goal"}, {"community_digest":"0"*64}):
+                mismatch=await client.post("/api/capabilities/moltbook/writes",json={**request_body,**changed})
+                assert mismatch.status_code==409 and len(requests)==count,mismatch.text
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url="http://test",headers={"origin":"http://localhost:3001"}) as other:
+                signed=await other.post("/api/auth/login",json={"password":"moltbook-mutation-private-root","start_new_scope":True})
+                assert signed.status_code==200 and signed.json()["principal_id"]!=principal
+                refused=await other.post("/api/capabilities/moltbook/writes",json=request_body)
+                assert refused.status_code==404 and len(requests)==count,refused.text
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url="http://test",headers={"origin":"http://localhost:3001"},cookies=client.cookies) as other_root:
+                signed=await other_root.post("/api/auth/login",json={"password":"moltbook-mutation-private-root"})
+                assert signed.status_code==200
+                assert signed.json()["session_id"]!=historical.json()["operator_session_id"]
+                refused=await other_root.post("/api/capabilities/moltbook/writes",json=request_body)
+                assert refused.status_code==404 and len(requests)==count,refused.text
         assert sum(method == "POST" and path in {"/api/v1/posts", "/api/v1/posts/target-post/comments"} for method,path,_ in requests) == 1
         assert sum(path == "/api/v1/verify" for _,path,_ in requests) == 1

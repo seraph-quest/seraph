@@ -17,6 +17,7 @@ export interface MoltbookJob {
   approval?: { id: string; status: string; scope_digest: string }; manual_answer?: string;
   approvals?: { id: string; status: string; scope_digest: string }[];
   admission_request?: Record<string, unknown>;
+  finished_at?: string | null;
 }
 export interface MoltbookPending { method: "PUT" | "POST"; path: string; body: Record<string, unknown> }
 const bytes = (raw: string) => new TextEncoder().encode(raw).length;
@@ -90,6 +91,17 @@ export function clearMoltbookPending(key: string) {
   sessionStorage.removeItem(key);
   if (sessionStorage.getItem(key) !== null) throw Error("Confirmed request could not be cleared");
 }
+export function readMoltbookLastJob(key: string): string | null {
+  const value = sessionStorage.getItem(key.replace("seraph.moltbook.v1:", "seraph.moltbook.job.v1:"));
+  if (value !== null && !/^moltbook:[a-f0-9]{40}$/.test(value)) throw Error("Original Moltbook job reference corrupt");
+  return value;
+}
+function retainMoltbookLastJob(key: string, value: string) {
+  if (!/^moltbook:[a-f0-9]{40}$/.test(value)) throw Error("Original Moltbook job reference invalid");
+  const reference = key.replace("seraph.moltbook.v1:", "seraph.moltbook.job.v1:");
+  sessionStorage.setItem(reference, value);
+  if (readMoltbookLastJob(key) !== value) throw Error("Original Moltbook job reference unavailable");
+}
 export async function moltbookRequest(path: string, init: RequestInit = {}, signal?: AbortSignal): Promise<unknown> {
   const response = await apiFetch(API_URL + MOLTBOOK_PATH + path, { ...init, signal });
   if (!response.ok) {
@@ -113,6 +125,7 @@ export async function submitMoltbook(key: string, pending: MoltbookPending, sign
       if (value.approval_id !== pending.body.approval_id || value.status !== pending.body.decision) throw Error("Exact approval receipt mismatch");
     } else if (pending.path !== `/jobs/${value.job_id}/${action}`) throw Error("Original job receipt mismatch");
   }
+  if (typeof value.job_id === "string") retainMoltbookLastJob(key, value.job_id);
   clearMoltbookPending(key);
   return value;
 }

@@ -33,6 +33,7 @@ export function githubCapacityClosure(value: unknown): GitHubCapacityClosure | n
 export function githubCapacityClosePending(scope: string, candidate: Record<string, unknown>) {
   const key = `seraph:github-capacity-close:v1:${scope}`;
   const existing = sessionStorage.getItem(key);
+  if (existing !== null && existing.length > 2048) throw new Error("Retained capacity-close request exceeds its finite bound");
   const body: unknown = existing === null ? candidate : JSON.parse(existing);
   if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Invalid retained capacity-close request");
   const row = body as Record<string, unknown>;

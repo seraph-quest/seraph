@@ -373,11 +373,16 @@ describe("OutcomeCockpitPanel", () => {
     const close = vi.fn(); const check = vi.fn();
     const github = { state: "partial_metadata" as const, repository: "acme/example", action: "create_issue" as const,
       jobId: "job-a", jobRevision: 12, previewBody: "Exact retained text", recoveryReason: "unknown_external_effect" };
-    const view = renderFixture({}, { githubFollowthrough: github, onCloseGitHubCapacity: close, onReconcileGitHubFollowthrough: check });
+    const view = renderFixture({}, { githubFollowthrough: github, githubCapacityAcknowledgmentScope: "owner:root-a", onCloseGitHubCapacity: close, onReconcileGitHubFollowthrough: check });
     expect(screen.getByRole("button", { name: "Close GitHub capacity" })).toBeDisabled();
     fireEvent.click(screen.getByLabelText(/I authorize separate capacity closure/));
     fireEvent.click(screen.getByRole("button", { name: "Close GitHub capacity" }));
     expect(close).toHaveBeenCalledExactlyOnceWith(true); expect(check).not.toHaveBeenCalled();
+    view.rerender(<OutcomeCockpitPanel {...fixtureModel()} githubFollowthrough={github} githubCapacityAcknowledgmentScope="owner:root-b" onCloseGitHubCapacity={close} />);
+    expect(screen.getByLabelText(/I authorize separate capacity closure/)).not.toBeChecked();
+    expect(screen.getByRole("button", { name: "Close GitHub capacity" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Close GitHub capacity" }));
+    expect(close).toHaveBeenCalledTimes(1);
     view.unmount();
     renderFixture({}, { githubFollowthrough: { ...github, capacityClosure: {
       closure_id: "close-a", artifact_id: "artifact-a", artifact_sha256: "a".repeat(64),

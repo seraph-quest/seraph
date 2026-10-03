@@ -31,6 +31,15 @@ describe("finite GitHub capacity closure", () => {
       expect(() => githubCapacityClosePending("invalid", value)).toThrow();
     }
   });
+  it("rejects oversized retained bytes before parsing or replacing them", () => {
+    sessionStorage.clear();
+    const key = "seraph:github-capacity-close:v1:oversized";
+    const original = "{" + "a".repeat(2048);
+    sessionStorage.setItem(key, original);
+    expect(() => githubCapacityClosePending("oversized", body)).toThrow(/finite bound/);
+    expect(sessionStorage.getItem(key)).toBe(original);
+    sessionStorage.clear();
+  });
   it("projects only the durable closed identity without changing effect truth", () => {
     expect(githubCapacityClosure(null)).toBeNull();
     expect(() => githubCapacityClosure({ observation_only: true })).toThrow();

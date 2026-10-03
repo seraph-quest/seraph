@@ -16976,6 +16976,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 onExecuteGitHubFollowthrough={() => void executeGitHubFollowthrough()}
                 onCancelGitHubFollowthrough={() => void cancelGitHubFollowthrough()}
                 onReconcileGitHubFollowthrough={() => void reconcileGitHubFollowthrough()}
+                githubCapacityAcknowledgmentScope={operatorAuth.status === "authenticated" ? capacityScope : null}
                 onCloseGitHubCapacity={acknowledged => { void closeGitHubCapacity(acknowledged); }}
                 onOpenPriorities={() => setQuestPanelOpen(true)}
                 onLoadWork={() => void loadWorkflowRuns()}

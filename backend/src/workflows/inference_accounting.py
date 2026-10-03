@@ -36,6 +36,32 @@ class InferenceAccountingError(RuntimeError):
         super().__init__(code)
 
 
+_CONTACT_DENIAL_SEAL = object()
+
+
+class InferenceProviderContactDenied(InferenceAccountingError):
+    """A sealed committed writer result, subsequently bound to its broker handle."""
+
+    def __init__(self, code, *, _seal=None, _binding=None, _witness=None):
+        super().__init__(code)
+        self._seal = _seal
+        self._binding = _binding
+        self._witness = _witness
+        self._broker_request = None
+
+    def bind_broker_handle(self, handle):
+        expected = (handle.request.operation_id, handle.job_id, handle.request.owner_id,
+            handle.request.data_digest, handle.policy_digest, handle.owner, handle.fence)
+        if (self._seal is _CONTACT_DENIAL_SEAL and self._binding == expected
+            and isinstance(self._witness, dict) and self._witness.get("ledger_digest")):
+            self._broker_request = handle.request
+
+
+def proven_contact_denial_for_request(error, request) -> bool:
+    return (isinstance(error, InferenceProviderContactDenied)
+        and error._seal is _CONTACT_DENIAL_SEAL and error._broker_request is request)
+
+
 def integer_amount(value: object, *, positive: bool = False) -> int:
     if type(value) is not int or not (1 if positive else 0) <= value <= 1_000_000_000:
         raise InferenceAccountingError("accounting_amount_invalid")
@@ -86,6 +112,14 @@ def period_id(now: datetime) -> str:
 
 def _operation_payload(row: InferenceCostReservation) -> dict[str, object]:
     return row.model_dump(mode="json")
+
+
+def _provider_contact_denied(row: InferenceCostReservation) -> bool:
+    """A committed denial retains its original, never-contacted allowance."""
+    return (row.state == "reserved" and row.contact_started_at is None
+        and row.recovery_reason == "provider_contact_denied"
+        and any(item.get("kind") == "provider_contact_denied"
+            for item in json.loads(row.evidence_json)))
 
 
 def _operator_operation(row: InferenceCostReservation) -> dict[str, object]:
@@ -177,6 +211,21 @@ class InferenceAccountingRepositoryMixin:
                     if run.status != "running" or (run.lease_expires_at is not None and _utc(run.lease_expires_at) > observed):
                         continue
                     never_contacted = row.state == "reserved"
+                    if _provider_contact_denied(row):
+                        # Broker teardown/restart cannot forgive a committed
+                        # denial or turn it into a fresh provider opportunity.
+                        run.status = "blocked"
+                        run.failure_reason = "provider_contact_denied"
+                        run.lease_owner = None
+                        run.lease_expires_at = None
+                        run.fencing_token += 1
+                        run.revision += 1
+                        run.updated_at = observed.replace(tzinfo=None)
+                        db.add(run)
+                        changed = True
+                        recovered.append({"job_id": row.job_id, "operation_id": row.operation_id,
+                            "status": "blocked", "reason": "provider_contact_denied"})
+                        continue
                     # No closure or provider payload is retained by an
                     # ephemeral chat/probe/embedding job. Its owner must start
                     # a fresh bounded operation explicitly.
@@ -414,6 +463,10 @@ class InferenceAccountingRepositoryMixin:
 
     async def contact_inference_provider(self, operation_id: str, *, owner: str,
                                          fencing_token: int, policy_digest: str) -> dict[str, object]:
+        denial = None
+        result = None
+        denial_binding = None
+        denial_witness = None
         async with self._session() as db:
             await self._accounting_begin(db)
             account, rows = await self._accounting_rows(db)
@@ -434,16 +487,59 @@ class InferenceAccountingRepositoryMixin:
                 now = datetime.now(timezone.utc).replace(tzinfo=None)
                 if run.status != "running" or row.job_fencing_token != fencing_token or _utc(row.deadline_at) <= _utc(now):
                     raise InferenceAccountingError("accounting_contact_fence_invalid")
-                row.state = "contact_started"
-                row.contact_started_at = now
-                row.updated_at = now
-                row.revision += 1
-                history = json.loads(row.evidence_json)
-                history.append({"kind": "provider_contact_started", "fencing_token": fencing_token, "recorded_at": now.isoformat()})
-                row.evidence_json = _json(history)
-                db.add(row)
-                await self._persist_accounting_witness(db, workspace, account, rows)
-                return _operation_payload(row)
+                # Reservations can predate another call's actual settlement.
+                # Recheck the canonical ledger under this SAME writer and
+                # witness lock before recording contact, including prefunding.
+                from src.model_fabric.effective_policy import current_inference_policy
+                from src.workspace.accounting_witness import period_state, unreviewed_overruns
+                try:
+                    configured, current_digest = current_inference_policy()
+                except PermissionError:
+                    configured, current_digest = None, None
+                owner_data = account.model_dump(mode="json")
+                operations = [_operation_payload(item) for item in rows]
+                period = period_id(_utc(now))
+                period_status = period_state(owner_data, operations, period)
+                def held(item):
+                    return item.bound_microusd if item.state in {"reserved", "contact_started", "unknown"} else (
+                        (item.actual_cost_microusd or 0) if item.state == "settled" and item.period_id >= period else 0)
+                denial = ("provider_contact_denied" if _provider_contact_denied(row)
+                    else "provider_policy_revision_changed" if current_digest != policy_digest
+                    else "accounting_settings_revision_unavailable" if (
+                        account.ceiling_microusd != configured.openrouter_setup.spend_ceiling_microusd
+                        or row.settings_revision != account.settings_revision)
+                    else period_status["reason_code"]
+                    or ("provider_charge_exceeded_reservation" if unreviewed_overruns(owner_data, operations) else None)
+                    or ("deployment_cost_budget_exhausted" if sum(held(item) for item in rows) > account.ceiling_microusd else None)
+                    or ("owner_cost_budget_exhausted" if row.owner_ceiling_microusd is not None
+                        and sum(held(item) for item in rows if item.owner_id == row.owner_id) > row.owner_ceiling_microusd else None))
+                if not _provider_contact_denied(row):
+                    history = json.loads(row.evidence_json)
+                    if denial:
+                        row.recovery_reason = "provider_contact_denied"
+                        history.append({"kind": "provider_contact_denied", "reason": denial,
+                            "accounting_revision": account.revision, "fencing_token": fencing_token,
+                            "never_contacted": True, "recorded_at": now.isoformat(), "memory_status": "no_learning"})
+                    else:
+                        row.state = "contact_started"
+                        row.contact_started_at = now
+                        history.append({"kind": "provider_contact_started", "fencing_token": fencing_token, "recorded_at": now.isoformat()})
+                    row.updated_at = now
+                    row.revision += 1
+                    row.evidence_json = _json(history)
+                    db.add(row)
+                    await self._persist_accounting_witness(db, workspace, account, rows)
+                result = _operation_payload(row)
+                if denial:
+                    denial_binding = (row.operation_id, row.job_id, row.owner_id,
+                        row.payload_digest, row.policy_digest, owner, fencing_token)
+                    denial_witness = _witness(account)
+        # Raising inside the session would roll back the durable denial while
+        # its external witness had already advanced. Commit before reporting it.
+        if denial:
+            raise InferenceProviderContactDenied(denial, _seal=_CONTACT_DENIAL_SEAL,
+                _binding=denial_binding, _witness=denial_witness)
+        return result
 
     async def settle_inference_cost(self, operation_id: str, *, payload: object = None,
                                     actual_cost_microusd: int | None = None,
@@ -480,6 +576,10 @@ class InferenceAccountingRepositoryMixin:
                 if row.state in {"settled", "released"}:
                     if row.actual_cost_microusd != actual and actual is not None:
                         raise InferenceAccountingError("accounting_settlement_conflict")
+                    return _operation_payload(row)
+                if _provider_contact_denied(row) and actual is None:
+                    # The broker's finally path must read the canonical held
+                    # denial, not infer release from its transient contacted flag.
                     return _operation_payload(row)
                 if row.state == "reserved":
                     # Only callback-never-started cancellation/expiry releases.

@@ -174,8 +174,13 @@ class DurableInferenceBrokerMixin:
         configured, digest = current_inference_policy()
         if digest != handle.policy_digest:
             raise InferenceAccountingError("provider_policy_revision_changed")
-        await handle.repository.contact_inference_provider(handle.request.operation_id,
-            owner=handle.owner, fencing_token=handle.fence, policy_digest=digest)
+        from src.workflows.inference_accounting import InferenceProviderContactDenied
+        try:
+            await handle.repository.contact_inference_provider(handle.request.operation_id,
+                owner=handle.owner, fencing_token=handle.fence, policy_digest=digest)
+        except InferenceProviderContactDenied as error:
+            error.bind_broker_handle(handle)
+            raise
         handle.contacted = True
         # Recheck after the durable transaction's await, before invoking the
         # callback. Individual HTTP adapters check again at their final post.

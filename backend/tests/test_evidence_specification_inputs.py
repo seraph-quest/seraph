@@ -83,3 +83,37 @@ async def test_prepared_exact_input_handoff_preserves_original_and_rolls_back_at
             json.dump({'boundary':__doc__,'change':change,'task_revision':task.task_revision,
                 'old_artifact_id':old.artifact_id,'old_state':old.state,'new_artifact_id':new.artifact_id,
                 'new_state':new.state,'no_learning':True},f,indent=2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('async_db',['file'],indirect=True)
+@pytest.mark.parametrize('change',['pending','consumed','foreign-task'])
+async def test_authority_preview_resolves_only_exact_prepared_input(async_db,tmp_path,monkeypatch,change):
+    from src.work_board.triage import _proposal_task_authority_summary
+    from src.work_board.dispatcher import _dispatcher, REGISTERED_CAPABILITIES, registered_executor_id
+    tmp_path.chmod(0o700)
+    monkeypatch.setattr(settings,'workspace_dir',str(tmp_path))
+    monkeypatch.setattr(WorkBoardRepository,'_safe_text',AsyncMock(side_effect=lambda value,**kw:value))
+    async with async_db() as db:
+        owner,task,*_=await canonical_fact(db)
+        artifact=await prepare_input_artifact(db,owner,WorkBoardInputArtifactCreate(schema_version=1,
+            capability_id=task.capability_id,goal_id=task.goal_id,goal_revision=task.goal_revision,
+            input=_input(),idempotency_key='preview-exact-input'))
+        row=await db.get(WorkBoardInputArtifact,artifact.artifact_id)
+        if change=='consumed':row.state='consumed'
+        elif change=='foreign-task':row.bound_task_id='another-task'
+        await db.commit()
+        inspected=[]
+        async def inspect(candidate):
+            inspected.append(candidate.input_artifact_id)
+            assert candidate.input_artifact_id==artifact.artifact_id
+            return None,None
+        # This assertion isolates preview binding; it does not claim readiness.
+        monkeypatch.setattr(_dispatcher,'_current_readiness',inspect)
+        monkeypatch.setattr(_dispatcher,'_effective_runtime',AsyncMock(return_value=120))
+        summary=await _proposal_task_authority_summary(task,{'task_id':'reviewed-target',
+            'capability_id':task.capability_id,'capability_version':REGISTERED_CAPABILITIES[task.capability_id].version,
+            'executor_id':registered_executor_id(task.capability_id),
+            'typed_input_ref':artifact.typed_input_ref,'typed_input_digest':artifact.typed_input_digest})
+        assert ('Current provider-free preflight: READY' in summary)==(change=='pending')
+        assert inspected==([artifact.artifact_id] if change=='pending' else [])

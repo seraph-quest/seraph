@@ -366,7 +366,33 @@ async def _proposal_task_authority_summary(
         status=WorkBoardStatus.todo,
     )
     try:
+        # Fixed typed consumers preview the exact server-prepared input that
+        # acceptance will bind. A model reference alone is never input authority.
+        from src.memory.evidence_dependencies import CONSUMERS
+        if capability_id in CONSUMERS:
+            from src.work_board.input_artifacts import resolve_input_artifact_for_copy
+            unchanged = (capability_id, candidate.typed_input_ref, candidate.typed_input_digest) == (
+                parent.capability_id, parent.typed_input_ref, parent.typed_input_digest)
+            if unchanged and parent.input_artifact_id:
+                candidate.task_id = parent.task_id
+                candidate.input_artifact_id = parent.input_artifact_id
+            else:
+                async with get_session() as input_db:
+                    resolved = await resolve_input_artifact_for_copy(input_db,
+                        WorkBoardOwner(principal_id=parent.owner_principal_id,
+                            session_id=parent.owner_session_id),
+                        typed_input_ref=candidate.typed_input_ref,
+                        typed_input_digest=candidate.typed_input_digest,
+                        capability_id=capability_id, goal_id=parent.goal_id,
+                        goal_revision=parent.goal_revision)
+                    if resolved.row.state != "pending" or resolved.row.bound_task_id is not None:
+                        raise BoardError("specification_input_stale", "The prepared input is no longer pending", status_code=409)
+                    candidate.input_artifact_id = resolved.row.artifact_id
         readiness_code, _readiness_reason = await _dispatcher._current_readiness(candidate)
+        runtime_seconds = await _dispatcher._effective_runtime(candidate)
+    except BoardError as exc:
+        readiness_code = exc.code
+        _readiness_reason = "The exact prepared input is unavailable"
         runtime_seconds = await _dispatcher._effective_runtime(candidate)
     except Exception:
         # A preflight outage is shown as unavailable and the cockpit disables

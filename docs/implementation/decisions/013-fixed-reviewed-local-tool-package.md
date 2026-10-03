@@ -105,4 +105,3 @@ prerequisites.
 - https://raw.githubusercontent.com/containers/bubblewrap/v0.12.0/README.md — bubblewrap constructs namespaces; the caller owns policy. No blanket containment claim follows from its version.
 - https://docs.kernel.org/userspace-api/seccomp_filter.html — seccomp/no_new_privs syscall boundary; seccomp alone is not a sandbox.
 - https://docs.python.org/3.12/library/resource.html — platform-dependent process resource limits; no claim these apply to macOS identically.
-

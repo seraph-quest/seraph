@@ -13,6 +13,8 @@ from src.workflows.research_accounting import payload_checkpoint
 async def _current(jobs, db, parent_id):
     from src.workflows.job_runtime import _assert_canonical_goal_fence, DurableJobLeaseError
     parent = await jobs._fetch(db, parent_id)
+    from src.workflows.research_guard import assert_research_operator_session
+    await assert_research_operator_session(db, parent, now=datetime.now(timezone.utc))
     attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.workflow_run_id == parent_id))
     task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == attempt.task_id)) if attempt else None
     if (parent.job_kind != PARENT_KIND or parent.capability_version != "1" or task is None

@@ -5,8 +5,19 @@ import json
 from sqlalchemy import and_, false, func, or_, select
 from sqlalchemy.orm import aliased
 
-from src.db.models import WorkBoardAttempt, WorkBoardStatus, WorkBoardTask, WorkflowRunState
+from src.db.models import OperatorSession, WorkBoardAttempt, WorkBoardStatus, WorkBoardTask, WorkflowRunState
 from src.work_board.research_contracts import CHILD_KIND, PARENT_CAPABILITY, PARENT_KIND, WAIT_CHILDREN, WAIT_SOURCES
+
+
+async def assert_research_operator_session(db, run, *, now):
+    """Pure exact owner-Root predicate inside the current native writer."""
+    from src.workflows.job_runtime import DurableJobLeaseError
+    if run.operator_session_id != run.session_id or await db.scalar(select(OperatorSession.id).where(
+        OperatorSession.id == run.operator_session_id, OperatorSession.principal_id == run.owner_principal_id,
+        OperatorSession.revoked_at.is_(None), OperatorSession.replaced_by_id.is_(None),
+        OperatorSession.is_bearer_tombstone.is_(False), OperatorSession.idle_expires_at > now,
+        OperatorSession.absolute_expires_at > now)) is None:
+        raise DurableJobLeaseError("research original operator Root session is inactive")
 
 
 def append_research_parent_gate(conditions, run, *, now):
@@ -29,6 +40,12 @@ def append_research_parent_gate(conditions, run, *, now):
         conditions.append(false())
         return True
     parent, task, attempt = aliased(WorkflowRunState), aliased(WorkBoardTask), aliased(WorkBoardAttempt)
+    original_session = select(OperatorSession.id).where(
+        OperatorSession.id == parent.operator_session_id,
+        OperatorSession.principal_id == parent.owner_principal_id,
+        OperatorSession.revoked_at.is_(None), OperatorSession.replaced_by_id.is_(None),
+        OperatorSession.is_bearer_tombstone.is_(False),
+        OperatorSession.idle_expires_at > now, OperatorSession.absolute_expires_at > now).exists()
     checkpoints = func.json_each(parent.checkpoint_receipts_json).table_valued("key", "value").alias()
     creation = select(checkpoints.c.key).where(
         func.json_extract(checkpoints.c.value, "$.checkpoint_id") == "research:creation",
@@ -59,11 +76,14 @@ def append_research_parent_gate(conditions, run, *, now):
             parent.capability_version == "1", parent.parent_job_id.is_(None), parent.branch_depth == 0,
             parent.owner_kind == "user", parent.owner_principal_id == run.owner_principal_id,
             parent.session_id == run.session_id, parent.operator_session_id == run.operator_session_id,
+            parent.operator_session_id == parent.session_id, original_session,
             parent.root_run_identity == run.root_run_identity,
             parent.goal_id == run.goal_id, parent.goal_revision == run.goal_revision,
             parent.deadline_at > now,
             task.capability_id == PARENT_CAPABILITY, task.goal_id == run.goal_id, task.goal_revision == run.goal_revision,
             task.owner_principal_id == run.owner_principal_id, task.owner_session_id == run.session_id,
+            task.typed_input_digest == func.json_extract(parent.declared_authority_json, "$.typed_input_digest"),
+            task.input_artifact_id == func.json_extract(parent.declared_authority_json, "$.input_artifact_id"),
             attempt.workflow_run_id == parent.run_identity,
             attempt.ended_at.is_(None), attempt.cancel_requested_at.is_(None), creation, current_phase).exists())
     return True

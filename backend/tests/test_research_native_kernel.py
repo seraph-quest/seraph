@@ -21,6 +21,15 @@ from src.workflows.research_accounting import fund_fixed_group
 from src.workflows.research_waits import pause_parent, resume_parent
 
 
+@pytest.fixture(autouse=True)
+def configured_real_auth(monkeypatch):
+    from config.settings import settings
+    monkeypatch.setattr(settings,"operator_auth_secret","research-kernel-private-test-secret")
+    monkeypatch.setattr(settings,"operator_auth_secret_hash","")
+    monkeypatch.setattr(settings,"operator_auth_idle_seconds",300)
+    monkeypatch.setattr(settings,"operator_auth_absolute_seconds",3600)
+
+
 def inputs():
     return {"schema_version":1,"question":"What does this source establish?",
         "perspectives":[{"instruction":"Summarize evidence", "source_slots":[0]},
@@ -34,11 +43,13 @@ async def create_kernel(accounting_db):
     setup_configuration()
     jobs=DurableJobRepository()
     await jobs.configure_inference_accounting(1000)
+    from src.auth.service import create_session
+    _private_token, operator = await create_session()
     now=datetime.now(timezone.utc)
     # Explicit focused Board-row fixture. Production authentication, artifact
     # preparation and API admission are still required by milestone acceptance.
-    task=WorkBoardTask(task_id="research-task",owner_principal_id="operator:test-bypass",
-        owner_session_id="test-auth-bypass",goal_id="research-goal",goal_revision=1,
+    task=WorkBoardTask(task_id="research-task",owner_principal_id=operator.principal.principal_id,
+        owner_session_id=operator.session_id,goal_id="research-goal",goal_revision=1,
         capability_id=PARENT_CAPABILITY,status=WorkBoardStatus.running,
         idempotency_key="kernel-task",idempotency_binding="kernel-binding",
         input_artifact_id="kernel-input",typed_input_ref="artifacts/work-board/kernel-input.json",
@@ -132,3 +143,35 @@ def test_literal_injection_invalid_citations_and_multibyte_bounds():
         ResearchDossierInput.model_validate({**inputs(),"question":"🙂"*1024})
     with pytest.raises(ValueError):
         verified_child(json_bytes({**json.loads(raw),"tools":["shell"]}),[source])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["expired", "revoked", "same_principal_different_session"])
+async def test_original_operator_root_session_is_required_before_child_effect(accounting_db, change):
+    from src.auth.service import authenticate_principal, AuthFailure
+    from src.db.models import OperatorSession
+    jobs,task,_attempt,spec,_parent,creation=await create_kernel(accounting_db)
+    await pause_parent(jobs,parent_id=spec.identity.job_id,owner="research-kernel",job_fence=1,
+        board_fence=1,board_revision=1,reason=WAIT_SOURCES)
+    now=datetime.now(timezone.utc).replace(tzinfo=None)
+    async with accounting_db[2].accounting_sessions() as db:
+        session=await db.get(OperatorSession,task.owner_session_id)
+        if change == "expired":
+            session.idle_expires_at=now-timedelta(seconds=1)
+        elif change == "revoked":
+            session.revoked_at=now
+        else:
+            # The same principal is still active, but its original exact
+            # session ID is absent. Principal lookup alone is insufficient.
+            session.id="different-active-session"
+        db.add(session)
+    if change == "same_principal_different_session":
+        assert (await authenticate_principal(task.owner_principal_id)).principal.principal_id==task.owner_principal_id
+    with pytest.raises(DurableJobLeaseError):
+        await jobs.queue_job(creation["child_ids"][0])
+    child=await jobs.get_job(creation["child_ids"][0])
+    assert child["status"]=="accepted" and child["effects"]==[] and child["artifacts"]==[]
+    with pytest.raises((AuthFailure,ValueError)):
+        from src.workflows.research_sources import current_inputs
+        await current_inputs(jobs,spec.identity.job_id)
+    assert (await jobs.inference_accounting_snapshot())["operations"]==[]

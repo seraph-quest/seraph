@@ -16,7 +16,7 @@ from src.workflows.research_native import checkpoint
 
 
 async def current_inputs(jobs, parent_id):
-    from src.auth.service import authenticate_principal
+    from src.auth.service import authenticate_principal, authenticate_session
     from src.model_fabric.effective_policy import current_inference_policy
     from src.work_board.input_artifacts import resolve_input_artifact_for_task
     from src.work_board.pipelines import root_binding
@@ -25,6 +25,9 @@ async def current_inputs(jobs, parent_id):
     async with jobs._session() as db:
         parent = await jobs._fetch(db, parent_id)
         authority = json.loads(parent.declared_authority_json)
+        operator = await authenticate_session(parent.operator_session_id, touch=False)
+        if operator.principal.principal_id != parent.owner_principal_id or operator.session_id != parent.session_id:
+            raise ValueError("research requires its exact original active operator Root session")
         await authenticate_principal(parent.owner_principal_id, db=db)
         await _assert_canonical_goal_fence(db, goal_id=parent.goal_id, goal_revision=parent.goal_revision,
             owner_kind=parent.owner_kind, owner_principal_id=parent.owner_principal_id,

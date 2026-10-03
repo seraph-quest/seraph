@@ -31,6 +31,8 @@ async def create_fixed_children(jobs, *, parent_id, runtime_owner, runtime_fence
         await db.execute(text("BEGIN IMMEDIATE"))
         parent = await jobs._fetch(db, parent_id)
         jobs._assert_lease(parent, owner=runtime_owner, fencing_token=runtime_fence)
+        from src.workflows.research_guard import assert_research_operator_session
+        await assert_research_operator_session(db, parent, now=now)
         task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id))
         attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.attempt_id == attempt_id))
         if (parent.job_kind != PARENT_KIND or parent.status != "running" or parent.branch_depth != 0

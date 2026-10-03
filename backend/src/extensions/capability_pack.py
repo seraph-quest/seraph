@@ -185,6 +185,8 @@ def _assert_local_execution_target(pack_id: str) -> None:
 
     if str(pack_id).startswith(_ROUTINE_PACK_ID_PREFIX):
         raise CapabilityPackLifecycleError(_ROUTINE_LOCAL_EXECUTION_BLOCKED)
+    if str(pack_id) == "seraph.tool.json-format":
+        raise CapabilityPackLifecycleError("json_format_requires_isolated_native_job")
 
 
 def _normalize_strings(values: Iterable[Any] | None, *, field_name: str) -> list[str]:

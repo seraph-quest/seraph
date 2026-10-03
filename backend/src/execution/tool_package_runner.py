@@ -99,7 +99,13 @@ async def execute(stage: Path, request: dict, *, before_dispatch):
                         or identity.get("supervisor_start") != pid_start):
                         raise ToolPackageBlocked("tool_package_process_identity_changed")
                     try:
-                        await before_dispatch(identity)
+                        remaining = request["deadline_at"]-time.time()
+                        if remaining <= 0:
+                            raise ToolPackageBlocked("tool_package_deadline")
+                        async with asyncio.timeout(remaining):
+                            await before_dispatch(identity)
+                        if time.time() >= request["deadline_at"]:
+                            raise ToolPackageBlocked("tool_package_deadline")
                         process.stdin.write((request["token"]+"\n").encode())
                         process.stdin.flush()
                         process.stdin.close()

@@ -1143,7 +1143,7 @@ class WorkBoardRepository:
                 request = request.model_copy(update={"executor_id": expected_executor})
         if (
             request.status is WorkBoardStatus.todo
-            and request.capability_id in {"browser.public-task.v1", "work.research-dossier.v1"}
+            and request.capability_id in {"browser.public-task.v1", "work.research-dossier.v1", "work.json-format.v1"}
             and not request.input_artifact_id
         ):
             raise BoardError(
@@ -1723,11 +1723,12 @@ class WorkBoardRepository:
         return BoardMutation(task, event)
 
     async def require_generic_recovery_allowed(self, db: AsyncSession, task: WorkBoardTask) -> None:
-        if task.capability_id == "work.research-dossier.v1":
+        if task.capability_id in {"work.research-dossier.v1", "work.json-format.v1"}:
             linked = await db.scalar(select(WorkBoardAttempt.attempt_id).where(
                 WorkBoardAttempt.task_id == task.task_id, WorkBoardAttempt.workflow_run_id.is_not(None)).limit(1))
             if linked is not None:
-                raise BoardError("research_original_attempt_required", "Use explicit research recovery on the original attempt", status_code=409)
+                raise BoardError("research_original_attempt_required" if task.capability_id=="work.research-dossier.v1" else "tool_package_original_attempt_required",
+                    "Use explicit capability recovery on the original attempt", status_code=409)
 
     async def action_task(
         self,
@@ -3679,15 +3680,20 @@ class WorkBoardRepository:
                 "unknown_effect_requires_reconciliation",
                 "An unresolved outcome cannot be projected as Review or Done",
             )
-        if task.capability_id == "work.research-dossier.v1" and status in {WorkBoardStatus.review, WorkBoardStatus.done}:
-            from src.work_board.research_readback import verified_dossier
+        if task.capability_id in {"work.research-dossier.v1", "work.json-format.v1"} and status in {WorkBoardStatus.review, WorkBoardStatus.done}:
             from src.work_board.input_artifacts import consume_input_artifact, resolve_input_artifact_for_task
             from src.workflows.research_guard import assert_research_operator_session
             run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == attempt.workflow_run_id))
             if run is None:
                 raise BoardError("research_readback_required", "The original research root is unavailable", status_code=409)
             await assert_research_operator_session(db, run, now=observed_at)
-            artifact, _raw = await verified_dossier(db, task, attempt, run)
+            if task.capability_id=="work.json-format.v1":
+                from src.work_board.tool_package_native import verified_output, current
+                await current(db,task,attempt,run)
+                artifact,_raw=verified_output(task,attempt,run)
+            else:
+                from src.work_board.research_readback import verified_dossier
+                artifact, _raw = await verified_dossier(db, task, attempt, run)
             if artifact["content_sha256"] != proof_digest:
                 raise BoardError("research_readback_required", "The physical dossier differs from this attempt's proof", status_code=409)
             resolved = await resolve_input_artifact_for_task(db, owner, artifact_id=task.input_artifact_id,

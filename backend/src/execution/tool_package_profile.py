@@ -50,6 +50,12 @@ def source_package() -> Path:
     return Path(__file__).resolve().parents[1] / "defaults/tool-packages/json-format-v1/formatter.py"
 
 
+def package_manifest():
+    from src.extensions.capability_pack import parse_capability_pack_manifest
+    path = source_package().parent / "manifest.yaml"
+    return parse_capability_pack_manifest(path.read_text(encoding="utf-8"), source=str(path))
+
+
 def bootstrap() -> Path:
     return Path(__file__).with_name("tool_package_bootstrap.py")
 
@@ -158,6 +164,8 @@ def inspect_runtime(root: Path) -> dict:
     return {"profile": PROFILE, "runtime_digest": digest(canonical(descriptor)),
             "launcher_sha256": BWRAP_SHA256, "bootstrap_sha256": digest(bootstrap().read_bytes()),
             "embedding_sha256": EMBEDDING_SHA256, "embedding_source_sha256": EMBEDDING_SOURCE_SHA256,
+            "supervisor_sha256": digest(Path(__file__).with_name("tool_package_supervisor.py").read_bytes()),
+            "controller_sha256": digest(Path(__file__).with_name("tool_package_runner.py").read_bytes()),
             "package_sha256": digest(source_package().read_bytes()), "architecture": "native-linux-x86_64",
             "network": False, "secrets": [], "no_learning": True,
             "limits": {"cpu_seconds": 2, "address_space_bytes": 128*1024*1024,

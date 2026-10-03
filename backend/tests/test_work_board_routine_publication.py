@@ -84,6 +84,9 @@ def _context(*, approval_status=None, m3_job_id=None, failure_reason="awaiting_p
 
 @pytest.mark.asyncio
 async def test_publication_prepare_approval_and_resume_reconcile_same_card(monkeypatch):
+    # This isolated API protocol fixture supplies the current consent decision;
+    # real finite-consent authority is covered by the dedicated runtime tests.
+    monkeypatch.setattr(work_board_api,"_operator_has_github_consent",AsyncMock(return_value=True))
     operator = _operator()
     request = _request(operator)
     contexts = iter(
@@ -270,3 +273,22 @@ async def test_publication_context_rejects_cross_owner_parent(monkeypatch):
             "task-publication",
         )
     assert denied.value.code == "routine_publication_binding_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_publication_protocol_rejects_missing_current_consent(monkeypatch):
+    @asynccontextmanager
+    async def fake_session():
+        yield SimpleNamespace()
+    monkeypatch.setattr(work_board_api,"get_session",fake_session)
+    monkeypatch.setattr(work_board_api,"_routine_publication_context",AsyncMock(return_value=_context()))
+    monkeypatch.setattr(work_board_api,"_operator_has_github_consent",AsyncMock(return_value=False))
+    monkeypatch.setattr(work_board_api,"_block_routine_for_missing_external_authority",AsyncMock(return_value=False))
+    prepare=AsyncMock()
+    monkeypatch.setattr(work_board_api.routine_service,"prepare_publication",prepare)
+    with pytest.raises(HTTPException) as denied:
+        await work_board_api.prepare_work_board_routine_publication(_request(_operator()),"task-publication",
+            work_board_api.WorkBoardRoutinePublicationPrepareRequest(expected_revision=7,title="Exact title",body="Exact body"))
+    assert denied.value.status_code==403
+    assert denied.value.detail["code"]=="external_mutation_grant_required"
+    prepare.assert_not_awaited()

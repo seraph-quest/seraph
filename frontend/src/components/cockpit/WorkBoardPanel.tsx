@@ -766,6 +766,7 @@ function proposalStatusLabel(proposal: WorkBoardProposal): string {
 function hasServerAuthorityPreview(authority: unknown): authority is string {
   if (typeof authority !== "string") return false;
   const currentPreflight = authority.includes("Current provider-free preflight: READY;")
+    || authority.includes("Current provider-free preflight: PENDING input binding at acceptance; dispatch remains unavailable.")
     || /Current provider-free preflight: BLOCKED code=[a-z0-9_]+;/.test(authority);
   return authority.includes("Owner: authenticated owner/session; goal ")
     && authority.includes("Capability-specific authority requirements: ")

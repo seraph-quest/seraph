@@ -148,6 +148,9 @@ afterEach(() => {
 });
 
 beforeEach(() => {
+  // Keep the explicit October 2 approval fixtures live for positive cases;
+  // expired/revoked cases still supply their distinct server receipts.
+  vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-01T12:00:00Z"));
   vi.spyOn(procedureV2Api, "listRoutines").mockResolvedValue([]);
 });
 

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ProcedurePreferenceReview } from "./ProcedurePreferenceReview";
 
 import {
   createReadConsent,
@@ -1954,6 +1955,11 @@ export function ProcedureV2Review({
       </div>
 
       {prepared && routine ? <div className="mt-3 grid gap-3 rounded border border-white/10 p-3">
+        {routineActive && templateId === "public-browser-check" && ownerPrincipalId && ownerSessionId && selectedGoal?.revision ?
+          <ProcedurePreferenceReview ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
+            scope={{ routineId: routine.id, version: currentVersion, routineRevision: routine.revision,
+              goalId: selectedGoal.id, goalRevision: selectedGoal.revision }}
+            onSelectVersion={(version) => { void loadExistingRoutine(routine.id, version); }} /> : null}
         <div className="font-semibold">2. Review, install, and activate the exact package</div>
         <div className="text-xs">Binding <span className="font-mono">{prepared.bindingId}</span> · routine <span className="font-mono">{prepared.routineId}</span> · revision {routine.revision} · state {routine.state} · package {routine.package?.status ?? "unknown"}</div>
         {routine.state === "revoked" ? <div className="rounded border border-red-500/40 p-2" role="alert">This procedure is revoked permanently. Prepare a new version from a fresh verified source.</div> : null}

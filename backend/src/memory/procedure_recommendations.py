@@ -413,8 +413,8 @@ async def stage_procedure_bundle(operator: AuthenticatedOperator, *, routine_id:
             source_run = (await db.execute(select(WorkflowRunState).where(
                 WorkflowRunState.run_identity == source["job_id"]))).scalar_one()
             for artifact in bounded_json(source_run.artifact_receipts_json, []):
-                if artifact.get("artifact_type") == "browser_artifact":
-                    read(artifact["file_path"], artifact["sha256"])
+                if artifact.get("artifact_type") == "browser_public_task_result":
+                    read(artifact["file_path"], artifact["content_sha256"])
     async with db_engine.get_session() as db:
         for member in initial["members"]:
             task_id = member["task"]["task_id"]

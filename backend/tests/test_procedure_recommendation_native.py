@@ -12,10 +12,12 @@ import pytest
 from sqlalchemy import select
 
 from config.settings import settings
-from src.db.models import WorkBoardAttempt, WorkBoardTask
+from src.db.models import WorkBoardAttempt, WorkBoardTask, Memory, MemoryProposal, WorkBoardEvent
+from src.work_board.repository import BoardError
 from src.memory.procedure_recommendations import ProcedureFeedbackRequest, record_procedure_feedback, stage_procedure_bundle
 from src.memory.procedure_recommendation_job import ProcedureRecommendationRequest, prepare_recommendation, inspect_recommendation
 from src.memory.procedure_preferences import ProcedurePreferenceActionRequest, apply_preference_action, inspect_preference
+from src.memory.procedure_selection import current_procedure_preference
 from src.work_board.dispatcher import WorkBoardDispatcher
 from src.workflows.job_runtime import DurableJobRepository
 from src.workflows.procedure_service import ProcedureV2InvokeRequest
@@ -24,7 +26,8 @@ from tests.test_procedure_v2_native_vertical import _activate_v2_routine, _seed_
 pytestmark = [pytest.mark.asyncio, pytest.mark.parametrize("async_db", ["file"], indirect=True)]
 
 
-async def test_two_real_manual_invocations_yield_verified_feedback_bundle(async_db, monkeypatch, tmp_path: Path):
+@pytest.mark.parametrize("barrier", ["normal", "writer_io", "feedback", "phantom", "root_revoked", "package_paused"])
+async def test_two_real_manual_invocations_yield_verified_feedback_bundle(async_db, monkeypatch, tmp_path: Path, barrier):
     from playwright.async_api import async_playwright
     tmp_path.chmod(0o700)
     monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
@@ -96,17 +99,106 @@ async def test_two_real_manual_invocations_yield_verified_feedback_bundle(async_
         action = ProcedurePreferenceActionRequest(action="accept", expected_revision=review["revision"],
             expected_preview_text_digest=review["preview_text_digest"], expected_bundle_digest=review["bundle_digest"],
             acknowledged_selection_only=True, mutation_uuid=str(uuid4()))
+        from src.memory import procedure_preferences as preferences
+        from src.db import engine as db_engine
+        if barrier in {"feedback", "phantom", "root_revoked", "package_paused"}:
+            real_stage = preferences.stage_procedure_bundle
+            async def stage_then_change(*args, **kwargs):
+                staged = await real_stage(*args, **kwargs)
+                if barrier == "feedback":
+                    async with async_db() as db:
+                        tip = next(item["feedback_event_id"] for item in projection["outcomes"] if item["task_id"] == task_ids[-1])
+                        correction = feedback.model_copy(update={"supersedes_event_id": tip,
+                            "label": "harmful", "reason": "Corrected after staging", "mutation_uuid": str(uuid4())})
+                        await record_procedure_feedback(db, operator, routine_id=prepared["routine_id"], task_id=task_ids[-1], request=correction)
+                elif barrier == "phantom":
+                    await routines.invoke_v2(prepared["routine_id"], invocation.model_copy(update={"invocation_uuid": str(uuid4())}),
+                        owner_principal_id=owner.principal_id, owner_session_id=owner.session_id)
+                elif barrier == "root_revoked":
+                    await auth_service.revoke_session(operator.session_id)
+                else:
+                    from src.extensions.capability_pack import CapabilityPackLifecycle
+                    from src.workflows.routines import _routine_pack_id
+                    lifecycle = CapabilityPackLifecycle()
+                    pack_id = _routine_pack_id(prepared["routine_id"], 1)
+                    pending = lifecycle.prepare_operator_approval(pack_id, action="pause", goal_id=source["goal_id"],
+                        digest=staged.scope.package_digest, owner_principal_id=owner.principal_id, session_id=owner.session_id)
+                    approval_id = pending["approval"]["approval_id"]
+                    lifecycle.resolve_operator_approval(pack_id, approval_id, decision="approved",
+                        owner_principal_id=owner.principal_id, session_id=owner.session_id)
+                    lifecycle.pause(pack_id, approval_id=approval_id, owner_principal_id=owner.principal_id,
+                        session_id=owner.session_id)
+                return staged
+            monkeypatch.setattr(preferences, "stage_procedure_bundle", stage_then_change)
+            with pytest.raises(BoardError):
+                await apply_preference_action(operator, review["proposal_id"], action)
+            async with async_db() as db:
+                assert not (await db.execute(select(Memory))).scalars().all()
+                unchanged = await db.get(MemoryProposal, review["proposal_id"])
+                assert unchanged.revision == review["revision"] and unchanged.accepted_memory_id is None
+                assert not (await db.execute(select(WorkBoardEvent).where(WorkBoardEvent.mutation_idempotency_key == action.mutation_uuid))).scalars().all()
+            path = tmp_path / "native-barrier-receipt.json"
+            path.write_text(json.dumps({"barrier": barrier, "proposal_id": review["proposal_id"], "rejected": True,
+                "canonical_memory_count": 0, "proposal_unchanged": True, "action_audit_absent": True,
+                "membership": json.loads(bundle.membership_json), "files": json.loads(bundle.files_json)}, indent=2))
+            path.chmod(0o600)
+            return
+        if barrier == "writer_io":
+            # The actual successful adoption/rollback writer is guarded; the
+            # fixture does not supply a canonical source or signed-memory row.
+            import builtins
+            import os
+            from contextlib import asynccontextmanager
+            from src.memory import m5, repository as memory_repository_module
+            writer = {"active": False, "entries": 0}
+            real_begin = preferences._begin_sqlite_immediate
+            real_session = db_engine.get_session
+            async def begin(db):
+                await real_begin(db)
+                writer.update(active=True, entries=writer["entries"] + 1)
+            @asynccontextmanager
+            async def session():
+                assert not writer["active"], "nested session inside preference writer"
+                try:
+                    async with real_session() as db:
+                        yield db
+                finally:
+                    writer["active"] = False
+            def no_writer_io(real):
+                def checked(*args, **kwargs):
+                    assert not writer["active"], "physical/key read inside preference writer"
+                    return real(*args, **kwargs)
+                return checked
+            real_sanitize = m5.sanitize_m5_memory_text_async
+            async def sanitize(text):
+                assert not writer["active"], "Vault-backed redaction inside writer"
+                return await real_sanitize(text)
+            monkeypatch.setattr(preferences, "_begin_sqlite_immediate", begin)
+            monkeypatch.setattr(db_engine, "get_session", session)
+            for module, name in ((builtins, "open"), (os, "open"), (Path, "read_bytes"), (Path, "read_text"),
+                                 (preferences, "_effect_mac_key"), (memory_repository_module, "_effect_mac_key")):
+                monkeypatch.setattr(module, name, no_writer_io(getattr(module, name)))
+            monkeypatch.setattr(m5, "sanitize_m5_memory_text_async", sanitize)
         adopted = await apply_preference_action(operator, review["proposal_id"], action)
         assert adopted["status"] == "accepted" and adopted["accepted_memory_id"]
+        selection = await current_procedure_preference(operator, routine_id=prepared["routine_id"], version=1,
+            routine_revision=revision, goal_id=source["goal_id"], goal_revision=1)
+        assert selection["status"] == "suggested" and selection["suggested_version_id"] == bundle.scope.version_id
+        assert selection["review"]["included_count"] == 2
         assert (await apply_preference_action(operator, review["proposal_id"], action))["idempotent_replay"] is True
         rollback = ProcedurePreferenceActionRequest(action="rollback", expected_revision=adopted["revision"],
             expected_preview_text_digest=adopted["preview_text_digest"], expected_bundle_digest=adopted["bundle_digest"],
             acknowledged_selection_only=True, reason="Mechanical test rollback", mutation_uuid=str(uuid4()))
         rolled_back = await apply_preference_action(operator, review["proposal_id"], rollback)
         assert rolled_back["status"] == "rolled_back"
+        if barrier == "writer_io":
+            assert writer["entries"] == 2
+        assert (await current_procedure_preference(operator, routine_id=prepared["routine_id"], version=1,
+            routine_revision=revision, goal_id=source["goal_id"], goal_revision=1))["status"] == "none"
         receipt = {"scope": projection["scope"], "outcomes": projection["outcomes"],
             "recommendation": recommended,
             "adopted": adopted, "rolled_back": rolled_back,
+            "selected": selection, "barrier": barrier,
             "bundle_digest": bundle.bundle_digest, "membership": json.loads(bundle.membership_json),
             "files": json.loads(bundle.files_json), "boundary": "Real SQLite/auth/package/Chromium/native outcomes; fixed public HTTP fixture; no quality improvement claim"}
         proof_path = tmp_path / "native-stage-receipt.json"

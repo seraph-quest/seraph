@@ -4,7 +4,10 @@ import { TaskEvidencePanel } from "./TaskEvidencePanel";
 import type { WorkBoardTask } from "../../types";
 
 const fetchMock = vi.fn();
-vi.mock("../../lib/api", () => ({ apiFetch: (...args: unknown[]) => fetchMock(...args) }));
+vi.mock("../../lib/api", () => ({ apiFetch: (...args: unknown[]) =>
+  String(args[0]).includes('/execution-binding') ? Promise.resolve({ ok: true, json: async () => ({
+    task_id: String(args[0]).includes('task-b') ? 'task-b' : 'task-a', task_revision: 3,
+    binding_state: 'unbound', binding_count: 0, applied_result: null }) }) : fetchMock(...args) }));
 const task = { task_id: "task-a", task_revision: 3, goal_id: "goal-a", owner_session_id: "root-a", status: "triage" } as WorkBoardTask;
 const claim = { source_id: "a".repeat(64), source_kind: "canonical_memory", source_digest: "b".repeat(64),
   version: "2026-10-02", line_start: 1, line_end: 1, text: "Aurora launches October 20", confidence: .95,

@@ -123,7 +123,33 @@ async def test_operation_is_metadata_only_exact_owner_root_deadline_and_goal(asy
         assert moved.value.code == "pipeline_root_changed"
 
 
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+@pytest.mark.asyncio
+async def test_dispatcher_goal_rejection_commits_operation_and_all_unfinished_freezes(async_db, monkeypatch, tmp_path):
+    from src.db.engine import get_session as production_session, override_session_factory
+    owner, repository, operation = await setup_operation(async_db, monkeypatch, tmp_path)
+    async with async_db() as db:
+        bind = db.bind
+        task = await repository.get_task(db, owner, operation["steps"][0]["task_id"])
+        goal = await db.get(Goal, "goal-914")
+        goal.revision += 1
+        await db.commit()
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+    with override_session_factory(async_sessionmaker(bind, expire_on_commit=False)):
+        dispatcher = WorkBoardDispatcher(repository=repository, session_provider=production_session)
+        error, _reason = await dispatcher._readiness(task)
+        assert error == "stale_goal_revision"
+        async with production_session() as db:
+            row, value = await pipelines.owned(db, owner, operation["operation_id"])
+            assert value["authority_frozen"]["reason"] == "goal_changed"
+            leaves = (await db.scalars(select(WorkBoardTask))).all()
+            assert len(leaves) == 3 and all(leaf.status == WorkBoardStatus.blocked for leaf in leaves)
+            assert all(leaf.block_reason == "pipeline_review_required" for leaf in leaves)
+            assert not (await db.scalars(select(WorkBoardAttempt))).all()
+
+
 @pytest.mark.skipif(os.environ.get("SERAPH_RUN_REAL_BROWSER_VERTICAL_SLICE") != "1", reason="explicit real Chromium opt-in")
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
 @pytest.mark.asyncio
 async def test_real_chromium_native_browser_to_cpu_dossier_to_plain_report(async_db, monkeypatch, tmp_path):
     from playwright.async_api import async_playwright

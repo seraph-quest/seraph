@@ -129,10 +129,18 @@ async def accept_artifact_pipeline(request: Request, operation_id: str, body: Pi
 async def advance_artifact_pipeline(request: Request, operation_id: str, body: PipelineAdvanceRequest):
     owner = _owner(_operator(request))
     try:
+        failure = None
         async with get_session() as db:
-            result = await pipeline_service.advance(db, owner, operation_id, body.expected_revision)
+            try:
+                result = await pipeline_service.advance(db, owner, operation_id, body.expected_revision)
+            except BoardError as exc:
+                if not db.info.get("pipeline_authority_frozen"):
+                    raise
+                failure = exc
             await db.commit()
-            return result
+        if failure is not None:
+            raise failure
+        return result
     except BoardError as exc:
         _raise_board_error(exc)
 

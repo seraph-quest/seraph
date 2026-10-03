@@ -3789,11 +3789,8 @@ class WorkBoardDispatcher:
         """Resolve the current goal admission deadline, never from card input."""
 
         if task.pipeline_operation_id:
-            from src.work_board.pipelines import task_guard, utc, now
-            async with self.session_provider() as pipeline_db:
-                _row, operation = await task_guard(pipeline_db, task,
-                    attempt=await pipeline_db.scalar(select(WorkBoardAttempt).where(
-                        WorkBoardAttempt.task_id == task.task_id, WorkBoardAttempt.ended_at.is_(None))))
+            from src.work_board.pipelines import runtime_guard, utc, now
+            _row, operation = await runtime_guard(task, session_provider=self.session_provider)
             remaining = int((utc(datetime.fromisoformat(operation["deadline_at"])) - now()).total_seconds())
             hard_cap = 180 if task.capability_id == "browser.public-task.v1" else 30
             if remaining < 1:
@@ -3893,12 +3890,9 @@ class WorkBoardDispatcher:
         """
 
         if task.pipeline_operation_id or task.capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
-            from src.work_board.pipelines import task_guard
+            from src.work_board.pipelines import runtime_guard
             try:
-                async with self.session_provider() as pipeline_db:
-                    active = await pipeline_db.scalar(select(WorkBoardAttempt).where(
-                        WorkBoardAttempt.task_id == task.task_id, WorkBoardAttempt.ended_at.is_(None)))
-                    await task_guard(pipeline_db, task, attempt=active)
+                await runtime_guard(task, session_provider=self.session_provider)
             except BoardError as exc:
                 return exc.code, str(exc)
 
@@ -4132,11 +4126,9 @@ class WorkBoardDispatcher:
         try:
             if capability in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
                 from src.work_board.input_artifacts import resolve_input_artifact_for_task
-                from src.work_board.pipelines import task_guard
+                from src.work_board.pipelines import runtime_guard
+                await runtime_guard(task, session_provider=self.session_provider)
                 async with self.session_provider() as pipeline_db:
-                    active = await pipeline_db.scalar(select(WorkBoardAttempt).where(
-                        WorkBoardAttempt.task_id == task.task_id, WorkBoardAttempt.ended_at.is_(None)))
-                    await task_guard(pipeline_db, task, attempt=active)
                     await resolve_input_artifact_for_task(pipeline_db,
                         WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id),
                         artifact_id=_text(task.input_artifact_id), capability_id=capability,
@@ -4791,7 +4783,12 @@ class WorkBoardDispatcher:
                     return False
                 if task.pipeline_operation_id:
                     from src.work_board.pipelines import task_guard
-                    await task_guard(db, task, attempt=attempt)
+                    try:
+                        await task_guard(db, task, attempt=attempt)
+                    except BoardError:
+                        # This session contains only fence/authority reads and
+                        # the guard freeze; normal exit commits that freeze.
+                        return False
 
                 # Procedure-v2 Browser leaves are native children of the
                 # running parent board attempt.  Recheck that parent at every
@@ -5968,10 +5965,9 @@ class WorkBoardDispatcher:
     ) -> Mapping[str, Any]:
         capability_id = _text(task.capability_id)
         if capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
-            from src.work_board.pipelines import task_guard, validate_cpu_current, validate_cpu_binding, utc
+            from src.work_board.pipelines import runtime_guard, validate_cpu_current, validate_cpu_binding, utc
             from src.work_board.pipeline_cpu import execute
-            async with self.session_provider() as pipeline_db:
-                _row, operation = await task_guard(pipeline_db, task, attempt=attempt)
+            _row, operation = await runtime_guard(task, attempt=attempt, session_provider=self.session_provider)
             operation_deadline = utc(datetime.fromisoformat(operation["deadline_at"]))
             deadline = min(operation_deadline, _now() + timedelta(seconds=min(runtime_seconds, 30)))
             async def check_current(current_task, current_attempt, current_inputs):

@@ -173,6 +173,13 @@ async def execute(task: WorkBoardTask, attempt: WorkBoardAttempt, inputs: Mappin
             terminal_authority_check=validate_terminal)
         return {**dict(finished), "job_id": spec.identity.job_id, "status": "succeeded", "memory_status": "no_learning", "admission_only": False}
     except BaseException:
+        # A terminal authority callback is inside the job's atomic transaction
+        # and rolls back on rejection. Recheck in its own guard session so a
+        # current Goal/source freeze persists without committing job effects.
+        try:
+            await validate_current(task, attempt, inputs)
+        except Exception:
+            pass
         await jobs.transition_job(spec.identity.job_id, "blocked", owner=runner,
             fencing_token=fence, reason="Evidence output needs exact binding/readback recovery")
         raise

@@ -412,8 +412,32 @@ async def freeze_unfinished(db: Any, row: WorkBoardProposal, value: dict[str, An
                 updated_at=now()).execution_options(synchronize_session=False))
         if changed.rowcount != 1:
             raise BoardError("pipeline_revision_conflict", "The unfinished authority freeze lost its exact task CAS", status_code=409)
+        await db.refresh(current)
     value["authority_frozen"] = {"reason": reason, "plan_version": value["plan_version"]}
     await store(db, row, value)
+    db.info["pipeline_authority_frozen"] = True
+
+
+async def runtime_guard(task: WorkBoardTask, *, attempt: WorkBoardAttempt | None = None, session_provider: Any = get_session) -> tuple[WorkBoardProposal, dict[str, Any]]:
+    """Commit only the guard's authority freeze before returning its rejection.
+
+    The caller owns no terminal/effect transaction here. Catching inside this
+    dedicated session prevents get_session from rolling back the freeze.
+    """
+    failure = None
+    result = None
+    async with session_provider() as db:
+        active = attempt or await db.scalar(select(WorkBoardAttempt).where(
+            WorkBoardAttempt.task_id == task.task_id, WorkBoardAttempt.ended_at.is_(None)))
+        try:
+            result = await task_guard(db, task, attempt=active)
+        except BoardError as exc:
+            if not db.info.get("pipeline_authority_frozen"):
+                raise
+            failure = exc
+    if failure is not None:
+        raise failure
+    return result
 
 
 async def task_guard(db: Any, task: WorkBoardTask, *, attempt: WorkBoardAttempt | None = None) -> tuple[WorkBoardProposal, dict[str, Any]]:
@@ -471,8 +495,16 @@ def require_source_permission(scope: Mapping[str, Any]) -> None:
 
 
 async def validate_cpu_current(task: WorkBoardTask, attempt: WorkBoardAttempt, inputs: Mapping[str, Any], *, session_provider: Any = get_session) -> None:
+    failure = None
     async with session_provider() as db:
-        await validate_cpu_binding(db, task, attempt, inputs)
+        try:
+            await validate_cpu_binding(db, task, attempt, inputs)
+        except BoardError as exc:
+            if not db.info.get("pipeline_authority_frozen"):
+                raise
+            failure = exc
+    if failure is not None:
+        raise failure
 
 
 async def validate_cpu_binding(db: Any, task: WorkBoardTask, attempt: WorkBoardAttempt, inputs: Mapping[str, Any]) -> None:

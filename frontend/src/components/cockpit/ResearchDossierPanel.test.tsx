@@ -97,3 +97,18 @@ it("clears inflight UI ownership when the task scope changes and retains the ori
   await waitFor(() => expect(screen.getByRole("button", { name: "Recover original research" })).toBeEnabled());
   expect(screen.getByText(/Parent research:second-parent/)).toBeInTheDocument();
 });
+
+it("disables recovery when a refresh cannot verify current authority", async () => {
+  let reads = 0;
+  vi.mocked(apiFetch).mockImplementation(async () => {
+    if (++reads > 1) throw new Error("Current Root binding unavailable");
+    return new Response(JSON.stringify(state));
+  });
+  render(<ResearchDossierPanel {...props} />);
+  await waitFor(() => expect(screen.getByRole("button", { name: "Recover original research" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "Refresh research" }));
+  await screen.findByRole("alert");
+  expect(screen.getByRole("button", { name: "Recover original research" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Cancel original research" })).toBeDisabled();
+  expect(vi.mocked(apiFetch).mock.calls.every(([, options]) => options?.method !== "POST")).toBe(true);
+});

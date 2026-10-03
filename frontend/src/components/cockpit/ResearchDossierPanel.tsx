@@ -72,7 +72,7 @@ export function ResearchDossierPanel({ ownerPrincipalId, ownerSessionId, task, g
     if (!task) return;
     const version = generation.current;
     try { const result = await readResearchState(task.task_id); if (version === generation.current) { setState(result); setError(null); } }
-    catch { if (version === generation.current) setError("Current research state is unavailable; check its Board admission or block reason."); }
+    catch { if (version === generation.current) { setState(null); setError("Current research state is unavailable; check its Board admission or block reason."); } }
   };
 
   const submit = async (operation: ResearchPending) => {

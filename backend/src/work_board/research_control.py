@@ -113,13 +113,41 @@ async def snapshot(jobs, db, owner, task_id):
     children = list((await db.scalars(select(WorkflowRunState).where(WorkflowRunState.parent_job_id == parent.run_identity))).all())
     costs = list((await db.scalars(select(InferenceCostReservation).where(InferenceCostReservation.job_id.in_(
         [child.run_identity for child in children])))).all())
-    safe = parent.status == "paused" and parent.failure_reason in {WAIT_SOURCES, WAIT_CHILDREN} and not attempt.ended_at
+    safe = bool(creation and isinstance(creation.get("child_ids"), list)
+        and 1 <= len(creation["child_ids"]) <= 2
+        and sorted(child.run_identity for child in children) == sorted(creation["child_ids"])
+        and parent.status == "paused" and parent.failure_reason in {WAIT_SOURCES, WAIT_CHILDREN}
+        and not (attempt.ended_at or attempt.cancel_requested_at or parent.lease_owner or parent.lease_expires_at
+            or attempt.lease_owner or attempt.lease_expires_at)
+        and task.status == WorkBoardStatus.blocked and task.block_reason == parent.failure_reason)
     now = datetime.now(timezone.utc)
     safe = safe and all((not (child.lease_owner or child.lease_expires_at) and (
         child.status in {"accepted", "queued", "succeeded"} or child.status == "paused" and child.failure_reason == PROMPT_READY))
         or (creation and verified_reserved_output(child, next((cost for cost in costs if cost.job_id == child.run_identity), None), creation, now))
         for child in children)
     safe = safe and not any(cost.state in {"contact_started", "unknown"} or cost.recovery_reason == "provider_contact_denied" for cost in costs)
+    if safe:
+        from src.auth.service import AuthFailure
+        from src.workflows.job_runtime import DurableJobError
+        from src.workflows.research_sources import current_inputs_in_db, canonical_sources_in_db, _completed_local_source_in_db
+        try:
+            # These existing checks only read canonical rows and bounded
+            # local metadata/files. GET never reserves a phase or probes a
+            # remote source/provider; POST remains the authority boundary.
+            inputs = await current_inputs_in_db(jobs, db, parent.run_identity)
+            for selected in inputs.sources:
+                if selected.kind == "completed_board_artifact":
+                    await _completed_local_source_in_db(jobs, db, parent_id=parent.run_identity, source=selected)
+            for child in children:
+                authority = json.loads(child.declared_authority_json)
+                if (child.job_kind != "readonly_research_child" or child.owner_principal_id != parent.owner_principal_id
+                    or child.session_id != parent.session_id or child.parent_fencing_token != creation["creation_job_fence"]
+                    or authority.get("parent_creation_digest") != creation["creation_digest"]):
+                    raise ValueError("original research child lineage changed")
+                if checkpoint(_serialize(child), "research:prompt-ready"):
+                    await canonical_sources_in_db(jobs, db, _serialize(child), inputs)
+        except (BoardError, AuthFailure, DurableJobError, PermissionError, ValueError, TypeError, KeyError, OSError):
+            safe = False
     return {"task_id": task.task_id, "task_revision": task.task_revision, "attempt_id": attempt.attempt_id,
         "parent_id": parent.run_identity, "status": parent.status, "phase": parent.failure_reason,
         "deadline_at": parent.deadline_at.replace(tzinfo=timezone.utc).isoformat(),

@@ -215,7 +215,8 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
                     running.cancel()
                 await asyncio.gather(running, return_exceptions=True)
             return
-        recovery_scenarios = {"restart_before_sources", "restart_prompt_ready", "restart_funded_queued", "restart_written_outputs", "cancel_funded_queued"}
+        snapshot_scenarios = {"snapshot_missing_group", "snapshot_stale_goal", "snapshot_expired"}
+        recovery_scenarios = {"restart_before_sources", "restart_prompt_ready", "restart_funded_queued", "restart_written_outputs", "cancel_funded_queued", *snapshot_scenarios}
         if scenario in recovery_scenarios:
             from src.workflows import research_coordinator as coordinator
             from src.workflows.research_accounting import fund_fixed_group
@@ -225,7 +226,7 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
             original_continue = coordinator.continue_parent
             async def interrupted_process(jobs, *, parent_id, owner, phase_binding):
                 creation = checkpoint(await jobs.get_job(parent_id), "research:creation")
-                if scenario != "restart_before_sources":
+                if scenario != "restart_before_sources" and scenario not in snapshot_scenarios:
                     for child_id in creation["child_ids"]:
                         await coordinator._prepare_child(jobs, child_id, owner, {}, phase_binding)
                 if scenario in {"restart_funded_queued", "restart_written_outputs", "cancel_funded_queued"}:
@@ -267,6 +268,33 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
             monkeypatch.setattr("src.model_fabric.remote_inference_admission.remote_inference_admission_broker", fresh_broker)
             monkeypatch.setattr("src.llm_runtime.gpu_admission_broker", fresh_broker)
             monkeypatch.setattr(work_board, "dispatcher", WorkBoardDispatcher(jobs=jobs, session_provider=factory.accounting_sessions))
+            if scenario in snapshot_scenarios:
+                if scenario == "snapshot_stale_goal":
+                    changed = await client.patch("/api/goals/actual-research-goal", json={"title": "Current Goal changed", "expected_revision": 1})
+                    assert changed.status_code == 200, changed.text
+                else:
+                    async with factory.accounting_sessions() as db:
+                        row = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.job_kind == (
+                            "research_dossier" if scenario == "snapshot_expired" else "readonly_research_child")))
+                        if scenario == "snapshot_expired":
+                            row.deadline_at = datetime.now(timezone.utc).replace(tzinfo=None)-__import__("datetime").timedelta(seconds=1)
+                        else:
+                            row.parent_job_id = None  # actual incomplete queried group; immutable creation still names both
+                        db.add(row)
+                async with factory.accounting_sessions() as db:
+                    before = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id))
+                    before_revision = before.task_revision
+                state = await client.get("/api/work-board/tasks/"+task_id+"/research")
+                assert state.status_code == 200 and state.json()["recoverable"] is False, state.text
+                async with factory.accounting_sessions() as db:
+                    after = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id))
+                    assert after.task_revision == before_revision  # GET does not mutate admission
+                rejected = await client.post("/api/work-board/tasks/"+task_id+"/research/recover",
+                    json={"expected_revision": before_revision, "idempotency_key": "ineligible-original-recovery"})
+                assert rejected.status_code == 409 and len(calls) == 3
+                (root/"research-snapshot-ineligible-readback.json").write_text(json.dumps({"scenario": scenario,
+                    "state": state.json(), "recovery_status": rejected.status_code, "provider_post_count": len(calls)}, indent=2))
+                return
             state = await client.get("/api/work-board/tasks/"+task_id+"/research")
             assert state.status_code == 200, state.text
             original_state = state.json()
@@ -403,4 +431,10 @@ async def test_explicit_native_recovery_keeps_original_attempt_deadline_and_call
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scenario", ["cancel_active_provider", "cancel_held_denial"])
 async def test_actual_research_cancel_preserves_contacted_debt_and_releases_proven_denial(accounting_db, real_auth, monkeypatch, scenario):
+    await test_authenticated_parent_two_children_real_public_source_and_dossier(accounting_db, real_auth, monkeypatch, scenario=scenario)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ["snapshot_missing_group", "snapshot_stale_goal", "snapshot_expired"])
+async def test_research_snapshot_requires_exact_group_and_current_authority(accounting_db, real_auth, monkeypatch, scenario):
     await test_authenticated_parent_two_children_real_public_source_and_dossier(accounting_db, real_auth, monkeypatch, scenario=scenario)

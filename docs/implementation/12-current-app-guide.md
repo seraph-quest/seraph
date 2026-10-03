@@ -675,9 +675,18 @@ blocks mutations; the full retained request is bounded to 16 KiB.
 
 The dossier is served as verified `text/plain` and rendered literally.
 Citation checks establish matching supplied spans and digests, not semantic
-truth. Every result records `no_learning`. This capability remains **Partial**:
-focused authenticated native/file-SQLite and UI checks exist, while managed
-continued-use acceptance and cumulative review remain pending.
+truth. Every result records `no_learning`. This capability remains a
+branch-local **Target** and **Partial** operational evidence. The October 3
+managed CPU-host journey used actual operator authentication, governed settings
+and capability admission, public HTTPS source reads, two native child jobs,
+settled accounting, durable input consumption and physical dossier readback.
+Its exact retained creation request survived a lost response and browser reload;
+the completed dossier rendered literal injection text without executing it.
+Only the provider HTTP boundary was intercepted. This verifies the local
+runtime and operator journey; it does not establish live provider quality or
+actual upstream billing. Independent review corrections require the exact
+original child group and current authority before presenting recovery, keep
+generic retry/unblock fenced, and preserve one inspector per selected task.
 [ADR-012](./decisions/012-finite-durable-readonly-research.md) owns the accepted
 target. Local source/output and current policy metadata reads inside selected
 SQLite writers are bounded by their contracts; their lock duration and physical

@@ -4076,7 +4076,7 @@ function WorkBoardPanel({
                 ownerSessionId={ownerSessionId}
               />
               {selectedTask.capability_id === "work.research-dossier.v1" && <ResearchDossierPanel
-                key={`${ownerPrincipalId}:${ownerSessionId}:${selectedTask.task_id}`}
+                key={`research-inspector:${ownerPrincipalId}:${ownerSessionId}:${selectedTask.task_id}`}
                 task={selectedTask} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
                 onChanged={async () => { await refreshSnapshot(); }} />}
 

@@ -1460,9 +1460,10 @@ export function ProcedureV2Review({
     if (!context || !packagePreview?.review_id || packageApproval?.status !== "approved") return;
     if (packagePreview.routine_id !== context.routineId || packagePreview.version !== context.version
       || !packagePreview.digest
+      || !packagePreview.manifest.version.trim()
       || packageApproval.digest !== packagePreview.digest
       || packageApproval.pack_id !== packagePreview.pack_id
-      || packageApproval.version !== String(context.version)) {
+      || packageApproval.version !== packagePreview.manifest.version) {
       setError("Package activation is blocked until the reviewed approval, exact version, and package digest match the current routine readback.");
       return;
     }

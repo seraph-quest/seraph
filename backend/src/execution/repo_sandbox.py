@@ -573,7 +573,7 @@ class RepoSandboxPreflight:
             }
         digest = self.posture_digest or executor_posture_digest(posture)
         return {
-            "profile": PROFILE,
+            "profile": posture.get("profile", PROFILE),
             "executor_kind": self.executor_kind,
             "status": self.status,
             "ok": self.ok,
@@ -2685,7 +2685,49 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
         except (OSError, UnicodeDecodeError, ValueError):
             return None
 
+    @contextmanager
+    def _job_marker_lock(self, job_id: str, *, timeout_seconds: float = 2.0):
+        """Serialize marker read/check/rename and Node dispatch across processes."""
+        import errno
+        import fcntl
+
+        directory = _open_trusted_directory(self._job_marker_directory, create=True)
+        descriptor = -1
+        name = self._job_marker_name(job_id) + ".lock"
+        try:
+            metadata = os.fstat(directory)
+            if metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
+                raise RepoSandboxError("local marker lock directory is not private")
+            descriptor = os.open(name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=directory)
+            opened = os.fstat(descriptor)
+            if not stat.S_ISREG(opened.st_mode) or opened.st_uid != os.getuid() or stat.S_IMODE(opened.st_mode) != 0o600 or opened.st_nlink != 1:
+                raise RepoSandboxError("local marker lock is not a private regular file")
+            deadline = time.monotonic() + max(0, min(timeout_seconds, 2.0))
+            while True:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError as exc:
+                    if exc.errno not in {errno.EACCES, errno.EAGAIN}:
+                        raise
+                    if time.monotonic() >= deadline:
+                        raise RepoSandboxError("local marker lock is busy") from exc
+                    time.sleep(min(.005, max(0, deadline - time.monotonic())))
+            named = os.stat(name, dir_fd=directory, follow_symlinks=False)
+            if (not stat.S_ISREG(named.st_mode) or named.st_uid != os.getuid() or stat.S_IMODE(named.st_mode) != 0o600
+                or (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino) or named.st_nlink != 1):
+                raise RepoSandboxError("local marker lock identity changed")
+            yield
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            os.close(directory)
+
     def _write_job_marker(self, job_id: str, payload: Mapping[str, Any]) -> None:
+        with self._job_marker_lock(job_id):
+            self._write_job_marker_locked(job_id, payload)
+
+    def _write_job_marker_locked(self, job_id: str, payload: Mapping[str, Any]) -> None:
         """Atomically replace a private, server-owned local execution marker."""
 
         marker_dir_fd = _open_trusted_directory(self._job_marker_directory, create=True)
@@ -2721,13 +2763,15 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
             finally:
                 if existing_fd >= 0:
                     os.close(existing_fd)
+            if existing_payload and (existing_payload.get("cancellation_requested") is True or existing_payload.get("status") == "cancellation_requested"):
+                payload = {**payload, "cancellation_requested": True}
             if (
                 existing_payload is not None
-                and existing_payload.get("status") == "cancellation_requested"
+                and (existing_payload.get("cancellation_requested") is True or existing_payload.get("status") == "cancellation_requested")
                 and payload.get("status") != "cancellation_requested"
                 and payload.get("phase") != "cleanup_verified"
             ):
-                return
+                payload = {**payload, "status": "cancellation_requested", "phase": "cancel_requested"}
             marker_fd = os.open(
                 temporary_name,
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
@@ -3903,6 +3947,10 @@ def build_repo_repair_executor(config: RepoSandboxSettings | None = None) -> Rep
     """Build the server-selected executor without fallback."""
 
     value = config or _effective_repo_sandbox_settings()
+    if value.profile == "repo-node24-npm-v1":
+        from src.execution.repo_node import NodeRepoRepairExecutor
+
+        return NodeRepoRepairExecutor(config=value)
     kind = str(value.executor_kind)
     if kind == "local":
         return LocalRepoRepairExecutor(config=value)

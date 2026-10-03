@@ -10,9 +10,8 @@ Seraph is an AI guardian that remembers, watches, and acts. This page is the fas
 **Document class:** Shipped and Partial implementation inventory.
 **Target authority:** [Project Constitution](./00-project-constitution.md).
 
-The detailed inventory below records the large existing baseline. Some shipped
-surfaces remain transitional, including the Mac-hosted core, and Epic #736
-tracks their replacement. New target capabilities remain **Planned** until
+The detailed inventory below records the large existing baseline. Some shipped runtime contracts and implementations remain transitional;
+Epic #736 tracks their migration while macOS and Linux remain peer core-host targets. New target capabilities remain **Planned** until
 merged to `develop` with the required validation receipts.
 
 For a shorter reader-facing overview of the current app, start with
@@ -134,6 +133,19 @@ High-risk strategic wording in this status page remains governed by [19. Strateg
   Provider and account usefulness remain **external-unverified**. This remains
   **Partial** and is not Shipped
   `develop` truth. See [Current App Guide](./12-current-app-guide.md#governed-repository-repair-m4-887-branch-local-target).
+- [ ] Epic #899 milestone #912 adds a **Partial** Node repair capability on
+  the open program branch, with explicit installed-runtime, approval and recovery
+  boundaries. It is not Shipped `develop` truth until the final reviewed program lands.
+  [Optional Node Repository Repair](./optional-node-repair.md) documents the
+  installed runtime and exact host approval boundary. ADR-007 accepts one
+  inspected Node/npm profile behind the existing repair journey. Authenticated
+  JS and TypeScript durable-job tests exercise real direct Node build/test
+  execution, exact host approval, artifact hash readback and `no_learning`;
+  their model transport is intercepted. Native supervision is explicitly
+  Linux x86_64 only and blocks other selected-profile platforms while the core
+  and Python default remain usable. Local Node has no OS isolation or enforced
+  CPU/memory/PID guarantee. This branch evidence does not establish shipped
+  `develop`, Mac Node parity or live-provider behavior.
 - [ ] Bounded calendar meeting preparation adds write-only encrypted setup, verified calendar selection, finite event/model consent, a goal-linked Todo task, governed brief synthesis with two fresh event reads, and verified plaintext artifact inspection. Finite observation schedules propose deduplicated tasks for review without calling a model. This remains **Partial**; live Google/model usefulness remains external-unverified without an authorized canary. See [Current App Guide](./12-current-app-guide.md#bounded-calendar-meeting-preparation).
 - [ ] M7 #890 adds a bounded Gmail readonly path: encrypted owner/session-bound setup, explicit source and model consent, opaque message bindings, governed hourly or six-hour metadata watches, finite Goal quiet-hours and period-wide notification caps with visible coverage-blocked recovery, and private reply drafts with two source reads, one governed OpenRouter admission, encrypted artifact/readback, exact-key recovery, and `no_learning`. The bounded reply intent remains a local 0600 plaintext typed-input residual; source bodies and drafts stay encrypted and private, with no provider draft or send operation. This remains **Partial**. Focused SQLite and intercepted-transport receipts cover the mechanics; CPU-only/keyless OpenRouter operation, real Google-account usefulness, and paid-model canaries remain external-unverified. See [Current App Guide](./12-current-app-guide.md#bounded-gmail-source-watch-and-reply-drafting-m7-890-branch-local-target).
 - [ ] Bounded public browser tasks add typed input creation, finite HTTPS navigation/extraction, a single browser-task context lane, durable action and readback receipts, and explicit no-learning outcomes through Work. Current goal budgets narrow the fixed request, action, output, and runtime limits. This remains **Partial**; local browser mechanics and production transport have separate validation receipts; authenticated browsing and general computer use remain excluded from this capability. See [Current App Guide](./12-current-app-guide.md#bounded-public-browser-tasks).

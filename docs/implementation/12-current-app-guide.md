@@ -481,6 +481,34 @@ validation.
 
 ### Governed repository repair (M4 #887) {#governed-repository-repair-m4-887-branch-local-target}
 
+The #912 branch target adds the explicit `repo-node24-npm-v1` profile behind
+this same Work/API/durable-job journey. [ADR-007](decisions/007-bounded-node-repair-supervision.md)
+owns its accepted contract; it is not shipped `develop` truth.
+[Optional Node Repository Repair](./optional-node-repair.md) describes installed
+runtime selection, finite selectors, exact approval and unknown recovery. Settings select
+an already installed absolute Node 24 executable. Only finite inspected `npm
+test`, `npm run build`, or `npm run build test` selections are accepted; Seraph
+maps their script bodies to direct Node argv and never runs npm, shell bodies,
+installation or lifecycle hooks. An inspected TypeScript `tsc --project` build
+uses copied existing compiler dependencies. Package/lock/config/script/source,
+dependency manifests and trusted toolchain hashes bind approval and readback.
+Dependencies have separate 512-file/16MiB-per-file bounds inside the shared
+64MiB snapshot aggregate; source, patch and output bounds remain explicit.
+
+Native Node supervision is an optional Linux x86_64 capability, verified with
+pidfds and a dedicated per-job subreaper. Other platforms or missing facilities
+block this selected profile visibly; they do not block Seraph's Python/core
+startup or select a fallback. Approval shows exact build/test argv and requires
+fresh `local_host_execution`. The Inspector labels preparation evidence as the
+recorded job preflight; it does not replace fresh approval/claim checks.
+This is host-user execution with no OS isolation
+or enforced CPU, memory and PID ceiling. Detached descendants must be reaped
+before success. Supervisor death, missing/reused restart identity or exhausted
+cleanup/readback deadline remain `unknown_external_effect` and retain the
+physical slot until durable evidence resolves them. Model transport in local
+acceptance tests is intercepted at the governed boundary; no live provider or
+paid-inference proof is claimed.
+
 The M4 capability adds a bounded repository-repair path to the existing Work Board
 execution boundary. In **Work → Repository repair**, an authenticated operator
 selects an owned active Goal and current revision, then supplies the strict

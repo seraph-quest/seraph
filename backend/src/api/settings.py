@@ -112,6 +112,7 @@ class RepoSandboxSettingsRequest(BaseModel):
     docker_socket: str | None = None
     worker_image_digest: str | None = None
     profile: str | None = None
+    node_runtime_path: str | None = None
 
 
 # Active screenshot semantic analysis is OpenRouter-only. Retained settings
@@ -273,7 +274,7 @@ def _repo_sandbox_settings_payload(
         receipt = preflight.as_receipt()
     except (TypeError, ValueError, OSError, RepoSandboxError) as exc:
         receipt = {
-            "profile": "repo-python-pytest-v1",
+            "profile": value.profile,
             "executor_kind": executor_kind,
             "status": "blocked",
             "ok": False,
@@ -367,7 +368,7 @@ def _repo_sandbox_settings_payload(
     return {
         "enabled": bool(value.enabled),
         "executor_kind": executor_kind,
-        "executor_profile": f"{executor_kind}:repo-python-pytest-v1",
+        "executor_profile": f"{executor_kind}:{value.profile}",
         "executor_posture": posture,
         "executor_posture_raw": raw_posture,
         "executor_posture_digest": posture_digest,
@@ -376,6 +377,7 @@ def _repo_sandbox_settings_payload(
         "docker_socket": value.docker_socket,
         "worker_image_digest": value.worker_image_digest,
         "profile": value.profile,
+        "node_runtime_path": value.node_runtime_path,
         "limits": limits_payload,
         "limits_digest": digest,
         "limits_editable": False,
@@ -1404,8 +1406,10 @@ async def set_repo_sandbox_settings(body: RepoSandboxSettingsRequest, request: R
         candidate = RepoSandboxSettings.model_validate(
             current.model_dump(mode="json") | updates
         )
-        if candidate.profile != "repo-python-pytest-v1":
+        if candidate.profile not in {"repo-python-pytest-v1", "repo-node24-npm-v1"}:
             raise ValueError("unsupported_profile")
+        if candidate.node_runtime_path and (not Path(candidate.node_runtime_path).is_absolute() or len(candidate.node_runtime_path) > 512):
+            raise ValueError("node_runtime_path_requires_absolute_installed_path")
         # Disabled settings may be persisted before host provisioning supplies
         # the socket/image selectors.  Keep readiness fail-closed while still
         # allowing an operator to turn the profile off and save that intent.

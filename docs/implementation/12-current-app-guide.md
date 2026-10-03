@@ -575,6 +575,34 @@ Saving selectors never starts Docker or changes host resource limits. A legacy
 settings document without an executor selector remains rootless-only until the
 operator explicitly selects another backend.
 
+The tested-publication integration branch implements the accepted
+[tested repair publication](./decisions/009-tested-repository-publication.md)
+and [finite GitHub consent](./decisions/011-finite-github-connection-consent.md)
+targets. Its selected `repo-python-pytest-publication-v1` profile reports the
+recorded successful preflight from `ok=true`; a `ready` label alone cannot
+establish that proof. Preparation does not approve local host execution, and
+display normalization does not change the raw authority receipt or digest.
+The copied Python environment and fixed Git producer claim no OS isolation.
+
+Publication requires a separate exact preview and approval after the repair's
+verified test readback. GitHub settings separately ask for unchecked consent
+to named actions on the selected repository, credential and current login,
+with a finite expiry. Stopping writes preserves an uncertain job's reservation.
+An explicit current-revision readback acknowledgment permits only destination
+GETs; it does not replay writes or revive the original approval. A changed Goal
+can retain a positive observation while the original task remains Unknown.
+
+The separate unchecked capacity-close control uses complete positive
+destination proof and the original producer's verified quiescence to release
+only the exact connection reservation. It preserves Unknown effects, costs
+and the explicit `no_learning` outcome, and permanently fences the old job
+against new writes. Reload discovers owned history without automatic consent,
+publication, reconciliation or closure. An ambiguously answered close request
+retains its exact body and key; only the server's consistent canonical
+inspection can identify an applied receipt or permit explicit discard of a
+permanently rejected request. These are branch-local capability contracts,
+not a claim of shipped `develop` behavior or live GitHub/provider usefulness.
+
 This remains **Partial**. Intercepted model transport and executor
 mechanics prove request, authority, recovery, and readback contracts only. A
 local technical preflight can make preparation ready, but execution remains

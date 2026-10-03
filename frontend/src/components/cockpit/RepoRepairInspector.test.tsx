@@ -99,6 +99,42 @@ describe("RepoRepairInspector", () => {
     vi.restoreAllMocks();
   });
 
+  it("renders the recorded successful preflight with the actual ready status", async () => {
+    // Actual managed publication-profile API preflight uses status=ready,
+    // ok=true; status alone cannot establish successful recorded proof.
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response(projection({
+      executor_kind: "local",
+      executor_profile: "local:repo-python-pytest-publication-v1",
+      executor_posture: {
+        kind: "local", profile: "repo-python-pytest-publication-v1",
+        isolation_claim: "none", network_isolation: "not_verified",
+        resource_enforcement: "admission_and_wall_timeout_only",
+        host_access: "explicit_job_approval_required", image_digest: null,
+        limits_digest: "a".repeat(64), runtime_proof_available: true,
+        publication_runtime_proof_sha256: "b".repeat(64),
+      },
+      executor_posture_digest: "c".repeat(64),
+      local_host_execution_required: true,
+      required_permissions: ["local_host_execution"],
+      preflight: { ok: true, status: "ready", reason: "local_staging_available" },
+      preparation_ready: true,
+      execution_ready: false,
+    }))));
+    render(<RepoRepairInspector {...inspectorProps} jobId="job-1" />);
+    expect(await screen.findByText("Preflight: verified")).toBeInTheDocument();
+    expect(screen.queryByText(/Preflight: blocked or unknown/)).not.toBeInTheDocument();
+  });
+
+  it("does not treat the ready status alone as verified preflight", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response(projection({
+      preflight: { ok: false, status: "ready", reason: "receipt_not_verified" },
+      preparation_ready: false,
+    }))));
+    render(<RepoRepairInspector {...inspectorProps} jobId="job-1" />);
+    expect(await screen.findByText("Preflight: blocked or unknown · receipt_not_verified")).toBeInTheDocument();
+    expect(screen.queryByText("Preflight: verified")).not.toBeInTheDocument();
+  });
+
   const cleanupProps = {
     jobId: nodeCleanupApi.held.job_id,
     ownerPrincipalId: nodeCleanupApi.held.owner_principal_id,

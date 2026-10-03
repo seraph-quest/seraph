@@ -930,6 +930,14 @@ class GitHubFollowthroughConnection(SQLModel, table=True):
     mode: str = Field(default="disabled", index=True)
     active_job_id: Optional[str] = Field(default=None, index=True)
     active_fence: Optional[int] = Field(default=None, index=True)
+    consent_id: Optional[str] = Field(default=None)
+    consent_owner_session_id: Optional[str] = Field(default=None)
+    consent_actions_json: Optional[str] = Field(default=None)
+    consent_issued_at: Optional[datetime] = Field(default=None)
+    consent_expires_at: Optional[datetime] = Field(default=None)
+    consent_connection_revision: Optional[int] = Field(default=None)
+    consent_payload_digest: Optional[str] = Field(default=None)
+    consent_revoked_at: Optional[datetime] = Field(default=None)
     created_at: datetime = Field(default_factory=_now, index=True)
     updated_at: datetime = Field(default_factory=_now, index=True)
 
@@ -1759,6 +1767,11 @@ class WorkflowRunState(SQLModel, table=True):
     checkpoint_receipts_json: str = Field(default="[]")
     artifact_receipts_json: str = Field(default="[]")
     effect_receipts_json: str = Field(default="[]")
+    # Protected, server-minted GitHub GET authority. Never accepted from a
+    # caller mapping or exposed as an execution grant.
+    github_read_revision_json: Optional[str] = Field(default=None)
+    github_read_observation_history_json: Optional[str] = Field(default=None)
+    github_capacity_closure_json: Optional[str] = Field(default=None)
     result_digest: Optional[str] = Field(default=None)
     result_summary: Optional[str] = Field(default=None)
 

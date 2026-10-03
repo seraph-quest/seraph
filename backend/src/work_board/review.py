@@ -436,8 +436,11 @@ def _workflow_run_binds_board_attempt(
             capability = None
         if capability is None:
             return False
+        # The registered GitHub adapter owns its established native durable
+        # kind; retain every board identity/digest fence below for that alias.
+        expected_job_kind = "github_followthrough_v1" if capability_id == "work.github-followthrough.v1" else capability_id
         if (
-            str(run.job_kind or "") != capability_id
+            str(run.job_kind or "") != expected_job_kind
             or str(run.capability_version or "") != str(capability.version)
             or str(run.session_id or "") != str(task.owner_session_id or "")
             or str(run.idempotency_scope or "") != "work-board-attempt"

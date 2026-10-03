@@ -1,3 +1,5 @@
+import { githubCapacityClosure, githubCapacityClosePending, githubCapacityCloseStored, githubCapacityCloseInspection, type GitHubCapacityCloseInspection } from "../../lib/githubReadback";
+import { publicationKey } from "../../lib/repoPublication";
 import { EffectiveGrantsPanel } from "../settings/EffectiveGrantsPanel";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 
@@ -7786,6 +7788,8 @@ type GitHubConnectionState = {
   revision?: number | null;
   mode?: "disabled" | "active" | "reconcile_only" | string | null;
   credential_configured?: boolean;
+  active_fence?: number;
+  active_job_id?: string | null;
 };
 type DeepPaneLoadState = "idle" | "loading" | "loaded" | "stale" | "failed";
 type DeepPaneKey =
@@ -7839,6 +7843,8 @@ function normalizeGitHubFollowthrough(
     : null;
   const action = preview?.action === "create_comment" ? "create_comment" : preview?.action === "create_issue" ? "create_issue" : null;
   if (!action) return null;
+  const closure = githubCapacityClosure(value.github_capacity_closure);
+  if (closure && closure.native_kind !== "github_followthrough_v1") return null;
   const issueNumber = typeof preview?.issue_number === "number" ? preview.issue_number : null;
   const remoteId = typeof value.remote_id === "number" ? value.remote_id : null;
   return {
@@ -7856,6 +7862,8 @@ function normalizeGitHubFollowthrough(
     remoteId,
     remoteUrl: typeof value.remote_url === "string" ? value.remote_url : null,
     recoveryReason: typeof value.recovery_reason === "string" ? value.recovery_reason : null,
+    jobRevision: typeof value.revision === "number" && Number.isSafeInteger(value.revision) ? value.revision : null,
+    capacityClosure: closure,
     jobId: typeof value.job_id === "string" ? value.job_id : null,
     approvalId: typeof value.approval_id === "string" ? value.approval_id : null,
   };
@@ -7879,6 +7887,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [githubConnection, setGithubConnection] = useState<GitHubConnectionState | null>(null);
   const [githubConnectionLoaded, setGithubConnectionLoaded] = useState(false);
   const [githubFollowthrough, setGithubFollowthrough] = useState<CockpitGitHubFollowthrough | null>(null);
+  const capacityScope = `${operatorAuth.principalId}:${operatorAuth.sessionId}:${githubFollowthrough?.jobId}`;
+  const capacityGeneration = useRef({ scope: capacityScope, revision: 0 });
+  if (capacityGeneration.current.scope !== capacityScope) capacityGeneration.current = { scope: capacityScope, revision: capacityGeneration.current.revision + 1 };
+  const [capacityInspection, setCapacityInspection] = useState<{ scope: string; result: GitHubCapacityCloseInspection } | null>(null);
   const [feedbackState, setFeedbackState] = useState<Record<string, string>>({});
   const [approvalState, setApprovalState] = useState<Record<string, string>>({});
   const [selectedInspector, setSelectedInspector] = useState<InspectorSelection | null>(null);
@@ -11429,13 +11441,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     }
   }
 
-  async function refreshGitHubJob(jobId: string, path: "" | "/execute" | "/cancel" | "/reconcile", body?: Record<string, unknown>) {
-    if (!operatorAuth.sessionId) return;
+  async function refreshGitHubJob(jobId: string, path: "" | "/execute" | "/cancel" | "/reconcile" | "/close-capacity", body?: Record<string, unknown>, currentScope?: () => boolean) {
+    if (!operatorAuth.sessionId || (currentScope && !currentScope())) return;
+    const controller = new AbortController();
+    const closeTimer = path === "/close-capacity" ? setTimeout(() => controller.abort(), 15000) : null;
     try {
       const response = await apiFetch(`${API_URL}/api/capabilities/github/jobs/${encodeURIComponent(jobId)}${path}`, {
         method: path ? "POST" : "GET",
         headers: path ? { "Content-Type": "application/json" } : undefined,
         body: path ? JSON.stringify(body ?? {}) : undefined,
+        signal: controller.signal,
       });
       const payload = await response.json().catch(() => null);
       if (!response.ok) {
@@ -11445,6 +11460,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         setOperatorStatus(`GitHub follow-through refused: ${typeof detail === "string" ? detail : "the current job state is stale"}.`);
         return;
       }
+      if (currentScope && !currentScope()) return;
       const next = normalizeGitHubFollowthrough(payload, githubConnectionReady);
       if (next) {
         setGithubFollowthrough((current) => ({
@@ -11453,8 +11469,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         }));
       }
       await refreshCockpit();
+      return next;
     } catch {
       setOperatorStatus("GitHub follow-through status is temporarily unavailable; inspect the durable job before acting again.");
+    } finally {
+      if (closeTimer !== null) clearTimeout(closeTimer);
     }
   }
 
@@ -11472,9 +11491,73 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     await refreshGitHubJob(jobId, "/cancel");
   }
 
+  async function closeGitHubCapacity(acknowledged: true) {
+    const jobId = githubFollowthrough?.jobId;
+    const originalOwner = operatorAuth.principalId;
+    const originalRoot = operatorAuth.sessionId;
+    const capturedGeneration = capacityGeneration.current;
+    const stillCurrent = () => capacityGeneration.current === capturedGeneration;
+    if (acknowledged !== true || !jobId || !originalOwner || !originalRoot || !githubFollowthrough?.jobRevision) return;
+    setCapacityInspection(null);
+    try {
+      const connection = await loadGithubConnection();
+      const response = await apiFetch(`${API_URL}/api/auth/session`);
+      const current = await response.json();
+      if (!response.ok || current.principal_id !== originalOwner || current.session_id !== originalRoot || !connection || !stillCurrent()) throw new Error("Original login changed");
+      const pending = githubCapacityClosePending(`${originalOwner}:${originalRoot}:${jobId}:work.github-followthrough.v1`, {
+        acknowledged_capacity_close: true, expected_job_revision: githubFollowthrough.jobRevision,
+        expected_connection_revision: connection.revision, expected_connection_fence: connection.active_fence,
+        idempotency_key: publicationKey(), ...(githubFollowthrough.remoteId ? { remote_id: githubFollowthrough.remoteId } : {}),
+      });
+      const next = await refreshGitHubJob(jobId, "/close-capacity", pending.body, stillCurrent);
+      if (next?.capacityClosure) pending.clear();
+    } catch {
+      setOperatorStatus("Capacity closure unavailable; no new request can be sent without exact original-login metadata and durable request storage.");
+    }
+  }
+
+  async function inspectGitHubCapacity(discardRejected = false) {
+    const jobId = githubFollowthrough?.jobId;
+    const originalOwner = operatorAuth.principalId;
+    const originalRoot = operatorAuth.sessionId;
+    const capturedGeneration = capacityGeneration.current;
+    const scope = capacityScope;
+    const stillCurrent = () => capacityGeneration.current === capturedGeneration;
+    if (operatorAuth.status !== "authenticated" || !jobId || !originalOwner || !originalRoot) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
+    try {
+      const pending = githubCapacityCloseStored(`${originalOwner}:${originalRoot}:${jobId}:work.github-followthrough.v1`);
+      if (!pending) throw new Error("No retained close request");
+      const response = await apiFetch(`${API_URL}/api/capabilities/github/jobs/${encodeURIComponent(jobId)}?pending_capacity_close=${encodeURIComponent(JSON.stringify(pending.body))}`, { signal: controller.signal });
+      const payload = await response.json();
+      if (!response.ok) throw new Error("Canonical pending-close inspection unavailable");
+      const result = githubCapacityCloseInspection(payload.pending_capacity_close, jobId, pending.body);
+      const next = normalizeGitHubFollowthrough(payload, githubConnectionReady);
+      if (!next || next.jobId !== jobId || next.jobRevision !== result.job_revision) throw new Error("Canonical job inspection changed");
+      if (!stillCurrent()) return;
+      setGithubFollowthrough(current => ({ ...next, approvalStatus: current?.approvalStatus ?? next.approvalStatus }));
+      setCapacityInspection({ scope, result });
+      if (result.state === "applied") pending.clear();
+      else if (discardRejected && result.state === "permanently_stale_not_applied") {
+        pending.clear();
+        setCapacityInspection(null);
+        await loadGithubConnection();
+        setOperatorStatus("Rejected request discarded. Review current metadata and acknowledge a new capacity-close request separately.");
+      }
+    } catch {
+      if (stillCurrent()) {
+        setCapacityInspection(null);
+        setOperatorStatus("Pending-close inspection is inconclusive; the exact retained request is unchanged.");
+      }
+    } finally { clearTimeout(timer); }
+  }
+
   async function reconcileGitHubFollowthrough() {
     const jobId = githubFollowthrough?.jobId;
-    if (!jobId) return;
+    const originalOwner = operatorAuth.principalId;
+    const originalRoot = operatorAuth.sessionId;
+    if (!jobId || !originalOwner || !originalRoot) return;
     const suggested = githubFollowthrough.remoteId ? String(githubFollowthrough.remoteId) : "";
     const rawRemoteId = typeof window !== "undefined"
       ? window.prompt("Enter the verified GitHub object ID if it is known; leave blank to receive a durable block.", suggested)
@@ -11484,7 +11567,20 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       setOperatorStatus("GitHub reconciliation cancelled: the remote ID must be a positive integer.");
       return;
     }
-    await refreshGitHubJob(jobId, "/reconcile", remoteId === undefined ? {} : { remote_id: remoteId });
+    if (rawRemoteId === null || !window.confirm("Authorize GET-only readback of this exact publication under the current connection revision? This does not permit another publication.")) return;
+    try {
+      const connection = await loadGithubConnection();
+      const response = await apiFetch(`${API_URL}/api/auth/session`);
+      const current = await response.json();
+      if (!response.ok || current.principal_id !== originalOwner || current.session_id !== originalRoot || !connection || typeof connection.revision !== "number" || !Number.isSafeInteger(connection.revision) || connection.revision < 1) {
+        setOperatorStatus("GitHub readback blocked: the original login or connection metadata changed.");
+        return;
+      }
+      const { githubReadbackRequest } = await import("../../lib/githubReadback");
+      await refreshGitHubJob(jobId, "/reconcile", githubReadbackRequest(true, connection.revision, remoteId));
+    } catch {
+      setOperatorStatus("GitHub readback metadata unavailable; no reconciliation request was sent.");
+    }
   }
   const latestArtifactLineage = latestArtifact ? resolveArtifactLineage(latestArtifact) : null;
   const artifactSourceMatchesOutcome = Boolean(
@@ -16919,6 +17015,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 onExecuteGitHubFollowthrough={() => void executeGitHubFollowthrough()}
                 onCancelGitHubFollowthrough={() => void cancelGitHubFollowthrough()}
                 onReconcileGitHubFollowthrough={() => void reconcileGitHubFollowthrough()}
+                githubCapacityAcknowledgmentScope={operatorAuth.status === "authenticated" ? capacityScope : null}
+                onCloseGitHubCapacity={acknowledged => { void closeGitHubCapacity(acknowledged); }}
+                githubCapacityCloseInspection={capacityInspection?.scope === capacityScope ? capacityInspection.result : null}
+                onInspectGitHubCapacity={() => { void inspectGitHubCapacity(); }}
+                onDiscardRejectedGitHubCapacity={() => { void inspectGitHubCapacity(true); }}
                 onOpenPriorities={() => setQuestPanelOpen(true)}
                 onLoadWork={() => void loadWorkflowRuns()}
                 onInspectWork={() => inspectWorkflowRun(outcomeWorkflow)}

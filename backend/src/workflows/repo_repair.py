@@ -487,7 +487,7 @@ def _executor_kind(sandbox: Any) -> str:
 
 def _executor_profile(sandbox: Any) -> str:
     profile = str(getattr(getattr(sandbox, "config", None), "profile", "repo-python-pytest-v1") or "")
-    if profile not in {"repo-python-pytest-v1", "repo-node24-npm-v1"}:
+    if profile not in {"repo-python-pytest-v1", "repo-node24-npm-v1", "repo-python-pytest-publication-v1"} or (_executor_kind(sandbox) != "local" and profile != "repo-python-pytest-v1"):
         raise RepoRepairError("executor_profile_invalid", "The repository executor profile is invalid", status_code=409)
     return profile
 

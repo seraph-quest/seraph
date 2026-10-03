@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
+import { RepoPublicationPanel } from "./RepoPublicationPanel";
 import type {
   RepoRepairExecutorKind,
   WorkBoardRepoRepairProjection,
@@ -67,6 +68,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 const REPO_REPAIR_EXECUTOR_KINDS: RepoRepairExecutorKind[] = ["local", "docker_rootless", "docker_rootful"];
 const REPO_SANDBOX_PROFILE = "repo-python-pytest-v1";
+const LOCAL_REPAIR_PROFILES = new Set([REPO_SANDBOX_PROFILE, "repo-node24-npm-v1", "repo-python-pytest-publication-v1"]);
 const LOCAL_HOST_ACCESS = "explicit_job_approval_required";
 
 const POSTURE_VALUES: Record<RepoRepairExecutorKind, {
@@ -141,7 +143,9 @@ function normalizeExecutorMetadata(payload: Record<string, unknown>): Pick<
   if (posture.kind !== undefined && posture.kind !== executorKind) {
     throw new Error("The repair status response has mismatched executor posture metadata.");
   }
-  if (posture.profile !== undefined && ![REPO_SANDBOX_PROFILE, "repo-node24-npm-v1"].includes(String(posture.profile))) {
+  const selectedProfile = posture.profile ?? REPO_SANDBOX_PROFILE;
+  if (typeof selectedProfile !== "string"
+    || !(executorKind === "local" ? LOCAL_REPAIR_PROFILES.has(selectedProfile) : selectedProfile === REPO_SANDBOX_PROFILE)) {
     throw new Error("The repair status response has an unsupported executor profile.");
   }
   const imageDigest = posture.image_digest;
@@ -225,7 +229,7 @@ function normalizeExecutorMetadata(payload: Record<string, unknown>): Pick<
     : !isSafeDigest(optionalDigest)) {
     throw new Error("The repair status response has malformed posture digest metadata.");
   }
-  const expectedExecutorProfile = `${executorKind}:${postureValue.profile}`;
+  const expectedExecutorProfile = `${executorKind}:${selectedProfile}`;
   if (explicitExecutorKind && payload.executor_profile !== expectedExecutorProfile) {
     throw new Error("The repair status response has an unsupported executor profile.");
   }
@@ -239,6 +243,12 @@ function normalizeExecutorMetadata(payload: Record<string, unknown>): Pick<
   };
   const preparationReady = readiness("preparation_ready");
   const executionReady = readiness("execution_ready");
+  if (selectedProfile === "repo-python-pytest-publication-v1" && preparationReady === true
+    && (posture.runtime_proof_available !== true
+      || typeof posture.publication_runtime_proof_sha256 !== "string"
+      || !/^[0-9a-f]{64}$/.test(posture.publication_runtime_proof_sha256))) {
+    throw new Error("The selected publication profile has no verified runtime proof.");
+  }
   if (explicitExecutorKind) {
     if (typeof payload.local_host_execution_required !== "boolean"
       || typeof preparationReady !== "boolean"
@@ -948,7 +958,7 @@ export function RepoRepairInspector({
       <div className="mt-2 grid gap-1 text-[11px]">
         <div>Root <span className="font-mono break-all">{projectionForRender.job_id}</span> · authority <span className="font-mono">{safeDigest(projectionForRender.authority_digest)}</span></div>
         <div>Executor: <span className="font-mono">{executorProfile}</span> · posture <span className="font-mono">{safeDigest(projectionForRender.executor_posture_digest)}</span></div>
-        {posture.profile === "repo-node24-npm-v1" ? <div>Recorded job preflight: {typeof projectionForRender.preflight?.status === "string" ? projectionForRender.preflight.status : "blocked"}</div> : <div>Preflight: {projectionForRender.preflight?.status === "verified" ? "verified" : `blocked or unknown${projectionForRender.preflight && typeof projectionForRender.preflight.reason === "string" ? ` · ${projectionForRender.preflight.reason}` : ""}`}</div>}
+        {posture.profile === "repo-node24-npm-v1" ? <div>Recorded job preflight: {typeof projectionForRender.preflight?.status === "string" ? projectionForRender.preflight.status : "blocked"}</div> : <div>Preflight: {projectionForRender.preflight?.ok === true ? "verified" : `blocked or unknown${projectionForRender.preflight && typeof projectionForRender.preflight.reason === "string" ? ` · ${projectionForRender.preflight.reason}` : ""}`}</div>}
         <div>Preparation: {preparationReady ? "ready" : "blocked"} · execution: {executionReady ? "ready" : localHostExecution && preparationReady ? "awaiting exact host approval" : "blocked"}</div>
         <div>Posture: isolation {posture.isolation_claim ?? "unknown"} · network {posture.network_isolation ?? "unknown"} · resources {posture.resource_enforcement ?? "unknown"}</div>
         {localHostExecution && <div className="text-amber-200">Trusted host execution: no isolation guarantee. This job may access the host filesystem and network as the Seraph user after the exact approval.</div>}
@@ -1026,6 +1036,7 @@ export function RepoRepairInspector({
         {terminal && status !== "succeeded" && <div className="mt-2 rounded border border-amber-500/40 p-2" role="status">Recovery: {status === "unknown_external_effect" || status === "cost_liability" ? "reconcile the exact sandbox effect before any retry" : projectionForRender.recovery_action.replace(/_/g, " ")}.</div>}
       </div>
       {notice && <div className="mt-2 rounded border border-emerald-500/40 p-2" role="status">{notice}</div>}
+      {status === "succeeded" && hasCurrentBinding && ownerPrincipalId && ownerSessionId && <RepoPublicationPanel repair={projectionForRender} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} onOpenApprovals={onOpenApprovals} />}
       {error && <div className="mt-2 rounded border border-amber-500/40 p-2" role="alert">{error}</div>}
     </section>
   );

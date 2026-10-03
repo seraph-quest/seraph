@@ -241,6 +241,10 @@ def _executor_posture_projection(
             ),
         }
     )
+    if executor_kind == "local" and posture.get("image_digest") == "":
+        # Empty local image metadata is display absence. Raw approval posture
+        # and its authority digest keep the original server receipt unchanged.
+        posture["image_digest"] = None
     return posture, raw_posture
 
 
@@ -274,7 +278,7 @@ def _repo_sandbox_settings_payload(
         receipt = preflight.as_receipt()
     except (TypeError, ValueError, OSError, RepoSandboxError) as exc:
         receipt = {
-            "profile": value.profile,
+            "profile": str(value.profile),
             "executor_kind": executor_kind,
             "status": "blocked",
             "ok": False,
@@ -1406,7 +1410,7 @@ async def set_repo_sandbox_settings(body: RepoSandboxSettingsRequest, request: R
         candidate = RepoSandboxSettings.model_validate(
             current.model_dump(mode="json") | updates
         )
-        if candidate.profile not in {"repo-python-pytest-v1", "repo-node24-npm-v1"}:
+        if candidate.profile not in {"repo-python-pytest-v1", "repo-node24-npm-v1", "repo-python-pytest-publication-v1"}:
             raise ValueError("unsupported_profile")
         if candidate.node_runtime_path and (not Path(candidate.node_runtime_path).is_absolute() or len(candidate.node_runtime_path) > 512):
             raise ValueError("node_runtime_path_requires_absolute_installed_path")

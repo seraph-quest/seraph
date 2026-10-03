@@ -2816,7 +2816,8 @@ class WorkBoardRepository:
                 task,
                 owner,
                 kind="task.dispatch_blocked",
-                metadata={"status": WorkBoardStatus.blocked.value, "block_kind": _closed_block_kind(exc.code)},
+                metadata={"status": WorkBoardStatus.blocked.value, "block_kind": _closed_block_kind(exc.code),
+                          "reason_code": exc.code, "task_revision": task.task_revision},
                 actor_principal_id=actor_principal_id or lease_owner,
                 actor_session_id=actor_session_id or "work-board-dispatch",
             )

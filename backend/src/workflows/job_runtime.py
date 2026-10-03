@@ -2244,6 +2244,26 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         async with self._session() as db:
             bind = db.get_bind()
             dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
+            from src.memory.evidence_dependencies import stage_run_dependencies, recheck_run_dependencies
+            admission_dependencies = None
+            # Existing immutable admission replay does not authorize new use.
+            # Stage physical evidence only for a genuinely new invocation and
+            # finish those reads before acquiring the canonical writer.
+            prior_admission = await db.scalar(select(WorkflowRunState).where(
+                WorkflowRunState.idempotency_binding == binding))
+            if prior_admission is None:
+                candidate = WorkflowRunState(run_identity=identity.job_id,
+                    job_kind=identity.job_kind, owner_principal_id=identity.owner_principal_id,
+                    operator_session_id=spec.operator_session_id, goal_id=spec.goal_id,
+                    goal_revision=spec.goal_revision, idempotency_key=identity.idempotency_key,
+                    declared_authority_json=_canonical(safe_authority))
+                try:
+                    admission_dependencies = await stage_run_dependencies(db, candidate)
+                except (OSError, KeyError, TypeError):
+                    # The pure canonical guard below commits the stale receipt
+                    # for a bound task rather than admitting unreadable input.
+                    admission_dependencies = None
+            await db.rollback()
             transaction_started = False
             if not _text(spec.goal_id) and spec.goal_revision is not None:
                 raise DurableJobTransitionError("goal_revision requires a canonical goal")
@@ -2538,6 +2558,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 artifact_receipts_json="[]",
                 effect_receipts_json="[]",
             )
+            await recheck_run_dependencies(db, run, admission_dependencies)
             db.add(run)
             try:
                 await db.flush()

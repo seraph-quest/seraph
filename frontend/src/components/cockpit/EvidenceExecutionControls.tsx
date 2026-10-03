@@ -32,17 +32,19 @@ function validRequest(value: unknown): value is BindingRequest {
 export function EvidenceExecutionControls({ endpoint, taskId, taskRevision, ownerSessionId, canEdit,
   packetRevision, packetDigest }: { endpoint: string; taskId: string; taskRevision: number;
   ownerSessionId?: string | null; canEdit: boolean; packetRevision: number; packetDigest: string | null }) {
-  const [inspection, setInspection] = useState<Inspection | null>(null);
-  const [preview, setPreview] = useState<Preview | null>(null);
+  const [inspection, setInspection] = useState<{ scope: string; value: Inspection } | null>(null);
+  const [preview, setPreview] = useState<{ scope: string; value: Preview } | null>(null);
   const [ack, setAck] = useState(false);
+  const [ackScope, setAckScope] = useState<string | null>(null);
   const [pending, setPending] = useState<BindingRequest | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const scope = `${ownerSessionId ?? ''}:${taskId}:${taskRevision}`;
+  const scope = `${ownerSessionId ?? ''}:${taskId}:${taskRevision}:${packetRevision}:${packetDigest ?? ''}`;
   const currentScope = useRef(scope); currentScope.current = scope;
   const storageKey = `seraph:evidence-execution:${ownerSessionId ?? ''}:${taskId}`;
-  const boundInspection = inspection?.task_id === taskId ? inspection : null;
-  const boundPreview = preview?.task_id === taskId ? preview : null;
+  const boundInspection = inspection?.scope === scope && inspection.value.task_id === taskId ? inspection.value : null;
+  const boundPreview = preview?.scope === scope && preview.value.task_id === taskId ? preview.value : null;
+  const boundAck = ackScope === scope && ack;
   const enabled = canEdit && Boolean(ownerSessionId);
 
   async function call(method: string, suffix = '', body?: unknown) {
@@ -59,7 +61,7 @@ export function EvidenceExecutionControls({ endpoint, taskId, taskRevision, owne
       || !Number.isSafeInteger(value.binding_count) || value.binding_count < 0 || value.binding_count > 16) {
       throw new Error('Execution evidence projection is invalid.');
     }
-    if (currentScope.current === expectedScope) setInspection(value);
+    if (currentScope.current === expectedScope) setInspection({ scope: expectedScope, value });
     return value;
   }
   useEffect(() => {
@@ -101,7 +103,7 @@ export function EvidenceExecutionControls({ endpoint, taskId, taskRevision, owne
       || value.packet_revision !== packetRevision || !Number.isSafeInteger(value.task_revision)
       || !Array.isArray(value.affected_slots) || value.affected_slots.length > 4
       || value.affected_slots.some(slot => typeof slot !== 'string' || slot.length > 256)) throw new Error('Execution preview binding is invalid.');
-    if (currentScope.current === captured) { setPreview(value); setAck(false); }
+    if (currentScope.current === captured) { setPreview({ scope: captured, value }); setAck(false); }
   }
   async function submit(request: BindingRequest) {
     const captured = scope;
@@ -111,7 +113,7 @@ export function EvidenceExecutionControls({ endpoint, taskId, taskRevision, owne
     // Keep the exact request until explicit inspection confirms its receipt.
   }
   async function accept() {
-    if (!boundPreview || !ack || pending) return;
+    if (!boundPreview || !boundAck || pending) return;
     const request: BindingRequest = { expected_task_revision: boundPreview.task_revision,
       expected_packet_revision: boundPreview.packet_revision, expected_packet_digest: boundPreview.packet_digest,
       operation: boundPreview.operation, preview_digest: boundPreview.preview_digest,
@@ -144,9 +146,9 @@ export function EvidenceExecutionControls({ endpoint, taskId, taskRevision, owne
     {boundPreview && <>
       <p>Exact executor input SHA-256: <code>{boundPreview.executor_input_digest}</code></p>
       <p>Affected slots: {boundPreview.affected_slots.join(', ') || 'this task only'}.</p>
-      <label><input type="checkbox" checked={ack} onChange={event => setAck(event.target.checked)} />
+      <label><input type="checkbox" checked={boundAck} onChange={event => { setAckScope(scope); setAck(event.target.checked); }} />
         I reviewed this exact packet for execution use; it grants no model or external permission.</label>
-      <button disabled={!enabled || busy || !ack || Boolean(pending)} onClick={() => void action(accept)}>Accept exact execution binding</button>
+      <button disabled={!enabled || busy || !boundAck || Boolean(pending)} onClick={() => void action(accept)}>Accept exact execution binding</button>
     </>}
   </div>;
 }

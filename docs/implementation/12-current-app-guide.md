@@ -5,6 +5,14 @@ title: Current App Guide
 
 # Current App Guide
 
+The private invoice PDF/CSV comparison target is **Planned** under
+[ADR-017](./decisions/017-private-bounded-document-comparison.md) and
+[#923](https://github.com/seraph-quest/seraph/issues/923). Its one bounded literal
+line-total comparison produces cited formulas and private derived output.
+Structural checks do not certify files malware-clean. This branch must complete
+private ingestion, native child supervision, readback and cockpit proof before
+changing shipped `develop` truth.
+
 **Status:** Partial
 **Scope:** current `develop` baseline plus the accepted Epic #736/#775 target;
 open integration branches describe intended post-merge truth and label any

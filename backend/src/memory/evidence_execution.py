@@ -142,6 +142,33 @@ async def _prior(db, owner, request, request_digest):
     return json.loads(prior.metadata_json)['applied_result']
 
 
+async def _clearable_evidence_block(db, owner, task):
+    """Only an exact server-recorded stale-evidence pause may be removed.
+
+    Restoring Todo leaves all ordinary readiness/approval checks in force and
+    never revives a native attempt or a previously consumed execution approval.
+    """
+    if task.status != WorkBoardStatus.blocked or task.block_kind != 'dependency':
+        return False
+    event = await db.scalar(select(WorkBoardEvent).where(
+        WorkBoardEvent.task_id == task.task_id,
+        WorkBoardEvent.owner_principal_id == owner.principal_id,
+        WorkBoardEvent.owner_session_id == owner.session_id,
+        WorkBoardEvent.kind.in_(['task.dispatch_blocked', 'task.evidence.impact_paused'])
+    ).order_by(WorkBoardEvent.event_id.desc()).limit(1))
+    if event is None:
+        return False
+    metadata = json.loads(event.metadata_json)
+    if (metadata.get('reason_code') != 'evidence_dependency_stale'
+        or metadata.get('task_revision') != task.task_revision):
+        return False
+    from src.work_board.repository import _executor_lane_error
+    if _executor_lane_error(task.capability_id, task.executor_id) is not None:
+        return False
+    await WorkBoardRepository().validate_task_goal(db, owner, task)
+    return True
+
+
 async def accept_execution(db, owner, task_id, request, *, operator=None):
     request_digest = digest({'task_id': task_id, 'mutation': 'execution-evidence',
         'request': request.model_dump()})
@@ -183,10 +210,16 @@ async def accept_execution(db, owner, task_id, request, *, operator=None):
                 packet_digest=staged.packet_digest, binding_task_revision=revision,
                 executor_input_digest=task.typed_input_digest, pipeline_operation_id=task.pipeline_operation_id,
                 pipeline_slot=task.pipeline_slot))
+    clears_pause = request.operation == 'bind' and await _clearable_evidence_block(db, owner, task)
+    values = {'task_revision': revision}
+    if clears_pause:
+        values.update(status=WorkBoardStatus.todo, block_kind=None, block_reason=None,
+                      block_source_status=None)
     await WorkBoardRepository()._cas_task_update(db, owner, task,
-        expected_revision=request.expected_task_revision, values={'task_revision': revision})
+        expected_revision=request.expected_task_revision, values=values)
     result = {**_projection(value), 'task_revision': revision, 'binding_state':
-        'bound' if request.operation == 'bind' else 'unbound'}
+        'bound' if request.operation == 'bind' else 'unbound',
+        'cleared_stale_evidence_pause': bool(clears_pause), 'task_status': task.status.value}
     event = WorkBoardEvent(task_id=task_id, owner_principal_id=owner.principal_id,
         owner_session_id=owner.session_id, actor_principal_id=owner.principal_id,
         actor_session_id=owner.session_id, kind='task.evidence.execution_bound',

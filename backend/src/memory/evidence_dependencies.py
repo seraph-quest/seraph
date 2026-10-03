@@ -484,7 +484,8 @@ async def _run_task(db, run):
     attempt = attempts[0]
     task = (await db.execute(select(WorkBoardTask).where(
         WorkBoardTask.task_id == attempt.task_id).execution_options(populate_existing=True))).scalar_one_or_none()
-    if task is not None and not await dependency_rows(db, task):
+    if task is not None and await db.scalar(select(WorkBoardEvidenceDependency.dependency_id).where(
+        WorkBoardEvidenceDependency.task_id == task.task_id).limit(1)) is None:
         return None  # Unbound legacy execution retains its existing contract.
     declared = _json(run.declared_authority_json, maximum=256 * 1024)
     principal = (declared.get('operator_owner_principal_id')

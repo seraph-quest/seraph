@@ -2268,6 +2268,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             bind = db.get_bind()
             dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
             from src.memory.evidence_dependencies import stage_run_dependencies, recheck_run_dependencies
+            from src.work_board.repository import BoardError
             admission_dependencies = None
             # Existing immutable admission replay does not authorize new use.
             # Stage physical evidence only for a genuinely new invocation and
@@ -2282,7 +2283,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     declared_authority_json=_canonical(safe_authority))
                 try:
                     admission_dependencies = await stage_run_dependencies(db, candidate)
-                except (OSError, KeyError, TypeError):
+                except (BoardError, OSError, KeyError, TypeError):
                     # The pure canonical guard below commits the stale receipt
                     # for a bound task rather than admitting unreadable input.
                     admission_dependencies = None

@@ -112,3 +112,47 @@ def test_execution_acknowledgment_is_literal_true(ack):
         ExecutionAcceptRequest(expected_task_revision=1,expected_packet_revision=1,
             expected_packet_digest='a'*64,preview_digest='b'*64,idempotency_key=str(uuid4()),
             acknowledge_execution_use=ack)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('async_db',['file'],indirect=True)
+@pytest.mark.parametrize('other_block',[False, True])
+async def test_rebind_clears_only_exact_canonical_evidence_pause(async_db,tmp_path,monkeypatch,other_block):
+    tmp_path.chmod(0o700)
+    monkeypatch.setattr(settings,'workspace_dir',str(tmp_path))
+    monkeypatch.setattr(WorkBoardRepository,'_safe_text',AsyncMock(side_effect=lambda value,**kw:value))
+    async with async_db() as db:
+        owner,task,memory,_=await canonical_fact(db)
+        task.capability_id='work.evidence-dossier.v1'
+        task.executor_id='seraph-work-board:work.evidence-dossier.v1'
+        await db.commit()
+        request=await packet_for(db,task,memory)
+        preview=await preview_execution(db,owner,task.task_id,request)
+        await accept_execution(db,owner,task.task_id,ExecutionAcceptRequest(**request.model_dump(),
+            preview_digest=preview['preview_digest'],idempotency_key=str(uuid4()),acknowledge_execution_use=True))
+        await db.commit()
+        task=await WorkBoardRepository().get_task(db,owner,task.task_id)
+        task.status=WorkBoardStatus.ready
+        memory.content='Reviewed replacement private operator fact'
+        await db.commit()
+        assert await WorkBoardRepository().claim_ready_task(db,task.task_id,
+            expected_revision=task.task_revision,lease_owner='guarded-dispatch') is None
+        await db.commit()
+        if other_block:
+            db.add(WorkBoardEvent(task_id=task.task_id,owner_principal_id=owner.principal_id,
+                owner_session_id=owner.session_id,actor_principal_id=owner.principal_id,
+                kind='task.dispatch_blocked',metadata_json=json.dumps({'task_revision':task.task_revision,
+                    'reason_code':'handoff_materialization_required'})))
+            await db.commit()
+        replacement=await packet_for(db,task,memory)
+        refreshed=await preview_execution(db,owner,task.task_id,replacement)
+        result=await accept_execution(db,owner,task.task_id,ExecutionAcceptRequest(**replacement.model_dump(),
+            preview_digest=refreshed['preview_digest'],idempotency_key=str(uuid4()),acknowledge_execution_use=True))
+        await db.commit()
+        assert result['cleared_stale_evidence_pause'] is (not other_block)
+        assert task.status==(WorkBoardStatus.blocked if other_block else WorkBoardStatus.todo)
+        assert task.typed_input_digest=='a'*64
+    async with async_db() as reopened:
+        current=await WorkBoardRepository().get_task(reopened,owner,task.task_id)
+        assert current.status==(WorkBoardStatus.blocked if other_block else WorkBoardStatus.todo)
+        assert not list((await reopened.execute(select(WorkBoardAttempt))).scalars())

@@ -2267,6 +2267,27 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         async with self._session() as db:
             bind = db.get_bind()
             dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
+            from src.memory.evidence_dependencies import stage_run_dependencies, recheck_run_dependencies
+            from src.work_board.repository import BoardError
+            admission_dependencies = None
+            # Existing immutable admission replay does not authorize new use.
+            # Stage physical evidence only for a genuinely new invocation and
+            # finish those reads before acquiring the canonical writer.
+            prior_admission = await db.scalar(select(WorkflowRunState).where(
+                WorkflowRunState.idempotency_binding == binding))
+            if prior_admission is None:
+                candidate = WorkflowRunState(run_identity=identity.job_id,
+                    job_kind=identity.job_kind, owner_principal_id=identity.owner_principal_id,
+                    operator_session_id=spec.operator_session_id, goal_id=spec.goal_id,
+                    goal_revision=spec.goal_revision, idempotency_key=identity.idempotency_key,
+                    declared_authority_json=_canonical(safe_authority))
+                try:
+                    admission_dependencies = await stage_run_dependencies(db, candidate)
+                except (BoardError, OSError, KeyError, TypeError):
+                    # The pure canonical guard below commits the stale receipt
+                    # for a bound task rather than admitting unreadable input.
+                    admission_dependencies = None
+            await db.rollback()
             transaction_started = False
             if not _text(spec.goal_id) and spec.goal_revision is not None:
                 raise DurableJobTransitionError("goal_revision requires a canonical goal")
@@ -2561,6 +2582,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 artifact_receipts_json="[]",
                 effect_receipts_json="[]",
             )
+            await recheck_run_dependencies(db, run, admission_dependencies)
             db.add(run)
             try:
                 await db.flush()
@@ -2929,12 +2951,37 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             # consent, and artifact rows in the same serialized transaction as
             # the root CAS.  SQLite otherwise permits a stale read snapshot
             # between the caller's last preflight and this transition.
-            if terminal_authority_check is not None and to_status in {"succeeded", "degraded"}:
+            from src.memory.evidence_dependencies import stage_run_dependencies, recheck_run_dependencies
+            staged_dependencies = None
+            preflight_run = await self._fetch(db, job_id)
+            if str(preflight_run.status) in DURABLE_JOB_TERMINAL_STATUSES:
+                # Exact historical replay admits no contact/source use. Keep
+                # the original canonical Goal fence, then return the existing
+                # terminal result before inspecting mutable dependencies.
+                if to_status not in {'failed', 'cancelled'}:
+                    await _assert_canonical_goal_fence(db, goal_id=preflight_run.goal_id,
+                        goal_revision=preflight_run.goal_revision, owner_kind=preflight_run.owner_kind,
+                        owner_principal_id=preflight_run.owner_principal_id, session_id=preflight_run.session_id,
+                        authority=preflight_run.declared_authority_json)
+                if str(preflight_run.status) != to_status:
+                    raise DurableJobTransitionError(f'terminal job cannot transition {preflight_run.status} -> {to_status}')
+                db.expunge(preflight_run)
+                return _serialize(preflight_run, receipt={'kind': 'transition', 'status': 'deduped',
+                    'terminal_noop': True, 'revision': _revision(preflight_run)})
+            dependency_guard = (preflight_run.job_kind in {'browser_public_task',
+                'work.evidence-dossier.v1', 'work.local-evidence-report.v1'}
+                and to_status in {'queued', 'running', 'succeeded', 'degraded'})
+            if dependency_guard:
+                staged_dependencies = await stage_run_dependencies(db, preflight_run)
+            await db.rollback()
+            if (terminal_authority_check is not None and to_status in {"succeeded", "degraded"}) or dependency_guard:
                 bind = db.get_bind()
                 dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
                 if dialect_name == "sqlite":
                     await db.execute(text("BEGIN IMMEDIATE"))
             run = await self._fetch(db, job_id)
+            if dependency_guard:
+                await recheck_run_dependencies(db, run, staged_dependencies)
             if to_status not in {"failed", "cancelled"}:
                 await _assert_canonical_goal_fence(
                     db,
@@ -3675,9 +3722,24 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         if expected_state != "queued":
             raise DurableJobTransitionError("durable job claims require the queued state")
         async with self._session() as db:
-            if claim_authority_check is not None:
+            from src.memory.evidence_dependencies import stage_run_dependencies, recheck_run_dependencies
+            preflight_run = await self._fetch(db, job_id)
+            if str(preflight_run.status) in DURABLE_JOB_TERMINAL_STATUSES:
+                await _assert_canonical_goal_fence(db, goal_id=preflight_run.goal_id,
+                    goal_revision=preflight_run.goal_revision, owner_kind=preflight_run.owner_kind,
+                    owner_principal_id=preflight_run.owner_principal_id, session_id=preflight_run.session_id,
+                    authority=preflight_run.declared_authority_json)
+                db.expunge(preflight_run)
+                return _serialize(preflight_run, receipt={'kind': 'claim', 'status': 'terminal_noop'})
+            dependency_guard = preflight_run.job_kind in {'browser_public_task',
+                'work.evidence-dossier.v1', 'work.local-evidence-report.v1'}
+            staged_dependencies = await stage_run_dependencies(db, preflight_run) if dependency_guard else None
+            await db.rollback()
+            if claim_authority_check is not None or dependency_guard:
                 await db.execute(text("BEGIN IMMEDIATE"))
             run = await self._fetch(db, job_id)
+            if dependency_guard:
+                await recheck_run_dependencies(db, run, staged_dependencies)
             if claim_authority_check is not None:
                 if run.job_kind != "readonly_research_child":
                     raise DurableJobLeaseError("phase-bound claims require a fixed research child")
@@ -4252,6 +4314,10 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         if not _text(checkpoint_id):
             raise ValueError("checkpoint_id is required")
         async with self._session() as db:
+            from src.memory.evidence_dependencies import stage_run_dependencies, recheck_run_dependencies
+            preflight_run = await self._fetch(db, job_id)
+            staged_dependencies = await stage_run_dependencies(db, preflight_run)
+            await db.rollback()
             # SQLite WAL readers cannot reliably upgrade a snapshot to a
             # writer while another dispatcher is committing.  Acquire the
             # same immediate writer boundary used by durable admission and
@@ -4261,6 +4327,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if getattr(getattr(bind, "dialect", None), "name", "") == "sqlite":
                 await db.execute(text("BEGIN IMMEDIATE"))
             run = await self._fetch(db, job_id)
+            await recheck_run_dependencies(db, run, staged_dependencies)
             await _assert_canonical_goal_fence(
                 db,
                 goal_id=getattr(run, "goal_id", None),
@@ -5974,6 +6041,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         owner: str | None = None,
         fencing_token: int | None = None,
         expected_revision: int | None = None,
+        readback_authority_check: Callable[[Any, Any], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         """Persist a bounded effect or readback receipt on the job record.
 
@@ -6015,6 +6083,11 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 "adapter_idempotency_key": adapter_idempotency_key or "",
             })[:24]
         async with self._session() as db:
+            if readback_authority_check is not None:
+                if receipt_kind != "readback":
+                    raise ValueError("authority callback requires a readback receipt")
+                from src.work_board.repository import _begin_sqlite_immediate
+                await _begin_sqlite_immediate(db)
             run = await self._fetch(db, job_id)
             await _assert_canonical_goal_fence(
                 db,
@@ -6066,6 +6139,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     )
             else:
                 self._assert_lease(run, owner=owner, fencing_token=fencing_token)
+            if readback_authority_check is not None:
+                await readback_authority_check(db, run)
             recorded_at = _utc_now().isoformat()
             receipt = {
                 "effect_id": effect_id,
@@ -6311,6 +6386,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         owner: str | None = None,
         fencing_token: int | None = None,
         expected_revision: int | None = None,
+        readback_authority_check: Callable[[Any, Any], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         """Record an explicit readback receipt in the canonical effect ledger."""
         if effect_id and effect_type is None:
@@ -6341,6 +6417,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             owner=owner,
             fencing_token=fencing_token,
             expected_revision=expected_revision,
+            readback_authority_check=readback_authority_check,
         )
 
     async def record_remote_inference_receipt(

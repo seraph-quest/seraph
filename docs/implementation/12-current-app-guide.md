@@ -377,6 +377,39 @@ are never replayed automatically. Manual Specify and Decompose requests are
 provider-governed proposals that remain staged until operator acceptance; a
 missing route, authority, or budget is visible as a blocked recovery state.
 
+#### Bounded execution evidence (#917 branch-local target)
+
+The existing task evidence inspector can bind an exact reviewed packet for
+execution with a separate unchecked acknowledgment. This grants no model
+egress, external permission, approval or dispatch. Eligible sources are current
+owner/Goal canonical operator facts and verified browser, evidence-dossier or
+local-report outputs; each artifact producer binds only its matching consumer,
+as specified by [ADR-014](decisions/014-bounded-evidence-dependencies.md).
+Current source, Root, Goal, task and packet bindings are checked before new use,
+including each browser subrequest. Mail and Calendar evidence remains private
+inspection only and cannot become an execution dependency or generic model
+context through a purpose flag.
+
+Read-only affected-task inspection changes nothing. A separately reviewed
+bounded impact page can pause stale pending work while preserving running,
+completed, Review and other blocked tasks. Explicit replacement binding clears
+only the exact evidence pause to Todo; it preserves executor inputs, attempts
+and deadlines and does not approve or dispatch. Reload inspects retained exact
+requests without automatically resending them. Historical terminal replay
+remains readable after a correction without granting new use or adoption.
+
+Specify generation stores the protected actually-used source snapshot. Only
+the original native job's exact verified generated-advisory-output readback can
+settle that proposal for reconciliation or acceptance; a generic successful
+effect cannot. Proposal acceptance binds the exact canonical prepared input to
+the same task, and pending input binding is displayed separately from dispatch
+readiness. A generated proposal is advisory output, not execution of its task.
+The isolated October 3 operator journey exercised governed generation,
+acceptance, native browser readback, future artifact use, correction, safety
+pause and explicit rebinding with no learning. Model and public HTTP responses
+were intercepted and nonlocal sockets denied; live provider quality remains
+unverified. This is branch-local Target evidence, not Shipped `develop` truth.
+
 Epic #864 M5 adds a candidate from a verified task outcome only after
 independent readback. The candidate keeps its task, attempt, workflow, artifact,
 goal revision, content digest, provenance, confidence, and supersession evidence.

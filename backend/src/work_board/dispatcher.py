@@ -478,6 +478,9 @@ def _reject_authority_input_keys(value: Any, *, path: str = "input") -> None:
 
 
 def _typed_input_model(capability_id: str) -> type[BaseModel] | None:
+    if capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+        from src.work_board.pipeline_contracts import EvidenceConsumerInput
+        return EvidenceConsumerInput
     model_type = _TYPED_INPUT_MODELS.get(capability_id)
     if model_type is not None:
         return model_type
@@ -502,6 +505,8 @@ def _typed_input_model(capability_id: str) -> type[BaseModel] | None:
 
 
 REGISTERED_CAPABILITIES: dict[str, CapabilitySpec] = {
+    "work.evidence-dossier.v1": CapabilitySpec("work.evidence-dossier.v1", "1", secret_like=False),
+    "work.local-evidence-report.v1": CapabilitySpec("work.local-evidence-report.v1", "1", secret_like=False),
     GOAL_SNAPSHOT_CAPABILITY: CapabilitySpec(
         GOAL_SNAPSHOT_CAPABILITY,
         GOAL_SNAPSHOT_VERSION,
@@ -3337,7 +3342,9 @@ class WorkBoardDispatcher:
         binding_job_id = await self._lookup_linked_binding(task, active, inputs)
         if binding_job_id != job_id:
             raise BoardError("workflow_identity_conflict", "The durable run binding does not match this attempt")
-        if _text(task.capability_id) == GOAL_SNAPSHOT_CAPABILITY:
+        if _text(task.capability_id) == "browser.public-task.v1":
+            expected_identity = self._persisted_browser_identity(task, active, inputs, projection)
+        elif _text(task.capability_id) == GOAL_SNAPSHOT_CAPABILITY:
             expected_identity = self._expected_identity_for_task(
                 task,
                 active,
@@ -3502,6 +3509,22 @@ class WorkBoardDispatcher:
         capability = _text(task.capability_id)
         receipts: list[dict[str, Any]] = []
         try:
+            if capability in {"browser.public-task.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+                worker = self._active_worker_tasks.get((task.task_id, attempt.attempt_id))
+                if worker is not None and worker is not asyncio.current_task() and not worker.done():
+                    worker.cancel()
+                    try:
+                        await asyncio.wait_for(asyncio.shield(worker), timeout=5)
+                    except asyncio.CancelledError:
+                        pass
+                    except asyncio.TimeoutError:
+                        return receipts, False
+                latest = await self.jobs.get_job(_text(attempt.workflow_run_id))
+                if capability == "browser.public-task.v1":
+                    return receipts, isinstance(latest, Mapping) and _browser_cleanup_receipt_proven(latest)
+                # A missing process-local worker with a running durable lease
+                # after restart is uncertain until that exact lease settles.
+                return receipts, bool(worker is not None and worker.done()) or _status(latest) in {"accepted", "queued", "succeeded", "cancelled", "blocked", "failed"}
             if capability == GOAL_SNAPSHOT_CAPABILITY:
                 worker = self._active_worker_tasks.get((task.task_id, attempt.attempt_id))
                 if worker is not None and worker is not asyncio.current_task() and not worker.done():
@@ -3765,6 +3788,15 @@ class WorkBoardDispatcher:
     async def _effective_runtime(self, task: WorkBoardTask) -> int:
         """Resolve the current goal admission deadline, never from card input."""
 
+        if task.pipeline_operation_id:
+            from src.work_board.pipelines import runtime_guard, utc, now
+            _row, operation = await runtime_guard(task, session_provider=self.session_provider)
+            remaining = int((utc(datetime.fromisoformat(operation["deadline_at"])) - now()).total_seconds())
+            hard_cap = 180 if task.capability_id == "browser.public-task.v1" else 30
+            if remaining < 1:
+                raise BoardError("pipeline_expired", "The original operation has no remaining execution time", status_code=409)
+            return min(hard_cap, remaining)
+
         async with self.session_provider() as db:
             goal = (
                 await db.execute(
@@ -3820,7 +3852,8 @@ class WorkBoardDispatcher:
                     )
                 )
             ).scalar_one_or_none()
-        return effective_browser_limits(goal)
+        attempts, outstanding = effective_browser_limits(goal)
+        return (attempts, 1) if task.pipeline_operation_id else (attempts, outstanding)
 
     async def _post_claim_readiness(
         self,
@@ -3855,6 +3888,13 @@ class WorkBoardDispatcher:
         persisted attempt count; callers cannot provide this context through
         an API input or a public retry request.
         """
+
+        if task.pipeline_operation_id or task.capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+            from src.work_board.pipelines import runtime_guard
+            try:
+                await runtime_guard(task, session_provider=self.session_provider)
+            except BoardError as exc:
+                return exc.code, str(exc)
 
         try:
             operator = await authenticate_session(task.owner_session_id, touch=False)
@@ -4084,6 +4124,16 @@ class WorkBoardDispatcher:
 
         capability = _text(task.capability_id)
         try:
+            if capability in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+                from src.work_board.input_artifacts import resolve_input_artifact_for_task
+                from src.work_board.pipelines import runtime_guard
+                await runtime_guard(task, session_provider=self.session_provider)
+                async with self.session_provider() as pipeline_db:
+                    await resolve_input_artifact_for_task(pipeline_db,
+                        WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id),
+                        artifact_id=_text(task.input_artifact_id), capability_id=capability,
+                        goal_id=task.goal_id, goal_revision=task.goal_revision, expected_task_id=task.task_id)
+                return None, None
             if capability == GOAL_SNAPSHOT_CAPABILITY:
                 from src.agent.factory import get_tools
                 from src.workflows.manager import workflow_manager
@@ -4731,6 +4781,14 @@ class WorkBoardDispatcher:
                     and _text(task.input_artifact_id) == _text(binding.get("input_artifact_id"))
                 ):
                     return False
+                if task.pipeline_operation_id:
+                    from src.work_board.pipelines import task_guard
+                    try:
+                        await task_guard(db, task, attempt=attempt)
+                    except BoardError:
+                        # This session contains only fence/authority reads and
+                        # the guard freeze; normal exit commits that freeze.
+                        return False
 
                 # Procedure-v2 Browser leaves are native children of the
                 # running parent board attempt.  Recheck that parent at every
@@ -4906,6 +4964,22 @@ class WorkBoardDispatcher:
                 )
         except Exception:
             return False
+
+    @staticmethod
+    def _persisted_browser_identity(task, attempt, inputs, projection):
+        """Recompute native identity using its admitted finite limits."""
+        authority = projection.get("declared_authority") or {}
+        limits = authority.get("limits") or {}
+        runtime, attempts, outstanding = (limits.get("runtime_seconds"), limits.get("max_attempts"), limits.get("max_outstanding_jobs"))
+        if type(runtime) is not int or not 1 <= runtime <= 180 or type(attempts) is not int or not 1 <= attempts <= 2 or type(outstanding) is not int or not 1 <= outstanding <= 16 or (task.pipeline_operation_id and outstanding != 1):
+            raise DurableJobIdempotencyConflict("native browser admitted limits invalid")
+        immutable = copy(task)
+        immutable.task_revision = int(attempt.task_revision_at_claim) + 1
+        expected = WorkBoardDispatcher._browser_expected_identity(immutable, attempt, inputs, projection,
+            runtime, max_attempts=attempts, max_outstanding_jobs=outstanding)
+        if any(projection.get(key) != expected[key] for key in ("input_digest", "authority_digest", "run_fingerprint")):
+            raise DurableJobIdempotencyConflict("native browser admitted digest changed")
+        return expected
 
     @staticmethod
     def _browser_expected_identity(
@@ -5135,6 +5209,7 @@ class WorkBoardDispatcher:
             linked_attempt = linked.attempt
             active_claim = BoardDispatchClaim(linked_task, linked_attempt, claim.event)
             execution_started = True
+            self._active_worker_tasks[(task.task_id, attempt.attempt_id)] = asyncio.current_task()
             execution = await runner.run(
                 task_id=linked_task.task_id,
                 attempt_id=linked_attempt.attempt_id,
@@ -5156,6 +5231,7 @@ class WorkBoardDispatcher:
                 durable_job_id=job_id,
             )
             cleanup_status = _text(execution.get("cleanup_status")) or "cleanup_unknown"
+            self._active_worker_tasks.pop((task.task_id, attempt.attempt_id), None)
             cleanup_verified = cleanup_status in {"cleanup_verified", "not_needed"}
             latest = await self.jobs.get_job(job_id)
             if not isinstance(latest, Mapping):
@@ -5251,6 +5327,7 @@ class WorkBoardDispatcher:
             await self._project_blocked(active_claim, "unknown_effect", "reconcile_admission_binding")
             result["blocked"] = True
         finally:
+            self._active_worker_tasks.pop((task.task_id, attempt.attempt_id), None)
             if owned_lane is not None:
                 if execution_started and not cleanup_verified:
                     owned_lane.quarantine(job_id or f"browser-task:{task.task_id}")
@@ -5547,6 +5624,9 @@ class WorkBoardDispatcher:
                 return result
             direct_proof = self._direct_readback(adapter_result, projection, job_id)
             if direct_proof is not None:
+                if task.capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+                    matching = await self._verify_cpu_completion(task, attempt, inputs, projection, direct_proof)
+                    adapter_result = {**dict(adapter_result), "artifact_refs": matching}
                 proof = direct_proof
                 target_status = WorkBoardStatus.review if task.requires_review else WorkBoardStatus.done
                 await self._project(
@@ -5857,6 +5937,22 @@ class WorkBoardDispatcher:
             "approval_id": approval_id,
         }
 
+    async def _verify_cpu_completion(self, task, attempt, inputs, projection, proof):
+        from src.work_board.pipeline_cpu import read_output
+        from src.work_board.pipelines import validate_cpu_current
+        await validate_cpu_current(task, attempt, inputs, session_provider=self.session_provider)
+        self._canonical_identity_from_projection(task, attempt, inputs, projection)
+        matching = [item for item in projection.get("artifacts", []) if isinstance(item, Mapping)
+            and item.get("content_sha256") == proof["content_sha256"] and item.get("exists")]
+        if len(matching) != 1 or not any(isinstance(effect, Mapping)
+            and effect.get("receipt_kind") == "readback" and effect.get("status") == "succeeded"
+            and effect.get("target_path") == matching[0].get("file_path")
+            and effect.get("content_sha256") == proof["content_sha256"] for effect in projection.get("effects", [])):
+            raise BoardError("pipeline_output_unverified", "The CPU output needs exact independent readback")
+        read_output(matching[0]["file_path"], proof["content_sha256"])
+        await self._consume_v2_leaf_artifact(task)
+        return matching
+
     async def _execute_direct_adapter(
         self,
         task: WorkBoardTask,
@@ -5868,6 +5964,25 @@ class WorkBoardDispatcher:
         procedure_binding: ProcedureChildBinding | None = None,
     ) -> Mapping[str, Any]:
         capability_id = _text(task.capability_id)
+        if capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+            from src.work_board.pipelines import runtime_guard, validate_cpu_current, validate_cpu_binding, utc
+            from src.work_board.pipeline_cpu import execute
+            _row, operation = await runtime_guard(task, attempt=attempt, session_provider=self.session_provider)
+            operation_deadline = utc(datetime.fromisoformat(operation["deadline_at"]))
+            deadline = min(operation_deadline, _now() + timedelta(seconds=min(runtime_seconds, 30)))
+            async def check_current(current_task, current_attempt, current_inputs):
+                await validate_cpu_current(current_task, current_attempt, current_inputs, session_provider=self.session_provider)
+            async def check_terminal(db, run):
+                await validate_cpu_binding(db, task, attempt, inputs)
+            if not admission_only:
+                self._active_worker_tasks[(task.task_id, attempt.attempt_id)] = asyncio.current_task()
+            try:
+                return await execute(task, attempt, inputs, jobs=self.jobs, runner=self.runner_id,
+                    deadline=deadline, admission_only=admission_only, validate_current=check_current,
+                    validate_terminal=check_terminal)
+            finally:
+                if not admission_only:
+                    self._active_worker_tasks.pop((task.task_id, attempt.attempt_id), None)
         board_binding = f"{task.task_id}:{attempt.attempt_id}"
         parent_handoffs = self._attempt_parent_handoffs(attempt)
         parent_handoff_digest = _text(getattr(attempt, "parent_handoff_digest", None)) or None
@@ -8373,6 +8488,9 @@ class WorkBoardDispatcher:
 
         capability_id = _text(task.capability_id)
         binding_key = f"{task.task_id}:{attempt.attempt_id}"
+        if capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+            from src.work_board.pipeline_cpu import job_id
+            return job_id(task, attempt), task.owner_principal_id, capability_id, None, binding_key
         if capability_id == "guardian-routine.v2":
             from src.workflows.procedure_v2_runtime import procedure_v2_runtime
 
@@ -8495,6 +8613,9 @@ class WorkBoardDispatcher:
         """Compute the service input digest where the adapter contract is closed."""
 
         capability_id = _text(task.capability_id)
+        if capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+            from src.work_board.pipeline_cpu import spec_for
+            return _safe_digest(spec_for(task, attempt, inputs, deadline=_now()).inputs)
         handoff_binding = WorkBoardDispatcher._direct_handoff_binding(attempt)
         if capability_id == "guardian-routine.v2":
             return _safe_digest(
@@ -8672,6 +8793,9 @@ class WorkBoardDispatcher:
         attempt: WorkBoardAttempt,
         inputs: Mapping[str, Any],
     ) -> str:
+        if task.capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+            from src.work_board.pipeline_cpu import spec_for
+            return _safe_digest(spec_for(task, attempt, inputs, deadline=_now()).declared_authority)
         if _text(task.capability_id) == "calendar.meeting-prep.v1":
             from src.integrations.google_calendar import calendar_authority_digest
 
@@ -8754,6 +8878,9 @@ class WorkBoardDispatcher:
         attempt: WorkBoardAttempt,
         inputs: Mapping[str, Any],
     ) -> str:
+        if task.capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+            from src.work_board.pipeline_cpu import spec_for
+            return spec_for(task, attempt, inputs, deadline=_now()).run_fingerprint
         # Existing governed services use the canonical durable input digest as
         # their run fingerprint when they do not provide a separate one.
         return WorkBoardDispatcher._direct_input_digest(task, attempt, inputs)
@@ -8836,6 +8963,14 @@ class WorkBoardDispatcher:
             raise DurableJobIdempotencyConflict(
                 "adapter admission projection is missing canonical immutable digests"
             )
+        if task.capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+            expected_digests = {
+                "input_digest": WorkBoardDispatcher._direct_input_digest(task, attempt, inputs),
+                "authority_digest": WorkBoardDispatcher._direct_authority_digest(task, attempt, inputs),
+                "run_fingerprint": WorkBoardDispatcher._direct_run_fingerprint(task, attempt, inputs),
+            }
+            if digests != expected_digests:
+                raise DurableJobIdempotencyConflict("CPU evidence immutable admission digest changed")
         if _text(task.capability_id) == "engineering.repo-repair.v1":
             expected_authority = WorkBoardDispatcher._repo_repair_authority_payload(
                 task,
@@ -9804,6 +9939,9 @@ class WorkBoardDispatcher:
             if status == "succeeded":
                 proof = self._workflow_readback(projection, workflow_run_id)
                 if proof is not None:
+                    if current.task.capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+                        await self._verify_cpu_completion(current.task, current.attempt,
+                            _parse_typed_input(current.task), projection, proof)
                     target = WorkBoardStatus.review if current.task.requires_review else WorkBoardStatus.done
                     await self._project(
                         current.task,
@@ -9842,6 +9980,13 @@ class WorkBoardDispatcher:
         if lookup is None:
             raise DurableJobError("durable_binding_lookup_unavailable")
         capability_id = _text(task.capability_id)
+        if capability_id == "browser.public-task.v1":
+            projection = await self.jobs.get_job(f"browser-task:{task.task_id}:{attempt.attempt_id}")
+            if not isinstance(projection, Mapping):
+                return None
+            expected = self._persisted_browser_identity(task, attempt, inputs, projection)
+            found = await lookup(**{key: expected[key] for key in ("owner_principal_id", "goal_id", "goal_revision", "idempotency_scope", "idempotency_key", "owner_kind", "service_id", "session_id", "operator_session_id", "job_kind", "capability_version", "input_digest", "authority_digest", "run_fingerprint")}, expected_job_id=expected["job_id"])
+            return expected["job_id"] if isinstance(found, Mapping) else None
         if capability_id == GOAL_SNAPSHOT_CAPABILITY:
             expected_job_id = f"work-board:{task.task_id}:{attempt.attempt_id}"
             owner_principal_id = DISPATCHER_PRINCIPAL
@@ -9858,7 +10003,7 @@ class WorkBoardDispatcher:
             expected_authority_digest = _safe_digest(spec.declared_authority)
             expected_run_fingerprint = spec.run_fingerprint
         else:
-            if capability_id in {"guardian-routine.v1", "engineering.repo-repair.v1", "calendar.meeting-prep.v1", "work.mail-reply-draft.v1"}:
+            if capability_id in {"guardian-routine.v1", "engineering.repo-repair.v1", "calendar.meeting-prep.v1", "work.mail-reply-draft.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
                 # Routine invocation roots are already admitted and may be
                 # waiting on the operator approval boundary.  Re-entering
                 # RoutineService.invoke here (or rebuilding a repair Durable
@@ -10451,6 +10596,8 @@ class WorkBoardDispatcher:
                 if status == "succeeded":
                     proof = self._workflow_readback(projection, job_id)
                     if proof is not None:
+                        if task.capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+                            await self._verify_cpu_completion(task, attempt, inputs, projection, proof)
                         target = WorkBoardStatus.review if task.requires_review else WorkBoardStatus.done
                         await self._project(
                             task,

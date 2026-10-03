@@ -15,6 +15,7 @@ import type { PendingRepoRepairSubmission, RepoRepairSubmissionReceipt } from ".
 import { MailPanel } from "./MailPanel";
 import { WorkBoardMemoryReview } from "./WorkBoardMemoryReview";
 import { TaskApprovalReview } from "./TaskApprovalReview";
+import { ArtifactPipelineReview } from "./ArtifactPipelineReview";
 import { TaskEffectRecovery } from "./TaskEffectRecovery";
 import { TaskEvidencePanel } from "./TaskEvidencePanel";
 import { RepoRepairInspector } from "./RepoRepairInspector";
@@ -4070,6 +4071,10 @@ function WorkBoardPanel({
                 ownerSessionId={ownerSessionId}
               />
 
+              {ownerPrincipalId && ownerSessionId && <ArtifactPipelineReview key={`${ownerPrincipalId}:${ownerSessionId}:${selectedTask.task_id}`} task={selectedTask}
+                ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
+                metadataConfirmed={Boolean(selectedDetail && !detailLoading && !stale && !detailError)}
+                onRefresh={refreshSelectedTask} onOpenTask={openTask} />}
               <TaskEvidencePanel task={selectedTask} ownerSessionId={ownerSessionId} />
 
               {selectedDetail?.parent_handoffs && selectedDetail.parent_handoffs.length > 0 && (

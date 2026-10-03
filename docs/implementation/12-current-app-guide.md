@@ -599,6 +599,52 @@ and Docker resource enforcement remain **external-unverified**. The original
 repository is not claimed changed,
 and this capability remains Partial rather than Shipped `develop` truth.
 
+### Reviewed public evidence pipelines (#914 branch-local target)
+
+The existing task inspector offers a reviewed, fixed chain from
+`browser.public-task.v1` to `work.evidence-dossier.v1` and
+`work.local-evidence-report.v1`. Its non-executable operation metadata lives on
+the existing Work Board proposal. Each leaf uses the existing task, priority,
+claim, cancellation and durable job paths. The two CPU leaves use deterministic
+local transformations with no model, network, credential access, subprocess or
+learning. Public extracts remain quoted structured data, and the verified
+report is served as `text/plain` and rendered literally in the cockpit.
+
+Preview an unattempted public browser task and approve the exact source scope
+and plan digest. After a producer completes, explicitly materialize its
+independently verified next input. Each producer must have canonical native
+identity, a settled matching artifact/readback and actual unchanged output
+bytes; browser output also needs its typed context-cleanup receipt. The chain
+has one absolute deadline of at most 300 seconds from first admission,
+further narrowed by the current Goal grant, two attempts per leaf and six
+aggregate attempts, 180 seconds per browser leaf and 30 seconds per CPU leaf.
+Outputs are bounded to 64 KiB and quoted consumer inputs to 40 KiB.
+
+Goal or source-permission changes durably freeze unfinished claims. Source
+replacement requires exact operation and task revisions plus verified
+quiescence. It preserves the original deadline, attempt counters, completed
+outputs, unresolved liabilities and immutable old handoffs. An unattempted
+consumer retains its task identity while only its current link and current
+handoff binding change. A completed consumer requires a distinct operation.
+A freshly reviewed finite operation may reuse only exact independently
+verified completed output for unfinished consumers in the same original
+workspace and owner scope, under the current consumer Goal and source policy.
+Original attempts, effects and liabilities remain with their original operation.
+
+Materialization reserves its exact operation/version/producer-attempt/consumer
+key before writing private bounded files. Interrupted writes resume only that
+binding. Reload recovery retains and rereads a bounded exact mutation request
+in owner/session-scoped session storage before POST; corruption or unavailable
+storage blocks actions, and an uncertain outcome exposes explicit exact retry.
+
+This capability remains **Partial**. The October 3 managed CPU-host receipt
+used real operator authentication, actual public HTTPS body extraction, native
+browser execution, both deterministic CPU leaves, durable consumed inputs and
+verified report readback under the original deadline. This establishes that
+finite chain; broader DAGs, model planning, publication and PDF/CSV export are
+outside its contract. [ADR-010](./decisions/010-reviewed-artifact-pipelines.md)
+owns the accepted target.
+
 ### Bounded public browser tasks
 
 The bounded capability adds `browser.public-task.v1` through the existing Work

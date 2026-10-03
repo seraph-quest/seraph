@@ -79,6 +79,7 @@ The following architecture decisions are normative:
 6. [ADR-006: OpenRouter-only inference phase](./decisions/006-openrouter-only-inference-phase.md)
 7. [ADR-007: Bounded Node repair and Linux process supervision](./decisions/007-bounded-node-repair-supervision.md)
 8. [ADR-008: Portable core and consented context](./decisions/008-portable-core-and-consented-context.md)
+9. [ADR-010: Reviewed artifact pipelines](./decisions/010-reviewed-artifact-pipelines.md)
 
 Changing a locked decision requires a superseding ADR, a tracked issue, an
 independent Critic/Contrarian review, and updates to every affected active doc.

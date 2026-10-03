@@ -298,6 +298,29 @@ async def _verified_workflow_readback(
         return None
     if not _workflow_run_binds_board_attempt(task, attempt, run):
         return None
+    if task.capability_id in {"browser.public-task.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+        # A stored Succeeded label cannot authorize a downstream consumer.
+        # Reopen the exact private output and correlate its settled effect.
+        from src.work_board.pipeline_cpu import read_output
+        artifacts = _decode_list(run.artifact_receipts_json)
+        effects = _decode_list(run.effect_receipts_json)
+        if task.capability_id == "browser.public-task.v1":
+            from src.work_board.dispatcher import _browser_cleanup_receipt_proven
+            if not _browser_cleanup_receipt_proven({"effects": effects}):
+                return None
+        matching = [item for item in artifacts if isinstance(item, Mapping)
+            and item.get("content_sha256") == proof["content_sha256"] and item.get("exists") is True]
+        if len(matching) != 1:
+            return None
+        artifact = matching[0]
+        if not any(isinstance(effect, Mapping) and effect.get("receipt_kind") == "readback"
+            and effect.get("status") == "succeeded" and effect.get("target_path") == artifact.get("file_path")
+            and effect.get("content_sha256") == proof["content_sha256"] for effect in effects):
+            return None
+        try:
+            read_output(artifact["file_path"], proof["content_sha256"])
+        except (ValueError, TypeError, OSError, BoardError):
+            return None
     # Review and handoff both consume the same bounded evidence contract.  A
     # digest alone is insufficient: the durable readback ID and the verifier's
     # recorded timestamp must survive projection so an operator can inspect
@@ -343,6 +366,46 @@ def _workflow_run_binds_board_attempt(
 
     arguments = _decode_object(run.arguments_json)
     safe_digest = lambda value: bool(_SAFE_DIGEST.fullmatch(str(value or "").strip()))
+
+    capability_id = str(task.capability_id or "").strip()
+    if capability_id in {"browser.public-task.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+        try:
+            from src.work_board.dispatcher import WorkBoardDispatcher, _parse_typed_input, _safe_digest
+            inputs = _parse_typed_input(task)
+            if capability_id == "browser.public-task.v1":
+                authority = _decode_object(run.declared_authority_json)
+                limits = authority.get("limits", {})
+                if (run.owner_kind != "service" or run.owner_principal_id != "service:browser-task"
+                    or run.service_id != "service:browser-task" or run.job_kind != "browser_public_task"
+                    or type(limits.get("runtime_seconds")) is not int or not 1 <= limits["runtime_seconds"] <= 180
+                    or type(limits.get("max_attempts")) is not int or not 1 <= limits["max_attempts"] <= 2
+                    or type(limits.get("max_outstanding_jobs")) is not int or not 1 <= limits["max_outstanding_jobs"] <= 16
+                    or (task.pipeline_operation_id and limits["max_outstanding_jobs"] != 1)):
+                    return False
+                immutable_task = task.model_copy(update={"task_revision": attempt.task_revision_at_claim + 1})
+                projection = {"owner": {"principal_id": run.owner_principal_id, "kind": run.owner_kind, "service_id": run.service_id},
+                    "job_kind": run.job_kind, "capability_version": run.capability_version,
+                    "declared_authority": authority, "job_id": run.run_identity,
+                    "session_id": run.session_id, "operator_session_id": run.operator_session_id,
+                    "goal_id": run.goal_id, "goal_revision": run.goal_revision}
+                expected = WorkBoardDispatcher._browser_expected_identity(immutable_task, attempt, inputs, projection,
+                    limits["runtime_seconds"], limits["max_attempts"], limits["max_outstanding_jobs"])
+                return (run.run_identity == expected["job_id"] and run.input_digest == expected["input_digest"]
+                    and run.run_fingerprint == expected["run_fingerprint"]
+                    and _safe_digest(authority) == expected["authority_digest"]
+                    and run.idempotency_scope == "work-board-attempt"
+                    and run.idempotency_key == f"{task.task_id}:{attempt.attempt_id}")
+            from src.work_board.pipeline_cpu import spec_for
+            spec = spec_for(task, attempt, inputs, deadline=_now())
+            return (run.owner_kind == "user" and run.owner_principal_id == task.owner_principal_id
+                and not run.service_id and run.job_kind == capability_id and run.capability_version == "1"
+                and run.run_identity == spec.identity.job_id and run.input_digest == _safe_digest(spec.inputs)
+                and run.run_fingerprint == spec.run_fingerprint
+                and _decode_object(run.declared_authority_json) == spec.declared_authority
+                and run.idempotency_scope == "work-board-attempt"
+                and run.idempotency_key == f"{task.task_id}:{attempt.attempt_id}")
+        except (ValueError, TypeError, KeyError, BoardError):
+            return False
 
     if str(run.owner_kind or "") == "user":
         if str(run.owner_principal_id or "") != str(task.owner_principal_id or ""):

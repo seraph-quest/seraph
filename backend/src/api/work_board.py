@@ -69,6 +69,8 @@ from src.goals.repository import deserialize_admission_budget
 from src.work_board.dispatcher import TypedInputError, _dispatcher, _parse_typed_input
 from src.work_board import review as review_service
 from src.work_board import triage as triage_service
+from src.work_board import pipelines as pipeline_service
+from src.work_board.pipeline_contracts import PipelinePreviewRequest, PipelineAcceptRequest, PipelineAdvanceRequest, PipelineRevisionRequest, PipelineReuseRequest, REPORT
 from src.work_board.time import serialize_utc_datetime
 from src.security.trust_contract import AuthorityGrant
 from src.security.site_policy import _parse_rules
@@ -87,6 +89,114 @@ repository = WorkBoardRepository()
 # Use the same managed dispatcher instance as the scheduler so cancellation
 # can reach an inline GoalSnapshot worker admitted by the scheduler pass.
 dispatcher = _dispatcher
+
+
+@router.post("/tasks/{task_id}/pipeline-preview")
+async def preview_artifact_pipeline(request: Request, task_id: str, body: PipelinePreviewRequest):
+    owner = _owner(_operator(request))
+    try:
+        async with get_session() as db:
+            result = await pipeline_service.preview(db, owner, task_id, body)
+            await db.commit()
+            return result
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.get("/pipelines/{operation_id}")
+async def read_artifact_pipeline(request: Request, operation_id: str):
+    owner = _owner(_operator(request))
+    try:
+        async with get_session() as db:
+            return await pipeline_service.read(db, owner, operation_id)
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.post("/pipelines/{operation_id}/accept")
+async def accept_artifact_pipeline(request: Request, operation_id: str, body: PipelineAcceptRequest):
+    owner = _owner(_operator(request))
+    try:
+        async with get_session() as db:
+            result = await pipeline_service.accept(db, owner, operation_id, body)
+            await db.commit()
+            return result
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.post("/pipelines/{operation_id}/advance")
+async def advance_artifact_pipeline(request: Request, operation_id: str, body: PipelineAdvanceRequest):
+    owner = _owner(_operator(request))
+    try:
+        failure = None
+        async with get_session() as db:
+            try:
+                result = await pipeline_service.advance(db, owner, operation_id, body.expected_revision)
+            except BoardError as exc:
+                if not db.info.get("pipeline_authority_frozen"):
+                    raise
+                failure = exc
+            await db.commit()
+        if failure is not None:
+            raise failure
+        return result
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.post("/pipelines/{operation_id}/revision")
+async def stage_artifact_pipeline_revision(request: Request, operation_id: str, body: PipelineRevisionRequest):
+    owner = _owner(_operator(request))
+    try:
+        async with get_session() as db:
+            result = await pipeline_service.stage_revision(db, owner, operation_id, body)
+            await db.commit()
+            return result
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.post("/pipelines/{operation_id}/reuse-preview")
+async def reuse_artifact_pipeline_output(request: Request, operation_id: str, body: PipelineReuseRequest):
+    owner = _owner(_operator(request))
+    try:
+        async with get_session() as db:
+            result = await pipeline_service.reuse_preview(db, owner, operation_id, body)
+            await db.commit()
+            return result
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.post("/pipelines/{operation_id}/quiesce")
+async def quiesce_artifact_pipeline_revision(request: Request, operation_id: str, body: PipelineAdvanceRequest):
+    owner = _owner(_operator(request))
+    try:
+        return await pipeline_service.quiesce_revision(owner, operation_id, body.expected_revision,
+            dispatcher=dispatcher, session_provider=get_session)
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.get("/pipelines/{operation_id}/report")
+async def read_artifact_pipeline_report(request: Request, operation_id: str):
+    from fastapi.responses import Response
+    from src.work_board.pipeline_cpu import read_output
+    owner = _owner(_operator(request))
+    try:
+        async with get_session() as db:
+            _row, operation = await pipeline_service.owned(db, owner, operation_id)
+            if len(operation.get("steps", [])) != 3:
+                raise BoardError("pipeline_output_required", "The local report is not ready", status_code=409)
+            task = await repository.get_task(db, owner, operation["steps"][2]["task_ref"])
+            if task.capability_id != REPORT:
+                raise BoardError("pipeline_output_unverified", "The fixed report binding changed", status_code=409)
+            output = await pipeline_service.verified_output(db, owner, task)
+            return Response(content=read_output(output["file_path"], output["content_sha256"]),
+                media_type="text/plain", headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"})
+    except BoardError as exc:
+        _raise_board_error(exc)
 
 _RECOVERY_ACTIONS = frozenset(
     {
@@ -910,6 +1020,8 @@ def _task_payload(
         "body": task.body,
         "capability_id": safe_board_identifier(task.capability_id, max_length=128),
         "input_artifact_id": safe_board_identifier(task.input_artifact_id, max_length=512),
+        "pipeline_operation_id": safe_board_identifier(task.pipeline_operation_id, max_length=128),
+        "pipeline_slot": safe_board_identifier(task.pipeline_slot, max_length=128),
         "typed_input_ref": safe_board_reference(task.typed_input_ref, max_length=512),
         "typed_input_digest": safe_sha256_digest(task.typed_input_digest),
         "executor_id": safe_board_identifier(task.executor_id, max_length=128),

@@ -126,6 +126,18 @@ It does not invent a content readback or exported artifact manifest, resolve
 external or cost liability, or change the task/job's unknown outcome. A fresh
 job still needs its own current Goal bindings, consent, and execution approval.
 
+In Work, open the original task's repository repair inspector and choose
+**Recover process cleanup** explicitly. The control uses the original live
+owner/root and the existing recovery endpoint; opening or reloading the
+inspector never submits recovery or resumes execution. After the action, a
+fresh durable GET validates the canonical reservation against the original
+dispatch and displays **Physical capacity released** separately from the
+unchanged Unknown task, effect, and cost liabilities. That state survives a
+full inspector remount. Missing or invalid cleanup proof stays unverified;
+an uncertain action response triggers only a safe status read before another
+explicit bounded recovery attempt. Expired or wrong ownership clears the
+private inspector data and cannot adopt the original job under a new root.
+
 Optional native test fixtures discover an installed runtime from
 `SERAPH_TEST_NODE_RUNTIME` or PATH, and TypeScript from
 `SERAPH_TEST_TYPESCRIPT_ROOT` or the owning frontend dependency directory.

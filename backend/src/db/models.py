@@ -1576,6 +1576,10 @@ class WorkBoardEvent(SQLModel, table=True):
     """Append-only safe metadata event with a global monotonic cursor."""
 
     __tablename__ = "work_board_events"
+    __table_args__ = (
+        Index("ux_work_board_events_mutation_key", "owner_principal_id",
+              "owner_session_id", "mutation_idempotency_key", unique=True),
+    )
 
     event_id: Optional[int] = Field(
         default=None,
@@ -1588,7 +1592,45 @@ class WorkBoardEvent(SQLModel, table=True):
     actor_session_id: Optional[str] = Field(default=None, index=True)
     kind: str = Field(index=True)
     metadata_json: str = Field(default="{}")
+    # Ordinary historical events keep NULL. Explicit evidence mutations bind
+    # a canonical UUID and complete request digest in this same immutable row.
+    mutation_idempotency_key: Optional[str] = Field(default=None, max_length=36)
+    mutation_request_digest: Optional[str] = Field(default=None, max_length=64)
     created_at: datetime = Field(default_factory=_now, index=True)
+
+
+class WorkBoardEvidenceDependency(SQLModel, table=True):
+    """Active exact source/span execution preconditions, never fact text.
+
+    Replacement/revocation removes rows in the task CAS. Prior bounded token
+    metadata remains only in immutable WorkBoardEvent history.
+    """
+
+    __tablename__ = "work_board_evidence_dependencies"
+    __table_args__ = (
+        UniqueConstraint("task_id", "source_kind", "canonical_source_id", "span_digest",
+                         name="ux_work_board_evidence_task_source_span"),
+        Index("ix_work_board_evidence_owner_source", "owner_principal_id",
+              "owner_session_id", "source_kind", "canonical_source_id", "task_id"),
+    )
+
+    dependency_id: str = Field(default_factory=_uuid, primary_key=True)
+    task_id: str = Field(foreign_key="work_board_tasks.task_id", index=True)
+    owner_principal_id: str = Field(index=True)
+    owner_session_id: str = Field(index=True)
+    goal_id: str = Field(index=True)
+    source_kind: str = Field(max_length=64)
+    canonical_source_id: str = Field(max_length=256)
+    source_id: str = Field(max_length=64)
+    source_digest: str = Field(max_length=64)
+    span_digest: str = Field(max_length=64)
+    resolved_token_json: str = Field(max_length=8192)
+    packet_revision: int = Field(ge=1)
+    packet_digest: str = Field(max_length=64)
+    binding_task_revision: int = Field(ge=1)
+    executor_input_digest: str = Field(max_length=64)
+    pipeline_operation_id: Optional[str] = Field(default=None, max_length=256)
+    pipeline_slot: Optional[str] = Field(default=None, max_length=256)
 
 
 class WorkBoardProposal(SQLModel, table=True):

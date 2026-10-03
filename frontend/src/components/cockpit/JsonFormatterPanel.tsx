@@ -29,8 +29,9 @@ export function JsonFormatterPanel({ownerPrincipalId,ownerSessionId,task,goals=[
   {error&&<div role="alert">{error}</div>}{storageError&&<div role="alert">Exact request retention is corrupt or unavailable. No mutation can be sent.</div>}
   {pending&&<div><p>Uncertain request retained in this owner/session scope.</p><button type="button" disabled={busy||storageError||readOnly} onClick={()=>void submit(pending)}>Retry exact formatter request</button></div>}
   {!task&&<>
+   <button type="button" disabled={busy} onClick={()=>void refresh()}>Refresh manifest and dependencies</button>
    <label>Formatter Goal<select aria-label="Formatter Goal" value={goalId} disabled={disabled} onChange={e=>{setGoalId(e.target.value);setAck(false);}}><option value="">Choose current Goal</option>{goals.filter(g=>g.ownership_access!=="recovered_read_only").map(g=><option key={g.id} value={g.id}>{g.title}</option>)}</select></label>
-   <div role="status">Optional profile: {profile?.profile.status??"checking"}{profile?.profile.reason&&` · ${profile.profile.reason}`}</div>
+   <div role="status">Optional dependencies: {profile?.profile.status??"checking"}{profile?.profile.reason&&` · ${profile.profile.reason}`}</div>
    {profile&&<><div className="break-all text-xs">Package seraph.tool.json-format v1.0.0 · SHA-256 {profile.content_digest}</div><details><summary>Reviewed manifest and limits</summary><pre className="whitespace-pre-wrap break-all text-xs">{JSON.stringify(profile.manifest,null,2)}</pre></details>
     <label><input type="checkbox" disabled={disabled} checked={ack} onChange={e=>setAck(e.target.checked)}/>I review and approve this exact package, permissions and limits for the selected Goal.</label>
     <button type="button" disabled={disabled||!ack||!goal?.revision||profile.profile.status!=="available"} onClick={()=>{if(goal?.revision)void submit({kind:"approve",goal_id:goal.id,goal_revision:goal.revision,packet:profile,step:0,review_id:null,approval_id:null});}}>Review and approve exact formatter</button>

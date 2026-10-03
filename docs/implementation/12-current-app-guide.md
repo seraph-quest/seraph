@@ -1048,6 +1048,105 @@ approvals, and audit records stay canonical in Seraph-owned storage. Graph or
 external memory systems may be benchmarked only as advisory providers with
 provenance, conflict, deletion, export, and failure handling.
 
+## Fixed reviewed local JSON formatter
+
+**Status:** Target on the Epic integration branch; this is not a `develop`
+Shipped claim. [ADR-013](./decisions/013-fixed-reviewed-local-tool-package.md)
+defines one optional fixed package, `seraph.tool.json-format` v1.0.0, exposed as
+`work.json-format.v1`. Work → **Isolated JSON formatter** shows its exact manifest,
+content digest, permissions and limits. Select a current Goal, review and
+approve that exact package, then create a JSON task. The existing dispatcher
+owns Ready/admission, priority and execution; there is no installer or registry.
+
+Input is UTF-8 JSON up to 32 KiB; duplicate keys, non-finite numbers and excessive
+structure are rejected. Output is sorted, two-space JSON up to 64 KiB. One
+attempt has an original absolute deadline of at most ten seconds. The native
+profile enforces namespaces, a syscall filter, single-process execution, two
+CPU seconds, 128 MiB address space, bounded descriptors and 8 KiB stdout/stderr.
+These are hard CPU-time/address-space bounds, not CPU-rate or RSS quotas. It
+has no network, credential, model or canonical-memory learning permission.
+
+The optional dependency profile supports native Linux x86_64 with the exact
+reviewed CPython 3.12.8 closure. Other architectures, macOS, missing builds or
+missing kernel enforcement visibly block this feature while the portable core
+remains usable. Dependency metadata availability is not isolation proof: the
+actual trusted supervisor/bootstrap must establish enforcement before package
+work. Runtime traffic does not use Docker, a rootful service or a tunnel.
+
+Preparation is an explicit offline operator task, separate from invocation.
+Use the pinned [bubblewrap source commit](https://github.com/containers/bubblewrap/tree/2a76602a8c71f36c1527cf9fc3417d9149822e0c)
+with Meson 1.9.1, Ninja and matching local libcap headers/library. Build in a
+repository-local private directory with `selinux=disabled`, `man=disabled`,
+`tests=false`, `bash_completion=disabled`, `zsh_completion=disabled`; leave
+`assume_kernel` unset and verify its effective empty default. The approved
+bubblewrap binary SHA-256 is
+`95a4c13e9652537a941aea7c714516f199f477312eadd4f172845e0e0b4f87f5`.
+A differing binary remains Blocked pending review; Seraph does not install or
+download a replacement during use.
+
+Build the committed trusted C embedding launcher against the matching local
+CPython headers/libPython, without a host-global install. From the repository
+root, the reviewed compiler invocation is:
+
+```bash
+tool_python_prefix=$(backend/.venv/bin/python -c 'import sys; print(sys.base_prefix)')
+mkdir -p build/916-embedding-r5
+cc -O2 -fstack-protector-strong -D_FORTIFY_SOURCE=2 -Wall -Wextra -Werror \
+  -Wl,-z,relro,-z,now -Wl,-rpath,/runtime/lib \
+  -I "$tool_python_prefix/include/python3.12" \
+  backend/src/execution/tool_package_launcher.c \
+  -L "$tool_python_prefix/lib" -lpython3.12 \
+  -o build/916-embedding-r5/isolated-python
+sha256sum build/916-embedding-r5/isolated-python
+```
+
+The approved launcher digest is
+`409611f20b3c59146155e6dad7e274e062bc9b756085c81d479bd6365da8fb54`.
+The launcher obtains a bounded native hash seed before isolated initialization;
+no `/dev` device bind or package-controlled import path is permitted.
+
+Manually prepare `<canonical workspace>/artifacts/tool-package-runtime/json-python-bwrap-v1`
+under private, owner-controlled ancestry. All directories must be mode 0700;
+regular files mode 0600, with the launcher, bubblewrap and dynamic loader mode
+0700. Copy only the fixed mapping returned by
+`src.execution.tool_package_profile.expected_runtime_files()` beneath `rootfs/`,
+plus the reviewed bubblewrap binary at `bwrap`. Create empty regular placeholders
+`rootfs/input.json`, `rootfs/package.py`, `rootfs/out/result.json` and an empty
+`rootfs/proc` directory. `profile.json` is a JSON object with exactly `schema: 1`,
+`profile: "json-python-bwrap-v1"`, the pinned `source_commit`, `assume_kernel: ""`,
+and `files`, mapping `bwrap` and each `rootfs/` closure path to its SHA-256.
+No links, devices, extra files or writable directory entries enter the package
+namespace. `inspect_runtime()` validates this complete closure; the operator
+profile readback reports a block if any dependency differs. The actual OS
+preflight and attack receipts remain required before claiming containment on
+a new host. Private test receipts are evidence, never provisioning inputs.
+
+After execution, the task inspector shows cleanup and **no_learning**. **Read
+verified JSON output** reopens the exact physical artifact and serves it as
+`text/plain` with `nosniff`; React displays literal text. Cancel records the
+original attempt's intent and waits for actual supervisor reap. If a response
+is lost, the bounded request remains in owner/session/task-scoped storage;
+manual refresh clears a pending cancel only after matching canonical
+attempt/fence/intent readback. Cleanup truth is shown separately from intent.
+
+**Inspect and recover original output** can adopt only the exact reserved,
+finished output with actual reap proof under the original Root/Goal/permission
+and unexpired deadline. It creates no process, attempt or renewed allowance.
+Missing ownership, uncertain cleanup, an active lease or an expired original
+deadline stays Blocked/Unknown with an explicit reason. Produced but unadopted
+bytes may remain private audit evidence; they do not authorize Done or learning.
+Pause/revoke/quarantine fence new work and late adoption; completed verified
+output remains read-only history.
+
+The authenticated managed acceptance used actual local API/lifecycle review,
+approval, task creation, native OS execution, SQLite/artifact readback and a
+same-Root cold restart through `manage.sh`. The original output remained
+readable in the literal UI after restart, with one attempt and its unchanged
+deadline. Separate actual SQLite cases prove cancellation, logout/current Goal
+revocation, finished-output recovery and lifecycle contention. No provider
+transport was intercepted or contacted, and no macOS isolation proof is claimed.
+Independent cumulative review remains the whole-milestone gate.
+
 ## Actions, Workflows, And Extensions
 
 **Shipped foundation:** tools, workflows, skills, runbooks, starter packs, MCP

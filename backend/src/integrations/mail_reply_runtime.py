@@ -16,7 +16,7 @@ from sqlalchemy import select, text
 
 from src.approval.repository import (approval_repository, approval_decision_digest,
     fingerprint_tool_call)
-from src.db.models import ApprovalRequest, GoogleServiceConnection, MailMessageBinding, WorkBoardTask
+from src.db.models import ApprovalRequest, GoogleServiceConnection, MailMessageBinding, WorkBoardTask, Secret
 from src.integrations.gmail_send import (GmailReplyAdapter, READ_SERVICE, SEND_SERVICE,
     SCOPES, source, freeze_mime, validate_resource, sent_readback, provider_id, digest, fail)
 from src.integrations.mail_reply_send import (SEND_KIND, IDENTITY_KIND, OBSERVATION_KIND,
@@ -24,6 +24,7 @@ from src.integrations.mail_reply_send import (SEND_KIND, IDENTITY_KIND, OBSERVAT
     connection_snapshot, current_root, mark_dispatch, source_snapshot, state, utc,
     append_observation)
 from src.vault import vault_repository, decrypt
+from src.vault.repository import secret_binding_digest
 from src.workflows.job_runtime import (DurableJobIdentity, DurableJobSpec,
     durable_job_repository, _serialize, DurableJobNotFound)
 from src.workflows.mail_reply_draft import (prepare_private_draft,
@@ -63,9 +64,31 @@ async def pair_snapshots(operator, read_id, send_id=None):
             if row is None or row.service != service:
                 fail("reply_profile_required")
             expected = connection_snapshot(row)
+            secret = (await db.execute(select(Secret).where(Secret.key == row.vault_secret_key,
+                Secret.owner_principal_id == operator.principal.principal_id,
+                Secret.revoked_at.is_(None)))).scalar_one_or_none()
+            if secret is None:
+                fail("credential_unavailable")
+            expected["vault_record_digest"] = secret_binding_digest(secret)
             await connection(db, operator, expected)
             result.append(expected)
         return result
+
+
+async def request_replay(operator, *, kind, request_uuid, request_binding):
+    """Exact authenticated receipt read; never refresh admission authority."""
+    async with session() as db:
+        await current_root(db, operator)
+        try:
+            prior = await durable_job_repository._fetch(db, job_id(operator, kind, request_uuid))
+        except DurableJobNotFound:
+            return None
+        if (prior.owner_principal_id != operator.principal.principal_id
+            or prior.operator_session_id != operator.session_id or prior.job_kind != kind
+            or arguments(prior).get("operator_request_digest") != request_binding):
+            fail("admission_replay_conflict")
+        ident = prior.run_identity
+    return await snapshot(operator, ident)
 
 
 async def admit(operator, *, kind, request_uuid, goal_id, goal_revision, inputs, priority=60):
@@ -157,12 +180,12 @@ async def stage_credentials(operator, run):
             source_required=run.job_kind == SEND_KIND)
     result = {}
     for expected in inputs["connections"]:
-        raw = await vault_repository.get(expected["vault_secret_key"],
+        staged = await vault_repository.snapshot(expected["vault_secret_key"],
             owner_principal_id=operator.principal.principal_id)
-        if not raw:
+        if staged is None or staged.binding_digest != expected["vault_record_digest"]:
             fail("credential_unavailable")
         try:
-            value = json.loads(raw)
+            value = json.loads(staged.value)
         except (ValueError, TypeError):
             fail("credential_invalid")
         if digest({"client_id": value.get("client_id"), "client_secret": value.get("client_secret"),
@@ -256,7 +279,7 @@ async def reserve_private(operator, lease, name, payload):
     return {"path": path, "digest": sha}
 
 
-async def terminal(operator, lease, contacts, *, outcome, private_ref=None):
+async def terminal(operator, lease, contacts, *, outcome, private_ref=None, verified_connections=()):
     async with writer() as db:
         run = await get_run(operator, lease.job_id, db=db)
         await authority(db, operator, run, lease=lease, source_required=run.job_kind == SEND_KIND)
@@ -277,6 +300,12 @@ async def terminal(operator, lease, contacts, *, outcome, private_ref=None):
             values["artifact_receipts_json"] = canonical([{"artifact_type": "mail_exact_reply",
                 "file_path": private_ref["path"], "content_sha256": private_ref["digest"],
                 "exists": True, "no_learning": True}])
+        for expected in verified_connections:
+            row = await connection(db, operator, expected)
+            row.provider_scopes_json = canonical(sorted(SCOPES[row.service]))
+            row.scope_status = "verified"
+            row.verified_setup_job_id = lease.job_id
+            row.updated_at = now()
         await cas(db, run, values)
 
 
@@ -292,10 +321,17 @@ async def failed(operator, lease, contacts):
             or run.fencing_token != lease.fencing_token):
             fail("execution_changed")
         checkpoint = state(run)
-        contacted = checkpoint.get("contact_may_have_occurred") is True
+        contacted = bool(checkpoint.get("intent"))
         checkpoint["transport_quiescent"] = contacts.quiescent()
+        cancelled = checkpoint.get("cancel_requested") and contacts.quiescent() and not contacted
+        effects = json.loads(run.effect_receipts_json)
+        if contacted:
+            if len(effects) != 1:
+                fail("effect_changed")
+            effects[0]["status"] = "unknown"
         await cas(db, run, {"checkpoint_context_json": canonical(checkpoint),
-            "status": "unknown_external_effect" if contacted else "blocked",
+            "effect_receipts_json": canonical(effects),
+            "status": "unknown_external_effect" if contacted else ("cancelled" if cancelled else "blocked"),
             "failure_reason": "reply_readback_unconfirmed" if contacted else "reply_preflight_blocked",
             "lease_owner": None, "lease_expires_at": None}, current_goal=False)
 
@@ -325,16 +361,88 @@ async def snapshot(operator, ident):
         result["preview"].update(sender=payload["account"]["email"], recipient=payload["frozen"]["expected"]["to"],
             subject=payload["frozen"]["expected"]["subject"], body=payload["frozen"]["expected"]["body"],
             reply_to_untrusted=True, recipient_delivery_proven=False)
+        async with session() as db:
+            await current_root(db, operator)
+            row = await db.get(ApprovalRequest, checkpoint["preview"]["approval_id"])
+            if row is None or row.owner_principal_id != run.owner_principal_id or row.operator_session_id != run.operator_session_id:
+                fail("approval_changed")
+            result["preview"].update(approval_status=row.status, decision_digest=approval_decision_digest(row))
+    effects = json.loads(run.effect_receipts_json)
+    if len(effects) == 1 and effects[0].get("observation_history"):
+        result["observations"] = effects[0]["observation_history"]
+    result["cancel_requested"] = bool(checkpoint.get("cancel_requested"))
+    result["cancel_request_uuid"] = (checkpoint.get("cancel_request") or {}).get("request_uuid")
+    result["transport_quiescent"] = checkpoint.get("transport_quiescent") is True
     return result
 
 
+_active_workers = {}
+
+
+async def run_owned(operator, ident, execute_operation):
+    """Track only positively created callbacks, never infer restart quiescence."""
+    if ident in _active_workers:
+        return await snapshot(operator, ident)
+    task = asyncio.create_task(execute_operation(), name="mail-reply:"+ident)
+    _active_workers[ident] = task
+    def completed(done):
+        if _active_workers.get(ident) is done:
+            _active_workers.pop(ident, None)
+    task.add_done_callback(completed)
+    try:
+        return await asyncio.shield(task)
+    finally:
+        if task.done() and _active_workers.get(ident) is task:
+            _active_workers.pop(ident, None)
+
+
+async def cancel(operator, ident, *, request_uuid, expected_revision):
+    async with writer() as db:
+        run = await get_run(operator, ident, db=db)
+        checkpoint = state(run)
+        receipt = checkpoint.get("cancel_request")
+        if receipt is not None:
+            if receipt["request_uuid"] != request_uuid:
+                fail("cancel_request_conflict")
+        else:
+            if run.revision != expected_revision or run.status == "succeeded":
+                fail("cancel_revision_changed")
+            checkpoint["cancel_request"] = {"request_uuid": request_uuid,
+                "original_fence": run.fencing_token, "requested_at": now().isoformat()}
+            checkpoint["cancel_requested"] = True
+            values = {"checkpoint_context_json": canonical(checkpoint)}
+            # Paused preview or positively awaited preflight failure cannot
+            # resume through this API. Historical closure is a durable proof,
+            # not the absence of a local worker after restart.
+            if (run.lease_owner is None and run.lease_expires_at is None
+                and checkpoint.get("transport_quiescent") is True
+                and not checkpoint.get("contact_may_have_occurred")):
+                values.update(status="cancelled", finished_at=now())
+            await cas(db, run, values, current_goal=False)
+    task = _active_workers.get(ident)
+    if task is not None and not task.done():
+        task.cancel()
+        # Await actual provider/client close and writer completion. Deadline
+        # does not turn an unclosed callback into a successful cancellation.
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=10)
+        except asyncio.CancelledError:
+            pass
+        except (TimeoutError, Exception):
+            pass
+        finally:
+            if task.done() and _active_workers.get(ident) is task:
+                _active_workers.pop(ident, None)
+    return await snapshot(operator, ident)
+
+
 async def verify_pair(operator, *, request_uuid, goal_id, goal_revision,
-    read_connection_id, send_connection_id, priority=60, **boundary):
+    read_connection_id, send_connection_id, priority=60, request_binding=None, **boundary):
     connections = await pair_snapshots(operator, read_connection_id, send_connection_id)
     admitted = await admit(operator, kind=IDENTITY_KIND, request_uuid=request_uuid,
         goal_id=goal_id, goal_revision=goal_revision, priority=priority,
         inputs={"schema_version": 1, "connections": connections, "max_contacts": 5,
-            "acknowledge_identity_read": True, "no_learning": True})
+            "acknowledge_identity_read": True, "operator_request_digest": request_binding, "no_learning": True})
     if admitted.get("receipt", {}).get("status") == "deduped":
         return await snapshot(operator, admitted["job_id"])
     lease = await claim(operator, admitted)
@@ -348,18 +456,8 @@ async def verify_pair(operator, *, request_uuid, goal_id, goal_revision,
             account = same_account(await contacts.authenticate(read), await contacts.authenticate(send))
             ref = await reserve_private(operator, lease, "identity", {"account": account,
                 "read_scope": read.scope_evidence, "send_scope": send.scope_evidence})
-            await terminal(operator, lease, contacts, outcome="verified_reply_identity", private_ref=ref)
-        async with writer() as db:
-            current = await get_run(operator, lease.job_id, db=db)
-            await authority(db, operator, current, source_required=False)
-            if current.status != "succeeded":
-                fail("identity_readback_unavailable")
-            for expected in connections:
-                row = await connection(db, operator, expected)
-                row.provider_scopes_json = canonical(sorted(SCOPES[row.service]))
-                row.scope_status = "verified"
-                row.verified_setup_job_id = lease.job_id
-                row.updated_at = now()
+            await terminal(operator, lease, contacts, outcome="verified_reply_identity", private_ref=ref,
+                verified_connections=connections)
     except BaseException:
         await failed(operator, lease, contacts)
         raise
@@ -419,7 +517,7 @@ async def stage_source(operator, task_id):
         if task is None or task.owner_principal_id != operator.principal.principal_id or task.owner_session_id != operator.session_id:
             fail("draft_unavailable")
         resolved = await resolve_input_artifact_for_copy(db,
-            WorkBoardOwner(operator.principal.principal_id, operator.session_id),
+            WorkBoardOwner(principal_id=operator.principal.principal_id, session_id=operator.session_id),
             typed_input_ref=task.typed_input_ref, typed_input_digest=task.typed_input_digest,
             capability_id=task.capability_id, goal_id=task.goal_id, goal_revision=task.goal_revision)
         inputs = resolved.input
@@ -432,14 +530,14 @@ async def stage_source(operator, task_id):
 
 
 async def preview(operator, *, task_id, read_connection_id, send_connection_id,
-    request_uuid, priority=60, **boundary):
+    request_uuid, priority=60, request_binding=None, **boundary):
     connections = await pair_snapshots(operator, read_connection_id, send_connection_id)
     account = await paired_account(operator, connections)
     original = await stage_source(operator, task_id)
     inputs = {"schema_version": 1, "connections": connections, "source": original,
         "account_digest": digest(account), "max_contacts": 14,
         "acknowledge_identity_source_read": True, "acknowledge_exact_reply_send": True,
-        "preview_contact_limit": 5, "execution_contact_limit": 9, "no_learning": True}
+        "preview_contact_limit": 5, "execution_contact_limit": 9, "operator_request_digest": request_binding, "no_learning": True}
     admitted = await admit(operator, kind=SEND_KIND, request_uuid=request_uuid,
         goal_id=original["goal_id"], goal_revision=original["goal_revision"], inputs=inputs, priority=priority)
     if admitted.get("receipt", {}).get("status") == "deduped":
@@ -574,3 +672,101 @@ async def execute(operator, ident, **boundary):
         await failed(operator, lease, contacts)
         raise
     return await snapshot(operator, ident)
+
+
+async def recovery_original(db, operator, ident, expected_revision=None):
+    from src.db.models import Goal
+    from src.workflows.job_runtime import _goal_owner_binding
+    original = await get_run(operator, ident, db=db)
+    checkpoint = state(original)
+    intent = checkpoint.get("intent")
+    effects = json.loads(original.effect_receipts_json)
+    goal = await db.get(Goal, original.goal_id, populate_existing=True)
+    if (original.job_kind != SEND_KIND or not isinstance(intent, dict)
+        or original.status != "unknown_external_effect"
+        or original.lease_owner is not None or original.lease_expires_at is not None
+        or checkpoint.get("transport_quiescent") is not True
+        or len(effects) != 1 or effects[0].get("effect_id") != intent.get("effect_id")
+        or effects[0].get("status") != "unknown"
+        or goal is None or _goal_owner_binding(goal) != (original.owner_principal_id, original.session_id)
+        or (expected_revision is not None and original.revision != expected_revision)):
+        fail("original_recovery_unavailable")
+    return original
+
+
+async def observe(operator, *, original_job_id, expected_original_revision,
+    read_connection_id, goal_id, goal_revision, request_uuid, priority=60, request_binding=None, **boundary):
+    if request_binding is not None:
+        replay = await request_replay(operator, kind=OBSERVATION_KIND, request_uuid=request_uuid, request_binding=request_binding)
+        if replay is not None:
+            return replay
+    connections = await pair_snapshots(operator, read_connection_id)
+    async with session() as db:
+        original = await recovery_original(db, operator, original_job_id, expected_original_revision)
+        checkpoint = state(original)
+        intent = checkpoint["intent"]
+        private_ref = checkpoint["private_artifacts"]["preview"]
+        original_revision = original.revision
+    private = await asyncio.to_thread(read_private_draft, private_ref["path"], private_ref["digest"])
+    validate_resource(private["frozen"])
+    if private["frozen"]["mime_digest"] != intent["mime_digest"] or private["frozen"]["request_digest"] != intent["request_digest"]:
+        fail("original_artifact_changed")
+    inputs = {"schema_version": 1, "connections": connections, "max_contacts": 9,
+        "original_job_id": original_job_id, "original_revision": original_revision,
+        "original_intent_digest": digest(intent), "original_effect_id": intent["effect_id"],
+        "account_digest": intent["account_digest"], "acknowledge_readonly_recovery": True,
+        "operator_request_digest": request_binding,
+        "no_learning": True}
+    admitted = await admit(operator, kind=OBSERVATION_KIND, request_uuid=request_uuid,
+        goal_id=goal_id, goal_revision=goal_revision, inputs=inputs, priority=priority)
+    if admitted.get("receipt", {}).get("status") == "deduped":
+        return await snapshot(operator, admitted["job_id"])
+    lease = await claim(operator, admitted)
+    contacts = Contacts(operator, lease, source_required=False)
+    try:
+        run = await get_run(operator, lease.job_id)
+        credentials = await stage_credentials(operator, run)
+        async with asyncio.timeout(max(0, (utc(run.deadline_at)-now()).total_seconds())):
+            read = contacts.adapter(READ_SERVICE, credentials[READ_SERVICE], utc(run.deadline_at), **boundary)
+            account = await contacts.authenticate(read)
+            if {key: account[key] for key in private["account"]} != private["account"]:
+                fail("recovery_account_changed")
+            listed = await contacts.request(read, "search", rfc_message_id=private["frozen"]["expected"]["message_id"])
+            candidates = listed.get("messages", [])
+            if not isinstance(candidates, list) or len(candidates) > 5:
+                fail("recovery_search_bound")
+            observed = []
+            incomplete = "nextPageToken" in listed or len(candidates) == 5
+            estimate = listed.get("resultSizeEstimate")
+            if estimate is not None and (type(estimate) is not int or estimate > len(candidates) or estimate < 0):
+                incomplete = True
+            identities = set()
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    fail("recovery_candidate_invalid")
+                ident = provider_id(candidate.get("id"))
+                if ident in identities:
+                    incomplete = True
+                    continue
+                identities.add(ident)
+                raw = await contacts.request(read, "raw", provider_id_value=ident)
+                try:
+                    observed.append(sent_readback(raw, private["frozen"], provider_message_id=ident))
+                except Exception:
+                    incomplete = True
+            outcome = "verified_sent_observation" if len(observed) == 1 and not incomplete else "unknown_observation"
+            observation = {"outcome": outcome, "response_digest": digest([listed, observed]), "no_learning": True}
+            ref = await reserve_private(operator, lease, "observation", {"observation": observation,
+                "original_intent_digest": digest(intent)})
+            observation["private_artifact"] = ref
+            if not contacts.quiescent():
+                fail("transport_unsettled")
+            async with writer() as db:
+                auxiliary = await get_run(operator, lease.job_id, db=db)
+                current = await recovery_original(db, operator, original_job_id, original_revision)
+                await append_observation(db, operator, current, auxiliary, lease=lease,
+                    original_revision=original_revision, original_intent_digest=digest(intent), observation=observation)
+    except BaseException:
+        await failed(operator, lease, contacts)
+        raise
+    return await snapshot(operator, lease.job_id)

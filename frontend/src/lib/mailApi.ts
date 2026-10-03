@@ -479,7 +479,7 @@ function errorDetail(payload: unknown): { code: string; message: string; recover
   };
 }
 
-async function mailRequest<T>(path: string, init: RequestInit, validate: (value: unknown) => T): Promise<T> {
+export async function mailRequest<T>(path: string, init: RequestInit, validate: (value: unknown) => T): Promise<T> {
   let response: Response;
   let payload: unknown;
   try {

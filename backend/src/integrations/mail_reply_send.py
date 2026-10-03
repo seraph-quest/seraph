@@ -15,12 +15,14 @@ from sqlalchemy import select, update
 from src.auth.ownership import _current_root
 from src.db.models import (ApprovalRequest, Goal, GoogleServiceConnection,
     MailMessageBinding, MailReadConsent, OperatorIdentity, WorkBoardAttempt,
-    WorkBoardEvidenceDependency, WorkBoardInputArtifact,
+    WorkBoardEvidenceDependency, WorkBoardInputArtifact, Secret,
     WorkBoardTask, WorkflowRunState)
 from src.approval.repository import approval_repository, fingerprint_tool_call
 from src.integrations.gmail_send import READ_SERVICE, SEND_SERVICE, SCOPES, digest, fail
 from src.workflows.job_runtime import (durable_job_repository,
     _assert_canonical_goal_fence, _append_goal_fence_condition, _goal_owner_binding)
+from src.vault.repository import secret_binding_digest
+from src.security.trust_contract import AuthorityGrant
 
 SEND_KIND = "mail_reply_send_v1"
 OBSERVATION_KIND = "mail_reply_observation_v1"
@@ -64,6 +66,8 @@ def arguments(run):
 
 
 async def current_root(db, operator):
+    if AuthorityGrant.CAPABILITY_EXECUTE not in operator.principal.grants:
+        fail("capability_permission_required")
     root = await _current_root(db, operator)
     if root.replaced_by_id:
         fail("root_replaced")
@@ -85,10 +89,17 @@ async def connection(db, operator, expected):
     row = await db.get(GoogleServiceConnection, expected["connection_id"], populate_existing=True)
     if (row is None or row.owner_principal_id != operator.principal.principal_id
         or row.owner_session_id != operator.session_id or row.state != "active"
-        or row.service not in SCOPES or connection_snapshot(row) != expected):
+        or row.service not in SCOPES or connection_snapshot(row) != {
+            key: item for key, item in expected.items() if key != "vault_record_digest"}):
         fail("connection_changed")
     if frozenset(json.loads(row.declared_scopes_json)) != SCOPES[row.service]:
         fail("scope_not_exact")
+    secret = (await db.execute(select(Secret).where(Secret.key == row.vault_secret_key,
+        Secret.owner_principal_id == operator.principal.principal_id,
+        Secret.revoked_at.is_(None)).execution_options(populate_existing=True))).scalar_one_or_none()
+    if (secret is None or "vault_record_digest" not in expected
+        or secret_binding_digest(secret) != expected["vault_record_digest"]):
+        fail("credential_changed")
     return row
 
 
@@ -126,7 +137,7 @@ async def source_snapshot(db, operator, task_id, *, binding_hint):
     artifact = await db.get(WorkBoardInputArtifact, task.input_artifact_id, populate_existing=True)
     if (artifact is None or artifact.owner_principal_id != task.owner_principal_id
         or artifact.owner_session_id != task.owner_session_id
-        or artifact.bound_task_id != task.task_id or artifact.state != "consumed"
+        or artifact.bound_task_id != task.task_id or artifact.state not in {"bound", "consumed"}
         or artifact.payload_sha256 != task.typed_input_digest
         or binding_hint["source_input_digest"] != run.input_digest):
         fail("draft_input_changed")
@@ -289,6 +300,8 @@ async def mark_dispatch(db, operator, run, *, lease, intent_digest):
     intent = checkpoint.get("intent")
     if not isinstance(intent, dict) or digest(intent) != intent_digest or checkpoint.get("contact_may_have_occurred"):
         fail("dispatch_slot_consumed")
+    if not 0 <= datetime.now(timezone.utc).timestamp() - intent.get("source_observed_at", 0) <= 10:
+        fail("source_observation_expired")
     effects = json.loads(run.effect_receipts_json)
     if len(effects) != 1 or effects[0].get("effect_id") != intent["effect_id"] or effects[0].get("status") != "claimed":
         fail("effect_changed")
@@ -309,11 +322,27 @@ async def append_observation(db, operator, original, auxiliary, *, lease,
     if (original.owner_principal_id != operator.principal.principal_id
         or original.operator_session_id != operator.session_id
         or original.revision != original_revision or not isinstance(intent, dict)
-        or digest(intent) != original_intent_digest or not checkpoint.get("contact_may_have_occurred")
+        or digest(intent) != original_intent_digest
         or original.status not in {"unknown_external_effect", "blocked", "failed", "cancelled"}
         or original.lease_owner is not None or original.lease_expires_at is not None
         or checkpoint.get("transport_quiescent") is not True):
         fail("original_recovery_unavailable")
+    original_bindings = {"job_id": original.run_identity, "input_digest": original.input_digest,
+        "authority_digest": original.authority_digest, "budget_digest": original.budget_digest,
+        "original_root": original.operator_session_id, "owner_principal_id": original.owner_principal_id,
+        "goal_id": original.goal_id, "goal_revision": original.goal_revision,
+        "attempt": original.attempt_count, "fencing_token": original.fencing_token,
+        "effect_id": original.run_identity+":send-once"}
+    if any(intent.get(key) != item for key, item in original_bindings.items()):
+        fail("original_binding_changed")
+    preview = checkpoint.get("preview", {})
+    approval = await db.get(ApprovalRequest, intent.get("approval_id"), populate_existing=True)
+    if (approval is None or approval.status != "consumed"
+        or approval.id != preview.get("approval_id")
+        or approval.owner_principal_id != original.owner_principal_id
+        or approval.operator_session_id != original.operator_session_id
+        or approval.fingerprint != preview.get("approval_fingerprint")):
+        fail("original_approval_changed")
     old_goal = await db.get(Goal, original.goal_id, populate_existing=True)
     if old_goal is None or _goal_owner_binding(old_goal) != (original.owner_principal_id, original.session_id):
         fail("original_provenance_changed")

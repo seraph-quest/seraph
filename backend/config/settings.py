@@ -24,7 +24,7 @@ class RepoSandboxSettings(BaseModel):
     enabled: bool = False
     docker_socket: str = ""
     worker_image_digest: str = ""
-    profile: Literal["repo-python-pytest-v1", "repo-node24-npm-v1"] = "repo-python-pytest-v1"
+    profile: Literal["repo-python-pytest-v1", "repo-node24-npm-v1", "repo-python-pytest-publication-v1"] = "repo-python-pytest-v1"
     node_runtime_path: str = ""
     max_files: int = 2000
     max_directories: int = 500

@@ -18,15 +18,15 @@ import uuid
 from dataclasses import dataclass
 from dataclasses import replace as replace_dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Callable, Mapping
+from typing import Any, Awaitable, Callable, Literal, Mapping
 
-from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field
+from fastapi import APIRouter, HTTPException, Request, Query
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import func, update
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 
-from src.approval.repository import approval_repository, fingerprint_tool_call
+from src.approval.repository import approval_repository, fingerprint_tool_call, _approval_expiry
 from src.auth.service import AuthFailure, authenticate_session
 from src.db import engine as db_engine
 from src.db.models import (
@@ -52,6 +52,7 @@ from src.tools.filesystem_tool import (
     _write_workspace_text_bounded,
 )
 from src.vault.repository import vault_repository
+from src.extensions.github_consent import GitHubConsentRequest, GitHubReadbackAuthority, live_operator, issuance, require_consent, projection as consent_projection, mutation_action
 from src.workflows.job_runtime import (
     DurableJobError,
     DurableJobIdentity,
@@ -459,14 +460,12 @@ async def _require_live_owner_session(
 ) -> None:
     """Enforce the dispatch boundary inside the adapter service.
 
-    HTTP routes perform the same checks for operator ergonomics, but routine
-    and recovery callers reach this service directly.  A missing explicit
-    grant therefore fails closed even when a durable job carries old
-    permissions, and the persisted owner session must still be live.
+    Routine and recovery callers reach this service directly. Identity must
+    remain live; exact canonical connection consent is checked separately at
+    prepare and every protected mutation handoff. The legacy Boolean argument
+    is retained for call compatibility and supplies no authority.
     """
 
-    if not external_mutation_granted:
-        raise GitHubFollowthroughError("external_mutation_grant_required", status_code=403)
     if not _text(owner_session_id):
         raise GitHubFollowthroughError("owner_session_required", status_code=403)
     try:
@@ -476,11 +475,8 @@ async def _require_live_owner_session(
     principal_id = _text(getattr(getattr(operator, "principal", None), "principal_id", None))
     if _text(getattr(operator, "session_id", None)) != _text(owner_session_id) or principal_id != _text(owner_principal_id):
         raise GitHubFollowthroughError("owner_session_mismatch", status_code=403)
-    # The caller's boolean is only an admission hint.  Re-read the current
-    # authenticated principal at the adapter boundary so a grant revoked
-    # after preview/approval cannot still authorize an external POST.
-    if not _has_grant(operator, AuthorityGrant.EXTERNAL_MUTATION):
-        raise GitHubFollowthroughError("external_mutation_grant_required", status_code=403)
+    # This GitHub-only helper checks identity. Mutation authority is derived
+    # independently from the exact canonical connection consent at handoff.
 
 
 def _connection_payload(row: GitHubFollowthroughConnection | None) -> dict[str, Any]:
@@ -572,12 +568,13 @@ def _publication_readback_id(prepared: PreparedPublication) -> str:
 
 
 class ConnectionRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
 
     repository: str = Field(min_length=3, max_length=200)
     vault_key: str = Field(min_length=1, max_length=160)
     mode: str = CONNECTION_MODE_DISABLED
     expected_revision: int = Field(ge=0)
+    consent: GitHubConsentRequest | None = None
 
 
 class PrepareRequest(BaseModel):
@@ -597,9 +594,21 @@ class PrepareRequest(BaseModel):
 
 
 class ReconcileRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
 
     remote_id: int | None = Field(default=None, gt=0)
+    acknowledged_readback: Literal[True]
+    expected_connection_revision: int = Field(gt=0)
+
+    @field_validator("acknowledged_readback", mode="before")
+    @classmethod
+    def exact_read_ack(cls, value):
+        if value is not True:
+            raise ValueError("explicit original-root readback acknowledgment required")
+        return value
+
+
+from src.extensions.github_capacity_closure import LegacyCloseRequest
 
 
 class GitHubFollowthroughService:
@@ -615,6 +624,7 @@ class GitHubFollowthroughService:
         self._resolver = resolver
         self._transport = transport
         self._sleep = sleep
+        self._last_verified_get = None
 
     async def _request(
         self,
@@ -625,7 +635,36 @@ class GitHubFollowthroughService:
         json_body: dict[str, Any] | None = None,
         timeout_seconds: float = 20.0,
         authority_check: Callable[[], Awaitable[None]] | None = None,
+        github_consent_binding: dict[str, Any] | None = None,
+        readback_authority=None,
+        read_window=None,
     ) -> PinnedResponse:
+        if read_window is not None:
+            from src.extensions.github_capacity_closure import ReadWindow
+            if type(read_window) is not ReadWindow or method != "GET" or readback_authority is None or authority_check is None:
+                raise GitHubFollowthroughError("github_read_window_invalid", status_code=403)
+            read_window.before_get()
+            outer_read_check = authority_check
+            async def bounded_read_check():
+                read_window.remaining()
+                await outer_read_check()
+                read_window.remaining()
+            authority_check = bounded_read_check
+            timeout_seconds = min(timeout_seconds, read_window.remaining())
+        if method == "POST":
+            if github_consent_binding is None or authority_check is None:
+                raise GitHubFollowthroughError("github_consent_transport_binding_required", status_code=403)
+            outer_authority = authority_check
+            async def scoped_handoff():
+                await outer_authority()
+                binding = github_consent_binding
+                action = mutation_action(binding["repository"], method, url, json_body)
+                row = await self._get_connection_row(binding["owner_principal_id"])
+                await require_consent(row, principal=binding["owner_principal_id"], root=binding["consent_root_id"],
+                    repository=binding["repository"], revision=binding["connection_revision"],
+                    required_actions={action}, binding=binding)
+            authority_check = scoped_handoff
+            await authority_check()
         headers = {
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": GITHUB_API_VERSION,
@@ -646,9 +685,141 @@ class GitHubFollowthroughService:
             kwargs["resolver"] = self._resolver
         if self._transport is not None:
             kwargs["transport"] = self._transport
-        return await request_pinned_https(f"{GITHUB_ORIGIN}{url}", **kwargs)
+        if readback_authority is not None:
+            from src.extensions.github_consent import GitHubReadbackAuthority, GitHubClosedReadbackAuthority
+            if method != "GET" or type(readback_authority) not in {GitHubReadbackAuthority, GitHubClosedReadbackAuthority}:
+                raise GitHubFollowthroughError("github_readback_authority_invalid", status_code=403)
+            await readback_authority.validate()
+        response = await request_pinned_https(f"{GITHUB_ORIGIN}{url}", **kwargs)
+        if read_window is not None:
+            read_window.after_get(response.content)
+        if method == "POST" and authority_check is not None:
+            await authority_check()
+        if readback_authority is not None and response.status_code == 200:
+            from src.extensions.github_consent import digest
+            await readback_authority.validate()
+            await authority_check()
+            self._last_verified_get = (url, hashlib.sha256(response.content).hexdigest(),
+                digest(json.loads(response.content)), digest(readback_authority.__dict__), _now())
+        return response
 
-    async def get_connection(self, owner_principal_id: str) -> dict[str, Any]:
+    async def verified_get_receipt(self, *, read_authority, path, payload, effect_identity,
+                                   publication_inputs=None, read_window=None, publication_boundary=None):
+        """Mint only actual GET bytes matching canonical original effect intent."""
+        from src.extensions.github_consent import GitHubVerifiedReadback, _GET_RECEIPT_SEAL, digest
+        await read_authority.validate()
+        # Compare decoded canonical JSON because transport whitespace is not
+        # publication identity. The actual raw digest is separately retained.
+        captured = self._last_verified_get
+        self._last_verified_get = None
+        if captured is None or captured[0] != path or captured[2] != digest(payload) or captured[3] != digest(read_authority.__dict__) or (_now()-captured[4]).total_seconds() > 30:
+            raise GitHubFollowthroughError("github_actual_get_proof_missing", status_code=409)
+        current = await durable_job_repository.get_job(read_authority.job_id)
+        if not current or current.get("owner", {}).get("kind") != "user" or current.get("owner", {}).get("principal_id") != read_authority.principal or current.get("operator_session_id") != read_authority.root or current.get("job_kind") != read_authority.capability:
+            raise GitHubFollowthroughError("github_get_original_job_changed", status_code=409)
+        prior = next((item for item in current.get("effects", []) if item.get("effect_id") == effect_identity.get("effect_id")), None)
+        expected_identity = {"job_id": current["job_id"], "attempt_count": current["attempt_count"], "authority_digest": current["authority_digest"]}
+        if prior:
+            expected_identity.update({key: prior.get(key) for key in ("effect_id", "effect_type", "target_path", "target_digest", "adapter_idempotency_key")})
+        if not prior or expected_identity != effect_identity:
+            raise GitHubFollowthroughError("github_get_original_effect_changed", status_code=409)
+        if current["job_kind"] == JOB_KIND:
+            if (current.get("declared_authority") or {}).get("capability_id") != CAPABILITY_ID:
+                raise GitHubFollowthroughError("github_get_native_capability_mismatch", status_code=409)
+            prepared = await self._read_prepared(current)
+            remote_id = _positive_id(payload.get("number") if prepared.action == ACTION_CREATE_ISSUE else payload.get("id"), field="remote_id")
+            matches = path == _canonical_path(prepared.repository, prepared.action, prepared.issue_number, remote_id)
+            matches = matches and prior.get("effect_type") == "github_publication" and prior.get("target_path") == _publication_effect_target_path(prepared) and prior.get("target_digest") == prepared.body_sha256
+            matches = matches and payload.get("body") == prepared.body
+            if prepared.action == ACTION_CREATE_ISSUE:
+                matches = matches and payload.get("title") == prepared.title
+            else:
+                matches = matches and payload.get("issue_url") == f"{GITHUB_ORIGIN}/repos/{prepared.repository}/issues/{prepared.issue_number}"
+            if not matches:
+                raise GitHubFollowthroughError("github_get_original_payload_mismatch", status_code=409)
+        elif current["job_kind"] == "engineering.repo-publication.v1":
+            from pathlib import Path
+            from config.settings import settings
+            from src.workspace import canonical_workspace_root
+            from src.workflows.repo_publication import RepoPublicationService
+            from src.execution.repo_publication import file_manifest, equivalent
+            service = RepoPublicationService(adapter=self)
+            preview = service.preview(current)
+            if publication_inputs is not None:
+                from src.workflows.repo_publication_closure import _PublicationClosureInputs
+                from src.extensions.github_capacity_closure import ReadWindow
+                if type(publication_inputs) is not _PublicationClosureInputs or type(read_window) is not ReadWindow:
+                    raise GitHubFollowthroughError("github_publication_closure_inputs_invalid", status_code=409)
+                publication_inputs.validate_intent(current, prior, path, payload, service, read_window, publication_boundary)
+            else:
+                original = {"title": preview["title"], "body": preview["body"], "head": preview["branch_name"], "base": preview["base_branch"], "draft": False}
+                remote_commit = next((item.get("details", {}).get("remote_identity") for item in reversed(current.get("effects", [])) if item.get("effect_type") == "repo_publication_commit" and item.get("receipt_kind") == "readback" and item.get("status") == "succeeded"), None)
+                if prior.get("effect_type") != "repo_publication_pr" or prior.get("target_path") != f"/repos/{preview['repository']}/pulls" or prior.get("target_digest") != digest(original) or path != f"/repos/{preview['repository']}/pulls/{service.positive(payload.get('number'))}" or not remote_commit:
+                    raise GitHubFollowthroughError("github_get_original_payload_mismatch", status_code=409)
+                equivalent(file_manifest(Path(canonical_workspace_root(settings.workspace_dir)) / f"artifacts/repo-publication/{current['job_id']}/producer"), preview["tested_input"]["tested_files"])
+                service.verify_pr(payload, preview, remote_commit)
+        else:
+            raise GitHubFollowthroughError("github_get_native_capability_mismatch", status_code=409)
+        snapshot = await read_authority.validate()
+        from src.extensions.github_recovery import capture_binding, check_binding, check_closed_binding
+        from src.extensions.github_consent import GitHubClosedReadbackAuthority
+        async with db_engine.get_session() as db:
+            run = (await db.execute(select(WorkflowRunState).where(
+                WorkflowRunState.run_identity == read_authority.job_id))).scalars().one()
+            if type(read_authority) is GitHubClosedReadbackAuthority:
+                binding = await check_closed_binding(db, run, read_authority, snapshot=snapshot)
+            else:
+                binding = await capture_binding(db, run, read_authority, snapshot)
+                await check_binding(db, run, binding)
+            if run.revision != current["revision"]:
+                raise GitHubFollowthroughError("github_get_original_job_changed", status_code=409)
+        from dataclasses import replace
+        from src.extensions.github_consent import _seal_verified_get
+        verified = GitHubVerifiedReadback(read_authority.job_id, read_authority.root,
+            read_authority.capability, path, captured[1], digest(read_authority.__dict__),
+            digest(effect_identity), captured[4], _GET_RECEIPT_SEAL, captured[2], binding)
+        return replace(verified, _seal=_seal_verified_get(verified))
+
+    async def request_repo_publication(
+        self, path: str, *, method: str, token: str, authority_check,
+        json_body: dict[str, Any] | None = None, timeout_seconds: float = 20,
+        consent_binding: dict[str, Any] | None = None,
+        owner_principal_id: str | None = None, owner_session_id: str | None = None,
+        readback_authority=None,
+        read_window=None,
+    ) -> PinnedResponse:
+        """Exact Git Data/PR operation through the existing protected adapter.
+
+        The reviewed final-DNS authority callback is a required dependency;
+        older adapters cannot silently execute under weaker authority.
+        """
+        import inspect
+        if "authority_check" not in inspect.signature(self._request).parameters:
+            raise GitHubFollowthroughError("publication_transport_authority_unavailable")
+        if consent_binding is None:
+            raise GitHubFollowthroughError("publication_transport_consent_unavailable")
+        if method not in {"GET", "POST"} or not re.fullmatch(
+            r"/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/(?:git/(?:blobs(?:/[0-9a-f]{40})?|trees(?:/[0-9a-f]{40}(?:\?recursive=1)?)?|commits(?:/[0-9a-f]{40})?|refs|ref/heads/[A-Za-z0-9_./-]+)|pulls(?:/[1-9][0-9]*(?:/files\?per_page=100&page=(?:[1-9]|1[0-9]|2[01]))?|\?state=all&head=[A-Za-z0-9_.-]+%3A[A-Za-z0-9_.%/-]+&base=[A-Za-z0-9_.%/-]+&per_page=100)?)", path
+        ):
+            raise GitHubFollowthroughError("publication_request_invalid", status_code=422)
+        async def scoped_authority():
+            await authority_check()
+            if method == "POST":
+                repository = consent_binding["repository"]
+                action = mutation_action(repository, method, path, json_body)
+                row = await self._get_connection_row(owner_principal_id)
+                await require_consent(row, principal=owner_principal_id, root=owner_session_id,
+                    repository=repository, revision=consent_binding["connection_revision"],
+                    required_actions={action}, binding=consent_binding)
+        await scoped_authority()
+        response = await self._request(path, method=method, token=token, json_body=json_body,
+                                       timeout_seconds=timeout_seconds, authority_check=scoped_authority,
+                                       github_consent_binding=consent_binding, readback_authority=readback_authority,
+                                       read_window=read_window)
+        await scoped_authority()
+        return response
+
+    async def get_connection(self, owner_principal_id: str, owner_session_id: str | None = None) -> dict[str, Any]:
         async with db_engine.get_session() as db:
             row = (
                 await db.execute(
@@ -659,7 +830,9 @@ class GitHubFollowthroughService:
             ).scalars().first()
             if row is not None:
                 db.expunge(row)
-        return _connection_payload(row)
+        value = _connection_payload(row)
+        value["consent"] = await consent_projection(row, owner_session_id)
+        return value
 
     async def revoke_connection(self, *, owner_principal_id: str, expected_revision: int) -> dict[str, Any]:
         """Fence publication locally while retaining any contacted liability."""
@@ -668,7 +841,7 @@ class GitHubFollowthroughService:
                 update(GitHubFollowthroughConnection).where(
                     GitHubFollowthroughConnection.owner_principal_id == owner_principal_id,
                     GitHubFollowthroughConnection.revision == expected_revision,
-                ).values(mode=CONNECTION_MODE_DISABLED,
+                ).values(mode=CONNECTION_MODE_DISABLED, consent_revoked_at=_now(),
                     revision=GitHubFollowthroughConnection.revision + 1, updated_at=_now())
             )
             if result.rowcount != 1:
@@ -683,11 +856,19 @@ class GitHubFollowthroughService:
         vault_key: str,
         mode: str,
         expected_revision: int,
+        owner_session_id: str | None = None,
+        consent: GitHubConsentRequest | None = None,
     ) -> dict[str, Any]:
         repository = _repository(repository)
         vault_key = _vault_key(vault_key)
         if mode not in CONNECTION_MODES:
             raise GitHubFollowthroughError("connection_mode_invalid", status_code=422)
+        if (mode == CONNECTION_MODE_ACTIVE) != (consent is not None):
+            raise GitHubFollowthroughError("github_connection_explicit_consent_required", status_code=422)
+        operator = await live_operator(owner_principal_id, owner_session_id) if consent is not None else None
+        snapshot = await vault_repository.snapshot(vault_key, owner_principal_id=owner_principal_id) if consent is not None else None
+        if consent is not None and snapshot is None:
+            raise GitHubFollowthroughError("credential_not_configured", status_code=409)
         if mode == CONNECTION_MODE_ACTIVE and not _text(owner_principal_id):
             raise GitHubFollowthroughError("owner_required", status_code=401)
         if mode != CONNECTION_MODE_DISABLED and not await vault_repository.exists(vault_key, owner_principal_id=owner_principal_id):
@@ -710,6 +891,9 @@ class GitHubFollowthroughService:
                     mode=mode,
                     revision=1,
                 )
+                if consent is not None:
+                    for key, value in issuance(row, operator, consent, snapshot.binding_digest, 1).items():
+                        setattr(row, key, value)
                 db.add(row)
                 await db.flush()
             else:
@@ -722,6 +906,11 @@ class GitHubFollowthroughService:
                 # bytes under another.
                 if row.active_job_id:
                     raise GitHubFollowthroughError("connection_reserved", status_code=409)
+                consent_fields = {key: None for key in ("consent_id", "consent_owner_session_id", "consent_actions_json", "consent_issued_at", "consent_expires_at", "consent_connection_revision", "consent_payload_digest", "consent_revoked_at")}
+                if consent is not None:
+                    from types import SimpleNamespace
+                    selected = SimpleNamespace(id=row.id, owner_principal_id=owner_principal_id, repository=repository)
+                    consent_fields = issuance(selected, operator, consent, snapshot.binding_digest, expected_revision + 1)
                 # The read above is only for a useful error classification. A
                 # reservation can commit after that read and before this
                 # mutation, so the write itself must carry the reservation
@@ -740,6 +929,7 @@ class GitHubFollowthroughService:
                         mode=mode,
                         revision=GitHubFollowthroughConnection.revision + 1,
                         updated_at=_now(),
+                        **consent_fields,
                     )
                 )
                 if updated.rowcount != 1:
@@ -766,7 +956,9 @@ class GitHubFollowthroughService:
                     raise GitHubFollowthroughError("connection_missing", status_code=404)
                 await db.flush()
             db.expunge(row)
-        return _connection_payload(row)
+        value = _connection_payload(row)
+        value["consent"] = await consent_projection(row, owner_session_id)
+        return value
 
     async def _get_connection_row(self, owner_principal_id: str) -> GitHubFollowthroughConnection | None:
         async with db_engine.get_session() as db:
@@ -1750,6 +1942,10 @@ class GitHubFollowthroughService:
         job_id: str,
     ) -> int:
         async with db_engine.get_session() as db:
+            closed = (await db.execute(select(WorkflowRunState.github_capacity_closure_json).where(
+                WorkflowRunState.run_identity == job_id))).scalar_one_or_none()
+            if closed:
+                raise GitHubFollowthroughError("github_capacity_already_closed", status_code=409)
             row = (
                 await db.execute(
                     select(GitHubFollowthroughConnection).where(
@@ -1777,6 +1973,8 @@ class GitHubFollowthroughService:
                     GitHubFollowthroughConnection.revision == expected_revision,
                     GitHubFollowthroughConnection.mode == CONNECTION_MODE_ACTIVE,
                     GitHubFollowthroughConnection.active_job_id.is_(None),
+                    ~select(WorkflowRunState.id).where(WorkflowRunState.run_identity == job_id,
+                        WorkflowRunState.github_capacity_closure_json.is_not(None)).exists(),
                 )
                 .values(
                     active_job_id=job_id,
@@ -1806,6 +2004,10 @@ class GitHubFollowthroughService:
         fence: int,
     ) -> bool:
         async with db_engine.get_session() as db:
+            closed = (await db.execute(select(WorkflowRunState.github_capacity_closure_json).where(
+                WorkflowRunState.run_identity == job_id))).scalar_one_or_none()
+            if closed:
+                return False
             result = await db.execute(
                 update(GitHubFollowthroughConnection)
                 .where(
@@ -1839,6 +2041,10 @@ class GitHubFollowthroughService:
         """
 
         async with db_engine.get_session() as db:
+            closed = (await db.execute(select(WorkflowRunState.github_capacity_closure_json).where(
+                WorkflowRunState.run_identity == job_id))).scalar_one_or_none()
+            if closed:
+                raise GitHubFollowthroughError("github_capacity_already_closed", status_code=409)
             result = await db.execute(
                 update(GitHubFollowthroughConnection)
                 .where(
@@ -1911,9 +2117,10 @@ class GitHubFollowthroughService:
         *,
         prepared: PreparedPublication | None = None,
         approval: Mapping[str, Any] | None = None,
+        repair_connection: bool = True,
     ) -> dict[str, Any]:
         connection_release_status = "not_required"
-        if current.get("status") == "succeeded":
+        if repair_connection and current.get("status") == "succeeded":
             try:
                 connection_release_status = await self._repair_terminal_connection_reservation(current)
             except Exception:
@@ -1925,6 +2132,8 @@ class GitHubFollowthroughService:
                 prepared = None
         response: dict[str, Any] = {
             "job_id": current.get("job_id"),
+            "revision": current.get("revision"),
+            "github_capacity_closure": current.get("github_capacity_closure"),
             "operation_id": str(prepared.operation_id) if prepared else None,
             "status": current.get("status"),
             "goal_id": current.get("goal_id"),
@@ -2051,6 +2260,9 @@ class GitHubFollowthroughService:
             raise GitHubFollowthroughError("connection_not_active", status_code=403)
         if not connection.vault_key or not await vault_repository.exists(connection.vault_key, owner_principal_id=owner_principal_id):
             raise GitHubFollowthroughError("credential_not_configured", status_code=409)
+        consent_binding = await require_consent(connection, principal=owner_principal_id, root=owner_session_id,
+            repository=connection.repository, revision=request.connection_revision,
+            required_actions={"github_issue_write" if request.action == ACTION_CREATE_ISSUE else "github_comment_write"})
         packet, watch, goal, _dossier_text = await self._load_dossier(
             owner_principal_id=owner_principal_id,
             request=request,
@@ -2135,6 +2347,7 @@ class GitHubFollowthroughService:
             "dossier_artifact_id": request.dossier_artifact_id,
             "dossier_sha256": request.dossier_sha256,
             "budget_microusd": 0,
+            "github_consent": consent_binding,
         }
         if routine_binding is not None:
             authority["routine_binding"] = dict(routine_binding)
@@ -2427,7 +2640,7 @@ class GitHubFollowthroughService:
                 updates={
                     "durable_authority_digest": bound.get("authority_digest"),
                     "authority_digest": bound.get("authority_digest"),
-                    "approval_expires_at": approval.expires_at.timestamp() if approval.expires_at else None,
+                    "approval_expires_at": _approval_expiry(approval.expires_at).timestamp() if _approval_expiry(approval.expires_at) is not None else None,
                 },
             )
             bound_lease = bound.get("lease") or {}
@@ -2804,6 +3017,7 @@ class GitHubFollowthroughService:
         remote_id: int,
         deadline: float,
         authority_check: Callable[[], Awaitable[None]] | None = None,
+        readback_authority=None,
     ) -> tuple[bool, str, dict[str, Any] | None]:
         path = _canonical_path(prepared.repository, prepared.action, prepared.issue_number, remote_id)
         for attempt in range(READBACK_ATTEMPTS):
@@ -2819,6 +3033,7 @@ class GitHubFollowthroughService:
                     token=token,
                     timeout_seconds=min(20.0, max(0.1, remaining)),
                     **({"authority_check": authority_check} if authority_check is not None else {}),
+                    **({"readback_authority": readback_authority} if readback_authority is not None else {}),
                 )
             except Exception as exc:
                 if attempt + 1 >= READBACK_ATTEMPTS:
@@ -2879,6 +3094,7 @@ class GitHubFollowthroughService:
         payload: Mapping[str, Any],
         readback_path: str,
     ) -> dict[str, Any]:
+        await self._require_current_goal(current)
         connection = await self._get_connection_row(prepared.owner_principal_id)
         if connection is None or connection.revision != prepared.connection_revision or connection.mode != CONNECTION_MODE_ACTIVE:
             return await self._mark_unknown(prepared,reason="connection_revoked_before_adoption",current=current,
@@ -2987,6 +3203,7 @@ class GitHubFollowthroughService:
         readback_path: str,
     ) -> dict[str, Any]:
         """Persist the local result after a recovery-only verified readback."""
+        await self._require_current_goal(current)
         output = {
             "schema": "seraph.github-followthrough-result.v1",
             "operation_id": str(prepared.operation_id),
@@ -3082,6 +3299,17 @@ class GitHubFollowthroughService:
                 fence=int(connection.active_fence or 0),
             )
         return finalized
+
+    async def _require_current_goal(self, current):
+        from src.workflows.job_runtime import _assert_canonical_goal_fence, DurableJobTransitionError
+        async with db_engine.get_session() as db:
+            try:
+                await _assert_canonical_goal_fence(db, goal_id=current.get("goal_id"),
+                    goal_revision=current.get("goal_revision"), owner_kind=current["owner"]["kind"],
+                    owner_principal_id=current["owner"]["principal_id"], session_id=current["session_id"],
+                    authority=current.get("declared_authority"))
+            except DurableJobTransitionError as exc:
+                raise GitHubFollowthroughError("github_current_goal_changed", status_code=409) from exc
 
     async def execute(
         self,
@@ -3349,7 +3577,13 @@ class GitHubFollowthroughService:
                 result["reason_code"] = exc.code
                 result["recovery_action"] = "restore_prerequisite"
                 return result
-            token = await self._load_token(connection)
+            consent_binding = (current.get("declared_authority") or {}).get("github_consent")
+            if not isinstance(consent_binding, dict):
+                raise GitHubFollowthroughError("github_connection_needs_consent")
+            snapshot = await vault_repository.snapshot(connection.vault_key, owner_principal_id=owner_principal_id)
+            if snapshot is None or snapshot.binding_digest != consent_binding.get("vault_binding_digest"):
+                raise GitHubFollowthroughError("github_consent_credential_or_metadata_changed")
+            token = snapshot.value
             current_deadline = _now().timestamp() + EXECUTION_DEADLINE_SECONDS
             if current.get("deadline_at"):
                 persisted_deadline = datetime.fromisoformat(
@@ -3385,6 +3619,7 @@ class GitHubFollowthroughService:
                     json_body=request_body,
                     timeout_seconds=min(20.0, max(0.1, deadline - _now().timestamp())),
                     authority_check=final_authority,
+                    github_consent_binding=consent_binding,
                 )
             except Exception as exc:
                 unknown = await self._mark_unknown(
@@ -3763,6 +3998,61 @@ class GitHubFollowthroughService:
             )
         return await self._prepare_job_response(cancelled)
 
+    async def close_capacity(self, *, owner_principal_id, owner_session_id, job_id, request):
+        from pathlib import Path
+        from config.settings import settings
+        from src.workspace import canonical_workspace_root
+        from src.execution.repo_publication_supervisor import guard
+        from src.extensions.github_capacity_closure import (ReadWindow, original_effects, stage_observation_inventory,
+            effect_identity, _mint_complete_proof)
+        current = await durable_job_repository.get_job(job_id)
+        if current is None or current.get("job_kind") != JOB_KIND or current.get("owner", {}).get("principal_id") != owner_principal_id or current.get("operator_session_id") != owner_session_id or current.get("declared_authority", {}).get("capability_id") != CAPABILITY_ID:
+            raise GitHubFollowthroughError("job_not_found", status_code=404)
+        repeated = await durable_job_repository.get_github_capacity_closure(job_id,
+            request=request, principal=owner_principal_id, root=owner_session_id)
+        if repeated is not None:
+            return await self._prepare_job_response(repeated)
+        if current["revision"] != request.expected_job_revision or current["status"] not in {"unknown_external_effect", "blocked", "failed"} or current["lease"].get("owner") or current["lease"].get("expires_at"):
+            raise GitHubFollowthroughError("github_capacity_close_unleased_revision_required", status_code=409)
+        prepared = await self._read_prepared(current)
+        await stage_observation_inventory(current)
+        effects = original_effects(current)
+        prior = effects[0]
+        recorded_id = (prior.get("details") or {}).get("remote_id")
+        if recorded_id is not None:
+            recorded_id = _positive_id(recorded_id, field="remote_id")
+        remote_id = request.remote_id if request.remote_id is not None else recorded_id
+        if remote_id is None:
+            raise GitHubFollowthroughError("remote_id_required", status_code=409)
+        if recorded_id is not None and recorded_id != remote_id:
+            raise GitHubFollowthroughError("remote_id_binding_conflict", status_code=409)
+        authority = GitHubReadbackAuthority(owner_principal_id, owner_session_id, job_id, JOB_KIND,
+            request.expected_connection_revision, request.expected_connection_fence,
+            current["declared_authority"].get("github_consent") or {})
+        # Legacy has no local producer; the same private per-job guard bounds
+        # simultaneous close requests, never serving as absence/process proof.
+        stage = Path(canonical_workspace_root(settings.workspace_dir)) / f"artifacts/github-capacity-closures/{job_id}/legacy"
+        with guard(stage) as (_, _, guard_fd):
+            snapshot = await authority.validate()
+            window = ReadWindow(legacy=True)
+            path = _canonical_path(prepared.repository, prepared.action, prepared.issue_number, remote_id)
+            response = await self._request(path, method="GET", token=snapshot.value,
+                authority_check=authority.validate, readback_authority=authority, read_window=window)
+            if response.status_code != 200:
+                raise GitHubFollowthroughError("github_capacity_positive_readback_required", status_code=409)
+            payload = self._response_json(response)
+            if not isinstance(payload, dict):
+                raise GitHubFollowthroughError("github_capacity_positive_readback_required", status_code=409)
+            window.decoded(len(response.content))
+            identity = effect_identity(current, prior)
+            verified = await self.verified_get_receipt(read_authority=authority,
+                path=path, payload=payload, effect_identity=identity)
+            proof = _mint_complete_proof(current=current, binding=verified.canonical_binding,
+                positive_gets=[(verified, identity)], guard_fd=guard_fd, window=window)
+            closed = await durable_job_repository.record_github_capacity_closure(job_id,
+                request=request, read_authority=authority, proof=proof)
+        return await self._prepare_job_response(closed, prepared=prepared)
+
     async def reconcile(
         self,
         *,
@@ -3773,6 +4063,8 @@ class GitHubFollowthroughService:
         current = await durable_job_repository.get_job(job_id)
         if current is None or current.get("owner", {}).get("principal_id") != owner_principal_id:
             raise GitHubFollowthroughError("job_not_found", status_code=404)
+        if current.get("github_capacity_closure"):
+            return await self.observe_closed(current=current, request=request)
         if current.get("status") == "succeeded":
             return await self._prepare_job_response(current)
         prepared = await self._read_prepared(current)
@@ -3781,8 +4073,13 @@ class GitHubFollowthroughService:
             raise GitHubFollowthroughError("connection_not_found", status_code=404)
         if connection.repository != prepared.repository:
             raise GitHubFollowthroughError("repository_binding_changed")
-        if connection.mode not in {CONNECTION_MODE_RECONCILE_ONLY, CONNECTION_MODE_ACTIVE}:
-            raise GitHubFollowthroughError("reconcile_grant_required", status_code=403)
+        authority = current.get("declared_authority") or {}
+        if current.get("status") not in {"unknown_external_effect", "blocked", "failed", "cost_liability"} or (current.get("lease") or {}).get("owner"):
+            raise GitHubFollowthroughError("reconcile_unleased_job_required", status_code=409)
+        read_authority = GitHubReadbackAuthority(owner_principal_id, authority.get("session_id"),
+            job_id, "github_followthrough_v1", request.expected_connection_revision,
+            connection.active_fence, authority.get("github_consent") or {})
+        snapshot = await read_authority.validate()
         recorded_remote_id: int | None = None
         for item in reversed(current.get("effects") or []):
             if not isinstance(item, Mapping):
@@ -3798,13 +4095,14 @@ class GitHubFollowthroughService:
             remote_id = recorded_remote_id
         if remote_id is None:
             raise GitHubFollowthroughError("remote_id_required", status_code=409)
-        token = await self._load_token(connection)
+        token = snapshot.value
         deadline = _now().timestamp() + EXECUTION_DEADLINE_SECONDS
         verified, reason, payload = await self._readback(
             prepared,
             token=token,
             remote_id=remote_id,
             deadline=deadline,
+            authority_check=read_authority.validate, readback_authority=read_authority,
         )
         readback_path = _canonical_path(prepared.repository, prepared.action, prepared.issue_number, remote_id)
         effect_target_path = _publication_effect_target_path(prepared)
@@ -3835,6 +4133,29 @@ class GitHubFollowthroughService:
             result["reconciliation"] = "unresolved"
             result["reason_code"] = reason
             return result
+        prior = next((item for item in current.get("effects", []) if item.get("effect_id") == f"github:{prepared.operation_id}"), None)
+        if prior is None:
+            raise GitHubFollowthroughError("github_prior_effect_unproven", status_code=409)
+        verified_at = _now().isoformat()
+        identity = {"job_id": job_id, "attempt_count": current["attempt_count"], "authority_digest": current["authority_digest"],
+            "effect_id": prior["effect_id"], "effect_type": prior["effect_type"], "target_path": prior["target_path"],
+            "target_digest": prior["target_digest"], "adapter_idempotency_key": prior.get("adapter_idempotency_key")}
+        verified_get = await self.verified_get_receipt(read_authority=read_authority, path=readback_path, payload=payload, effect_identity=identity)
+        observation = {"schema": "seraph.github-effect-observation.v1", **identity,
+            "readback_id": _publication_readback_id(prepared), "verified_at": verified_at,
+            "remote_readback": {"remote_id": remote_id, "readback_path": readback_path, "payload_sha256": verified_get.payload_sha256}}
+        content = _dump(observation).encode()
+        current = await durable_job_repository.record_github_recovery_observation(job_id,
+            read_authority=read_authority, verified_readback=verified_get,
+            expected_revision=current["revision"], expected_attempt_count=current["attempt_count"],
+            expected_authority_digest=current["authority_digest"], effect_id=prior["effect_id"],
+            effect_type=prior["effect_type"], target_path=prior["target_path"], target_digest=prior["target_digest"],
+            adapter_idempotency_key=prior.get("adapter_idempotency_key"), readback_id=observation["readback_id"],
+            verified_at=verified_at, artifact_content=content, artifact_sha256=hashlib.sha256(content).hexdigest())
+        if current["receipt"].get("blocked_current_goal"):
+            result = await self._prepare_job_response(current, prepared=prepared)
+            result.update(reason_code="github_current_goal_changed", observation_only=True)
+            return result
         readback = await durable_job_repository.record_readback(
             job_id,
             target_path=effect_target_path,
@@ -3843,7 +4164,7 @@ class GitHubFollowthroughService:
             target_digest=prepared.body_sha256,
             content_sha256=_sha(_dump(payload)),
             readback_id=_publication_readback_id(prepared),
-            verified_at=_now().isoformat(),
+            verified_at=verified_at,
             status="succeeded",
             details={
                 "verified": True,
@@ -3866,6 +4187,40 @@ class GitHubFollowthroughService:
         )
         return await self._prepare_job_response(finalized, prepared=prepared)
 
+    async def observe_closed(self, *, current, request):
+        from src.extensions.github_recovery import closed_authority, record_closed_observation
+        from src.extensions.github_capacity_closure import ReadWindow, original_effects, effect_identity, stage_observation_inventory
+        authority = await closed_authority(current, expected_revision=request.expected_connection_revision)
+        prepared = await self._read_prepared(current)
+        async with db_engine.get_session() as db:
+            run = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == current["job_id"]))).scalars().one()
+            history = _load(run.github_capacity_closure_json, {})
+        await stage_observation_inventory(current)
+        prior = original_effects(current)[0]
+        positive = next((item for item in history.get("positive_gets", []) if item["identity"]["effect_id"] == prior["effect_id"]), None)
+        if positive is None:
+            raise GitHubFollowthroughError("github_closed_readback_positive_history_missing", status_code=409)
+        remote_id = _positive_id(int(positive["path"].rsplit("/", 1)[1]), field="remote_id")
+        if request.remote_id is not None and request.remote_id != remote_id:
+            raise GitHubFollowthroughError("remote_id_binding_conflict", status_code=409)
+        window = ReadWindow(legacy=True)
+        snapshot = await authority.validate()
+        response = await self._request(positive["path"], method="GET", token=snapshot.value,
+            authority_check=authority.validate, readback_authority=authority, read_window=window)
+        if response.status_code != 200:
+            raise GitHubFollowthroughError("github_closed_readback_positive_required", status_code=409)
+        payload = self._response_json(response)
+        if not isinstance(payload, dict):
+            raise GitHubFollowthroughError("github_closed_readback_positive_required", status_code=409)
+        identity = effect_identity(current, prior)
+        actual = await self.verified_get_receipt(read_authority=authority,
+            path=positive["path"], payload=payload, effect_identity=identity)
+        observed = await record_closed_observation(durable_job_repository, current, authority, actual, identity)
+        result = await self._prepare_job_response(observed, prepared=prepared)
+        result.update(observation_only=True, reconciliation="capacity_closed_observation",
+            reason_code="github_capacity_closed_observation_only")
+        return result
+
 
 github_followthrough_service = GitHubFollowthroughService()
 
@@ -3881,7 +4236,7 @@ def _raise_http(exc: GitHubFollowthroughError) -> HTTPException:
 async def get_github_connection(request: Request):
     try:
         operator = _operator(request)
-        return await github_followthrough_service.get_connection(_principal_id(operator))
+        return await github_followthrough_service.get_connection(_principal_id(operator), _session_id(operator))
     except GitHubFollowthroughError as exc:
         raise _raise_http(exc) from exc
 
@@ -3891,15 +4246,16 @@ async def put_github_connection(req: ConnectionRequest, request: Request):
     try:
         operator = _operator(request)
         owner = _principal_id(operator)
-        if req.mode == CONNECTION_MODE_ACTIVE and not _has_grant(operator, AuthorityGrant.EXTERNAL_MUTATION):
-            raise GitHubFollowthroughError("external_mutation_grant_required", status_code=403)
         return await github_followthrough_service.put_connection(
             owner_principal_id=owner,
             repository=req.repository,
             vault_key=req.vault_key,
             mode=req.mode,
             expected_revision=req.expected_revision,
+            owner_session_id=_session_id(operator), consent=req.consent,
         )
+    except IntegrityError as exc:
+        raise HTTPException(status_code=409, detail={"code": "connection_revision_stale"}) from exc
     except GitHubFollowthroughError as exc:
         raise _raise_http(exc) from exc
 
@@ -3935,24 +4291,35 @@ async def prepare_github_followthrough(req: PrepareRequest, request: Request):
 
 
 @github_followthrough_router.get("/jobs/{job_id}")
-async def get_github_followthrough_job(job_id: str, request: Request):
+async def get_github_followthrough_job(job_id: str, request: Request,
+                                      pending_capacity_close: str | None = Query(default=None, min_length=2, max_length=2048)):
     try:
         operator = _operator(request)
         await _require_job_session(job_id, operator)
+        if pending_capacity_close is not None:
+            from src.extensions.github_capacity_closure import LegacyCloseRequest
+            try:
+                pending = LegacyCloseRequest.model_validate_json(pending_capacity_close)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail={"code": "pending_capacity_close_invalid"}) from exc
+            current = await durable_job_repository.inspect_github_capacity_close(job_id, request=pending,
+                principal=_principal_id(operator), root=_session_id(operator), native_kind=JOB_KIND)
+            return {**await github_followthrough_service._prepare_job_response(current, repair_connection=False),
+                    "pending_capacity_close": current["pending_capacity_close"]}
         return await github_followthrough_service.get_job(
             owner_principal_id=_principal_id(operator),
             job_id=job_id,
         )
     except GitHubFollowthroughError as exc:
         raise _raise_http(exc) from exc
+    except (DurableJobError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail={"code": "pending_capacity_close_unavailable"}) from exc
 
 
 @github_followthrough_router.post("/jobs/{job_id}/execute")
 async def execute_github_followthrough_job(job_id: str, request: Request):
     try:
         operator = _operator(request)
-        if not _has_grant(operator, AuthorityGrant.EXTERNAL_MUTATION):
-            raise GitHubFollowthroughError("external_mutation_grant_required", status_code=403)
         await _require_job_session(job_id, operator)
         return await github_followthrough_service.execute(
             owner_principal_id=_principal_id(operator),
@@ -3980,6 +4347,27 @@ async def cancel_github_followthrough_job(job_id: str, request: Request):
         raise _raise_http(exc) from exc
 
 
+@github_followthrough_router.post("/jobs/{job_id}/close-capacity")
+async def close_github_followthrough_capacity(job_id: str, req: LegacyCloseRequest, request: Request):
+    try:
+        operator = _operator(request)
+        await _require_job_session(job_id, operator)
+        return await github_followthrough_service.close_capacity(
+            owner_principal_id=_principal_id(operator), owner_session_id=_session_id(operator),
+            job_id=job_id, request=req)
+    except GitHubFollowthroughError as exc:
+        raise _raise_http(exc) from exc
+    except DurableJobError as exc:
+        raise HTTPException(status_code=409, detail={"code": "github_capacity_close_conflict"}) from exc
+    except ValueError as exc:
+        code = str(exc).split(":", 1)[0]
+        if re.fullmatch(r"(?:github|publication)_[a-z_]{1,110}", code) is None:
+            code = "github_capacity_close_unproven"
+        raise HTTPException(status_code=409, detail={"code": code}) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=409, detail={"code": "github_capacity_private_artifact_unavailable"}) from exc
+
+
 @github_followthrough_router.post("/jobs/{job_id}/reconcile")
 async def reconcile_github_followthrough_job(
     job_id: str,
@@ -3998,6 +4386,8 @@ async def reconcile_github_followthrough_job(
         raise _raise_http(exc) from exc
     except DurableJobError as exc:
         raise HTTPException(status_code=409, detail={"code": "reconcile_conflict"}) from exc
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=409, detail={"code": "github_reconcile_proof_unavailable"}) from exc
 
 
 __all__ = [

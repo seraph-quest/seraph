@@ -27,6 +27,7 @@ const MAX_REFERENCE_BYTES = 512;
 const REQUEST_TIMEOUT_MS = 15_000;
 const EXECUTION_METADATA_TIMEOUT_MS = 10_000;
 const LOCAL_HOST_ACCESS = "explicit_job_approval_required";
+const REPAIR_PROFILES = new Set(["repo-python-pytest-v1", "repo-node24-npm-v1", "repo-python-pytest-publication-v1"]);
 export const REPO_REPAIR_TASK_BODY = "Repository repair request submitted for server-owned inspection and governed execution.";
 const ALLOWED_TEST_FLAGS = new Set(["-q", "-x", "--maxfail=1", "--disable-warnings"]);
 const SECRET_PATH_PARTS = new Set([
@@ -88,9 +89,10 @@ function parseExecutionMetadata(value: unknown): RepoRepairExecutionMetadata | n
     ? value.executor_kind as RepoRepairExecutorKind
     : "docker_rootless";
   if (explicit && !isExecutorKind(value.executor_kind)) return null;
-  const profile = isRecord(value.executor_posture) ? value.executor_posture.profile : "repo-python-pytest-v1";
-  if (profile !== undefined && !["repo-python-pytest-v1", "repo-node24-npm-v1"].includes(String(profile))) return null;
-  const expectedProfile = `${kind}:${profile ?? "repo-python-pytest-v1"}`;
+  const selectedProfile = isRecord(value.executor_posture) ? value.executor_posture.profile : "repo-python-pytest-v1";
+  if (typeof selectedProfile !== "string" || !REPAIR_PROFILES.has(selectedProfile)
+    || (kind !== "local" && selectedProfile !== "repo-python-pytest-v1")) return null;
+  const expectedProfile = `${kind}:${selectedProfile}`;
   if (explicit && value.executor_profile !== expectedProfile) return null;
   if (!explicit && value.executor_profile !== undefined && value.executor_profile !== expectedProfile) return null;
   if (!isRecord(value.executor_posture) && explicit) return null;
@@ -102,7 +104,7 @@ function parseExecutionMetadata(value: unknown): RepoRepairExecutionMetadata | n
   };
   if (explicit && ["kind", "profile", "isolation_claim", "network_isolation", "resource_enforcement", "limits_digest"].some((key) => !Object.prototype.hasOwnProperty.call(posture, key))) return null;
   if (posture.kind !== undefined && posture.kind !== kind) return null;
-  if (posture.profile !== undefined && !["repo-python-pytest-v1", "repo-node24-npm-v1"].includes(String(posture.profile))) return null;
+  if (posture.profile !== undefined && posture.profile !== selectedProfile) return null;
   if (!boundedMetadata(posture.isolation_claim, 128) || !boundedMetadata(posture.network_isolation, 128) || !boundedMetadata(posture.resource_enforcement, 128)) return null;
   const hostAccess = posture.host_access;
   if (hostAccess !== undefined && (!boundedMetadata(hostAccess, 128) || (kind !== "local" || hostAccess !== LOCAL_HOST_ACCESS))) return null;
@@ -120,6 +122,10 @@ function parseExecutionMetadata(value: unknown): RepoRepairExecutionMetadata | n
   if (preflight.ok !== undefined && typeof preflight.ok !== "boolean") return null;
   if (preflight.status !== undefined && !boundedMetadata(preflight.status, 128)) return null;
   if (preflight.reason !== undefined && !boundedMetadata(preflight.reason, 512)) return null;
+  if (selectedProfile === "repo-python-pytest-publication-v1" && value.preparation_ready === true
+    && (posture.runtime_proof_available !== true
+      || typeof posture.publication_runtime_proof_sha256 !== "string"
+      || !/^[0-9a-f]{64}$/.test(posture.publication_runtime_proof_sha256))) return null;
   if (explicit && (typeof value.local_host_approval_required !== "boolean"
     || typeof value.preparation_ready !== "boolean"
     || typeof value.execution_ready !== "boolean"

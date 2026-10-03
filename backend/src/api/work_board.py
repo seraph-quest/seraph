@@ -380,9 +380,11 @@ def _browser_execution_progress(projection: Mapping[str, Any]) -> tuple[int | No
     unknown instead of borrowing an older network receipt.
     """
 
+    from src.browser.task_runner import observed_browser_request_receipts
+    observed = observed_browser_request_receipts(projection)
     checkpoints = projection.get("checkpoints")
     if not isinstance(checkpoints, list):
-        return None, None
+        return None, len(observed) if observed else None
     # Checkpoints are append-only and bounded by the durable runtime. Walk
     # newest first and use the first recognized browser progress checkpoint as
     # one atomic projection.
@@ -401,8 +403,10 @@ def _browser_execution_progress(projection: Mapping[str, Any]) -> tuple[int | No
             continue
         action_index = _strict_bounded_int(payload.get("action_index"), minimum=-1, maximum=7)
         request_count = _strict_bounded_int(payload.get("request_count"), minimum=0, maximum=32)
+        if observed:
+            request_count = max(request_count or 0, len(observed))
         return action_index, request_count
-    return None, None
+    return None, len(observed) if observed else None
 
 
 def _browser_artifact_projection(projection: Mapping[str, Any]) -> dict[str, str] | None:
@@ -2673,7 +2677,7 @@ async def accept_work_board_proposal(
 ):
     operator = _operator(request)
     try:
-        return await triage_service.accept_proposal(_owner(operator), proposal_id, body)
+        return await triage_service.accept_proposal(_owner(operator), proposal_id, body, operator=operator)
     except BoardError as exc:
         _raise_board_error(exc)
     except SQLAlchemyError as exc:

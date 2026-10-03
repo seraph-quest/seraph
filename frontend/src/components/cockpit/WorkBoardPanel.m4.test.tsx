@@ -425,7 +425,7 @@ describe("WorkBoardPanel M4 review and triage controls", () => {
     }));
   });
 
-  it("previews a governed proposal and refreshes after a stale acceptance", async () => {
+  it.each(["READY", "PENDING input binding at acceptance"])("previews exact %s authority and refreshes after stale acceptance", async (preflight) => {
     const todo = task({ status: "todo", title: "Task to decompose" });
     const refreshed = { ...todo, task_revision: 4, title: "Task changed on server" };
     const state = { task: todo, detail: detail(todo) };
@@ -434,7 +434,14 @@ describe("WorkBoardPanel M4 review and triage controls", () => {
     installBoardTransport(fetchMock, state, (url, init) => {
       if (url.endsWith("/decompose") && init?.method === "POST") {
         proposalCall += 1;
-        return response(proposal());
+        const preview = proposal();
+        if (preflight.startsWith("PENDING")) {
+          preview.proposed_tasks[0].authority = preview.proposed_tasks[0].authority.replace(
+            "READY; dispatch will recheck before claim.",
+            "PENDING input binding at acceptance; dispatch remains unavailable.",
+          );
+        }
+        return response(preview);
       }
       if (url.endsWith("/proposals/proposal-1/accept") && init?.method === "POST") {
         acceptBody = JSON.parse(String(init.body)) as Record<string, unknown>;
@@ -451,7 +458,8 @@ describe("WorkBoardPanel M4 review and triage controls", () => {
     expect(await screen.findByRole("region", { name: "Triage proposal preview" })).toHaveTextContent("Proposed bounded action");
     expect(screen.getByText(/authority: Owner: authenticated owner\/session; goal goal-1 revision 1/i)).toBeInTheDocument();
     expect(screen.getByText(/Capability-specific authority requirements: Operator capability-execute session/i)).toBeInTheDocument();
-    expect(screen.getByText(/Current provider-free preflight: READY/i)).toBeInTheDocument();
+    expect(screen.getByText(new RegExp(`Current provider-free preflight: ${preflight}`, "i"))).toBeInTheDocument();
+    if (preflight.startsWith("PENDING")) expect(screen.getByText(/dispatch remains unavailable/i)).toBeInTheDocument();
     expect(screen.getByText(/300s effective goal\/job runtime/i)).toBeInTheDocument();
     expect(screen.getByText(/at most 2 task attempts/i)).toBeInTheDocument();
     expect(screen.getByText(/grants no authority or external-effect approval/i)).toBeInTheDocument();
@@ -520,7 +528,7 @@ describe("WorkBoardPanel M4 review and triage controls", () => {
 
     render(<WorkBoardPanel {...owner} />);
     fireEvent.click(await screen.findByRole("button", { name: "Open task Retryable proposal" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("openrouter_route_unavailable");
+    expect(await screen.findByText("openrouter_route_unavailable")).toHaveAttribute("role", "alert");
     fireEvent.click(screen.getByRole("button", { name: "Retry with new request key" }));
 
     await waitFor(() => expect(proposalPostBody).not.toBeNull());

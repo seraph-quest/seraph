@@ -100,6 +100,7 @@ OPERATOR_REQUIRED_TABLES = (
     "work_board_links",
     "work_board_comments",
     "work_board_events",
+    "work_board_evidence_dependencies",
     "work_board_proposals",
     "work_board_handoffs",
     "memory_proposals",
@@ -1517,6 +1518,26 @@ async def _ensure_work_board_indexes(conn) -> None:
 
 async def _ensure_work_board_columns(conn) -> None:
     """Additive columns for existing canonical board workspaces."""
+
+    proposal_result = await conn.exec_driver_sql('PRAGMA table_info(work_board_proposals)')
+    proposal_columns = {row[1] for row in proposal_result.fetchall()}
+    if proposal_columns and 'evidence_use_snapshot_json' not in proposal_columns:
+        await conn.exec_driver_sql('ALTER TABLE work_board_proposals ADD COLUMN evidence_use_snapshot_json VARCHAR')
+
+    result = await conn.exec_driver_sql("PRAGMA table_info(work_board_events)")
+    event_columns = {row[1] for row in result.fetchall()}
+    for column in ("mutation_idempotency_key", "mutation_request_digest"):
+        if event_columns and column not in event_columns:
+            await conn.exec_driver_sql(
+                f"ALTER TABLE work_board_events ADD COLUMN {column} VARCHAR"
+            )
+    if event_columns:
+        # create_all does not add indexes to existing tables. NULL ordinary
+        # events remain compatible; explicit owner-scoped keys are unique.
+        await conn.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_work_board_events_mutation_key "
+            "ON work_board_events (owner_principal_id, owner_session_id, mutation_idempotency_key)"
+        )
 
     result = await conn.exec_driver_sql("PRAGMA table_info(work_board_attempts)")
     columns = {row[1] for row in result.fetchall()}

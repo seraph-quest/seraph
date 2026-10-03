@@ -39,6 +39,7 @@ MAX_BYTES = 64 * 1024
 _PUBLIC_TYPES = frozenset({
     "browser_public_task_result", "guardian_decision_dossier", "guardian_local_task",
     "markdown_document", "goal_snapshot", "research_report", "document_summary",
+    "evidence_dossier", "evidence_local_report",
 })
 _TOKEN = re.compile(r"^[a-z0-9]{64}$")
 
@@ -501,9 +502,16 @@ async def _artifact_sources(db, owner: WorkBoardOwner, task: WorkBoardTask,
                 if text == "[redaction unavailable]":
                     blocked.append(f"{kind}:redaction_unavailable")
                     continue
-                sources.append(_source(kind, receipt["artifact_id"], text,
+                source = _source(kind, receipt["artifact_id"], text,
                     digest=receipt["content_sha256"], version=str(source_run.revision), owner=owner,
-                    updated_at=source_run.updated_at, private=private))
+                    updated_at=source_run.updated_at, private=private)
+                # Private server-only lineage for exact execution-token resolution.
+                # Rendered packet claims keep their existing explicit projection.
+                source["canonical_binding"] = {
+                    "task_id": source_task.task_id, "attempt_id": _attempt.attempt_id,
+                    "run_id": source_run.run_identity,
+                }
+                sources.append(source)
             except Exception:
                 blocked.append(f"{kind}:source_revoked_or_unavailable")
     return sources, sorted(set(blocked))[:MAX_SOURCES]

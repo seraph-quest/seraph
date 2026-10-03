@@ -78,6 +78,7 @@ OPERATOR_REQUIRED_TABLES = (
     "telegram_inbound_updates",
     "telegram_transport_outbox",
     "telegram_delivery_attempts",
+    "telegram_task_callbacks",
     "guardian_interventions",
     "strategy_deltas",
     "guardian_source_watches",
@@ -901,11 +902,17 @@ async def _ensure_telegram_transport_columns(conn) -> None:
     after lease/readback hardening lands.
     """
     definitions = {
+        "telegram_task_callbacks": {
+            "workflow_run_id": "VARCHAR",
+            "workflow_binding_digest": "VARCHAR",
+        },
         "telegram_transport_states": {
             "last_update_at": "DATETIME",
             "last_error": "VARCHAR",
         },
         "telegram_transport_outbox": {
+            "task_control_markup_json": "VARCHAR",
+            "task_control_markup_digest": "VARCHAR",
             "lease_owner": "VARCHAR",
             "lease_expires_at": "DATETIME",
             "fencing_token": "INTEGER DEFAULT 0",

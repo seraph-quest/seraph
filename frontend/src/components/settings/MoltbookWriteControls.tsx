@@ -46,7 +46,15 @@ export function MoltbookWriteControls({ connection, goal, job, busy, act }: {
     <label className="block">Exact public text <textarea aria-label="Moltbook draft text" maxLength={8192} value={content} onChange={event => setContent(event.target.value)} /></label>
     <label className="block"><input type="checkbox" checked={publicAcknowledged} onChange={event => setPublicAcknowledged(event.target.checked)} /> This is public personal, noncommercial text; the reviewed community permits introductions, and I will not redistribute others’ content.</label>
     <button disabled={busy || !!connection?.active_job_id || connection?.mode !== "active" || !goal || !publicAcknowledged || !content || !reviewId || !/^[a-f0-9]{64}$/.test(reviewDigest) || !connection.consent?.actions?.includes(operation)} onClick={prepare}>Prepare exact public text for approval</button>
-    {job?.draft && <div><p>Canonical original draft for this job:</p><pre className="whitespace-pre-wrap break-all">{JSON.stringify(job.draft, null, 2)}</pre></div>}
+    {job?.draft && <div aria-label="Canonical Moltbook draft">
+      <p>Canonical original draft for this job:</p>
+      <p>Account: {job.declared_authority?.account_name || "Original account unavailable"} · Community: {String(job.draft.fields.community ?? job.draft.review.community ?? "unavailable")} · Source read at {String(job.draft.review.finished_at ?? "unavailable")}</p>
+      {job.draft.fields.title && <p>Title: {job.draft.fields.title}</p>}
+      {job.draft.fields.post_id && <p>Target post: {job.draft.fields.post_id}{job.draft.fields.parent_id ? ` · Parent comment: ${job.draft.fields.parent_id}` : ""}</p>}
+      <pre aria-label="Canonical Moltbook public text" className="whitespace-pre-wrap">{job.draft.fields.content}</pre>
+      <p>Outcome: {phase === "published_verified" ? "Exact content verified in the public listing" : phase === "awaiting_manual_answer" ? "Original content created; manual verification pending" : phase === "awaiting_verify_approval" ? "Manual answer awaits its separate approval" : phase === "awaiting_create_approval" ? "Creation awaits exact approval" : "Unconfirmed; inspect the original job"}.</p>
+      <details><summary>Original binding diagnostics</summary><pre className="whitespace-pre-wrap break-all">{JSON.stringify(job.draft, null, 2)}</pre></details>
+    </div>}
     {job && approval && ["awaiting_create_approval", "awaiting_verify_approval"].includes(String(phase)) && <div>
       <p>{phase === "awaiting_verify_approval" ? "Approve the manual answer for the original content and challenge." : "Approve only the canonical original draft shown above."}</p>
       <button disabled={busy || !job.draft} onClick={() => void act({ method: "POST", path: `/jobs/${job.job_id}/approval`, body: { approval_id: approval, decision: "approved" } })}>Approve exact {phase === "awaiting_verify_approval" ? "verification answer" : "creation"}</button>

@@ -133,7 +133,10 @@ describe("fixed Moltbook owner controls", () => {
     const fetch = vi.fn((url: unknown) => response(String(url).endsWith(`/jobs/${jobId}/output`)
       ? { no_learning: true, data: "<script>quoted only</script>" }
       : String(url).endsWith(`/jobs/${jobId}`) ? { job_id: jobId, status: "succeeded", no_learning: true,
-        lease: { fencing_token: 3 }, attempt_count: 1, checkpoints: [] } : metadata(String(url))));
+        lease: { fencing_token: 3 }, attempt_count: 1,
+        declared_authority: { operation: "create_post", account_name: "FixtureSeraph" },
+        draft: { operation: "create_post", fields: { community: "introductions", title: "Exact public title", content: "<script>quoted only</script>" }, review: { community: "introductions", finished_at: "2026-10-03T20:00:00Z", private_binding: "diagnostic-only-digest" } },
+        checkpoints: [{ checkpoint_id: "moltbook:state", payload: { phase: "published_verified" } }] } : metadata(String(url))));
     vi.stubGlobal("fetch", fetch);
     const view = render(<MoltbookConnectionPanel ownerPrincipalId="owner-one" ownerSessionId="root-one" />);
     await screen.findByText(/pending claim/);
@@ -141,6 +144,10 @@ describe("fixed Moltbook owner controls", () => {
     fireEvent.click(screen.getByText("Refresh local metadata and original job"));
     await screen.findByLabelText("Moltbook literal private output");
     expect(document.querySelector("script")).toBeNull();
+    expect(screen.getByLabelText("Canonical Moltbook public text").textContent).toBe("<script>quoted only</script>");
+    expect(screen.getByText("Original binding diagnostics").closest("details")?.hasAttribute("open")).toBe(false);
+    expect(screen.getByText("Title: Exact public title")).toBeInTheDocument();
+
     view.rerender(<MoltbookConnectionPanel ownerPrincipalId="owner-one" ownerSessionId="root-two" />);
     await waitFor(() => expect(screen.queryByLabelText("Moltbook original job")).toBeNull());
     const before = fetch.mock.calls.length;

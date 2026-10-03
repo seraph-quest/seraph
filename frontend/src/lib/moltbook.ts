@@ -13,7 +13,7 @@ export interface MoltbookJob {
   job_id: string; status: string; revision: number; deadline_at: string;
   attempt_count: number; no_learning: true; checkpoints: { checkpoint_id: string; payload?: Record<string, unknown> }[];
   lease: { fencing_token: number }; artifacts?: { content_sha256: string }[];
-  declared_authority?: { operation?: string }; draft?: { operation: string; fields: Record<string, string>; review: Record<string, unknown> };
+  declared_authority?: { operation?: string; account_name?: string }; draft?: { operation: string; fields: Record<string, string>; review: Record<string, unknown> };
   approval?: { id: string; status: string; scope_digest: string }; manual_answer?: string;
   approvals?: { id: string; status: string; scope_digest: string }[];
   admission_request?: Record<string, unknown>;

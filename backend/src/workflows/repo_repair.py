@@ -359,9 +359,9 @@ class RepoRepairInput(BaseModel):
         if not set(self.source_paths).issubset(set(allowed)):
             raise ValueError("source_paths must be contained in allowed_paths")
         try:
-            _worker_test_args(tuple(self.test_args), allowed)
+            _repair_test_args(tuple(self.test_args), allowed)
         except (RepoSandboxError, ValueError) as exc:
-            raise ValueError("test_args are not an allowlisted pytest invocation") from exc
+            raise ValueError("test_args are not an allowlisted profile invocation") from exc
         return self
 
 
@@ -487,14 +487,26 @@ def _executor_kind(sandbox: Any) -> str:
 
 def _executor_profile(sandbox: Any) -> str:
     profile = str(getattr(getattr(sandbox, "config", None), "profile", "repo-python-pytest-v1") or "")
-    if profile != "repo-python-pytest-v1":
+    if profile not in {"repo-python-pytest-v1", "repo-node24-npm-v1"}:
         raise RepoRepairError("executor_profile_invalid", "The repository executor profile is invalid", status_code=409)
     return profile
 
 
-def _executor_preflight(sandbox: Any) -> Any:
+def _repair_test_args(arguments: tuple[str, ...], allowed: Any) -> tuple[str, ...]:
+    if arguments[:1] == ("npm",):
+        from src.execution.repo_node import normalize_selection
+
+        return normalize_selection(arguments)
+    return _worker_test_args(arguments, allowed)
+
+
+def _executor_preflight(sandbox: Any, authority: Mapping[str, Any] | None = None) -> Any:
     """Call either the additive executor seam or the legacy rootless seam."""
 
+    if _executor_profile(sandbox) == "repo-node24-npm-v1":
+        return sandbox.preflight(authority)
+    if authority and tuple(authority.get("test_args") or ())[:1] == ("npm",):
+        raise RepoRepairError("executor_profile_mismatch", "Named npm scripts require the selected Node profile")
     try:
         return sandbox.preflight()
     except TypeError:
@@ -1286,7 +1298,10 @@ class RepoRepairService:
             )
         if expected_sandbox_authority:
             try:
-                current_preflight = await asyncio.to_thread(_executor_preflight, self.sandbox)
+                current_preflight = await asyncio.to_thread(_executor_preflight, self.sandbox, {
+                    "repository_ref": packet.repository_ref, "test_args": current.input.test_args,
+                    "allowed_paths": current.input.allowed_paths,
+                })
                 current_sandbox = _sandbox_authority_payload(self.sandbox, current_preflight)
             except Exception as exc:
                 raise RepoRepairError(
@@ -2813,7 +2828,10 @@ class RepoRepairService:
         # responsibility.  Its receipt is tied to the same durable lease
         # before model construction or any provider contact is possible.
         try:
-            preflight = await asyncio.to_thread(_executor_preflight, self.sandbox)
+            preflight = await asyncio.to_thread(_executor_preflight, self.sandbox, {
+                "repository_ref": packet.repository_ref, "test_args": intent.test_args,
+                "allowed_paths": intent.allowed_paths,
+            })
             preflight_receipt = (
                 preflight.as_receipt()
                 if hasattr(preflight, "as_receipt")
@@ -3102,10 +3120,10 @@ class RepoRepairService:
             raise RepoRepairError("patch_path_outside_allowlist", "The model proposal names a path outside the server allowlist", status_code=409)
         try:
             changed_paths = set(_patch_paths_from_diff(output.patch_unified_diff.encode("utf-8"), model_allowed))
-            normalized_tests = tuple(_worker_test_args(tuple(output.test_args), model_allowed))
+            normalized_tests = tuple(_repair_test_args(tuple(output.test_args), model_allowed))
         except (RepoSandboxError, ValueError) as exc:
             raise RepoRepairError("model_patch_invalid", "The model proposal is not a supported patch/test contract", status_code=409) from exc
-        if not changed_paths.issubset(server_allowed) or tuple(normalized_tests) != tuple(_worker_test_args(tuple(intent.test_args), tuple(intent.allowed_paths))):
+        if not changed_paths.issubset(server_allowed) or tuple(normalized_tests) != tuple(_repair_test_args(tuple(intent.test_args), tuple(intent.allowed_paths))):
             raise RepoRepairError("model_patch_authority_changed", "The model changed the reviewed paths or tests", status_code=409)
         # Pydantic's bounded response model strips surrounding whitespace from
         # strings.  A unified diff still needs its terminal newline for the
@@ -3484,7 +3502,10 @@ class RepoRepairService:
                     status_code=409,
                 ) from exc
             try:
-                current_preflight = await asyncio.to_thread(_executor_preflight, proposal_sandbox)
+                current_preflight = await asyncio.to_thread(_executor_preflight, proposal_sandbox, {
+                    "repository_ref": row.repository_ref, "test_args": json.loads(row.test_args_json),
+                    "allowed_paths": json.loads(row.allowed_paths_json),
+                })
             except Exception as exc:
                 raise RepoRepairError(
                     "repo_sandbox_preflight_blocked",

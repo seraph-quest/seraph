@@ -552,6 +552,23 @@ export interface WorkBoardRepoRepairExecutorPosture {
 }
 
 /** Owner-bound, content-free status projection for engineering.repo-repair.v1. */
+export type WorkBoardRepoRepairProcessCleanup = {
+  status: "unverified" | "held";
+  physical_capacity_released: false;
+  cleanup_receipt_verified: false;
+  readback_scope: null;
+} | {
+  status: "released";
+  physical_capacity_released: true;
+  cleanup_receipt_verified: true;
+  readback_scope: "process_cleanup_only";
+  job_id: string;
+  attempt_id: string;
+  fencing_token: number;
+  authority_digest: string;
+  process_cleanup_readback_sha256: string;
+};
+
 export interface WorkBoardRepoRepairProjection {
   job_id: string;
   status: string;
@@ -612,6 +629,7 @@ export interface WorkBoardRepoRepairProjection {
     safe_metadata: Record<string, unknown>;
   } | null;
   execution: {
+    process_cleanup?: WorkBoardRepoRepairProcessCleanup | null;
     artifacts: Array<{
       artifact_id?: string;
       file_path?: string;

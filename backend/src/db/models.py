@@ -2921,3 +2921,27 @@ class OperatorRecoveryJournal(SQLModel, table=True):
     fresh_work_json: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=_now)
     rolled_back_at: Optional[datetime] = Field(default=None)
+
+
+class MoltbookConnection(SQLModel, table=True):
+    """One optional owner-scoped account; secret values remain in the Vault."""
+    __tablename__ = "moltbook_connections"
+    __table_args__ = (Index("ux_moltbook_connection_owner", "owner_principal_id", unique=True),)
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_principal_id: str = Field(index=True)
+    owner_session_id: str = Field(index=True)
+    revision: int = Field(default=1)
+    mode: str = Field(default="pending_claim")
+    account_id: str = Field(default="")
+    account_name: str = Field(default="")
+    vault_key: str = Field(default="", max_length=256)
+    credential_binding: str = Field(default="", max_length=128)
+    consent_json: str = Field(default="{}")
+    active_job_id: Optional[str] = Field(default=None)
+    active_deadline_at: Optional[datetime] = Field(default=None)
+    active_payload_digest: str = Field(default="", max_length=128)
+    cooldown_until: Optional[datetime] = Field(default=None)
+    setup_key: str = Field(default="", max_length=128)
+    setup_digest: str = Field(default="", max_length=128)
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)

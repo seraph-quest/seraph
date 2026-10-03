@@ -365,6 +365,7 @@ async def _proposal_task_authority_summary(
         idempotency_key=f"{parent.task_id}:{item.get('task_id')}",
         status=WorkBoardStatus.todo,
     )
+    pending_input_binding = False
     try:
         # Fixed typed consumers preview the exact server-prepared input that
         # acceptance will bind. A model reference alone is never input authority.
@@ -388,7 +389,10 @@ async def _proposal_task_authority_summary(
                     if resolved.row.state != "pending" or resolved.row.bound_task_id is not None:
                         raise BoardError("specification_input_stale", "The prepared input is no longer pending", status_code=409)
                     candidate.input_artifact_id = resolved.row.artifact_id
+                    pending_input_binding = True
         readiness_code, _readiness_reason = await _dispatcher._current_readiness(candidate)
+        if pending_input_binding and readiness_code == "typed_input_digest_mismatch":
+            readiness_code = "specification_input_pending_acceptance"
         runtime_seconds = await _dispatcher._effective_runtime(candidate)
     except BoardError as exc:
         readiness_code = exc.code
@@ -412,6 +416,8 @@ async def _proposal_task_authority_summary(
             else "preflight_failed"
         )
         preflight = (
+            "PENDING input binding at acceptance; dispatch remains unavailable"
+            if safe_code == "specification_input_pending_acceptance" else
             f"BLOCKED code={safe_code}; capability-specific recovery is required"
             if safe_code != "authority_preflight_unavailable"
             else "UNAVAILABLE; acceptance is disabled until a fresh preview succeeds"
@@ -744,6 +750,7 @@ async def _transition_proposal_job(
     status: str,
     reason: str | None = None,
     result_summary: str | None = None,
+    terminal_authority_check=None,
 ) -> None:
     await durable_job_repository.transition_job(
         job_id,
@@ -752,7 +759,87 @@ async def _transition_proposal_job(
         fencing_token=fence,
         reason=reason,
         result_summary=result_summary,
+        terminal_authority_check=terminal_authority_check,
     )
+
+
+async def _complete_generated_proposal(owner, proposal_id, expected_digest, *, operator, job_id, lease_owner, fence):
+    """Verify persisted advisory output; this does not execute the proposed task.
+
+    The existing policy lock is acquired before staging and held through both
+    short writers. Physical source reads occur only during staging; callbacks
+    compare canonical rows and the immutable staged source tokens.
+    """
+    from config.settings import settings
+    from pathlib import Path
+    from src.workspace.accounting_witness import maintenance_accounting_lock
+    from src.memory.evidence_execution import _current_operator
+    from src.memory.evidence_proposal import stage_proposal_context, recheck_context, stored_snapshot
+    from src.workflows.job_runtime import _serialize
+    repository = WorkBoardRepository()
+
+    with maintenance_accounting_lock(Path(settings.workspace_dir)):
+        route, version = _route_binding()
+        async with get_session() as db:
+            await _current_operator(db, owner, operator)
+            proposal = await _get_proposal(db, owner, proposal_id)
+            task = await repository._owned_task(db, owner, proposal.parent_task_id)
+            staged, snapshot = await stage_proposal_context(db, owner, task, proposal)
+            authority_digest = _authority_digest(owner, task, route, version)
+            expected_json = str(proposal.proposal_json)
+            expected_request_digest = str(proposal.request_digest)
+
+        async def verify(db, run):
+            await _current_operator(db, owner, operator)
+            current = await _get_proposal(db, owner, proposal_id, transaction_locked=True)
+            task = await repository._owned_task(db, owner, current.parent_task_id)
+            await repository.validate_task_goal(db, owner, task)
+            if (current.status != "pending_inference" or not current.provider_contact_started
+                or current.provider_contact_state != "started" or _aware(current.expires_at) <= _now()
+                or current.parent_revision != task.task_revision or current.goal_revision != task.goal_revision
+                or current.route_id != route or current.capability_version != version
+                or current.authority_digest != authority_digest or current.request_digest != expected_request_digest
+                or str(current.proposal_json) != expected_json or current.proposal_digest != expected_digest
+                or not _proposal_has_staged_output(current)
+                or _proposal_digest(_decode_json(current.proposal_json)) != expected_digest
+                or stored_snapshot(current) != snapshot
+                or current.admission_job_id != job_id):
+                raise BoardError("proposal_output_stale", "The generated proposal is no longer current", status_code=409)
+            await recheck_context(db, owner, task, staged, snapshot)
+            projection = _serialize(run)
+            authority = projection["declared_authority"]
+            if (projection["job_id"] != job_id or projection["status"] != "running"
+                or projection["job_kind"] != _PROPOSAL_JOB_KIND
+                or projection["owner"] != {"kind": "user", "principal_id": owner.principal_id, "service_id": None}
+                or projection["session_id"] != owner.session_id or projection["operator_session_id"] != owner.session_id
+                or projection["goal_id"] != task.goal_id or projection["goal_revision"] != task.goal_revision
+                or projection["capability_version"] != current.capability_version
+                or projection["input_digest"] != _proposal_admission_input_digest(current)
+                or projection["authority_digest"] != current.authority_digest
+                or projection["run_fingerprint"] != current.request_digest
+                or projection["idempotency"]["scope"] != "work-board-proposal"
+                or projection["idempotency"]["key"] != proposal_id
+                or projection["lease"]["owner"] != lease_owner or projection["lease"]["fencing_token"] != fence
+                or not _durable_job_lease_live(projection)
+                or authority.get("principal") != owner.principal_id or authority.get("session_id") != owner.session_id
+                or authority.get("capability_id") != current.capability_id
+                or authority.get("capability_version") != current.capability_version
+                or authority.get("grant_revision") != current.grant_revision
+                or authority.get("finite_authority") is not True):
+                raise BoardError("proposal_binding_conflict", "The generated output has no current original job fence", status_code=409)
+
+        # Independent canonical reread occurs inside the actual append writer.
+        await durable_job_repository.record_readback(job_id, target_path=f"work-board-proposal:{proposal_id}",
+            status="succeeded", effect_type="work_board_proposal_output",
+            target_digest=expected_digest, content_sha256=expected_digest,
+            readback_id=hashlib.sha256(f"{job_id}:{fence}:{expected_digest}".encode()).hexdigest(),
+            verified_at=_now().isoformat(), owner=lease_owner, fencing_token=fence,
+            details={"verified": True, "proposal_id": proposal_id, "proposal_digest": expected_digest,
+                "evidence_snapshot_digest": _proposal_digest(snapshot), "memory_status": "no_learning",
+                "verification_scope": "generated_advisory_output_only"},
+            readback_authority_check=verify)
+        await _transition_proposal_job(job_id, lease_owner=lease_owner, fence=fence, status="succeeded",
+            result_summary="verified structured work-board proposal produced", terminal_authority_check=verify)
 
 
 def _proposal_payload(proposal: WorkBoardProposal) -> dict[str, Any]:
@@ -1083,6 +1170,7 @@ def _validate_proposed_typed_inputs(
     tasks: list[Mapping[str, Any]],
     *,
     parent: WorkBoardTask,
+    prepared_input=None,
 ) -> None:
     """Validate model-proposed input files before any child row is created.
 
@@ -1099,6 +1187,7 @@ def _validate_proposed_typed_inputs(
         TypedInputError,
         _parse_typed_input,
         registered_executor_id as derive_registered_executor_id,
+        validate_capability_input,
     )
 
     for item in tasks:
@@ -1134,7 +1223,26 @@ def _validate_proposed_typed_inputs(
             status=WorkBoardStatus.todo,
         )
         try:
-            _parse_typed_input(candidate)
+            from src.memory.evidence_dependencies import CONSUMERS
+            if capability_id in CONSUMERS and prepared_input is not None:
+                row = prepared_input.row
+                if (len(tasks) != 1 or row.capability_id != capability_id
+                    or row.capability_version != capability.version
+                    or row.owner_principal_id != parent.owner_principal_id
+                    or row.owner_session_id != parent.owner_session_id
+                    or candidate.executor_id != derive_registered_executor_id(capability_id)
+                    or row.goal_id != parent.goal_id or row.goal_revision != parent.goal_revision
+                    or row.typed_input_ref != candidate.typed_input_ref
+                    or row.payload_sha256 != candidate.typed_input_digest
+                    or hashlib.sha256(prepared_input.payload).hexdigest() != row.payload_sha256):
+                    raise BoardError("specification_input_stale", "The exact staged input does not match the proposal", status_code=409)
+                from src.work_board.input_artifacts import _decode_and_validate_payload
+                payload = _decode_and_validate_payload(row, prepared_input.payload)
+                if payload != prepared_input.input:
+                    raise BoardError("specification_input_stale", "The staged input payload changed", status_code=409)
+                validate_capability_input(capability_id, payload)
+            else:
+                _parse_typed_input(candidate)
         except TypedInputError as exc:
             raise BoardError(exc.code, str(exc), status_code=409) from exc
         except (OSError, ValueError) as exc:
@@ -2183,13 +2291,8 @@ async def create_proposal(
             proposal.proposal_digest = digest
             proposal.estimated_cost = estimated_cost
             await db.flush()
-        await _transition_proposal_job(
-            job_id,
-            lease_owner=lease_owner,
-            fence=fence,
-            status="succeeded",
-            result_summary="structured work-board proposal produced",
-        )
+        await _complete_generated_proposal(owner, proposal_id, digest, operator=operator,
+            job_id=job_id, lease_owner=lease_owner, fence=fence)
         async with get_session() as db:
             proposal = await _get_proposal(db, owner, proposal_id)
             if proposal.status == "pending_inference":
@@ -2334,7 +2437,8 @@ async def accept_proposal(
         preview_tasks,
         parent=preview_parent_snapshot,
     )
-    _validate_proposed_typed_inputs(preview_tasks, parent=preview_parent_snapshot)
+    _validate_proposed_typed_inputs(preview_tasks, parent=preview_parent_snapshot,
+        prepared_input=specification_input.resolved if specification_input is not None else None)
 
     async with get_session() as db:
         # Serialize the full validation and materialization window.  The

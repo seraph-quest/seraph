@@ -20,7 +20,7 @@ from tests.test_browser_task_runtime import _input
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('async_db',['file'],indirect=True)
-@pytest.mark.parametrize('change',['none','foreign-task','consumed','physical-drift','row-race','rollback','pipeline'])
+@pytest.mark.parametrize('change',['none','foreign-task','consumed','physical-drift','row-race','rollback','pipeline','metadata','expired'])
 async def test_prepared_exact_input_handoff_preserves_original_and_rolls_back_atomically(async_db,tmp_path,monkeypatch,change):
     tmp_path.chmod(0o700)
     monkeypatch.setattr(settings,'workspace_dir',str(tmp_path))
@@ -47,13 +47,22 @@ async def test_prepared_exact_input_handoff_preserves_original_and_rolls_back_at
         if change=='foreign-task':target_row.bound_task_id='another-task'
         elif change=='consumed':target_row.state='consumed'
         elif change=='pipeline':task.pipeline_operation_id='reviewed-existing-operation'
+        elif change=='metadata':target_row.payload_sha256='f'*64
+        elif change=='expired':target_row.expires_at=datetime.now(timezone.utc)-timedelta(seconds=1)
         elif change=='physical-drift':
             (tmp_path/target.typed_input_ref.removeprefix('workspace-json:')).write_bytes(b'changed outside the guarded writer')
         await db.commit()
-        if change in {'foreign-task','consumed','physical-drift','pipeline'}:
+        if change in {'foreign-task','consumed','physical-drift','pipeline','metadata','expired'}:
             with pytest.raises(BoardError):await stage_specification_input(db,owner,task,'specify',[item])
             return
         staged=await stage_specification_input(db,owner,task,'specify',[item])
+        from src.work_board.triage import _validate_proposed_typed_inputs
+        from src.work_board.dispatcher import REGISTERED_CAPABILITIES, registered_executor_id
+        typed_item={**item,'capability_version':REGISTERED_CAPABILITIES[task.capability_id].version,
+            'executor_id':registered_executor_id(task.capability_id)}
+        _validate_proposed_typed_inputs([typed_item],parent=task,prepared_input=staged.resolved)
+        with pytest.raises(BoardError):
+            _validate_proposed_typed_inputs([{**typed_item,'typed_input_digest':'f'*64}],parent=task,prepared_input=staged.resolved)
         if change=='row-race':
             target_row.state='revoked';await db.commit()
         await _begin_sqlite_immediate(db)
@@ -107,7 +116,7 @@ async def test_authority_preview_resolves_only_exact_prepared_input(async_db,tmp
         async def inspect(candidate):
             inspected.append(candidate.input_artifact_id)
             assert candidate.input_artifact_id==artifact.artifact_id
-            return None,None
+            return 'typed_input_digest_mismatch','Pending rows cannot dispatch'
         # This assertion isolates preview binding; it does not claim readiness.
         monkeypatch.setattr(_dispatcher,'_current_readiness',inspect)
         monkeypatch.setattr(_dispatcher,'_effective_runtime',AsyncMock(return_value=120))
@@ -115,5 +124,6 @@ async def test_authority_preview_resolves_only_exact_prepared_input(async_db,tmp
             'capability_id':task.capability_id,'capability_version':REGISTERED_CAPABILITIES[task.capability_id].version,
             'executor_id':registered_executor_id(task.capability_id),
             'typed_input_ref':artifact.typed_input_ref,'typed_input_digest':artifact.typed_input_digest})
-        assert ('Current provider-free preflight: READY' in summary)==(change=='pending')
+        assert ('Current provider-free preflight: PENDING input binding at acceptance' in summary)==(change=='pending')
+        assert 'Current provider-free preflight: READY' not in summary
         assert inspected==([artifact.artifact_id] if change=='pending' else [])

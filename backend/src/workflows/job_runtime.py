@@ -6041,6 +6041,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         owner: str | None = None,
         fencing_token: int | None = None,
         expected_revision: int | None = None,
+        readback_authority_check: Callable[[Any, Any], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         """Persist a bounded effect or readback receipt on the job record.
 
@@ -6082,6 +6083,11 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 "adapter_idempotency_key": adapter_idempotency_key or "",
             })[:24]
         async with self._session() as db:
+            if readback_authority_check is not None:
+                if receipt_kind != "readback":
+                    raise ValueError("authority callback requires a readback receipt")
+                from src.work_board.repository import _begin_sqlite_immediate
+                await _begin_sqlite_immediate(db)
             run = await self._fetch(db, job_id)
             await _assert_canonical_goal_fence(
                 db,
@@ -6133,6 +6139,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     )
             else:
                 self._assert_lease(run, owner=owner, fencing_token=fencing_token)
+            if readback_authority_check is not None:
+                await readback_authority_check(db, run)
             recorded_at = _utc_now().isoformat()
             receipt = {
                 "effect_id": effect_id,
@@ -6378,6 +6386,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         owner: str | None = None,
         fencing_token: int | None = None,
         expected_revision: int | None = None,
+        readback_authority_check: Callable[[Any, Any], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         """Record an explicit readback receipt in the canonical effect ledger."""
         if effect_id and effect_type is None:
@@ -6408,6 +6417,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             owner=owner,
             fencing_token=fencing_token,
             expected_revision=expected_revision,
+            readback_authority_check=readback_authority_check,
         )
 
     async def record_remote_inference_receipt(

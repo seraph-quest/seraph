@@ -24,7 +24,7 @@ class OwnedStream(httpx.AsyncByteStream):
 
 class ActualLoopback(httpx.AsyncBaseTransport):
     """Only logical Host+TLS SNI codeberg maps to the confined local provider."""
-    def __init__(self,port): self.port=port;self.requests=[];self.lose_title_response=False
+    def __init__(self,port): self.port=port;self.requests=[];self.lose_title_response=False;self.inject_page=None
     async def handle_async_request(self,request):
         assert request.url.scheme=="https" and request.headers.get("host")=="codeberg.org"
         assert request.extensions.get("sni_hostname") in ("codeberg.org",b"codeberg.org")
@@ -35,6 +35,17 @@ class ActualLoopback(httpx.AsyncBaseTransport):
         try:response=await client.send(mapped,stream=True)
         except BaseException:
             await client.aclose();raise
+        if self.inject_page and request.method=="GET" and request.url.path=="/seraph_fixture925/fixture925/issues/1":
+            # Negative external-response boundary only: actual signed provider
+            # TCP response is read/closed before injecting layout drift. No
+            # authority, canonical success, provider binary or form is forged.
+            body=await response.aread();headers=dict(response.headers)
+            await response.aclose();await client.aclose()
+            mode,self.inject_page=self.inject_page,None
+            body=(body.replace(b"</body>",b"<script>window.unapproved=true</script></body>") if mode=="script"
+                else body.replace(b'id="issue-title-editor"',b'id="unexpected-title-layout"'))
+            headers.pop("content-length",None)
+            return httpx.Response(response.status_code,headers=headers,content=body,request=request)
         if self.lose_title_response and request.method=="POST" and request.url.path.endswith("/title"):
             self.lose_title_response=False
             await response.aread();await response.aclose();await client.aclose()
@@ -129,6 +140,25 @@ async def test_actual_signed_provider_auth_vault_native_chrome_title(accounting_
             json={"expected_revision":cancelled["revision"],"fencing_token":cancelled["lease"]["fencing_token"]})
         assert cancelled_response.status_code==200 and cancelled_response.json()["status"]=="cancelled"
         assert len(transport.requests)==count
+        rejected=[]
+        for mode in ("script","layout"):
+            bad_preview=await execute(await prepare("preview",fields={"owner":credentials["user_name"],
+                "repository":"fixture925","issue_index":1,"new_title":"Rejected "+mode}))
+            bad_output=await client.get("/api/capabilities/forgejo/jobs/"+bad_preview["job_id"]+"/output")
+            bad=await prepare("title",preview_job_id=bad_preview["job_id"],preview_digest=digest(bad_output.json()))
+            bad_approval=await client.post("/api/capabilities/forgejo/jobs/"+bad["job_id"]+"/approve",
+                json={"approval_id":bad["approval"]["id"],"decision":"approved","exact_ack":True})
+            assert bad_approval.status_code==200
+            transport.inject_page=mode
+            before_post=sum(v[0]=="POST" and v[1].endswith("/title") for v in transport.requests)
+            denied=await client.post("/api/capabilities/forgejo/jobs/"+bad["job_id"]+"/execute",json={
+                "expected_revision":bad_approval.json()["revision"],"fencing_token":bad_approval.json()["lease"]["fencing_token"]})
+            assert denied.status_code==409,denied.text
+            negative=(await client.get("/api/capabilities/forgejo/jobs/"+bad["job_id"])).json()
+            assert negative["status"]=="blocked",negative
+            assert negative["forgejo"]["cleanup"]["status"]=="verified" and negative["forgejo"]["capacity_closed"]
+            assert sum(v[0]=="POST" and v[1].endswith("/title") for v in transport.requests)==before_post
+            rejected.append({"mode":mode,"job":negative,"title_posts_unchanged":True})
         loss_title="Lost response "+uuid.uuid4().hex[:8]
         loss_preview=await execute(await prepare("preview",fields={"owner":credentials["user_name"],
             "repository":"fixture925","issue_index":1,"new_title":loss_title}))
@@ -171,5 +201,5 @@ async def test_actual_signed_provider_auth_vault_native_chrome_title(accounting_
         (root/"actual-native-receipt.json").write_text(json.dumps({"goal":goal,
             "provision":provision,"preview":preview,"title":title,"output":result.json(),
             "lost_response_original":original,"observation":observation,"observation_output":observed.json(),
-            "title_posts":post_count},indent=2))
+            "title_posts":post_count,"external_response_injection_negatives":rejected},indent=2))
         os.chmod(root/"actual-native-receipt.json",0o600)

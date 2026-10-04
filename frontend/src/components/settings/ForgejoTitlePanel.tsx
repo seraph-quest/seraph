@@ -29,6 +29,44 @@ function pendingValue(raw: string | null): Pending | null {
     || !/^(?:\/connection(?:\/read-consent|\/revoke)?|\/jobs(?:\/forgejo:[a-f0-9]{40}\/(?:execute|approve|cancel|read-only-recovery))?)$/.test(value.path)) {
     throw Error("Saved Forgejo request is outside these fixed controls");
   }
+  const body = value.body;
+  const integer = (key: string, min = 1) => Number.isSafeInteger(body[key]) && Number(body[key]) >= min;
+  const text = (key: string, max: number) => typeof body[key] === "string" && String(body[key]).length > 0 && String(body[key]).length <= max;
+  let allowed: string[] = [];
+  let valid = false;
+  if (value.path === "/connection" && value.method === "PUT") {
+    allowed = ["vault_key", "expected_revision"]; valid = text("vault_key", 256) && integer("expected_revision", 0);
+  } else if (value.path === "/connection/read-consent" && value.method === "PUT") {
+    allowed = ["expected_revision", "duration_seconds", "read_ack"];
+    valid = integer("expected_revision") && body.duration_seconds === 900 && body.read_ack === true;
+  } else if (value.path === "/connection/revoke" && value.method === "POST") {
+    allowed = ["expected_revision"]; valid = integer("expected_revision");
+  } else if (value.method === "POST" && value.path === "/jobs") {
+    allowed = ["operation", "fields", "request_key", "goal_id", "goal_revision", "expected_revision", "preview_job_id", "preview_digest"];
+    valid = ["provision", "preview", "title"].includes(String(body.operation)) && text("goal_id", 128)
+      && integer("goal_revision") && integer("expected_revision") && text("request_key", 36)
+      && /^[a-f0-9-]{36}$/.test(String(body.request_key)) && !!body.fields && typeof body.fields === "object" && !Array.isArray(body.fields);
+    const fields = body.fields as Record<string, unknown>;
+    if (body.operation === "preview") valid &&= Object.keys(fields).sort().join(",") === "issue_index,new_title,owner,repository"
+      && typeof fields.owner === "string" && typeof fields.repository === "string" && typeof fields.new_title === "string"
+      && Number.isSafeInteger(fields.issue_index) && Number(fields.issue_index) >= 1;
+    else valid &&= Object.keys(fields).length === 0;
+    if (body.operation === "title") valid &&= typeof body.preview_job_id === "string" && jobPattern.test(body.preview_job_id)
+      && typeof body.preview_digest === "string" && /^[a-f0-9]{64}$/.test(body.preview_digest);
+    else valid &&= body.preview_job_id === undefined && body.preview_digest === undefined;
+  } else if (value.method === "POST" && /\/(execute|cancel)$/.test(value.path)) {
+    allowed = ["expected_revision", "fencing_token"]; valid = integer("expected_revision") && integer("fencing_token", 0);
+  } else if (value.method === "POST" && value.path.endsWith("/approve")) {
+    allowed = ["approval_id", "decision", "exact_ack"];
+    valid = text("approval_id", 128) && body.decision === "approved" && body.exact_ack === true;
+  } else if (value.method === "POST" && value.path.endsWith("/read-only-recovery")) {
+    allowed = ["expected_revision", "original_job_revision", "original_fencing_token", "request_key", "read_ack"];
+    valid = integer("expected_revision") && integer("original_job_revision") && integer("original_fencing_token", 0)
+      && text("request_key", 36) && /^[a-f0-9-]{36}$/.test(String(body.request_key)) && body.read_ack === true;
+  }
+  if (!valid || Object.keys(body).some(key => !allowed.includes(key)) || Object.keys(value).sort().join(",") !== "body,method,path") {
+    throw Error("Saved Forgejo request has invalid fixed fields");
+  }
   return value;
 }
 
@@ -45,6 +83,7 @@ export function ForgejoTitlePanel({ ownerPrincipalId, ownerSessionId }: {
   const scope = ownerPrincipalId && ownerSessionId ? `seraph.forgejo.${ownerPrincipalId}.${ownerSessionId}` : null;
   const generation = useRef(0);
   const [connection, setConnection] = useState<Connection | null>(null);
+  const [loadedScope, setLoadedScope] = useState<string | null>(null);
   const [goals, setGoals] = useState<GoalInfo[]>([]);
   const [keys, setKeys] = useState<string[]>([]);
   const [goalId, setGoalId] = useState("");
@@ -74,7 +113,7 @@ export function ForgejoTitlePanel({ ownerPrincipalId, ownerSessionId }: {
   useEffect(() => {
     const current = ++generation.current;
     const abort = new AbortController();
-    setConnection(null); setJob(null); setOutput(null); setPending(null); setError(null); setBusy(false);
+    setLoadedScope(null); setConnection(null); setJob(null); setOutput(null); setPending(null); setError(null); setBusy(false);
     setGoals([]); setKeys([]); setGoalId(""); setVaultKey(""); setReadAck(false); setExactAck(false); setRecoveryAck(false);
     if (!scope) return () => abort.abort();
     try { setPending(pendingValue(sessionStorage.getItem(scope + ".pending"))); }
@@ -90,7 +129,7 @@ export function ForgejoTitlePanel({ ownerPrincipalId, ownerSessionId }: {
       tree.forEach(visit);
       const names = await keyResponse.json() as { key: string }[];
       if (current !== generation.current) return;
-      setConnection(value as Connection); setGoals(flat.filter(entry => entry.status === "active"));
+      setLoadedScope(scope); setConnection(value as Connection); setGoals(flat.filter(entry => entry.status === "active"));
       setKeys(names.map(entry => entry.key));
       const last = sessionStorage.getItem(scope + ".job");
       if (last !== null) {
@@ -106,7 +145,7 @@ export function ForgejoTitlePanel({ ownerPrincipalId, ownerSessionId }: {
     [scope, connection?.revision, connection?.read_consent_revision, goalId, selectedGoal?.revision, job?.job_id, job?.revision]);
 
   async function act(next?: Pending) {
-    if (!scope || busy) return;
+    if (!scope || loadedScope !== scope || busy) return;
     const command = next ?? pending;
     if (!command) return;
     const raw = JSON.stringify(command); pendingValue(raw);
@@ -150,7 +189,7 @@ export function ForgejoTitlePanel({ ownerPrincipalId, ownerSessionId }: {
   }
 
   const readLive = !!connection?.read_consent_expires_at && Date.parse(connection.read_consent_expires_at) > Date.now();
-  const ready = !!scope && connection?.available === true && readLive && !!selectedGoal && !busy && !pending;
+  const ready = !!scope && loadedScope === scope && connection?.available === true && readLive && !!selectedGoal && !busy && !pending;
   const prepare = (operation: string, fields: Record<string, unknown> = {}, extras = {}) => void act({ method: "POST", path: "/jobs",
     body: { operation, fields, request_key: crypto.randomUUID(), goal_id: goalId,
       goal_revision: selectedGoal?.revision, expected_revision: connection?.revision, ...extras } });

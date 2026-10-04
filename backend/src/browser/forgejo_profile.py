@@ -221,13 +221,19 @@ class ForgejoTitleBrowser:
         blocked_requests = []
         failure = None
         output = None
+        closing = False
+        route_handlers = set()
+        async def handoff_current():
+            if closing: raise ForgejoError("forgejo_browser_cleanup_started")
+            await check_current()
+            if closing: raise ForgejoError("forgejo_browser_cleanup_started")
         async def fetch(operation, path, *, api=False, browser_headers=None, body=None, asset=None):
             nonlocal contacts
             request_id = uuid.uuid4().hex
             descriptor = {"request_id":request_id,"method":"POST" if body is not None else "GET",
                           "path_digest":digest(path.encode()),"operation":operation}
             if body is not None: descriptor["body_digest"] = digest(body)
-            await check_current()
+            await handoff_current()
             if contacts >= MAX_CONTACTS: raise ForgejoError("forgejo_contact_bound")
             contacts += 1
             remaining = (deadline-datetime.now(timezone.utc)).total_seconds()-10
@@ -239,9 +245,9 @@ class ForgejoTitleBrowser:
             result = await request_pinned_https(ORIGIN + path, method="POST" if body is not None else "GET",
                 headers=headers, form_body=body, resolver=self.resolver, transport=self.local_transport,
                 timeout_seconds=min(10, remaining), max_bytes=MAX_ASSET_BYTES if asset else MAX_DOCUMENT_BYTES,
-                _lifecycle_marker=marker, authority_check=lambda: contact(operation,descriptor), handoff_check=check_current)
+                _lifecycle_marker=marker, authority_check=lambda: contact(operation,descriptor), handoff_check=handoff_current)
             await observe(operation, result.status_code, digest(result.content), marker.snapshot(),request_id)
-            await check_current()
+            await handoff_current()
             if password.encode() in result.content or session.value.encode() in result.content:
                 raise ForgejoError("forgejo_secret_echo_blocked")
             if result.status_code != 200 or "location" in result.headers:
@@ -281,7 +287,7 @@ class ForgejoTitleBrowser:
                     nonlocal mutation_started, submission_response, route_failure, navigations
                     path = None
                     try:
-                        await check_current()
+                        await handoff_current()
                         headers = {k.lower(): v for k, v in (await request.all_headers()).items()}
                         parsed = urlsplit(request.url)
                         path = parsed.path + ("?" + parsed.query if parsed.query else "")
@@ -352,8 +358,14 @@ class ForgejoTitleBrowser:
                                     "/assets/js/eventsource.sharedworker.js?v=15.0.9~gitea-1.22.0",
                                     "/assets/css/dropzone.5a752d14.css", "/assets/js/dropzone.8f90b3c1.js"} else None,
                                 "reason": getattr(exc, "reason", type(exc).__name__)})
-                        await route.abort()
-                await context.route("**/*", route_guard)
+                        try: await route.abort()
+                        except Exception:
+                            if not closing or not page.is_closed(): raise
+                async def tracked_route(route, request):
+                    task = asyncio.current_task(); route_handlers.add(task)
+                    try: await route_guard(route, request)
+                    finally: route_handlers.discard(task)
+                await context.route("**/*", tracked_route)
                 context.on("page", lambda other: asyncio.create_task(other.close()) if other != page else None)
                 await page.goto(ORIGIN+target.page_path, wait_until="domcontentloaded", timeout=10000)
                 await page.locator("body:not(.no-js)").wait_for(timeout=5000)
@@ -403,13 +415,27 @@ class ForgejoTitleBrowser:
                     "degraded_background": "Notification worker and optional content history are denied before provider contact",
                     "provider_cas": False, "production_acceptance": "unverified_local_test_only"}
         except BaseException as exc:
-            failure = exc
+            failure = route_failure if route_failure is not None else exc
         finally:
             remaining = max(0, (deadline-datetime.now(timezone.utc)).total_seconds())
+            closing = True
             closed = await runner._close_launch_resources_bounded(resources, timeout_seconds=min(10, remaining))
-            cleanup = {"status": "verified" if closed and marker.snapshot()["status"] == "verified" else "unknown",
+            handlers_drained = True
+            # Mediation remains installed through actual browser close. The
+            # closing latch denies all new contacts. Positively drain only our
+            # own route callbacks, including their contact/observe awaits.
+            if route_handlers:
+                try:
+                    remaining = max(0, (deadline-datetime.now(timezone.utc)).total_seconds())
+                    async with asyncio.timeout(min(3, remaining)):
+                        while route_handlers:
+                            await asyncio.gather(*tuple(route_handlers), return_exceptions=True)
+                except BaseException:
+                    handlers_drained = False
+            handlers_drained = handlers_drained and not route_handlers
+            cleanup = {"status": "verified" if closed and handlers_drained and marker.snapshot()["status"] == "verified" else "unknown",
                 "browser_closed": closed, "transport": marker.snapshot(), "possible_submission": mutation_started,
-                "no_persistent_storage": True, "blocked_requests": blocked_requests}
+                "route_handlers_drained": handlers_drained, "no_persistent_storage": True, "blocked_requests": blocked_requests}
             await cleanup_observer(cleanup)
         if cleanup["status"] != "verified": raise ForgejoError("forgejo_browser_or_transfer_cleanup_unknown")
         if failure is not None: raise failure

@@ -82,7 +82,9 @@ One outstanding native execution is allowed per owner/package across Goals,
 revisions, tasks and service instances. The existing pure SQL claim transaction
 orders queued jobs by priority, creation time and identity, and retains an
 unresolved original claim until exact positive cleanup. This is not a global
-CPU lane: different owners/packages may execute independently. A bounded
+CPU lane: its native owner/package fence permits independent owners/packages.
+Ordinary WorkBoard admission still retains its global two-task limit and
+one Running task per capability executor, including across owners. A bounded
 owner history scan fails closed at 4096 rows or malformed original bindings.
 Ordinary dispatcher priority is the scheduling boundary; cross-instance
 priority fairness is not established by this package-local capacity fence.

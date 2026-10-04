@@ -20,7 +20,7 @@ from src.workflows.job_runtime import DurableJobRepository
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("authored_fixture",["time-ledger","tiny-copy","two-goal-race","two-goal-lock-trace"])
+@pytest.mark.parametrize("authored_fixture",["time-ledger","tiny-copy","two-goal-race","two-goal-lock-trace","sandbox-denials"])
 async def test_actual_authored_time_ledger_native_reopen_private_read(accounting_db, monkeypatch, authored_fixture):
     from src.api import auth, capability_packs, goals, work_board
     root,engine,factory=accounting_db
@@ -53,6 +53,51 @@ async def test_actual_authored_time_ledger_native_reopen_private_read(accounting
         "immutable_execute_restored":["bwrap","rootfs/runtime/bin/isolated-python","rootfs/lib64/ld-linux-x86-64.so.2"]}))
     package_root=root/"selected-package"
     scaffold_adapter(package_root,package_id="local.test-json-copy" if authored_fixture=="tiny-copy" else "local.time-ledger-summary",display_name="Test-only JSON copy" if authored_fixture=="tiny-copy" else "Time ledger summary")
+    if authored_fixture=="sandbox-denials":
+        from src.extensions.authored_adapter import canonical,sha256
+        # These bytes are reviewed data on the host and execute only through
+        # the production native package runner and unchanged #916 namespace.
+        secret=root/"private-sandbox-sentinel.txt"
+        secret.write_text("dummy-private-value-never-mounted")
+        monkeypatch.setenv("SERAPH_TEST_FORBIDDEN_SECRET","dummy-parent-only-secret")
+        prefix=("import os,ctypes,json\ndenials={}\n"
+            "def denied(name,operation,allowed):\n"
+            " try: operation()\n"
+            " except OSError as error:\n"
+            "  assert error.errno in allowed,(name,error.errno)\n"
+            "  denials[name]=True\n"
+            "  print(json.dumps({'operation':name,'errno':error.errno}),flush=True)\n"
+            " else: raise AssertionError(name+' unexpectedly permitted')\n"
+            "def network_socket():\n"
+            " libc=ctypes.CDLL(None,use_errno=True)\n"
+            " descriptor=libc.socket(2,1,0)\n"
+            " if descriptor<0:raise OSError(ctypes.get_errno(),'socket denied')\n"
+            " os.close(descriptor)\n"
+            "denied('network',network_socket,{1,13})\n"
+            f"denied('host_secret',lambda:open({str(secret)!r},'rb'),{{2,13}})\n"
+            "assert os.environ.get('SERAPH_TEST_FORBIDDEN_SECRET') is None\n"
+            "denials['parent_secret_environment']=True\n"
+            "denied('filesystem_escape',lambda:open('/host-escape.json','w'),{13,30})\n"
+            "def extra_process():\n"
+            " pid=os.fork()\n"
+            " if pid==0:os._exit(77)\n"
+            " os.waitpid(pid,0)\n"
+            "denied('extra_process',extra_process,{1,13})\n"
+            "denied('exec',lambda:os.execv('/runtime/bin/isolated-python',['isolated-python','-c','raise SystemExit(78)']),{1,13})\n"
+            "denied('output_symlink',lambda:os.symlink('/input.json','/out/escape-link'),{1,13,30})\n"
+            "denied('output_same_path_unlink',lambda:os.unlink('/out/result.json'),{1,13,16,30})\n").encode()
+        code=prefix+(package_root/"adapter.py").read_bytes()+b'\nwith open("/out/result.json",encoding="utf-8") as source: actual=json.load(source)\nactual["sandbox_denials"]=denials\nwith open("/out/result.json","w",encoding="utf-8") as output:json.dump(actual,output,sort_keys=True)\n'
+        names=("network","host_secret","parent_secret_environment","filesystem_escape","extra_process","exec","output_symlink","output_same_path_unlink")
+        descriptor=json.loads((package_root/"adapters/adapter.json").read_bytes())
+        schema=descriptor["output_schema"]
+        schema["properties"]["sandbox_denials"]={"type":"object","properties":{name:{"type":"boolean","const":True} for name in names},"required":list(names),"additionalProperties":False}
+        schema["required"].append("sandbox_denials")
+        descriptor.update(code_sha256=sha256(code),output_schema_sha256=sha256(canonical(schema)))
+        vector=json.loads((package_root/"evals/known-answer.json").read_bytes())
+        vector["output"]["sandbox_denials"]={name:True for name in names}
+        (package_root/"adapter.py").write_bytes(code)
+        (package_root/"adapters/adapter.json").write_bytes(canonical(descriptor))
+        (package_root/"evals/known-answer.json").write_bytes(canonical(vector))
     if authored_fixture in {"two-goal-race","two-goal-lock-trace"}:
         # A reviewed test-only barrier uses the one precreated output inode.
         # No new writable mountpoint or runner/profile option is introduced.
@@ -289,6 +334,11 @@ async def test_actual_authored_time_ledger_native_reopen_private_read(accounting
         original_mirror=next(item for item in mirror["jobs"] if item["job_id"]==original[0])
         assert original_mirror["status"]=="succeeded" and original_mirror["control_authority"]=="canonical_native_job"
         assert (await dispatcher.run_pass())["completed"]==0
+        if authored_fixture=="sandbox-denials":
+            assert not (root/"host-escape.json").exists()
+            assert secret.read_text()=="dummy-private-value-never-mounted"
+            (root/"actual-authored-api.json").write_text(json.dumps(records,indent=2))
+            return
         changed=await client.patch(f"/api/goals/{goal['id']}",json={"title":"Corrected current Goal","expected_revision":1})
         assert changed.status_code==200,changed.text
         denied=await client.get(f"/api/work-board/tasks/{task_id}/tool-package-output")

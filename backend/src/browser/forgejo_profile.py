@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from http.cookies import SimpleCookie
 import json
 import re
+import uuid
 from urllib.parse import urlencode, urlsplit
 
 from config.settings import settings
@@ -20,6 +21,7 @@ from src.browser.forgejo_issue_title import (
     ForgejoError, ORIGIN, MAX_CONTACTS, MAX_DOCUMENT_BYTES, MAX_ASSET_BYTES,
     checked_assets, digest, timeline_response, require_issue_identity,
     require_browser_submission,
+    checked_segment, positive_id, TitleTarget,
 )
 from src.security.http_transport import (
     _TransportLifecycleMarker, default_resolver, request_pinned_https,
@@ -113,6 +115,9 @@ class ForgejoTitleBrowser:
         marker = _TransportLifecycleMarker()
         authorization = "Basic " + base64.b64encode((username + ":" + password).encode()).decode()
         async def fetch(operation, path, *, headers=None, body=None):
+            request_id = uuid.uuid4().hex
+            descriptor = {"request_id": request_id, "method": "POST" if body is not None else "GET",
+                          "path_digest": digest(path.encode()), "operation": operation}
             await check_current()
             remaining = (deadline - datetime.now(timezone.utc)).total_seconds()
             if remaining <= 10: raise ForgejoError("forgejo_original_deadline")
@@ -120,8 +125,8 @@ class ForgejoTitleBrowser:
                 headers=headers, form_body=body, resolver=self.resolver, transport=self.local_transport,
                 timeout_seconds=min(10, remaining-5), max_bytes=MAX_DOCUMENT_BYTES,
                 observe_redirect_response=operation == "provision_login",
-                _lifecycle_marker=marker, authority_check=lambda: contact(operation), handoff_check=check_current)
-            await observe(operation, result.status_code, digest(result.content), marker.snapshot())
+                _lifecycle_marker=marker, authority_check=lambda: contact(operation, descriptor), handoff_check=check_current)
+            await observe(operation, result.status_code, digest(result.content), marker.snapshot(), request_id)
             await check_current()
             if password.encode() in result.content: raise ForgejoError("forgejo_secret_echo_blocked")
             return result
@@ -151,6 +156,45 @@ class ForgejoTitleBrowser:
         if marker.snapshot()["status"] != "verified": raise ForgejoError("forgejo_transport_cleanup_unknown")
         return BackendSession(cookie, first["id"], username), marker.snapshot()
 
+    async def inspect(self, *, owner, repository, issue_index, new_title, username, password,
+                      expected_user_id, deadline, check_current, contact, observe, cleanup_observer):
+        """Fixed independent Basic-auth reads, never cookie API auth or write."""
+        self.require_available()
+        checked_segment(owner); checked_segment(repository); positive_id(issue_index)
+        marker = _TransportLifecycleMarker()
+        authorization = "Basic " + base64.b64encode((username+":"+password).encode()).decode()
+        async def get(operation, path):
+            await check_current()
+            descriptor = {"request_id":uuid.uuid4().hex,"method":"GET",
+                          "path_digest":digest(path.encode()),"operation":operation}
+            remaining = (deadline-datetime.now(timezone.utc)).total_seconds()-5
+            if remaining <= 0: raise ForgejoError("forgejo_original_deadline")
+            result = await request_pinned_https(ORIGIN+path, headers={"Authorization":authorization},
+                resolver=self.resolver, transport=self.local_transport, timeout_seconds=min(10,remaining),
+                max_bytes=MAX_DOCUMENT_BYTES, _lifecycle_marker=marker,
+                authority_check=lambda:contact(operation,descriptor), handoff_check=check_current)
+            await observe(operation,result.status_code,digest(result.content),marker.snapshot(),descriptor["request_id"])
+            await check_current()
+            if result.status_code != 200 or "location" in result.headers or password.encode() in result.content:
+                raise ForgejoError("forgejo_fixed_read_response_invalid")
+            return result
+        try:
+            identity = json.loads((await get("identity","/api/v1/user")).content)
+            if (identity.get("id"),identity.get("login")) != (expected_user_id,username):
+                raise ForgejoError("forgejo_provider_identity_changed")
+            path = f"/api/v1/repos/{owner}/{repository}/issues/{issue_index}"
+            issue = json.loads((await get("issue_readback",path)).content)
+            timeline = await get("timeline_readback",path+"/timeline?page=1&limit=21")
+            events = timeline_response(timeline.content,timeline.headers)
+            target = TitleTarget(owner,repository,(issue.get("repository") or {}).get("id"),
+                issue.get("id"),issue_index,expected_user_id,username,issue.get("title"),new_title,
+                issue.get("updated_at"),digest(events))
+            require_issue_identity(issue,target,title=target.old_title)
+            return {"target":vars(target),"no_learning":True,"provider_cas":False}
+        finally:
+            await cleanup_observer({"status":marker.snapshot()["status"],"browser_closed":True,
+                "launch_attempted":False,"transport":marker.snapshot(),"possible_submission":False})
+
     async def submit(self, *, target, session, username, password, asset_manifest, deadline,
                      check_current, contact, observe, cleanup_observer):
         self.require_available()
@@ -174,6 +218,10 @@ class ForgejoTitleBrowser:
         output = None
         async def fetch(operation, path, *, api=False, browser_headers=None, body=None, asset=None):
             nonlocal contacts
+            request_id = uuid.uuid4().hex
+            descriptor = {"request_id":request_id,"method":"POST" if body is not None else "GET",
+                          "path_digest":digest(path.encode()),"operation":operation}
+            if body is not None: descriptor["body_digest"] = digest(body)
             await check_current()
             if contacts >= MAX_CONTACTS: raise ForgejoError("forgejo_contact_bound")
             contacts += 1
@@ -186,8 +234,8 @@ class ForgejoTitleBrowser:
             result = await request_pinned_https(ORIGIN + path, method="POST" if body is not None else "GET",
                 headers=headers, form_body=body, resolver=self.resolver, transport=self.local_transport,
                 timeout_seconds=min(10, remaining), max_bytes=MAX_ASSET_BYTES if asset else MAX_DOCUMENT_BYTES,
-                _lifecycle_marker=marker, authority_check=lambda: contact(operation), handoff_check=check_current)
-            await observe(operation, result.status_code, digest(result.content), marker.snapshot())
+                _lifecycle_marker=marker, authority_check=lambda: contact(operation,descriptor), handoff_check=check_current)
+            await observe(operation, result.status_code, digest(result.content), marker.snapshot(),request_id)
             await check_current()
             if password.encode() in result.content or session.value.encode() in result.content:
                 raise ForgejoError("forgejo_secret_echo_blocked")
@@ -238,11 +286,20 @@ class ForgejoTitleBrowser:
                             raise ForgejoError("forgejo_browser_route_changed")
                         if request.method == "POST":
                             require_browser_submission(target, url=request.url, method=request.method,
-                                body=request.post_data_buffer, headers=headers)
+                                body=request.post_data_buffer, headers=headers,
+                                main_frame_matches=request.frame == page.main_frame,
+                                frame_url=request.frame.url, page_url=page.url)
                             if not save_armed: raise ForgejoError("forgejo_submission_before_reviewed_save")
                             if mutation_started: raise ForgejoError("forgejo_original_submission_not_replayable")
                             await identity()
                             await source(title=target.old_title, initial=True)
+                            # Recheck the original browser document after the
+                            # asynchronous source reads, immediately before
+                            # this sole final provider contact handoff.
+                            require_browser_submission(target, url=request.url, method=request.method,
+                                body=request.post_data_buffer, headers=headers,
+                                main_frame_matches=request.frame == page.main_frame,
+                                frame_url=request.frame.url, page_url=page.url)
                             mutation_started = True
                             submission_response = await fetch("title_submission", path,
                                 browser_headers=headers, body=request.post_data_buffer)

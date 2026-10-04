@@ -103,13 +103,16 @@ class TitleTarget:
         return ("title=" + quote_plus(self.new_title, safe="*").replace("~", "%7E")).encode("ascii")
 
 
-def require_browser_submission(target, *, url, method, body, headers):
+def require_browser_submission(target, *, url, method, body, headers,
+                               main_frame_matches, frame_url, page_url):
     lowered = {key.lower(): value for key, value in headers.items()}
-    if (url != ORIGIN + target.page_path + "/title" or method != "POST"
+    document = ORIGIN + target.page_path
+    if (main_frame_matches is not True or frame_url != document or page_url != document
+        or url != document + "/title" or method != "POST"
         or body != target.title_body
         or lowered.get("origin") != ORIGIN
-        or lowered.get("sec-fetch-site") != "same-origin"
-        or lowered.get("referer") != ORIGIN + target.page_path
+        or ("sec-fetch-site" in lowered and lowered["sec-fetch-site"] != "same-origin")
+        or lowered.get("referer") != document
         or any(name in lowered for name in ("authorization", "cookie", "proxy-authorization"))
         or lowered.get("content-type", "").lower() != "application/x-www-form-urlencoded;charset=utf-8"):
         raise ForgejoError("forgejo_browser_submission_changed")

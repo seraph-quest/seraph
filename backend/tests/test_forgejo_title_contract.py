@@ -23,15 +23,18 @@ def test_submission_requires_actual_same_origin_metadata_and_exact_body():
                "referer": "https://codeberg.org" + t.page_path,
                "content-type": "application/x-www-form-urlencoded;charset=UTF-8"}
     require_browser_submission(t, url="https://codeberg.org" + t.page_path + "/title",
-                               method="POST", body=t.title_body, headers=headers)
+                               method="POST", body=t.title_body, headers=headers,
+                               main_frame_matches=True, frame_url="https://codeberg.org"+t.page_path, page_url="https://codeberg.org"+t.page_path)
     for key, bad in [("origin", "https://evil.example"), ("sec-fetch-site", "none"),
                      ("cookie", "session=forbidden"), ("referer", "https://codeberg.org/")]:
         with pytest.raises(ForgejoError):
             require_browser_submission(t, url="https://codeberg.org" + t.page_path + "/title",
-                                       method="POST", body=t.title_body, headers={**headers, key: bad})
+                                       method="POST", body=t.title_body, headers={**headers, key: bad},
+                                       main_frame_matches=True, frame_url="https://codeberg.org"+t.page_path, page_url="https://codeberg.org"+t.page_path)
     with pytest.raises(ForgejoError):
         require_browser_submission(t, url="https://codeberg.org" + t.page_path + "/title",
-                                   method="POST", body=t.title_body + b"&other=x", headers=headers)
+                                   method="POST", body=t.title_body + b"&other=x", headers=headers,
+                                   main_frame_matches=True, frame_url="https://codeberg.org"+t.page_path, page_url="https://codeberg.org"+t.page_path)
 
 
 def test_title_bytes_use_browser_urlsearchparams_encoding():
@@ -105,3 +108,23 @@ def test_pinned_provisioning_rotation_is_not_general_duplicate_cookie_acceptance
                   pair + ", " + locale + ", " + locale,
                   pair + ", other=secret" + scope):
         with pytest.raises(ForgejoError): session_cookie({"set-cookie": value}, provisioning_login=True)
+
+
+def test_intercepted_fetch_metadata_requires_original_main_document_without_synthesis():
+    t = target(); document = "https://codeberg.org" + t.page_path
+    request = dict(url=document+"/title", method="POST", body=t.title_body,
+        headers={"origin":"https://codeberg.org", "referer":document,
+                 "content-type":"application/x-www-form-urlencoded;charset=UTF-8"},
+        main_frame_matches=True, frame_url=document, page_url=document)
+    require_browser_submission(t, **request)
+    require_browser_submission(t, **{**request, "headers":{**request["headers"],"sec-fetch-site":"same-origin"}})
+    for key,value in (("main_frame_matches",False),("main_frame_matches",None),
+                      ("main_frame_matches",1),("frame_url",None),
+                      ("frame_url",document+"/other"),("page_url",document+"?changed=1")):
+        with pytest.raises(ForgejoError): require_browser_submission(t, **{**request,key:value})
+    for value in ("", "none", "same-site", "cross-site", "same-origin "):
+        with pytest.raises(ForgejoError):
+            require_browser_submission(t, **{**request,"headers":{**request["headers"],"sec-fetch-site":value}})
+    for key in ("origin", "referer"):
+        removed = dict(request["headers"]); del removed[key]
+        with pytest.raises(ForgejoError): require_browser_submission(t, **{**request,"headers":removed})

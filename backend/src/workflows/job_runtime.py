@@ -2309,6 +2309,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
 
     async def admit_job(
         self, spec: DurableJobSpec, *, repo_node_posture_expectation: dict[str, Any] | None = None,
+        admission_authority_check: Callable[[Any, Any], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         # Internal server-only copy of actual selected Node preflight facts.
         # A separate method argument cannot be supplied by spec/request
@@ -2583,6 +2584,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     now=now,
                     dialect_name=dialect_name,
                 )
+            if admission_authority_check is not None and dialect_name == "sqlite" and not transaction_started:
+                await db.execute(text("BEGIN IMMEDIATE"))
+                transaction_started = True
             await ensure_sessions_exist(db, [spec.session_id])
             existing = (
                 await db.execute(
@@ -2689,6 +2693,11 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 effect_receipts_json="[]",
             )
             await recheck_run_dependencies(db, run, admission_dependencies)
+            if admission_authority_check is not None:
+                # Server-only capability guard shares the canonical Goal and
+                # new-row insert transaction. Exact immutable replay above
+                # performs no new authority-bearing admission or callback.
+                await admission_authority_check(db, run)
             db.add(run)
             try:
                 await db.flush()

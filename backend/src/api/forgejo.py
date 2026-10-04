@@ -1,6 +1,7 @@
 """Explicit fixed-site controls; configuration/inspection never contact Forgejo."""
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
+from typing import Literal
 
 from src.api.work_board import _operator, _owner
 from src.browser.forgejo_issue_title import ForgejoError
@@ -26,6 +27,32 @@ class Configuration(Strict):
 
 class Revision(Strict):
     expected_revision: int = Field(ge=1)
+
+
+class ReadConsent(Revision):
+    duration_seconds: int = Field(ge=30,le=900)
+    read_ack: StrictBool
+
+
+class Prepare(Revision):
+    operation: Literal["provision","preview","title"]
+    fields: dict = Field(default_factory=dict)
+    request_key: str = Field(min_length=36,max_length=36)
+    goal_id: str = Field(min_length=1,max_length=128)
+    goal_revision: int = Field(ge=1)
+    preview_job_id: str | None = Field(default=None,max_length=128)
+    preview_digest: str | None = Field(default=None,pattern=r"^[a-f0-9]{64}$")
+
+
+class Execute(Strict):
+    expected_revision: int = Field(ge=1)
+    fencing_token: int = Field(ge=0)
+
+
+class Approve(Strict):
+    approval_id: str = Field(min_length=1,max_length=128)
+    decision: Literal["approved","denied"]
+    exact_ack: StrictBool
 
 
 def owner(request):
@@ -57,3 +84,38 @@ async def configure(request: Request, body: Configuration):
 @router.post("/connection/revoke")
 async def revoke(request: Request, body: Revision):
     return await response(forgejo_service.revoke(owner(request), **body.model_dump()))
+
+
+@router.put("/connection/read-consent")
+async def read_consent(request: Request, body: ReadConsent):
+    return await response(forgejo_service.native.consent(owner(request),**body.model_dump()))
+
+
+@router.post("/jobs")
+async def prepare(request: Request, body: Prepare):
+    return await response(forgejo_service.native.prepare(owner(request),**body.model_dump()))
+
+
+@router.get("/jobs/{job_id}")
+async def inspect_job(request: Request, job_id: str):
+    return await response(forgejo_service.native.snapshot(owner(request),job_id))
+
+
+@router.get("/jobs/{job_id}/output")
+async def output(request: Request, job_id: str):
+    return await response(forgejo_service.native.output(owner(request),job_id))
+
+
+@router.post("/jobs/{job_id}/approve")
+async def approve(request: Request, job_id: str, body: Approve):
+    return await response(forgejo_service.native.approve(owner(request),job_id,**body.model_dump()))
+
+
+@router.post("/jobs/{job_id}/execute")
+async def execute(request: Request, job_id: str, body: Execute):
+    return await response(forgejo_service.native.execute(owner(request),job_id,**body.model_dump()))
+
+
+@router.post("/jobs/{job_id}/cancel")
+async def cancel(request: Request, job_id: str, body: Execute):
+    return await response(forgejo_service.native.cancel(owner(request),job_id,**body.model_dump()))

@@ -70,6 +70,16 @@ class ForgejoService:
     def __init__(self, *, browser=None):
         from src.browser.forgejo_profile import ForgejoTitleBrowser
         self.browser = browser or ForgejoTitleBrowser()
+        # Imported lazily: native callbacks reuse the control module's pure
+        # canonical checks without introducing a parallel authority store.
+        self._native = None
+
+    @property
+    def native(self):
+        if self._native is None:
+            from src.browser.forgejo_native import ForgejoNative
+            self._native = ForgejoNative(self)
+        return self._native
 
     async def connection(self, owner):
         async with engine.get_session() as db:

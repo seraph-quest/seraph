@@ -18,7 +18,7 @@ from src.extensions.capability_pack import CapabilityPackLifecycle, capability_p
 from src.work_board.contracts import WorkBoardOwner
 from src.work_board.repository import WorkBoardRepository
 from src.work_board.tool_package_contracts import JsonFormatInput
-from src.work_board.authored_packages import is_authored, load_registration
+from src.work_board.authored_packages import is_authored, load_registration, integrity_fence
 from src.workflows.job_runtime import DurableJobIdentity, DurableJobSpec
 from src.workspace import canonical_workspace_root
 
@@ -50,6 +50,7 @@ def adapter_for(task, *, lifecycle=None, state=None, original_pin=None, continua
         registration = load_registration(task.capability_id, lifecycle=lifecycle, state=state,
             original_pin=original_pin, continuation=continuation)
     if (registration.pointer["goal_id"] != task.goal_id or
+        registration.pointer.get("goal_revision") != task.goal_revision or
         registration.pointer["owner_principal_id"] != task.owner_principal_id or
         registration.pointer["session_id"] != task.owner_session_id):
         raise ToolPackageBlocked("tool_package_exact_review_required")
@@ -251,7 +252,7 @@ async def authority_guard(jobs,task,attempt,*,full=True):
     # Every loop-thread lifecycle lock is nonblocking, so revoke returns busy
     # instead of blocking the event loop while this guard awaits SQLite.
     lifecycle=CapabilityPackLifecycle()
-    with lifecycle._state_lock(shared=True):
+    with integrity_fence(lifecycle):
         state=bounded_pack_state(lifecycle)
         async with jobs._session() as db:
             run=await jobs._fetch(db,job_id(task,attempt))
@@ -454,7 +455,7 @@ async def private_read_guard(db,task,attempt,run):
     """Lifecycle fence spans physical stage and final canonical private-read check."""
     from src.work_board.pipelines import root_binding
     lifecycle=CapabilityPackLifecycle()
-    with lifecycle._state_lock(shared=True):
+    with integrity_fence(lifecycle):
         state=bounded_pack_state(lifecycle)
         authority=json.loads(run.declared_authority_json)
         if authority["live_root_digest"]!=digest(canonical(root_binding())):
@@ -473,7 +474,7 @@ async def private_read_guard(db,task,attempt,run):
 async def session_authority_guard(db,task,attempt,run):
     lifecycle=CapabilityPackLifecycle()
     deadline=run.deadline_at.replace(tzinfo=timezone.utc) if run.deadline_at.tzinfo is None else run.deadline_at
-    with lifecycle._state_lock(shared=True):
+    with integrity_fence(lifecycle):
         async with asyncio.timeout(max(0,(deadline-now()).total_seconds())):
             state=bounded_pack_state(lifecycle)
             staged=await stage_authority(db,task,attempt,run,lifecycle=lifecycle,state=state)
@@ -778,5 +779,5 @@ async def adopt_output(jobs,task,attempt,runner,reference,expected,fence):
                 "revision":refreshed.revision,"operator_visible":True})
     CapabilityPackLifecycle()._set_local_job_status(identity,status="succeeded",expected_statuses={"running"},
         pack_id=package_id(task),owner_principal_id=task.owner_principal_id,session_id=task.owner_session_id,
-        expected_digest=pack_binding(task)["digest"],details={"no_learning":True,"cleanup_proven":True,"output_sha256":sha})
+        expected_digest=json.loads(staged.authority_json)["pack"]["digest"],details={"no_learning":True,"cleanup_proven":True,"output_sha256":sha})
     return {**finished,"admission_only":False,"artifact_refs":finished.get("artifacts",[]),"memory_status":"no_learning"}

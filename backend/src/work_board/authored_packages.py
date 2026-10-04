@@ -7,10 +7,26 @@ import re
 from functools import wraps
 import inspect
 
-from src.extensions.authored_adapter import load_adapter
+from src.extensions.authored_adapter import load_adapter, read_member, sha256
 from src.extensions.capability_pack import CapabilityPackLifecycle, capability_pack_digest, parse_capability_pack_manifest
 
 _STAGED = ContextVar("authored_package_stage", default={})
+
+class AuthoredIntegrityFailure(ValueError):
+    def __init__(self, *, pack_id, expected_digest, record_sha256, review_sha256, observed_digest):
+        super().__init__("authored_package_observed_integrity_failure")
+        self.binding=dict(pack_id=pack_id,expected_digest=expected_digest,record_sha256=record_sha256,
+            review_sha256=review_sha256,observed_digest=observed_digest)
+
+
+@contextmanager
+def integrity_fence(lifecycle):
+    """Publish observed integrity denial only after releasing the stage lock."""
+    try:
+        with lifecycle._state_lock(shared=True):yield
+    except AuthoredIntegrityFailure as failure:
+        lifecycle.quarantine_authored_observation(**failure.binding)
+        raise
 
 
 def is_authored(capability_id):
@@ -29,7 +45,7 @@ class Registration:
 
     @property
     def pin(self):
-        return {key: self.pointer[key] for key in ("pack_id", "version", "digest", "goal_id", "review_id",
+        return {key: self.pointer[key] for key in ("pack_id", "version", "digest", "goal_id", "goal_revision", "review_id",
                 "authority_digest", "dependencies_digest", "owner_principal_id", "session_id")}
 
 
@@ -37,7 +53,7 @@ def load_registration(capability_id, *, lifecycle=None, state=None, original_pin
     """Caller holds the lifecycle lock when supplying state; performs physical I/O."""
     lifecycle = lifecycle or CapabilityPackLifecycle()
     if state is None:
-        with lifecycle._state_lock(shared=True):
+        with integrity_fence(lifecycle):
             return load_registration(capability_id, lifecycle=lifecycle, state=lifecycle._load(),
                                      original_pin=original_pin, continuation=continuation)
     if not is_authored(capability_id):
@@ -56,10 +72,19 @@ def load_registration(capability_id, *, lifecycle=None, state=None, original_pin
         # Only the native caller with a persisted released-process fence may
         # select this typed continuation. No new process uses this branch.
         selected = {**original_pin, "root_path": record["root_path"], "status": "active"}
-    if not lifecycle._pointer_binding_valid(state, package_id, selected):
+    from src.extensions.capability_pack import canonical_digest
+    record=state.get("versions",{}).get(package_id,{}).get(selected.get("digest"))
+    review=state.get("reviews",{}).get(selected.get("review_id"))
+    if not isinstance(record,dict) or not isinstance(review,dict) or selected.get("digest") in state.get("revoked",{}).get(package_id,[]):
         raise ValueError("authored_package_exact_review_required")
     root = Path(selected["root_path"])
-    manifest = parse_capability_pack_manifest((root / "manifest.yaml").read_text())
+    observed=capability_pack_digest(root)
+    if observed!=selected["digest"]:
+        raise AuthoredIntegrityFailure(pack_id=package_id,expected_digest=selected["digest"],
+            record_sha256=canonical_digest(record),review_sha256=canonical_digest(review),observed_digest=observed)
+    if not lifecycle._pointer_binding_valid(state, package_id, selected):
+        raise ValueError("authored_package_exact_review_required")
+    manifest = parse_capability_pack_manifest(read_member(root,"manifest.yaml",65536).decode())
     adapter = load_adapter(root, manifest)
     if adapter.capability_id != capability_id or capability_pack_digest(root) != selected["digest"]:
         raise ValueError("authored_package_digest_changed")
@@ -95,6 +120,11 @@ def stage_package_request(function):
         if not is_authored(capability_id):
             return await function(*args, **kwargs)
         with package_scope(capability_id):
+            registration=staged_registration(capability_id)
+            if (getattr(request,"goal_id",None)!=registration.pointer["goal_id"] or
+                getattr(request,"goal_revision",None)!=registration.pointer.get("goal_revision")):
+                from src.work_board.repository import BoardError
+                raise BoardError("authored_package_goal_review_stale","Review and approve the exact package for the current Goal revision")
             result = await function(*args, **kwargs)
             # Authoritative publication finishes while the lifecycle lock
             # still pins the exact staged pointer. No lock spans execution.
@@ -125,7 +155,7 @@ def package_scope(capability_id):
         yield
         return
     lifecycle = CapabilityPackLifecycle()
-    with lifecycle._state_lock(shared=True):
+    with integrity_fence(lifecycle):
         registration = load_registration(capability_id, lifecycle=lifecycle, state=lifecycle._load())
         token = _STAGED.set({**_STAGED.get(), capability_id: registration})
         try:

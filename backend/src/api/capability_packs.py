@@ -152,9 +152,11 @@ def _authored_packet(root_path):
 
 @router.post("/capability-packs/authored/inspect")
 async def inspect_authored_package(req: AuthoredInspectRequest, request: Request):
-    _operator_identity(request)
+    _operator,principal_id,session_id=_operator_identity(request)
     try:
-        return _authored_packet(req.root_path)
+        packet=_authored_packet(req.root_path)
+        packet["lifecycle"]=_store().status(packet["pack_id"],owner_principal_id=principal_id,session_id=session_id)
+        return packet
     except (OSError,ValueError,KeyError,TypeError):
         raise HTTPException(status_code=422,detail={"code":"authored_package_static_contract_invalid"})
 
@@ -223,7 +225,7 @@ async def review_authored_package(pack_id: str, req: AuthoredReviewRequest, requ
             await WorkBoardRepository._validate_goal(db,WorkBoardOwner(principal_id=principal_id,session_id=session_id),
                 goal_id=req.goal_id,goal_revision=req.goal_revision)
         return _store().review(packet["manifest"],root_path=req.root_path,goal_id=req.goal_id,
-            reviewed_by=principal_id,authority_expansion_approved=True)
+            reviewed_by=principal_id,authority_expansion_approved=True,goal_revision=req.goal_revision)
     except (OSError,ValueError,KeyError,TypeError):
         raise HTTPException(status_code=409,detail={"code":"authored_package_exact_review_changed"})
 
@@ -232,6 +234,35 @@ def _operator_identity(request: Request) -> tuple[Any, str, str]:
     operator = _require_authenticated_capability_operator(request)
     principal_id = str(getattr(operator.principal, "principal_id", "") or "")
     return operator, principal_id, operator.session_id
+
+
+async def _validate_authored_lifecycle_goal(pack_id, *, principal_id, session_id, review_id=None, digest=None):
+    """Metadata permission check; native source/adoption separately recheck SQL."""
+    lifecycle=_store()
+    with lifecycle._state_lock(shared=True):
+        state=lifecycle._load()
+        pointer=state["active"].get(pack_id,{})
+        supplied_review=state["reviews"].get(review_id,{})
+        record=state["versions"].get(pack_id,{}).get(digest or supplied_review.get("digest") or pointer.get("digest"),{})
+        review=state["reviews"].get(review_id or record.get("review_id"),{})
+        if record.get("authority",{}).get("tools")!=["isolated_json_adapter"]:return
+        goal_id=review.get("goal_id");revision=review.get("goal_revision")
+    if type(revision) is not int or revision<1:
+        raise HTTPException(status_code=409,detail={"code":"authored_package_goal_review_stale"})
+    from src.db.engine import get_session
+    from src.work_board.repository import WorkBoardRepository,BoardError
+    from src.work_board.contracts import WorkBoardOwner
+    from src.goals.repository import deserialize_admission_budget
+    from datetime import datetime,timezone
+    try:
+        async with get_session() as db:
+            goal=await WorkBoardRepository._validate_goal(db,WorkBoardOwner(principal_id=principal_id,session_id=session_id),goal_id=goal_id,goal_revision=revision)
+            budget=deserialize_admission_budget(goal)
+            for value in (goal.due_date,budget.period_expires_at if budget else None):
+                if value is not None and (value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value)<=datetime.now(timezone.utc):
+                    raise HTTPException(status_code=409,detail={"code":"authored_package_goal_window_expired"})
+    except BoardError as error:
+        raise HTTPException(status_code=error.status_code,detail={"code":error.code}) from error
 
 
 def _lifecycle_http_error(exc: Exception) -> HTTPException:
@@ -434,6 +465,7 @@ async def capability_pack_activate(
     if str(req.manifest.get("id") or "") != pack_id:
         raise HTTPException(status_code=422, detail={"code": "pack_identity_mismatch"})
     try:
+        await _validate_authored_lifecycle_goal(pack_id,principal_id=principal_id,session_id=session_id,review_id=req.review_id,digest=req.content_digest)
         return _store().activate(
             req.manifest,
             root_path=req.root_path,
@@ -462,6 +494,7 @@ async def capability_pack_update(
     if str(req.manifest.get("id") or "") != pack_id:
         raise HTTPException(status_code=422, detail={"code": "pack_identity_mismatch"})
     try:
+        await _validate_authored_lifecycle_goal(pack_id,principal_id=principal_id,session_id=session_id,review_id=req.review_id,digest=req.content_digest)
         return _store().update(
             req.manifest,
             root_path=req.root_path,
@@ -512,6 +545,7 @@ async def capability_pack_rollback(
 ) -> CapabilityPackLifecycleResponse:
     _operator, principal_id, session_id = _operator_identity(request)
     try:
+        await _validate_authored_lifecycle_goal(pack_id,principal_id=principal_id,session_id=session_id,digest=req.content_digest)
         return _store().rollback(
             pack_id,
             goal_id=req.goal_id,

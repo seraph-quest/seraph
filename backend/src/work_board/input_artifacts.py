@@ -40,7 +40,7 @@ from src.work_board.repository import (
     WorkBoardRepository,
 )
 from src.workspace import canonical_workspace_root
-from src.work_board.authored_packages import capability_spec, stage_package_request
+from src.work_board.authored_packages import capability_spec, stage_package_request, is_authored
 
 
 INPUT_ARTIFACT_SCHEMA_VERSION = 1
@@ -687,6 +687,14 @@ async def prepare_input_artifact(
     expires_at = requested_deadline or (observed_at + INPUT_ARTIFACT_TTL)
     typed_input_ref = f"workspace-json:{INPUT_ARTIFACT_ROOT}/{artifact_id}-{payload_digest}.json"
 
+    authored_replay=None
+    if is_authored(request.capability_id):
+        staged_row=await db.get(WorkBoardInputArtifact,artifact_id,populate_existing=True)
+        if staged_row is not None and staged_row.metadata_digest is not None and staged_row.state not in {"expired","revoked","deleted"}:
+            verified=_safe_file_bytes(_payload_path(staged_row),expected_digest=staged_row.payload_sha256,expected_size=staged_row.size_bytes)
+            parsed=_decode_and_validate_payload(staged_row,verified,allow_scheduler=allow_scheduler)
+            authored_replay=(tuple(str(getattr(staged_row,column.name)) for column in staged_row.__table__.columns),parsed)
+
     await _begin_immediate(db)
     existing = (
         await db.execute(
@@ -735,6 +743,11 @@ async def prepare_input_artifact(
         # canonical bytes are still present and structurally valid.  A stale
         # metadata row must fail closed instead of returning a receipt that a
         # later task bind could not execute.
+        if is_authored(request.capability_id):
+            binding=tuple(str(getattr(existing,column.name)) for column in existing.__table__.columns)
+            if authored_replay is None or authored_replay!=(binding,inputs):
+                raise BoardError("input_artifact_staged_replay_changed","Retry the exact input request after current physical staging",status_code=409)
+            return _metadata(existing)
         verified = _safe_file_bytes(
             _payload_path(existing),
             expected_digest=existing.payload_sha256,

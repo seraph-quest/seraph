@@ -1550,7 +1550,9 @@ def _authority_delta_from_payloads(
     }
 
 
-def _review_digest(*, pack_id: str, version: str, digest: str, goal_id: str, authority_digest: str) -> str:
+def _review_digest(*, pack_id: str, version: str, digest: str, goal_id: str, authority_digest: str, goal_revision: int | None=None) -> str:
+    if goal_revision is not None:
+        return canonical_digest("authored-pack-review",pack_id,version,digest,goal_id,goal_revision,authority_digest)
     return canonical_digest("pack-review", pack_id, version, digest, goal_id, authority_digest)
 
 
@@ -2120,6 +2122,7 @@ class CapabilityPackLifecycle:
             "versions": {},
             "reviews": {},
             "revoked": {},
+            "authored_quarantines": {},
             "receipts": [],
             "jobs": {},
             "approvals": {},
@@ -2144,6 +2147,7 @@ class CapabilityPackLifecycle:
             "versions",
             "reviews",
             "revoked",
+            "authored_quarantines",
             "jobs",
             "approvals",
             "canary_attempts",
@@ -2315,6 +2319,42 @@ class CapabilityPackLifecycle:
                     pending.append((candidate_id, candidate_digest))
         return affected
 
+    def quarantine_authored_observation(self, *, pack_id: str, expected_digest: str,
+        record_sha256: str, review_sha256: str, observed_digest: str) -> dict[str, Any]:
+        """Deny an exact reviewed digest after a bounded observed hash mismatch.
+
+        No current physical recheck erases the observation. This existing
+        lifecycle mutation never runs in a canonical SQLite writer.
+        """
+        pack_id=_validate_pack_id(pack_id)
+        if any(not isinstance(value,str) or not _DIGEST_RE.fullmatch(value) for value in
+            (expected_digest,record_sha256,review_sha256,observed_digest)) or observed_digest==expected_digest:
+            raise CapabilityPackLifecycleError("authored quarantine observation is invalid")
+        with self._state_lock():
+            state=self._load()
+            existing=state["authored_quarantines"].get(pack_id,{}).get(expected_digest)
+            if isinstance(existing,Mapping):return deepcopy(existing)
+            record=state["versions"].get(pack_id,{}).get(expected_digest)
+            review=state["reviews"].get(record.get("review_id")) if isinstance(record,Mapping) else None
+            if (not isinstance(record,Mapping) or not isinstance(review,Mapping)
+                or canonical_digest(record)!=record_sha256 or canonical_digest(review)!=review_sha256
+                or record.get("digest")!=expected_digest or review.get("digest")!=expected_digest
+                or review.get("status")!="approved" or record.get("authority",{}).get("tools")!=["isolated_json_adapter"]):
+                raise CapabilityPackLifecycleError("authored quarantine reviewed identity changed")
+            quarantine={"schema_version":1,"cause":"observed_content_digest_mismatch","expected_digest":expected_digest,
+                "observed_digest":observed_digest,"record_sha256":record_sha256,"review_sha256":review_sha256,
+                "review_id":record["review_id"],"version":record["version"],"observed_at":_utc_now()}
+            state["authored_quarantines"].setdefault(pack_id,{})[expected_digest]=quarantine
+            revoked=state["revoked"].setdefault(pack_id,[])
+            if expected_digest not in revoked:revoked.append(expected_digest)
+            record["revoked"]=True
+            pointer=state["active"].get(pack_id)
+            if isinstance(pointer,Mapping) and pointer.get("digest")==expected_digest and pointer.get("status") in {"active","paused"}:
+                state["active"][pack_id]={**pointer,"status":"quarantined","quarantine_cause":quarantine["cause"]}
+            self._record_receipt(state,action="quarantine",status="quarantined",pack_id=pack_id,details=quarantine)
+            self._commit(state)
+            return deepcopy(quarantine)
+
     def register_job(
         self,
         pack_id: str,
@@ -2452,7 +2492,7 @@ class CapabilityPackLifecycle:
             )
 
     @staticmethod
-    def _record_delta(previous: Mapping[str, Any] | None, candidate: CapabilityPackManifest) -> dict[str, Any]:
+    def _record_delta(previous: Mapping[str, Any] | None, candidate: CapabilityPackManifest, *, authored_contract=None, goal_revision=None, previous_goal_revision=None) -> dict[str, Any]:
         previous = previous if isinstance(previous, Mapping) else {}
         delta = _authority_delta_from_payloads(
             previous.get("authority") if isinstance(previous.get("authority"), Mapping) else {},
@@ -2462,6 +2502,11 @@ class CapabilityPackLifecycle:
         )
         delta["authority_digest_before"] = previous.get("authority_digest")
         delta["authority_digest_after"] = candidate.authority_digest
+        if candidate.contributes.adapters:
+            delta["authored_contract_before"]=previous.get("authored_contract")
+            delta["authored_contract_after"]=authored_contract
+            delta["goal_revision_before"]=previous_goal_revision
+            delta["goal_revision_after"]=goal_revision
         return delta
 
     @staticmethod
@@ -2681,14 +2726,14 @@ class CapabilityPackLifecycle:
             expected_authority_digest = str(authority_digest or record.get("authority_digest") or "")
             if expected_authority_digest != str(record.get("authority_digest") or ""):
                 raise CapabilityPackLifecycleError("approval authority digest must exactly match the reviewed authority")
-            if current_digest is None and action in {"activate", "update", "rollback"} and isinstance(pointer, Mapping) and pointer.get("status") in {"active", "paused"}:
+            if current_digest is None and action in {"activate", "update", "rollback"} and isinstance(pointer, Mapping) and pointer.get("status") in {"active", "paused", "quarantined"}:
                 current_digest = str(pointer.get("digest") or "") or None
             if authority_delta_payload is not None and not isinstance(authority_delta_payload, Mapping):
                 raise CapabilityPackLifecycleError("authority delta must be a mapping")
             delta = authority_delta_payload if authority_delta_payload is not None else {}
             if action in {"activate", "update", "rollback"}:
                 current_record = None
-                if isinstance(pointer, Mapping) and pointer.get("status") in {"active", "paused"}:
+                if isinstance(pointer, Mapping) and pointer.get("status") in {"active", "paused", "quarantined"}:
                     current_record = state["versions"].get(pack_id, {}).get(pointer.get("digest"))
                     if not isinstance(current_record, Mapping):
                         current_record = None
@@ -2700,6 +2745,10 @@ class CapabilityPackLifecycle:
                 )
                 expected_delta["authority_digest_before"] = current_record.get("authority_digest") if isinstance(current_record, Mapping) else None
                 expected_delta["authority_digest_after"] = record.get("authority_digest")
+                if record.get("authority",{}).get("tools")==["isolated_json_adapter"]:
+                    expected_delta.update(authored_contract_before=current_record.get("authored_contract") if isinstance(current_record,Mapping) else None,
+                        authored_contract_after=record.get("authored_contract"),goal_revision_before=pointer.get("goal_revision") if isinstance(pointer,Mapping) else None,
+                        goal_revision_after=record.get("goal_revision"))
                 if authority_delta_payload is None:
                     delta = expected_delta
                 elif canonical_digest(delta) != canonical_digest(expected_delta):
@@ -3082,6 +3131,7 @@ class CapabilityPackLifecycle:
             digest=digest,
             goal_id=str(pointer.get("goal_id") or ""),
             authority_digest=manifest.authority_digest,
+            goal_revision=pointer.get("goal_revision") if manifest.contributes.adapters else None,
         )
         canonical_record = {
             "pack_id": manifest.id,
@@ -3101,6 +3151,9 @@ class CapabilityPackLifecycle:
             "revoked": False,
         }
         record_fields = tuple(canonical_record)
+        if manifest.contributes.adapters:
+            if type(record.get("goal_revision")) is not int or record["goal_revision"]<1 or type(pointer.get("goal_revision")) is not int or pointer["goal_revision"]<1:return False
+            record_fields=tuple(field for field in record_fields if field!="review_id")
         if any(record.get(field_name) != canonical_record[field_name] for field_name in record_fields):
             return False
         canonical_review = {
@@ -3115,6 +3168,7 @@ class CapabilityPackLifecycle:
             "dependencies_digest": _dependencies_digest(manifest),
             "publisher_trust": publisher_trust,
         }
+        if manifest.contributes.adapters:canonical_review["goal_revision"]=pointer["goal_revision"]
         review_fields = tuple(canonical_review)
         if any(review.get(field_name) != canonical_review[field_name] for field_name in review_fields):
             return False
@@ -3130,6 +3184,7 @@ class CapabilityPackLifecycle:
             "owner_principal_id": pointer_owner,
             "session_id": pointer_session,
         }
+        if manifest.contributes.adapters:canonical_pointer["goal_revision"]=review["goal_revision"]
         return (
             all(pointer.get(field_name) == value for field_name, value in canonical_pointer.items())
             and not bool(record.get("revoked"))
@@ -3166,9 +3221,12 @@ class CapabilityPackLifecycle:
         reviewed_by: str = "operator",
         authority_expansion_approved: bool = False,
         available_dependencies: Mapping[str, Any] | Iterable[Mapping[str, Any]] | None = None,
+        goal_revision: int | None = None,
     ) -> dict[str, Any]:
         """Record local review for one immutable digest/version/goal binding."""
         pack = self._coerce_manifest(manifest)
+        if pack.contributes.adapters and (type(goal_revision) is not int or goal_revision<1):
+            raise CapabilityPackLifecycleError("authored review requires exact Goal revision")
         self._assert_compatible(pack)
         goal_id = _validate_goal_id(goal_id)
         reviewed_by = _validate_goal_id(reviewed_by)
@@ -3199,6 +3257,7 @@ class CapabilityPackLifecycle:
             digest=digest,
             goal_id=goal_id,
             authority_digest=pack.authority_digest,
+            goal_revision=goal_revision if pack.contributes.adapters else None,
         )
         review = {
             "review_id": review_id,
@@ -3215,6 +3274,13 @@ class CapabilityPackLifecycle:
             "authority_expansion_approved": bool(authority_expansion_approved),
             "publisher_trust": publisher_trust,
         }
+        authored_contract=None
+        if pack.contributes.adapters:
+            from src.extensions.authored_adapter import load_adapter
+            adapter=load_adapter(Path(root_path),pack)
+            authored_contract={key:adapter.descriptor[key] for key in ("code_sha256","input_schema_sha256","output_schema_sha256","resources","profile","profile_contract_version")}
+            authored_contract["descriptor_sha256"]=adapter.descriptor_sha256
+            review.update(goal_revision=goal_revision,authored_contract=authored_contract)
         with self._state_lock():
             state = self._load()
             state_dependency_errors = validate_capability_pack_dependencies(
@@ -3255,6 +3321,10 @@ class CapabilityPackLifecycle:
                 "revoked": False,
             })
             versions[digest]["root_path"] = _safe_pack_path(root_path)
+            if pack.contributes.adapters:
+                versions[digest]["goal_revision"]=goal_revision
+                versions[digest]["review_id"]=review_id
+                versions[digest]["authored_contract"]=authored_contract
             receipt = self._record_receipt(state, action="review", status="approved", pack_id=pack.id, details={"version": pack.version, "digest": digest, "goal_id": goal_id, "review_id": review_id})
             self._commit(state)
         return {"review": deepcopy(review), "receipt": receipt}
@@ -3281,6 +3351,8 @@ class CapabilityPackLifecycle:
             raise CapabilityPackLifecycleError("; ".join(validation["errors"]))
         digest = capability_pack_digest(root_path)
         review = self._review_from_state(state, review_id)
+        if pack.contributes.adapters and (type(review.get("goal_revision")) is not int or review["goal_revision"]<1):
+            raise CapabilityPackLifecycleError("authored activation requires exact Goal revision")
         expected = {
             "pack_id": pack.id,
             "version": pack.version,
@@ -3304,7 +3376,7 @@ class CapabilityPackLifecycle:
         existing = state["active"].get(pack.id)
         previous_manifest = None
         previous_digest = None
-        candidate_delta: dict[str, Any] = self._record_delta(None, pack)
+        candidate_delta: dict[str, Any] = self._record_delta(None, pack,authored_contract=review.get("authored_contract"),goal_revision=review.get("goal_revision"))
         idempotent_existing = False
         if isinstance(existing, Mapping) and existing.get("status") in {"active", "paused"}:
             if not self._pointer_binding_valid(state, pack.id, existing):
@@ -3312,14 +3384,14 @@ class CapabilityPackLifecycle:
             previous_digest = str(existing.get("digest") or "") or None
             if existing.get("goal_id") != goal_id:
                 raise CapabilityPackLifecycleError("active pack is bound to a different goal")
-            if existing.get("digest") == digest and existing.get("version") == pack.version and existing.get("goal_id") == goal_id:
+            if existing.get("digest") == digest and existing.get("version") == pack.version and existing.get("goal_id") == goal_id and (not pack.contributes.adapters or existing.get("goal_revision")==review["goal_revision"]):
                 idempotent_existing = True
-            elif not allow_replace:
+            elif not allow_replace and not (pack.contributes.adapters and existing.get("digest")==digest and existing.get("version")==pack.version):
                 raise CapabilityPackLifecycleError("a different version is active; use update or rollback")
             old_version = state["versions"].get(pack.id, {}).get(existing.get("digest"))
             if isinstance(old_version, Mapping):
                 previous_manifest = old_version
-            candidate_delta = self._record_delta(old_version, pack)
+            candidate_delta = self._record_delta(old_version, pack,authored_contract=review.get("authored_contract"),goal_revision=review.get("goal_revision"),previous_goal_revision=existing.get("goal_revision"))
         approval = self._require_approval(
             state,
             approval_id=approval_id,
@@ -3359,6 +3431,10 @@ class CapabilityPackLifecycle:
             "revoked": False,
         })
         record["root_path"] = _safe_pack_path(root_path)
+        if pack.contributes.adapters:
+            record["goal_revision"]=review["goal_revision"]
+            record["review_id"]=review_id
+            record["authored_contract"]=review["authored_contract"]
         pointer = {
             "pack_id": pack.id,
             "version": pack.version,
@@ -3374,6 +3450,7 @@ class CapabilityPackLifecycle:
             "previous_digest": existing.get("digest") if isinstance(existing, Mapping) else None,
             "root_path": record.get("root_path"),
         }
+        if pack.contributes.adapters:pointer["goal_revision"]=review["goal_revision"]
         return pointer, {"digest": digest, "previous": previous_manifest, "authority_delta": candidate_delta, "approval_id": approval_id}
 
     def activate(
@@ -3453,7 +3530,8 @@ class CapabilityPackLifecycle:
             current_status = pointer.get("status")
             if action == "pause" and current_status != "active":
                 raise CapabilityPackLifecycleError("pause requires an active pack")
-            if action == "uninstall" and current_status not in {"active", "paused", "revoked"}:
+            authored=state["versions"].get(pack_id,{}).get(pointer.get("digest"),{}).get("authority",{}).get("tools")==["isolated_json_adapter"]
+            if action == "uninstall" and current_status not in ({"active", "paused", "revoked", "quarantined"} if authored else {"active", "paused", "revoked"}):
                 raise CapabilityPackLifecycleError("uninstall requires an active, paused, or revoked pack")
             target_digest = str(pointer.get("digest") or "")
             target_version = str(pointer.get("version") or "")
@@ -3485,6 +3563,12 @@ class CapabilityPackLifecycle:
             cancelled_jobs = self._cancel_pack_jobs(state, pack_id, digest=target_digest, reason=f"{action}_requested")
             next_pointer = dict(pointer)
             next_pointer["status"] = status
+            if action=="uninstall" and authored:
+                next_pointer["authority_withdrawn"]=True
+                revoked=state["revoked"].setdefault(pack_id,[])
+                for version_digest,record in state["versions"].get(pack_id,{}).items():
+                    if version_digest not in revoked:revoked.append(version_digest)
+                    record["revoked"]=True
             details = {"version": pointer.get("version"), "digest": pointer.get("digest"), "goal_id": pointer.get("goal_id"), "reason_code": canonical_digest(reason or action)[:16], "approval_id": approval_id, "cancelled_jobs": cancelled_jobs, "revoke_running_jobs": revoke_policy}
             state["active"][pack_id] = next_pointer
             receipt = self._record_receipt(state, action=action, status=status, pack_id=pack_id, details=details)
@@ -3568,6 +3652,7 @@ class CapabilityPackLifecycle:
             next_pointer = dict(pointer) if isinstance(pointer, Mapping) and pointer.get("digest") == target_digest else None
             if next_pointer is not None:
                 next_pointer["status"] = "revoked"
+                next_pointer["authority_withdrawn"] = True
                 state["active"][pack_id] = next_pointer
             lifecycle = target_record.get("lifecycle", {}) if isinstance(target_record, Mapping) else {}
             revoke_policy = str(lifecycle.get("revoke_running_jobs") or "cancel_at_safe_checkpoint") if isinstance(lifecycle, Mapping) else "cancel_at_safe_checkpoint"
@@ -3660,9 +3745,23 @@ class CapabilityPackLifecycle:
             pointer = state["active"].get(pack_id)
             if not isinstance(pointer, Mapping):
                 raise CapabilityPackLifecycleError(f"pack '{pack_id}' has no active-version pointer")
-            if pointer.get("status") not in {"active", "paused"}:
+            quarantined=pointer.get("status")=="quarantined"
+            current_record=state["versions"].get(pack_id,{}).get(pointer.get("digest"))
+            quarantine=state["authored_quarantines"].get(pack_id,{}).get(pointer.get("digest"))
+            if quarantined:
+                current_review=state["reviews"].get(pointer.get("review_id"))
+                if (not isinstance(current_record,Mapping) or not isinstance(current_review,Mapping) or not isinstance(quarantine,Mapping)
+                    or pointer.get("authority_withdrawn") or pointer.get("quarantine_cause")!="observed_content_digest_mismatch"
+                    or current_record.get("authority",{}).get("tools")!=["isolated_json_adapter"]
+                    or current_record.get("review_id")!=pointer.get("review_id")
+                    or current_record.get("version")!=pointer.get("version") or current_record.get("goal_id")!=pointer.get("goal_id")
+                    or canonical_digest({**current_record,"revoked":False})!=quarantine.get("record_sha256")
+                    or canonical_digest(current_review)!=quarantine.get("review_sha256")):
+                    raise CapabilityPackLifecycleError("quarantined rollback identity or permission is invalid")
+                self._require_pointer_identity(pointer,owner_principal_id=owner_principal_id,session_id=session_id)
+            elif pointer.get("status") not in {"active", "paused"}:
                 raise CapabilityPackLifecycleError("rollback requires an active or paused pack")
-            if not self._pointer_binding_valid(state, pack_id, pointer):
+            if not quarantined and not self._pointer_binding_valid(state, pack_id, pointer):
                 raise CapabilityPackLifecycleError("active pointer binding is invalid")
             previous_digest = pointer.get("previous_digest")
             previous_version = pointer.get("previous_version")
@@ -3704,6 +3803,7 @@ class CapabilityPackLifecycle:
                 digest=target_digest,
                 goal_id=target_goal,
                 authority_digest=target_manifest.authority_digest,
+                goal_revision=record.get("goal_revision") if target_manifest.contributes.adapters else None,
             )
             canonical_record = {
                 "pack_id": target_manifest.id,
@@ -3722,6 +3822,10 @@ class CapabilityPackLifecycle:
                 "review_id": expected_review_id,
                 "revoked": False,
             }
+            if target_manifest.contributes.adapters:
+                if type(record.get("goal_revision")) is not int or record["goal_revision"]<1:
+                    raise CapabilityPackLifecycleError("authored rollback Goal revision is unavailable")
+                canonical_record["goal_revision"]=record["goal_revision"]
             if any(record.get(field_name) != expected for field_name, expected in canonical_record.items()):
                 raise CapabilityPackLifecycleError("rollback target version binding is stale")
             review = self._review_from_state(state, review_id)
@@ -3737,6 +3841,7 @@ class CapabilityPackLifecycle:
                 "dependencies_digest": _dependencies_digest(target_manifest),
                 "publisher_trust": target_publisher_trust,
             }
+            if target_manifest.contributes.adapters:canonical_review["goal_revision"]=record["goal_revision"]
             if any(review.get(field_name) != expected for field_name, expected in canonical_review.items()):
                 raise CapabilityPackLifecycleError("rollback review binding is stale")
             current_record = state["versions"].get(pack_id, {}).get(pointer.get("digest"))
@@ -3748,6 +3853,9 @@ class CapabilityPackLifecycle:
             )
             rollback_delta["authority_digest_before"] = current_record.get("authority_digest") if isinstance(current_record, Mapping) else None
             rollback_delta["authority_digest_after"] = target_manifest.authority_digest
+            if target_manifest.contributes.adapters:
+                rollback_delta.update(authored_contract_before=current_record.get("authored_contract") if isinstance(current_record,Mapping) else None,
+                    authored_contract_after=record.get("authored_contract"),goal_revision_before=pointer.get("goal_revision"),goal_revision_after=record["goal_revision"])
             self._require_approval(
                 state,
                 approval_id=approval_id,
@@ -3766,6 +3874,8 @@ class CapabilityPackLifecycle:
             cancelled_jobs = self._cancel_pack_jobs(state, pack_id, digest=str(pointer.get("digest") or ""), reason="rollback_requested")
             next_pointer = dict(pointer)
             next_pointer.update({"version": target_manifest.version, "digest": target_digest, "goal_id": target_goal, "review_id": expected_review_id, "authority_digest": target_manifest.authority_digest, "dependencies_digest": _dependencies_digest(target_manifest), "status": "active", "previous_version": pointer.get("version"), "previous_digest": pointer.get("digest"), "root_path": _safe_pack_path(root_path)})
+            next_pointer.pop("quarantine_cause",None)
+            if target_manifest.contributes.adapters:next_pointer["goal_revision"]=record["goal_revision"]
             state["active"][pack_id] = next_pointer
             receipt = self._record_receipt(state, action="rollback", status="active", pack_id=pack_id, details={"version": target_manifest.version, "digest": target_digest, "goal_id": target_goal, "authority_delta": rollback_delta, "approval_id": approval_id, "cancelled_jobs": cancelled_jobs})
             self._commit(state)
@@ -4127,6 +4237,11 @@ class CapabilityPackLifecycle:
         # before reconciliation and job admission so no lifecycle receipt or
         # artifact can be created for the wrong execution surface.
         _assert_local_execution_target(pack_id)
+        with self._state_lock(shared=True):
+            state=self._load();pointer=state["active"].get(pack_id)
+            record=state["versions"].get(pack_id,{}).get(pointer.get("digest")) if isinstance(pointer,Mapping) else None
+            if isinstance(record,Mapping) and record.get("authority",{}).get("tools")==["isolated_json_adapter"]:
+                raise CapabilityPackLifecycleError("authored_adapter_requires_isolated_native_job")
         if domain == "primary" and source_payload is None:
             raise CapabilityPackLifecycleError("primary local execution requires an intercepted source value")
         if domain == "secondary" and goal_snapshot is None:
@@ -4484,7 +4599,7 @@ class CapabilityPackLifecycle:
             active = _public_pointer(pointer)
             if (
                 isinstance(pointer, Mapping)
-                and pointer.get("status") != "revoked"
+                and pointer.get("status") not in {"revoked","quarantined","uninstalled"}
                 and not self._pointer_binding_valid(state, pack_id, pointer)
             ):
                 active = {
@@ -4502,6 +4617,7 @@ class CapabilityPackLifecycle:
                     if isinstance(record, Mapping)
                 ],
                 "revoked_digests": list(state["revoked"].get(pack_id, [])),
+                "digest_quarantines": deepcopy(state["authored_quarantines"].get(pack_id,{})),
                 "jobs": [deepcopy(job) for job in state["jobs"].values() if isinstance(job, Mapping) and job.get("pack_id") == pack_id],
                 "local_executions": [
                     deepcopy(execution)

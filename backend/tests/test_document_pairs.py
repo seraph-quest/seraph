@@ -77,7 +77,8 @@ async def test_document_typed_workflow_controls_require_original_executor(monkey
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode",["ingest","native","recovery","interruption","cancel","unsupported"])
+@pytest.mark.parametrize("mode",["ingest","native","recovery","interruption","cancel","unsupported",
+    "expiry_goal","expiry_budget","expiry_pair","expiry_root","expiry_changed","expiry_idle_touch","priority"])
 async def test_authenticated_private_pair_reserve_stream_seal_and_exact_bind(accounting_db, monkeypatch,mode):
     from src.api import auth, goals, work_board
     from src.vault import crypto
@@ -173,9 +174,11 @@ async def test_authenticated_private_pair_reserve_stream_seal_and_exact_bind(acc
             from src.workflows.job_runtime import DurableJobRepository
             from src.work_board import document_compare_native
             original_execute=document_compare_native.execute
+            observed_errors=[]
             async def traced_execute(*args,**kwargs):
                 try:return await original_execute(*args,**kwargs)
-                except Exception:
+                except Exception as exc:
+                    observed_errors.append(getattr(exc,"code",type(exc).__name__))
                     import traceback
                     traceback.print_exc()
                     raise
@@ -201,6 +204,133 @@ async def test_authenticated_private_pair_reserve_stream_seal_and_exact_bind(acc
                 monkeypatch.setattr(document_compare_native,"adopt_output",interrupted_adoption)
             jobs=DurableJobRepository();dispatcher=WorkBoardDispatcher(jobs=jobs,session_provider=factory.accounting_sessions)
             monkeypatch.setattr(work_board,"dispatcher",dispatcher)
+            if mode=="priority":
+                from datetime import timedelta
+                from src.db.models import WorkBoardTask, WorkBoardAttempt, WorkBoardStatus, WorkflowRunState
+                high_goal=await client.post('/api/goals',json={"title":"Higher priority private comparison",
+                    "admission_budget":{"reviewed_grant":True,"grant_id":"document-high-reviewed",
+                        "max_outstanding_jobs":1,"max_attempts":2,"max_runtime_seconds":70}})
+                assert high_goal.status_code==200,high_goal.text
+                high=(await client.post('/api/work-board/document-pairs',json={**body,
+                    "goal_id":high_goal.json()['id'],"idempotency_key":"priority-high-pair"})).json()
+                for slot,raw in sources.items():
+                    response=await client.put(f"/api/work-board/document-pairs/{high['artifact_id']}/sources/{slot}",
+                        params={"expected_revision":high['revision']},content=raw,headers={"content-type":"application/octet-stream"})
+                    assert response.status_code==200,response.text
+                    high=response.json()
+                assert (await client.post(f"/api/work-board/document-pairs/{high['artifact_id']}/complete",
+                    json={"expected_revision":high['revision']})).status_code==200
+                high_response=await client.post('/api/work-board/tasks',json={"title":"High priority",
+                    "goal_id":high_goal.json()['id'],"goal_revision":1,"capability_id":"work.document-compare.v1",
+                    "input_artifact_id":high['artifact_id'],"status":"todo","priority":10,"requires_review":False,
+                    "idempotency_scope":"document-test","idempotency_key":"priority-high-task"})
+                assert high_response.status_code==200,high_response.text
+                # This isolated queue fixture creates exact linked Running
+                # board attempts; admission and parsing are the real native
+                # executor. It is not a second managed UI/claim journey.
+                selected=[]
+                async with factory.accounting_sessions() as db:
+                    for task_id,priority in ((task.json()['task']['task_id'],90),(high_response.json()['task']['task_id'],10)):
+                        selected_task=await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id==task_id))
+                        selected_task.status=WorkBoardStatus.running;selected_task.priority=priority;selected_task.task_revision+=1
+                        stamp=document_compare_native.now()
+                        selected_attempt=WorkBoardAttempt(task_id=task_id,started_at=stamp,fencing_token=1,
+                            lease_owner="document-priority-fixture",lease_expires_at=stamp+timedelta(seconds=70))
+                        selected_attempt.workflow_run_id=document_compare_native.job_id(selected_task,selected_attempt)
+                        db.add(selected_attempt);await db.flush()
+                        selected.append((selected_task,selected_attempt))
+                from src.work_board.dispatcher import _parse_typed_input
+                originals=[]
+                for selected_task,selected_attempt in selected:
+                    projection=await original_execute(selected_task,selected_attempt,_parse_typed_input(selected_task),jobs=jobs,
+                        runner="document-priority-fixture",deadline=selected_attempt.started_at+timedelta(seconds=70),admission_only=True)
+                    projection=await jobs.queue_job(projection['job_id'],expected_revision=projection['revision'])
+                    originals.append((projection['job_id'],projection['deadline_at']))
+                async def run_selected(index):
+                    selected_task,selected_attempt=selected[index]
+                    return await original_execute(selected_task,selected_attempt,_parse_typed_input(selected_task),jobs=jobs,
+                        runner="document-priority-fixture",deadline=selected_attempt.started_at+timedelta(seconds=70),admission_only=False)
+                waiting=await run_selected(0)
+                assert waiting['status']=='queued' and waiting['reason_code']=='document_higher_priority_ready'
+                assert 'document-child' not in document_compare_native.checkpoints(waiting)
+                assert (await run_selected(1))['status']=='succeeded'
+                assert (await run_selected(0))['status']=='succeeded'
+                for index,(job,deadline) in enumerate(originals):
+                    result=await jobs.get_job(job)
+                    assert result['job_id']==job and result['deadline_at']==deadline and result['attempt_count']==1
+                    assert document_compare_native.cleanup_proven(*selected[index],result)
+                evidence=os.environ.get('SERAPH_DOCUMENT_TEST_EVIDENCE')
+                if evidence:
+                    destination=Path(evidence)/mode;destination.mkdir(parents=True,exist_ok=False,mode=0o700)
+                    shutil.copytree(root,destination/'workspace')
+                    for file in destination.rglob('*'):
+                        if file.is_file():file.chmod(0o600)
+                return
+            if mode.startswith("expiry_"):
+                from datetime import timedelta
+                from src.db.models import Goal, OperatorSession, WorkBoardTask, WorkBoardAttempt, WorkflowRunState
+                from src.work_board.dispatcher import _parse_typed_input
+                cap=document_compare_native.now()+timedelta(seconds=60 if mode in {"expiry_changed","expiry_idle_touch"} else 10)
+                async with factory.accounting_sessions() as db:
+                    live=await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id==task.json()['task']['task_id']))
+                    if mode in {"expiry_goal","expiry_changed","expiry_idle_touch"}:
+                        selected_goal=await db.get(Goal,goal_id);selected_goal.due_date=cap
+                    elif mode=="expiry_budget":
+                        selected_goal=await db.get(Goal,goal_id)
+                        budget=json.loads(selected_goal.admission_budget_json);budget['period_expires_at']=cap.isoformat()
+                        selected_goal.admission_budget_json=json.dumps(budget)
+                    elif mode=="expiry_pair":
+                        selected_pair=await db.get(WorkBoardInputArtifact,identifier);selected_pair.expires_at=cap
+                        # Keep the physical metadata seal exact for this valid
+                        # near-expiry input; execution must cap this timestamp.
+                        from src.work_board.input_artifacts import _metadata_digest
+                        selected_pair.metadata_digest=_metadata_digest(selected_pair)
+                    elif mode=="expiry_root":
+                        selected_session=await db.get(OperatorSession,live.owner_session_id);selected_session.absolute_expires_at=cap
+                if mode in {"expiry_changed","expiry_idle_touch"}:
+                    async def expiry_between_admission_and_execution(*args,**kwargs):
+                        result=await traced_execute(*args,**kwargs)
+                        if kwargs['admission_only']:
+                            async with factory.accounting_sessions() as db:
+                                if mode=="expiry_changed":
+                                    selected_goal=await db.get(Goal,goal_id);selected_goal.due_date=cap-timedelta(seconds=1)
+                                else:
+                                    selected_session=await db.get(OperatorSession,args[0].owner_session_id)
+                                    selected_session.idle_expires_at=document_compare_native.utc(selected_session.idle_expires_at)+timedelta(seconds=60)
+                        return result
+                    monkeypatch.setattr(document_compare_native,"execute",expiry_between_admission_and_execution)
+                receipt=await dispatcher.run_pass()
+                async with factory() as db:
+                    run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.job_kind=='document_invoice_compare_v1'))
+                    assert run is not None
+                    assert document_compare_native.utc(run.deadline_at)==cap
+                    original_expiries=json.loads(run.declared_authority_json)['execution_expiries']
+                    assert original_expiries['goal']==cap.isoformat() if mode in {"expiry_goal","expiry_changed","expiry_idle_touch"} else True
+                    if mode=="expiry_idle_touch":
+                        assert run.status=='succeeded' and receipt['completed']==1
+                        projection=await jobs.get_job(run.run_identity)
+                        original_attempt=await db.scalar(select(WorkBoardAttempt))
+                        WorkBoardDispatcher._canonical_identity_from_projection(live,original_attempt,_parse_typed_input(live),projection)
+                        import copy
+                        forged=copy.deepcopy(projection);forged['declared_authority']['execution_expiries']['extra']='caller-expiry'
+                        from src.workflows.job_runtime import DurableJobIdempotencyConflict
+                        from src.work_board.repository import BoardError
+                        with pytest.raises((BoardError,DurableJobIdempotencyConflict)):
+                            WorkBoardDispatcher._canonical_identity_from_projection(live,original_attempt,_parse_typed_input(live),forged)
+                    else:
+                        assert 'document-child' not in document_compare_native.checkpoints(run)
+                        assert 'document-capacity' not in document_compare_native.checkpoints(run)
+                        assert receipt['completed']==0
+                        assert run.attempt_count==0
+                        assert ("document_execution_expiry_changed" if mode=="expiry_changed"
+                            else "document_insufficient_execution_window") in observed_errors
+                evidence=os.environ.get('SERAPH_DOCUMENT_TEST_EVIDENCE')
+                if evidence:
+                    destination=Path(evidence)/mode;destination.mkdir(parents=True,exist_ok=False,mode=0o700)
+                    shutil.copytree(root,destination/'workspace')
+                    for file in destination.rglob('*'):
+                        if file.is_file():file.chmod(0o600)
+                return
             if mode=="cancel":
                 running=asyncio.create_task(dispatcher.run_pass())
                 await asyncio.wait_for(ready.wait(),timeout=10)

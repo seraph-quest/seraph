@@ -5,6 +5,7 @@ input. A positive wait receipt survives a parent crash; absent proof is Unknown.
 """
 from __future__ import annotations
 import json
+import math
 import os
 from pathlib import Path
 import signal
@@ -12,13 +13,18 @@ import stat
 import struct
 import subprocess
 import sys
+import time
 
 MAX_OUTPUT = 512 * 1024
 
 
 def main():
-    if len(sys.argv) != 3: return 2
+    if len(sys.argv) != 4: return 2
     directory = int(sys.argv[1]); binding = json.loads(sys.argv[2])
+    absolute_deadline=float(sys.argv[3])
+    allowance=absolute_deadline-time.time()
+    if not math.isfinite(absolute_deadline) or not 5<allowance<=70:return 2
+    wait_deadline=time.monotonic()+min(35,allowance)
     if (set(binding) != {"job_id", "input_digest", "generation", "nonce"}
         or len(binding["nonce"]) != 32 or any(c not in "0123456789abcdef" for c in binding["nonce"])
         or len(binding["input_digest"]) != 64 or binding["generation"] not in (1,2)):
@@ -26,9 +32,11 @@ def main():
     metadata = os.fstat(directory)
     if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
         return 2
-    # A stalled parent cannot keep the witness supervisor indefinitely. If its
-    # own deadline kills it, absence of the actual witness continues to hold.
-    signal.signal(signal.SIGALRM, signal.SIG_DFL); signal.setitimer(signal.ITIMER_REAL, 35)
+    # Kill the actual parser with five seconds left for positive wait/reap.
+    # Parent death cannot leave a parser running beyond this original window.
+    def expire(_signal,_frame):raise TimeoutError("document_supervisor_deadline")
+    signal.signal(signal.SIGALRM,expire)
+    signal.setitimer(signal.ITIMER_REAL,max(.001,wait_deadline-time.monotonic()-5))
     parser = subprocess.Popen([sys.executable, "-I", str(Path(__file__).with_name("document_compare_child.py")), binding["nonce"]],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, close_fds=True)
     result=b""; reason=None
@@ -54,15 +62,18 @@ def main():
             parser.stdin.close()
             result=parser.stdout.read(MAX_OUTPUT+1)
             if len(result)>MAX_OUTPUT: raise ValueError("document_output_pipe_bound")
+    except TimeoutError:
+        reason="document_supervisor_deadline"
     except (ValueError, OSError, json.JSONDecodeError):
         reason="document_supervisor_interrupted"
     finally:
+        signal.setitimer(signal.ITIMER_REAL,0)
         if reason is not None and parser.poll() is None:
             parser.kill()
         try:
-            exit_code=parser.wait(timeout=5)
+            exit_code=parser.wait(timeout=max(0,min(5,wait_deadline-time.monotonic())))
         except subprocess.TimeoutExpired:
-            parser.kill();exit_code=parser.wait(timeout=5);reason="document_parser_quiescence_timeout"
+            parser.kill();exit_code=parser.wait(timeout=max(0,min(5,wait_deadline-time.monotonic())));reason="document_parser_quiescence_timeout"
         witness={**binding,"supervisor_pid":os.getpid(),"parser_pid":parser.pid,
             "parser_exit":exit_code,"wait_reaped":True,"reason":reason}
         raw=json.dumps(witness,sort_keys=True,separators=(",",":")).encode()

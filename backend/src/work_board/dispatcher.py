@@ -8995,6 +8995,10 @@ class WorkBoardDispatcher:
         *,
         procedure_binding: ProcedureChildBinding | None = None,
     ) -> dict[str, Any]:
+        if task.capability_id == "work.document-compare.v1":
+            if not isinstance(projection, Mapping):
+                raise DurableJobIdempotencyConflict("document expiry snapshot requires canonical admission")
+            return WorkBoardDispatcher._canonical_identity_from_projection(task, attempt, inputs, projection)
         expected_job_id, owner_principal_id, job_kind, service_id, binding_key = WorkBoardDispatcher._direct_job_identity(
             task,
             attempt,
@@ -9232,7 +9236,17 @@ class WorkBoardDispatcher:
             raise DurableJobIdempotencyConflict(
                 "adapter admission projection is missing canonical immutable digests"
             )
-        if task.capability_id in {"work.json-format.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1", "work.document-compare.v1"}:
+        if task.capability_id == "work.document-compare.v1":
+            from src.work_board.document_compare_native import spec_for
+            original_deadline = _utc_datetime(datetime.fromisoformat(str(projection.get("deadline_at"))))
+            expected_spec = spec_for(task, attempt, inputs, deadline=original_deadline,
+                expiries=authority.get("execution_expiries"))
+            expected_digests = {"input_digest": WorkBoardDispatcher._direct_input_digest(task, attempt, inputs),
+                "authority_digest": _safe_digest(expected_spec.declared_authority),
+                "run_fingerprint": expected_spec.run_fingerprint}
+            if expected_spec.deadline_at != original_deadline or digests != expected_digests:
+                raise DurableJobIdempotencyConflict("document original execution window or admission digest changed")
+        elif task.capability_id in {"work.json-format.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
             expected_digests = {
                 "input_digest": WorkBoardDispatcher._direct_input_digest(task, attempt, inputs),
                 "authority_digest": WorkBoardDispatcher._direct_authority_digest(task, attempt, inputs),

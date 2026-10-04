@@ -2,7 +2,7 @@
 from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 import json
 import os
 from pathlib import Path
@@ -24,6 +24,58 @@ from src.workspace import canonical_workspace_root
 
 PREFIX="artifacts/work-board/document-output"
 SEAL=object()
+LAUNCH_SECONDS=35
+
+
+async def execution_expiries(db,task):
+    """Stage finite SQL facts before admission; no writer or filesystem I/O."""
+    row=await db.get(WorkBoardInputArtifact,task.input_artifact_id,populate_existing=True)
+    if row is None:raise BoardError("document_pair_missing","The private pair is unavailable")
+    owner=WorkBoardOwner(principal_id=task.owner_principal_id,session_id=task.owner_session_id)
+    value=metadata(row)
+    goal,budget=await authority(db,owner,row,value,value["root"])
+    session=await db.get(OperatorSession,task.owner_session_id,populate_existing=True)
+    if (session is None or session.principal_id!=task.owner_principal_id or session.revoked_at is not None
+        or session.replaced_by_id is not None or session.is_bearer_tombstone
+        or utc(session.idle_expires_at)<=now() or utc(session.absolute_expires_at)<=now()):
+        raise BoardError("document_operator_session_inactive","The original operator session is inactive")
+    return {key:utc(value).isoformat() if value is not None else None for key,value in {
+        "artifact":row.expires_at,"goal":goal.due_date,"budget":budget.period_expires_at,
+        "root_absolute":session.absolute_expires_at,"root_idle":session.idle_expires_at}.items()}
+
+
+def expiry_cap(expiries):
+    if (not isinstance(expiries,dict) or set(expiries)!={"artifact","goal","budget","root_absolute","root_idle"}
+        or any(expiries[key] is None for key in ("artifact","root_absolute","root_idle"))):
+        raise BoardError("document_execution_window_required","The original finite execution window is required")
+    try:
+        stamps=[datetime.fromisoformat(value) for value in expiries.values() if value is not None]
+        if any(stamp.tzinfo is None or stamp.utcoffset()!=timedelta(0) for stamp in stamps):raise ValueError()
+        if any(not isinstance(value,str) for value in expiries.values() if value is not None):raise ValueError()
+    except (ValueError,TypeError):
+        raise BoardError("document_execution_window_required","The original finite execution window is required") from None
+    return min(stamps)
+
+
+async def validate_expiries(db,task,attempt,run):
+    original=json.loads(run.declared_authority_json).get("execution_expiries")
+    bound=expiry_cap(original)
+    live=await execution_expiries(db,task)
+    if (any(live[key]!=original[key] for key in original if key!="root_idle")
+        or utc(datetime.fromisoformat(live["root_idle"]))<utc(datetime.fromisoformat(original["root_idle"]))
+        or utc(run.deadline_at)>min(bound,utc(attempt.started_at)+timedelta(seconds=70))):
+        raise BoardError("document_execution_expiry_changed","The original execution expiry facts changed")
+
+
+def remaining(deadline,maximum,*,cleanup=0):
+    value=min(maximum,(utc(deadline)-now()).total_seconds()-cleanup)
+    if value<=0:raise BoardError("document_job_window_expired","The original job window expired")
+    return value
+
+
+def require_launch_window(deadline):
+    if remaining(deadline,LAUNCH_SECONDS)<LAUNCH_SECONDS:
+        raise BoardError("document_insufficient_execution_window","The original window cannot cover parser execution and cleanup")
 
 
 def job_id(task, attempt):
@@ -49,9 +101,10 @@ def authority_for(task,attempt,inputs):
             "max_attempts":2,"job_seconds":70,"encrypted_output_bytes":512*1024},"no_learning":True}
 
 
-def spec_for(task,attempt,inputs,*,deadline):
-    deadline=min(deadline,utc(attempt.started_at)+timedelta(seconds=70))
+def spec_for(task,attempt,inputs,*,deadline,expiries):
+    deadline=min(utc(deadline),utc(attempt.started_at)+timedelta(seconds=70),expiry_cap(expiries))
     safe=immutable_inputs(task,inputs); declared=authority_for(task,attempt,inputs)
+    declared["execution_expiries"]=expiries
     return DurableJobSpec(identity=DurableJobIdentity(job_id=job_id(task,attempt),owner_kind="user",
         owner_principal_id=task.owner_principal_id,job_kind=JOB_KIND,capability_version="1",
         idempotency_scope="work-board-attempt",idempotency_key=f"{task.task_id}:{attempt.attempt_id}"),
@@ -103,6 +156,7 @@ class Stage:
 
 async def stage(db,task,attempt,run,inputs,*,physical=True):
     if physical:await source_pair(db,task,inputs)
+    await validate_expiries(db,task,attempt,run)
     row=await db.get(WorkBoardInputArtifact,task.input_artifact_id,populate_existing=True)
     if row is None:raise BoardError("document_pair_missing","The private pair is unavailable")
     return Stage(SEAL,run.run_identity,run.declared_authority_json,_metadata_digest(row),sha256(canonical(root_binding())))
@@ -118,6 +172,7 @@ async def current(db,task,attempt,run,staged,*,require_lease=True):
     row=await db.get(WorkBoardInputArtifact,task.input_artifact_id,populate_existing=True)
     # The root is already physically staged; compare its sealed representation.
     await authority(db,owner,row,metadata(row),json.loads(row.document_metadata_json)["root"])
+    await validate_expiries(db,task,attempt,run)
     if (_metadata_digest(row)!=staged.input_digest or row.metadata_digest!=staged.input_digest
         or row.state not in {"bound","consumed"} or row.bound_task_id!=task.task_id
         or row.payload_sha256!=task.typed_input_digest):
@@ -219,7 +274,13 @@ def _serialize_job(run):
 
 
 async def execute(task,attempt,inputs,*,jobs,runner,deadline,admission_only):
-    spec=spec_for(task,attempt,inputs,deadline=deadline); projection=await jobs.get_job(spec.identity.job_id)
+    projection=await jobs.get_job(job_id(task,attempt))
+    if projection is None:
+        async with jobs._session() as db:expiries=await execution_expiries(db,task)
+    else:
+        expiries=projection["declared_authority"].get("execution_expiries")
+        deadline=utc(datetime.fromisoformat(projection["deadline_at"]))
+    spec=spec_for(task,attempt,inputs,deadline=deadline,expiries=expiries)
     if projection is None:projection=await jobs.admit_job(spec)
     else:
         from src.workflows.job_runtime import _digest
@@ -233,6 +294,7 @@ async def execute(task,attempt,inputs,*,jobs,runner,deadline,admission_only):
     if "document-capacity" in prior:
         raise BoardError("document_original_attempt_recovery_required","Recover the original parser witness and output")
     staged=await stage_current(jobs,task,attempt,inputs)
+    require_launch_window(spec.deadline_at)
     if projection["status"]=="accepted":projection=await jobs.queue_job(spec.identity.job_id,expected_revision=projection["revision"])
     binding={"job_id":spec.identity.job_id,"input_digest":spec.inputs["typed_input_digest"],
         "input_artifact_id":task.input_artifact_id,
@@ -273,9 +335,12 @@ async def execute(task,attempt,inputs,*,jobs,runner,deadline,admission_only):
         path=directory_path(task.input_artifact_id)/"unused"
         parent,_leaf=_open_input_artifact_parent(path,create=True)
         child_binding={key:binding[key] for key in ("job_id","input_digest","generation","nonce")}
+        await stage_current(jobs,task,attempt,inputs)
+        require_launch_window(spec.deadline_at)
         process=await asyncio.create_subprocess_exec(sys.executable,"-I",str(Path(__file__).with_name("document_compare_supervisor.py")),str(parent),canonical(child_binding).decode(),
+            str(spec.deadline_at.timestamp()),
             pass_fds=(parent,),stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.DEVNULL,limit=512*1024+4096)
-        ready=await asyncio.wait_for(process.stdout.readline(),timeout=5)
+        ready=await asyncio.wait_for(process.stdout.readline(),timeout=remaining(spec.deadline_at,5,cleanup=5))
         packet=json.loads(ready)
         if (len(ready)>4096 or packet.get("state")!="ready" or packet.get("binding")!=child_binding
             or packet.get("supervisor_pid")!=process.pid or type(packet.get("parser_pid")) is not int or packet["parser_pid"]<=0):
@@ -285,11 +350,14 @@ async def execute(task,attempt,inputs,*,jobs,runner,deadline,admission_only):
             checkpoint_payload=binding,owner=runner,fencing_token=fence)
         await stage_current(jobs,task,attempt,inputs)
         async with jobs._session() as db: pdf,csv_source=await source_pair(db,task,inputs)
+        await stage_current(jobs,task,attempt,inputs,physical=False)
+        require_launch_window(spec.deadline_at)
         # Source delivery follows persisted positive identity and fresh gates.
         process.stdin.write(struct.pack("!II",len(pdf),len(csv_source))+pdf+csv_source)
-        await process.stdin.drain();process.stdin.close();await process.stdin.wait_closed()
-        raw=await asyncio.wait_for(process.stdout.read(512*1024+1),timeout=35)
-        await asyncio.wait_for(process.wait(),timeout=5)
+        await asyncio.wait_for(process.stdin.drain(),timeout=remaining(spec.deadline_at,5,cleanup=5))
+        process.stdin.close();await asyncio.wait_for(process.stdin.wait_closed(),timeout=remaining(spec.deadline_at,5,cleanup=5))
+        raw=await asyncio.wait_for(process.stdout.read(512*1024+1),timeout=remaining(spec.deadline_at,30,cleanup=5))
+        await asyncio.wait_for(process.wait(),timeout=remaining(spec.deadline_at,5))
         actual,witness_sha=witness(binding)
         if process.returncode!=0 or actual["parser_exit"]!=0 or len(raw)>512*1024:
             raise BoardError("document_parser_resource_exit","The bounded parser did not complete")
@@ -314,8 +382,8 @@ async def execute(task,attempt,inputs,*,jobs,runner,deadline,admission_only):
         # and publish its witness even after this coroutine is cancelled.
         if process is not None:
             if process.stdin is not None:process.stdin.close()
-            try:await asyncio.wait_for(asyncio.shield(process.wait()),timeout=5)
-            except (asyncio.TimeoutError,asyncio.CancelledError):pass
+            try:await asyncio.wait_for(asyncio.shield(process.wait()),timeout=remaining(spec.deadline_at,5))
+            except (asyncio.TimeoutError,asyncio.CancelledError,BoardError):pass
         latest=await jobs.get_job(spec.identity.job_id)
         if latest and cleanup_proven(task,attempt,latest):
             actual,witness_sha=witness(binding)

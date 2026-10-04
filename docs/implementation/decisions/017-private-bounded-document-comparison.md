@@ -72,6 +72,16 @@ this capability. Each child has independent30s default-disposition alarm and
 10s CPU limit; the parent enforces bounded output and positive reap. Two attempts
 maximum share one original70s job deadline capped by authority. Unknown child
 keeps capacity held; lease expiry/empty registry are not cleanup proof.
+Admission snapshots the exact input artifact expiry, Goal due date, budget
+period expiry, and original Root session absolute and idle expiry. The earliest
+of these, caller deadline and original attempt+70s is the immutable job bound.
+An idle touch may extend the current session but cannot extend this original
+bound. Before launch and source delivery, require at least35s for the fixed30s
+child plus5s positive reap; changed absolute expiry facts or shortened idle
+authority deny. Every process/pipe wait uses remaining original time, and the
+trusted supervisor independently kills the parser before its cleanup reserve.
+The upload300s window remains separate. Completed current-owner output reads
+check current private-read authority rather than the execution deadline.
 This trusted subprocess is not an OS confidentiality or network sandbox.
 
 The fixed trusted supervisor inherits a held private directory descriptor and

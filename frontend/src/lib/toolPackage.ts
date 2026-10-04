@@ -52,6 +52,16 @@ async function reviewPackage(packet:ToolProfile,goal_id:string,goal_revision:num
  if(!record(result)||!record(result.review)||!id(result.review.review_id))throw Error("Review receipt unavailable");
  return result.review.review_id;
 }
+function canonicalPins(value:unknown):unknown{
+ if(Array.isArray(value))return value.map(canonicalPins);
+ if(record(value))return Object.fromEntries(Object.keys(value).sort().map(key=>[key,canonicalPins(value[key])]));
+ return value;
+}
+async function requireAuthoredExecutionProfile(packet:ToolProfile,signal?:AbortSignal){
+ const current=await readAuthoredProfile(packet.root_path,signal);
+ if(current.profile.status!=="available")throw Error("Current authored execution profile unavailable; retain and retry the exact request.");
+ if(current.pack_id!==packet.pack_id||current.root_path!==packet.root_path||current.content_digest!==packet.content_digest||current.authority_digest!==packet.authority_digest||JSON.stringify(canonicalPins(current.manifest))!==JSON.stringify(canonicalPins(packet.manifest))||JSON.stringify(canonicalPins(current.descriptor))!==JSON.stringify(canonicalPins(packet.descriptor)))throw Error("Current authored package pins changed; original request and approvals retained.");
+}
 export async function submitTool(key:string,pending:ToolPending,signal?:AbortSignal):Promise<WorkBoardTask|null>{
  retainToolPending(key,pending);
  if(pending.kind==="review"){
@@ -59,10 +69,12 @@ export async function submitTool(key:string,pending:ToolPending,signal?:AbortSig
  }
  if(pending.kind==="approve"){
   const packet=pending.packet;const action=pending.action??"activate";const packPath="/api/capability-packs/"+encodeURIComponent(packet.pack_id);const base={goal_id:pending.goal_id,content_digest:packet.content_digest,authority_digest:packet.authority_digest};
+  const executionBound=Boolean(packet.descriptor)&&["activate","update","rollback"].includes(action);
+  if(executionBound&&pending.step!==3)await requireAuthoredExecutionProfile(packet,signal);
   if(pending.step===0){if(action==="revoke"||action==="uninstall"){pending={...pending,step:1};}else{pending={...pending,step:1,review_id:await reviewPackage(packet,pending.goal_id,pending.goal_revision,signal)};}retainToolPending(key,pending);}
   if(pending.step===1){const result=await request(packPath+"/approvals",{...base,action,digest:packet.content_digest,version:packet.manifest.version},signal);if(!record(result)||!record(result.approval)||!id(result.approval.approval_id))throw Error("Approval receipt unavailable");pending={...pending,step:2,approval_id:result.approval.approval_id};retainToolPending(key,pending);}
   if(pending.step===2){await request(packPath+`/approvals/${pending.approval_id}/approve`,{},signal);pending={...pending,step:3};retainToolPending(key,pending);}
-  if(pending.step===3){const body=action==="activate"||action==="update"?{...base,manifest:packet.manifest,root_path:packet.root_path,review_id:pending.review_id,approval_id:pending.approval_id}:action==="rollback"?{...base,approval_id:pending.approval_id}:{content_digest:packet.content_digest,authority_digest:packet.authority_digest,approval_id:pending.approval_id,...(action==="revoke"?{digest:packet.content_digest}:{})};await request(packPath+"/"+action,body,signal);}
+  if(pending.step===3){if(executionBound)await requireAuthoredExecutionProfile(packet,signal);const body=action==="activate"||action==="update"?{...base,manifest:packet.manifest,root_path:packet.root_path,review_id:pending.review_id,approval_id:pending.approval_id}:action==="rollback"?{...base,approval_id:pending.approval_id}:{content_digest:packet.content_digest,authority_digest:packet.authority_digest,approval_id:pending.approval_id,...(action==="revoke"?{digest:packet.content_digest}:{})};await request(packPath+"/"+action,body,signal);}
   clear(key);return null;
  }
  if(pending.kind==="create"){

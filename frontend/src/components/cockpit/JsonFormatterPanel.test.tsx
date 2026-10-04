@@ -1,7 +1,8 @@
 import {fireEvent,render,screen,waitFor} from "@testing-library/react";
 import {beforeEach,expect,it,vi} from "vitest";
 import {apiFetch} from "../../lib/api";
-import {readToolPending,toolStorageKey} from "../../lib/toolPackage";
+import {readToolPending,retainToolPending,toolStorageKey} from "../../lib/toolPackage";
+import type {ToolPending,ToolProfile} from "../../lib/toolPackage";
 import type {GoalInfo,WorkBoardTask} from "../../types";
 import {JsonFormatterPanel} from "./JsonFormatterPanel";
 vi.mock("../../lib/api",()=>({apiFetch:vi.fn()}));
@@ -136,4 +137,52 @@ it("retains a lost static review exactly across reload and isolates it from anot
  mounted.rerender(<JsonFormatterPanel {...authoredProps} ownerPrincipalId="operator:other" ownerSessionId="other-root"/>);expect(screen.queryByRole("button",{name:"Retry exact authored package request"})).toBeNull();expect(readToolPending(toolStorageKey("operator:other","other-root","authored-create"))).toBeNull();expect(readToolPending(staticKey)?.kind).toBe("review");expect(bodies).toHaveLength(1);
  mounted.unmount();render(<JsonFormatterPanel {...authoredProps}/>);fireEvent.click(await screen.findByRole("button",{name:"Retry exact authored package request"}));await screen.findByText(/Static package review recorded for Goal goal-one/);
  expect(readToolPending(staticKey)).toBeNull();expect(bodies).toHaveLength(2);expect(bodies[1]).toBe(bodies[0]);expect(vi.mocked(apiFetch).mock.calls.every(([url])=>String(url).endsWith("/inspect")||String(url).endsWith("/review"))).toBe(true);expect(screen.getByRole("button",{name:"Create authored package task"})).toBeDisabled();
+});
+
+it.each(["activate","update","rollback"] as const)("requires fresh matching availability before retained %s and preserves lost-response owner scope",async(action)=>{
+ const pending:ToolPending={kind:"approve",goal_id:"goal-one",goal_revision:1,packet:blockedAuthoredPacket as ToolProfile,step:3,review_id:"original-review",approval_id:"original-approval",action};
+ retainToolPending(staticKey,pending);const original=sessionStorage.getItem(staticKey);let available=false;
+ const bodies:string[]=[];const paths:string[]=[];
+ vi.mocked(apiFetch).mockImplementation(async(url,options)=>{
+  const path=String(url);paths.push(path);
+  if(path.endsWith("/inspect"))return new Response(JSON.stringify({...blockedAuthoredPacket,profile:available?{status:"available"}:blockedAuthoredPacket.profile}));
+  expect(path).toMatch(new RegExp(`/local.time-ledger-summary/${action}$`));bodies.push(String(options?.body));
+  expect(sessionStorage.getItem(staticKey)).toBe(original);
+  if(bodies.length===1)throw Error("Lifecycle response lost");
+  return new Response('{}');
+ });
+ const mounted=render(<JsonFormatterPanel {...authoredProps}/>);
+ fireEvent.click(await screen.findByRole("button",{name:"Retry exact authored package request"}));await screen.findByText(/Current authored execution profile unavailable/);
+ expect(paths).toHaveLength(1);expect(paths[0]).toMatch(/\/authored\/inspect$/);expect(bodies).toHaveLength(0);expect(sessionStorage.getItem(staticKey)).toBe(original);
+ available=true;fireEvent.click(screen.getByRole("button",{name:"Retry exact authored package request"}));await screen.findByText("Lifecycle response lost");expect(sessionStorage.getItem(staticKey)).toBe(original);
+ mounted.rerender(<JsonFormatterPanel {...authoredProps} ownerPrincipalId="operator:other" ownerSessionId="other-root"/>);expect(screen.queryByRole("button",{name:"Retry exact authored package request"})).toBeNull();expect(sessionStorage.getItem(staticKey)).toBe(original);expect(bodies).toHaveLength(1);
+ mounted.unmount();render(<JsonFormatterPanel {...authoredProps}/>);fireEvent.click(await screen.findByRole("button",{name:"Retry exact authored package request"}));await waitFor(()=>expect(readToolPending(staticKey)).toBeNull());
+ expect(bodies).toHaveLength(2);expect(bodies[1]).toBe(bodies[0]);
+ expect(JSON.parse(bodies[0])).toEqual(action==="rollback"?{goal_id:"goal-one",content_digest:pending.packet.content_digest,authority_digest:pending.packet.authority_digest,approval_id:"original-approval"}:{goal_id:"goal-one",content_digest:pending.packet.content_digest,authority_digest:pending.packet.authority_digest,manifest:pending.packet.manifest,root_path:pending.packet.root_path,review_id:"original-review",approval_id:"original-approval"});
+ expect(paths.every(path=>path.endsWith("/inspect")||path.endsWith("/"+action))).toBe(true);
+});
+
+it.each([
+ ["package",{pack_id:"local.other-package",manifest:{id:"local.other-package",version:"1.0.0"},descriptor:{capability_id:"pack.local.other-package.summarize.v1"}}],
+ ["content",{content_digest:"c".repeat(64)}],
+ ["authority",{authority_digest:"c".repeat(64)}],
+ ["descriptor",{descriptor:{capability_id:"pack.local.time-ledger-summary.other.v1"}}],
+ ["manifest",{manifest:{id:"local.time-ledger-summary",version:"2.0.0"}}],
+] as const)("denies retained activation when fresh %s pins differ",async(_name,change)=>{
+ const pending:ToolPending={kind:"approve",goal_id:"goal-one",goal_revision:1,packet:blockedAuthoredPacket as ToolProfile,step:3,review_id:"original-review",approval_id:"original-approval"};retainToolPending(staticKey,pending);const original=sessionStorage.getItem(staticKey);
+ vi.mocked(apiFetch).mockImplementation(async(url)=>{expect(String(url)).toMatch(/\/authored\/inspect$/);return new Response(JSON.stringify({...blockedAuthoredPacket,...change,profile:{status:"available"}}));});
+ render(<JsonFormatterPanel {...authoredProps}/>);fireEvent.click(await screen.findByRole("button",{name:"Retry exact authored package request"}));await screen.findByText(/Current authored package pins changed/);expect(vi.mocked(apiFetch)).toHaveBeenCalledTimes(1);expect(sessionStorage.getItem(staticKey)).toBe(original);
+});
+
+it("checks fresh availability before starting combined authored review and approval",async()=>{
+ let available=true;const paths:string[]=[];
+ vi.mocked(apiFetch).mockImplementation(async(url)=>{const path=String(url);paths.push(path);expect(path).toMatch(/\/authored\/inspect$/);return new Response(JSON.stringify({...blockedAuthoredPacket,profile:available?{status:"available"}:blockedAuthoredPacket.profile}));});
+ render(<JsonFormatterPanel {...authoredProps}/>);fireEvent.change(screen.getByLabelText("Selected package directory"),{target:{value:blockedAuthoredPacket.root_path}});fireEvent.click(screen.getByRole("button",{name:"Refresh manifest and dependencies"}));await screen.findByText(/Selected capability:/);fireEvent.change(screen.getByLabelText("Authored package Goal"),{target:{value:"goal-one"}});fireEvent.click(screen.getByRole("checkbox"));available=false;
+ fireEvent.click(screen.getByRole("button",{name:"Review and approve exact authored package"}));await screen.findByText(/Current authored execution profile unavailable/);expect(paths).toHaveLength(2);expect(readToolPending(staticKey)).toMatchObject({kind:"approve",step:0,review_id:null,approval_id:null});expect(screen.getByRole("button",{name:"Create authored package task"})).toBeDisabled();
+});
+
+it.each(["revoke","uninstall"] as const)("keeps retained %s usable with a blocked authored profile",async(action)=>{
+ retainToolPending(staticKey,{kind:"approve",goal_id:"goal-one",goal_revision:1,packet:blockedAuthoredPacket as ToolProfile,step:3,review_id:null,approval_id:"withdrawal-approval",action});
+ vi.mocked(apiFetch).mockImplementation(async(url)=>{expect(String(url)).toMatch(new RegExp(`/local.time-ledger-summary/${action}$`));return new Response('{}');});
+ render(<JsonFormatterPanel {...authoredProps}/>);fireEvent.click(await screen.findByRole("button",{name:"Retry exact authored package request"}));await waitFor(()=>expect(readToolPending(staticKey)).toBeNull());expect(vi.mocked(apiFetch)).toHaveBeenCalledTimes(1);
 });

@@ -379,6 +379,26 @@ class CalendarObservationInput(BaseModel):
     max_events_per_scan: int = Field(..., ge=1, le=10)
 
 
+class CalendarRescheduleTime(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    dateTime: str = Field(min_length=1, max_length=128)
+    timeZone: str = Field(min_length=1, max_length=128)
+
+
+class CalendarRescheduleInput(BaseModel):
+    """Opaque selection/grant plus literal times; provider IDs stay private."""
+    model_config = ConfigDict(extra="forbid", strict=True)
+    schema_version: Literal[1] = 1
+    consent_id: str = Field(min_length=1, max_length=256)
+    expected_consent_revision: int = Field(ge=1)
+    event_binding_id: str = Field(min_length=1, max_length=256)
+    expected_event_binding_revision: int = Field(ge=1)
+    goal_id: str = Field(min_length=1, max_length=256)
+    goal_revision: int = Field(ge=1)
+    new_start: CalendarRescheduleTime
+    new_end: CalendarRescheduleTime
+
+
 class MailWatchInput(BaseModel):
     """Scheduler-only, metadata-only Gmail watch configuration."""
 
@@ -423,6 +443,7 @@ _TYPED_INPUT_MODELS: dict[str, type[BaseModel]] = {
     "guardian-routine.v2": _RoutineV2Input,
     "calendar.meeting-prep.v1": CalendarMeetingPrepInput,
     "calendar.observe_due_events.v1": CalendarObservationInput,
+    "calendar.event.reschedule.v1": CalendarRescheduleInput,
     "gmail.scan_metadata.v1": MailWatchInput,
     "work.mail-reply-draft.v1": MailReplyDraftInput,
 }
@@ -570,6 +591,11 @@ REGISTERED_CAPABILITIES: dict[str, CapabilitySpec] = {
         "1",
         input_category="scheduler",
         secret_like=False,
+    ),
+    "calendar.event.reschedule.v1": CapabilitySpec(
+        "calendar.event.reschedule.v1", "calendar-exact-reschedule-v1",
+        blocked_reason="calendar_exact_operator_control_required",
+        input_category="task", secret_like=False,
     ),
     "gmail.scan_metadata.v1": CapabilitySpec(
         "gmail.scan_metadata.v1",

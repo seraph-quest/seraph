@@ -12,6 +12,7 @@ import { WorkflowPanel } from "./settings/WorkflowPanel";
 import { SourceWatchPanel } from "./settings/SourceWatchPanel";
 import { ArtifactStoragePanel } from "./settings/ArtifactStoragePanel";
 import { CalendarConnectionPanel } from "./settings/CalendarConnectionPanel";
+import { CalendarRescheduleProfiles } from "./settings/CalendarRescheduleProfiles";
 import { GitHubConnectionPanel } from "./settings/GitHubConnectionPanel";
 import { MoltbookConnectionPanel } from "./settings/MoltbookConnectionPanel";
 import { RepoSandboxPanel } from "./settings/RepoSandboxPanel";
@@ -754,6 +755,10 @@ export function SettingsPanel() {
 
           {activeSection === "calendar" && <CalendarConnectionPanel
             service="calendar_readonly"
+            ownerPrincipalId={operatorAuth?.session.principal_id ?? null}
+            ownerSessionId={operatorAuth?.session.session_id ?? null}
+          />}
+          {activeSection === "calendar" && <CalendarRescheduleProfiles
             ownerPrincipalId={operatorAuth?.session.principal_id ?? null}
             ownerSessionId={operatorAuth?.session.session_id ?? null}
           />}

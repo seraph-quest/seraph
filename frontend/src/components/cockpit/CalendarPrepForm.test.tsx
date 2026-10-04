@@ -49,6 +49,25 @@ describe("CalendarPrepForm", () => {
     vi.restoreAllMocks();
   });
 
+  it("allows readonly event selection without model consent while meeting preparation stays blocked", async () => {
+    fetchMock
+      .mockResolvedValueOnce(response({ connections: [connection] }))
+      .mockResolvedValueOnce(response({ connection, calendars: [{ calendar_id: "calendar-1", summary: "Work" }], calendar_list_revision: digest, pages_read: 1, truncated: false, provider_status: "verified" }))
+      .mockResolvedValueOnce(response({ consent: { consent_id: "consent-1", connection_id: "connection-1", connection_revision: 2, goal_id: "goal-1", goal_revision: 4, allowed_fields: ["summary", "start", "end", "location"], window_minutes: 1440, max_events: 20, allow_remote_model: false, expires_at: futureConsentExpiry(), state: "active", revision: 1, consent_digest: digest, created_at: "2026-09-30T09:00:00Z", updated_at: "2026-09-30T09:00:00Z" } }))
+      .mockResolvedValueOnce(response({ events: [{ event_binding_id: "binding-1", event_binding_revision: 3, event_key: digest, event_revision: digest, calendar_list_revision: digest, summary: "Planning", start: "2026-09-30T12:00:00Z", end: "2026-09-30T13:00:00Z", location: null, description: null, attendees: null }], consent_id: "consent-1", consent_revision: 1, connection_revision: 2, calendar_list_revision: digest, fetched_at: "2026-09-30T09:01:00Z", pages_read: 1, truncated: false }));
+    const onCreated=vi.fn();
+    render(<CalendarPrepForm goals={[goal]} ownerPrincipalId="operator" ownerSessionId="root" onCreated={onCreated} onClose={vi.fn()} />);
+    await screen.findByText("Work calendar · active · revision 2");
+    fireEvent.click(screen.getByRole("button", { name: "Verify calendars" })); await screen.findByRole("option", { name: "Work" });
+    expect(screen.getByRole("checkbox", { name: /Allow the governed OpenRouter model/ })).not.toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: "Create finite consent and read events" })); await screen.findByRole("option", { name: /Planning/ });
+    expect(JSON.parse(String(fetchMock.mock.calls[2][1].body)).allow_remote_model).toBe(false);
+    fireEvent.change(screen.getByLabelText("Event binding"), { target: { value: "binding-1" } });
+    expect(screen.getByRole("region", { name: "Reschedule one owned calendar event" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Prepare meeting" })).toBeDisabled();
+    expect(fetchMock).toHaveBeenCalledTimes(4); expect(onCreated).not.toHaveBeenCalled();
+  });
+
   it("walks the explicit verify, finite consent, event, and prep sequence", async () => {
     const onCreated = vi.fn();
     const selectedEventListRevision = "b".repeat(64);

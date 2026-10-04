@@ -364,8 +364,9 @@ provider, embedding, edge, voice, and Telegram evidence is reported as
 `skipped`/`degraded` until a separately authorised canary supplies a receipt;
 those omissions never become a superiority claim.
 
-Branch-local #920 adds **Send neutral Telegram notice** in the current task's
-inspector. Pair the operator/chat and grant Telegram transit consent in Settings
+The bounded #920 profile adds **Send neutral Telegram notice** in the current
+task's inspector, available with the installed reviewed program revision.
+Pair the operator/chat and grant Telegram transit consent in Settings
 first. Explicit status review sends enum metadata; exact denial and cancellation
 use current canonical authority. Sensitive approval and recovery remain in the
 cockpit. Unknown delivery requires visible outbox recovery or an explicit fresh

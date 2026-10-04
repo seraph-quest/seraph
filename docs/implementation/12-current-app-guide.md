@@ -1592,16 +1592,20 @@ community receipt from the same authority within five minutes, acknowledgment
 of community purpose and exact draft approval. Content verification retains
 the same job: the human supplies a two-decimal answer and separately approves
 that answer for the original content, challenge and expiry. The immutable
-300-second job has one attempt and six contacts: one status GET, three other
+300-second job has one attempt and at most six contacts: one status GET, three other
 fixed GETs, one creation POST and one verification POST. Restart, approval and
 manual answer never renew those allowances.
 
 The [official API instructions](https://www.moltbook.com/skill.md), checked
 2026-10-03, document community feed/comment listings and verification.
 Verification or exact-ID readback alone cannot establish public visibility.
-Publication requires matching verified ID, author, text, target and parent
-in one bounded public community-feed or target-comment listing; explicit
-hidden/private/removed metadata rejects adoption. An absent item remains
+Post publication requires exact-ID membership in one bounded public community
+feed page (at most ten items), then one exact-post GET matching the full approved
+text, verified ID, author and community. A truncated feed preview is membership
+evidence rather than full text. Comments retain the bounded target-comment
+listing and exact parent check. All contacts remain inside the original
+six-contact/deadline allowance; explicit hidden/private/removed metadata rejects
+adoption. An absent item remains
 unconfirmed. No invented positive visibility field, extra pagination, alternate
 origin or retry is used.
 

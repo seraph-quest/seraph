@@ -20,7 +20,7 @@ from src.vault.repository import vault_repository
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["post", "reply", "reply_observed", "reply_unlisted", "reply_hidden", "reply_pending", "reply_ambiguous", "accepted_drop", "wrong_author", "hidden", "peer_goal", "rotated_key", "stale_community", "status_rate_limited", "status_rate_html", "status_unclaimed", "status_rejected", "status_drop", "status_stale_goal", "status_revoked_root", "status_cancel_rate", "status_cancel_rate_stale_goal"])
+@pytest.mark.parametrize("mode", ["post", "post_truncated", "feed_overflow", "post_altered", "full_hidden", "full_pending", "full_foreign_community", "absent_feed", "verify_drop", "reply", "reply_observed", "reply_unlisted", "reply_hidden", "reply_pending", "reply_ambiguous", "accepted_drop", "wrong_author", "hidden", "peer_goal", "rotated_key", "stale_community", "status_rate_limited", "status_rate_html", "status_unclaimed", "status_rejected", "status_drop", "status_stale_goal", "status_revoked_root", "status_cancel_rate", "status_cancel_rate_stale_goal"])
 async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db, monkeypatch, mode):
     from src.api import auth, goals, moltbook
     root, db_engine, factory = accounting_db
@@ -86,7 +86,16 @@ async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db
             assert verified is False, "second underlying verification POST forbidden"
             assert json.loads(request.content) == {"verification_code": "private-original-challenge-code", "answer": "42.00"}
             verified = True
+            if mode == "verify_drop": raise httpx.ReadError("verification response lost after acceptance",request=request)
             value = {"success": True}
+        elif path == "/posts/"+content_id:
+            assert request.method == "GET" and verified
+            value = {"post": {"id": content_id, "title": creation["title"],
+                "content": creation["content"]+" altered" if mode == "post_altered" else creation["content"],
+                "author": {"id": "wrong-account" if mode == "wrong_author" else "account-one"},
+                "submolt": {"name": "foreign-community" if mode == "full_foreign_community" else "introductions"},
+                "verification_status": "pending" if mode == "full_pending" else "verified",
+                "hidden": mode == "full_hidden"}}
         elif path == "/posts/target-post": value = {"post": {"id": "target-post", "content": "Public introduction",
             "title": "Welcome", "author": {"id": "original-author"}, "submolt": {"name": "introductions"}, "verification_status": "verified"}}
         elif path == "/posts/target-post/comments":
@@ -104,10 +113,14 @@ async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db
                 if mode != "reply_observed": target["verification_status"] = "pending" if mode == "reply_pending" else "verified"
                 if mode == "reply_hidden": target["hidden"] = True
                 return httpx.Response(200, json={"posts": [] if mode == "reply_unlisted" else [target, target] if mode == "reply_ambiguous" else [target]})
-            value = {"posts": [{"id": content_id, "title": creation["title"], "content": creation["content"],
-                "author": {"id": "wrong-account" if mode == "wrong_author" else "account-one"},
+            assert request.url.params["limit"] == "10"
+            value = {"posts": [] if mode == "absent_feed" else [{"id": content_id, "title": creation["title"], "content": creation["content"][:400],
+                "author": {"id": "account-one"},
                 "submolt": {"name": "introductions"}, "verification_status": "verified" if verified else "pending",
                 "hidden": mode == "hidden"}]}
+            if mode in {"post_truncated","feed_overflow"}:
+                target=value["posts"][0]
+                value["posts"]=[{**target,"id":"unrelated-post-"+str(i)} for i in range(9 if mode=="post_truncated" else 10)]+[target]
         else: raise AssertionError("unexpected fixed provider route: "+path)
         return httpx.Response(200, json=value)
     class ClosingBarrier(httpx.MockTransport):
@@ -164,6 +177,7 @@ async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db
                 row.finished_at = datetime.now(timezone.utc)-timedelta(minutes=6); db.add(row)
         fields = {"post_id": "target-post", "parent_id": "parent-one", "content": "Public operator-authored reply"} if reply_mode else {
             "community": "introductions", "title": "Transparent Seraph introduction", "content": "Public operator-authored feedback request"}
+        if mode == "post_truncated": fields["content"] = "Public operator-authored feedback request. " * 20
         prepared = await client.post("/api/capabilities/moltbook/writes", json={"operation": "create_comment" if reply_mode else "create_post",
             "fields": fields, "request_key": "write-one", "goal_id": write_goal, "goal_revision": 1, "expected_revision": write_revision,
             "community_job_id": community["job_id"], "community_digest": community["artifacts"][0]["content_sha256"],
@@ -279,16 +293,26 @@ async def test_actual_exact_approved_create_manual_verify_same_job(accounting_db
             "expected_phase": "awaiting_verify_approval"})
         assert conflict.status_code == 409 and len(requests) == count
         completed = await execute(client, job_id)
-        if mode in {"wrong_author", "hidden"}:
+        if mode in {"wrong_author", "hidden", "post_altered", "full_hidden", "full_pending", "full_foreign_community", "absent_feed", "feed_overflow", "verify_drop"}:
             assert completed.status_code == 409, completed.text
             state = (await client.get(f"/api/capabilities/moltbook/jobs/{job_id}")).json()
             assert state["status"] == "unknown_external_effect" and state["artifacts"] == []
+            assert state["deadline_at"] == original["deadline_at"] and state["attempt_count"] == 1
+            assert (await client.get("/api/capabilities/moltbook/connection")).json()["active_job_id"] == job_id
+            count=len(requests)
+            await db_engine.dispose()
+            historical=await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/execute",json=json.loads(completed.request.content))
+            assert historical.status_code==200 and historical.json()["status"]=="unknown_external_effect",historical.text
+            assert len(requests)==count
         else:
             assert completed.status_code == 200, completed.text
             final = completed.json()
             assert final["status"] == "succeeded" and final["attempt_count"] == 1
             assert final["deadline_at"] == original["deadline_at"]
-            assert len(checkpoint(final)["calls"]) == (6 if reply_mode else 4)
+            assert len(checkpoint(final)["calls"]) == (6 if reply_mode else 5)
+            if not reply_mode:
+                assert sum(path == "/api/v1/posts/"+content_id for _,path,_ in requests)==1
+                assert len(checkpoint(final)["calls"])<=6
             if reply_mode:
                 assert not any(path == "/api/v1/posts/target-post" for _, path, _ in requests)
             output = await client.get(f"/api/capabilities/moltbook/jobs/{job_id}/output")

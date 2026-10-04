@@ -7,7 +7,7 @@ import uuid
 
 from config.settings import settings
 from src.artifacts.registry import build_artifact_record
-from src.browser.moltbook_private_read import ARTIFACT_TYPE, JOB_KIND, OPERATION, PROFILE, validate_projection
+from src.browser.moltbook_private_read import ARTIFACT_TYPE, JOB_KIND, OPERATION, PROFILE, validate_read_result
 from src.browser.task_lane import try_acquire_browser_task_lane
 from src.db import engine
 from src.integrations.moltbook import MoltbookError, canonical, digest
@@ -36,7 +36,7 @@ def read_output(reference, expected_digest, *, expected_job):
     if (len(canonical(payload)) > 65536 or payload.get("job_id") != expected_job
         or payload.get("profile") != PROFILE or payload.get("no_learning") is not True):
         raise MoltbookError("moltbook_private_output_binding_changed")
-    validate_projection(payload)
+    validate_read_result(payload,expected_job=expected_job)
     return payload
 
 
@@ -146,7 +146,7 @@ async def execute_private_read(service, owner, job_id, *, execution):
             expected_name=authority["account_name"],deadline=deadline,check_current=check_current,
             contact=contact,observe=observe,cleanup_observer=retain_cleanup)
         result["job_id"] = job_id
-        validate_projection(result)
+        validate_read_result(result,expected_job=job_id)
         plain = canonical(result)
         if len(plain) > 65536: raise MoltbookError("moltbook_private_output_bound")
         encrypted = encrypt(plain.decode()).encode()

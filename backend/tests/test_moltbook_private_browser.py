@@ -11,13 +11,13 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 from fastapi import FastAPI
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from tests.test_inference_accounting import accounting_db
 from tests.moltbook_requests import execute
 from config.settings import settings
 from src.auth.middleware import OperatorAuthMiddleware
-from src.browser.moltbook_private_read import MoltbookPrivateBrowserReader, parse_document, cited_projection, validate_projection
+from src.browser.moltbook_private_read import MoltbookPrivateBrowserReader, parse_document, cited_projection, validate_projection, validate_read_result
 from src.db.models import Goal, MoltbookConnection, OperatorSession, WorkflowRunState
 from src.integrations.moltbook import MoltbookAdapter, MoltbookError, canonical, digest
 from src.integrations.moltbook_controls import MoltbookService
@@ -61,7 +61,8 @@ class LocalTCPTransport(httpx.AsyncBaseTransport):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode",["positive","stale_goal","vault_drift","input_drift","revoke","expired_root",
-    "wrong_identity","home_drop","home_redirect","set_cookie","secret_echo","goal_after_home"])
+    "wrong_identity","home_drop","home_redirect","set_cookie","secret_echo","goal_after_home",
+    "root_refresh","dns_private","dns_mixed","cancel_unattempted","cancel_staged","foreign_owner"])
 async def test_actual_private_home_chromium_owner_job_readback_restart(accounting_db,monkeypatch,mode):
     from src.api import auth,goals,moltbook
     root,db_engine,factory = accounting_db
@@ -76,7 +77,31 @@ async def test_actual_private_home_chromium_owner_job_readback_restart(accountin
     _reset_login_throttle_for_tests()
     calls=[]
     deliveries=[]
+    staged=asyncio.Event()
+    release=asyncio.Event()
+    writer_connections=set()
+    def sql_boundary(connection,cursor,statement,parameters,context,many):
+        if statement.strip().upper().startswith("BEGIN IMMEDIATE"): writer_connections.add(id(connection))
+    def finished(connection): writer_connections.discard(id(connection))
+    event.listen(db_engine.sync_engine,"before_cursor_execute",sql_boundary)
+    event.listen(db_engine.sync_engine,"commit",finished)
+    event.listen(db_engine.sync_engine,"rollback",finished)
+    from src.browser import moltbook_private_native
+    from src.integrations import moltbook_controls
+    for module in (moltbook_private_native,moltbook_controls):
+        for name in ("encrypt","decrypt","_read_workspace_text_bounded","_write_payload","build_artifact_record"):
+            original=getattr(module,name)
+            def outside_writer(*args,_original=original,**kwargs):
+                assert not writer_connections,"private file/crypto operation inside immediate writer"
+                return _original(*args,**kwargs)
+            monkeypatch.setattr(module,name,outside_writer)
+    original_snapshot=vault_repository.snapshot
+    async def staged_vault(*args,**kwargs):
+        assert not writer_connections,"Vault nested session/decrypt inside immediate writer"
+        return await original_snapshot(*args,**kwargs)
+    monkeypatch.setattr(vault_repository,"snapshot",staged_vault)
     async def server(reader,writer):
+        assert not writer_connections,"network contact inside immediate writer"
         raw=await reader.readuntil(b"\r\n\r\n")
         first,*lines=raw.decode().split("\r\n")
         method,path,_=first.split()
@@ -95,6 +120,9 @@ async def test_actual_private_home_chromium_owner_job_readback_restart(accountin
             if mode == "goal_after_home":
                 changed=await client.patch("/api/goals/"+goal["id"],json={"expected_revision":1,"description":"Changed after actual Home contact"})
                 assert changed.status_code == 200,changed.text
+            if mode == "root_refresh":
+                refreshed=await client.post("/api/auth/refresh")
+                assert refreshed.status_code == 200,refreshed.text
         else: raise AssertionError("unapproved fixture route")
         body=canonical(value)
         status=b"302 Found" if mode == "home_redirect" and path == "/api/v1/home" else b"200 OK"
@@ -111,6 +139,8 @@ async def test_actual_private_home_chromium_owner_job_readback_restart(accountin
     resolver=lambda host,port:["93.184.216.34"]
     service=MoltbookService(adapter=MoltbookAdapter(transport=transport,resolver=resolver),
         private_browser=MoltbookPrivateBrowserReader(local_transport=transport,resolver=resolver))
+    if mode in {"dns_private","dns_mixed"}:
+        service.private_browser.resolver=lambda host,port:["127.0.0.1"] if mode == "dns_private" else ["93.184.216.34","127.0.0.1"]
     monkeypatch.setattr(moltbook,"moltbook_service",service)
     app=FastAPI(); app.add_middleware(OperatorAuthMiddleware)
     app.include_router(auth.router,prefix="/api/auth"); app.include_router(goals.router,prefix="/api")
@@ -151,6 +181,35 @@ async def test_actual_private_home_chromium_owner_job_readback_restart(accountin
             assert prepared.status_code == 200,prepared.text
             job_id=prepared.json()["job_id"]
             assert prepared.json()["job_kind"] == "moltbook_private_home_v1"
+            if mode == "foreign_owner":
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url="http://test",
+                    headers={"origin":"http://localhost:3001"}) as other:
+                    logged=await other.post("/api/auth/login",json={"password":"private-browser-local-password","start_new_scope":True})
+                    assert logged.status_code == 200,logged.text
+                    assert (await other.get(f"/api/capabilities/moltbook/jobs/{job_id}")).status_code in {403,404}
+                    assert (await other.get(f"/api/capabilities/moltbook/jobs/{job_id}/output")).status_code in {403,404}
+                    assert (await other.post(f"/api/capabilities/moltbook/jobs/{job_id}/execute",json={"request_key":"foreign-execute","expected_phase":"unattempted","fencing_token":0})).status_code in {403,404}
+                    imported=await other.put("/api/capabilities/moltbook/connection",json={"vault_key":"private-home-dummy","request_key":"foreign-import"})
+                    assert imported.status_code == 409,imported.text
+                    assert calls == ["/api/v1/agents/me","/api/v1/agents/status"]
+                print(json.dumps({"mode":mode,"actual_authenticated_foreign_root":"denied","contacts":len(calls),"workspace":str(root)}))
+                return
+            if mode == "cancel_unattempted":
+                cancelled=await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/cancel",json={"request_key":"cancel-precontact",
+                    "expected_revision":prepared.json()["revision"],"fencing_token":0})
+                assert cancelled.status_code == 200 and cancelled.json()["status"] == "cancelled",cancelled.text
+                assert cancelled.json()["artifacts"] == [] and len(calls) == 2
+                assert (await client.get("/api/capabilities/moltbook/connection")).json()["active_job_id"] is None
+                print(json.dumps({"mode":mode,"status":"cancelled","new_contacts":0,"workspace":str(root)}))
+                return
+            if mode == "cancel_staged":
+                actual_read=service.private_browser.read
+                async def cancel_after_actual_read(**kwargs):
+                    result=await actual_read(**kwargs)
+                    staged.set()
+                    await release.wait()
+                    return result
+                service.private_browser.read=cancel_after_actual_read
             if mode == "stale_goal":
                 changed=await client.patch("/api/goals/"+goal["id"],json={"expected_revision":1,"description":"Changed before native contact"})
                 assert changed.status_code == 200,changed.text
@@ -181,6 +240,25 @@ async def test_actual_private_home_chromium_owner_job_readback_restart(accountin
                     assert run.status == "accepted" and run.attempt_count == 0 and json.loads(run.artifact_receipts_json) == []
                 print(json.dumps({"mode":mode,"job_id":job_id,"new_contacts":0,"outcome":"Root expired; no invocation","workspace":str(root)}))
                 return
+            if mode == "cancel_staged":
+                executing=asyncio.create_task(execute(client,job_id))
+                await asyncio.wait_for(staged.wait(),20)
+                original=(await client.get(f"/api/capabilities/moltbook/jobs/{job_id}")).json()
+                cancelled=await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/cancel",json={"request_key":"cancel-before-artifact",
+                    "expected_revision":original["revision"],"fencing_token":original["lease"]["fencing_token"]})
+                assert cancelled.status_code == 200 and cancelled.json()["status"] == "cancelled",cancelled.text
+                release.set()
+                try: completed=await executing
+                except (asyncio.CancelledError,RuntimeError) as exc:
+                    execution_result=type(exc).__name__
+                else: execution_result="HTTP "+str(completed.status_code)
+                actual=(await client.get(f"/api/capabilities/moltbook/jobs/{job_id}")).json()
+                assert actual["status"] == "cancelled" and actual["artifacts"] == []
+                assert calls[2:] == ["/api/v1/agents/me","/api/v1/home","/api/v1/agents/me"]
+                assert (await client.get("/api/capabilities/moltbook/connection")).json()["active_job_id"] is None
+                print(json.dumps({"mode":mode,"status":actual["status"],"cancelled_execute_request":execution_result,
+                    "contacts":len(calls),"checkpoints":actual["checkpoints"],"workspace":str(root)}))
+                return
             completed=await execute(client,job_id)
             if mode != "positive":
                 assert completed.status_code in {403,409},completed.text
@@ -192,13 +270,16 @@ async def test_actual_private_home_chromium_owner_job_readback_restart(accountin
                 if mode in {"stale_goal","vault_drift","input_drift","revoke"}:
                     assert len(calls) == 2 and deliveries == []
                     assert actual["attempt_count"] == 0
+                elif mode in {"dns_private","dns_mixed"}:
+                    assert len(calls) == 2 and deliveries == [] and actual["status"] == "blocked"
+                    assert connection_now.json()["active_job_id"] is None
                 elif mode == "wrong_identity":
                     assert calls[2:] == ["/api/v1/agents/me"] and deliveries == []
                     assert actual["status"] == "blocked" and connection_now.json()["active_job_id"] is None
                 else:
                     assert calls[2:] == ["/api/v1/agents/me","/api/v1/home"] and len(deliveries) == 1
                     assert actual["status"] != "succeeded"
-                    if mode in {"home_drop","home_redirect","goal_after_home"}:
+                    if mode in {"home_drop","home_redirect","goal_after_home","root_refresh"}:
                         assert connection_now.json()["active_job_id"] == job_id
                     if mode in {"home_drop","home_redirect"}:
                         assert actual["status"] == "unknown_external_effect"
@@ -220,6 +301,9 @@ async def test_actual_private_home_chromium_owner_job_readback_restart(accountin
             assert output.json()["source"]["equal_transport_and_browser_source"] is True
             assert output.json()["no_learning"] is True and output.json()["data"]["your_account"]["karma"] == 4
             assert all(c["source_id"] == output.json()["source"]["id"] == "h" for c in output.json()["citations"])
+            validate_read_result(output.json(),expected_job=job_id)
+            for extra in ({"discarded_raw_document":home_document()},{"schema":"foreign.v1"},{"no_learning":1}):
+                with pytest.raises(MoltbookError):validate_read_result({**output.json(),**extra},expected_job=job_id)
             assert "NEVER FOLLOW" not in output.text and DUMMY_KEY not in output.text
             artifact=completed.json()["artifacts"][0]
             raw=(root/artifact["file_path"]).read_bytes()

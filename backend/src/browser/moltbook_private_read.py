@@ -30,6 +30,7 @@ ME_URL = ORIGIN + "/api/v1/agents/me"
 PROFILE = "seraph.moltbook.private-home.v1"
 ARTIFACT_TYPE = "moltbook_private_browser_read"
 MAX_RESPONSE = 65536
+OUTPUT_SCHEMA = "seraph.moltbook.private-browser-read.v1"
 
 
 def policy_digest():
@@ -168,6 +169,22 @@ def validate_projection(payload):
         raise MoltbookError("moltbook_private_citation_source_invalid") from None
 
 
+def validate_read_result(payload, *, expected_job=None):
+    """Closed private output: no discarded document fields may be retained."""
+    fixed = {"schema":OUTPUT_SCHEMA,"profile":PROFILE,"no_learning":True,
+        "trust":"private_external_untrusted_literal",
+        "effects":"one_home_read_may_deliver_due_briefing_and_access_bookkeeping",
+        "discarded":"role_instructions_unrelated_activity_and_suggested_actions",
+        "production_acceptance":"unverified_local_test_only"}
+    keys = set(fixed) | {"data","citations","source"}
+    if expected_job is not None: keys.add("job_id")
+    if (type(payload) is not dict or set(payload) != keys
+        or any(type(payload.get(key)) is not type(value) or payload.get(key) != value for key,value in fixed.items())
+        or expected_job is not None and payload.get("job_id") != expected_job):
+        raise MoltbookError("moltbook_private_output_schema_changed")
+    validate_projection(payload)
+
+
 class MoltbookPrivateBrowserReader:
     def __init__(self, *, local_transport=None, resolver=default_resolver):
         self.local_transport = local_transport
@@ -274,7 +291,7 @@ class MoltbookPrivateBrowserReader:
                 observed_at = datetime.now(timezone.utc).isoformat()
                 data, citations = cited_projection(document, account_name=expected_name,
                     raw_digest=digest(home_response.content),dom_digest=digest(source_bytes),observed_at=observed_at)
-                output = {"schema":"seraph.moltbook.private-browser-read.v1", "profile":PROFILE,
+                output = {"schema":OUTPUT_SCHEMA, "profile":PROFILE,
                     "data":data, "citations":citations, "source":{"id":"h","observed_at":observed_at,
                         "response_sha256":digest(home_response.content),
                         "browser_source_sha256":digest(source_bytes), "browser_dom_sha256":digest(dom_html.encode()),
@@ -283,7 +300,7 @@ class MoltbookPrivateBrowserReader:
                     "effects":"one_home_read_may_deliver_due_briefing_and_access_bookkeeping",
                     "discarded":"role_instructions_unrelated_activity_and_suggested_actions",
                     "production_acceptance":"unverified_local_test_only"}
-                validate_projection(output)
+                validate_read_result(output)
         except BaseException as exc:
             failure = exc
         finally:

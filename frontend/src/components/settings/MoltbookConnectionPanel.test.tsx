@@ -17,6 +17,60 @@ function metadata(url: string) {
 }
 
 describe("fixed Moltbook owner controls", () => {
+  it("discloses the full fetched Home, retained fields and blocked production gate without contacts", async () => {
+    const fetch = vi.fn((url: unknown) => response(metadata(String(url))));
+    vi.stubGlobal("fetch", fetch);
+    render(<MoltbookConnectionPanel ownerPrincipalId="owner-one" ownerSessionId="root-one" />);
+    await screen.findByText(/pending claim/);
+    expect(screen.getByText(/The complete Home JSON document is fetched/).textContent).toContain("Role briefings, unrelated activity and suggested actions are discarded");
+    expect(screen.getByText(/Home may deliver or consume/).textContent).toContain("not side-effect-free");
+    expect(screen.getByText(/Production Home is blocked/)).toBeTruthy();
+    expect((screen.getByLabelText("Acknowledge private Home delivery bookkeeping") as HTMLInputElement).checked).toBe(false);
+    expect(screen.getByRole("button", { name: "Allow private Home for at most five minutes" }).hasAttribute("disabled")).toBe(true);
+    expect(fetch.mock.calls.every(([url]) => !String(url).includes("moltbook.com"))).toBe(true);
+  });
+  it("requires a distinct scoped acknowledgment and submits only the exact finite Home consent", async () => {
+    const bodies: Record<string, unknown>[] = [];
+    const local = { ...connection, mode: "active", account_name: "FixtureAgent",
+      private_browser: { available: true, production_acceptance: "blocked_unverified", retained_fields: [],
+        max_contacts: 3, max_home_contacts: 1, max_runtime_seconds: 120, no_learning: true } };
+    const fetch = vi.fn((url: unknown, init?: RequestInit) => {
+      if (String(url).endsWith("/connection/private-home-consent") && init?.method === "POST") {
+        const body = JSON.parse(String(init.body)); bodies.push(body);
+        return response({ ...local, consent: { request_key: body.request_key, request: body } });
+      }
+      return response(String(url).endsWith("/connection") ? local : metadata(String(url)));
+    });
+    vi.stubGlobal("fetch", fetch);
+    render(<MoltbookConnectionPanel ownerPrincipalId="owner-one" ownerSessionId="root-one" />);
+    await screen.findByText(/active · FixtureAgent/);
+    const button = screen.getByRole("button", { name: "Allow private Home for at most five minutes" });
+    expect(button.hasAttribute("disabled")).toBe(true);
+    fireEvent.click(screen.getByLabelText("Acknowledge private Home delivery bookkeeping"));
+    fireEvent.click(button);
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    await waitFor(() => expect(readMoltbookPending(moltbookStorageKey("owner-one", "root-one"))).toBeNull());
+    expect(bodies[0]).toMatchObject({ actions: ["private_home"], duration_seconds: 300,
+      private_bookkeeping_ack: true, goal_id: "goal-one", goal_revision: 1, expected_revision: 2 });
+    expect(fetch.mock.calls.filter(([, init]) => (init as RequestInit)?.method === "POST")).toHaveLength(1);
+  });
+  it("cannot carry a checked Home acknowledgment into another Root or Goal revision", async () => {
+    let revision = 1;
+    const fetch = vi.fn((url: unknown, _init?: RequestInit) => response(String(url).endsWith("/connection") ? {
+      ...connection, mode: "active", account_name: "FixtureAgent", private_browser: { available: true }
+    } : String(url).endsWith("/goals/tree") ? [{ id: "goal-one", title: "Personal feedback", status: "active", revision }]
+      : metadata(String(url))));
+    vi.stubGlobal("fetch", fetch);
+    const view = render(<MoltbookConnectionPanel ownerPrincipalId="owner-one" ownerSessionId="root-one" />);
+    await screen.findByText(/active · FixtureAgent/);
+    fireEvent.click(screen.getByLabelText("Acknowledge private Home delivery bookkeeping"));
+    expect((screen.getByLabelText("Acknowledge private Home delivery bookkeeping") as HTMLInputElement).checked).toBe(true);
+    revision = 2;
+    view.rerender(<MoltbookConnectionPanel ownerPrincipalId="owner-one" ownerSessionId="root-two" />);
+    await waitFor(() => expect((screen.getByLabelText("Acknowledge private Home delivery bookkeeping") as HTMLInputElement).checked).toBe(false));
+    expect(screen.getByRole("button", { name: "Allow private Home for at most five minutes" }).hasAttribute("disabled")).toBe(true);
+    expect(fetch.mock.calls.every(([, init]) => !(init as RequestInit | undefined)?.method)).toBe(true);
+  });
   it("loads local metadata without a remote inspection or implicit consent", async () => {
     const fetch = vi.fn((url: unknown) => response(metadata(String(url))));
     vi.stubGlobal("fetch", fetch);

@@ -197,6 +197,7 @@ async def request_pinned_https(
     max_bytes: int = MAX_RESPONSE_BYTES,
     _lifecycle_marker: _TransportLifecycleMarker | None = None,
     authority_check: Callable[[], Awaitable[None]] | None = None,
+    handoff_check: Callable[[], Awaitable[None]] | None = None,
 ) -> PinnedResponse:
     """The existing general HTTPS surface remains bounded GET/POST only."""
     if str(method or "GET").upper() not in {"GET", "POST"}:
@@ -205,7 +206,8 @@ async def request_pinned_https(
         json_body=json_body, form_body=form_body, resolver=resolver,
         transport=transport, timeout_seconds=timeout_seconds,
         connect_timeout_seconds=connect_timeout_seconds, max_bytes=max_bytes,
-        _lifecycle_marker=_lifecycle_marker, authority_check=authority_check)
+        _lifecycle_marker=_lifecycle_marker, authority_check=authority_check,
+        handoff_check=handoff_check)
 
 
 async def request_pinned_calendar_patch(
@@ -263,6 +265,7 @@ async def _request_pinned_https(
     max_bytes: int = MAX_RESPONSE_BYTES,
     _lifecycle_marker: _TransportLifecycleMarker | None = None,
     authority_check: Callable[[], Awaitable[None]] | None = None,
+    handoff_check: Callable[[], Awaitable[None]] | None = None,
 ) -> PinnedResponse:
     """Private shared transport for general reads/posts and the fixed PATCH.
 
@@ -369,6 +372,8 @@ async def _request_pinned_https(
     # a peer keep a request alive indefinitely by sending tiny chunks.
     try:
         async with asyncio.timeout(bounded_timeout):
+            if handoff_check is not None:
+                await handoff_check()
             try:
                 addresses = await asyncio.wait_for(
                     _resolve(resolver, parsed.hostname or "", parsed.port or 443),
@@ -377,6 +382,8 @@ async def _request_pinned_https(
             except asyncio.TimeoutError as exc:
                 raise TimeoutError("source DNS resolution timed out") from exc
             pinned = addresses[0]
+            if handoff_check is not None:
+                await handoff_check()
             # ASGI/mock transports need the logical URL so tests can route it.
             # A real network client uses the pinned address and an explicit
             # Host header.
@@ -431,6 +438,8 @@ async def _request_pinned_https(
                     content=request_content,
                     extensions={"sni_hostname": parsed.hostname or ""},
                 ) as response:
+                    if handoff_check is not None:
+                        await handoff_check()
                     if 300 <= response.status_code < 400:
                         raise PinnedTransportError("redirects are disabled for source watches")
                     content_encoding = response.headers.get("content-encoding", "").strip().lower()
@@ -440,6 +449,8 @@ async def _request_pinned_https(
                         )
                     content = bytearray()
                     async for chunk in response.aiter_bytes():
+                        if handoff_check is not None:
+                            await handoff_check()
                         # Check before extending so an overflow chunk is never
                         # retained in the bounded response buffer.
                         if len(content) + len(chunk) > max_bytes:

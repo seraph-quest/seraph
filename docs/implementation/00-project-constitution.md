@@ -88,7 +88,8 @@ The following architecture decisions are normative:
 15. [ADR-015: Reviewed procedure preferences](./decisions/015-reviewed-procedure-preferences.md)
 16. [ADR-016: Exact Gmail reply send and readonly reconciliation](./decisions/016-exact-gmail-reply-send.md)
 17. [ADR-017: Private bounded document comparison](./decisions/017-private-bounded-document-comparison.md)
-18. [ADR-019: Exact owned-calendar reschedule](./decisions/019-exact-calendar-reschedule.md)
+18. [ADR-018: Fixed Moltbook private browser read](./decisions/018-fixed-moltbook-private-browser-read.md)
+19. [ADR-019: Exact owned-calendar reschedule](./decisions/019-exact-calendar-reschedule.md)
 
 Changing a locked decision requires a superseding ADR, a tracked issue, an
 independent Critic/Contrarian review, and updates to every affected active doc.

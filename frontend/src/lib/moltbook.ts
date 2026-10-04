@@ -8,6 +8,8 @@ export interface MoltbookConnection {
   cooldown_until?: string | null;
   consent?: { actions?: string[]; expires_at?: string; goal_id?: string; goal_revision?: number; session?: string; request_key?: string; request?: Record<string, unknown> };
   credential_is_consent: false; no_learning: true;
+  private_browser?: { available: boolean; production_acceptance: string; retained_fields: string[];
+    max_contacts: number; max_home_contacts: number; max_runtime_seconds: number; no_learning: true };
 }
 export interface MoltbookJob {
   job_id: string; status: string; revision: number; deadline_at: string;
@@ -36,20 +38,25 @@ function validate(value: unknown): MoltbookPending {
     if (keys !== "expected_revision,request_key,vault_key" || !id(value.body.request_key)
         || typeof value.body.vault_key !== "string" || value.body.vault_key.length > 256
         || !(value.body.expected_revision === null || Number.isSafeInteger(value.body.expected_revision))) throw Error("Retained connection import corrupt");
-  } else if (value.method === "POST" && value.path === "/connection/consent") {
-    if (keys !== "actions,duration_seconds,expected_revision,goal_id,goal_revision,no_redistribution,personal_noncommercial,request_key"
+  } else if (value.method === "POST" && ["/connection/consent", "/connection/private-home-consent"].includes(value.path)) {
+    const privateHome = value.path === "/connection/private-home-consent";
+    const expected = privateHome ? "actions,duration_seconds,expected_revision,goal_id,goal_revision,no_redistribution,personal_noncommercial,private_bookkeeping_ack,request_key"
+      : "actions,duration_seconds,expected_revision,goal_id,goal_revision,no_redistribution,personal_noncommercial,request_key";
+    if (keys !== expected
         || !id(value.body.request_key) || !id(value.body.goal_id) || !Number.isSafeInteger(value.body.goal_revision)
         || !Number.isSafeInteger(value.body.expected_revision) || !Number.isSafeInteger(value.body.duration_seconds)
         || !Array.isArray(value.body.actions) || value.body.actions.length > 7
-        || !value.body.actions.every(action => ["inspect", "feed", "post", "comments", "community", "create_post", "create_comment"].includes(action))
+        || !value.body.actions.every(action => (privateHome ? ["private_home"] : ["inspect", "feed", "post", "comments", "community", "create_post", "create_comment"]).includes(action))
         || value.body.personal_noncommercial !== true || value.body.no_redistribution !== true) throw Error("Retained finite consent corrupt");
+    if (privateHome && (value.body.private_bookkeeping_ack !== true || value.body.actions.length !== 1
+      || Number(value.body.duration_seconds) > 300)) throw Error("Retained private Home consent corrupt");
   } else if (value.method === "POST" && (value.path === "/reads" || value.path === "/writes")) {
     const write = value.path === "/writes";
     const expected = write ? "community_digest,community_job_id,expected_revision,fields,goal_id,goal_revision,introductions_allowed,operation,public_only,request_key"
       : "expected_revision,fields,goal_id,goal_revision,operation,request_key";
     if (keys !== expected
         || !id(value.body.goal_id) || !id(value.body.request_key) || !record(value.body.fields)
-        || !(write ? ["create_post", "create_comment"] : ["inspect", "feed", "post", "comments", "community"]).includes(String(value.body.operation))
+        || !(write ? ["create_post", "create_comment"] : ["inspect", "feed", "post", "comments", "community", "private_home"]).includes(String(value.body.operation))
         || !Number.isSafeInteger(value.body.goal_revision) || !Number.isSafeInteger(value.body.expected_revision)) throw Error("Retained read request corrupt");
     if (write && (typeof value.body.community_job_id !== "string" || !/^moltbook:[a-f0-9]{40}$/.test(value.body.community_job_id) || typeof value.body.community_digest !== "string"
         || !/^[a-f0-9]{64}$/.test(value.body.community_digest) || value.body.introductions_allowed !== true || value.body.public_only !== true)) throw Error("Retained public target review corrupt");
@@ -117,7 +124,7 @@ export async function submitMoltbook(key: string, pending: MoltbookPending, sign
     headers: { "Content-Type": "application/json" }, body: JSON.stringify(pending.body) }, signal);
   if (!record(value)) throw Error("Canonical Moltbook receipt unavailable");
   if (pending.path === "/connection" && (value.setup_request_key !== pending.body.request_key || value.configured !== true)) throw Error("Connection import receipt mismatch");
-  if (pending.path === "/connection/consent" && (!record(value.consent) || value.consent.request_key !== pending.body.request_key)) throw Error("Original finite consent receipt mismatch");
+  if (["/connection/consent", "/connection/private-home-consent"].includes(pending.path) && (!record(value.consent) || value.consent.request_key !== pending.body.request_key)) throw Error("Original finite consent receipt mismatch");
   if (["/reads", "/writes"].includes(pending.path) && (!id(value.job_id) || !record(value.idempotency) || value.idempotency.key !== pending.body.request_key)) throw Error("Original admission receipt mismatch");
   if (operationPath.test(pending.path)) {
     const action = pending.path.split("/").pop();

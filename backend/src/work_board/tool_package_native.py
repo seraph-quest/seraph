@@ -557,6 +557,80 @@ def cleanup_proven(task, attempt, projection):
             and effect.get("status")=="succeeded" and effect.get("verified_at") for effect in effects))
 
 
+AUTHOR_QUEUE_REASONS = frozenset({"authored_package_capacity_held", "authored_package_higher_priority_ready"})
+
+
+async def claim_authored_capacity(db, run):
+    """Pure SQL owner/package claim fence, including unresolved old Goals.
+
+    The existing native row holds capacity from claim until exact wait/reap
+    proof. Terminal status, elapsed deadline and lease/PID absence do not free
+    an observed reservation. Different owners/packages remain independent.
+    """
+    from src.work_board.repository import BoardError
+    from src.workflows.job_runtime import _digest, _serialize
+    from types import SimpleNamespace
+
+    def binding(row):
+        try:
+            if not row.declared_authority_json or len(row.declared_authority_json)>65536:
+                raise ValueError()
+            authority=json.loads(row.declared_authority_json)
+            pin=authority["pack"];cap=authority["capability_id"]
+            fields={"pack_id","version","digest","goal_id","goal_revision","review_id","authority_digest",
+                "dependencies_digest","owner_principal_id","session_id"}
+            if (type(pin) is not dict or set(pin)!=fields or type(pin["goal_revision"]) is not int
+                or pin["goal_revision"]<1 or any(type(pin[key]) is not str or not 0<len(pin[key])<=256
+                    for key in fields-{"goal_revision"})
+                or any(len(pin[key])!=64 or any(char not in "0123456789abcdef" for char in pin[key])
+                    for key in ("digest","authority_digest","dependencies_digest"))):
+                raise ValueError()
+            if (row.job_kind!="local_authored_json" or row.owner_kind!="user" or not is_authored(cap)
+                or authority["principal"]!=row.owner_principal_id or pin["owner_principal_id"]!=row.owner_principal_id
+                or authority["session_id"]!=row.session_id or pin["session_id"]!=row.session_id
+                or authority["goal_id"]!=row.goal_id or pin["goal_id"]!=row.goal_id
+                or authority["goal_revision"]!=row.goal_revision or pin["goal_revision"]!=row.goal_revision
+                or pin["pack_id"]!=cap[5:].rsplit(".",2)[0] or _digest(authority)!=row.authority_digest):
+                raise ValueError()
+            task=SimpleNamespace(task_id=authority["board_task_id"],capability_id=cap,
+                owner_principal_id=row.owner_principal_id,owner_session_id=row.session_id)
+            attempt=SimpleNamespace(attempt_id=authority["board_attempt_id"])
+            if job_id(task,attempt)!=row.run_identity:raise ValueError()
+            return pin["pack_id"],task,attempt
+        except (ValueError,TypeError,KeyError,AttributeError):
+            raise BoardError("authored_package_capacity_binding_invalid","An original package capacity binding needs reconciliation") from None
+
+    package,_,_=binding(run)
+    rows=list((await db.scalars(select(WorkflowRunState).where(
+        WorkflowRunState.job_kind=="local_authored_json",WorkflowRunState.owner_principal_id==run.owner_principal_id)
+        .order_by(WorkflowRunState.run_identity).limit(4097))).all())
+    if len(rows)>4096:
+        raise BoardError("authored_package_capacity_history_full","Package capacity history needs reconciliation")
+    for other in rows:
+        other_package,task,attempt=binding(other)
+        if other.run_identity==run.run_identity or other_package!=package:continue
+        try:
+            projection=_serialize(other)
+            records=projection["checkpoints"];effects=projection["effects"]
+            reserved=any(item.get("checkpoint_id") in {"tool-package:reservation","tool-package:process","authored-package:capacity"}
+                for item in records)
+        except (ValueError,TypeError,KeyError,AttributeError):
+            raise BoardError("authored_package_capacity_binding_invalid","An original package cleanup binding needs reconciliation") from None
+        released=cleanup_proven(task,attempt,projection)
+        if reserved and not any(item.get("checkpoint_id")=="tool-package:reservation" for item in records):
+            released=False
+        if (reserved or effects or other.status not in {"accepted","queued","failed","cancelled"}) and not released:
+            raise BoardError("authored_package_capacity_held","A prior job for this owner/package requires actual quiescence proof")
+        if other.status=="queued" and (other.priority,other.started_at,other.run_identity)<(run.priority,run.started_at,run.run_identity):
+            raise BoardError("authored_package_higher_priority_ready","A higher priority ready job for this package owns the next turn")
+    records=json.loads(run.checkpoint_receipts_json)
+    if any(item.get("checkpoint_id")=="authored-package:capacity" for item in records):
+        raise BoardError("authored_package_capacity_held","Recover the original package claim before another launch")
+    records.append({"checkpoint_id":"authored-package:capacity","payload":{"job_id":run.run_identity,
+        "owner_principal_id":run.owner_principal_id,"pack_id":package,"authority_digest":run.authority_digest},"safe":True})
+    run.checkpoint_receipts_json=canonical(records).decode();await db.flush()
+
+
 async def execute(task, attempt, inputs, *, jobs, runner, deadline, admission_only):
     from src.execution.tool_package_runner import prepare,execute as isolated_execute
     from src.work_board.input_artifacts import _write_payload
@@ -593,8 +667,36 @@ async def execute(task, attempt, inputs, *, jobs, runner, deadline, admission_on
         projection=await jobs.queue_job(spec.identity.job_id,expected_revision=projection["revision"],reason="tool_package_board_linked")
     if projection["status"]!="queued":
         return {**projection,"admission_only":False,"reason_code":"tool_package_explicit_recovery_required"}
-    projection=await jobs.claim_job(spec.identity.job_id,owner=runner,lease_seconds=10,
-        expected_state="queued",expected_revision=projection["revision"],expected_fencing_token=projection["lease"]["fencing_token"])
+    async def claim(db,run):
+        await current(db,task,attempt,run,staged=claim_stage)
+        await claim_authored_capacity(db,run)
+    try:
+        if registration:
+            async with authority_guard(jobs,task,attempt) as claim_stage:
+                projection=await jobs.claim_job(spec.identity.job_id,owner=runner,lease_seconds=10,
+                    expected_state="queued",expected_revision=projection["revision"],expected_fencing_token=projection["lease"]["fencing_token"],
+                    claim_authority_check=claim)
+        else:
+            projection=await jobs.claim_job(spec.identity.job_id,owner=runner,lease_seconds=10,
+                expected_state="queued",expected_revision=projection["revision"],expected_fencing_token=projection["lease"]["fencing_token"])
+    except Exception as exc:
+        from src.work_board.repository import BoardError
+        if not isinstance(exc,BoardError) or exc.code not in AUTHOR_QUEUE_REASONS:raise
+        async with authority_guard(jobs,task,attempt) as staged:
+            async with jobs._session() as db:
+                await db.execute(text("BEGIN IMMEDIATE"));waiting=await jobs._fetch(db,spec.identity.job_id)
+                await current(db,task,attempt,waiting,staged=staged)
+                if waiting.status!="queued" or waiting.lease_owner is not None:
+                    raise ToolPackageBlocked("tool_package_original_queue_changed")
+                changed=await db.execute(update(WorkflowRunState).execution_options(synchronize_session=False).where(
+                    WorkflowRunState.run_identity==waiting.run_identity,WorkflowRunState.revision==waiting.revision,
+                    WorkflowRunState.status=="queued",WorkflowRunState.lease_owner.is_(None))
+                    .values(failure_reason=exc.code,updated_at=now(),revision=waiting.revision+1))
+                if changed.rowcount!=1:raise ToolPackageBlocked("tool_package_original_queue_changed")
+                await db.refresh(waiting)
+                from src.workflows.job_runtime import _serialize
+                held=_serialize(waiting)
+        return {**held,"admission_only":False,"reason_code":exc.code}
     fence=projection["lease"]["fencing_token"]
     original_deadline=datetime.fromisoformat(projection["deadline_at"])
     if original_deadline.tzinfo is None:original_deadline=original_deadline.replace(tzinfo=timezone.utc)

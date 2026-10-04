@@ -19,7 +19,8 @@ from src.workflows.job_runtime import DurableJobRepository
 
 
 @pytest.mark.asyncio
-async def test_actual_authored_time_ledger_native_reopen_private_read(accounting_db, monkeypatch):
+@pytest.mark.parametrize("authored_fixture",["time-ledger","tiny-copy"])
+async def test_actual_authored_time_ledger_native_reopen_private_read(accounting_db, monkeypatch, authored_fixture):
     from src.api import auth, capability_packs, goals, work_board
     root,engine,factory=accounting_db
     os.chmod(root,0o700)
@@ -50,7 +51,18 @@ async def test_actual_authored_time_ledger_native_reopen_private_read(accounting
         "proc_before":before,"proc_after":True,"mode":"0700","entries":[],
         "immutable_execute_restored":["bwrap","rootfs/runtime/bin/isolated-python","rootfs/lib64/ld-linux-x86-64.so.2"]}))
     package_root=root/"selected-package"
-    scaffold_adapter(package_root,package_id="local.time-ledger-summary",display_name="Time ledger summary")
+    scaffold_adapter(package_root,package_id="local.time-ledger-summary" if authored_fixture=="time-ledger" else "local.test-json-copy",display_name="Time ledger summary" if authored_fixture=="time-ledger" else "Test-only JSON copy")
+    if authored_fixture=="tiny-copy":
+        # Second data-only contract proves resolver/runner generality. The
+        # authored bytes are never imported, compiled or executed on the host.
+        from src.extensions.authored_adapter import canonical,sha256
+        code=b'import json\nwith open("/input.json", encoding="utf-8") as source: value=json.load(source)\nwith open("/out/result.json","w",encoding="utf-8") as output: json.dump(value,output,sort_keys=True)\n'
+        schema={"type":"object","properties":{"schema_version":{"type":"integer","minimum":1,"maximum":1,"const":1},"value":{"type":"integer","minimum":0,"maximum":9}},"required":["schema_version","value"],"additionalProperties":False}
+        descriptor=json.loads((package_root/"adapters/adapter.json").read_bytes())
+        descriptor.update(code_sha256=sha256(code),input_schema=schema,output_schema=schema,input_schema_sha256=sha256(canonical(schema)),output_schema_sha256=sha256(canonical(schema)))
+        (package_root/"adapter.py").write_bytes(code)
+        (package_root/"adapters/adapter.json").write_bytes(canonical(descriptor))
+        (package_root/"evals/known-answer.json").write_bytes(canonical({"input":{"schema_version":1,"value":7},"output":{"schema_version":1,"value":7}}))
     app=FastAPI();app.add_middleware(OperatorAuthMiddleware)
     app.include_router(auth.router,prefix="/api/auth")
     for router in (capability_packs.router,goals.router,work_board.router):app.include_router(router,prefix="/api")
@@ -134,4 +146,24 @@ async def test_actual_authored_time_ledger_native_reopen_private_read(accounting
             retained=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==original[0]))
             assert retained.status=="succeeded" and original==(retained.run_identity,retained.deadline_at,retained.run_fingerprint)
         records["denied"]=denied.json();records["denied_state"]=denied_state.json()
+        old_review_input=await client.post("/api/work-board/input-artifacts",json={"schema_version":1,"capability_id":cap,
+            "goal_id":goal["id"],"goal_revision":2,"input":{"schema_version":1,"json_text":json.dumps(vector["input"]),"no_learning":True},"idempotency_key":"current-goal-old-review"})
+        assert old_review_input.status_code==409 and old_review_input.json()["detail"]["code"]=="authored_package_goal_review_stale",old_review_input.text
+        fresh_review=await post(f"/api/capability-packs/{pack_id}/review",{"goal_id":goal["id"],"goal_revision":2,
+            "root_path":str(package_root),"content_digest":packet["content_digest"],"authority_digest":packet["authority_digest"],"acknowledge_unsigned_local":True})
+        assert fresh_review["review"]["review_id"]!=reviewed["review"]["review_id"]
+        fresh_approval=await post(f"/api/capability-packs/{pack_id}/approvals",{"action":"activate","goal_id":goal["id"],"digest":packet["content_digest"],"version":"1.0.0","content_digest":packet["content_digest"],"authority_digest":packet["authority_digest"]})
+        fresh_id=fresh_approval["approval"]["approval_id"]
+        await post(f"/api/capability-packs/{pack_id}/approvals/{fresh_id}/approve",{})
+        await post(f"/api/capability-packs/{pack_id}/activate",{"manifest":packet["manifest"],"root_path":str(package_root),"goal_id":goal["id"],"review_id":fresh_review["review"]["review_id"],"approval_id":fresh_id,"content_digest":packet["content_digest"],"authority_digest":packet["authority_digest"]})
+        fresh_artifact=await post("/api/work-board/input-artifacts",{"schema_version":1,"capability_id":cap,
+            "goal_id":goal["id"],"goal_revision":2,"input":{"schema_version":1,"json_text":json.dumps(vector["input"]),"no_learning":True},"idempotency_key":"current-goal-new-review"})
+        fresh_task=await post("/api/work-board/tasks",{"title":"Fresh reviewed current Goal","capability_id":cap,"goal_id":goal["id"],"goal_revision":2,"status":"todo","input_artifact_id":fresh_artifact["artifact_id"],"idempotency_key":"current-goal-new-task"})
+        await dispatcher.run_pass()
+        fresh_output=await client.get(f"/api/work-board/tasks/{fresh_task['task']['task_id']}/tool-package-output")
+        assert fresh_output.status_code==200 and fresh_output.json()==vector["output"],fresh_output.text
+        async with factory.accounting_sessions() as db:
+            unchanged=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==original[0]))
+            assert unchanged.status=="succeeded" and original==(unchanged.run_identity,unchanged.deadline_at,unchanged.run_fingerprint)
+        records["old_review_current_goal_denial"]=old_review_input.json();records["fresh_current_goal_output"]=fresh_output.json()
         (root/"actual-authored-api.json").write_text(json.dumps(records,indent=2))

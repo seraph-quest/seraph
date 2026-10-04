@@ -75,6 +75,14 @@ Root/session, Goal/revision, task/attempt, lease/fence and staged pins; no
 filesystem, Vault, HTTP, authored import or nested writer occurs inside them.
 Actual process ownership, wait/reap and cleanup remain distinct from output
 truth. Unknown cleanup holds capacity without age or PID-absence guesses.
+One outstanding native execution is allowed per owner/package across Goals,
+revisions, tasks and service instances. The existing pure SQL claim transaction
+orders queued jobs by priority, creation time and identity, and retains an
+unresolved original claim until exact positive cleanup. This is not a global
+CPU lane: different owners/packages may execute independently. A bounded
+owner history scan fails closed at 4096 rows or malformed original bindings.
+Ordinary dispatcher priority is the scheduling boundary; cross-instance
+priority fairness is not established by this package-local capacity fence.
 
 Apply current private-read authority to both formatter and authored output
 GET/snapshot availability. Physical verified output and a final canonical check

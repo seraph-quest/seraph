@@ -5773,9 +5773,15 @@ class WorkBoardDispatcher:
                     raise DurableJobError("durable_run_projection_missing_after_execution")
             safe_status = _status(adapter_result.get("status")) or _status(projection)
             raw_reason = _text(adapter_result.get("reason_code")) or _text(projection.get("failure_reason"))
+            from src.work_board.authored_packages import is_authored
+            authored_wait = is_authored(task.capability_id) and raw_reason in {
+                "authored_package_capacity_held", "authored_package_higher_priority_ready"}
             reason = (raw_reason if task.capability_id == "work.document-compare.v1"
                 and raw_reason in {"document_parser_capacity_held", "document_higher_priority_ready"}
-                else _stable_reason_code(raw_reason))
+                else raw_reason if authored_wait else _stable_reason_code(raw_reason))
+            if authored_wait and safe_status == "queued":
+                result["deferred"] = True
+                return result
             if (task.capability_id == "work.document-compare.v1" and safe_status == "queued"
                 and reason in {"document_parser_capacity_held", "document_higher_priority_ready"}):
                 # This original bounded attempt owns queued work, not a

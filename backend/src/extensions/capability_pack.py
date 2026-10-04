@@ -433,6 +433,7 @@ class PackContributions(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     capabilities: list[str] = Field(default_factory=list)
+    adapters: list[str] = Field(default_factory=list, max_length=1)
     skills: list[str] = Field(default_factory=list)
     workflows: list[str] = Field(default_factory=list)
     prompts: list[str] = Field(default_factory=list)
@@ -443,6 +444,7 @@ class PackContributions(BaseModel):
 
     @field_validator(
         "capabilities",
+        "adapters",
         "skills",
         "workflows",
         "prompts",
@@ -464,6 +466,7 @@ class PackContributions(BaseModel):
         references: list[str] = []
         for field_name in (
             "capabilities",
+            "adapters",
             "skills",
             "workflows",
             "prompts",
@@ -699,6 +702,7 @@ class CapabilityPackManifest(BaseModel):
             getattr(self.contributes, field_name)
             for field_name in (
                 "capabilities",
+                "adapters",
                 "skills",
                 "workflows",
                 "prompts",
@@ -1022,8 +1026,9 @@ def validate_capability_pack_archive(
     )
 
 
-_CONTRIBUTION_PATH_FIELDS = ("skills", "workflows", "prompts", "sources", "reports", "evals", "runbooks")
+_CONTRIBUTION_PATH_FIELDS = ("skills", "workflows", "prompts", "sources", "reports", "evals", "runbooks", "adapters")
 _CONTRIBUTION_PREFIXES = {
+    "adapters": "adapters/",
     "skills": "skills/",
     "workflows": "workflows/",
     "prompts": "prompts/",
@@ -1154,6 +1159,12 @@ def validate_capability_pack_path(
             errors.append("supplied manifest does not match the package manifest")
     references: list[str] = []
     if parsed is not None:
+        if parsed.contributes.adapters:
+            from src.extensions.authored_adapter import load_adapter
+            try:
+                load_adapter(root, parsed)
+            except (ValueError, OSError, TypeError, KeyError) as exc:
+                errors.append(str(exc))
         errors.extend(_validate_declared_archive_files(parsed, members, regular_files))
         for field_name in _CONTRIBUTION_PATH_FIELDS:
             field_references = list(getattr(parsed.contributes, field_name))
@@ -1217,6 +1228,8 @@ def validate_capability_pack_package(
             if len(content.encode("utf-8")) > MAX_PACK_MEMBER_BYTES:
                 raise CapabilityPackError("archive manifest exceeds size limit")
             parsed = parse_capability_pack_manifest(content, source=f"{path}:{manifest_name}")
+            if parsed.contributes.adapters:
+                errors.append("authored adapters require a safely inspected local package directory")
             errors.extend(_validate_declared_archive_files(parsed, archive.members, archive.regular_files))
             if manifest is not None:
                 supplied = manifest if isinstance(manifest, CapabilityPackManifest) else parse_capability_pack_manifest(manifest)

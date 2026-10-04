@@ -59,3 +59,38 @@ def test_assets_are_finite_exact_digest_inventory_not_wildcard():
     assert len(checked_assets({"/assets/js/index.js?v=fixed": {"sha256": "b" * 64, "bytes": 400}})) == 64
     for path in ("https://evil.example/a", "/assets/../secret", "/not-assets/a"):
         with pytest.raises(ForgejoError): checked_assets({path: {"sha256": "b" * 64, "bytes": 400}})
+
+
+def test_lazy_login_page_cookie_never_allows_authenticated_cookie_absence():
+    from src.browser.forgejo_profile import session_cookie
+    assert session_cookie({}, unauthenticated_login_page=True) is None
+    with pytest.raises(ForgejoError): session_cookie({})
+    deleted = "persistent=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0"
+    assert session_cookie({"set-cookie": deleted}, unauthenticated_login_page=True) is None
+    with pytest.raises(ForgejoError): session_cookie({"set-cookie": deleted})
+    with pytest.raises(ForgejoError):
+        session_cookie({"set-cookie": deleted.replace("persistent=", "persistent=active")},
+                       unauthenticated_login_page=True)
+    for value in ("session=abcdefghijklmnop; Path=/; Secure; SameSite=Lax",
+                  "session=abcdefghijklmnop; Path=/; HttpOnly; SameSite=Lax",
+                  "session=abcdefghijklmnop; Domain=evil.example; Path=/; Secure; HttpOnly; SameSite=Lax"):
+        with pytest.raises(ForgejoError): session_cookie({"set-cookie": value})
+
+
+def test_pinned_provisioning_rotation_is_not_general_duplicate_cookie_acceptance():
+    from src.browser.forgejo_profile import session_cookie
+    scope = "; Path=/; Secure; HttpOnly; SameSite=Lax"
+    first = "session=" + "a" * 16 + scope
+    second = "session=" + "b" * 16 + scope
+    locale = "lang=en-US" + scope
+    pair = first + ", " + second
+    assert session_cookie({"set-cookie": pair + ", " + locale}, provisioning_login=True) == "b" * 16
+    assert session_cookie({"set-cookie": second}, provisioning_login=True) == "b" * 16
+    for value in (pair, second + ", " + locale):
+        with pytest.raises(ForgejoError): session_cookie({"set-cookie": value})
+    for value in (first + ", " + first, pair + ", " + second,
+                  pair.replace("Path=/", "Path=/elsewhere", 1),
+                  pair + "; Max-Age=86400", pair + ", " + locale.replace("en-US", "fr-FR"),
+                  pair + ", " + locale + ", " + locale,
+                  pair + ", other=secret" + scope):
+        with pytest.raises(ForgejoError): session_cookie({"set-cookie": value}, provisioning_login=True)

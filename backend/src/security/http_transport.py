@@ -37,6 +37,7 @@ class PinnedResponse:
     headers: dict[str, str]
     content: bytes
     pinned_address: str
+    location_header_count: int = 0
 
 
 class _TransportLifecycleMarker:
@@ -198,6 +199,7 @@ async def request_pinned_https(
     _lifecycle_marker: _TransportLifecycleMarker | None = None,
     authority_check: Callable[[], Awaitable[None]] | None = None,
     handoff_check: Callable[[], Awaitable[None]] | None = None,
+    observe_redirect_response: bool = False,
 ) -> PinnedResponse:
     """Issue one bounded GET/POST over the same pinned HTTPS boundary.
 
@@ -208,6 +210,8 @@ async def request_pinned_https(
     """
 
     normalized_method = str(method or "GET").upper()
+    if type(observe_redirect_response) is not bool:
+        raise PinnedTransportError("redirect observation requires a strict boolean")
     if normalized_method not in {"GET", "POST"}:
         raise PinnedTransportError("only GET and POST are supported")
     if json_body is not None and normalized_method != "POST":
@@ -265,6 +269,9 @@ async def request_pinned_https(
             raise PinnedTransportError("connect timeout must be a finite positive number")
 
     parsed = _parse_public_url(url)
+    if observe_redirect_response and (normalized_method != "POST"
+        or parsed.hostname != "codeberg.org" or parsed.path != "/user/login" or parsed.query):
+        raise PinnedTransportError("redirect observation is restricted to fixed Forgejo login")
     resolve_timeout = bounded_timeout
     if connect_timeout_seconds is not None:
         resolve_timeout = min(resolve_timeout, bounded_connect_timeout)
@@ -346,7 +353,9 @@ async def request_pinned_https(
                 ) as response:
                     if handoff_check is not None:
                         await handoff_check()
-                    if 300 <= response.status_code < 400:
+                    if 300 <= response.status_code < 400 and not (
+                        observe_redirect_response and response.status_code in {302, 303}
+                    ):
                         raise PinnedTransportError("redirects are disabled for source watches")
                     content_encoding = response.headers.get("content-encoding", "").strip().lower()
                     if content_encoding not in {"", "identity"}:
@@ -367,6 +376,7 @@ async def request_pinned_https(
                     response_headers = {
                         str(k).lower(): str(v) for k, v in response.headers.items()
                     }
+                    location_header_count = len(response.headers.get_list("location"))
             finally:
                 # Do not infer settlement from response/stream state or an
                 # ``is_closed`` property.  The marker is advanced only after
@@ -392,6 +402,7 @@ async def request_pinned_https(
         headers=response_headers,
         content=bytes(content),
         pinned_address=pinned,
+        location_header_count=location_header_count,
     )
 
 

@@ -132,6 +132,39 @@ async def test_signed_ingress_and_vault_before_json_authority_race(accounting_db
 
 
 @pytest.mark.asyncio
+async def test_selected_primary_replay_composes_with_sql_admission_callback(accounting_db,real_auth,monkeypatch):
+    root,factory,client,device,signed,metadata,text=await setup(accounting_db,monkeypatch)
+    real_admit=runtime.durable_job_repository.admit_job;calls=[];refuse=True
+    async def combined(spec,**kwargs):
+        proof=kwargs["selected_context_admission"]
+        async def current_authority(db,candidate):
+            assert db.in_transaction() and candidate.source_task_id=="selected-task"
+            await runtime.assert_secret(db,proof.pair)
+            calls.append(candidate.run_identity)
+            if refuse:raise SelectedContextError("integration_callback_denied",403)
+        return await real_admit(spec,**kwargs,admission_authority_check=current_authority)
+    monkeypatch.setattr(runtime.durable_job_repository,"admit_job",combined)
+    try:
+        denied=await signed("prepare",metadata);assert denied.status_code==403,denied.text
+        async with factory.accounting_sessions() as db:
+            assert not (await db.scalars(select(WorkflowRunState).where(WorkflowRunState.job_kind=="selected_context_v1"))).all()
+        refuse=False
+        admitted=await signed("prepare",metadata);assert admitted.status_code==200,admitted.text
+        original=admitted.json();assert original["status"]=="paused" and len(calls)==2
+        async with factory.accounting_sessions() as db:
+            goal=await db.get(Goal,"selected-goal");goal.revision=2;db.add(goal)
+        # Exact capture lookup precedes mutable Goal fences/callback, and only
+        # returns original immutable history. It cannot grant new execution.
+        replay=await signed("prepare",metadata);assert replay.status_code==200,replay.text
+        assert replay.json()["job_id"]==original["job_id"] and len(calls)==2
+        async with factory.accounting_sessions() as db:
+            rows=(await db.scalars(select(WorkflowRunState).where(WorkflowRunState.job_kind=="selected_context_v1"))).all()
+            assert len(rows)==1 and rows[0].goal_revision==1 and rows[0].status=="paused"
+    finally:
+        await device.aclose();await client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_cancelled_physical_publication_retains_quota_until_settled(accounting_db,real_auth,monkeypatch):
     root,factory,client,device,signed,metadata,text=await setup(accounting_db,monkeypatch)
     entered=threading.Event();release=threading.Event();original_publish=files.publish

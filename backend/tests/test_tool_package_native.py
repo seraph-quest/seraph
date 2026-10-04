@@ -43,6 +43,19 @@ async def test_actual_authenticated_review_approval_native_formatter_reopen(acco
     target.parent.mkdir(parents=True,mode=0o700)
     for parent in (target.parent,target.parent.parent):os.chmod(parent,0o700)
     shutil.copytree(bundle,target)
+    # Retained receipts deliberately remove executable modes. Restore only
+    # the immutable pinned executables in this disposable execution fixture.
+    os.chmod(target/'bwrap',0o700)
+    os.chmod(target/'rootfs/runtime/bin/isolated-python',0o700)
+    os.chmod(target/'rootfs/lib64/ld-linux-x86-64.so.2',0o700)
+    # The approved #916 preparation creates /proc; files-only physical
+    # retention omits this empty mountpoint. Restore it in the fixture only.
+    before=(target/'rootfs/proc').exists()
+    (target/'rootfs/proc').mkdir(mode=0o700)
+    (root/'runtime-directory-restoration.json').write_text(json.dumps({
+        'reference':'#916 profile-probe-r10.py:41; retain-managed-r1.py files-only',
+        'proc_before':before,'proc_after':True,'mode':'0700','entries':[],
+        'immutable_execute_restored':['bwrap','rootfs/runtime/bin/isolated-python','rootfs/lib64/ld-linux-x86-64.so.2']}))
     app=FastAPI();app.add_middleware(OperatorAuthMiddleware)
     app.include_router(auth.router,prefix="/api/auth")
     for router in (capability_packs.router,goals.router,work_board.router):app.include_router(router,prefix="/api")
@@ -112,6 +125,12 @@ async def test_actual_authenticated_review_approval_native_formatter_reopen(acco
                 assert not writer_connections,'native physical proof inside SQLite writer'
                 return _physical(*args,**kwargs)
             monkeypatch.setattr(tool_package_native,name,pure_guard)
+        from src.work_board import dispatcher as dispatcher_module
+        physical_parse=dispatcher_module._parse_typed_input
+        def parse_outside_writer(*args,**kwargs):
+            assert not writer_connections,'input filesystem parsing inside SQLite writer'
+            return physical_parse(*args,**kwargs)
+        monkeypatch.setattr(dispatcher_module,'_parse_typed_input',parse_outside_writer)
         if mode in {'lifecycle_pin','adopt_revoke'}:
             prepared_revoke=await client.post('/api/capability-packs/seraph.tool.json-format/approvals',json={
                 'action':'revoke','goal_id':goal_id,'digest':packet['content_digest'],'version':'1.0.0',
@@ -346,7 +365,10 @@ async def test_actual_authenticated_review_approval_native_formatter_reopen(acco
             'approval_id':revoke_id,'digest':packet['content_digest'],'content_digest':packet['content_digest'],
             'authority_digest':packet['authority_digest'],'reason':'Operator revoked exact reviewed formatter'})
         assert revoked.status_code==200,revoked.text
-        assert (await client.get('/api/work-board/tasks/'+task_id+'/tool-package-output')).content==raw
+        denied=await client.get('/api/work-board/tasks/'+task_id+'/tool-package-output')
+        assert denied.status_code==409 and raw not in denied.content
+        denied_state=await client.get('/api/work-board/tasks/'+task_id+'/tool-package')
+        assert denied_state.status_code==200 and not denied_state.json()['report_available']
         from src.work_board.tool_package_native import pack_binding
         with pytest.raises(ValueError,match='exact_review_required'):pack_binding(task)
         (root/'tool-package-native-final-readback.json').write_text(json.dumps({'state':state.json(),

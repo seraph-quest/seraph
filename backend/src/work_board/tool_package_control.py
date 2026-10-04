@@ -8,20 +8,22 @@ from src.work_board.repository import BoardError
 from src.work_board.tool_package_native import (CAPABILITY,cleanup_proven,binds,current,
     now,verified_output,authority_guard,stage_readback,read_private,canonical,digest,runtime_root,adopt_output)
 from src.execution.tool_package_profile import expected_output,MAX_OUTPUT,ToolPackageBlocked
+from src.work_board.authored_packages import is_tool_package, is_authored
 from src.workflows.job_runtime import _serialize
 from src.workspace import canonical_workspace_root
 from config.settings import settings
 
 
-async def bound(db,owner,task_id):
+async def bound(db,owner,task_id,*,staged=None):
     task=await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id==task_id,
         WorkBoardTask.owner_principal_id==owner.principal_id,WorkBoardTask.owner_session_id==owner.session_id,
-        WorkBoardTask.capability_id==CAPABILITY))
+        ))
+    if task is not None and not is_tool_package(task.capability_id):task=None
     if task is None:raise BoardError('tool_package_unavailable','Formatter task unavailable',status_code=404)
     attempt=await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id==task_id)
         .order_by(WorkBoardAttempt.created_at.desc(),WorkBoardAttempt.attempt_id.desc()).limit(1))
     run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==attempt.workflow_run_id)) if attempt else None
-    if run is None or not binds(task,attempt,run):raise BoardError('tool_package_binding_unavailable','The original formatter admission is unavailable')
+    if run is None or not binds(task,attempt,run,staged=staged):raise BoardError('tool_package_binding_unavailable','The original formatter admission is unavailable')
     return task,attempt,run
 
 
@@ -59,6 +61,13 @@ def reserved_output(task,attempt,run):
 async def snapshot(jobs,db,owner,task_id):
     task,attempt,run=await bound(db,owner,task_id)
     projection=_serialize(run);recoverable=False
+    available=False;read_reason=None
+    if run.status=='succeeded':
+        from src.work_board.tool_package_native import private_read_guard
+        try:
+            async with private_read_guard(db,task,attempt,run):available=True
+        except BoardError as exc:read_reason=exc.code
+        except (ToolPackageBlocked,OSError,ValueError,KeyError,TypeError):read_reason='tool_package_private_read_denied'
     try:
         async with authority_guard(jobs,task,attempt) as staged:
             await current(db,task,attempt,run,require_lease=False,staged=staged)
@@ -88,7 +97,7 @@ async def snapshot(jobs,db,owner,task_id):
         'job_id':run.run_identity,'status':run.status,'deadline_at':projection['deadline_at'],
         'attempt_count':run.attempt_count,'max_attempts':1,'profile':projection['declared_authority']['runtime']['profile'],
         'cleanup_proven':bool(cleanup_proven(task,attempt,projection)),'recoverable':bool(recoverable),
-        'report_available':run.status=='succeeded' and task.status in {WorkBoardStatus.done,WorkBoardStatus.review},
+        'report_available':available,'read_reason':read_reason,
         'cancel_available':not attempt.ended_at and run.status!='succeeded','no_learning':True,
         'recovery_limit':'Only the exact reserved finished output with actual reap proof may be adopted within the original deadline. Uncertain execution remains Blocked; no package retry.'}
 
@@ -105,7 +114,7 @@ async def recover(dispatcher,owner,task_id,request):
       original_binding=(original_run.revision,original_run.checkpoint_receipts_json,original_run.effect_receipts_json)
       async with jobs._session() as db:
         await db.execute(text('BEGIN IMMEDIATE'))
-        task,attempt,run=await bound(db,owner,task_id)
+        task,attempt,run=await bound(db,owner,task_id,staged=staged)
         records=json.loads(run.checkpoint_receipts_json)
         prior=next((item.get('payload') for item in records if item.get('checkpoint_id')=='tool-package:operator-recovery'),None)
         replay=prior and prior.get('idempotency_key')==request.idempotency_key

@@ -22,7 +22,7 @@ from src.integrations.gmail_send import (GmailReplyAdapter, READ_SERVICE, SEND_S
 from src.integrations.mail_reply_send import (SEND_KIND, IDENTITY_KIND, OBSERVATION_KIND,
     VERSION, ReplyLease, arguments, authority, cas, canonical, claim_intent, connection,
     connection_snapshot, current_root, mark_dispatch, source_snapshot, state, utc,
-    append_observation)
+    append_observation, assert_original_recovery)
 from src.vault import vault_repository, decrypt
 from src.vault.repository import secret_binding_digest
 from src.workflows.job_runtime import (DurableJobIdentity, DurableJobSpec,
@@ -221,6 +221,10 @@ class Contacts:
                 records = checkpoint.setdefault("contacts", [])
             records.append({"slot": len(records)+1, "operation": operation, "service": service,
                 "status": "reserved", "fence": self.lease.fencing_token, "reserved_at": now().isoformat()})
+            # A preview/previous phase's closure never attests this new contact.
+            # Reservation, dispatch and invalidation commit in the same writer.
+            checkpoint["transport_quiescent"] = False
+            checkpoint.pop("transport_closure", None)
             await cas(db, run, {"checkpoint_context_json": canonical(checkpoint)})
 
     async def request(self, adapter, operation, **kwargs):
@@ -258,6 +262,23 @@ class Contacts:
 
     def quiescent(self):
         return bool(self.adapters) and all(item.marker.snapshot()["status"] == "verified" for item in self.adapters)
+
+    def closure_receipt(self, run, checkpoint):
+        """Only the actual awaited worker can attest its original contact phase."""
+        intent = checkpoint.get("intent")
+        if (not isinstance(intent, dict) or not self.quiescent()
+            or run.lease_owner != self.lease.owner or run.fencing_token != self.lease.fencing_token
+            or intent.get("fencing_token") != self.lease.fencing_token):
+            return None
+        records = checkpoint.get("contacts", [])
+        return {"schema_version": 1, "kind": "mail_reply_owned_transport_closure_v1",
+            "job_id": run.run_identity, "original_root": run.operator_session_id,
+            "owner_principal_id": run.owner_principal_id, "attempt": run.attempt_count,
+            "fencing_token": self.lease.fencing_token, "lease_owner": self.lease.owner,
+            "intent_digest": digest(intent), "contact_history_digest": digest(records),
+            "last_slot": len(records), "closed_revision": run.revision + 1,
+            "closed_at": now().isoformat(), "adapters": [
+                {"service": item.service, "transport": item.marker.snapshot()} for item in self.adapters]}
 
 
 async def reserve_private(operator, lease, name, payload):
@@ -323,6 +344,10 @@ async def failed(operator, lease, contacts):
         checkpoint = state(run)
         contacted = bool(checkpoint.get("intent"))
         checkpoint["transport_quiescent"] = contacts.quiescent()
+        checkpoint.pop("transport_closure", None)
+        closure = contacts.closure_receipt(run, checkpoint)
+        if closure is not None:
+            checkpoint["transport_closure"] = closure
         cancelled = checkpoint.get("cancel_requested") and contacts.quiescent() and not contacted
         effects = json.loads(run.effect_receipts_json)
         if contacted:
@@ -678,22 +703,8 @@ async def execute(operator, ident, **boundary):
 
 
 async def recovery_original(db, operator, ident, expected_revision=None):
-    from src.db.models import Goal
-    from src.workflows.job_runtime import _goal_owner_binding
     original = await get_run(operator, ident, db=db)
-    checkpoint = state(original)
-    intent = checkpoint.get("intent")
-    effects = json.loads(original.effect_receipts_json)
-    goal = await db.get(Goal, original.goal_id, populate_existing=True)
-    if (original.job_kind != SEND_KIND or not isinstance(intent, dict)
-        or original.status != "unknown_external_effect"
-        or original.lease_owner is not None or original.lease_expires_at is not None
-        or checkpoint.get("transport_quiescent") is not True
-        or len(effects) != 1 or effects[0].get("effect_id") != intent.get("effect_id")
-        or effects[0].get("status") != "unknown"
-        or goal is None or _goal_owner_binding(goal) != (original.owner_principal_id, original.session_id)
-        or (expected_revision is not None and original.revision != expected_revision)):
-        fail("original_recovery_unavailable")
+    await assert_original_recovery(db, operator, original, expected_revision=expected_revision)
     return original
 
 
@@ -703,13 +714,13 @@ async def observe(operator, *, original_job_id, expected_original_revision,
         replay = await request_replay(operator, kind=OBSERVATION_KIND, request_uuid=request_uuid, request_binding=request_binding)
         if replay is not None:
             return replay
-    connections = await pair_snapshots(operator, read_connection_id)
     async with session() as db:
         original = await recovery_original(db, operator, original_job_id, expected_original_revision)
         checkpoint = state(original)
         intent = checkpoint["intent"]
         private_ref = checkpoint["private_artifacts"]["preview"]
         original_revision = original.revision
+    connections = await pair_snapshots(operator, read_connection_id)
     private = await asyncio.to_thread(read_private_draft, private_ref["path"], private_ref["digest"])
     validate_resource(private["frozen"])
     if private["frozen"]["mime_digest"] != intent["mime_digest"] or private["frozen"]["request_digest"] != intent["request_digest"]:

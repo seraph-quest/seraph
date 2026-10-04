@@ -308,6 +308,14 @@ async def test_unknown_send_readonly_recovery_old_goal_deadline_preserved(accoun
         assert len(posts)==1 and len(model_calls)==5
         async with factory.accounting_sessions() as db:
             run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==preview["job_id"]))
+            closed = json.loads(run.checkpoint_context_json)
+            # A response-lost reservation is recoverable only because the
+            # actual owning callback/client has positively closed.
+            assert closed["contacts"][-1]["status"] == "reserved"
+            proof = closed["transport_closure"]
+            assert proof["kind"] == "mail_reply_owned_transport_closure_v1"
+            assert proof["fencing_token"] == closed["intent"]["fencing_token"] == run.fencing_token
+            assert all(item["transport"]["status"] == "verified" for item in proof["adapters"])
             # Explicit persisted fault/clock-boundary fixture: expire the old
             # immutable deadline, close/change its Goal; recovery never rewrites them.
             run.deadline_at = datetime.now(timezone.utc)-timedelta(seconds=1)
@@ -340,6 +348,105 @@ async def test_unknown_send_readonly_recovery_old_goal_deadline_preserved(accoun
         assert len(google.calls)==contacts and len(model_calls)==5
         (root/"mail-unknown-recovery-readback.json").write_text(json.dumps({"unknown":original,"auxiliary":recovered,"original_after":after,"contacts":google.calls,"send_posts":len(posts),"model_setup_calls":5},indent=2))
     finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["stale_worker", "missing_closure", "wrong_history", "wrong_fence"])
+async def test_original_transport_closure_blocks_recovery_before_staging(accounting_db, real_auth, monkeypatch, fault):
+    import asyncio
+    from src.integrations import mail_reply_runtime as runtime
+    pure_reply_writer_guard(monkeypatch)
+    client, post, google, model_calls, preview, body, owner = await prepared_flow(accounting_db, real_auth, monkeypatch)
+    root, engine, factory = accounting_db
+    release = asyncio.Event(); started = asyncio.Event(); closed = asyncio.Event(); running = None
+    try:
+        if fault == "stale_worker":
+            original_handle = google.handle
+            async def hold_post(request):
+                response = await original_handle(request)
+                if request.url.path.endswith("/messages/send"):
+                    started.set()
+                    try:
+                        await release.wait()
+                    finally:
+                        closed.set()
+                return response
+            real_reply = __import__("src.integrations.gmail_send", fromlist=["GmailReplyAdapter"]).GmailReplyAdapter
+            monkeypatch.setattr(runtime, "GmailReplyAdapter", lambda *args, **kwargs: real_reply(*args,
+                transport=httpx.MockTransport(hold_post), resolver=lambda host, port: ["93.184.216.34"], **kwargs))
+            # Simulate loss of the original worker's terminal callback. The
+            # real provider callback remains active during stale recovery.
+            async def lost_worker(*args, **kwargs):
+                return None
+            monkeypatch.setattr(runtime, "failed", lost_worker)
+            running = asyncio.create_task(client.post("/api/capabilities/mail/reply-sends/"+preview["job_id"]+"/execute", json={}))
+            await asyncio.wait_for(started.wait(), timeout=30)
+        else:
+            google.drop_send = True
+            response = await client.post("/api/capabilities/mail/reply-sends/"+preview["job_id"]+"/execute", json={})
+            assert response.status_code >= 400
+        async with factory.accounting_sessions() as db:
+            run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==preview["job_id"]))
+            checkpoint = json.loads(run.checkpoint_context_json)
+            original_fence = run.fencing_token
+            immutable = {key: str(getattr(run, key)) for key in ("deadline_at", "goal_id", "goal_revision", "attempt_count", "authority_digest", "budget_digest", "effect_receipts_json")}
+            if fault == "stale_worker":
+                assert checkpoint["contact_may_have_occurred"] is True
+                assert checkpoint["contacts"][-1]["status"] == "reserved"
+                assert checkpoint["transport_quiescent"] is False and "transport_closure" not in checkpoint
+                assert not closed.is_set()
+                # Persist the old-version stale boolean to reproduce the
+                # whole-review bug after a genuine dispatched reservation.
+                checkpoint["transport_quiescent"] = True
+                run.lease_expires_at = datetime.now(timezone.utc)-timedelta(seconds=1)
+            elif fault == "missing_closure":
+                checkpoint.pop("transport_closure")
+            elif fault == "wrong_history":
+                checkpoint["transport_closure"]["contact_history_digest"] = "0"*64
+            else:
+                checkpoint["transport_closure"]["fencing_token"] += 1
+            run.checkpoint_context_json = json.dumps(checkpoint)
+            db.add(Goal(id="mail-closure-recovery-goal", title="Finite readonly observation", status="active", revision=1,
+                owner_principal_id=owner["principal_id"], owner_session_id=owner["session_id"],
+                admission_budget_json=serialize_admission_budget(GoalAdmissionBudget(reviewed_grant=True, grant_id="closure-recovery-grant", max_outstanding_jobs=1, max_attempts=1, max_runtime_seconds=120))))
+        if fault == "stale_worker":
+            recovered = await DurableJobRepository().recover_stale_job(preview["job_id"])
+            assert recovered["status"] == "unknown_external_effect"
+            assert not closed.is_set()
+        await engine.dispose()  # Assert persisted/reopened state, not ORM-only.
+        original = (await client.get("/api/capabilities/mail/reply-sends/"+preview["job_id"])).json()
+        profiles = (await client.get("/api/capabilities/mail/reply-profiles")).json()["profiles"]
+        read = next(row for row in profiles if row["service"] == READ_SERVICE)
+        contacts = len(google.calls)
+        async with factory.accounting_sessions() as db:
+            before_jobs = len((await db.scalars(select(WorkflowRunState))).all())
+        def forbidden_staging(*args, **kwargs):
+            raise AssertionError("invalid original reached private artifact/Vault staging")
+        monkeypatch.setattr(runtime, "read_private_draft", forbidden_staging)
+        monkeypatch.setattr(runtime, "stage_credentials", forbidden_staging)
+        response = await client.post("/api/capabilities/mail/reply-sends/"+preview["job_id"]+"/observe", json={
+            "expected_original_revision": original["revision"], "read_connection_id": read["connection_id"], "expected_read_revision": read["revision"],
+            "goal_id": "mail-closure-recovery-goal", "goal_revision": 1, "acknowledge_readonly_recovery": True, "request_uuid": "closure-denied-once"})
+        assert response.status_code == 409, response.text
+        assert len(google.calls) == contacts and len(model_calls) == 5
+        async with factory.accounting_sessions() as db:
+            run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==preview["job_id"]))
+            assert all(str(getattr(run, key)) == value for key, value in immutable.items())
+            assert run.fencing_token == original_fence + (1 if fault == "stale_worker" else 0)
+            assert len((await db.scalars(select(WorkflowRunState))).all()) == before_jobs
+            result = {"fault": fault, "response_status": response.status_code, "original": original,
+                "checkpoint": json.loads(run.checkpoint_context_json), "provider_contacts_before": contacts,
+                "provider_contacts_after": len(google.calls), "auxiliary_admitted": False,
+                "active_original_callback": not closed.is_set() if fault == "stale_worker" else False,
+                "original_fence": original_fence, "current_fence": run.fencing_token}
+        (root/("mail-closure-denied-"+fault+".json")).write_text(json.dumps(result, indent=2))
+    finally:
+        release.set()
+        if running is not None:
+            if not running.done():
+                running.cancel()
+            await asyncio.wait_for(asyncio.gather(running, return_exceptions=True), timeout=5)
         await client.aclose()
 
 

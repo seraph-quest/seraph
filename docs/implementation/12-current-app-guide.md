@@ -958,6 +958,14 @@ unchanged. A revoked/replaced operator Root, unproven worker closure, incomplete
 or ambiguous search, or unavailable private artifact blocks this path. A new
 Root cannot adopt the old send authority.
 
+Readonly recovery requires the original worker's versioned transport-closure
+receipt, bound to that send's intent, execution fence and complete contact
+history. Every new contact invalidates prior-phase closure in its reservation
+transaction. A response-lost reservation can qualify when its actual HTTP client
+has positively closed; an expired lease, generic restart recovery or an empty
+process registry cannot establish closure. Older receipts without this proof
+remain blocked for recovery; the app does not reconstruct or resend them.
+
 Focused acceptance uses actual authenticated SQLite, encrypted Vault/private
 artifacts, canonical draft admission/accounting, approval, native send and
 readonly recovery. Only external Google HTTP is intercepted for send/recovery;

@@ -307,23 +307,21 @@ async def mark_dispatch(db, operator, run, *, lease, intent_digest):
         fail("effect_changed")
     checkpoint["contact_may_have_occurred"] = True
     checkpoint["dispatch_fence"] = run.fencing_token
+    checkpoint["transport_quiescent"] = False
+    checkpoint.pop("transport_closure", None)
     effects[0]["status"] = "unknown"
     await cas(db, run, {"checkpoint_context_json": canonical(checkpoint), "effect_receipts_json": canonical(effects)})
 
 
-async def append_observation(db, operator, original, auxiliary, *, lease,
-    original_revision, original_intent_digest, observation):
-    """Observation-only recovery and auxiliary completion in the SAME writer."""
-    await authority(db, operator, auxiliary, lease=lease, source_required=False)
-    if auxiliary.job_kind != OBSERVATION_KIND or original.job_kind != SEND_KIND:
-        fail("recovery_kind_invalid")
+async def assert_original_recovery(db, operator, original, *, expected_revision=None):
+    """Pure original-row proof shared by precontact and adoption writers."""
     checkpoint = state(original)
     intent = checkpoint.get("intent")
-    if (original.owner_principal_id != operator.principal.principal_id
+    if (original.job_kind != SEND_KIND or original.capability_version != VERSION
+        or original.owner_principal_id != operator.principal.principal_id
         or original.operator_session_id != operator.session_id
-        or original.revision != original_revision or not isinstance(intent, dict)
-        or digest(intent) != original_intent_digest
-        or original.status not in {"unknown_external_effect", "blocked", "failed", "cancelled"}
+        or (expected_revision is not None and original.revision != expected_revision)
+        or not isinstance(intent, dict) or original.status != "unknown_external_effect"
         or original.lease_owner is not None or original.lease_expires_at is not None
         or checkpoint.get("transport_quiescent") is not True):
         fail("original_recovery_unavailable")
@@ -335,6 +333,73 @@ async def append_observation(db, operator, original, auxiliary, *, lease,
         "effect_id": original.run_identity+":send-once"}
     if any(intent.get(key) != item for key, item in original_bindings.items()):
         fail("original_binding_changed")
+    records = checkpoint.get("contacts")
+    closure = checkpoint.get("transport_closure")
+    if (not isinstance(records, list) or not 1 <= len(records) <= 14
+        or not isinstance(closure, dict)
+        or set(closure) != {"schema_version", "kind", "job_id", "original_root", "owner_principal_id",
+            "attempt", "fencing_token", "lease_owner", "intent_digest", "contact_history_digest",
+            "last_slot", "closed_revision", "closed_at", "adapters"}
+        or closure.get("schema_version") != 1 or closure.get("kind") != "mail_reply_owned_transport_closure_v1"
+        or any(closure.get(key) != original_bindings[key] for key in
+            ("job_id", "original_root", "owner_principal_id", "attempt", "fencing_token"))
+        or closure.get("intent_digest") != digest(intent)
+        or closure.get("contact_history_digest") != digest(records)
+        or closure.get("last_slot") != len(records)
+        or not isinstance(closure.get("lease_owner"), str) or not closure["lease_owner"]
+        or type(closure.get("closed_revision")) is not int or not 1 <= closure["closed_revision"] <= original.revision):
+        fail("original_transport_closure_unavailable")
+    try:
+        closed_at = datetime.fromisoformat(closure["closed_at"])
+        if closed_at.tzinfo is None or closed_at.utcoffset() is None:
+            raise ValueError()
+    except (ValueError, TypeError, KeyError):
+        fail("original_transport_closure_unavailable")
+    phase = []
+    for slot, record in enumerate(records, 1):
+        if (not isinstance(record, dict) or record.get("slot") != slot
+            or record.get("service") not in {READ_SERVICE, SEND_SERVICE}
+            or record.get("operation") not in {"refresh", "identity", "profile", "raw", "thread", "send"}
+            or type(record.get("fence")) is not int or not 1 <= record["fence"] <= original.fencing_token
+            or record.get("status") not in {"received", "reserved"}):
+            fail("original_contact_history_changed")
+        if record["fence"] == original.fencing_token:
+            phase.append(record)
+        elif record["status"] != "received":
+            fail("original_contact_history_changed")
+        if record["status"] == "reserved" and (slot != len(records) or record["fence"] != original.fencing_token):
+            fail("original_contact_history_changed")
+    adapters = closure.get("adapters")
+    if not isinstance(adapters, list) or not 1 <= len(adapters) <= 2:
+        fail("original_transport_closure_unavailable")
+    seen = set()
+    started = 0
+    for adapter in adapters:
+        if not isinstance(adapter, dict) or set(adapter) != {"service", "transport"}:
+            fail("original_transport_closure_unavailable")
+        service = adapter["service"]
+        proof = adapter["transport"]
+        if (service not in {READ_SERVICE, SEND_SERVICE} or service in seen or not isinstance(proof, dict)
+            or set(proof) != {"status", "active_operations", "unsettled_operations", "requests_started", "requests_settled"}
+            or proof.get("status") != "verified"
+            or any(type(proof.get(key)) is not int for key in
+                ("active_operations", "unsettled_operations", "requests_started", "requests_settled"))
+            or proof["active_operations"] != 0 or proof["unsettled_operations"] != 0
+            or not 0 <= proof["requests_started"] <= 9 or proof["requests_started"] != proof["requests_settled"]
+            or proof["requests_started"] < sum(record["service"] == service for record in phase)):
+            fail("original_transport_closure_unavailable")
+        seen.add(service)
+        started += proof["requests_started"]
+    # One failing DNS/authority check may close before a contact reservation.
+    # It cannot authorize a missing reserved contact or a second provider call.
+    if not phase or not len(phase) <= started <= len(phase) + 1 or any(record["service"] not in seen for record in phase):
+        fail("original_transport_closure_unavailable")
+    sends = [record for record in records if record["operation"] == "send"]
+    if (len(sends) > 1 or any(record["service"] != SEND_SERVICE or record["fence"] != original.fencing_token for record in sends)
+        or (checkpoint.get("contact_may_have_occurred") is True
+            and (len(sends) != 1 or checkpoint.get("dispatch_fence") != original.fencing_token))
+        or (checkpoint.get("contact_may_have_occurred") is not True and sends)):
+        fail("original_dispatch_changed")
     preview = checkpoint.get("preview", {})
     approval = await db.get(ApprovalRequest, intent.get("approval_id"), populate_existing=True)
     if (approval is None or approval.status != "consumed"
@@ -346,12 +411,23 @@ async def append_observation(db, operator, original, auxiliary, *, lease,
     old_goal = await db.get(Goal, original.goal_id, populate_existing=True)
     if old_goal is None or _goal_owner_binding(old_goal) != (original.owner_principal_id, original.session_id):
         fail("original_provenance_changed")
-    inputs = arguments(auxiliary)
-    if inputs.get("original_job_id") != original.run_identity or inputs.get("original_intent_digest") != original_intent_digest:
-        fail("recovery_input_changed")
     effects = json.loads(original.effect_receipts_json)
     if len(effects) != 1 or effects[0].get("effect_id") != intent["effect_id"] or effects[0].get("status") != "unknown":
         fail("original_liability_changed")
+    return checkpoint, intent, effects
+
+
+async def append_observation(db, operator, original, auxiliary, *, lease,
+    original_revision, original_intent_digest, observation):
+    """Observation-only recovery and auxiliary completion in the SAME writer."""
+    await authority(db, operator, auxiliary, lease=lease, source_required=False)
+    if auxiliary.job_kind != OBSERVATION_KIND:
+        fail("recovery_kind_invalid")
+    checkpoint, intent, effects = await assert_original_recovery(db, operator, original, expected_revision=original_revision)
+    inputs = arguments(auxiliary)
+    if (digest(intent) != original_intent_digest or inputs.get("original_job_id") != original.run_identity
+        or inputs.get("original_intent_digest") != original_intent_digest):
+        fail("recovery_input_changed")
     history = effects[0].get("observation_history", [])
     if not isinstance(history, list) or len(history) >= 16 or any(item.get("auxiliary_job_id") == auxiliary.run_identity for item in history):
         fail("recovery_history_conflict")

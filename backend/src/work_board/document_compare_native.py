@@ -172,6 +172,52 @@ def cleanup_proven(task,attempt,projection):
     except (OSError,ValueError,KeyError,TypeError):return False
 
 
+async def reconcile_reap(jobs,task,attempt):
+    """Record physical quiescence only; this grants no execution/adoption."""
+    async with jobs._session() as db:
+        original=await jobs._fetch(db,job_id(task,attempt))
+        state=checkpoints(original);binding=state.get("document-child") or state.get("document-capacity")
+        if binding is None:return _serialize_job(original)
+        actual,witness_sha=witness(binding)
+        original_checkpoints=original.checkpoint_receipts_json
+        root_digest=sha256(canonical(root_binding()))
+        original_authority=original.declared_authority_json
+    # Filesystem proof and Root readback finished before acquiring the writer.
+    async with jobs._session() as db:
+        await db.execute(text("BEGIN IMMEDIATE"));run=await jobs._fetch(db,job_id(task,attempt))
+        active=await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id==task.task_id))
+        live=await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.attempt_id==attempt.attempt_id))
+        declared=json.loads(run.declared_authority_json)
+        if (run.checkpoint_receipts_json!=original_checkpoints or run.declared_authority_json!=original_authority
+            or run.job_kind!=JOB_KIND or run.owner_principal_id!=task.owner_principal_id
+            or run.operator_session_id!=task.owner_session_id or declared["live_root_digest"]!=root_digest
+            or declared["typed_input_digest"]!=binding["input_digest"]
+            or declared["input_artifact_id"]!=binding["input_artifact_id"]
+            or active is None or live is None or live.task_id!=task.task_id
+            or live.workflow_run_id!=run.run_identity or live.fencing_token!=attempt.fencing_token
+            or active.owner_principal_id!=task.owner_principal_id or active.owner_session_id!=task.owner_session_id):
+            raise BoardError("document_reap_binding_changed","The exact original parser witness changed")
+        existing=checkpoints(run).get("document-reaped")
+        if existing:
+            if existing.get("witness_sha256")!=witness_sha:
+                raise BoardError("document_reap_binding_changed","The committed parser witness changed")
+            return _serialize_job(run)
+        records=json.loads(run.checkpoint_receipts_json)
+        records.append({"checkpoint_id":"document-reaped","payload":{"binding":binding,
+            "witness_sha256":witness_sha,"wait_reaped":True,"parser_exit":actual["parser_exit"]},"safe":True})
+        changed=await db.execute(update(WorkflowRunState).execution_options(synchronize_session=False)
+            .where(WorkflowRunState.run_identity==run.run_identity,WorkflowRunState.revision==run.revision,
+                WorkflowRunState.checkpoint_receipts_json==original_checkpoints)
+            .values(checkpoint_receipts_json=canonical(records).decode(),revision=run.revision+1,updated_at=now()))
+        if changed.rowcount!=1:raise BoardError("document_reap_binding_changed","The exact parser quiescence write raced")
+        await db.refresh(run);return _serialize_job(run)
+
+
+def _serialize_job(run):
+    from src.workflows.job_runtime import _serialize
+    return _serialize(run)
+
+
 async def execute(task,attempt,inputs,*,jobs,runner,deadline,admission_only):
     spec=spec_for(task,attempt,inputs,deadline=deadline); projection=await jobs.get_job(spec.identity.job_id)
     if projection is None:projection=await jobs.admit_job(spec)
@@ -189,7 +235,8 @@ async def execute(task,attempt,inputs,*,jobs,runner,deadline,admission_only):
     staged=await stage_current(jobs,task,attempt,inputs)
     if projection["status"]=="accepted":projection=await jobs.queue_job(spec.identity.job_id,expected_revision=projection["revision"])
     binding={"job_id":spec.identity.job_id,"input_digest":spec.inputs["typed_input_digest"],
-        "input_artifact_id":task.input_artifact_id,"generation":1,"nonce":uuid.uuid4().hex}
+        "input_artifact_id":task.input_artifact_id,
+        "generation":prior.get("document-parser-retry",{}).get("generation",1),"nonce":uuid.uuid4().hex}
     async def claim(db,run):
         await current(db,task,attempt,run,staged)
         rows=list((await db.scalars(select(WorkflowRunState).where(WorkflowRunState.job_kind==JOB_KIND).limit(4097))).all())
@@ -247,7 +294,7 @@ async def execute(task,attempt,inputs,*,jobs,runner,deadline,admission_only):
         await jobs.record_checkpoint(spec.identity.job_id,checkpoint_id="document-output",state=receipt,
             checkpoint_payload={**receipt,"reference":reference,"plain_sha256":sha256(plaintext),"no_learning":True},owner=runner,fencing_token=fence)
         return await adopt_output(jobs,task,attempt,inputs,runner,fence)
-    except BaseException:
+    except BaseException as exc:
         # Closing the actual parent pipe lets the independent supervisor reap
         # and publish its witness even after this coroutine is cancelled.
         if process is not None:
@@ -257,10 +304,17 @@ async def execute(task,attempt,inputs,*,jobs,runner,deadline,admission_only):
         latest=await jobs.get_job(spec.identity.job_id)
         if latest and cleanup_proven(task,attempt,latest):
             actual,witness_sha=witness(binding)
-            try:
-                await jobs.record_checkpoint(spec.identity.job_id,checkpoint_id="document-reaped",state={"witness_sha256":witness_sha},
-                    checkpoint_payload={"binding":binding,"witness_sha256":witness_sha,"wait_reaped":True},owner=runner,fencing_token=fence)
+            try:latest=await reconcile_reap(jobs,task,attempt)
             except Exception:pass
+            if (isinstance(exc,BoardError) and "document-output" not in checkpoints(latest)
+                and actual["reason"]!="document_supervisor_interrupted"):
+                try:
+                    failed=await jobs.transition_job(spec.identity.job_id,"failed",owner=runner,
+                        fencing_token=fence,reason=exc.code,result={"memory_status":"no_learning"},
+                        result_summary="Selected documents visibly blocked; exact parser quiescence verified")
+                    return {**failed,"job_id":spec.identity.job_id,"admission_only":False,
+                        "reason_code":exc.code,"memory_status":"no_learning"}
+                except Exception:pass
         # Never free host capacity or quota on an absent/unverified witness.
         raise
     finally:
@@ -278,6 +332,18 @@ def read_output(task,attempt,run):
     value=json.loads(raw)
     if value.get("no_learning") is not True or set(value)!={"report","csv","manifest","no_learning"}:
         raise BoardError("document_output_schema_invalid","The private output schema changed")
+    manifest=value["manifest"]
+    from src.work_board.dispatcher import _parse_typed_input
+    selected=_parse_typed_input(task)
+    if (not isinstance(value["report"],str) or not isinstance(value["csv"],str)
+        or len(value["report"].encode())>65536 or len(value["csv"].encode())>262144
+        or not isinstance(manifest,dict) or len(canonical(manifest))>32768
+        or manifest.get("schema")!="document_invoice_compare.v1"
+        or manifest.get("operation")!="compare-line-totals-by-sku" or manifest.get("no_learning") is not True
+        or manifest.get("pdf_sha256")!=selected["pdf"]["sha256"]
+        or manifest.get("csv_sha256")!=selected["csv"]["sha256"]
+        or not isinstance(manifest.get("rows"),list) or len(manifest["rows"])>1000):
+        raise BoardError("document_output_schema_invalid","The bounded private output schema changed")
     return receipt,value
 
 

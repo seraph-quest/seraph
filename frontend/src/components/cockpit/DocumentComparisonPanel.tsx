@@ -8,6 +8,7 @@ const CAPABILITY = "work.document-compare.v1";
 type Descriptor = { size_bytes: number; sha256: string };
 type Pair = { artifact_id: string; revision: number; pair_state: string; uploaded: string[]; goal_id: string; goal_revision: number; typed_input_digest: string | null; ingest_deadline: string; reason_code?: string };
 type Pending = { request: { schema_version: 1; operation: "compare-line-totals-by-sku"; goal_id: string; goal_revision: number; idempotency_key: string; pdf: Descriptor; csv: Descriptor; no_learning: true }; pair: string | null; taskKey: string };
+type NativeState = { task_revision: number; status: string; cleanup_proven: boolean; recoverable: boolean; retryable: boolean; report_available: boolean; reason_code: string | null; recovery_limit: string; deadline_at: string };
 interface Props { ownerPrincipalId?: string | null; ownerSessionId?: string | null; task?: WorkBoardTask; goals?: GoalInfo[]; onClose?: () => void; onCreated?: (task: WorkBoardTask) => void | Promise<void> }
 
 async function request(path: string, body?: unknown, method = "POST") {
@@ -27,9 +28,11 @@ export function DocumentComparisonPanel({ ownerPrincipalId, ownerSessionId, task
   const [goalId, setGoalId] = useState(""), [pending, setPending] = useState<Pending | null>(null), [pair, setPair] = useState<Pair | null>(null);
   const [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null), [output, setOutput] = useState<string | null>(null);
   const generation = useRef(0);
+  const [native, setNative] = useState<NativeState | null>(null);
+  const recovery = useRef<{ expected_revision: number; idempotency_key: string } | null>(null);
   const key = ownerPrincipalId && ownerSessionId ? `seraph.document-pair.v1:${encodeURIComponent(ownerPrincipalId)}:${encodeURIComponent(ownerSessionId)}` : null;
   useEffect(() => {
-    generation.current += 1; setPdf(null); setCsv(null); setOutput(null); setPair(null); setError(null); setPending(null);
+    generation.current += 1; recovery.current=null; setNative(null); setBusy(false); setPdf(null); setCsv(null); setOutput(null); setPair(null); setError(null); setPending(null);
     if (!key || task) return () => { generation.current += 1; };
     try {
       const raw = sessionStorage.getItem(key);
@@ -110,10 +113,25 @@ export function DocumentComparisonPanel({ ownerPrincipalId, ownerSessionId, task
     </>}
     {task && <>
       <p>Comparison {task.status} · recovery and cancellation use this original task and its bounded attempt.</p>
-      <button type="button" disabled={busy || !["done", "review"].includes(task.status)} onClick={() => {
+      <button type="button" disabled={busy} onClick={() => {
+        const version=generation.current;setBusy(true);setError(null);
+        void request(`/tasks/${task.task_id}/document-comparison`,undefined,"GET").then(value => {if(version===generation.current)setNative(value as NativeState);}).catch(failure => {if(version===generation.current)setError(String(failure));}).finally(() => {if(version===generation.current)setBusy(false);});
+      }}>Read original parser and recovery state</button>
+      {native && <p>{native.status} · {native.reason_code ?? "original attempt"} · parser cleanup {native.cleanup_proven ? "verified" : "unknown; capacity held"} · original window ends {native.deadline_at}. {native.recovery_limit}</p>}
+      <button type="button" disabled={busy || !native?.recoverable} onClick={() => {
+        if(!native)return;const version=generation.current;setBusy(true);setError(null);
+        recovery.current ??= {expected_revision:native.task_revision,idempotency_key:crypto.randomUUID()};
+        void request(`/tasks/${task.task_id}/document-comparison/recover`,recovery.current).then(value => {if(version===generation.current)setNative(value.document_comparison as NativeState);}).catch(failure => {if(version===generation.current)setError(String(failure));}).finally(() => {if(version===generation.current)setBusy(false);});
+      }}>Adopt original verified output without reparsing</button>
+      <button type="button" disabled={busy || !native?.retryable} onClick={() => {
+        if(!native)return;const version=generation.current;setBusy(true);setError(null);
+        recovery.current ??= {expected_revision:native.task_revision,idempotency_key:crypto.randomUUID()};
+        void request(`/tasks/${task.task_id}/document-comparison/retry`,recovery.current).then(value => {if(version===generation.current)setNative(value.document_comparison as NativeState);}).catch(failure => {if(version===generation.current)setError(String(failure));}).finally(() => {if(version===generation.current)setBusy(false);});
+      }}>Retry known terminated interruption within original allowance</button>
+      <button type="button" disabled={busy || !(["done", "review"].includes(task.status) || native?.report_available)} onClick={() => {
         const version=generation.current;setBusy(true); void request(`/tasks/${task.task_id}/document-output/report`, undefined, "GET").then(value => {if(version===generation.current)setOutput(value.text);}).catch(failure => {if(version===generation.current)setError(String(failure));}).finally(() => {if(version===generation.current)setBusy(false);});
       }}>Read verified cited report</button>
-      <button type="button" disabled={busy || !["done", "review"].includes(task.status)} onClick={() => {
+      <button type="button" disabled={busy || !(["done", "review"].includes(task.status) || native?.report_available)} onClick={() => {
         const version=generation.current;setBusy(true); void request(`/tasks/${task.task_id}/document-output/csv`, undefined, "GET").then(value => {
           if(version!==generation.current)return;
           const link = document.createElement("a"), url = URL.createObjectURL(new Blob([value.text], { type: "text/csv;charset=utf-8" })); link.href = url; link.download = "invoice-comparison.csv"; link.click(); URL.revokeObjectURL(url);

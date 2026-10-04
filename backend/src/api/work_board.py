@@ -2183,6 +2183,30 @@ async def retry_document_pair(request: Request, identifier: str, body: DocumentP
     except BoardError as exc:_raise_board_error(exc)
 
 
+@router.post("/tasks/{task_id}/document-comparison/retry")
+async def retry_document_comparison(request: Request,task_id: str,body: DocumentControlRequest):
+    from src.work_board.document_compare_control import retry,snapshot
+    try:
+        owner=_owner(_operator(request));result=await retry(dispatcher,owner,task_id,body)
+        async with get_session() as db:
+            return {"retry":result,"document_comparison":await snapshot(db,owner,task_id)}
+    except BoardError as exc:_raise_board_error(exc)
+    except (DurableJobError,OSError,ValueError,TypeError,KeyError):
+        raise HTTPException(status_code=409,detail={"code":"document_known_terminated_interruption_required"})
+
+
+@router.post("/tasks/{task_id}/document-comparison/reconcile")
+async def reconcile_document_comparison(request: Request,task_id: str,body: DocumentControlRequest):
+    from src.work_board.document_compare_control import reconcile,snapshot
+    try:
+        owner=_owner(_operator(request));result=await reconcile(dispatcher,owner,task_id,body)
+        async with get_session() as db:
+            return {"reconciliation":result,"document_comparison":await snapshot(db,owner,task_id)}
+    except BoardError as exc:_raise_board_error(exc)
+    except (DurableJobError,OSError,ValueError,TypeError,KeyError):
+        raise HTTPException(status_code=409,detail={"code":"document_exact_actual_reap_required"})
+
+
 @router.post("/document-pairs/{identifier}/discard")
 async def discard_document_pair(request: Request, identifier: str, body: DocumentPairMutation):
     from src.work_board.document_pairs import reset_unbound

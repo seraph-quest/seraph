@@ -3529,9 +3529,11 @@ class WorkBoardDispatcher:
                         await asyncio.wait_for(asyncio.shield(worker),timeout=5)
                     except asyncio.CancelledError:pass
                     except asyncio.TimeoutError:return receipts,False
-                from src.work_board.document_compare_native import cleanup_proven
+                from src.work_board.document_compare_native import cleanup_proven, reconcile_reap
                 latest = await self.jobs.get_job(_text(attempt.workflow_run_id))
                 proven = isinstance(latest,Mapping) and cleanup_proven(task,attempt,latest)
+                if proven:
+                    latest = await reconcile_reap(self.jobs,task,attempt)
                 receipts.append({"job_id":attempt.workflow_run_id,"status":"cancelled" if proven else "unknown",
                     "reason_code":"document_parser_reaped" if proven else "document_parser_quiescence_unknown"})
                 return receipts,bool(proven)

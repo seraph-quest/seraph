@@ -4094,11 +4094,13 @@ function WorkBoardPanel({
                 </div>
               </section>
 
-              <WorkBoardMemoryReview
+              {selectedTask.capability_id === "work.document-compare.v1" ? <section aria-label="Document comparison memory policy" className="mt-3 text-xs">
+                This private comparison has an explicit no_learning policy. Its native receipt and verified report record that result; no memory proposal is created.
+              </section> : <WorkBoardMemoryReview
                 task={selectedTask}
                 ownerPrincipalId={ownerPrincipalId}
                 ownerSessionId={ownerSessionId}
-              />
+              />}
               {selectedTask.capability_id === "work.research-dossier.v1" && <ResearchDossierPanel
                 key={`research-inspector:${ownerPrincipalId}:${ownerSessionId}:${selectedTask.task_id}`}
                 task={selectedTask} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}

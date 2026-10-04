@@ -27,12 +27,14 @@ export function DocumentComparisonPanel({ ownerPrincipalId, ownerSessionId, task
   const [pdf, setPdf] = useState<File | null>(null), [csv, setCsv] = useState<File | null>(null);
   const [goalId, setGoalId] = useState(""), [pending, setPending] = useState<Pending | null>(null), [pair, setPair] = useState<Pair | null>(null);
   const [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null), [output, setOutput] = useState<string | null>(null);
+  const [derivedCsv, setDerivedCsv] = useState<{ scope: string; text: string } | null>(null), [csvUrl, setCsvUrl] = useState<{ scope: string; url: string } | null>(null);
   const generation = useRef(0);
   const [native, setNative] = useState<NativeState | null>(null);
   const recovery = useRef<{ expected_revision: number; idempotency_key: string } | null>(null);
   const key = ownerPrincipalId && ownerSessionId ? `seraph.document-pair.v1:${encodeURIComponent(ownerPrincipalId)}:${encodeURIComponent(ownerSessionId)}` : null;
+  const scope = `${key ?? "unauthenticated"}:${task?.task_id ?? "create"}`;
   useEffect(() => {
-    generation.current += 1; recovery.current=null; setNative(null); setBusy(false); setPdf(null); setCsv(null); setOutput(null); setPair(null); setError(null); setPending(null);
+    generation.current += 1; recovery.current=null; setNative(null); setBusy(false); setPdf(null); setCsv(null); setOutput(null); setDerivedCsv(null); setPair(null); setError(null); setPending(null);
     if (!key || task) return () => { generation.current += 1; };
     try {
       const raw = sessionStorage.getItem(key);
@@ -45,6 +47,12 @@ export function DocumentComparisonPanel({ ownerPrincipalId, ownerSessionId, task
     } catch { setError("Retained document request is unavailable. Keep its reservation for explicit cleanup."); }
     return () => { generation.current += 1; };
   }, [key, task?.task_id]);
+  useEffect(() => {
+    if (derivedCsv === null || derivedCsv.scope !== scope || !key) { setCsvUrl(null); return; }
+    const url = URL.createObjectURL(new Blob([derivedCsv.text], { type: "text/csv;charset=utf-8" }));
+    setCsvUrl({ scope, url });
+    return () => URL.revokeObjectURL(url);
+  }, [derivedCsv, scope, key]);
   function retain(value: Pending) {
     if (!key) throw Error("The current operator session is required.");
     const encoded = JSON.stringify(value); sessionStorage.setItem(key, encoded);
@@ -139,9 +147,10 @@ export function DocumentComparisonPanel({ ownerPrincipalId, ownerSessionId, task
       <button type="button" disabled={busy || !(["done", "review"].includes(task.status) || native?.report_available)} onClick={() => {
         const version=generation.current;setBusy(true); void request(`/tasks/${task.task_id}/document-output/csv`, undefined, "GET").then(value => {
           if(version!==generation.current)return;
-          const link = document.createElement("a"), url = URL.createObjectURL(new Blob([value.text], { type: "text/csv;charset=utf-8" })); link.href = url; link.download = "invoice-comparison.csv"; link.click(); URL.revokeObjectURL(url);
+          setDerivedCsv({ scope, text: value.text });
         }).catch(failure => {if(version===generation.current)setError(String(failure));}).finally(() => {if(version===generation.current)setBusy(false);});
-      }}>Download verified derived CSV</button>
+      }}>Prepare verified derived CSV</button>
+      {key && csvUrl?.scope === scope && <a href={csvUrl.url} download="invoice-comparison.csv">Save verified derived CSV</a>}
       {output !== null && <pre className="whitespace-pre-wrap break-words text-xs" aria-label="Verified cited document report">{output}</pre>}
     </>}
   </section>;

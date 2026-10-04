@@ -1648,8 +1648,15 @@ admission replay, with no new provider contact or deadline renewal. A bounded
 owner/login-scoped job reference supports explicit local refresh after reload;
 it stores no credential, content or verification secret and grants no authority.
 Completed exact admission replay is read-only; new work still requires current
-consent and source review. This target does not claim shipped `develop`
-behavior, live claimed-account usefulness or successful live public outreach.
+consent and source review. On October 4, 2026, the human-claimed `seraphquest`
+account published one transparent introduction; its full public post and feed
+membership were verified at [the published post](https://www.moltbook.com/post/9637612d-bb5b-458e-9cdb-0d52e27fe48a).
+One bounded feedback GET returned seven comments, treated as untrusted external
+content. The original native Unknown state, history and reservation remain
+unchanged; the subsequent full-readback correction is independent of that
+original job. Availability depends on the installed reviewed `develop`
+revision. This single event establishes no general provider quality or
+usefulness claim.
 
 - Trust effective API/UI state, not a default provider label.
 - Keep settings usable through partial metadata failure and show last-known state.

@@ -24,7 +24,8 @@ export function SelectedContextInspector({task,ownerPrincipalId,ownerSessionId}:
   async function refresh(v:number, next=""){
     const rows=await call<{captures:Capture[];next_cursor:string|null}>(`/tasks/${encodeURIComponent(task.task_id)}/captures${next?`?cursor=${encodeURIComponent(next)}`:""}`);
     const p=await call<{pairings:Pair[];state_revision:number}>("/pairings");if(v!==generation.current)return;
-    setCaptures(old=>next?[...old.map(c=>({...c,text:undefined})),...rows.captures.map(bound)]:rows.captures.map(bound));setCursor(rows.next_cursor);setPairs(p.pairings);setStateRevision(p.state_revision);setAck(false);
+    const validated=rows.captures.map(bound);
+    setCaptures(old=>next?[...old.map(c=>({...c,text:undefined})),...validated]:validated);setCursor(rows.next_cursor);setPairs(p.pairings);setStateRevision(p.state_revision);setAck(false);
   }
   async function receipt(c:Capture){return bound(await call<Capture>(`/tasks/${encodeURIComponent(task.task_id)}/captures/${encodeURIComponent(c.job_id)}`));}
   return <section aria-label="Private selected text attachments" className="rounded border border-sky-500/30 p-3 text-xs">

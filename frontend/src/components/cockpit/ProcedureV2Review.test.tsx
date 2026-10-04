@@ -148,6 +148,9 @@ afterEach(() => {
 });
 
 beforeEach(() => {
+  // Keep the explicit October 2 approval fixtures live for positive cases;
+  // expired/revoked cases still supply their distinct server receipts.
+  vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-01T12:00:00Z"));
   vi.spyOn(procedureV2Api, "listRoutines").mockResolvedValue([]);
 });
 
@@ -976,12 +979,12 @@ describe("ProcedureV2Review", () => {
     const lifecycle = vi.spyOn(procedureV2Api, "lifecycle").mockImplementation(async (_routineId, action) => action === "activate" ? activeRoutine : installedRoutine);
     vi.spyOn(procedureV2Api, "packagePreview").mockResolvedValue({
       routine_id: "routine-1", version: 1, pack_id: "pack-1", digest, installed_package_digest: digest, review_id: null, status: "reviewed",
-      manifest: { display_name: "Public status package", summary: "Fixed browser procedure", version: "1", authority: { tools: ["browser.public-task.v1"], filesystem: [], network: false, secrets: [], approval: "operator" }, resources: { max_runtime_seconds: 300, max_artifact_bytes: 1000, max_inference_cost_microusd: 0, inference_priority: "normal" }, data_policy: { classes: ["public"], egress: ["none"] } },
+      manifest: { display_name: "Public status package", summary: "Fixed browser procedure", version: "2.0.1", authority: { tools: ["browser.public-task.v1"], filesystem: [], network: false, secrets: [], approval: "operator" }, resources: { max_runtime_seconds: 300, max_artifact_bytes: 1000, max_inference_cost_microusd: 0, inference_priority: "normal" }, data_policy: { classes: ["public"], egress: ["none"] } },
       runbook: { title: "Public status", summary: "Fixed", procedure: { capability_id: "guardian-routine.v2", steps: [{ id: "public_browser_check", capability: "browser.public-task.v1", tool: "browser" }] }, bindings: { workflow_sha256: digest, legacy_runbook_sha256: digest, source_provenance_sha256: digest } },
     });
     vi.spyOn(procedureV2Api, "packageReview").mockResolvedValue({ digest, review: { review_id: "review-1", status: "approved" } });
-    vi.spyOn(procedureV2Api, "preparePackageApproval").mockResolvedValue({ digest, approval: { approval_id: "approval-1", status: "pending", action: "activate", pack_id: "pack-1", version: "1", digest, goal_id: "goal-1" } });
-    vi.spyOn(procedureV2Api, "decidePackageApproval").mockResolvedValue({ digest, approval: { approval_id: "approval-1", status: "approved", action: "activate", pack_id: "pack-1", version: "1", digest, goal_id: "goal-1" } });
+    vi.spyOn(procedureV2Api, "preparePackageApproval").mockResolvedValue({ digest, approval: { approval_id: "approval-1", status: "pending", action: "activate", pack_id: "pack-1", version: "2.0.1", digest, goal_id: "goal-1" } });
+    vi.spyOn(procedureV2Api, "decidePackageApproval").mockResolvedValue({ digest, approval: { approval_id: "approval-1", status: "approved", action: "activate", pack_id: "pack-1", version: "2.0.1", digest, goal_id: "goal-1" } });
     vi.spyOn(procedureV2Api, "activatePackage").mockResolvedValue({ digest, status: "active" });
     const invokeCall = vi.spyOn(procedureV2Api, "invoke").mockImplementation(async (_routineId, request) => ({ status: "accepted", routine_id: "routine-1", version: 1, schema_version: 2, template_id: "public-browser-check", invocation_uuid: request.invocation_uuid, scope: "procedure-v2:routine-1:version-1", goal_id: request.goal_id, goal_revision: request.expected_goal_revision, task_id: "task-2", attempt_id: null, job_id: null, input_artifact_id: "input-2", input_digest: digest, plan_digest: digest, revision: 4, audit_receipt_id: "receipt-2", recovery_action: null }));
     const schedule: ProcedureV2ScheduleReceipt = { status: "scheduled", scheduled_job_id: "schedule-1", binding_id: "schedule-binding-1", revision: 1, action_type: "guardian.run_procedure.v2", routine_id: "routine-1", version: 1, template_id: "public-browser-check", goal_id: "goal-1", goal_revision: 4, schedule_idempotency_key: "schedule-1", input_digest: digest, next_run: "2026-10-02T09:00:00Z", expires_at: "2026-10-05T09:00:00Z", state: "active", pause_route: "/api/governed-schedules/schedule-binding-1", recovery_action: null };
@@ -1367,7 +1370,7 @@ describe("ProcedureV2Review", () => {
     expect(screen.getByRole("button", { name: "Resume procedure" })).toBeDisabled();
   });
 
-  it("retains exact package activation context across same-owner remount and accepts only a newer active readback", async () => {
+  it.each(["2.0.1", "9.9.9"])("binds approval manifest version %s independently of routine version and retains exact activation recovery", async (approvalVersion) => {
     const installedRoutine = {
       ...existingRoutine,
       state: "installed",
@@ -1386,12 +1389,12 @@ describe("ProcedureV2Review", () => {
       installed_package_digest: digest,
       review_id: "review-package",
       status: "reviewed",
-      manifest: { display_name: "Public status package", summary: "Fixed browser procedure", version: "2", authority: { tools: ["browser.public-task.v1"], filesystem: [], network: false, secrets: [], approval: "operator" }, resources: { max_runtime_seconds: 300, max_artifact_bytes: 1000, max_inference_cost_microusd: 0, inference_priority: "normal" }, data_policy: { classes: ["public"], egress: ["none"] } },
+      manifest: { display_name: "Public status package", summary: "Fixed browser procedure", version: "2.0.1", authority: { tools: ["browser.public-task.v1"], filesystem: [], network: false, secrets: [], approval: "operator" }, resources: { max_runtime_seconds: 300, max_artifact_bytes: 1000, max_inference_cost_microusd: 0, inference_priority: "normal" }, data_policy: { classes: ["public"], egress: ["none"] } },
       runbook: { title: "Public status", summary: "Fixed", procedure: { capability_id: "guardian-routine.v2", steps: [{ id: "public_browser_check", capability: "browser.public-task.v1", tool: "browser" }] }, bindings: { workflow_sha256: digest, legacy_runbook_sha256: digest, source_provenance_sha256: digest } },
     } as WorkBoardRoutinePackagePreview;
     vi.spyOn(procedureV2Api, "packagePreview").mockResolvedValue(packagePreview);
-    vi.spyOn(procedureV2Api, "preparePackageApproval").mockResolvedValue({ digest, approval: { approval_id: "package-approval-2", status: "pending", action: "activate", pack_id: "pack-2", version: "2", digest, goal_id: "goal-1" } });
-    vi.spyOn(procedureV2Api, "decidePackageApproval").mockResolvedValue({ digest, approval: { approval_id: "package-approval-2", status: "approved", action: "activate", pack_id: "pack-2", version: "2", digest, goal_id: "goal-1" } });
+    vi.spyOn(procedureV2Api, "preparePackageApproval").mockResolvedValue({ digest, approval: { approval_id: "package-approval-2", status: "pending", action: "activate", pack_id: "pack-2", version: approvalVersion, digest, goal_id: "goal-1" } });
+    vi.spyOn(procedureV2Api, "decidePackageApproval").mockResolvedValue({ digest, approval: { approval_id: "package-approval-2", status: "approved", action: "activate", pack_id: "pack-2", version: approvalVersion, digest, goal_id: "goal-1" } });
     let rejectActivation!: (cause: unknown) => void;
     const activatePackage = vi.spyOn(procedureV2Api, "activatePackage").mockImplementation(() => new Promise((_, reject) => { rejectActivation = reject; }));
     window.sessionStorage.setItem("seraph.procedure-v2.prepared:operator%3Aone:session-1", JSON.stringify({ schema_version: 1, routineId: installedRoutine.id, bindingId: "binding-existing-2", revision: 4, version: 2, versionId: "version-existing-2", installJobId: "install-2", approvalId: "install-approval-2" }));
@@ -1402,6 +1405,12 @@ describe("ProcedureV2Review", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Prepare activation approval" }));
     fireEvent.click(await screen.findByRole("button", { name: "Approve activation" }));
     fireEvent.click(await screen.findByRole("button", { name: "Activate reviewed package" }));
+    if (approvalVersion !== packagePreview.manifest.version) {
+      await screen.findByText(/Package activation is blocked until the reviewed approval/);
+      expect(activatePackage).not.toHaveBeenCalled();
+      expect(window.sessionStorage.getItem("seraph.procedure-v2.prepared:operator%3Aone:session-1")).not.toContain("packageActivationRecovery");
+      return;
+    }
     await waitFor(() => expect(activatePackage).toHaveBeenCalledTimes(1));
     expect(JSON.parse(window.sessionStorage.getItem("seraph.procedure-v2.prepared:operator%3Aone:session-1") ?? "null")).toMatchObject({
       packageActivationRecovery: {

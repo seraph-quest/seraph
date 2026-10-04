@@ -91,6 +91,8 @@ from src.workflows.routine_templates import (
     validate_generated_files,
 )
 from src.workflows.routine_steps import RoutineStepContext, github_followthrough, guardian_watch_run
+from src.memory.procedure_recommendations import ProcedureFeedbackRequest
+from src.memory.procedure_recommendation_job import ProcedureRecommendationRequest, ProcedureRecommendationCancelRequest
 from src.workflows.procedure_contracts import (
     ROUTINE_V2_CAPABILITY_VERSION,
     build_procedure_plan,
@@ -10146,6 +10148,100 @@ async def invoke_procedure_v2(routine_id: str, req: ProcedureV2InvokeRequest, re
         return JSONResponse(status_code=status_code, content=payload)
     except ProcedureV2Error as exc:
         raise _procedure_http_error(exc) from exc
+
+
+@routine_router.post("/{routine_id}/outcomes/{task_id}/feedback")
+async def record_procedure_outcome_feedback(
+    routine_id: str, task_id: str, req: ProcedureFeedbackRequest, request: Request,
+):
+    operator = _operator(request)
+    from src.memory.procedure_recommendations import record_procedure_feedback
+    from src.work_board.repository import BoardError
+    try:
+        async with db_engine.get_session() as db:
+            return await record_procedure_feedback(db, operator, routine_id=routine_id,
+                task_id=task_id, request=req)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@routine_router.get("/{routine_id}/outcomes")
+async def list_procedure_outcomes(routine_id: str, version: int, expected_routine_revision: int,
+                                 goal_id: str, expected_goal_revision: int, request: Request):
+    from src.memory.procedure_recommendations import resolve_scope, canonical_procedure_membership, MANUAL_DISCLOSURE, QUALITY_DISCLOSURE
+    from sqlalchemy import text
+    try:
+        async with db_engine.get_session() as db:
+            await db.execute(text("BEGIN"))
+            scope = await resolve_scope(db, _operator(request), routine_id=routine_id, version=version,
+                routine_revision=expected_routine_revision, goal_id=goal_id, goal_revision=expected_goal_revision)
+            token = await canonical_procedure_membership(db, scope)
+            return {"included_count": token["task_count"], "membership_digest": token["membership_digest"],
+                "manual_disclosure": MANUAL_DISCLOSURE, "quality_disclosure": QUALITY_DISCLOSURE,
+                "outcomes": [{"task_id": item["task"]["task_id"], "task_revision": item["task"]["task_revision"],
+                    "status": item["task"]["status"], "attempt_id": item["attempt"]["attempt_id"] if item["attempt"] else None,
+                    "attempt_fence": item["attempt"]["fencing_token"] if item["attempt"] else None,
+                    "feedback": item["effective_feedback_tip"]["label"] if item["effective_feedback_tip"] else None,
+                    "feedback_event_id": item["feedback_tip"]["event_id"] if item["feedback_tip"] else None,
+                    "feedback_current": item["effective_feedback_tip"] is not None,
+                    "feedback_history_label": item["feedback_tip"]["label"] if item["feedback_tip"] else None,
+                    "feedback_history_count": item["feedback_count"], "feedback_allowed": item["feedback_allowed"],
+                    "reason_code": "feedback_outcome_stale" if item["feedback_tip"] and not item["effective_feedback_tip"] else None}
+                    for item in token["members"]]}
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@routine_router.post("/{routine_id}/recommendations")
+async def prepare_procedure_recommendation(routine_id: str, req: ProcedureRecommendationRequest, request: Request):
+    from src.memory.procedure_recommendation_job import prepare_recommendation
+    operator = _operator(request)
+    try:
+        return await prepare_recommendation(operator, routine_id, req)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@routine_router.get("/{routine_id}/recommendations")
+async def find_procedure_recommendation(routine_id: str, version: int, expected_routine_revision: int,
+                                       goal_id: str, expected_goal_revision: int, request_uuid: str, request: Request):
+    from src.memory.procedure_recommendation_job import find_recommendation
+    try:
+        req = ProcedureRecommendationRequest(version=version, expected_routine_revision=expected_routine_revision,
+            goal_id=goal_id, expected_goal_revision=expected_goal_revision, request_uuid=request_uuid)
+        return await find_recommendation(_operator(request), routine_id, req)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@routine_router.get("/{routine_id}/recommendations/{job_id}")
+async def inspect_procedure_recommendation(routine_id: str, job_id: str, request: Request):
+    from src.memory.procedure_recommendation_job import inspect_recommendation
+    operator = _operator(request)
+    try:
+        return await inspect_recommendation(operator, routine_id, job_id)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@routine_router.post("/{routine_id}/recommendations/{job_id}/cancel")
+async def cancel_procedure_recommendation(routine_id: str, job_id: str, req: ProcedureRecommendationCancelRequest, request: Request):
+    from src.memory.procedure_recommendation_job import cancel_recommendation
+    try:
+        return await cancel_recommendation(_operator(request), routine_id, job_id, req)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@routine_router.get("/{routine_id}/preference")
+async def read_current_procedure_preference(routine_id: str, version: int, expected_routine_revision: int,
+                                          goal_id: str, expected_goal_revision: int, request: Request):
+    from src.memory.procedure_selection import current_procedure_preference
+    try:
+        return await current_procedure_preference(_operator(request), routine_id=routine_id, version=version,
+            routine_revision=expected_routine_revision, goal_id=goal_id, goal_revision=expected_goal_revision)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
 
 
 @routine_router.post("/{routine_id}/schedule-v2")

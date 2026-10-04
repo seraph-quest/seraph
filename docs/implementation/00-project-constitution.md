@@ -85,6 +85,7 @@ The following architecture decisions are normative:
 12. [ADR-012: Finite durable read-only research](./decisions/012-finite-durable-readonly-research.md)
 13. [ADR-013: Fixed reviewed local tool package](./decisions/013-fixed-reviewed-local-tool-package.md)
 14. [ADR-014: Bounded evidence dependencies](./decisions/014-bounded-evidence-dependencies.md)
+15. [ADR-015: Reviewed procedure preferences](./decisions/015-reviewed-procedure-preferences.md)
 
 Changing a locked decision requires a superseding ADR, a tracked issue, an
 independent Critic/Contrarian review, and updates to every affected active doc.

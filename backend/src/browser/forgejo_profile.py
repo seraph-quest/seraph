@@ -163,7 +163,9 @@ class ForgejoTitleBrowser:
         checked_segment(owner); checked_segment(repository); positive_id(issue_index)
         marker = _TransportLifecycleMarker()
         authorization = "Basic " + base64.b64encode((username+":"+password).encode()).decode()
+        aggregate_bytes = 0
         async def get(operation, path):
+            nonlocal aggregate_bytes
             await check_current()
             descriptor = {"request_id":uuid.uuid4().hex,"method":"GET",
                           "path_digest":digest(path.encode()),"operation":operation}
@@ -175,6 +177,8 @@ class ForgejoTitleBrowser:
                 authority_check=lambda:contact(operation,descriptor), handoff_check=check_current)
             await observe(operation,result.status_code,digest(result.content),marker.snapshot(),descriptor["request_id"])
             await check_current()
+            aggregate_bytes += len(result.content)
+            if aggregate_bytes>1024*1024:raise ForgejoError("forgejo_complete_read_byte_bound")
             if result.status_code != 200 or "location" in result.headers or password.encode() in result.content:
                 raise ForgejoError("forgejo_fixed_read_response_invalid")
             return result
@@ -190,7 +194,8 @@ class ForgejoTitleBrowser:
                 issue.get("id"),issue_index,expected_user_id,username,issue.get("title"),new_title,
                 issue.get("updated_at"),digest(events))
             require_issue_identity(issue,target,title=target.old_title)
-            return {"target":vars(target),"no_learning":True,"provider_cas":False}
+            return {"target":vars(target),"no_change":target.old_title==target.new_title,
+                    "no_learning":True,"provider_cas":False}
         finally:
             await cleanup_observer({"status":marker.snapshot()["status"],"browser_closed":True,
                 "launch_attempted":False,"transport":marker.snapshot(),"possible_submission":False})

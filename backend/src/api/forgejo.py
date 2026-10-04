@@ -8,6 +8,8 @@ from src.browser.forgejo_issue_title import ForgejoError
 from src.integrations.forgejo_controls import forgejo_service
 from src.security.trust_contract import AuthorityGrant
 from src.work_board.contracts import WorkBoardOwner
+from src.work_board.repository import BoardError
+from src.workflows.job_runtime import DurableJobError
 
 router = APIRouter(prefix="/capabilities/forgejo", tags=["forgejo"])
 
@@ -55,6 +57,13 @@ class Approve(Strict):
     exact_ack: StrictBool
 
 
+class Recovery(Revision):
+    original_job_revision: int = Field(ge=1)
+    original_fencing_token: int = Field(ge=1)
+    request_key: str = Field(min_length=36,max_length=36)
+    read_ack: StrictBool
+
+
 def owner(request):
     operator = _operator(request)
     grants = {getattr(value, "value", value) for value in operator.principal.grants}
@@ -69,6 +78,10 @@ async def response(call):
     try: return await call
     except ForgejoError as exc:
         raise HTTPException(exc.status_code, detail={"code": exc.reason}) from None
+    except BoardError as exc:
+        raise HTTPException(getattr(exc,"status_code",409),detail={"code":exc.code}) from None
+    except DurableJobError:
+        raise HTTPException(409,detail={"code":"forgejo_durable_job_conflict"}) from None
 
 
 @router.get("/connection")
@@ -119,3 +132,8 @@ async def execute(request: Request, job_id: str, body: Execute):
 @router.post("/jobs/{job_id}/cancel")
 async def cancel(request: Request, job_id: str, body: Execute):
     return await response(forgejo_service.native.cancel(owner(request),job_id,**body.model_dump()))
+
+
+@router.post("/jobs/{job_id}/read-only-recovery")
+async def recover(request: Request, job_id: str, body: Recovery):
+    return await response(forgejo_service.native.recover(owner(request),job_id,**body.model_dump()))

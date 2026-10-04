@@ -28,7 +28,7 @@ from src.vault.crypto import decrypt, encrypt
 from src.vault.repository import secret_binding_digest, vault_repository
 from src.work_board.input_artifacts import _write_payload
 from src.work_board.repository import WorkBoardRepository
-from src.workflows.job_runtime import DurableJobIdentity, DurableJobSpec, durable_job_repository, _serialize
+from src.workflows.job_runtime import DurableJobIdentity, DurableJobSpec, durable_job_repository, _serialize, _digest as authority_digest
 from src.workspace import canonical_workspace_root
 
 PREFIX = "artifacts/forgejo/"
@@ -86,28 +86,31 @@ class ForgejoNative:
                 ForgejoConnection.owner_principal_id==owner.principal_id))
             if row is None or row.owner_session_id != owner.session_id or row.revision != expected_revision:
                 raise ForgejoError("forgejo_configuration_revision_changed")
-            await self.inventory(db,owner,row.id)
+            # A new explicit READ window grants no replay of an old write.
+            # Old jobs retain their original read revision/deadline; a later
+            # recovery is a separate fixed GET-only canonical job.
             row.read_consent_revision += 1
             row.read_consent_expires_at = min(now()+timedelta(seconds=duration_seconds),
                 utc(root.absolute_expires_at),utc(root.idle_expires_at))
             row.updated_at = now(); db.add(row)
         return await self.service.connection(owner)
 
-    async def inventory(self, db, owner, connection_id, *, excluding=None):
+    async def inventory(self, db, owner, connection_id, *, excluding=None, observed_original=None):
         # Filtering by owner and fixed kind is performed before this cap;
         # every bounded canonical row is inspected, never a truncated success.
         runs = (await db.execute(select(WorkflowRunState).where(
             WorkflowRunState.owner_principal_id==owner.principal_id,
             WorkflowRunState.job_kind==JOB_KIND,
             WorkflowRunState.status.not_in(("succeeded","degraded","cancelled")))
-            .order_by(WorkflowRunState.created_at.desc()).limit(21))).scalars().all()
+            .order_by(WorkflowRunState.updated_at.desc()).limit(21))).scalars().all()
         if len(runs)>20: raise ForgejoError("forgejo_unresolved_inventory_overflow")
         for run in runs:
             try: authority = json.loads(run.declared_authority_json)
             except (TypeError,ValueError): raise ForgejoError("forgejo_unresolved_inventory_invalid") from None
             if not isinstance(authority,dict) or not authority.get("connection_id"):
                 raise ForgejoError("forgejo_unresolved_inventory_invalid")
-            if run.run_identity != excluding and authority["connection_id"]==connection_id:
+            if (run.run_identity not in {excluding,observed_original}
+                and authority["connection_id"]==connection_id):
                 value = journal(run) if run.checkpoint_receipts_json not in (None,"","[]") else {}
                 # An Unknown POST can never become free from expiry, equality
                 # observation, absence of a process or a missing lock.
@@ -121,7 +124,7 @@ class ForgejoNative:
             raise ForgejoError("forgejo_original_job_owner_changed",status_code=404)
         await WorkBoardRepository._validate_goal(db,owner,goal_id=run.goal_id,goal_revision=run.goal_revision)
         authority = json.loads(run.declared_authority_json)
-        if (run.authority_digest != digest(authority) or authority.get("capability_id") != CAPABILITY
+        if (run.authority_digest != authority_digest(authority) or authority.get("capability_id") != CAPABILITY
             or authority.get("principal") != owner.principal_id or authority.get("session_id") != owner.session_id
             or authority.get("no_learning") is not True or authority.get("profile") != PROFILE):
             raise ForgejoError("forgejo_original_authority_changed")
@@ -130,14 +133,14 @@ class ForgejoNative:
         row = await db.get(ForgejoConnection,authority["connection_id"],populate_existing=True)
         if (row is None or row.owner_principal_id != owner.principal_id or row.owner_session_id != owner.session_id
             or row.state=="revoked" or row.revision != authority["connection_revision"]
-            or row.credential_binding != authority["credential_binding"]
+            or row.credential_binding != authority["vault_binding_digest"]
             or row.read_consent_revision != authority["read_consent_revision"]
             or row.read_consent_expires_at is None or utc(row.read_consent_expires_at)<=now()):
             raise ForgejoError("forgejo_current_connection_read_consent_required")
         expected_inputs={"payload_ref":reference(run.run_identity,"input"),
             "payload_digest":authority["payload_digest"],"no_learning":True}
         if run.input_digest != digest(expected_inputs): raise ForgejoError("forgejo_original_input_changed")
-        for key,binding in [(row.credential_vault_key,authority["credential_binding"])]+(
+        for key,binding in [(row.credential_vault_key,authority["vault_binding_digest"])]+(
             [] if authority["operation"]=="provision" else [(row.session_vault_key,authority["session_binding"])]):
             secret = await db.scalar(select(Secret).where(Secret.key==key,
                 Secret.owner_principal_id==owner.principal_id,Secret.revoked_at.is_(None)))
@@ -147,8 +150,33 @@ class ForgejoNative:
             row.state!="active" or row.provider_user_id!=authority["provider_user_id"]
             or row.provider_login!=authority["provider_login"] or row.session_binding!=authority["session_binding"]):
             raise ForgejoError("forgejo_original_numeric_session_identity_changed")
+        if authority["operation"]=="title" and run.status=="running":
+            value=journal(run);approval=await db.get(ApprovalRequest,value.get("approval_id"))
+            if (approval is None or approval.status!="consumed" or approval.owner_principal_id!=owner.principal_id
+                or approval.operator_session_id!=owner.session_id or approval.tool_name!=CAPABILITY
+                or approval.fingerprint!=value.get("approval_fingerprint") or utc(approval.expires_at)<=now()
+                or json.loads(approval.details_json).get("approval_scope")!=value.get("approval_scope")
+                or value["approval_scope"]["authority_digest"]!=run.authority_digest):
+                raise ForgejoError("forgejo_original_consumed_approval_changed")
+        observed_original=None
+        if authority["operation"]=="observe":
+            observed_original=authority["original_job_id"]
+            original=await self.jobs._fetch(db,observed_original)
+            original_authority=json.loads(original.declared_authority_json)
+            if (original.status!="unknown_external_effect" or original.job_kind!=JOB_KIND
+                or original.owner_principal_id!=owner.principal_id or original.operator_session_id!=owner.session_id
+                or original.goal_id!=run.goal_id or original.goal_revision!=run.goal_revision
+                or original.revision!=authority["original_job_revision"]
+                or original.fencing_token!=authority["original_job_fence"]
+                or original_authority.get("operation")!="title"
+                or original.authority_digest!=authority["original_authority_digest"]
+                or any(original_authority.get(k)!=authority.get(k) for k in (
+                    "connection_id","connection_revision","vault_binding_digest","session_binding",
+                    "provider_user_id","provider_login"))
+                or not any(c["operation"]=="title_submission" for c in journal(original)["calls"])):
+                raise ForgejoError("forgejo_original_unknown_observation_binding_changed")
         if lease is not None: self.jobs._assert_lease(run,owner=lease[0],fencing_token=lease[1])
-        if admission: await self.inventory(db,owner,row.id,excluding=run.run_identity)
+        if admission: await self.inventory(db,owner,row.id,excluding=run.run_identity,observed_original=observed_original)
         return row
 
     async def snapshot(self, owner, job_id):
@@ -167,7 +195,7 @@ class ForgejoNative:
             return result
 
     async def prepare(self, owner, *, operation, fields, request_key, goal_id, goal_revision,
-                      expected_revision, preview_job_id=None, preview_digest=None):
+                      expected_revision, preview_job_id=None, preview_digest=None, original_binding=None):
         self.service.browser.require_available()
         try: uuid.UUID(request_key)
         except (ValueError,TypeError,AttributeError): raise ForgejoError("forgejo_request_uuid_required",status_code=422) from None
@@ -180,7 +208,8 @@ class ForgejoNative:
             positive_id(fields["issue_index"]);checked_title(fields["new_title"])
         elif fields: raise ForgejoError("forgejo_closed_input_required",status_code=422)
         request={"operation":operation,"fields":fields,"goal_id":goal_id,"goal_revision":goal_revision,
-            "expected_revision":expected_revision,"preview_job_id":preview_job_id,"preview_digest":preview_digest}
+            "expected_revision":expected_revision,"preview_job_id":preview_job_id,"preview_digest":preview_digest,
+            "original_binding":original_binding}
         job_id="forgejo:"+digest([owner.principal_id,owner.session_id,request_key])[:40]
         prior=await self.jobs.get_job(job_id)
         if prior is not None:
@@ -188,6 +217,9 @@ class ForgejoNative:
             if prior_authority.get("request_digest")!=digest(request): raise ForgejoError("forgejo_idempotency_conflict")
             return await self.snapshot(owner,job_id)
         payload={"operation":operation,"fields":fields,"no_learning":True}
+        if operation=="observe":
+            if not isinstance(original_binding,dict):raise ForgejoError("forgejo_original_unknown_binding_required")
+            payload["original_binding"]=original_binding
         if operation=="title":
             preview=await self.output(owner,preview_job_id)
             snap=await self.snapshot(owner,preview_job_id)
@@ -197,6 +229,8 @@ class ForgejoNative:
                 or now()-utc(datetime.fromisoformat(snap["finished_at"]))>timedelta(seconds=300)):
                 raise ForgejoError("forgejo_current_exact_preview_required")
             payload["target"]=preview["target"]
+            if payload["target"]["old_title"]==payload["target"]["new_title"]:
+                raise ForgejoError("forgejo_no_change_read_only_preview")
             payload["preview_job_id"]=preview_job_id;payload["preview_digest"]=preview_digest
         ref,cipher_digest,_=stage(job_id,"input",payload)
         async with engine.get_session() as db:
@@ -210,12 +244,13 @@ class ForgejoNative:
             authority={"principal":owner.principal_id,"owner_kind":"user","session_id":owner.session_id,
                 "capability_id":CAPABILITY,"profile":PROFILE,"operation":operation,"connection_id":row.id,
                 "connection_revision":row.revision,"read_consent_revision":row.read_consent_revision,
-                "credential_binding":row.credential_binding,"session_binding":row.session_binding,
+                "vault_binding_digest":row.credential_binding,"session_binding":row.session_binding,
                 "provider_user_id":row.provider_user_id,"provider_login":row.provider_login,
                 "payload_digest":digest(payload),"input_cipher_digest":cipher_digest,"request_digest":digest(request),
                 "permissions":["forgejo_private_read","credential_egress","browser_process","workspace_write"]+
                     (["external_mutation"] if operation=="title" else ["provider_session_login"] if operation=="provision" else []),
                 "no_learning":True}
+            if operation=="observe":authority.update(original_binding)
         async def guard(db,candidate): await self.current(db,owner,candidate,admission=True)
         admitted=await self.jobs.admit_job(DurableJobSpec(identity=DurableJobIdentity(job_id=job_id,
             owner_kind="user",owner_principal_id=owner.principal_id,job_kind=JOB_KIND,capability_version="1",
@@ -231,6 +266,30 @@ class ForgejoNative:
             db.add(run)
         if operation=="title": await self.make_approval(owner,job_id,payload)
         return await self.snapshot(owner,job_id)
+
+    async def recover(self, owner, original_job_id, *, expected_revision, original_job_revision,
+                      original_fencing_token, request_key, read_ack):
+        if read_ack is not True:raise ForgejoError("forgejo_separate_read_only_ack_required",status_code=422)
+        async with engine.get_session() as db:
+            await original_root(db,owner);original=await self.jobs._fetch(db,original_job_id)
+            if (original.job_kind!=JOB_KIND or original.owner_principal_id!=owner.principal_id
+                or original.operator_session_id!=owner.session_id or original.status!="unknown_external_effect"
+                or original.revision!=original_job_revision or original.fencing_token!=original_fencing_token):
+                raise ForgejoError("forgejo_exact_original_unknown_required")
+            a=json.loads(original.declared_authority_json)
+            if a.get("operation")!="title":raise ForgejoError("forgejo_exact_original_title_required")
+            goal_id,goal_revision=original.goal_id,original.goal_revision
+        _,sha,payload=stage(original_job_id,"input")
+        if sha!=a["input_cipher_digest"] or digest(payload)!=a["payload_digest"]:
+            raise ForgejoError("forgejo_original_private_input_changed")
+        target=TitleTarget(**payload["target"])
+        fields={"owner":target.owner,"repository":target.repository,"issue_index":target.issue_index,
+            "new_title":target.new_title}
+        binding={"original_job_id":original_job_id,"original_job_revision":original_job_revision,
+            "original_job_fence":original_fencing_token,"original_authority_digest":original.authority_digest,
+            "original_target":vars(target)}
+        return await self.prepare(owner,operation="observe",fields=fields,request_key=request_key,
+            goal_id=goal_id,goal_revision=goal_revision,expected_revision=expected_revision,original_binding=binding)
 
     async def make_approval(self, owner, job_id, payload):
         async with engine.get_session() as db:
@@ -293,7 +352,7 @@ class ForgejoNative:
         if input_sha!=authority["input_cipher_digest"] or digest(payload)!=authority["payload_digest"]:
             raise ForgejoError("forgejo_original_private_input_changed")
         credential=await vault_repository.snapshot(credential_key,owner_principal_id=owner.principal_id)
-        if credential is None or credential.binding_digest!=authority["credential_binding"]:
+        if credential is None or credential.binding_digest!=authority["vault_binding_digest"]:
             raise ForgejoError("forgejo_original_vault_binding_changed")
         credentials=credential_payload(credential.value)
         session=None
@@ -325,7 +384,6 @@ class ForgejoNative:
                         or value["approval_scope"]["authority_digest"]!=run.authority_digest):
                         raise ForgejoError("forgejo_exact_current_approval_required")
                     approval.status="consumed";approval.resolved_at=now();db.add(approval)
-                    value["approval_consumed"]=True;save(run,value);db.add(run)
             claimed=await self.jobs.claim_job(job_id,owner=runner,expected_revision=queued["revision"],
                 expected_fencing_token=fencing_token,lease_seconds=120,claim_authority_check=claim_guard)
             lease=(runner,claimed["lease"]["fencing_token"]);self.active[job_id]=task
@@ -397,6 +455,14 @@ class ForgejoNative:
                 result=await self.service.browser.inspect(**payload["fields"],username=credentials["user_name"],
                     password=credentials["password"],expected_user_id=authority["provider_user_id"],deadline=deadline,
                     check_current=current,contact=contact,observe=observe,cleanup_observer=retain_cleanup)
+                if operation=="observe":
+                    expected=authority["original_target"];observed=result["target"]
+                    if any(observed[k]!=expected[k] for k in ("owner","repository","issue_index",
+                        "repository_id","issue_id","provider_user_id","provider_login")):
+                        raise ForgejoError("forgejo_original_observed_destination_changed")
+                    result.update(observation_only=True,attribution_uncertain=True,original_unknown=True,
+                        original_job_id=authority["original_job_id"],observed_current_title=observed["old_title"],
+                        approved_title=expected["new_title"],original_capacity_released=False)
             else:
                 result=await self.service.browser.submit(target=TitleTarget(**payload["target"]),session=session,
                     username=credentials["user_name"],password=credentials["password"],asset_manifest=assets,deadline=deadline,

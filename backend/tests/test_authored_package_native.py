@@ -171,6 +171,8 @@ async def test_actual_authored_time_ledger_native_reopen_private_read(accounting
                     first_attempt=await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id==task_id))
                     first_run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==first_attempt.workflow_run_id))
                     first_identity=(first_run.run_identity,first_run.deadline_at,first_run.run_fingerprint)
+                    first_history=(first_run.checkpoint_receipts_json,first_run.effect_receipts_json)
+                    first_board_identity=(first_task.task_revision,first_attempt.attempt_id,first_attempt.workflow_run_id,first_attempt.fencing_token)
                     assert first_run.status=="running" and first_run.attempt_count==1
                 assert await tool_package_native.live_original_owner(jobs,first_task,first_attempt)
                 # Current live authority is copied to separate real SQLite
@@ -217,20 +219,30 @@ async def test_actual_authored_time_ledger_native_reopen_private_read(accounting
                 # this is not an independent-process parent-death proof.
                 second_dispatcher=WorkBoardDispatcher(jobs=DurableJobRepository(),session_provider=factory.accounting_sessions)
                 waiting=await second_dispatcher.run_pass()
+                records["second_dispatch_waiting"]=waiting
+                (root/"actual-authored-api.json").write_text(json.dumps(records,indent=2))
                 async with factory.accounting_sessions() as db:
                     second_attempt=await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id==second_task["task"]["task_id"]))
-                    second_run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==second_attempt.workflow_run_id))
-                    second_identity=(second_run.run_identity,second_run.deadline_at,second_run.run_fingerprint)
-                    assert second_run.status=="queued" and second_run.failure_reason=="authored_package_capacity_held",waiting
-                    assert second_run.attempt_count==0 and json.loads(second_run.effect_receipts_json)==[]
+                    second_row=await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id==second_task["task"]["task_id"]))
+                    assert second_attempt is None and second_row.status.value=="ready",waiting
+                    assert list((await db.scalars(select(WorkflowRunState).where(WorkflowRunState.goal_id==second_goal["id"]))).all())==[]
                     still_first=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==first_identity[0]))
                     assert still_first.status=="running" and first_identity==(still_first.run_identity,still_first.deadline_at,still_first.run_fingerprint)
+                    assert first_history==(still_first.checkpoint_receipts_json,still_first.effect_receipts_json)
+                    still_task=await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id==task_id))
+                    still_attempt=await db.get(WorkBoardAttempt,first_attempt.attempt_id)
+                    assert still_task.status.value=="running" and first_board_identity==(still_task.task_revision,still_attempt.attempt_id,still_attempt.workflow_run_id,still_attempt.fencing_token)
+                assert await tool_package_native.live_original_owner(jobs,first_task,first_attempt)
                 descriptor=os.open(barrier_path,os.O_WRONLY|os.O_NOFOLLOW)
                 try:assert os.write(descriptor,b'{"barrier":false}')==17
                 finally:os.close(descriptor)
                 await first_pass
                 completed_second=await second_dispatcher.run_pass()
                 async with factory.accounting_sessions() as db:
+                    second_attempt=await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id==second_task["task"]["task_id"]))
+                    assert second_attempt is not None,completed_second
+                    second_run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==second_attempt.workflow_run_id))
+                    second_identity=(second_run.run_identity,second_run.deadline_at,second_run.run_fingerprint)
                     for identity in (first_identity,second_identity):
                         row=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==identity[0]))
                         assert row.status=="succeeded" and row.attempt_count==1 and identity==(row.run_identity,row.deadline_at,row.run_fingerprint),completed_second
@@ -238,7 +250,7 @@ async def test_actual_authored_time_ledger_native_reopen_private_read(accounting
                 second_output=await client.get(f"/api/work-board/tasks/{second_task['task']['task_id']}/tool-package-output")
                 assert first_output.status_code==200 and first_output.json()==vector["output"]
                 assert second_output.status_code==200 and second_output.json()=={"schema_version":1,"groups":[],"total_minutes":0}
-                records["two_goal_barrier"]={"first_identity":str(first_identity),"second_identity":str(second_identity),"waiting":waiting,"completed_second":completed_second,"first_output":first_output.json(),"second_output":second_output.json(),"source_barrier_observed":True,"registry_scope":"two dispatcher instances in one process"}
+                records["two_goal_barrier"]={"first_identity":str(first_identity),"second_identity":str(second_identity),"second_native_identity_minted":"first actual admission after prior positive reap; not queued native continuation","waiting":waiting,"completed_second":completed_second,"first_output":first_output.json(),"second_output":second_output.json(),"source_barrier_observed":True,"registry_scope":"two dispatcher instances in one process"}
                 (root/"actual-authored-api.json").write_text(json.dumps(records,indent=2))
                 return
             finally:

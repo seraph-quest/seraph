@@ -13,6 +13,23 @@ Structural checks do not certify files malware-clean. This branch must complete
 private ingestion, native child supervision, readback and cockpit proof before
 changing shipped `develop` truth.
 
+The accepted operator flow selects one PDF and one CSV against a bounded Goal,
+reserves their immutable private pair, and creates the typed comparison on the
+Work board. Ordinary parser capacity or priority refusal keeps that original
+bounded attempt queued; it does not create a new attempt or terminal failure.
+The task inspector reads a cited literal report and prepares a verified CSV for
+an explicit save link. Owner/session/task changes and typed output denials clear
+cached output. Completed execution history remains visible when current
+Root/Goal authority blocks later private reads. The comparison records an
+explicit `no_learning` result and makes no model/provider call.
+
+Cancellation can leave the generic task card Blocked while its document
+inspector records the actual cancelled parser and reap state. Unknown cleanup
+holds capacity; the original exact witness permits cleanup reconciliation.
+Recovery adopts recorded verified output without reparsing. Only a known
+terminated interruption may use the remaining original retry allowance;
+exit-zero with missing output remains lost-output/nonretryable in this version.
+
 **Status:** Partial
 **Scope:** current `develop` baseline plus the accepted Epic #736/#775 target;
 open integration branches describe intended post-merge truth and label any

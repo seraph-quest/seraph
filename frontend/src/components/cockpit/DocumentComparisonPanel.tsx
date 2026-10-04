@@ -10,11 +10,16 @@ type Pair = { artifact_id: string; revision: number; pair_state: string; uploade
 type Pending = { request: { schema_version: 1; operation: "compare-line-totals-by-sku"; goal_id: string; goal_revision: number; idempotency_key: string; pdf: Descriptor; csv: Descriptor; no_learning: true }; pair: string | null; taskKey: string };
 type NativeState = { task_revision: number; status: string; cleanup_proven: boolean; quiescence_recorded: boolean; recoverable: boolean; retryable: boolean; report_available: boolean; reason_code: string | null; recovery_limit: string; deadline_at: string };
 interface Props { ownerPrincipalId?: string | null; ownerSessionId?: string | null; task?: WorkBoardTask; goals?: GoalInfo[]; onClose?: () => void; onCreated?: (task: WorkBoardTask) => void | Promise<void> }
+class DocumentRequestError extends Error {
+  constructor(readonly status: number, code: string) { super(code); }
+}
 
 async function request(path: string, body?: unknown, method = "POST") {
   const response = await apiFetch(`${API_URL}/api/work-board${path}`, { method, ...(body === undefined ? {} : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }) });
   const value = await response.json();
-  if (!response.ok) throw Error(value.detail?.code ?? "Document request failed; read back before retry.");
+  if (!response.ok) throw new DocumentRequestError(response.status,
+    typeof value.detail?.code === "string" && /^[a-z][a-z0-9_]{0,95}$/.test(value.detail.code)
+      ? value.detail.code : "document_request_failed_readback_required");
   return value;
 }
 async function descriptor(file: File, maximum: number): Promise<Descriptor> {
@@ -26,15 +31,16 @@ async function descriptor(file: File, maximum: number): Promise<Descriptor> {
 export function DocumentComparisonPanel({ ownerPrincipalId, ownerSessionId, task, goals = [], onClose, onCreated }: Props) {
   const [pdf, setPdf] = useState<File | null>(null), [csv, setCsv] = useState<File | null>(null);
   const [goalId, setGoalId] = useState(""), [pending, setPending] = useState<Pending | null>(null), [pair, setPair] = useState<Pair | null>(null);
-  const [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null), [output, setOutput] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null), [output, setOutput] = useState<{ scope: string; text: string } | null>(null);
   const [derivedCsv, setDerivedCsv] = useState<{ scope: string; text: string } | null>(null), [csvUrl, setCsvUrl] = useState<{ scope: string; url: string } | null>(null);
+  const [outputDenied, setOutputDenied] = useState(false);
   const generation = useRef(0);
   const [native, setNative] = useState<NativeState | null>(null);
   const recovery = useRef<{ expected_revision: number; idempotency_key: string } | null>(null);
   const key = ownerPrincipalId && ownerSessionId ? `seraph.document-pair.v1:${encodeURIComponent(ownerPrincipalId)}:${encodeURIComponent(ownerSessionId)}` : null;
   const scope = `${key ?? "unauthenticated"}:${task?.task_id ?? "create"}`;
   useEffect(() => {
-    generation.current += 1; recovery.current=null; setNative(null); setBusy(false); setPdf(null); setCsv(null); setOutput(null); setDerivedCsv(null); setPair(null); setError(null); setPending(null);
+    generation.current += 1; recovery.current=null; setNative(null); setBusy(false); setPdf(null); setCsv(null); setOutput(null); setDerivedCsv(null); setOutputDenied(false); setPair(null); setError(null); setPending(null);
     if (!key || task) return () => { generation.current += 1; };
     try {
       const raw = sessionStorage.getItem(key);
@@ -53,6 +59,12 @@ export function DocumentComparisonPanel({ ownerPrincipalId, ownerSessionId, task
     setCsvUrl({ scope, url });
     return () => URL.revokeObjectURL(url);
   }, [derivedCsv, scope, key]);
+  function outputFailure(failure: unknown) {
+    setOutput(null); setDerivedCsv(null);
+    if (failure instanceof DocumentRequestError && [401,403,404,409].includes(failure.status)) setOutputDenied(true);
+    setError(failure instanceof Error ? failure.message : "document_output_readback_required");
+  }
+  const canReadOutput = !outputDenied && (native ? native.report_available : Boolean(task && ["done", "review"].includes(task.status)));
   function retain(value: Pending) {
     if (!key) throw Error("The current operator session is required.");
     const encoded = JSON.stringify(value); sessionStorage.setItem(key, encoded);
@@ -123,7 +135,10 @@ export function DocumentComparisonPanel({ ownerPrincipalId, ownerSessionId, task
       <p>Comparison {task.status} · recovery and cancellation use this original task and its bounded attempt.</p>
       <button type="button" disabled={busy} onClick={() => {
         const version=generation.current;setBusy(true);setError(null);
-        void request(`/tasks/${task.task_id}/document-comparison`,undefined,"GET").then(value => {if(version===generation.current)setNative(value as NativeState);}).catch(failure => {if(version===generation.current)setError(String(failure));}).finally(() => {if(version===generation.current)setBusy(false);});
+        void request(`/tasks/${task.task_id}/document-comparison`,undefined,"GET").then(value => {
+          if(version!==generation.current)return;setNative(value as NativeState);setOutputDenied(!value.report_available);
+          if(!value.report_available){setOutput(null);setDerivedCsv(null);}
+        }).catch(failure => {if(version===generation.current)outputFailure(failure);}).finally(() => {if(version===generation.current)setBusy(false);});
       }}>Read original parser and recovery state</button>
       {native && <p>{native.status} · {native.reason_code ?? "original attempt"} · parser cleanup {native.cleanup_proven ? "verified" : "unknown; capacity held"} · original window ends {native.deadline_at}. {native.recovery_limit}</p>}
       {native?.status === "cancelled" && <p>Comparison cancelled; no external action was performed. The blocked card preserves its cancellation record. Parser capacity is {native.quiescence_recorded ? "released with the recorded reap witness" : "held pending a recorded exact reap witness"}.</p>}
@@ -141,17 +156,17 @@ export function DocumentComparisonPanel({ ownerPrincipalId, ownerSessionId, task
         recovery.current ??= {expected_revision:native.task_revision,idempotency_key:crypto.randomUUID()};
         void request(`/tasks/${task.task_id}/document-comparison/retry`,recovery.current).then(value => {if(version===generation.current)setNative(value.document_comparison as NativeState);}).catch(failure => {if(version===generation.current)setError(String(failure));}).finally(() => {if(version===generation.current)setBusy(false);});
       }}>Retry known terminated interruption within original allowance</button>
-      <button type="button" disabled={busy || !(["done", "review"].includes(task.status) || native?.report_available)} onClick={() => {
-        const version=generation.current;setBusy(true); void request(`/tasks/${task.task_id}/document-output/report`, undefined, "GET").then(value => {if(version===generation.current)setOutput(value.text);}).catch(failure => {if(version===generation.current)setError(String(failure));}).finally(() => {if(version===generation.current)setBusy(false);});
+      <button type="button" disabled={busy || !canReadOutput} onClick={() => {
+        const version=generation.current;setBusy(true); void request(`/tasks/${task.task_id}/document-output/report`, undefined, "GET").then(value => {if(version===generation.current)setOutput({ scope, text: value.text });}).catch(failure => {if(version===generation.current)outputFailure(failure);}).finally(() => {if(version===generation.current)setBusy(false);});
       }}>Read verified cited report</button>
-      <button type="button" disabled={busy || !(["done", "review"].includes(task.status) || native?.report_available)} onClick={() => {
+      <button type="button" disabled={busy || !canReadOutput} onClick={() => {
         const version=generation.current;setBusy(true); void request(`/tasks/${task.task_id}/document-output/csv`, undefined, "GET").then(value => {
           if(version!==generation.current)return;
           setDerivedCsv({ scope, text: value.text });
-        }).catch(failure => {if(version===generation.current)setError(String(failure));}).finally(() => {if(version===generation.current)setBusy(false);});
+        }).catch(failure => {if(version===generation.current)outputFailure(failure);}).finally(() => {if(version===generation.current)setBusy(false);});
       }}>Prepare verified derived CSV</button>
       {key && csvUrl?.scope === scope && <a href={csvUrl.url} download="invoice-comparison.csv">Save verified derived CSV</a>}
-      {output !== null && <pre className="whitespace-pre-wrap break-words text-xs" aria-label="Verified cited document report">{output}</pre>}
+      {key && output?.scope === scope && <pre className="whitespace-pre-wrap break-words text-xs" aria-label="Verified cited document report">{output.text}</pre>}
     </>}
   </section>;
   return task ? contents : createPortal(<div className="fixed inset-0 overflow-auto bg-black/70 p-6" style={{ zIndex: 1100 }} role="dialog" aria-modal="true" aria-label="Create private invoice comparison"><div className="mx-auto max-w-2xl">{contents}</div></div>, document.body);

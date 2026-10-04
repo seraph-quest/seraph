@@ -39,10 +39,23 @@ async def snapshot(db, owner, task_id):
     task, attempt, run = await bound(db, owner, task_id)
     projection = _serialize(run)
     proven = cleanup_proven(task, attempt, projection)
-    recoverable = False; retryable = False; authorized = False
+    recoverable = False; retryable = False; authorized = False; readable = False
     reason = run.failure_reason
     if run.status == "cancelled":
         reason = "document_cancelled_reaped" if proven else "document_cancelled_quiescence_unknown"
+    if run.status == "succeeded" and task.status in {WorkBoardStatus.done, WorkBoardStatus.review}:
+        try:
+            # Match the private output route's current read authority exactly.
+            # Reading completed output does not renew execution or require a
+            # still-live execution lease/deadline.
+            from src.work_board.document_pairs import owned, authority
+            from src.work_board.pipelines import root_binding
+            row, value = await owned(db, owner, task.input_artifact_id)
+            await authority(db, owner, row, value, dict(root_binding()))
+            read_output(task, attempt, run)
+            readable = True
+        except (BoardError, OSError, ValueError, TypeError, KeyError) as failure:
+            reason = failure.code if isinstance(failure, BoardError) else "document_output_readback_required"
     try:
         staged = await stage(db, task, attempt, run, inputs(task))
         await current(db, task, attempt, run, staged, require_lease=False)
@@ -65,12 +78,12 @@ async def snapshot(db, owner, task_id):
                 pass
     return {"task_id": task_id, "task_revision": task.task_revision,
         "attempt_id": attempt.attempt_id, "job_id": run.run_identity,
-        "status": run.status, "reason_code": reason, "deadline_at": projection["deadline_at"],
+        "status": run.status, "reason_code": reason, "deadline_at": utc(run.deadline_at).isoformat(),
         "attempt_count": run.attempt_count, "max_attempts": 2,
         "cleanup_proven": proven, "recoverable": recoverable, "retryable": retryable,
         "quiescence_recorded": "document-reaped" in checkpoints(run),
         "cancel_requested": attempt.cancel_requested_at is not None,
-        "report_available": run.status == "succeeded" and task.status in {WorkBoardStatus.done, WorkBoardStatus.review},
+        "report_available": readable,
         "no_learning": True,
         "recovery_limit": "Only original verified output with an exact parser reap witness can be adopted. Lost output is blocked; expiry alone never releases parser capacity."}
 

@@ -71,7 +71,7 @@ separately from owned-event access; runtime contacts remain selected-ID-only.
 Preview old/new RFC3339 seconds/numeric offsets, explicit IANA zones and UTC
 instants. Reject gaps, offset/zone mismatches, ambiguity without an explicit
 offset, invalid/end-before-start/no-op times. Duration1 minute–24 hours, future
-start within365 days; last fresh owner/event observations <=10 seconds at claim
+start within365 days; last fresh owner/event observations at most 10 seconds at claim
 and contact. Frozen full accepted resource rejects unknown fields and preserves
 protected title/description/location/reminders/identity/property/exclusion state.
 
@@ -104,8 +104,8 @@ SQLite writer; approval consumption and intent install are atomic. A second
 dispatch/contact CAS permanently spends the sole PATCH slot and invalidates
 prior closure before contact. No filesystem/Vault/network/nested writer there.
 
-Priority60, attempts1, outstanding1, original runtime<=120 seconds, approval
-<=5 minutes capped by all original finite authority. HTTPS<=10 seconds, zero
+Priority60, attempts1, outstanding1, original runtime at most 120 seconds, approval
+at most 5 minutes capped by all original finite authority. HTTPS at most 10 seconds, zero
 redirects/retries. Persistent contacts: verification6 (two refresh/UserInfo plus
 two selected lists), preview4, execution9, original combined13, recovery4.
 No pagination/search. Replay keeps original request/marker/deadline/budget.

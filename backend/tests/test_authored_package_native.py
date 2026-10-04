@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from sqlalchemy import select
 
 from tests.test_inference_accounting import accounting_db
+from tests.test_tool_package_native import _optional_runtime_bundle
 from config.settings import settings
 from src.auth.middleware import OperatorAuthMiddleware
 from src.db.models import WorkBoardAttempt, WorkBoardTask, WorkflowRunState, OperatorSession
@@ -20,6 +21,8 @@ from src.workflows.job_runtime import DurableJobRepository
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif('SERAPH_TEST_TOOL_PACKAGE_RUNTIME' not in os.environ,
+    reason='optional locally prepared tool package runtime not supplied')
 @pytest.mark.parametrize("authored_fixture",["time-ledger","tiny-copy","two-goal-race","two-goal-lock-trace","sandbox-denials"])
 async def test_actual_authored_time_ledger_native_reopen_private_read(accounting_db, monkeypatch, authored_fixture):
     from src.api import auth, capability_packs, goals, work_board
@@ -36,7 +39,7 @@ async def test_actual_authored_time_ledger_native_reopen_private_read(accounting
     monkeypatch.setattr(crypto,"_fernet",None)
     from src.api.auth import _reset_login_throttle_for_tests
     _reset_login_throttle_for_tests()
-    bundle=Path(os.environ["SERAPH_TEST_TOOL_PACKAGE_RUNTIME"])
+    bundle=_optional_runtime_bundle()
     target=root/"artifacts/tool-package-runtime/json-python-bwrap-v1"
     target.parent.mkdir(mode=0o700,parents=True)
     shutil.copytree(bundle,target)

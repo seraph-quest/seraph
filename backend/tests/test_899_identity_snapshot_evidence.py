@@ -8,7 +8,9 @@ from sqlalchemy import select
 
 from config.settings import settings
 from src.auth.service import authenticate_session, authenticate_token, AuthFailure
-from src.db.models import Goal, OperatorSession, OperatorRecoveryJournal, WorkBoardTask, WorkBoardAttempt, WorkflowRunState
+from src.db.models import (Goal, OperatorSession, OperatorRecoveryJournal, WorkBoardTask,
+    WorkBoardAttempt, WorkBoardProposal, WorkBoardEvent, WorkflowRunState,
+    InferenceCostReservation, ApprovalRequest)
 from tests.test_first_result_setup import async_db, setup_workspace, create_snapshot, run_task, progress
 from tests.test_operator_identity import auth, login, enroll, recover, HEADERS
 
@@ -104,17 +106,41 @@ async def test_actual_identity_starter_snapshot_recovery_and_scoped_evidence(cli
             "expected_task_revision": detail["task_revision"], "expected_packet_revision": cited["revision"],
             "expected_packet_digest": cited["digest"], "allow_model_context": True})
         assert adopted.status_code == 200, adopted.text
+        # Packet review grants neither recovered-source model purpose nor a
+        # proposal/job/approval. The source-purpose guard runs before admission.
+        effects = (WorkBoardProposal, WorkflowRunState, WorkBoardAttempt,
+                   InferenceCostReservation, ApprovalRequest, WorkBoardEvent)
+        async with async_db() as db:
+            before_effects = {model.__name__: sorted(row.model_dump_json()
+                for row in (await db.execute(select(model))).scalars()) for model in effects}
+            before_task = (await db.execute(select(WorkBoardTask).where(
+                WorkBoardTask.task_id == new_id))).scalar_one().model_dump_json()
+            before_goal = (await db.get(Goal, detail["goal_id"])).model_dump_json()
         specified = await client.post(f"/api/work-board/tasks/{new_id}/specify", json={
             "expected_revision": detail["task_revision"], "idempotency_key": f"historical-egress-{new_id}"})
-        assert specified.status_code == 200, specified.text
-        assert specified.json()["blocked_reason"] == "evidence_source_purpose_consent_required"
+        assert specified.status_code == 403, specified.text
+        assert specified.json()["detail"]["code"] == "evidence_source_purpose_consent_required"
+        transport.assert_not_awaited()
         async with async_db() as db:
+            after_effects = {model.__name__: sorted(row.model_dump_json()
+                for row in (await db.execute(select(model))).scalars()) for model in effects}
+            assert after_effects == before_effects
+            assert (await db.execute(select(WorkBoardTask).where(
+                WorkBoardTask.task_id == new_id))).scalar_one().model_dump_json() == before_task
+            assert (await db.get(Goal, detail["goal_id"])).model_dump_json() == before_goal
             source_goal = await db.get(Goal, goal["id"])
             new_goal = await db.get(Goal, detail["goal_id"])
             assert source_goal.owner_session_id == first["session_id"]
             assert new_goal.admission_budget_json is None and new_goal.proactive_enabled is False
             assert new_goal.success_criterion_json is None
             assert (await db.execute(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == new_id))).first() is None
+        still_readable = await client.get(f"/api/work-board/tasks/{new_id}/evidence")
+        assert still_readable.status_code == 200, still_readable.text
+        retained = still_readable.json()
+        assert (retained["revision"], retained["digest"]) == (cited["revision"], cited["digest"])
+        assert retained["allow_model_context"] is True  # exact packet adoption only
+        assert retained["claims"] == adopted.json()["claims"]
+        assert all(not claim["model_context_allowed"] for claim in retained["claims"])
     transport.assert_not_awaited()
     # Fresh intent prevents rolling back old selections behind the operator's
     # current work, without resurrecting historical dispatch authority.

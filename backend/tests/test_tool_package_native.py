@@ -19,7 +19,33 @@ from src.work_board.dispatcher import WorkBoardDispatcher
 from src.workflows.job_runtime import DurableJobRepository
 
 
+def _optional_runtime_bundle():
+    configured = os.environ.get('SERAPH_TEST_TOOL_PACKAGE_RUNTIME')
+    if configured is None:
+        pytest.skip('optional locally prepared tool package runtime not supplied')
+    assert configured.strip(), 'supplied optional tool package runtime path is empty'
+    bundle = Path(configured)
+    assert bundle.is_dir(), f'supplied optional tool package runtime unavailable: {bundle}'
+    return bundle
+
+
+def test_optional_runtime_requirement_distinguishes_absence_and_invalid_path(monkeypatch, tmp_path):
+    monkeypatch.delenv('SERAPH_TEST_TOOL_PACKAGE_RUNTIME', raising=False)
+    with pytest.raises(pytest.skip.Exception, match='not supplied'):
+        _optional_runtime_bundle()
+    for invalid in ('', str(tmp_path / 'missing-runtime')):
+        monkeypatch.setenv('SERAPH_TEST_TOOL_PACKAGE_RUNTIME', invalid)
+        with pytest.raises(AssertionError, match='supplied optional tool package runtime'):
+            _optional_runtime_bundle()
+    # A supplied directory is only a locator; the actual native profile still
+    # validates its complete contents and sandbox enforcement independently.
+    monkeypatch.setenv('SERAPH_TEST_TOOL_PACKAGE_RUNTIME', str(tmp_path))
+    assert _optional_runtime_bundle() == tmp_path
+
+
 @pytest.mark.asyncio
+@pytest.mark.skipif('SERAPH_TEST_TOOL_PACKAGE_RUNTIME' not in os.environ,
+    reason='optional locally prepared tool package runtime not supplied')
 @pytest.mark.parametrize('mode',['positive','goal_revision','logout','cancel','written_recovery','vault_drift','callback_deadline','lifecycle_pin','adopt_goal','adopt_revoke','adopt_cancel'])
 async def test_actual_authenticated_review_approval_native_formatter_reopen(accounting_db,monkeypatch,mode):
     from src.api import auth,capability_packs,goals,work_board
@@ -35,10 +61,7 @@ async def test_actual_authenticated_review_approval_native_formatter_reopen(acco
     _reset_login_throttle_for_tests()
     # Explicit existing locally built optional dependency. Missing profile is
     # a skip, never proof of enforcement or native capability readiness.
-    configured=os.environ.get('SERAPH_TEST_TOOL_PACKAGE_RUNTIME')
-    if not configured:pytest.skip('optional locally prepared tool package runtime not supplied')
-    bundle=Path(configured)
-    if not bundle.is_dir():pytest.skip('explicit optional tool package runtime unavailable')
+    bundle=_optional_runtime_bundle()
     target=root/"artifacts/tool-package-runtime"/PROFILE
     target.parent.mkdir(parents=True,mode=0o700)
     for parent in (target.parent,target.parent.parent):os.chmod(parent,0o700)

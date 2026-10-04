@@ -20,7 +20,11 @@
   },
   "commands": {
     "review-selected-text": {
-      "description": "Review selected ordinary DOM text"
+      "description": "Review selected ordinary DOM text",
+      "suggested_key": {
+        "default": "Ctrl+Shift+Y",
+        "mac": "Command+Shift+Y"
+      }
     }
   },
   "incognito": "not_allowed"

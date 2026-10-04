@@ -29,8 +29,13 @@ from src.work_board.input_artifacts import _write_payload
 from src.work_board.repository import WorkBoardRepository, BoardError
 from src.workflows.job_runtime import DurableJobIdentity, DurableJobSpec, durable_job_repository
 from src.workspace import canonical_workspace_root
+from src.browser.moltbook_private_read import (MoltbookPrivateBrowserReader,
+    CAPABILITY as PRIVATE_CAPABILITY, JOB_KIND as PRIVATE_JOB_KIND,
+    OPERATION as PRIVATE_OPERATION, PROFILE as PRIVATE_PROFILE,
+    policy_digest as private_policy_digest, require_policy as private_require_policy,
+    root_auth_digest as private_root_auth_digest)
 
-READS = frozenset({"inspect", "feed", "post", "comments", "community"})
+READS = frozenset({"inspect", "feed", "post", "comments", "community", PRIVATE_OPERATION})
 WRITES = frozenset({"create_post", "create_comment"})
 PREFIX = "artifacts/moltbook/"
 STATE_ID = "moltbook:state"
@@ -93,16 +98,30 @@ def connection_view(row):
 
 
 class MoltbookService:
-    def __init__(self, *, adapter=None, jobs=None):
+    def __init__(self, *, adapter=None, jobs=None, private_browser=None):
         self.adapter = adapter or MoltbookAdapter()
         self.jobs = jobs or durable_job_repository
         self._active = {}
+        self.private_browser = private_browser or MoltbookPrivateBrowserReader()
+
+    def connection_view(self, row):
+        result = connection_view(row)
+        result["private_browser"] = {"capability_id": PRIVATE_CAPABILITY,
+            "profile": PRIVATE_PROFILE, "production_acceptance": "blocked_unverified",
+            "available": not self.private_browser.production_blocked,
+            "max_contacts": 3, "max_home_contacts": 1, "max_runtime_seconds": 120,
+            "retained_fields": ["your_account.name", "your_account.karma", "your_account.unread_notification_count",
+                "activity_on_your_posts.post_id", "post_title", "submolt_name", "new_notification_count",
+                "latest_at", "latest_commenters", "preview"],
+            "complete_home_fetched": True, "role_and_unrelated_instructions_discarded": True,
+            "side_effect_free": False, "no_learning": True}
+        return result
 
     async def connection(self, owner):
         async with engine.get_session() as db:
             await root_current(db, owner.principal_id, owner.session_id)
             row = await db.scalar(select(MoltbookConnection).where(MoltbookConnection.owner_principal_id == owner.principal_id))
-            return connection_view(row)
+            return self.connection_view(row)
 
     async def configure_from_vault(self, owner, *, vault_key, request_key, expected_revision=None):
         text(vault_key, 256)
@@ -159,7 +178,7 @@ class MoltbookService:
             return connection_view(row)
 
     async def consent(self, owner, *, request_key, expected_revision, goal_id, goal_revision, actions,
-                      duration_seconds, personal_noncommercial, no_redistribution):
+                      duration_seconds, personal_noncommercial, no_redistribution, private_bookkeeping_ack=False):
         identifier(request_key)
         if (personal_noncommercial is not True or no_redistribution is not True
             or type(duration_seconds) is not int or not 30 <= duration_seconds <= 3600
@@ -167,11 +186,20 @@ class MoltbookService:
             or any(type(a) is not str or a not in READS | WRITES for a in actions)
             or len(set(actions)) != len(actions)):
             raise MoltbookError("moltbook_explicit_consent_invalid", status_code=422)
+        private = PRIVATE_OPERATION in actions
+        if private:
+            self.private_browser.require_available()
+            if (actions != [PRIVATE_OPERATION] or private_bookkeeping_ack is not True or duration_seconds > 300):
+                raise MoltbookError("moltbook_private_bookkeeping_consent_required", status_code=422)
+        elif private_bookkeeping_ack is not False:
+            raise MoltbookError("moltbook_private_consent_scope_invalid", status_code=422)
         request_digest = digest([owner.principal_id, owner.session_id, expected_revision, goal_id,
-            goal_revision, sorted(actions), duration_seconds, personal_noncommercial, no_redistribution])
+            goal_revision, sorted(actions), duration_seconds, personal_noncommercial, no_redistribution]
+            + ([private_bookkeeping_ack, private_policy_digest()] if private else []))
         async with engine.get_session() as db:
             await writer(db)
             root = await root_current(db, owner.principal_id, owner.session_id)
+            private_auth = private_root_auth_digest(owner, root) if private else None
             goal = await WorkBoardRepository._validate_goal(db, owner, goal_id=goal_id, goal_revision=goal_revision)
             row = await db.scalar(select(MoltbookConnection).where(MoltbookConnection.owner_principal_id == owner.principal_id))
             if row is None:
@@ -180,6 +208,8 @@ class MoltbookService:
                 Secret.owner_principal_id == owner.principal_id, Secret.revoked_at.is_(None)))
             if secret is None or secret_binding_digest(secret) != row.credential_binding:
                 raise MoltbookError("moltbook_credential_changed")
+            if private and (row.mode != "active" or not row.account_id or not row.account_name):
+                raise MoltbookError("moltbook_private_positive_account_inspect_required")
             prior = json.loads(row.consent_json)
             if prior.get("request_key") == request_key:
                 if (prior.get("request_digest") != request_digest or prior.get("session") != owner.session_id
@@ -188,7 +218,7 @@ class MoltbookService:
                     raise MoltbookError("moltbook_consent_idempotency_conflict")
                 if datetime.fromisoformat(prior["expires_at"]) <= now():
                     raise MoltbookError("moltbook_original_consent_expired")
-                return connection_view(row)
+                return self.connection_view(row)
             if row.revision != expected_revision or row.active_job_id:
                 raise MoltbookError("moltbook_connection_busy_or_revision_changed")
             expiry = min(now() + timedelta(seconds=duration_seconds), utc(root.absolute_expires_at), utc(root.idle_expires_at))
@@ -207,9 +237,16 @@ class MoltbookService:
                     "goal_id": goal_id, "goal_revision": goal_revision, "actions": actions,
                     "duration_seconds": duration_seconds, "personal_noncommercial": True,
                     "no_redistribution": True}}).decode()
+            if private:
+                value = json.loads(row.consent_json)
+                value.update(private_profile=PRIVATE_PROFILE, private_policy_digest=private_policy_digest(),
+                    private_bookkeeping_ack=True, account_id=row.account_id, account_name=row.account_name,
+                    root_auth_digest=private_auth)
+                value["request"].update(private_bookkeeping_ack=True)
+                row.consent_json = canonical(value).decode()
             if row.mode == "disabled": row.mode = "pending_claim"
             db.add(row)
-            return connection_view(row)
+            return self.connection_view(row)
 
     async def disable(self, owner, *, expected_revision):
         async with engine.get_session() as db:
@@ -224,12 +261,12 @@ class MoltbookService:
             db.add(row)
             # Retain active capacity and all contacted uncertainty until the
             # actual worker closes and an exact canonical recovery settles it.
-            return connection_view(row)
+            return self.connection_view(row)
 
-    async def current(self, db, owner, run, *, lease=None, settlement_only=False):
-        await root_current(db, owner.principal_id, owner.session_id)
+    async def current(self, db, owner, run, *, lease=None, settlement_only=False, completed_read=False):
+        original_root = await root_current(db, owner.principal_id, owner.session_id)
         if (run.owner_principal_id != owner.principal_id or run.operator_session_id != owner.session_id
-            or run.job_kind != JOB_KIND or run.capability_version != "1" or utc(run.deadline_at) <= now()):
+            or run.job_kind not in {JOB_KIND, PRIVATE_JOB_KIND} or run.capability_version != "1" or utc(run.deadline_at) <= now()):
             raise MoltbookError("moltbook_original_job_binding_changed")
         if lease:
             self.jobs._assert_lease(run, owner=lease[0], fencing_token=lease[1])
@@ -241,24 +278,40 @@ class MoltbookService:
         for limit in (goal.due_date, budget.period_expires_at if budget else None):
             if limit is not None and utc(limit) <= now(): raise MoltbookError("moltbook_goal_window_expired")
         authority = json.loads(run.declared_authority_json)
+        private = run.job_kind == PRIVATE_JOB_KIND
+        if completed_read and (not private or run.status != "succeeded"):
+            raise MoltbookError("moltbook_private_completed_read_required")
+        expected_capability = PRIVATE_CAPABILITY if private else CAPABILITY
         reference = PREFIX + digest(run.run_identity.encode()) + ".input.enc"
         expected_inputs = {"payload_ref": reference, "payload_digest": authority["payload_digest"], "no_learning": True}
         if (run.input_digest != digest(expected_inputs) or run.authority_digest != digest(authority)
             or authority.get("principal") != owner.principal_id or authority.get("session_id") != owner.session_id
-            or authority.get("owner_kind") != "user" or authority.get("capability_id") != CAPABILITY
+            or authority.get("owner_kind") != "user" or authority.get("capability_id") != expected_capability
+            or (authority.get("operation") == PRIVATE_OPERATION) != private
             or authority.get("no_learning") is not True
             or run.run_fingerprint != digest([authority["payload_digest"], authority, run.priority])):
             raise MoltbookError("moltbook_canonical_input_authority_changed")
         row = await db.get(MoltbookConnection, authority["connection_id"], populate_existing=True)
         if (row is None or row.owner_principal_id != owner.principal_id or row.mode == "disabled"
-            or row.revision != authority["connection_revision"] or row.active_job_id != run.run_identity
-            or row.active_payload_digest != authority["payload_digest"]
+            or row.revision != authority["connection_revision"]
+            or (not completed_read and (row.active_job_id != run.run_identity
+                or row.active_payload_digest != authority["payload_digest"]))
             or row.credential_binding != authority["vault_binding_digest"] or digest(json.loads(row.consent_json)) != authority["consent_digest"]):
             raise MoltbookError("moltbook_connection_authority_changed")
         if authority["operation"] in WRITES and (row.mode != "active" or row.account_id != authority["account_id"]
             or row.account_name != authority["account_name"]):
             raise MoltbookError("moltbook_original_account_changed")
         consent = json.loads(row.consent_json)
+        if private:
+            if (row.mode != "active" or row.account_id != authority.get("account_id")
+                or row.account_name != authority.get("account_name") or consent.get("private_profile") != PRIVATE_PROFILE
+                or consent.get("private_bookkeeping_ack") is not True
+                or consent.get("account_id") != row.account_id or consent.get("account_name") != row.account_name
+                or authority.get("private_policy_digest") != consent.get("private_policy_digest")):
+                raise MoltbookError("moltbook_private_profile_authority_changed")
+            if authority.get("root_auth_digest") != private_root_auth_digest(owner, original_root):
+                raise MoltbookError("moltbook_private_authenticated_root_changed")
+            private_require_policy(authority["private_policy_digest"])
         if (consent.get("session") != owner.session_id or consent.get("goal_id") != run.goal_id
             or consent.get("goal_revision") != run.goal_revision or consent.get("connection_revision") != row.revision
             or datetime.fromisoformat(consent["expires_at"]) <= now()
@@ -276,6 +329,8 @@ class MoltbookService:
     async def prepare_read(self, owner, **request):
         if request.get("operation") not in READS:
             raise MoltbookError("moltbook_read_operation_required", status_code=422)
+        if request.get("operation") == PRIVATE_OPERATION:
+            self.private_browser.require_available()
         replay = await self.replayed_admission(owner, request)
         if replay is not None: return replay
         admitted = await self._prepare(owner, **request)
@@ -317,7 +372,10 @@ class MoltbookService:
         if operation not in READS | WRITES: raise MoltbookError("moltbook_operation_not_allowed", status_code=422)
         identifier(request_key)
         if type(priority) is not int or not 0 <= priority <= 100: raise MoltbookError("moltbook_priority_invalid", status_code=422)
-        if operation == "inspect":
+        private = operation == PRIVATE_OPERATION
+        if private:
+            self.private_browser.require_available()
+        if operation in {"inspect", PRIVATE_OPERATION}:
             if fields: raise MoltbookError("moltbook_inspect_shape_invalid", status_code=422)
         else: route(operation, fields)
         payload = {"operation": operation, "fields": fields, "no_learning": True}
@@ -342,7 +400,16 @@ class MoltbookService:
                 or consent.get("goal_id") != goal_id or consent.get("goal_revision") != goal_revision
                 or operation not in consent.get("actions", []) or datetime.fromisoformat(consent["expires_at"]) <= now()):
                 raise MoltbookError("moltbook_current_consent_required")
-            deadline = min(now()+timedelta(seconds=300 if operation in WRITES else 30), datetime.fromisoformat(consent["expires_at"]))
+            if private and (row.mode != "active" or not row.account_id or not row.account_name
+                or consent.get("private_bookkeeping_ack") is not True or consent.get("private_profile") != PRIVATE_PROFILE
+                or consent.get("account_id") != row.account_id or consent.get("account_name") != row.account_name):
+                raise MoltbookError("moltbook_private_profile_authority_changed")
+            if private:
+                original_root = await root_current(db, owner.principal_id, owner.session_id)
+                if consent.get("root_auth_digest") != private_root_auth_digest(owner, original_root):
+                    raise MoltbookError("moltbook_private_authenticated_root_changed")
+            if private: private_require_policy(consent["private_policy_digest"])
+            deadline = min(now()+timedelta(seconds=120 if private else 300 if operation in WRITES else 30), datetime.fromisoformat(consent["expires_at"]))
             for limit in (goal.due_date,):
                 if limit is not None: deadline = min(deadline, utc(limit))
             if row.active_job_id is not None:
@@ -359,7 +426,7 @@ class MoltbookService:
                 row.active_job_id, row.active_deadline_at, row.active_payload_digest = job_id, deadline, payload_digest
                 db.add(row)
             authority = {"principal": owner.principal_id, "owner_kind": "user", "session_id": owner.session_id,
-                "capability_id": CAPABILITY, "connection_id": row.id, "connection_revision": row.revision,
+                "capability_id": PRIVATE_CAPABILITY if private else CAPABILITY, "connection_id": row.id, "connection_revision": row.revision,
                 "vault_binding_digest": row.credential_binding, "consent_digest": digest(consent),
                 "payload_digest": payload_digest, "operation": operation,
                 "account_id": row.account_id, "account_name": row.account_name,
@@ -367,6 +434,11 @@ class MoltbookService:
                 "no_learning": True}
             if operation in WRITES:
                 authority["review_digest"] = digest(review)
+            if private:
+                authority.update(private_profile=PRIVATE_PROFILE, private_policy_digest=consent["private_policy_digest"],
+                    root_auth_digest=consent["root_auth_digest"],
+                    private_bookkeeping_ack=True, permissions=["moltbook_private_read", "credential_egress",
+                        "browser_process", "workspace_write", "one_due_home_delivery_bookkeeping"])
         # Never regenerate an already persisted ciphertext on exact replay.
         reference = PREFIX + digest(job_id.encode()) + ".input.enc"
         path = canonical_workspace_root(settings.workspace_dir) / reference
@@ -376,21 +448,26 @@ class MoltbookService:
                 raise MoltbookError("moltbook_private_input_changed")
         else:
             _write_payload(path, encrypt(canonical(payload).decode()).encode())
+        if private:
+            staged, truncated = _read_workspace_text_bounded(_safe_resolve(reference), max_bytes=32768)
+            if truncated: raise MoltbookError("moltbook_private_input_changed")
+            authority["input_cipher_digest"] = digest(staged.encode())
         return await self.jobs.admit_job(DurableJobSpec(identity=DurableJobIdentity(job_id=job_id,
-            owner_kind="user", owner_principal_id=owner.principal_id, job_kind=JOB_KIND,
+            owner_kind="user", owner_principal_id=owner.principal_id, job_kind=PRIVATE_JOB_KIND if private else JOB_KIND,
             capability_version="1", idempotency_scope="moltbook-operation", idempotency_key=request_key),
             inputs={"payload_ref": reference, "payload_digest": payload_digest, "no_learning": True},
             session_id=owner.session_id, operator_session_id=owner.session_id, goal_id=goal_id,
             goal_revision=goal_revision, priority=priority, declared_authority=authority,
             deadline_at=deadline, max_attempts=1, budget_microusd=0,
-            run_fingerprint=digest([payload_digest, authority, priority])))
+            run_fingerprint=digest([payload_digest, authority, priority]),
+            resource_claims=["browser-task-lane"] if private else []))
 
     async def snapshot(self, owner, job_id):
         async with engine.get_session() as db:
             await root_current(db, owner.principal_id, owner.session_id)
             run = await self.jobs._fetch(db, job_id)
             if (run.owner_principal_id != owner.principal_id or run.operator_session_id != owner.session_id
-                or run.job_kind != JOB_KIND or run.capability_version != "1"):
+                or run.job_kind not in {JOB_KIND, PRIVATE_JOB_KIND} or run.capability_version != "1"):
                 raise MoltbookError("moltbook_job_owner_mismatch", status_code=404)
             from src.workflows.job_runtime import _serialize
             result = _serialize(run)
@@ -488,6 +565,9 @@ class MoltbookService:
 
     async def execute_read(self, owner, job_id, *, execution):
         projected = await self.snapshot(owner, job_id)
+        if projected["declared_authority"].get("operation") == PRIVATE_OPERATION:
+            from src.browser.moltbook_private_native import execute_private_read
+            return await execute_private_read(self, owner, job_id, execution=execution)
         if projected["lease"]["fencing_token"] != execution["fencing_token"]:
             raise MoltbookError("moltbook_original_execution_fence_changed")
         if projected["status"] == "accepted":
@@ -662,6 +742,16 @@ class MoltbookService:
         if projected["status"] != "succeeded" or len(projected["artifacts"]) != 1:
             raise MoltbookError("moltbook_verified_output_unavailable")
         artifact = projected["artifacts"][0]
+        if projected["job_kind"] == PRIVATE_JOB_KIND:
+            async with engine.get_session() as db:
+                run = await self.jobs._fetch(db, job_id)
+                await self.current(db, owner, run, completed_read=True)
+            from src.browser.moltbook_private_native import read_output
+            result = read_output(artifact["file_path"], artifact["content_sha256"], expected_job=job_id)
+            async with engine.get_session() as db:
+                run = await self.jobs._fetch(db, job_id)
+                await self.current(db, owner, run, completed_read=True)
+            return result
         reference = PREFIX + digest(job_id.encode()) + ".output.json"
         if artifact.get("file_path") != reference: raise MoltbookError("moltbook_output_reference_invalid")
         raw, truncated = _read_workspace_text_bounded(_safe_resolve(reference), max_bytes=65536)

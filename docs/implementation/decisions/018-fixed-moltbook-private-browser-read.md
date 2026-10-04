@@ -227,6 +227,19 @@ Any retained bounded raw source proof is private and secret-scanned; independent
 physical readback proves artifact bytes/digest/schema before canonical promotion.
 Result always states `no_learning`; no measured quality or production claim.
 
+The accepted representation refinement uses ONE immutable source envelope, with
+fixed source ID `h`, response/browser-source/browser-DOM digests and fetch time.
+Every field citation explicitly references `h` and contains its exact JSON
+pointer and canonical value SHA256. Publication and private readback verify the
+complete citation membership, source reference, schema and digests. This keeps
+all ten posts with four commenters per post within the unchanged 16 KiB total
+provenance cap; no undeclared or implicit source can supply a citation. The
+allowlisted result is encrypted with existing workspace Vault crypto: plaintext
+at most 64 KiB, ciphertext at most 96 KiB. Current private Root/Goal/connection
+authority is checked before decrypt/readback/adoption. Discarded full-response
+role text, unrelated feeds and raw headers remain ephemeral, not stored in the
+canonical artifact.
+
 ## Current authority, atomic publication, and recovery
 
 At every handoff bind current canonical Root/token hash and expiry/revocation,

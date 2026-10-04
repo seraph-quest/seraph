@@ -17,6 +17,7 @@ export function MoltbookConnectionPanel({ ownerPrincipalId, ownerSessionId }: {
   const [goals, setGoals] = useState<GoalInfo[]>([]);
   const [goalId, setGoalId] = useState("");
   const [acknowledged, setAcknowledged] = useState(false);
+  const [privateAcknowledgment, setPrivateAcknowledgment] = useState<string | null>(null);
   const [allowWrites, setAllowWrites] = useState(false);
   const [operation, setOperation] = useState("feed");
   const [postId, setPostId] = useState("");
@@ -28,6 +29,8 @@ export function MoltbookConnectionPanel({ ownerPrincipalId, ownerSessionId }: {
   const [error, setError] = useState<string | null>(null);
   const storageKey = ownerPrincipalId && ownerSessionId ? moltbookStorageKey(ownerPrincipalId, ownerSessionId) : null;
   const selectedGoal = goals.find(value => value.id === goalId);
+  const privateScope = JSON.stringify([storageKey, connection?.id, connection?.revision, goalId, selectedGoal?.revision]);
+  const privateReady = connection?.private_browser?.available === true && connection.mode === "active";
   async function localRefresh(signal?: AbortSignal) {
     const value = await moltbookRequest("/connection", {}, signal) as MoltbookConnection;
     if (typeof value.configured !== "boolean" || value.credential_is_consent !== false || value.no_learning !== true) throw Error("Local connection metadata unavailable");
@@ -100,7 +103,7 @@ export function MoltbookConnectionPanel({ ownerPrincipalId, ownerSessionId }: {
       const retained = readMoltbookPending(storageKey);
       if (current !== generation.current) return;
       setConnection(value);
-      if (retained?.path === "/connection/consent" && value.consent?.request && equalMoltbookBody(value.consent.request, retained.body)) {
+      if (retained && ["/connection/consent", "/connection/private-home-consent"].includes(retained.path) && value.consent?.request && equalMoltbookBody(value.consent.request, retained.body)) {
         clearMoltbookPending(storageKey); setPending(null);
       }
       const originalJob = retained?.path.startsWith("/jobs/") ? retained.path.split("/")[2] : job?.job_id ?? value.active_job_id ?? readMoltbookLastJob(storageKey);
@@ -134,6 +137,22 @@ export function MoltbookConnectionPanel({ ownerPrincipalId, ownerSessionId }: {
     void act({ method: "POST", path: "/reads", body: { operation, fields, request_key: crypto.randomUUID(),
       goal_id: selectedGoal.id, goal_revision: selectedGoal.revision, expected_revision: connection.revision } });
   }
+  function allowPrivateHome() {
+    if (!privateReady || privateAcknowledgment !== privateScope || !selectedGoal || !connection?.revision) return;
+    void act({ method: "POST", path: "/connection/private-home-consent", body: {
+      request_key: crypto.randomUUID(), expected_revision: connection.revision,
+      goal_id: selectedGoal.id, goal_revision: selectedGoal.revision,
+      actions: ["private_home"], duration_seconds: 300, personal_noncommercial: true,
+      no_redistribution: true, private_bookkeeping_ack: true,
+    } });
+  }
+  function preparePrivateHome() {
+    if (!privateReady || !selectedGoal || !connection?.revision) return;
+    void act({ method: "POST", path: "/reads", body: {
+      operation: "private_home", fields: {}, request_key: crypto.randomUUID(),
+      goal_id: selectedGoal.id, goal_revision: selectedGoal.revision, expected_revision: connection.revision,
+    } });
+  }
   return <section aria-label="Moltbook connection" className="space-y-3 px-1">
     <p>Moltbook is optional. Imported credentials grant no read or write consent. Account claim remains a manual human action.</p>
     <p role="status">{connection ? `${connection.mode.replace(/_/g, " ")} · ${connection.account_name || "Account not yet inspected"}` : "Loading local metadata"}</p>
@@ -159,6 +178,24 @@ export function MoltbookConnectionPanel({ ownerPrincipalId, ownerSessionId }: {
       <button disabled={busy || !!pending} onClick={() => void act({ method: "POST", path: `/jobs/${job.job_id}/recover`, body: {} })}>Inspect or recover original written output</button>
       <button disabled={busy || !!pending || !job.lease || ["succeeded", "cancelled"].includes(job.status)} onClick={() => void act({ method: "POST", path: `/jobs/${job.job_id}/cancel`, body: { request_key: crypto.randomUUID(), expected_revision: job.revision, fencing_token: job.lease.fencing_token } })}>Cancel remaining original work</button>
       {!["accepted", "queued", "succeeded"].includes(job.status) && <p>Explicit inspection is required. No contact is replayed or deadline renewed.</p>}</div>}
+    <section aria-label="Private Moltbook Home browser read">
+      <h4>Private Home document in Chromium</h4>
+      <p>Production Home is blocked until separately authorized effect, identity and account acceptance evidence exists. Local test availability grants no production access.</p>
+      <p>The complete Home JSON document is fetched. Only account name, karma, unread count and own-post ID, title, community, notification count, latest time, commenter names and literal preview are retained with private field citations. Role briefings, unrelated activity and suggested actions are discarded; no instructions are followed.</p>
+      <p>One Home contact plus two identity checks, at most 120 seconds and one attempt. Home may deliver or consume a due briefing and record access bookkeeping; this is not side-effect-free. No role execution, notification mark-read, business write, heartbeat, model call or learning.</p>
+      <label><input type="checkbox" aria-label="Acknowledge private Home delivery bookkeeping"
+        checked={privateAcknowledgment === privateScope} disabled={busy || !!pending || !privateReady}
+        onChange={event => setPrivateAcknowledgment(event.target.checked ? privateScope : null)} />
+        I separately authorize one private Home read and possible due-briefing delivery bookkeeping for this Goal and login.</label>
+      <button disabled={busy || !!pending || !privateReady || !selectedGoal || privateAcknowledgment !== privateScope || !!connection?.active_job_id}
+        onClick={allowPrivateHome}>Allow private Home for at most five minutes</button>
+      <button disabled={busy || !!pending || !privateReady || !selectedGoal || !!connection?.active_job_id
+        || !connection?.consent?.actions?.includes("private_home") || connection.consent.session !== ownerSessionId
+        || connection.consent.goal_id !== selectedGoal.id || connection.consent.goal_revision !== selectedGoal.revision}
+        onClick={preparePrivateHome}>Prepare one private Chromium Home read</button>
+      {!privateReady && <p role="status">Private Home blocked: production acceptance is unverified or a positive owner account inspection is required.</p>}
+      <p>Response loss is Unknown; no Home replay, refresh or deadline renewal. Logout/revoke removes usable session authority. Original job inspection stays read-only; no_learning.</p>
+    </section>
     <MoltbookWriteControls key={storageKey} connection={connection} goal={selectedGoal} job={job} busy={busy || !!pending} act={act} />
     {pending && <div role="status"><p>An exact original request remains retained for this login. Inspect its outcome before continuing.</p><button disabled={busy} onClick={() => void act()}>Retry exact retained request</button></div>}
     {output && <pre aria-label="Moltbook literal private output" className="whitespace-pre-wrap">{output}</pre>}

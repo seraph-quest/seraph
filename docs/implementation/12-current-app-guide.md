@@ -1417,6 +1417,11 @@ refresh or replay after possible contact, with private field citations and
 explicit no_learning. Unknown contact/cleanup remains visible and reserved until
 positive exact settlement. Local acceptance requires an actual authenticated
 local TCP site and real Chromium; those receipts cannot waive production gates.
+One immutable Home source envelope binds each field's explicit source reference,
+JSON pointer and value digest within 16 KiB provenance. Only the allowlisted
+result is retained encrypted (64 KiB plaintext/96 KiB ciphertext); discarded
+role text, unrelated feeds and raw headers stay ephemeral. Private readback
+requires current Root/Goal/connection authority and never grants model context.
 
 ### Optional Moltbook adapter target
 

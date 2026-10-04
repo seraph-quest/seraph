@@ -2,7 +2,7 @@
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 
 from src.api.work_board import _operator, _owner
 from src.integrations.moltbook import MoltbookError
@@ -10,8 +10,14 @@ from src.integrations.moltbook_controls import moltbook_service
 from src.security.trust_contract import AuthorityGrant
 from src.work_board.repository import BoardError
 from src.workflows.job_runtime import DurableJobError
+from src.work_board.contracts import WorkBoardOwner
 
 router = APIRouter(prefix="/capabilities/moltbook", tags=["moltbook"])
+
+
+class MoltbookOwner(WorkBoardOwner):
+    # Server-derived authenticated request binding; never caller input or output.
+    authenticated_token_hash: str | None = Field(default=None, exclude=True, repr=False)
 
 
 class Strict(BaseModel):
@@ -39,8 +45,20 @@ class Revision(Strict):
     expected_revision: int = Field(ge=1)
 
 
+class PrivateHomeConsent(Consent):
+    actions: list[Literal["private_home"]] = Field(min_length=1, max_length=1)
+    duration_seconds: int = Field(ge=30, le=300)
+    private_bookkeeping_ack: StrictBool
+
+    @field_validator("private_bookkeeping_ack")
+    @classmethod
+    def require_ack(cls, value):
+        if value is not True: raise ValueError("explicit private Home bookkeeping acknowledgment required")
+        return value
+
+
 class Read(Strict):
-    operation: Literal["inspect", "feed", "post", "comments", "community"]
+    operation: Literal["inspect", "feed", "post", "comments", "community", "private_home"]
     fields: dict = Field(default_factory=dict)
     request_key: str = Field(min_length=1, max_length=128)
     goal_id: str = Field(min_length=1, max_length=128)
@@ -95,7 +113,9 @@ def owner(request, *, contact=False, mutation=False):
     # independently approved request. Do not broaden the shared Root grants.
     if not required <= grants:
         raise HTTPException(403, detail={"code": "moltbook_current_operator_grant_required"})
-    return _owner(operator)
+    bound = _owner(operator)
+    return MoltbookOwner(principal_id=bound.principal_id, session_id=bound.session_id,
+        authenticated_token_hash=getattr(operator, "_token_hash", None))
 
 
 async def response(call):
@@ -126,6 +146,11 @@ async def consent(request: Request, body: Consent):
 @router.post("/connection/disable")
 async def disable(request: Request, body: Revision):
     return await response(moltbook_service.disable(owner(request), **body.model_dump()))
+
+
+@router.post("/connection/private-home-consent")
+async def private_home_consent(request: Request, body: PrivateHomeConsent):
+    return await response(moltbook_service.consent(owner(request, contact=True), **body.model_dump()))
 
 
 @router.post("/reads")

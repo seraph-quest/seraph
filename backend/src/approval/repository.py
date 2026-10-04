@@ -31,14 +31,21 @@ def _approval_expiry(value: object) -> datetime | None:
     if value is None:
         return None
     if isinstance(value, datetime):
-        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc) if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
     try:
         return datetime.fromtimestamp(float(value), tz=timezone.utc)
     except (TypeError, ValueError, OverflowError):
         try:
-            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            return parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
         except (TypeError, ValueError):
             return None
+
+
+def _approval_timestamp(value: object) -> str | None:
+    """Publish SQLite's naive UTC timestamps with explicit UTC authority."""
+    parsed = _approval_expiry(value)
+    return parsed.isoformat() if parsed is not None else None
 
 
 def _approval_is_expired(value: object, *, now: datetime | None = None) -> bool:
@@ -439,6 +446,56 @@ def _select_exact_approval_rows(
 
 
 class ApprovalRepository:
+    async def resolve_exact_in_session(
+        self, db, approval_id: str, decision: str, *, expected_digest: str,
+    ) -> ApprovalRequest | None:
+        """Resolve the exact inspected approval in the caller's writer transaction.
+
+        The digest covers owner, details, fingerprint, state and expiry. The
+        caller authenticates its authority in this same transaction; this
+        method never opens a second session or consumes approved authority.
+        """
+        if decision not in {"approved", "denied"}:
+            raise ValueError("Invalid approval decision")
+        row = await db.get(ApprovalRequest, approval_id)
+        if row is None:
+            return None
+        if not hmac.compare_digest(approval_decision_digest(row), expected_digest):
+            raise ValueError("approval_binding_changed")
+        if row.status != "pending":
+            return row
+        now = datetime.now(timezone.utc)
+        state = "expired" if _approval_is_expired(row.expires_at, now=now) else decision
+        transition = await db.execute(update(ApprovalRequest)
+            .where(ApprovalRequest.id == approval_id, ApprovalRequest.status == "pending",
+                   ApprovalRequest.fingerprint == row.fingerprint,
+                   ApprovalRequest.details_json == row.details_json if row.details_json is not None
+                   else ApprovalRequest.details_json.is_(None))
+            .values(status=state, resolved_at=now)
+            .execution_options(synchronize_session=False))
+        await db.refresh(row)
+        if transition.rowcount != 1:
+            raise ValueError("approval_binding_changed")
+        return row
+
+    async def resolve_exact(self, approval_id: str, decision: str, *, expected_digest: str,
+                            owner_principal_id: str, operator_session_id: str):
+        from src.work_board.repository import _begin_sqlite_immediate
+        from src.auth.service import authenticate_principal, AuthFailure
+        async with get_session() as db:
+            await _begin_sqlite_immediate(db)
+            try:
+                operator = await authenticate_principal(owner_principal_id, db=db)
+            except AuthFailure as exc:
+                raise ValueError("approval_authority_changed") from exc
+            if operator.session_id != operator_session_id:
+                raise ValueError("approval_authority_changed")
+            row = await self.resolve_exact_in_session(db, approval_id, decision,
+                                                     expected_digest=expected_digest)
+            if row is not None:
+                db.expunge(row)
+            return row
+
     async def get(self, approval_id: str) -> ApprovalRequest | None:
         """Fetch an approval without resolving it."""
 
@@ -721,6 +778,32 @@ class ApprovalRepository:
             await db.refresh(request)
             db.expunge(request)
             return request
+
+    async def revoke_unconsumed(self, approval_id: str, *, expected_revision: int,
+            owner_principal_id: str, operator_session_id: str) -> str:
+        """CAS against consume; a spent receipt cannot claim effect undo."""
+        async with get_session() as db:
+            row = await db.get(ApprovalRequest, approval_id)
+            if row is None or row.owner_principal_id != owner_principal_id or row.operator_session_id != operator_session_id:
+                raise LookupError("approval_not_found")
+            if row.status == "consumed":
+                return "already_consumed"
+            if approval_state_revision(row) != expected_revision or row.status not in {"pending", "approved"}:
+                raise ValueError("approval_revision_stale")
+            mutation = await db.execute(update(ApprovalRequest).where(
+                ApprovalRequest.id == approval_id,
+                ApprovalRequest.owner_principal_id == owner_principal_id,
+                ApprovalRequest.operator_session_id == operator_session_id,
+                ApprovalRequest.fingerprint == row.fingerprint,
+                ApprovalRequest.status == row.status,
+                ApprovalRequest.resolved_at == row.resolved_at,
+            ).values(status="denied", resolved_at=datetime.now(timezone.utc)).execution_options(synchronize_session=False))
+            if mutation.rowcount != 1:
+                await db.refresh(row)
+                if row.status == "consumed":
+                    return "already_consumed"
+                raise ValueError("approval_revision_stale")
+            return "revoked"
 
     async def merge_details(self, approval_id: str, details: dict[str, Any]) -> ApprovalRequest | None:
         """Merge additional metadata into an existing approval request."""
@@ -1413,11 +1496,25 @@ class ApprovalRepository:
                         "attachment_refs": attachment_refs,
                         "challenge": request.challenge or details.get("challenge"),
                         "action": request.action or details.get("action"),
-                        "expires_at": request.expires_at.isoformat() if request.expires_at is not None else details.get("expires_at"),
-                        "created_at": request.created_at.isoformat(),
+                        "expires_at": _approval_timestamp(request.expires_at if request.expires_at is not None else details.get("expires_at")),
+                        "created_at": _approval_timestamp(request.created_at),
                     }
                 )
             return output
 
 
 approval_repository = ApprovalRepository()
+
+
+def approval_decision_digest(row) -> str:
+    """Exact decision snapshot; raw details are never exposed by this digest."""
+    material = [row.id, row.owner_principal_id, row.operator_session_id, row.session_id,
+                row.conversation_id, row.thread_id, row.fingerprint, row.status,
+                str(row.resolved_at), str(row.expires_at), row.details_json,
+                row.action, row.tool_name, row.risk_level]
+    return hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
+
+
+def approval_state_revision(row) -> int:
+    payload=[row.id,row.fingerprint,row.status,str(row.resolved_at),str(row.expires_at)]
+    return int(hashlib.sha256(json.dumps(payload).encode()).hexdigest()[:12],16)

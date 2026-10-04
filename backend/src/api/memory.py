@@ -36,6 +36,7 @@ from src.memory.control import (
 from src.memory.decay import summarize_memory_reconciliation_state
 from src.memory.providers import list_memory_provider_inventory
 from src.memory.repository import memory_repository
+from src.memory.procedure_preferences import ProcedurePreferenceActionRequest
 from src.security.trust_contract import AuthorityGrant, PrincipalType
 
 router = APIRouter()
@@ -233,6 +234,7 @@ async def get_memory_records(
     """Read the authenticated operator's canonical memory library page."""
 
     context = authenticated_memory_context(http_request)
+    from src.auth.ownership import selected_read_scopes
     try:
         return await memory_repository.list_memory_records(
             owner_session_id=context.session_id,
@@ -241,6 +243,7 @@ async def get_memory_records(
             query=q,
             kind=kind,
             status=status,
+            recovered_read_scopes=await selected_read_scopes(http_request.state.operator, "memory"),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -251,8 +254,10 @@ async def get_memory_record(http_request: Request, memory_id: str):
     """Read one owner-scoped canonical memory record without an existence hint."""
 
     context = authenticated_memory_context(http_request)
+    from src.auth.ownership import selected_read_scopes, RECOVERED_FIELDS
+    recovered = await selected_read_scopes(http_request.state.operator, "memory")
     record = await memory_repository.get_memory_record(
-        owner_session_id=context.session_id,
+        owner_session_id=recovered.get(memory_id, context.session_id),
         memory_id=memory_id,
     )
     if record is None:
@@ -260,6 +265,8 @@ async def get_memory_record(http_request: Request, memory_id: str):
             status_code=404,
             detail={"code": "memory_record_not_found"},
         )
+    if memory_id in recovered:
+        record.update(RECOVERED_FIELDS)
     return record
 
 
@@ -469,6 +476,28 @@ async def get_memory_task_decision_capabilities(http_request: Request):
 
     authenticated_memory_context(http_request)
     return {"capabilities": m5_registered_capability_contracts()}
+
+
+@router.get("/memory/procedure-preferences/{proposal_id}")
+async def get_procedure_preference(http_request: Request, proposal_id: str):
+    authenticated_memory_context(http_request)
+    from src.memory.procedure_preferences import inspect_preference
+    from src.work_board.repository import BoardError
+    try:
+        return await inspect_preference(http_request.state.operator, proposal_id)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@router.post("/memory/procedure-preferences/{proposal_id}/actions")
+async def act_on_procedure_preference(http_request: Request, proposal_id: str, request: ProcedurePreferenceActionRequest):
+    authenticated_memory_context(http_request)
+    from src.memory.procedure_preferences import apply_preference_action
+    from src.work_board.repository import BoardError
+    try:
+        return await apply_preference_action(http_request.state.operator, proposal_id, request)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
 
 
 @router.post("/memory/task-proposals/{proposal_id}/actions")

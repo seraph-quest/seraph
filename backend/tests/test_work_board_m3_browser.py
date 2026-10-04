@@ -663,8 +663,8 @@ async def test_artifact_secret_like_rejected_and_legacy_pending_replay_recovers(
                 db,
                 OWNER,
                 _artifact_request(
-                    capability_id=GOAL_SNAPSHOT_CAPABILITY,
-                    input={"file_path": "artifacts/result.md"},
+                    capability_id="engineering.repo-change.v1",
+                    input={"candidate_id": "candidate", "repository_path": "repo", "patch_artifact_id": "patch", "patch_sha256": "a" * 64, "allowed_paths": ["file.txt"], "test_args": ["pytest"]},
                 ),
             )
         assert secret_error.value.code == "secret_like_capability_blocked"
@@ -1169,6 +1169,8 @@ def test_registered_typed_artifact_capabilities_have_an_explicit_opt_in_allowlis
         "engineering.repo-repair.v1",
         "gmail.scan_metadata.v1",
         "guardian-routine.v2",
+        "workflow.goal-snapshot-to-file",
+        "guardian.research-watch.v1",
         "work.mail-reply-draft.v1",
     }
     assert {

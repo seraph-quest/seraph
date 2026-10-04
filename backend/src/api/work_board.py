@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
-from src.auth.service import AuthenticatedOperator
+from src.auth.service import AuthenticatedOperator, AuthFailure
 from src.approval.repository import approval_repository
 from src.db.engine import get_session
 from src.db.models import (
@@ -23,6 +23,7 @@ from src.db.models import (
     WorkBoardLink,
     WorkBoardStatus,
     WorkBoardTask,
+    WorkflowRunState,
     Goal,
 )
 from src.vault import redaction as vault_redaction
@@ -69,17 +70,22 @@ from src.goals.repository import deserialize_admission_budget
 from src.work_board.dispatcher import TypedInputError, _dispatcher, _parse_typed_input
 from src.work_board import review as review_service
 from src.work_board import triage as triage_service
+from src.work_board import pipelines as pipeline_service
+from src.work_board.pipeline_contracts import PipelinePreviewRequest, PipelineAcceptRequest, PipelineAdvanceRequest, PipelineRevisionRequest, PipelineReuseRequest, REPORT
+from src.work_board.tool_package_contracts import ToolPackageRecoverRequest
+from src.work_board.document_compare_contracts import DocumentPairReserve, DocumentPairMutation, DocumentControlRequest
 from src.work_board.time import serialize_utc_datetime
 from src.security.trust_contract import AuthorityGrant
 from src.security.site_policy import _parse_rules
 from config.settings import settings
-from src.workflows.job_runtime import durable_job_repository
+from src.workflows.job_runtime import durable_job_repository, DurableJobError
 from src.workflows.routines import (
     RoutinePublicationRequest,
     RoutineError,
     _job_checkpoint,
     routine_service,
 )
+from src.work_board.research_contracts import ResearchControlRequest
 
 
 router = APIRouter(prefix="/work-board")
@@ -87,6 +93,221 @@ repository = WorkBoardRepository()
 # Use the same managed dispatcher instance as the scheduler so cancellation
 # can reach an inline GoalSnapshot worker admitted by the scheduler pass.
 dispatcher = _dispatcher
+
+
+@router.get("/tasks/{task_id}/tool-package")
+async def read_tool_package_state(request: Request, task_id: str):
+    from src.work_board.tool_package_control import snapshot
+    try:
+        async with get_session() as db:
+            return await snapshot(dispatcher.jobs,db,_owner(_operator(request)),task_id)
+    except BoardError as exc:
+        _raise_board_error(exc)
+    except (DurableJobError,ValueError,TypeError,KeyError,OSError):
+        raise HTTPException(status_code=409,detail={"code":"tool_package_original_binding_required"})
+
+
+@router.post("/tasks/{task_id}/tool-package/recover")
+async def recover_tool_package(request: Request,task_id: str,body: ToolPackageRecoverRequest):
+    from src.work_board.tool_package_control import recover,snapshot
+    try:
+        owner=_owner(_operator(request));result=await recover(dispatcher,owner,task_id,body)
+        async with get_session() as db:
+            return {"recovery":result,"tool_package":await snapshot(dispatcher.jobs,db,owner,task_id)}
+    except BoardError as exc:
+        _raise_board_error(exc)
+    except (DurableJobError,ValueError,TypeError,KeyError,OSError):
+        raise HTTPException(status_code=409,detail={"code":"tool_package_current_reserved_output_and_cleanup_required"})
+
+
+@router.get("/tasks/{task_id}/tool-package-output")
+async def read_tool_package_output(request: Request,task_id: str):
+    from fastapi import Response
+    from src.work_board.tool_package_control import bound
+    from src.work_board.tool_package_native import private_read_guard
+    try:
+        async with get_session() as db:
+            task,attempt,run=await bound(db,_owner(_operator(request)),task_id)
+            if attempt.ended_at is None or task.status not in {WorkBoardStatus.done,WorkBoardStatus.review}:
+                raise BoardError('tool_package_readback_pending','Independent formatter readback is not complete')
+            async with private_read_guard(db,task,attempt,run) as staged:
+                raw=staged.raw
+        return Response(content=raw,media_type='text/plain',headers={'X-Content-Type-Options':'nosniff','Cache-Control':'no-store'})
+    except BoardError as exc:
+        _raise_board_error(exc)
+    except (ValueError,TypeError,KeyError,OSError):
+        raise HTTPException(status_code=409,detail={"code":"tool_package_output_readback_required"})
+
+
+@router.get("/tasks/{task_id}/research")
+async def read_research_state(request: Request, task_id: str):
+    from src.work_board.research_control import snapshot
+    try:
+        async with get_session() as db:
+            return await snapshot(dispatcher.jobs, db, _owner(_operator(request)), task_id)
+    except BoardError as exc:
+        _raise_board_error(exc)
+    except (DurableJobError, AuthFailure, ValueError, TypeError, KeyError, OSError):
+        raise HTTPException(status_code=409, detail={"code": "research_current_binding_unavailable"})
+
+
+@router.post("/tasks/{task_id}/research/recover")
+async def recover_research(request: Request, task_id: str, body: ResearchControlRequest):
+    try:
+        result = await dispatcher.recover_research(_owner(_operator(request)), task_id, body)
+        async with get_session() as db:
+            from src.work_board.research_control import snapshot
+            return {"recovery": result, "research": await snapshot(dispatcher.jobs, db, _owner(_operator(request)), task_id)}
+    except BoardError as exc:
+        _raise_board_error(exc)
+    except (DurableJobError, AuthFailure, ValueError, TypeError, KeyError, OSError):
+        raise HTTPException(status_code=409, detail={"code": "research_current_authority_or_artifact_required"})
+
+
+@router.post("/tasks/{task_id}/research/cancel")
+async def cancel_research(request: Request, task_id: str, body: ResearchControlRequest):
+    try:
+        result = await dispatcher.cancel_research(_owner(_operator(request)), task_id, body)
+        async with get_session() as db:
+            from src.work_board.research_control import snapshot
+            return {"cancellation": result, "research": await snapshot(dispatcher.jobs, db, _owner(_operator(request)), task_id)}
+    except BoardError as exc:
+        _raise_board_error(exc)
+    except (DurableJobError, AuthFailure, ValueError, TypeError, KeyError, OSError):
+        raise HTTPException(status_code=409, detail={"code": "research_current_cancellation_proof_required"})
+
+
+@router.get("/tasks/{task_id}/research-report")
+async def read_research_report(request: Request, task_id: str):
+    from fastapi import Response
+    from src.work_board.research_readback import verified_dossier
+    operator = _operator(request)
+    async with get_session() as db:
+        task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id,
+            WorkBoardTask.owner_principal_id == operator.principal.principal_id,
+            WorkBoardTask.owner_session_id == operator.session_id,
+            WorkBoardTask.capability_id == "work.research-dossier.v1"))
+        if task is None:
+            raise HTTPException(status_code=404, detail="Research task unavailable")
+        attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == task_id)
+            .order_by(WorkBoardAttempt.created_at.desc(), WorkBoardAttempt.attempt_id.desc()).limit(1))
+        if attempt is None or attempt.ended_at is None or task.status not in {WorkBoardStatus.review, WorkBoardStatus.done}:
+            raise HTTPException(status_code=409, detail="Research dossier requires completed independent readback")
+        run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == attempt.workflow_run_id))
+        try:
+            _binding, raw = await verified_dossier(db, task, attempt, run)
+        except (ValueError, TypeError, KeyError, OSError, BoardError):
+            raise HTTPException(status_code=409, detail="Research dossier readback requires recovery")
+        return Response(content=raw, media_type="text/plain", headers={
+            "X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"})
+
+
+@router.post("/tasks/{task_id}/pipeline-preview")
+async def preview_artifact_pipeline(request: Request, task_id: str, body: PipelinePreviewRequest):
+    owner = _owner(_operator(request))
+    try:
+        async with get_session() as db:
+            result = await pipeline_service.preview(db, owner, task_id, body)
+            await db.commit()
+            return result
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.get("/pipelines/{operation_id}")
+async def read_artifact_pipeline(request: Request, operation_id: str):
+    owner = _owner(_operator(request))
+    try:
+        async with get_session() as db:
+            return await pipeline_service.read(db, owner, operation_id)
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.post("/pipelines/{operation_id}/accept")
+async def accept_artifact_pipeline(request: Request, operation_id: str, body: PipelineAcceptRequest):
+    owner = _owner(_operator(request))
+    try:
+        async with get_session() as db:
+            result = await pipeline_service.accept(db, owner, operation_id, body)
+            await db.commit()
+            return result
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.post("/pipelines/{operation_id}/advance")
+async def advance_artifact_pipeline(request: Request, operation_id: str, body: PipelineAdvanceRequest):
+    owner = _owner(_operator(request))
+    try:
+        failure = None
+        async with get_session() as db:
+            try:
+                result = await pipeline_service.advance(db, owner, operation_id, body.expected_revision)
+            except BoardError as exc:
+                if not db.info.get("pipeline_authority_frozen"):
+                    raise
+                failure = exc
+            await db.commit()
+        if failure is not None:
+            raise failure
+        return result
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.post("/pipelines/{operation_id}/revision")
+async def stage_artifact_pipeline_revision(request: Request, operation_id: str, body: PipelineRevisionRequest):
+    owner = _owner(_operator(request))
+    try:
+        async with get_session() as db:
+            result = await pipeline_service.stage_revision(db, owner, operation_id, body)
+            await db.commit()
+            return result
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.post("/pipelines/{operation_id}/reuse-preview")
+async def reuse_artifact_pipeline_output(request: Request, operation_id: str, body: PipelineReuseRequest):
+    owner = _owner(_operator(request))
+    try:
+        async with get_session() as db:
+            result = await pipeline_service.reuse_preview(db, owner, operation_id, body)
+            await db.commit()
+            return result
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.post("/pipelines/{operation_id}/quiesce")
+async def quiesce_artifact_pipeline_revision(request: Request, operation_id: str, body: PipelineAdvanceRequest):
+    owner = _owner(_operator(request))
+    try:
+        return await pipeline_service.quiesce_revision(owner, operation_id, body.expected_revision,
+            dispatcher=dispatcher, session_provider=get_session)
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.get("/pipelines/{operation_id}/report")
+async def read_artifact_pipeline_report(request: Request, operation_id: str):
+    from fastapi.responses import Response
+    from src.work_board.pipeline_cpu import read_output
+    owner = _owner(_operator(request))
+    try:
+        async with get_session() as db:
+            _row, operation = await pipeline_service.owned(db, owner, operation_id)
+            if len(operation.get("steps", [])) != 3:
+                raise BoardError("pipeline_output_required", "The local report is not ready", status_code=409)
+            task = await repository.get_task(db, owner, operation["steps"][2]["task_ref"])
+            if task.capability_id != REPORT:
+                raise BoardError("pipeline_output_unverified", "The fixed report binding changed", status_code=409)
+            output = await pipeline_service.verified_output(db, owner, task)
+            return Response(content=read_output(output["file_path"], output["content_sha256"]),
+                media_type="text/plain", headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"})
+    except BoardError as exc:
+        _raise_board_error(exc)
 
 _RECOVERY_ACTIONS = frozenset(
     {
@@ -161,9 +382,11 @@ def _browser_execution_progress(projection: Mapping[str, Any]) -> tuple[int | No
     unknown instead of borrowing an older network receipt.
     """
 
+    from src.browser.task_runner import observed_browser_request_receipts
+    observed = observed_browser_request_receipts(projection)
     checkpoints = projection.get("checkpoints")
     if not isinstance(checkpoints, list):
-        return None, None
+        return None, len(observed) if observed else None
     # Checkpoints are append-only and bounded by the durable runtime. Walk
     # newest first and use the first recognized browser progress checkpoint as
     # one atomic projection.
@@ -182,8 +405,10 @@ def _browser_execution_progress(projection: Mapping[str, Any]) -> tuple[int | No
             continue
         action_index = _strict_bounded_int(payload.get("action_index"), minimum=-1, maximum=7)
         request_count = _strict_bounded_int(payload.get("request_count"), minimum=0, maximum=32)
+        if observed:
+            request_count = max(request_count or 0, len(observed))
         return action_index, request_count
-    return None, None
+    return None, len(observed) if observed else None
 
 
 def _browser_artifact_projection(projection: Mapping[str, Any]) -> dict[str, str] | None:
@@ -745,6 +970,10 @@ def _recovery_action(
 
     status = _json_value(task.status)
     block_kind = str(task.block_kind or "")
+    if task.capability_id in {"work.research-dossier.v1","work.json-format.v1"} and latest_attempt is not None and latest_attempt.workflow_run_id:
+        # The research inspector owns explicit same-attempt controls. Generic
+        # retry/unblock would discard its immutable original operation.
+        return None
     if status == WorkBoardStatus.running.value:
         # A pending admission has no durable run to cancel.  The dispatcher
         # must reconcile that binding first so the card never advertises a
@@ -863,12 +1092,17 @@ def _input_artifact_payload(metadata, *, include_details: bool = False) -> dict[
     return payload
 
 
-def _operator_has_external_mutation(operator: AuthenticatedOperator) -> bool:
-    grants = {
-        str(getattr(item, "value", item))
-        for item in (getattr(getattr(operator, "principal", None), "grants", ()) or ())
-    }
-    return AuthorityGrant.EXTERNAL_MUTATION.value in grants
+async def _operator_has_github_consent(operator: AuthenticatedOperator, context: Mapping[str, Any]) -> bool:
+    authority = (context.get("parent") or {}).get("declared_authority") or {}
+    try:
+        from src.extensions.github_consent import require_followthrough_consent
+        await require_followthrough_consent(principal=operator.principal.principal_id,
+            root=operator.session_id, action=authority.get("github_action"),
+            repository=authority.get("github_repository"),
+            revision=authority.get("github_connection_revision"))
+        return True
+    except Exception:
+        return False
 
 
 def _raise_board_error(exc: BoardError) -> None:
@@ -910,6 +1144,8 @@ def _task_payload(
         "body": task.body,
         "capability_id": safe_board_identifier(task.capability_id, max_length=128),
         "input_artifact_id": safe_board_identifier(task.input_artifact_id, max_length=512),
+        "pipeline_operation_id": safe_board_identifier(task.pipeline_operation_id, max_length=128),
+        "pipeline_slot": safe_board_identifier(task.pipeline_slot, max_length=128),
         "typed_input_ref": safe_board_reference(task.typed_input_ref, max_length=512),
         "typed_input_digest": safe_sha256_digest(task.typed_input_digest),
         "executor_id": safe_board_identifier(task.executor_id, max_length=128),
@@ -966,6 +1202,7 @@ async def _safe_task_payload(
     attempt_count: int = 0,
     dispatch_rank: int | None = None,
     browser_projection: Mapping[str, Any] | None = None,
+    recovered_read_only: bool = False,
 ) -> dict[str, Any]:
     payload = _task_payload(
         task,
@@ -1014,6 +1251,11 @@ async def _safe_task_payload(
                     value,
                     fail_closed=True,
                 )
+    if recovered_read_only:
+        from src.auth.ownership import RECOVERED_FIELDS
+        payload.update(RECOVERED_FIELDS)
+        payload.update(recovery_action=None, dispatch_rank=None, dispatch_wait_reason=None)
+        return payload
     if payload.get("recovery_action") == "retry":
         # Recovery controls are an operator projection of current authority,
         # not a cached promise from the last dispatcher pass.  Re-run the
@@ -1692,8 +1934,10 @@ async def list_work_board_tasks(
     limit: int = Query(default=100, ge=1, le=100),
 ):
     operator = _operator(request)
+    from src.auth.ownership import selected_read_scopes, selected_read_principal
     try:
         async with get_session() as db:
+            recovered = await selected_read_scopes(operator, "task", db=db)
             page = await repository.list_tasks(
                 db,
                 _owner(operator),
@@ -1703,6 +1947,7 @@ async def list_work_board_tasks(
                 query=q,
                 after=after,
                 limit=limit,
+                recovered_read_scopes=recovered,
             )
             browser_job_ids = [
                 str(attempt.workflow_run_id)
@@ -1732,6 +1977,7 @@ async def list_work_board_tasks(
                             if task.task_id in page.latest_attempts and page.latest_attempts[task.task_id].workflow_run_id
                             else None
                         ),
+                        recovered_read_only=task.task_id in recovered,
                     )
                     for task in page.tasks
                 ],
@@ -1837,17 +2083,157 @@ async def create_work_board_input_artifact(
         ) from exc
 
 
+@router.post("/document-pairs")
+async def reserve_document_pair(request: Request, body: DocumentPairReserve):
+    from src.work_board.document_pairs import reserve
+    try:
+        async with get_session() as db:
+            return await reserve(db, _owner(_operator(request)), body)
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.get("/document-pairs/{identifier}")
+async def read_document_pair(request: Request, identifier: str):
+    from src.work_board.document_pairs import owned, projection
+    try:
+        async with get_session() as db:
+            row, _value = await owned(db, _owner(_operator(request)), identifier)
+            return projection(row)
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.put("/document-pairs/{identifier}/sources/{slot}")
+async def upload_document_source(request: Request, identifier: str, slot: str, expected_revision: int = Query(ge=1)):
+    from src.work_board.document_pairs import upload
+    if request.headers.get("content-type", "").split(";", 1)[0] != "application/octet-stream":
+        raise HTTPException(status_code=415, detail={"code": "document_raw_stream_required"})
+    try:
+        async with get_session() as db:
+            return await upload(db, _owner(_operator(request)), identifier, expected_revision, slot, request.stream())
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.post("/document-pairs/{identifier}/complete")
+async def complete_document_pair(request: Request, identifier: str, body: DocumentPairMutation):
+    from src.work_board.document_pairs import complete
+    try:
+        async with get_session() as db:
+            return await complete(db, _owner(_operator(request)), identifier, body.expected_revision)
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.get("/tasks/{task_id}/document-output/{slot}")
+async def read_document_comparison_output(request: Request, task_id: str, slot: str):
+    from src.work_board.document_compare_native import read_output
+    from src.work_board.document_pairs import owned, authority
+    from src.work_board.pipelines import root_binding
+    if slot not in {"report","csv","manifest"}:raise HTTPException(status_code=404)
+    owner=_owner(_operator(request))
+    try:
+        async with get_session() as db:
+            task=await WorkBoardRepository().get_task(db,owner,task_id)
+            if task.capability_id!="work.document-compare.v1" or task.status not in {WorkBoardStatus.done,WorkBoardStatus.review}:
+                raise BoardError("document_output_unavailable","A verified comparison output is required",status_code=409)
+            row,value=await owned(db,owner,task.input_artifact_id)
+            await authority(db,owner,row,value,dict(root_binding()))
+            attempt=await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id==task_id)
+                .order_by(WorkBoardAttempt.created_at.desc()).limit(1))
+            run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==attempt.workflow_run_id)) if attempt else None
+            if run is None or run.status!="succeeded":raise BoardError("document_output_unavailable","The original job is not verified",status_code=409)
+            receipt,output=read_output(task,attempt,run)
+            text=json.dumps(output[slot],sort_keys=True) if slot=="manifest" else output[slot]
+            return {"text":text,"sha256":hashlib.sha256(text.encode()).hexdigest(),"cipher_sha256":receipt["cipher_sha256"],"no_learning":True}
+    except BoardError as exc:_raise_board_error(exc)
+    except (OSError,ValueError,TypeError,KeyError):
+        raise HTTPException(status_code=409,detail={"code":"document_output_readback_required"})
+
+
+@router.get("/tasks/{task_id}/document-comparison")
+async def read_document_comparison_state(request: Request,task_id: str):
+    from src.work_board.document_compare_control import snapshot
+    try:
+        async with get_session() as db:
+            return await snapshot(db,_owner(_operator(request)),task_id)
+    except BoardError as exc:_raise_board_error(exc)
+    except (DurableJobError,OSError,ValueError,TypeError,KeyError):
+        raise HTTPException(status_code=409,detail={"code":"document_original_binding_required"})
+
+
+@router.post("/tasks/{task_id}/document-comparison/recover")
+async def recover_document_comparison(request: Request,task_id: str,body: DocumentControlRequest):
+    from src.work_board.document_compare_control import recover,snapshot
+    try:
+        owner=_owner(_operator(request));result=await recover(dispatcher,owner,task_id,body)
+        async with get_session() as db:
+            return {"recovery":result,"document_comparison":await snapshot(db,owner,task_id)}
+    except BoardError as exc:_raise_board_error(exc)
+    except (DurableJobError,OSError,ValueError,TypeError,KeyError):
+        raise HTTPException(status_code=409,detail={"code":"document_original_output_and_reap_required"})
+
+
+@router.post("/document-pairs/{identifier}/retry")
+async def retry_document_pair(request: Request, identifier: str, body: DocumentPairMutation):
+    from src.work_board.document_pairs import reset_unbound
+    try:
+        async with get_session() as db:
+            return await reset_unbound(db,_owner(_operator(request)),identifier,body.expected_revision,retry=True)
+    except BoardError as exc:_raise_board_error(exc)
+
+
+@router.post("/tasks/{task_id}/document-comparison/retry")
+async def retry_document_comparison(request: Request,task_id: str,body: DocumentControlRequest):
+    from src.work_board.document_compare_control import retry,snapshot
+    try:
+        owner=_owner(_operator(request));result=await retry(dispatcher,owner,task_id,body)
+        async with get_session() as db:
+            return {"retry":result,"document_comparison":await snapshot(db,owner,task_id)}
+    except BoardError as exc:_raise_board_error(exc)
+    except (DurableJobError,OSError,ValueError,TypeError,KeyError):
+        raise HTTPException(status_code=409,detail={"code":"document_known_terminated_interruption_required"})
+
+
+@router.post("/tasks/{task_id}/document-comparison/reconcile")
+async def reconcile_document_comparison(request: Request,task_id: str,body: DocumentControlRequest):
+    from src.work_board.document_compare_control import reconcile,snapshot
+    try:
+        owner=_owner(_operator(request));result=await reconcile(dispatcher,owner,task_id,body)
+        async with get_session() as db:
+            return {"reconciliation":result,"document_comparison":await snapshot(db,owner,task_id)}
+    except BoardError as exc:_raise_board_error(exc)
+    except (DurableJobError,OSError,ValueError,TypeError,KeyError):
+        raise HTTPException(status_code=409,detail={"code":"document_exact_actual_reap_required"})
+
+
+@router.post("/document-pairs/{identifier}/discard")
+async def discard_document_pair(request: Request, identifier: str, body: DocumentPairMutation):
+    from src.work_board.document_pairs import reset_unbound
+    try:
+        async with get_session() as db:
+            return await reset_unbound(db,_owner(_operator(request)),identifier,body.expected_revision,retry=False)
+    except BoardError as exc:_raise_board_error(exc)
+
+
 @router.get("/input-artifacts/{artifact_id}")
 async def get_work_board_input_artifact(request: Request, artifact_id: str):
     operator = _operator(request)
+    from src.auth.ownership import selected_read_scopes, selected_read_principal, RECOVERED_FIELDS
     try:
         async with get_session() as db:
+            recovered = await selected_read_scopes(operator, "artifact", db=db)
+            read_owner = WorkBoardOwner(principal_id=(await selected_read_principal(operator, "artifact", artifact_id, db=db)) if artifact_id in recovered else operator.principal.principal_id, session_id=recovered.get(artifact_id, operator.session_id))
             metadata = await read_input_artifact_metadata(
                 db,
-                _owner(operator),
+                read_owner,
                 artifact_id=artifact_id,
             )
-            return _input_artifact_payload(metadata, include_details=True)
+            payload = _input_artifact_payload(metadata, include_details=True)
+            if artifact_id in recovered:
+                payload.update(RECOVERED_FIELDS)
+            return payload
     except BoardError as exc:
         _raise_board_error(exc)
     except SQLAlchemyError as exc:
@@ -1910,10 +2296,13 @@ async def create_work_board_task(request: Request, body: WorkBoardTaskCreate):
 @router.get("/tasks/{task_id}")
 async def get_work_board_task(request: Request, task_id: str):
     operator = _operator(request)
+    from src.auth.ownership import selected_read_scopes, selected_read_principal
     try:
         async with get_session() as db:
-            detail = await repository.get_detail(db, _owner(operator), task_id)
-            dispatch_rank = await repository.dispatch_rank(db, _owner(operator), detail["task"])
+            recovered = await selected_read_scopes(operator, "task", db=db)
+            read_owner = WorkBoardOwner(principal_id=(await selected_read_principal(operator, "task", task_id, db=db)) if task_id in recovered else operator.principal.principal_id, session_id=recovered.get(task_id, operator.session_id))
+            detail = await repository.get_detail(db, read_owner, task_id)
+            dispatch_rank = None if task_id in recovered else await repository.dispatch_rank(db, _owner(operator), detail["task"])
             latest_attempt = detail["attempts"][0] if detail["attempts"] else None
             task_payload = await _safe_task_payload(
                 detail["task"],
@@ -1922,6 +2311,7 @@ async def get_work_board_task(request: Request, task_id: str):
                 latest_attempt=latest_attempt,
                 attempt_count=len(detail["attempts"]),
                 dispatch_rank=dispatch_rank,
+                recovered_read_only=task_id in recovered,
             )
             attempts_payload = []
             for item in detail["attempts"]:
@@ -1943,11 +2333,11 @@ async def get_work_board_task(request: Request, task_id: str):
             return {
                 "task": task_payload,
                 "attempts": attempts_payload,
-                "parents": detail["parents"],
-                "children": detail["children"],
+                "parents": [identifier for identifier in detail["parents"] if task_id not in recovered or identifier in recovered],
+                "children": [identifier for identifier in detail["children"] if task_id not in recovered or identifier in recovered],
                 "comments": [await _safe_comment_payload(item, db=db) for item in detail["comments"]],
                 "events": [_event_payload(item) for item in detail["events"]],
-                "parent_handoffs": await review_service.parent_handoffs(
+                "parent_handoffs": [] if task_id in recovered else await review_service.parent_handoffs(
                     db,
                     _owner(operator),
                     detail["task"],
@@ -2013,7 +2403,7 @@ async def prepare_work_board_routine_publication(
                 task_id,
                 expected_revision=body.expected_revision,
             )
-        if not _operator_has_external_mutation(operator):
+        if not await _operator_has_github_consent(operator, context):
             safely_blocked = await _block_routine_for_missing_external_authority(context)
             raise BoardError(
                 "external_mutation_grant_required",
@@ -2097,7 +2487,7 @@ async def recover_work_board_routine_publication(
                 task_id,
                 expected_revision=body.expected_revision,
             )
-        if not _operator_has_external_mutation(operator):
+        if not await _operator_has_github_consent(operator, context):
             safely_blocked = await _block_routine_for_missing_external_authority(context)
             raise BoardError(
                 "external_mutation_grant_required",
@@ -2423,7 +2813,7 @@ async def accept_work_board_proposal(
 ):
     operator = _operator(request)
     try:
-        return await triage_service.accept_proposal(_owner(operator), proposal_id, body)
+        return await triage_service.accept_proposal(_owner(operator), proposal_id, body, operator=operator)
     except BoardError as exc:
         _raise_board_error(exc)
     except SQLAlchemyError as exc:

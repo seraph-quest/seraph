@@ -93,14 +93,15 @@ async def test_login_cookie_session_refresh_rotation_and_logout(client, async_db
 
     session = await client.get("/api/auth/session")
     assert session.status_code == 200
-    assert session.json()["principal_id"] == "operator:single"
+    assert session.json()["principal_id"] == login.json()["principal_id"]
+    assert session.json()["principal_id"].startswith("operator:root:")
     assert session.json()["session_id"]
 
     refreshed = await client.post("/api/auth/refresh", headers={"origin": ORIGIN})
     assert refreshed.status_code == 200
     new_token = refreshed.cookies.get(settings.operator_auth_cookie_name)
     assert new_token and new_token != old_token
-    assert refreshed.json()["principal_id"] == "operator:single"
+    assert refreshed.json()["principal_id"] == login.json()["principal_id"]
     assert refreshed.json()["session_id"] == session.json()["session_id"]
     assert refreshed.json()["absolute_expires_at"] == original_absolute_expiry
     assert refreshed.json()["ownership_continuity"] == "stable"
@@ -113,6 +114,7 @@ async def test_login_cookie_session_refresh_rotation_and_logout(client, async_db
         "absolute_expires_at",
         "ownership_continuity",
         "ownership_recovery_action",
+        "operator_identity_id",
     }
 
     with pytest.raises(AuthFailure, match="session_revoked"):
@@ -550,7 +552,7 @@ async def test_server_mints_operator_principal_and_conversation_id_is_only_scope
     operator = await authenticate_token(token)
     principal = bind_operator_principal(operator, "attacker-chosen-conversation")
     assert principal.principal_type is PrincipalType.OPERATOR
-    assert principal.principal_id == "operator:single"
+    assert principal.principal_id == operator.principal.principal_id
     assert principal.session_id == "attacker-chosen-conversation"
     assert AuthorityGrant.MODEL_INFERENCE in principal.grants
     assert AuthorityGrant.EXTERNAL_MUTATION not in principal.grants

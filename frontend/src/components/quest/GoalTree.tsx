@@ -52,11 +52,13 @@ export function GoalTree({ goals, depth, onEdit, onInspect }: Props) {
         const icon = STATUS_ICONS[goal.status] ?? "[ ]";
         const color = LEVEL_COLORS[goal.level] ?? "text-retro-text/60";
         const isCompleted = goal.status === "completed";
+        const recoveredReadOnly = goal.ownership_access === "recovered_read_only";
 
         return (
           <div key={goal.id} className="mb-1">
             <div className="flex items-start gap-1 group">
               <button
+                disabled={recoveredReadOnly}
                 className={`text-[11px] font-mono shrink-0 ${
                   isCompleted ? "text-green-400/70" : "text-retro-text/50"
                 } hover:text-retro-highlight`}
@@ -72,6 +74,7 @@ export function GoalTree({ goals, depth, onEdit, onInspect }: Props) {
                 >
                   {goal.title}
                 </span>
+                {recoveredReadOnly && <span className="block text-[9px] text-amber-300">Recovered original · read only. Create fresh intent from ownership recovery.</span>}
                 {goal.due_date && (
                   <span className="text-[9px] text-retro-text/30 ml-1">
                     {new Date(goal.due_date).toLocaleDateString("en-US", {
@@ -102,7 +105,7 @@ export function GoalTree({ goals, depth, onEdit, onInspect }: Props) {
                 </span>
               </div>
               <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">
-                {onInspect && (
+                {onInspect && !recoveredReadOnly && (
                   <button
                     type="button"
                     onClick={() => onInspect(goal)}
@@ -113,7 +116,7 @@ export function GoalTree({ goals, depth, onEdit, onInspect }: Props) {
                     ?
                   </button>
                 )}
-                {onEdit && (
+                {onEdit && !recoveredReadOnly && (
                   <button
                     onClick={() => onEdit(goal)}
                     className="text-[9px] text-retro-text/30 hover:text-retro-highlight px-0.5"
@@ -123,6 +126,7 @@ export function GoalTree({ goals, depth, onEdit, onInspect }: Props) {
                   </button>
                 )}
                 <button
+                  disabled={recoveredReadOnly}
                   onClick={() => {
                     if (window.confirm(`Delete "${goal.title}"?`)) {
                       deleteGoal(goal.id);

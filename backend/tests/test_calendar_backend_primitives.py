@@ -463,7 +463,7 @@ async def test_calendar_adapter_checks_authority_before_token_and_read(monkeypat
     )
 
     assert await adapter._token() == "access-token-sentinel"
-    assert calls == ["authority", "authority"]
+    assert calls == ["authority", "authority", "authority"]
     scrubbed = adapter._scrub(
         "client-id-sentinel refresh-token-sentinel client-secret-sentinel access-token-sentinel"
     )
@@ -471,7 +471,7 @@ async def test_calendar_adapter_checks_authority_before_token_and_read(monkeypat
 
     await adapter.list_calendars()
     assert calls[-1] == "authority"
-    assert len(calls) == 3
+    assert len(calls) == 5
     events, _revision = await adapter.list_events(
         "calendar:one",
         time_min=datetime(2026, 10, 1, tzinfo=timezone.utc),
@@ -479,7 +479,7 @@ async def test_calendar_adapter_checks_authority_before_token_and_read(monkeypat
     )
     assert events[0].fields["summary"] == "[redacted]"
     assert "sentinel" not in json.dumps(events[0].fields)
-    assert len(calls) == 4
+    assert len(calls) == 7
 
 
 @pytest.mark.asyncio
@@ -975,7 +975,7 @@ async def test_calendar_prepare_stops_before_provider_read_after_authority_revok
             model_call=model_call,
         )
     assert error.value.code == "calendar_revision_stale"
-    assert provider_requests == ["POST", "GET"]
+    assert provider_requests == ["POST"]
 
 
 @pytest.mark.asyncio

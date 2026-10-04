@@ -220,6 +220,14 @@ async def test_material_verified_packet_creates_one_inbox_item(async_db, tmp_pat
 @pytest.mark.asyncio
 async def test_real_source_watch_completion_creates_inbox_from_durable_readbacks(async_db, tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    # Executing a watch requires a canonical owner Root, unlike the isolated
+    # projection fixtures above. Create it through normal auth provisioning.
+    from src.auth import service as auth_service
+    monkeypatch.setattr(settings, "operator_auth_secret", "guardian-inbox-source-test")
+    monkeypatch.setattr(settings, "operator_auth_secret_hash", "")
+    _, operator = await auth_service.create_session()
+    owner = operator.principal.principal_id
+    session = operator.session_id
     now = datetime.now(timezone.utc)
     goal = Goal(
         id="goal-real-source-watch-inbox",
@@ -227,8 +235,8 @@ async def test_real_source_watch_completion_creates_inbox_from_durable_readbacks
         status="active",
         proactive_enabled=True,
         revision=1,
-        owner_principal_id=OWNER,
-        owner_session_id=SESSION,
+        owner_principal_id=owner,
+        owner_session_id=session,
         admission_budget_json=json.dumps(
             {
                 "reviewed_grant": True,
@@ -262,8 +270,8 @@ async def test_real_source_watch_completion_creates_inbox_from_durable_readbacks
 
     service = SourceWatchService(fetcher=fetcher)
     watch = await service.create_watch(
-        owner_principal_id=OWNER,
-        owner_session_id=SESSION,
+        owner_principal_id=owner,
+        owner_session_id=session,
         goal_id=goal.id,
         expected_goal_revision=1,
         sources=[
@@ -289,20 +297,20 @@ async def test_real_source_watch_completion_creates_inbox_from_durable_readbacks
         watch["id"],
         occurrence_id="real-baseline",
         expected_plan_revision=1,
-        expected_owner_session_id=SESSION,
+        expected_owner_session_id=session,
     )
     changed = await service.run_watch(
         watch["id"],
         occurrence_id="real-change",
         expected_plan_revision=1,
-        expected_owner_session_id=SESSION,
+        expected_owner_session_id=session,
     )
 
-    assert baseline["status"] == "baseline_initialized"
-    assert changed["status"] == "succeeded"
+    assert baseline["status"] == "baseline_initialized", baseline
+    assert changed["status"] == "succeeded", changed
     assert changed.get("packet_id")
     packet_id = str(changed["packet_id"])
-    page = await list_owned_items(owner_principal_id=OWNER, owner_session_id=SESSION)
+    page = await list_owned_items(owner_principal_id=owner, owner_session_id=session)
     # The source completion hook must create the projection before any
     # explicit repair call.  This makes the test cover the actual completion
     # path rather than manufacturing the inbox row in the assertion.

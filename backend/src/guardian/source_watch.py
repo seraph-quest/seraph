@@ -26,7 +26,7 @@ import httpx
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, update
+from sqlalchemy import delete, update, text
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 
@@ -37,6 +37,8 @@ from src.audit.runtime import log_integration_event
 from src.db import engine as db_engine
 from src.db.models import (
     Goal,
+    OperatorSession,
+    OperatorIdentity,
     GuardianDecisionPacket,
     GuardianSourceBaseline,
     GuardianSourceWatch,
@@ -634,6 +636,11 @@ def parse_sources(raw: Sequence[Mapping[str, Any]]) -> tuple[SourceSpec, ...]:
     return tuple(sorted(result, key=lambda item: item.source_key))
 
 
+def _public_source_set(sources: Sequence[SourceSpec]) -> bool:
+    """Only a nonempty validated public plan may outlive its browser bearer."""
+    return bool(sources) and all(source.kind == "public_https_text" for source in sources)
+
+
 def parse_criteria(raw: Mapping[str, Any]) -> WatchCriteria:
     def terms(key: str) -> tuple[str, ...]:
         value = raw.get(key, [])
@@ -676,6 +683,13 @@ def _validate_schedule(schedule: Mapping[str, Any]) -> tuple[str, str]:
     if first is None or second is None or (second - first).total_seconds() < 15 * 60:
         raise SourceWatchError("schedule_cadence_too_frequent")
     return cron, timezone_name
+
+
+def _schedule_enabled(schedule: Mapping[str, Any], *, default: bool = True) -> bool:
+    enabled = schedule.get("enabled", default)
+    if type(enabled) is not bool:
+        raise SourceWatchError("schedule_enabled_invalid")
+    return enabled
 
 
 def normalize_source_text(content: str, *, html_content: bool = False) -> str:
@@ -1002,14 +1016,16 @@ def build_task(
     return "\n".join(lines) + "\n"
 
 
-async def _read_source(source: SourceSpec) -> tuple[str, dict[str, str]]:
+async def _read_source(source: SourceSpec, *, authority_check=None) -> tuple[str, dict[str, str]]:
     if source.kind == "public_https_text":
         try:
-            response = await fetch_pinned_https(source.target)
+            response = await fetch_pinned_https(source.target, authority_check=authority_check)
         except (httpx.TimeoutException, TimeoutError) as exc:
             raise SourceWatchError("source_transport_timeout", str(exc)) from exc
         except (PinnedTransportError, OSError) as exc:
             raise SourceWatchError("source_transport_blocked", str(exc)) from exc
+        if authority_check is not None:
+            await authority_check()
         if response.status_code != 200:
             raise SourceWatchError(f"source_http_{response.status_code}")
         content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
@@ -1065,6 +1081,7 @@ class SourceWatchService:
         schedule: Mapping[str, Any],
         write_mode: str,
         reviewed_grant_id: str | None = None,
+        setup_watch_id: str | None = None,
     ) -> dict[str, Any]:
         parsed_sources = parse_sources(sources)
         parsed_criteria = parse_criteria(criteria)
@@ -1072,9 +1089,12 @@ class SourceWatchService:
             raise SourceWatchError("write_mode_invalid")
         if write_mode == "standing_reviewed" and not _text(reviewed_grant_id):
             raise SourceWatchError("standing_grant_required")
+        if write_mode == "standing_reviewed" and not _public_source_set(parsed_sources):
+            raise SourceWatchError("standing_sources_must_be_public")
         cron, timezone_name = _validate_schedule(schedule)
-        watch_id = str(uuid.uuid4())
-        scheduled_job_id = str(uuid.uuid4())
+        schedule_enabled = _schedule_enabled(schedule)
+        watch_id = setup_watch_id or str(uuid.uuid4())
+        scheduled_job_id = f"setup-job-{watch_id}" if setup_watch_id else str(uuid.uuid4())
         source_json = [
             {
                 "source_key": item.source_key,
@@ -1126,11 +1146,12 @@ class SourceWatchService:
                 plan_revision=1,
                 sources_json=_dump(source_json),
                 criteria_json=_dump(criteria_json),
-                schedule_spec_json=_dump({"cron": cron, "timezone": timezone_name}),
+                schedule_spec_json=_dump({"cron": cron, "timezone": timezone_name, "enabled": schedule_enabled}),
                 read_authority_json=_dump(
                     {
                         "source_keys": [item.source_key for item in parsed_sources],
                         "grant_id": _text(goal_budget.grant_id),
+                        "browser_expiry_scope": "public_https_text_only",
                     }
                 ),
                 write_authority_json=_dump(
@@ -1148,7 +1169,7 @@ class SourceWatchService:
             scheduled_job = ScheduledJob(
                 id=scheduled_job_id,
                 name=f"Guardian source watch {watch_id[:8]}",
-                enabled=True,
+                enabled=schedule_enabled,
                 trigger_type="cron",
                 trigger_spec_json=_dump({"cron": cron, "timezone": timezone_name}),
                 action_type="run_source_watch",
@@ -1156,15 +1177,27 @@ class SourceWatchService:
                 session_id=owner_session_id,
                 created_by_session_id=owner_session_id,
             )
-            db.add(watch)
-            db.add(scheduled_job)
-            await db.flush()
+            if setup_watch_id:
+                from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+                inserted = await db.execute(sqlite_insert(GuardianSourceWatch).values(**watch.model_dump()).on_conflict_do_nothing(index_elements=["id"]))
+                watch_created = inserted.rowcount == 1
+                stored = (await db.execute(select(GuardianSourceWatch).where(GuardianSourceWatch.id == watch_id))).scalar_one()
+                for field in ("goal_id", "owner_principal_id", "owner_session_id", "goal_revision", "sources_json", "criteria_json", "write_mode", "scheduled_job_id"):
+                    if getattr(stored, field) != getattr(watch, field):
+                        raise SourceWatchError("setup_journey_payload_conflict")
+                await db.execute(sqlite_insert(ScheduledJob).values(**scheduled_job.model_dump()).on_conflict_do_nothing(index_elements=["id"]))
+            else:
+                watch_created = True
+                db.add(watch)
+                db.add(scheduled_job)
+                await db.flush()
         result = await self.get_watch(
             watch_id,
             owner_principal_id=owner_principal_id,
             owner_session_id=owner_session_id,
         )
-        await _audit_watch_event(result, "created", write_mode=write_mode)
+        if watch_created:
+            await _audit_watch_event(result, "created", write_mode=write_mode)
         return result or {}
 
     async def get_watch(
@@ -1188,6 +1221,7 @@ class SourceWatchService:
             ).scalars().first()
             if watch is None:
                 return None
+            scheduled_job = (await db.execute(select(ScheduledJob).where(ScheduledJob.id == watch.scheduled_job_id))).scalars().first()
             baselines = (
                 await db.execute(
                     select(GuardianSourceBaseline).where(GuardianSourceBaseline.watch_id == watch_id)
@@ -1216,8 +1250,13 @@ class SourceWatchService:
                     if isinstance(item, Mapping)
                 ],
                 "criteria": _safe_export_value(_load(watch.criteria_json, {})),
-                "schedule": _load(watch.schedule_spec_json, {}),
-                "read_authority": _safe_export_value(_load(watch.read_authority_json, {})),
+                "schedule": {
+                    **_load(watch.schedule_spec_json, {}),
+                    "configured_enabled": _schedule_enabled(_load(watch.schedule_spec_json, {})),
+                    "enabled": bool(scheduled_job and scheduled_job.enabled),
+                },
+                "read_authority": {**_safe_export_value(_load(watch.read_authority_json, {})),
+                                   "browser_expiry_scope": "public_https_text_only"},
                 "write_authority": _safe_export_value(_load(watch.write_authority_json, {})),
                 "write_mode": watch.write_mode,
                 "scheduled_job_id": watch.scheduled_job_id,
@@ -1317,6 +1356,10 @@ class SourceWatchService:
         if state is not None and state not in {"active", "paused", "revoked", "blocked"}:
             raise SourceWatchError("watch_state_invalid")
         async with db_engine.get_session() as db:
+            # Serialize edits against pause/revoke so a stale editor cannot
+            # resurrect the plan after local revocation wins.
+            if db.get_bind().dialect.name == "sqlite":
+                await db.execute(text("BEGIN IMMEDIATE"))
             watch = (
                 await db.execute(
                     select(GuardianSourceWatch).where(
@@ -1336,23 +1379,23 @@ class SourceWatchService:
             # usable while an occurrence is scanning or awaiting approval.
             # Other edits still require an idle watch so a running job cannot
             # observe a half-rotated plan.
-            state_only_stop = bool(
-                active_job_id
-                and state in {"paused", "revoked"}
+            stop_only = bool(
+                state in {"paused", "revoked"}
                 and sources is None
                 and criteria is None
                 and schedule is None
                 and write_mode is None
                 and reviewed_grant_id is None
             )
+            state_only_stop = bool(active_job_id and stop_only)
             if active_job_id and not state_only_stop:
                 raise SourceWatchError("watch_active_job")
             goal = (
                 await db.execute(select(Goal).where(Goal.id == watch.goal_id))
             ).scalars().first()
-            if goal is None:
+            if goal is None and not stop_only:
                 raise SourceWatchError("goal_not_found")
-            if (
+            if not stop_only and (
                 _text(goal.owner_principal_id) != _text(owner_principal_id)
                 or _text(goal.owner_session_id) != _text(owner_session_id)
                 or int(goal.revision or 0) != int(watch.goal_revision or 0)
@@ -1360,17 +1403,18 @@ class SourceWatchService:
                 raise SourceWatchError("goal_binding_stale")
             if schedule is not None:
                 cron, timezone_name = _validate_schedule(schedule)
-                watch.schedule_spec_json = _dump({"cron": cron, "timezone": timezone_name})
+                schedule_enabled = _schedule_enabled(schedule, default=_schedule_enabled(_load(watch.schedule_spec_json, {})))
+                watch.schedule_spec_json = _dump({"cron": cron, "timezone": timezone_name, "enabled": schedule_enabled})
                 job = (
                     await db.execute(
                         select(ScheduledJob).where(ScheduledJob.id == watch.scheduled_job_id)
                     )
                 ).scalars().first()
                 if job is not None:
-                    job.trigger_spec_json = watch.schedule_spec_json
+                    job.trigger_spec_json = _dump({"cron": cron, "timezone": timezone_name})
                     job.updated_at = _now()
                     db.add(job)
-            goal_budget = deserialize_admission_budget(goal)
+            goal_budget = deserialize_admission_budget(goal) if goal is not None else None
             changed_identity = False
             rotated_grant_id: str | None = None
             if parsed_sources is not None:
@@ -1476,9 +1520,11 @@ class SourceWatchService:
                 }
                 watch.criteria_json = _dump(criteria_json)
                 watch.criteria_digest = _sha(_dump(criteria_json))
-            if write_mode == "standing_reviewed" or (
+            if not stop_only and (write_mode == "standing_reviewed" or (
                 write_mode is None and watch.write_mode == "standing_reviewed"
-            ):
+            )):
+                if not _public_source_set(parse_sources(_load(watch.sources_json, []))):
+                    raise SourceWatchError("standing_sources_must_be_public")
                 goal_budget = goal_budget or deserialize_admission_budget(goal)
                 if (
                     goal_budget is None
@@ -1498,6 +1544,11 @@ class SourceWatchService:
                 watch.write_mode = write_mode
             if state is not None:
                 watch.state = state
+            job = (await db.execute(select(ScheduledJob).where(ScheduledJob.id == watch.scheduled_job_id))).scalars().first()
+            if job is not None:
+                job.enabled = watch.state == "active" and _schedule_enabled(_load(watch.schedule_spec_json, {}))
+                job.updated_at = _now()
+                db.add(job)
             watch.plan_revision += 1
             watch.updated_at = _now()
             db.add(watch)
@@ -1606,6 +1657,53 @@ class SourceWatchService:
             )
             return getattr(result, "rowcount", 0) == 1
 
+    async def _assert_read_authority(self, watch, *, allow_paused=False, db=None):
+        if db is None:
+            async with db_engine.get_session() as session:
+                return await self._assert_read_authority(watch,allow_paused=allow_paused,db=session)
+        root = await db.get(OperatorSession, watch.owner_session_id)
+        if root is None or root.is_bearer_tombstone or root.principal_id != watch.owner_principal_id:
+            raise SourceWatchError("standing_owner_identity_unproved")
+        if root.operator_identity_id:
+            identity = await db.get(OperatorIdentity, root.operator_identity_id)
+            if identity is None or identity.revoked_at is not None:
+                raise SourceWatchError("standing_identity_revoked")
+        # The finite SERVICE_OWNER exception is classified below. Only a
+        # public source plan may outlive interactive logout/expiry.
+        current = await db.get(GuardianSourceWatch, watch.id)
+        goal = await db.get(Goal, watch.goal_id)
+        if (current is None or current.state not in ({"active", "paused"} if allow_paused else {"active"})
+                or current.plan_revision != watch.plan_revision
+                or current.owner_principal_id != watch.owner_principal_id
+                or current.owner_session_id != watch.owner_session_id):
+            raise SourceWatchError("watch_read_authority_revoked")
+        try:
+            raw_sources=json.loads(current.sources_json)
+            if not isinstance(raw_sources,list) or not raw_sources:
+                raise ValueError('source_set_invalid')
+            parsed_sources=parse_sources(raw_sources)
+        except (ValueError,TypeError,AttributeError) as exc:
+            raise SourceWatchError("watch_source_classification_invalid") from exc
+        public_only=_public_source_set(parsed_sources)
+        if not public_only:
+            now=_now()
+            if (current.write_mode == "standing_reviewed" or root.revoked_at is not None
+                    or root.idle_expires_at.replace(tzinfo=root.idle_expires_at.tzinfo or timezone.utc) <= now
+                    or root.absolute_expires_at.replace(tzinfo=root.absolute_expires_at.tzinfo or timezone.utc) <= now):
+                raise SourceWatchError("private_source_requires_live_browser")
+        if (goal is None or goal.owner_principal_id != watch.owner_principal_id
+                or goal.owner_session_id != watch.owner_session_id
+                or str(getattr(goal.status,'value',goal.status)) != 'active'
+                or goal.revision != watch.goal_revision):
+            raise SourceWatchError("goal_binding_stale")
+        admitted, reason, budget = _goal_admission(goal)
+        if not admitted or budget is None:
+            raise SourceWatchError(reason)
+        if budget.period_expires_at is None:
+            raise SourceWatchError("standing_grant_expiry_required")
+        if _text(_load(current.read_authority_json, {}).get("grant_id")) != _text(budget.grant_id):
+            raise SourceWatchError("standing_grant_stale")
+
     async def _scan(self, watch: GuardianSourceWatch, *, occurrence_id: str | None = None) -> ScanResult:
         sources = parse_sources(_load(watch.sources_json, []))
         criteria = parse_criteria(_load(watch.criteria_json, {}))
@@ -1618,6 +1716,9 @@ class SourceWatchService:
             baselines = {row.source_key: row for row in baseline_rows}
         observations: list[SourceObservation] = []
         successful = 0
+        async def check_authority():
+            if occurrence_id is not None:
+                await self._assert_read_authority(watch)
         deadline = _now() + timedelta(seconds=SCAN_DEADLINE_SECONDS)
         for source in sources:
             if _now() >= deadline:
@@ -1637,15 +1738,17 @@ class SourceWatchService:
                         remaining = (deadline - _now()).total_seconds()
                         if remaining <= 0:
                             raise SourceWatchError("scan_deadline")
+                        await check_authority()
                         reader = (
                             self._fetcher(source)
                             if self._fetcher is not None
-                            else _read_source(source)
+                            else _read_source(source,authority_check=check_authority)
                         )
                         raw, metadata = await asyncio.wait_for(
                             reader,
                             timeout=min(float(SOURCE_READ_DEADLINE_SECONDS), remaining),
                         )
+                        await check_authority()
                         break
                     except asyncio.TimeoutError as exc:
                         raise SourceWatchError("source_transport_timeout") from exc
@@ -2283,6 +2386,7 @@ class SourceWatchService:
                     self._scan(watch, occurrence_id=job_id),
                     timeout=min(float(SCAN_DEADLINE_SECONDS), scan_timeout),
                 )
+                await self._assert_read_authority(watch)
             except asyncio.TimeoutError as exc:
                 raise SourceWatchError("scan_deadline") from exc
             await assert_routine_parent_current()
@@ -3496,7 +3600,10 @@ class SourceWatchService:
                 if observed is None or not observed.new_hash:
                     raise SourceWatchError("recovery_baseline_unverified")
                 try:
-                    reader = self._fetcher(observed.source) if self._fetcher is not None else _read_source(observed.source)
+                    async def recovery_authority():
+                        await self._assert_read_authority(watch,allow_paused=True)
+                    await recovery_authority()
+                    reader = self._fetcher(observed.source) if self._fetcher is not None else _read_source(observed.source,authority_check=recovery_authority)
                     raw, metadata = await asyncio.wait_for(
                         reader,
                         timeout=SOURCE_READ_DEADLINE_SECONDS,
@@ -4703,6 +4810,8 @@ class SourceWatchService:
                 expected_revision=int(current_job.get("revision") or 0),
             )
         async with db_engine.get_session() as db:
+            if job_id:
+                await self._assert_read_authority(watch,db=db)
             current = (
                 await db.execute(select(GuardianSourceWatch).where(GuardianSourceWatch.id == watch.id))
             ).scalars().first()
@@ -4745,6 +4854,7 @@ class SourceWatchService:
             expected_revision=expected_revision,
         )
         async with db_engine.get_session() as db:
+            await self._assert_read_authority(watch,db=db)
             row = (
                 await db.execute(select(GuardianDecisionPacket).where(GuardianDecisionPacket.id == packet.id))
             ).scalars().first()

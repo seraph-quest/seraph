@@ -37,6 +37,7 @@ class PinnedResponse:
     headers: dict[str, str]
     content: bytes
     pinned_address: str
+    location_header_count: int = 0
 
 
 class _TransportLifecycleMarker:
@@ -167,6 +168,7 @@ async def fetch_pinned_https(
     transport: httpx.AsyncBaseTransport | None = None,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     max_bytes: int = MAX_RESPONSE_BYTES,
+    authority_check: Callable[[], Awaitable[None]] | None = None,
 ) -> PinnedResponse:
     """Fetch one public HTTPS response without redirects or ambient proxies."""
 
@@ -178,6 +180,7 @@ async def fetch_pinned_https(
         timeout_seconds=timeout_seconds,
         max_bytes=max_bytes,
         headers={"Accept": "text/plain, text/html, application/xhtml+xml"},
+        authority_check=authority_check,
     )
 
 
@@ -194,8 +197,80 @@ async def request_pinned_https(
     connect_timeout_seconds: float | None = None,
     max_bytes: int = MAX_RESPONSE_BYTES,
     _lifecycle_marker: _TransportLifecycleMarker | None = None,
+    authority_check: Callable[[], Awaitable[None]] | None = None,
+    handoff_check: Callable[[], Awaitable[None]] | None = None,
+    observe_redirect_response: bool = False,
 ) -> PinnedResponse:
-    """Issue one bounded GET/POST over the same pinned HTTPS boundary.
+    """The existing general HTTPS surface remains bounded GET/POST only."""
+    if str(method or "GET").upper() not in {"GET", "POST"}:
+        raise PinnedTransportError("only GET and POST are supported")
+    return await _request_pinned_https(url, method=method, headers=headers,
+        json_body=json_body, form_body=form_body, resolver=resolver,
+        transport=transport, timeout_seconds=timeout_seconds,
+        connect_timeout_seconds=connect_timeout_seconds, max_bytes=max_bytes,
+        _lifecycle_marker=_lifecycle_marker, authority_check=authority_check,
+        handoff_check=handoff_check, observe_redirect_response=observe_redirect_response)
+
+
+async def request_pinned_calendar_patch(
+    *, calendar_id: str, event_id: str, etag: str, start: Mapping[str, str],
+    end: Mapping[str, str], marker_key: str, marker_value: str, access_token: str,
+    authority_validate: Callable[[], Awaitable[None]],
+    authority_check: Callable[[], Awaitable[None]],
+    lifecycle_marker: _TransportLifecycleMarker,
+    resolver: Resolver = default_resolver,
+    transport: httpx.AsyncBaseTransport | None = None,
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+) -> PinnedResponse:
+    """One structured conditional Calendar PATCH, without a URL/method input.
+
+    Route and literal schema validation plus a current canonical permission
+    check precede DNS. The second native callback atomically spends the sole
+    dispatch slot immediately before the actual stream. Shared internals own
+    pinning, zero redirects/retries and positive awaited client settlement.
+    """
+    from urllib.parse import quote, urlencode
+    import re
+    from src.integrations.calendar_reschedule_contract import provider_id, text, proposed_times
+    if not callable(authority_validate) or not callable(authority_check) or not isinstance(lifecycle_marker, _TransportLifecycleMarker):
+        raise PinnedTransportError("native Calendar authority and transport ownership are required")
+    calendar_id, event_id = provider_id(calendar_id, 1024), provider_id(event_id)
+    etag, access_token = text(etag,512), text(access_token,8192)
+    if type(start) is not dict or type(end) is not dict:
+        raise PinnedTransportError("literal Calendar event times are required")
+    proposed_times(start,end)
+    if type(marker_key) is not str or re.fullmatch(r"seraphReschedule_[0-9a-f]{24}",marker_key) is None or type(marker_value) is not str or re.fullmatch(r"[0-9a-f]{64}",marker_value) is None:
+        raise PinnedTransportError("the exact Calendar correlation property is required")
+    # Freeze caller mappings before any await; callback code cannot alter the
+    # approved wire bytes through shared mutable input references.
+    body = {"start":dict(start), "end":dict(end), "extendedProperties":{"private":{marker_key:marker_value}}}
+    url = "https://www.googleapis.com/calendar/v3/calendars/"+quote(calendar_id,safe="")+"/events/"+quote(event_id,safe="")+"?"+urlencode({"sendUpdates":"none","conferenceDataVersion":0,"supportsAttachments":"false"})
+    await authority_validate()
+    return await _request_pinned_https(url, method="PATCH", json_body=body,
+        headers={"Accept":"application/json","Authorization":"Bearer "+access_token,"If-Match":etag},
+        resolver=resolver, transport=transport, timeout_seconds=timeout_seconds,
+        max_bytes=64*1024, _lifecycle_marker=lifecycle_marker,
+        authority_check=authority_check)
+
+
+async def _request_pinned_https(
+    url: str,
+    *,
+    method: str = "GET",
+    headers: Mapping[str, str] | None = None,
+    json_body: Any | None = None,
+    form_body: bytes | None = None,
+    resolver: Resolver = default_resolver,
+    transport: httpx.AsyncBaseTransport | None = None,
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    connect_timeout_seconds: float | None = None,
+    max_bytes: int = MAX_RESPONSE_BYTES,
+    _lifecycle_marker: _TransportLifecycleMarker | None = None,
+    authority_check: Callable[[], Awaitable[None]] | None = None,
+    handoff_check: Callable[[], Awaitable[None]] | None = None,
+    observe_redirect_response: bool = False,
+) -> PinnedResponse:
+    """Private shared transport for general reads/posts and the fixed PATCH.
 
     ``transport`` is an explicit constructor seam for local tests. It is never
     read from configuration, and production clients always connect to the
@@ -204,9 +279,37 @@ async def request_pinned_https(
     """
 
     normalized_method = str(method or "GET").upper()
-    if normalized_method not in {"GET", "POST"}:
+    if type(observe_redirect_response) is not bool:
+        raise PinnedTransportError("redirect observation requires a strict boolean")
+    if normalized_method not in {"GET", "POST", "PATCH"}:
         raise PinnedTransportError("only GET and POST are supported")
-    if json_body is not None and normalized_method != "POST":
+    if normalized_method == "PATCH":
+        # Defense in depth even within the private implementation: PATCH
+        # cannot become a general method/URL escape hatch for other adapters.
+        from urllib.parse import unquote, parse_qsl
+        import re
+        from src.integrations.calendar_reschedule_contract import provider_id, text, proposed_times
+        route = _parse_public_url(url)
+        segments = re.fullmatch(r"/calendar/v3/calendars/([^/]+)/events/([^/]+)",route.path)
+        if route.hostname != "www.googleapis.com" or route.port not in {None,443} or segments is None or parse_qsl(route.query,keep_blank_values=True) != [("sendUpdates","none"),("conferenceDataVersion","0"),("supportsAttachments","false")]:
+            raise PinnedTransportError("only the exact conditional Calendar event route permits PATCH")
+        provider_id(unquote(segments[1]),1024); provider_id(unquote(segments[2]))
+        if type(json_body) is not dict or set(json_body)!={"start","end","extendedProperties"} or form_body is not None:
+            raise PinnedTransportError("only the exact conditional Calendar event body permits PATCH")
+        proposed_times(json_body["start"],json_body["end"])
+        properties = json_body["extendedProperties"]
+        if type(properties) is not dict or set(properties)!={"private"} or type(properties["private"]) is not dict or len(properties["private"])!=1:
+            raise PinnedTransportError("one Calendar private correlation property is required")
+        key, value = next(iter(properties["private"].items()))
+        if type(key) is not str or re.fullmatch(r"seraphReschedule_[0-9a-f]{24}",key) is None or type(value) is not str or re.fullmatch(r"[0-9a-f]{64}",value) is None:
+            raise PinnedTransportError("the exact Calendar correlation property is required")
+        if not isinstance(_lifecycle_marker,_TransportLifecycleMarker) or not callable(authority_check):
+            raise PinnedTransportError("native Calendar contact ownership is required")
+        wire_headers = {str(key).lower():value for key,value in (headers or {}).items()}
+        if set(wire_headers)!={"accept","authorization","if-match"} or wire_headers["accept"]!="application/json" or type(wire_headers["authorization"]) is not str or not wire_headers["authorization"].startswith("Bearer "):
+            raise PinnedTransportError("the exact Calendar headers are required")
+        text(wire_headers["if-match"],512); text(wire_headers["authorization"][7:],8192)
+    if json_body is not None and normalized_method not in {"POST", "PATCH"}:
         raise PinnedTransportError("JSON request bodies are only allowed for POST")
     if json_body is not None and form_body is not None:
         raise PinnedTransportError("JSON and form request bodies are mutually exclusive")
@@ -261,6 +364,9 @@ async def request_pinned_https(
             raise PinnedTransportError("connect timeout must be a finite positive number")
 
     parsed = _parse_public_url(url)
+    if observe_redirect_response and (normalized_method != "POST"
+        or parsed.hostname != "codeberg.org" or parsed.path != "/user/login" or parsed.query):
+        raise PinnedTransportError("redirect observation is restricted to fixed Forgejo login")
     resolve_timeout = bounded_timeout
     if connect_timeout_seconds is not None:
         resolve_timeout = min(resolve_timeout, bounded_connect_timeout)
@@ -274,6 +380,8 @@ async def request_pinned_https(
     # a peer keep a request alive indefinitely by sending tiny chunks.
     try:
         async with asyncio.timeout(bounded_timeout):
+            if handoff_check is not None:
+                await handoff_check()
             try:
                 addresses = await asyncio.wait_for(
                     _resolve(resolver, parsed.hostname or "", parsed.port or 443),
@@ -282,6 +390,8 @@ async def request_pinned_https(
             except asyncio.TimeoutError as exc:
                 raise TimeoutError("source DNS resolution timed out") from exc
             pinned = addresses[0]
+            if handoff_check is not None:
+                await handoff_check()
             # ASGI/mock transports need the logical URL so tests can route it.
             # A real network client uses the pinned address and an explicit
             # Host header.
@@ -327,6 +437,8 @@ async def request_pinned_https(
             )
             client_created = True
             try:
+                if authority_check is not None:
+                    await authority_check()
                 async with client.stream(
                     normalized_method,
                     request_url,
@@ -334,7 +446,11 @@ async def request_pinned_https(
                     content=request_content,
                     extensions={"sni_hostname": parsed.hostname or ""},
                 ) as response:
-                    if 300 <= response.status_code < 400:
+                    if handoff_check is not None:
+                        await handoff_check()
+                    if 300 <= response.status_code < 400 and not (
+                        observe_redirect_response and response.status_code in {302, 303}
+                    ):
                         raise PinnedTransportError("redirects are disabled for source watches")
                     content_encoding = response.headers.get("content-encoding", "").strip().lower()
                     if content_encoding not in {"", "identity"}:
@@ -343,6 +459,8 @@ async def request_pinned_https(
                         )
                     content = bytearray()
                     async for chunk in response.aiter_bytes():
+                        if handoff_check is not None:
+                            await handoff_check()
                         # Check before extending so an overflow chunk is never
                         # retained in the bounded response buffer.
                         if len(content) + len(chunk) > max_bytes:
@@ -353,6 +471,7 @@ async def request_pinned_https(
                     response_headers = {
                         str(k).lower(): str(v) for k, v in response.headers.items()
                     }
+                    location_header_count = len(response.headers.get_list("location"))
             finally:
                 # Do not infer settlement from response/stream state or an
                 # ``is_closed`` property.  The marker is advanced only after
@@ -378,6 +497,7 @@ async def request_pinned_https(
         headers=response_headers,
         content=bytes(content),
         pinned_address=pinned,
+        location_header_count=location_header_count,
     )
 
 

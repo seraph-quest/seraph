@@ -685,7 +685,9 @@ def test_durable_receipts_redact_secret_key_variants_and_error_payloads():
 
 
 @pytest.mark.asyncio
-async def test_remote_receipt_adapter_maps_status_without_mutating_job_lifecycle():
+async def test_remote_receipt_adapter_maps_status_without_mutating_job_lifecycle(async_db):
+    # The adapter consults canonical cost reservations even when the effect
+    # recorder is isolated below; use the complete local accounting schema.
     class RecordingRepository(DurableJobRepository):
         async def get_job(self, job_id):
             return {"job_id": job_id, "owner": {"principal_id": "service:strategist"}}

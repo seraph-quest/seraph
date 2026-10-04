@@ -121,6 +121,11 @@ SOURCE_CONTRACTS: tuple[SourceContractDefinition, ...] = (
         preferred_access="goal_followthrough_api",
     ),
     SourceContractDefinition(
+        name="github_followthrough.publish_tested_patch",
+        description="Publish an exactly approved tested repository repair as a ready PR with independent Git Data and PR readback.",
+        preferred_access="repo_publication_api",
+    ),
+    SourceContractDefinition(
         name="mail.messages.read",
         description="Read a bounded, owner-consented Gmail label window and selected message metadata.",
         preferred_access="authenticated_mail_api",

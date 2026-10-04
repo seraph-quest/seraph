@@ -585,7 +585,7 @@ async def _run_real_board_goal_snapshot(
     )
     task = WorkBoardTask(
         task_id=task_id,
-        owner_principal_id="operator:single",
+        owner_principal_id="operator:root:managed-snapshot-test",
         owner_session_id="managed-session",
         goal_id=goal_id,
         goal_revision=1,
@@ -606,15 +606,16 @@ async def _run_real_board_goal_snapshot(
                 title="Managed board goal",
                 status="active",
                 revision=1,
-                owner_principal_id="operator:single",
+                owner_principal_id="operator:root:managed-snapshot-test",
                 owner_session_id="managed-session",
                 success_criterion_json=criterion.model_dump_json(),
             )
         )
-        db.add(Session(id="managed-session", owner_principal_id="operator:single"))
+        db.add(Session(id="managed-session", owner_principal_id="operator:root:managed-snapshot-test"))
         db.add(
             OperatorSession(
                 id="managed-session",
+                principal_id="operator:root:managed-snapshot-test",
                 token_hash="managed-session-token-hash",
                 idle_expires_at=now + timedelta(hours=1),
                 absolute_expires_at=now + timedelta(hours=1),

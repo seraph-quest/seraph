@@ -225,6 +225,37 @@ describe("WorkBoardPanel", () => {
     vi.restoreAllMocks();
   });
 
+  it("keeps one research inspector across refreshed detail reconciliation", async () => {
+    const currentTask = task({ capability_id: "work.research-dossier.v1", status: "done" });
+    taskResponse(fetchMock, currentTask);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const props = { ownerPrincipalId: "operator:one", ownerSessionId: "operator-session-1" };
+    const mounted = render(<WorkBoardPanel {...props} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Bounded task" }));
+    await screen.findByRole("region", { name: "Research dossier inspector" });
+    for (let revision = 0; revision < 3; revision++) {
+      mounted.rerender(<WorkBoardPanel {...props} focusTaskId="task-1" onFocusTaskHandled={() => {}} />);
+      fireEvent.click(screen.getByRole("button", { name: "Refresh board" }));
+      await waitFor(() => expect(screen.getAllByRole("region", { name: "Research dossier inspector" })).toHaveLength(1));
+    }
+    expect(errors.mock.calls.some((args) => args.some((value) => String(value).includes("same key")))).toBe(false);
+    expect(screen.getAllByRole("button", { name: "Refresh research" })).toHaveLength(1);
+  });
+
+  it("returns recovered history to its exact origin while all effect controls stay readonly", async () => {
+    const currentTask = task({ ownership_access: "recovered_read_only", status: "blocked", recovery_action: "reconcile_external_effect", block_kind: "unknown_effect" });
+    taskResponse(fetchMock, currentTask);
+    const returnContext = vi.fn(); const goal = vi.fn(); const thread = vi.fn();
+    render(<WorkBoardPanel focusTaskId="task-1" ownerPrincipalId="operator:one" ownerSessionId="operator-session-1" attentionContext={{ taskId: "task-1", origin: "inbox", goalId: "goal-1", threadId: "thread-1" }} onReturnAttention={returnContext} onOpenAttentionGoal={goal} onOpenAttentionThread={thread} />);
+    const returnButton = await screen.findByRole("button", { name: "Return to Inbox decision" });
+    fireEvent.click(screen.getByRole("button", { name: "Open originating goal" })); expect(goal).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "Open originating thread" })); expect(thread).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("button", { name: "Reconcile recorded GitHub effect" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve exact action" })).not.toBeInTheDocument();
+    fireEvent.click(returnButton); expect(returnContext).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+  });
+
   it("carries the server snapshot cursor to the authenticated socket and reconnects from a fresh snapshot", async () => {
     const currentTask = task({ status: "ready", dispatch_rank: 1 });
     taskResponse(fetchMock, currentTask, 42);
@@ -1320,16 +1351,50 @@ describe("WorkBoardPanel", () => {
     expect(document.activeElement).toBe(opener);
   });
 
-  it("traps focus in the create dialog, closes on Escape, and restores focus", async () => {
+  it.each([
+    ["Create task", "Create a goal-linked task"],
+    ["Public browser task", "Public browser task"],
+    ["Calendar meeting prep", "Prepare for a calendar meeting"],
+    ["Repository repair", "Repository repair"],
+  ])("keeps the selected task drawer behind the %s form", async (action, dialogName) => {
+    taskResponse(fetchMock, task({ title: "Preserved selection" }));
+    render(<WorkBoardPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Preserved selection" }));
+    const drawer = await screen.findByRole("region", { name: "Task details for Preserved selection" });
+    const opener = screen.getByRole("button", { name: action });
+    opener.focus();
+    fireEvent.click(opener);
+
+    const dialog = await screen.findByRole("dialog", { name: dialogName });
+    expect(dialog).toBeVisible();
+    expect(dialog.closest("section[aria-label='Work board']")).toBeNull();
+    expect(drawer).not.toBeVisible();
+    expect(screen.queryByRole("region", { name: "Task details for Preserved selection" })).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: action === "Create task" ? "Cancel" : "Close" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: dialogName })).not.toBeInTheDocument());
+    expect(screen.getByRole("region", { name: "Task details for Preserved selection" })).toBe(drawer);
+    expect(drawer).toBeVisible();
+  });
+
+  it("traps focus in the create dialog above a selected task, closes on Escape, and restores focus", async () => {
     taskResponse(fetchMock, task());
     render(<WorkBoardPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Bounded task" }));
+    const drawer = await screen.findByRole("region", { name: "Task details for Bounded task" });
     const opener = await screen.findByRole("button", { name: "Create task" });
     fireEvent.click(opener);
     const dialog = await screen.findByRole("dialog", { name: "Create a goal-linked task" });
+    expect(drawer).not.toBeVisible();
     const focusables = Array.from(dialog.querySelectorAll<HTMLElement>("button:not([disabled]), input:not([disabled]):not([type=\"hidden\"]), select:not([disabled]), textarea:not([disabled])"));
     expect(document.activeElement).toBe(focusables[0]);
-    const background = opener.closest<HTMLElement>(".cockpit-operator-row");
-    expect(background?.inert).toBe(true);
+    const backgroundIsInert = () => {
+      for (let element: HTMLElement | null = opener; element; element = element.parentElement) {
+        if (element.inert) return true;
+      }
+      return false;
+    };
+    expect(backgroundIsInert()).toBe(true);
 
     const first = focusables[0];
     const last = focusables[focusables.length - 1];
@@ -1344,7 +1409,8 @@ describe("WorkBoardPanel", () => {
 
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Create a goal-linked task" })).not.toBeInTheDocument());
     expect(document.activeElement).toBe(opener);
-    expect(background?.inert).toBe(false);
+    expect(backgroundIsInert()).toBe(false);
+    expect(drawer).toBeVisible();
   });
 
   it("refreshes canonical detail and snapshot after a stale revision conflict", async () => {

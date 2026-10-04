@@ -22,6 +22,45 @@ async def public_resolver(_host: str, _port: int) -> list[str]:
 
 
 @pytest.mark.asyncio
+async def test_final_authority_callback_after_dns_blocks_contact():
+    order = []
+    async def resolver(_host, _port):
+        order.append("dns")
+        await asyncio.sleep(0)
+        return [PUBLIC_ADDRESS]
+    async def authority_check():
+        order.append("authority")
+        raise PermissionError("exact grant revoked while DNS awaited")
+    async def forbidden(_request):
+        order.append("contact")
+        return httpx.Response(200, content=b"forbidden")
+    with pytest.raises(PermissionError):
+        await request_pinned_https("https://example.com/held", resolver=resolver,
+            transport=httpx.MockTransport(forbidden), authority_check=authority_check)
+    assert order == ["dns", "authority"]
+
+
+@pytest.mark.asyncio
+async def test_generic_wrapper_keeps_handoff_and_final_authority_callbacks():
+    order = []
+    async def handoff_check():
+        order.append("handoff")
+    async def resolver(_host, _port):
+        order.append("dns")
+        return [PUBLIC_ADDRESS]
+    async def authority_check():
+        order.append("authority")
+    async def contact(_request):
+        order.append("contact")
+        return httpx.Response(200, content=b"bounded")
+    response = await request_pinned_https("https://example.com/held",
+        resolver=resolver, transport=httpx.MockTransport(contact),
+        handoff_check=handoff_check, authority_check=authority_check)
+    assert response.content == b"bounded"
+    assert order == ["handoff", "dns", "handoff", "authority", "contact", "handoff", "handoff"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "addresses",
     [

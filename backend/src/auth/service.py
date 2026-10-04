@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import base64
+import re
 import hashlib
 import hmac
 import secrets
@@ -36,6 +37,8 @@ class AuthenticatedOperator:
     _token_hash: str | None = field(default=None, repr=False, compare=False)
     ownership_continuity: str = field(default="stable", compare=False)
     ownership_recovery_action: str | None = field(default=None, compare=False)
+    operator_identity_id: str | None = field(default=None, compare=False)
+    _continuity_token: str | None = field(default=None, repr=False, compare=False)
 
 
 _OWNERSHIP_STABLE = "stable"
@@ -141,9 +144,11 @@ def _aware(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
 
 
-def _principal(session_id: str) -> TrustPrincipal:
+def _principal(session_id: str, principal_id: str) -> TrustPrincipal:
+    if not principal_id or not re.fullmatch(r"operator:root:[A-Za-z0-9_-]{7,114}", principal_id):
+        raise AuthFailure("principal_migration_required")
     return TrustPrincipal(
-        principal_id="operator:single",
+        principal_id=principal_id,
         principal_type=PrincipalType.OPERATOR,
         authenticated=True,
         grants=(
@@ -206,6 +211,8 @@ async def create_session(
     *,
     replace_session_id: str | None = None,
     expected_token_hash: str | None = None,
+    continuity_token: str | None = None,
+    recovery_code: str | None = None,
 ) -> tuple[str, AuthenticatedOperator]:
     """Create a root session or atomically rotate its bearer in place.
 
@@ -225,6 +232,13 @@ async def create_session(
     async with get_session() as db:
         absolute_expires_at = now + timedelta(seconds=settings.operator_auth_absolute_seconds)
         if not replace_session_id:
+            identity_id = None
+            rotated_continuity = None
+            if continuity_token or recovery_code:
+                from src.auth.ownership import bind_login_identity
+                identity_id, rotated_continuity = await bind_login_identity(
+                    db, continuity_token=continuity_token, recovery_code=recovery_code,
+                )
             record = OperatorSession(
                 token_hash=token_hash,
                 idle_expires_at=min(
@@ -233,6 +247,7 @@ async def create_session(
                 ),
                 absolute_expires_at=absolute_expires_at,
                 is_bearer_tombstone=False,
+                operator_identity_id=identity_id,
             )
             db.add(record)
             await db.flush()
@@ -294,6 +309,9 @@ async def create_session(
             ownership_continuity=continuity,
             ownership_recovery_action=recovery_action,
         )
+        if not replace_session_id and rotated_continuity:
+            from dataclasses import replace
+            operator = replace(operator, _continuity_token=rotated_continuity)
     return token, operator
 
 
@@ -316,12 +334,13 @@ def _operator_for_record(
 ) -> AuthenticatedOperator:
     return AuthenticatedOperator(
         record.id,
-        _principal(record.id),
+        _principal(record.id, record.principal_id),
         _aware(record.idle_expires_at),
         _aware(record.absolute_expires_at),
         token_hash,
         ownership_continuity,
         ownership_recovery_action,
+        record.operator_identity_id,
     )
 
 
@@ -597,3 +616,23 @@ async def revoke_session(session_id: str) -> None:
         if record and record.is_bearer_tombstone is False and record.revoked_at is None:
             record.revoked_at = datetime.now(timezone.utc)
             db.add(record)
+
+async def authenticate_principal(principal_id: str, *, db=None) -> AuthenticatedOperator:
+    """Recheck server-bound device authority without adopting role metadata.
+
+    Device credentials are separate ingress proofs. They may act only while
+    their exact persisted operator root is live; this lookup is no login alias.
+    """
+    if principal_id == 'operator:test-bypass':
+        return test_bypass_operator()
+    if db is None:
+        async with get_session() as session:
+            return await authenticate_principal(principal_id, db=session)
+    record = (await db.execute(select(OperatorSession).where(
+        OperatorSession.principal_id == principal_id,
+        OperatorSession.is_bearer_tombstone.is_(False),
+    ).execution_options(populate_existing=True))).scalar_one_or_none()
+    now = datetime.now(timezone.utc)
+    if record is None or record.revoked_at is not None or now >= _aware(record.idle_expires_at) or now >= _aware(record.absolute_expires_at):
+        raise AuthFailure('session_revoked')
+    return await _operator_from_record(db, record)

@@ -2,6 +2,10 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { RepoRepairInspector } from "./RepoRepairInspector";
+import nodePendingApi from "./__fixtures__/node-repair-pending-api.json";
+// Actual authenticated recovery GETs; only host binary paths are normalized.
+// Original DTOs and the exact-field correlation stay in private test evidence.
+import nodeCleanupApi from "./__fixtures__/node-repair-cleanup-api.json";
 
 function response(payload: unknown, ok = true, status = ok ? 200 : 409) {
   return { ok, status, json: async () => payload } as unknown as Response;
@@ -93,6 +97,168 @@ describe("RepoRepairInspector", () => {
     window.sessionStorage.clear();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+  });
+
+  it("renders the recorded successful preflight with the actual ready status", async () => {
+    // Actual managed publication-profile API preflight uses status=ready,
+    // ok=true; status alone cannot establish successful recorded proof.
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response(projection({
+      executor_kind: "local",
+      executor_profile: "local:repo-python-pytest-publication-v1",
+      executor_posture: {
+        kind: "local", profile: "repo-python-pytest-publication-v1",
+        isolation_claim: "none", network_isolation: "not_verified",
+        resource_enforcement: "admission_and_wall_timeout_only",
+        host_access: "explicit_job_approval_required", image_digest: null,
+        limits_digest: "a".repeat(64), runtime_proof_available: true,
+        publication_runtime_proof_sha256: "b".repeat(64),
+      },
+      executor_posture_digest: "c".repeat(64),
+      local_host_execution_required: true,
+      required_permissions: ["local_host_execution"],
+      preflight: { ok: true, status: "ready", reason: "local_staging_available" },
+      preparation_ready: true,
+      execution_ready: false,
+    }))));
+    render(<RepoRepairInspector {...inspectorProps} jobId="job-1" />);
+    expect(await screen.findByText("Preflight: verified")).toBeInTheDocument();
+    expect(screen.queryByText(/Preflight: blocked or unknown/)).not.toBeInTheDocument();
+  });
+
+  it("does not treat the ready status alone as verified preflight", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response(projection({
+      preflight: { ok: false, status: "ready", reason: "receipt_not_verified" },
+      preparation_ready: false,
+    }))));
+    render(<RepoRepairInspector {...inspectorProps} jobId="job-1" />);
+    expect(await screen.findByText("Preflight: blocked or unknown · receipt_not_verified")).toBeInTheDocument();
+    expect(screen.queryByText("Preflight: verified")).not.toBeInTheDocument();
+  });
+
+  const cleanupProps = {
+    jobId: nodeCleanupApi.held.job_id,
+    ownerPrincipalId: nodeCleanupApi.held.owner_principal_id,
+    ownerSessionId: nodeCleanupApi.held.operator_session_id,
+    taskOwnerPrincipalId: nodeCleanupApi.held.owner_principal_id,
+    taskOwnerSessionId: nodeCleanupApi.held.operator_session_id,
+  };
+
+  it("recovers physical cleanup explicitly and preserves Unknown through a full remount using actual API projections", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(response(nodeCleanupApi.held))
+      .mockResolvedValueOnce(response({ status: "unknown_external_effect", physical_capacity_released: true }))
+      .mockResolvedValueOnce(response(nodeCleanupApi.released))
+      .mockResolvedValueOnce(response(nodeCleanupApi.released));
+    const mounted = render(<RepoRepairInspector {...cleanupProps} />);
+    expect(await screen.findByText(/Physical capacity held/)).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Recover process cleanup" }));
+    expect(await screen.findByText(/Physical capacity released · durable cleanup/)).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenNthCalledWith(2,
+      expect.stringContaining(`/api/workflows/repo-change/${cleanupProps.jobId}/recover`), expect.objectContaining({ method: "POST" }));
+    mounted.unmount();
+    render(<RepoRepairInspector {...cleanupProps} />);
+    expect(await screen.findByText(/Physical capacity released · durable cleanup/)).toBeInTheDocument();
+    expect(screen.getByText(/Task, effect and cost liabilities remain Unknown/)).toBeInTheDocument();
+    expect(screen.getByText(/unknown external effect · durable revision/)).toBeInTheDocument();
+    expect(screen.getByText(/No verified readback receipt/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Recover process cleanup|Resume approved repair/ })).not.toBeInTheDocument();
+    const writes = fetchMock.mock.calls.filter(([, options]) => options?.method === "POST");
+    expect(writes).toHaveLength(1);
+    expect(writes[0][0]).not.toContain("/resume");
+  });
+
+  it("refreshes durable GET after a lost recovery response without automatic replay", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(response(nodeCleanupApi.held))
+      .mockRejectedValueOnce(new Error("response lost"))
+      .mockResolvedValueOnce(response(nodeCleanupApi.held));
+    const mounted = render(<RepoRepairInspector {...cleanupProps} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Recover process cleanup" }));
+    expect(await screen.findByText(/Recovery response uncertain or rejected: response lost/)).toBeInTheDocument();
+    expect(fetchMock.mock.calls.filter(([, options]) => options?.method === "POST")).toHaveLength(1);
+    mounted.unmount();
+    fetchMock.mockResolvedValueOnce(response(nodeCleanupApi.held));
+    render(<RepoRepairInspector {...cleanupProps} />);
+    expect(await screen.findByRole("button", { name: "Recover process cleanup" })).toBeEnabled();
+    expect(fetchMock.mock.calls.filter(([, options]) => options?.method === "POST")).toHaveLength(1);
+  });
+
+  it("uses durable cleanup readback when the POST response was lost after settlement", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(response(nodeCleanupApi.held))
+      .mockRejectedValueOnce(new Error("response lost"))
+      .mockResolvedValueOnce(response(nodeCleanupApi.released));
+    render(<RepoRepairInspector {...cleanupProps} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Recover process cleanup" }));
+    expect(await screen.findByText(/Physical capacity released · durable cleanup/)).toBeInTheDocument();
+    expect(screen.getByText(/Task, effect and cost liabilities remain Unknown/)).toBeInTheDocument();
+  });
+
+  it("does not trust a positive POST when durable cleanup remains held", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(response(nodeCleanupApi.held))
+      .mockResolvedValueOnce(response({ status: "unknown_external_effect", physical_capacity_released: true }))
+      .mockResolvedValueOnce(response(nodeCleanupApi.held));
+    render(<RepoRepairInspector {...cleanupProps} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Recover process cleanup" }));
+    expect(await screen.findByText(/Process cleanup has no durable verified release/)).toBeInTheDocument();
+    expect(screen.queryByText(/Physical capacity released/)).not.toBeInTheDocument();
+  });
+
+  it("clears private cleanup data when recovery authority is expired or rejected", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(response(nodeCleanupApi.held))
+      .mockResolvedValueOnce(response({ detail: { code: "operator_session_expired" } }, false, 403))
+      .mockResolvedValueOnce(response(nodeCleanupApi.held));
+    render(<RepoRepairInspector {...cleanupProps} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Recover process cleanup" }));
+    expect(await screen.findByText(/operator session is no longer authorized for this repair/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Recover process cleanup" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Physical capacity held|Physical capacity released/)).not.toBeInTheDocument();
+  });
+
+  it("clears recovery data and ignores a late action response after owner rotation", async () => {
+    let resolveAction!: (value: Response) => void;
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(response(nodeCleanupApi.held))
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => { resolveAction = resolve; }));
+    const mounted = render(<RepoRepairInspector {...cleanupProps} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Recover process cleanup" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    mounted.rerender(<RepoRepairInspector {...cleanupProps} ownerSessionId="new-owner-root" />);
+    await act(async () => resolveAction(response({ status: "unknown_external_effect", physical_capacity_released: true })));
+    expect(screen.queryByText(/Physical capacity released|Physical capacity held/)).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    { job_id: "wrong-job" }, { attempt_id: "wrong-attempt" }, { authority_digest: "f".repeat(64) },
+    { fencing_token: 0 }, { fencing_token: "1" }, { process_cleanup_readback_sha256: "invalid" },
+    { readback_scope: "artifact_verified" }, { cleanup_receipt_verified: false }, { supervisor_token: "private" },
+  ])("rejects malformed or mismatched cleanup receipt metadata %j", async (invalid) => {
+    const payload = structuredClone(nodeCleanupApi.released);
+    Object.assign(payload.execution.process_cleanup, invalid);
+    vi.mocked(fetch).mockResolvedValueOnce(response(payload));
+    render(<RepoRepairInspector {...cleanupProps} />);
+    expect(await screen.findByText(/process cleanup receipt is malformed/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Physical capacity released/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Recover process cleanup" })).not.toBeInTheDocument();
+  });
+
+  it("renders exact script and argv from the authenticated TypeScript API receipt", async () => {
+    vi.mocked(fetch).mockResolvedValue(response(nodePendingApi));
+    render(<RepoRepairInspector jobId={nodePendingApi.job_id} ownerPrincipalId={nodePendingApi.owner_principal_id} ownerSessionId={nodePendingApi.operator_session_id} taskOwnerPrincipalId={nodePendingApi.owner_principal_id} taskOwnerSessionId={nodePendingApi.operator_session_id} />);
+    expect(await screen.findByLabelText("Reviewed Node execution inputs")).toBeInTheDocument();
+    expect(screen.getByText("tsc --project tsconfig.json")).toBeInTheDocument();
+    expect(screen.getByText(/Direct argv: .*node_modules\/typescript\/lib\/tsc.js --project tsconfig.json/)).toBeInTheDocument();
+    expect(screen.getByText("node --test tests/app.test.js")).toBeInTheDocument();
+    expect(screen.getByText(/CPU, memory and PID ceilings unenforced/)).toBeInTheDocument();
+    expect(screen.getByText(/npm and pre\/post hooks are not executed/)).toBeInTheDocument();
+  });
+
+  it("renders recorded Node preflight blocked without claiming readiness", async () => {
+    vi.mocked(fetch).mockResolvedValue(response({...nodePendingApi,preparation_ready:false,execution_ready:false,preflight:{status:"blocked",evidence_basis:"recorded_job_preflight"}}));
+    render(<RepoRepairInspector jobId={nodePendingApi.job_id} ownerPrincipalId={nodePendingApi.owner_principal_id} ownerSessionId={nodePendingApi.operator_session_id} taskOwnerPrincipalId={nodePendingApi.owner_principal_id} taskOwnerSessionId={nodePendingApi.operator_session_id} />);
+    expect(await screen.findByText("Recorded job preflight: blocked")).toBeInTheDocument();
+    expect(screen.getByText("Preparation: blocked · execution: blocked")).toBeInTheDocument();
   });
 
   it("does not request a repair projection without an exact current task owner binding", async () => {

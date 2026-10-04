@@ -49,6 +49,13 @@ from src.security.trust_contract import (
 def _legacy_provider_compatibility_mode(monkeypatch):
     """Keep the pre-#775 selector matrix explicit while active-policy tests stay separate."""
     monkeypatch.setattr("config.settings.settings.openrouter_provider_only", False)
+    # This module tests transport/fallback using literal dummy contexts and
+    # intercepted transports, not canonical job accounting. Retain the real
+    # bounded broker while using its documented isolated-fixture constructor;
+    # the production singleton and separate #909 accounting proofs stay intact.
+    from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
+    monkeypatch.setattr("src.model_fabric.execution.gpu_admission_broker",
+        RemoteInferenceAdmissionBroker(clock=lambda: 100.0, durable_accounting=False))
 
 
 def _profile(*, remote: bool = False, **changes) -> ProviderProfile:

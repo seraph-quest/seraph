@@ -285,6 +285,8 @@ export interface CanonicalMemoryLink {
 }
 
 export interface CanonicalMemoryRecord {
+  ownership_access?: "recovered_read_only";
+  execution_block_reason?: string;
   id: string;
   kind: CanonicalMemoryKind;
   status: CanonicalMemoryStatus;
@@ -316,6 +318,8 @@ export interface CanonicalMemoryPage {
 }
 
 export interface GoalInfo {
+  ownership_access?: "recovered_read_only";
+  execution_block_reason?: string;
   id: string;
   parent_id: string | null;
   path: string;
@@ -457,6 +461,8 @@ export interface WorkBoardAttempt {
 
 /** Safe task projection returned by the authenticated /api/work-board routes. */
 export interface WorkBoardTask {
+  ownership_access?: "recovered_read_only";
+  execution_block_reason?: string;
   task_id: string;
   creation_sequence: number;
   owner_principal_id: string;
@@ -469,6 +475,8 @@ export interface WorkBoardTask {
   body: string;
   capability_id: string | null;
   input_artifact_id?: string | null;
+  pipeline_operation_id?: string | null;
+  pipeline_slot?: string | null;
   typed_input_ref: string | null;
   typed_input_digest: string | null;
   executor_id: string | null;
@@ -546,6 +554,23 @@ export interface WorkBoardRepoRepairExecutorPosture {
 }
 
 /** Owner-bound, content-free status projection for engineering.repo-repair.v1. */
+export type WorkBoardRepoRepairProcessCleanup = {
+  status: "unverified" | "held";
+  physical_capacity_released: false;
+  cleanup_receipt_verified: false;
+  readback_scope: null;
+} | {
+  status: "released";
+  physical_capacity_released: true;
+  cleanup_receipt_verified: true;
+  readback_scope: "process_cleanup_only";
+  job_id: string;
+  attempt_id: string;
+  fencing_token: number;
+  authority_digest: string;
+  process_cleanup_readback_sha256: string;
+};
+
 export interface WorkBoardRepoRepairProjection {
   job_id: string;
   status: string;
@@ -606,6 +631,7 @@ export interface WorkBoardRepoRepairProjection {
     safe_metadata: Record<string, unknown>;
   } | null;
   execution: {
+    process_cleanup?: WorkBoardRepoRepairProcessCleanup | null;
     artifacts: Array<{
       artifact_id?: string;
       file_path?: string;
@@ -929,6 +955,8 @@ export interface WorkBoardRoutineVersion {
 }
 
 export interface WorkBoardRoutineRead {
+  ownership_access?: "recovered_read_only";
+  execution_block_reason?: string;
   id: string;
   owner_principal_id: string;
   state: string;

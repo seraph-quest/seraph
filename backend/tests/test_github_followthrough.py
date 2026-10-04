@@ -953,7 +953,7 @@ async def test_prepare_guard_rejects_after_cancellation_wins_final_absent_read(m
     monkeypatch.setattr("src.extensions.github_followthrough.approval_repository", _NoApproval())
     monkeypatch.setattr(
         "src.extensions.github_followthrough.vault_repository.exists",
-        lambda _key: _async_value(True),
+        lambda _key, **_kwargs: _async_value(True),
     )
 
     async def cancellation_after_final_absent_read():
@@ -1041,7 +1041,7 @@ def _patch_prepare_race_dependencies(monkeypatch, service, durable):
     )
     monkeypatch.setattr(
         "src.extensions.github_followthrough.vault_repository.exists",
-        lambda _key: _async_value(True),
+        lambda _key, **_kwargs: _async_value(True),
     )
     return connection, packet, watch, goal
 
@@ -1495,7 +1495,7 @@ async def test_dispatch_binding_fence_rejects_connection_swap_before_post(monkey
     """A held reservation blocks reconfiguration and stale final dispatch."""
 
     service = GitHubFollowthroughService()
-    monkeypatch.setattr("src.extensions.github_followthrough.vault_repository.exists", lambda _key: _async_value(True))
+    monkeypatch.setattr("src.extensions.github_followthrough.vault_repository.exists", lambda _key, **_kwargs: _async_value(True))
     async with _local_table_database(GitHubFollowthroughConnection) as get_session:
         monkeypatch.setattr("src.extensions.github_followthrough.db_engine.get_session", get_session)
         async with get_session() as db:

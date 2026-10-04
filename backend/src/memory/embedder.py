@@ -473,6 +473,8 @@ def _request_embeddings(
     ) as client:
         for retry_count in range(MAX_RETRIES + 1):
             try:
+                from src.model_fabric.accounting import assert_current_inference_policy
+                assert_current_inference_policy()
                 response = client.post(
                     OPENROUTER_EMBEDDINGS_ENDPOINT,
                     headers=headers,
@@ -544,6 +546,8 @@ def _request_embeddings(
 
             last_status = response.status_code
             if 200 <= response.status_code < 300:
+                from src.model_fabric.accounting import capture_response_usage
+                capture_response_usage(response)
                 return response.json()
 
             last_reason, retryable = _response_reason_code(response.status_code)

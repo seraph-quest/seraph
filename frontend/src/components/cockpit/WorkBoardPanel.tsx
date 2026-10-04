@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, MouseEvent } from "react";
+import { createPortal } from "react-dom";
 
 import { API_URL, WS_URL } from "../../config/constants";
 import { resolveWebSocketUrl } from "../../hooks/useWebSocket";
@@ -8,11 +9,24 @@ import { fetchGuardianInboxItem } from "../../lib/guardianInbox";
 import { BrowserTaskForm } from "./BrowserTaskForm";
 import type { BrowserTaskSubmissionReceipt, PendingBrowserSubmission } from "./BrowserTaskForm";
 import { CalendarPrepForm } from "./CalendarPrepForm";
+import { CalendarRescheduleInspector } from "./CalendarRescheduleInspector";
+import { SelectedContextInspector } from "./SelectedContextInspector";
 import type { PendingCalendarSubmission } from "./CalendarPrepForm";
 import { RepoRepairForm } from "./RepoRepairForm";
 import type { PendingRepoRepairSubmission, RepoRepairSubmissionReceipt } from "./RepoRepairForm";
 import { MailPanel } from "./MailPanel";
 import { WorkBoardMemoryReview } from "./WorkBoardMemoryReview";
+import { TaskApprovalReview } from "./TaskApprovalReview";
+import { ArtifactPipelineReview } from "./ArtifactPipelineReview";
+import { ResearchDossierPanel } from "./ResearchDossierPanel";
+import { JsonFormatterPanel } from "./JsonFormatterPanel";
+import { isAuthoredCapability } from "../../lib/toolPackage";
+import { DocumentComparisonPanel } from "./DocumentComparisonPanel";
+import { TaskEffectRecovery } from "./TaskEffectRecovery";
+import { TaskEvidencePanel } from "./TaskEvidencePanel";
+import { TelegramTaskNotice } from "./TelegramTaskNotice";
+import { SpecificationEvidenceReview, specificationScope, retainSpecificationAcceptance } from "./SpecificationEvidenceReview";
+import type { SpecificationReplacement } from "./SpecificationEvidenceReview";
 import { RepoRepairInspector } from "./RepoRepairInspector";
 import { validateCalendarExecution } from "../../lib/calendar";
 import type {
@@ -130,6 +144,11 @@ export interface WorkBoardPanelProps {
   ownerSessionId?: string | null;
   /** Safe task metadata link for the Library's explicit procedure source picker. */
   onSelectedTaskChange?: (task: WorkBoardTask | null) => void;
+  attentionContext?: { taskId: string; approvalId?: string | null; origin: "home" | "inbox"; goalId?: string | null; threadId?: string | null } | null;
+  onReturnAttention?: () => void;
+  onOpenAttentionGoal?: () => void;
+  onOpenAttentionThread?: () => void;
+  onOpenAccounting?: () => void;
 }
 
 export interface WorkBoardArtifactInspectRequest {
@@ -752,6 +771,7 @@ function proposalStatusLabel(proposal: WorkBoardProposal): string {
 function hasServerAuthorityPreview(authority: unknown): authority is string {
   if (typeof authority !== "string") return false;
   const currentPreflight = authority.includes("Current provider-free preflight: READY;")
+    || authority.includes("Current provider-free preflight: PENDING input binding at acceptance; dispatch remains unavailable.")
     || /Current provider-free preflight: BLOCKED code=[a-z0-9_]+;/.test(authority);
   return authority.includes("Owner: authenticated owner/session; goal ")
     && authority.includes("Capability-specific authority requirements: ")
@@ -782,6 +802,11 @@ function WorkBoardPanel({
   ownerPrincipalId,
   ownerSessionId,
   onSelectedTaskChange,
+  attentionContext,
+  onReturnAttention,
+  onOpenAttentionGoal,
+  onOpenAttentionThread,
+  onOpenAccounting,
 }: WorkBoardPanelProps) {
   const pendingCreateScope = ownerPrincipalId && ownerSessionId
     ? `${ownerPrincipalId}\u0000${ownerSessionId}`
@@ -824,6 +849,10 @@ function WorkBoardPanel({
   const [busyAction, setBusyAction] = useState(false);
   const [createOpen, setCreateOpen] = useState(Boolean(pendingCreateAtMount));
   const [browserTaskOpen, setBrowserTaskOpen] = useState(Boolean(pendingBrowserAtMount));
+  const [researchOpen, setResearchOpen] = useState(false);
+  const [formatterOpen, setFormatterOpen] = useState(false);
+  const [authoredPackageOpen, setAuthoredPackageOpen] = useState(false);
+  const [documentOpen, setDocumentOpen] = useState(false);
   const [browserTaskReceipt, setBrowserTaskReceipt] = useState<BrowserTaskSubmissionReceipt | null>(null);
   const [calendarPrepOpen, setCalendarPrepOpen] = useState(Boolean(pendingCalendarAtMount));
   const [calendarPrepReceipt, setCalendarPrepReceipt] = useState<CalendarPrepResponse | null>(null);
@@ -847,6 +876,10 @@ function WorkBoardPanel({
   const [unblockResolution, setUnblockResolution] = useState("");
   const [reviewChangesReason, setReviewChangesReason] = useState("");
   const [proposal, setProposal] = useState<WorkBoardProposal | null>(null);
+  const [proposalEvidence, setProposalEvidence] = useState<{ scope: string; replacement: SpecificationReplacement | null } | null>(null);
+  const updateProposalEvidence = useCallback((scope: string, replacement: SpecificationReplacement | null) => {
+    setProposalEvidence({ scope, replacement });
+  }, []);
   const [proposalBusy, setProposalBusy] = useState(false);
   const [proposalError, setProposalError] = useState<string | null>(null);
   const [routineSourceTaskId, setRoutineSourceTaskId] = useState("");
@@ -2647,9 +2680,14 @@ function WorkBoardPanel({
       ? {
         expected_proposal_revision: proposal.proposal_revision,
         expected_parent_revision: proposal.parent_revision,
+        ...(selectedTask && proposal.kind === "specify" && proposalEvidence?.scope === specificationScope(selectedTask, proposal, ownerSessionId)
+          && proposalEvidence.replacement ? { execution_replacement: proposalEvidence.replacement } : {}),
       }
       : { expected_proposal_revision: proposal.proposal_revision };
     try {
+      const retainedBody = decision === "accept" && selectedTask && proposal.kind === "specify"
+        ? retainSpecificationAcceptance(specificationScope(selectedTask, proposal, ownerSessionId), body as import('./SpecificationEvidenceReview').SpecificationAcceptance)
+        : body;
       const receipt = await requestBoard<{
         proposal_id: string;
         status: string;
@@ -2658,7 +2696,7 @@ function WorkBoardPanel({
       }>(path, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify(retainedBody),
       });
       if (stoppedRef.current
         || proposalSelectionVersionRef.current !== selectionVersion
@@ -3119,6 +3157,12 @@ function WorkBoardPanel({
           <button type="button" className="cockpit-feedback-button" onClick={() => { setBrowserTaskReceipt(null); setBrowserTaskOpen(true); }}>
             Public browser task
           </button>
+          <button type="button" className="cockpit-feedback-button" onClick={() => setResearchOpen(true)}>
+            Research dossier
+          </button>
+          <button type="button" className="cockpit-feedback-button" onClick={() => setFormatterOpen(true)}>Isolated JSON formatter</button>
+          <button type="button" className="cockpit-feedback-button" onClick={() => setAuthoredPackageOpen(true)}>Reviewed authored package</button>
+          <button type="button" className="cockpit-feedback-button" onClick={() => setDocumentOpen(true)}>Private invoice comparison</button>
           <button type="button" className="cockpit-feedback-button" onClick={() => { setCalendarPrepReceipt(null); setCalendarPrepOpen(true); }}>
             Calendar meeting prep
           </button>
@@ -3221,14 +3265,16 @@ function WorkBoardPanel({
                         <article
                           key={task.task_id}
                           role="listitem"
-                          draggable
+                          draggable={task.ownership_access !== "recovered_read_only"}
                           onDragStart={(event) => {
+                            if (task.ownership_access === "recovered_read_only") { event.preventDefault(); return; }
                             dragTaskIdRef.current = task.task_id;
                             event.dataTransfer.setData("text/plain", task.task_id);
                             event.dataTransfer.effectAllowed = "move";
                           }}
                           className="rounded border border-white/10 bg-slate-950/60 p-3 text-xs"
                         >
+                          {task.ownership_access === "recovered_read_only" && <div className="mb-2 text-amber-200">Recovered original · read only</div>}
                           <button type="button" className="w-full text-left" onClick={() => openTask(task.task_id)} aria-label={`Open task ${task.title}`}>
                             <div className="flex items-start justify-between gap-2">
                               <span className="break-all font-mono text-[10px] opacity-70">{task.task_id}</span>
@@ -3280,16 +3326,24 @@ function WorkBoardPanel({
         </section>
       )}
 
-      {selectedTask && (
-        <aside ref={taskDetailPanelRef} role="region" aria-label={`Task details for ${selectedTask.title}`} tabIndex={-1} className="fixed inset-y-0 right-0 z-[80] h-full w-full max-w-2xl overflow-y-auto border-l border-white/15 bg-slate-950 p-4 text-slate-100 shadow-2xl">
-            <div className="sticky top-0 z-10 -mx-4 -mt-4 mb-4 flex items-center justify-between border-b border-white/10 bg-slate-950/95 px-4 py-3 backdrop-blur">
-              <div>
+      {selectedTask && createPortal(
+        <aside hidden={createOpen || browserTaskOpen || researchOpen || formatterOpen || authoredPackageOpen || calendarPrepOpen || repoRepairOpen} ref={taskDetailPanelRef} role="region" aria-label={`Task details for ${selectedTask.title}`} tabIndex={-1} className="fixed inset-y-0 right-0 z-[190] h-full w-full max-w-2xl overflow-y-auto border-l border-white/15 bg-slate-950 p-4 text-slate-100 shadow-2xl">
+            <div className="sticky top-0 z-10 -mx-4 -mt-4 mb-4 flex flex-wrap items-center justify-between gap-2 border-b border-white/10 bg-slate-950/95 px-4 py-3 backdrop-blur">
+              <div className="min-w-0 flex-1 break-words">
                 <div className="text-[10px] uppercase tracking-wide opacity-70">{STATUS_LABELS[selectedTask.status]} · revision {selectedTask.task_revision}</div>
                 <h2 id="work-board-detail-title" className="text-lg font-semibold">{selectedTask.title}</h2>
               </div>
-              <button type="button" className="cockpit-feedback-button" aria-label="Close task details" onClick={closeTask}>Close</button>
+              <div className="flex flex-wrap justify-end gap-2">
+                {attentionContext?.taskId === selectedTask.task_id && onReturnAttention && <button type="button" className="cockpit-feedback-button" onClick={() => { closeTask(); onReturnAttention(); }}>Return to {attentionContext.origin === "home" ? "Home attention" : "Inbox decision"}</button>}
+                <button type="button" className="cockpit-feedback-button" aria-label="Close task details" onClick={closeTask}>Close</button>
+              </div>
             </div>
-
+            {attentionContext?.taskId === selectedTask.task_id && <div className="mb-3 flex flex-wrap gap-2" aria-label="Originating context">
+              {attentionContext.goalId && onOpenAttentionGoal && <button type="button" className="cockpit-feedback-button" onClick={onOpenAttentionGoal}>Open originating goal</button>}
+              {attentionContext.threadId && onOpenAttentionThread && <button type="button" className="cockpit-feedback-button" onClick={onOpenAttentionThread}>Open originating thread</button>}
+            </div>}
+            {selectedTask.ownership_access === "recovered_read_only" && <div role="status" className="mb-3 text-amber-200">Recovered original · read only. Previous approvals, jobs and permissions stay blocked. Create fresh reviewed intent through operator ownership recovery.</div>}
+            <fieldset disabled={selectedTask.ownership_access === "recovered_read_only"}>
             {(detailLoading || stale) && <div className="mb-3 text-xs text-amber-200" role="status">{detailLoading ? "Refreshing task detail…" : "Showing the last confirmed task detail."}</div>}
             {detailError && <div className="mb-3 rounded border border-red-500/40 p-2 text-sm" role="alert">{detailError}<button type="button" className="ml-2 underline" onClick={() => void refreshSelectedTask()}>Refresh detail</button></div>}
             {actionError && <div className="mb-3 rounded border border-amber-500/40 p-2 text-sm" role="alert">{actionError}</div>}
@@ -3394,6 +3448,11 @@ function WorkBoardPanel({
                   />
                 )}
 
+              {selectedTask.capability_id === "calendar.event.reschedule.v1"
+                && selectedTask.owner_principal_id === ownerPrincipalId && selectedTask.owner_session_id === ownerSessionId
+                && selectedTask.ownership_access !== "recovered_read_only" && <CalendarRescheduleInspector
+                  taskId={selectedTask.task_id} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} goals={allGoals}
+                />}
               {selectedTask.capability_id === "work.mail-reply-draft.v1" && (
                 <MailPanel
                   taskId={selectedTask.task_id}
@@ -3417,6 +3476,11 @@ function WorkBoardPanel({
                 <div className="font-semibold">Actions and recovery</div>
                 <div className="mt-1">{selectedTask.status === "blocked" ? `Blocked: ${selectedTask.block_reason || "No safe reason was supplied."}` : `Current state: ${STATUS_LABELS[selectedTask.status]}`}</div>
                 {selectedTask.recovery_action && <div className="mt-1">Server recovery action: {RECOVERY_LABELS[selectedTask.recovery_action]}</div>}
+                {selectedTask.ownership_access !== "recovered_read_only" && ownerPrincipalId && ownerSessionId && (selectedTask.recovery_action === "approve_existing_run" || (attentionContext?.taskId === selectedTask.task_id && attentionContext.approvalId)) && <TaskApprovalReview
+                  task={selectedTask} owner={{ principalId: ownerPrincipalId, sessionId: ownerSessionId }} approvalId={attentionContext?.taskId === selectedTask.task_id ? attentionContext.approvalId : null}
+                  metadataConfirmed={Boolean(selectedDetail) && !detailLoading && !stale && !detailError} onRefresh={refreshSelectedTask}
+                />}
+                {selectedTask.ownership_access !== "recovered_read_only" && ownerPrincipalId && ownerSessionId && selectedTask.recovery_action === "reconcile_external_effect" && <TaskEffectRecovery task={selectedTask} owner={{ principalId: ownerPrincipalId, sessionId: ownerSessionId }} metadataConfirmed={Boolean(selectedDetail) && !detailLoading && !stale && !detailError} onRefresh={refreshSelectedTask} onOpenAccounting={onOpenAccounting} />}
                 {selectedTask.capability_id === "guardian-routine.v1" && routinePublication && (
                   <section className="mt-3 rounded border border-amber-500/40 bg-amber-950/10 p-3" aria-label="Routine publication recovery">
                     <div className="font-semibold">Governed publication recovery</div>
@@ -3592,10 +3656,15 @@ function WorkBoardPanel({
                       <div className="mt-2 text-amber-200" role="status">A complete server-derived authority preview is missing. Request a fresh proposal before accepting this one.</div>
                     )}
                     {proposal.status === "proposed" && (
+                      <>
+                      {proposal.kind === "specify" && <SpecificationEvidenceReview
+                        key={specificationScope(selectedTask, proposal, ownerSessionId)} task={selectedTask}
+                        proposal={proposal} ownerSessionId={ownerSessionId} onReplacement={updateProposalEvidence} />}
                       <div className="mt-3 flex flex-wrap gap-2">
                         <button type="button" className="cockpit-feedback-button" disabled={proposalBusy || !proposalAuthorityComplete} onClick={() => void decideProposal("accept")}>Accept proposal</button>
                         <button type="button" className="cockpit-feedback-button" disabled={proposalBusy} onClick={() => void decideProposal("reject")}>Reject proposal</button>
                       </div>
+                      </>
                     )}
                     {proposal.status === "pending_inference" && <div className="mt-2 text-amber-200" role="status">The governed proposal request is pending. Refresh or retry the same request only after its durable receipt is reconciled.</div>}
                   </section>
@@ -3622,8 +3691,8 @@ function WorkBoardPanel({
                       >
                         <option value="">Create from a verified journey</option>
                         {routineRecords.map((record) => (
-                          <option key={record.id} value={record.id}>
-                            {record.name} · {record.state} · revision {record.revision}
+                          <option key={record.id} value={record.id} disabled={record.ownership_access === "recovered_read_only"}>
+                            {record.name}{record.ownership_access === "recovered_read_only" ? " · recovered read only" : ""} · {record.state} · revision {record.revision}
                           </option>
                         ))}
                       </select>
@@ -3862,7 +3931,7 @@ function WorkBoardPanel({
                                 onChange={(event) => { setRoutineInvocationGoalId(event.currentTarget.value); setRoutineInvocationWatchId(""); setRoutineInvokeReceipt(null); setRoutineError(null); }}
                               >
                                 <option value="">Choose an active goal</option>
-                                {activeRoutineGoals.map((goal) => <option key={goal.id} value={goal.id}>{goal.title} · revision {goal.revision ?? "unavailable"}</option>)}
+                                {activeRoutineGoals.map((goal) => <option key={goal.id} value={goal.id} disabled={goal.ownership_access === "recovered_read_only"}>{goal.title} · revision {goal.revision ?? "unavailable"}</option>)}
                               </select>
                             </label>
                             <label>Approved source watch
@@ -4035,11 +4104,31 @@ function WorkBoardPanel({
                 </div>
               </section>
 
-              <WorkBoardMemoryReview
+              <SelectedContextInspector key={`selected-context:${ownerPrincipalId}:${ownerSessionId}:${selectedTask.task_id}`} task={selectedTask} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}/>
+              {selectedTask.capability_id === "work.document-compare.v1" || selectedTask.capability_id === "work.json-format.v1" || isAuthoredCapability(selectedTask.capability_id??"") ? <section aria-label="Private native memory policy" className="mt-3 text-xs">
+                This private native capability has an explicit no_learning policy. Its native receipt and verified output record that result; no memory proposal is created.
+              </section> : <WorkBoardMemoryReview
                 task={selectedTask}
                 ownerPrincipalId={ownerPrincipalId}
                 ownerSessionId={ownerSessionId}
-              />
+              />}
+              {selectedTask.capability_id === "work.research-dossier.v1" && <ResearchDossierPanel
+                key={`research-inspector:${ownerPrincipalId}:${ownerSessionId}:${selectedTask.task_id}`}
+                task={selectedTask} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
+                onChanged={async () => { await refreshSnapshot(); }} />}
+              {selectedTask.capability_id === "work.document-compare.v1" && <DocumentComparisonPanel
+                ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} task={selectedTask} />}
+              {(selectedTask.capability_id === "work.json-format.v1" || isAuthoredCapability(selectedTask.capability_id??"")) && <JsonFormatterPanel
+                key={`formatter-inspector:${ownerPrincipalId}:${ownerSessionId}:${selectedTask.task_id}`}
+                task={selectedTask} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
+                onChanged={async () => { await refreshSnapshot(); }} />}
+
+              {ownerPrincipalId && ownerSessionId && <ArtifactPipelineReview key={`${ownerPrincipalId}:${ownerSessionId}:${selectedTask.task_id}`} task={selectedTask}
+                ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
+                metadataConfirmed={Boolean(selectedDetail && !detailLoading && !stale && !detailError)}
+                onRefresh={refreshSelectedTask} onOpenTask={openTask} />}
+              <TaskEvidencePanel task={selectedTask} ownerSessionId={ownerSessionId} />
+              <TelegramTaskNotice key={`telegram:${ownerSessionId}:${selectedTask.task_id}`} task={selectedTask} ownerSessionId={ownerSessionId} />
 
               {selectedDetail?.parent_handoffs && selectedDetail.parent_handoffs.length > 0 && (
                 <section className="rounded border border-white/10 p-3" aria-label="Safe parent handoffs">
@@ -4103,9 +4192,12 @@ function WorkBoardPanel({
                 </div>
               </section>
             </div>
-        </aside>
+            </fieldset>
+        </aside>,
+        document.querySelector(".cockpit-shell") ?? document.body,
       )}
 
+      {createPortal(<div className="relative z-[200]">
       {createOpen && (
         <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/65 p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeCreateDialog(); }}>
           <form ref={createDialogRef} role="dialog" aria-modal="true" aria-labelledby="work-board-create-title" tabIndex={-1} className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded border border-white/15 bg-slate-950 p-4 text-slate-100 shadow-2xl" onSubmit={(event) => void createTask(event)}>
@@ -4116,7 +4208,7 @@ function WorkBoardPanel({
             <fieldset disabled={Boolean(pendingCreate)} className="mt-3 grid gap-3 sm:grid-cols-2">
               <label className="sm:col-span-2">Title<input className="cockpit-input mt-1 w-full" autoFocus={!pendingCreate} maxLength={200} required value={createDraft.title} onChange={(event) => setCreateField("title", event.currentTarget.value)} /></label>
               <label className="sm:col-span-2">Bounded task description<textarea className="cockpit-input mt-1 w-full" maxLength={4000} rows={3} value={createDraft.body} onChange={(event) => setCreateField("body", event.currentTarget.value)} /></label>
-              <label>Goal<select className="cockpit-input mt-1 w-full" required value={createDraft.goalId} onChange={(event) => selectGoal(event.currentTarget.value)}><option value="">Choose a goal</option>{allGoals.map((goal) => <option key={goal.id} value={goal.id}>{goal.title} · {goal.id}</option>)}</select></label>
+              <label>Goal<select className="cockpit-input mt-1 w-full" required value={createDraft.goalId} onChange={(event) => selectGoal(event.currentTarget.value)}><option value="">Choose a goal</option>{allGoals.map((goal) => <option key={goal.id} value={goal.id} disabled={goal.ownership_access === "recovered_read_only"}>{goal.title} · {goal.id}</option>)}</select></label>
               <label>Goal revision<input className="cockpit-input mt-1 w-full" type="number" min={1} readOnly value={createDraft.goalRevision} aria-readonly="true" /></label>
               <label>Initial status<select className="cockpit-input mt-1 w-full" value={createDraft.status} onChange={(event) => setCreateField("status", event.currentTarget.value as CreateDraft["status"])}><option value="triage">Triage · rough idea</option><option value="todo">Todo · specified</option></select></label>
               <label>Priority 0–100<input className="cockpit-input mt-1 w-full" type="number" min={0} max={100} value={createDraft.priority} onChange={(event) => setCreateField("priority", event.currentTarget.value)} /></label>
@@ -4137,6 +4229,28 @@ function WorkBoardPanel({
           </form>
         </div>
       )}
+      {formatterOpen && <JsonFormatterPanel key={`${ownerPrincipalId}:${ownerSessionId}:formatter-create`}
+        goals={allGoals} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
+        onClose={() => setFormatterOpen(false)} onCreated={async (task) => {
+          setFormatterOpen(false);await refreshSnapshot();if (!stoppedRef.current) openTask(task.task_id);
+        }} />}
+      {authoredPackageOpen && <JsonFormatterPanel authored key={`${ownerPrincipalId}:${ownerSessionId}:authored-create`}
+        goals={allGoals} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
+        onClose={() => setAuthoredPackageOpen(false)} onCreated={async (task) => {
+          setAuthoredPackageOpen(false);await refreshSnapshot();if (!stoppedRef.current) openTask(task.task_id);
+        }} />}
+      {documentOpen && <DocumentComparisonPanel key={`${ownerPrincipalId}:${ownerSessionId}:document-create`}
+        goals={allGoals} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
+        onClose={() => setDocumentOpen(false)} onCreated={async (task) => {
+          setDocumentOpen(false); await refreshSnapshot(); if (!stoppedRef.current) openTask(task.task_id);
+        }} />}
+      {researchOpen && <ResearchDossierPanel key={`${ownerPrincipalId}:${ownerSessionId}:research-create`}
+        goals={allGoals} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
+        onClose={() => setResearchOpen(false)} onCreated={async (task) => {
+          setResearchOpen(false);
+          await refreshSnapshot();
+          if (!stoppedRef.current) openTask(task.task_id);
+        }} />}
       {browserTaskOpen && (
         <BrowserTaskForm
           key={pendingCreateScope ?? "anonymous"}
@@ -4160,6 +4274,8 @@ function WorkBoardPanel({
       {calendarPrepOpen && (
         <CalendarPrepForm
           key={pendingCreateScope ?? "anonymous"}
+          ownerPrincipalId={ownerPrincipalId}
+          ownerSessionId={ownerSessionId}
           goals={allGoals}
           initialPending={pendingCalendarAtMount}
           onPendingChange={setCalendarPending}
@@ -4196,6 +4312,7 @@ function WorkBoardPanel({
           }}
         />
       )}
+      </div>, document.querySelector(".cockpit-shell") ?? document.body)}
     </section>
   );
 }

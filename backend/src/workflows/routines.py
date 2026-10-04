@@ -27,7 +27,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 
 from config.settings import settings
-from src.approval.repository import approval_repository, fingerprint_tool_call
+from src.approval.repository import approval_repository, fingerprint_tool_call, _approval_expiry
 from src.db import engine as db_engine
 from src.db.models import (
     Goal,
@@ -91,6 +91,8 @@ from src.workflows.routine_templates import (
     validate_generated_files,
 )
 from src.workflows.routine_steps import RoutineStepContext, github_followthrough, guardian_watch_run
+from src.memory.procedure_recommendations import ProcedureFeedbackRequest
+from src.memory.procedure_recommendation_job import ProcedureRecommendationRequest, ProcedureRecommendationCancelRequest
 from src.workflows.procedure_contracts import (
     ROUTINE_V2_CAPABILITY_VERSION,
     build_procedure_plan,
@@ -4767,7 +4769,7 @@ class RoutineService:
             updates={
                 "durable_authority_digest": bound.get("authority_digest"),
                 "authority_digest": bound.get("authority_digest"),
-                "approval_expires_at": approval.expires_at.timestamp() if approval.expires_at else None,
+                "approval_expires_at": _approval_expiry(approval.expires_at).timestamp() if _approval_expiry(approval.expires_at) is not None else None,
             },
         )
         bound_lease = bound.get("lease") if isinstance(bound.get("lease"), Mapping) else {}
@@ -8210,8 +8212,6 @@ class RoutineService:
             raise PermissionError("routine runtime parent mismatch")
         if step_id not in {"guardian_watch_run", "github_followthrough"}:
             raise RoutineError("routine_step_not_allowed", status_code=422)
-        if step_id == "github_followthrough" and not context.external_mutation_granted:
-            raise PermissionError("routine follow-through requires external_mutation authority")
         parent = await durable_job_repository.get_job(str(routine_invocation_job_id).strip())
         if (
             not parent
@@ -8238,6 +8238,11 @@ class RoutineService:
                 owner_session_id=context.session_id,
             )
         authority = parent.get("declared_authority") if isinstance(parent.get("declared_authority"), Mapping) else {}
+        if step_id == "github_followthrough":
+            from src.extensions.github_consent import require_followthrough_consent
+            await require_followthrough_consent(principal=context.principal_id, root=context.session_id,
+                action=authority.get("github_action"), repository=authority.get("github_repository"),
+                revision=authority.get("github_connection_revision"))
         routine_id = str(authority.get("routine_id") or "")
         routine_revision = int(authority.get("routine_revision") or 0)
         invocation_uuid = str(authority.get("invocation_uuid") or "")
@@ -8676,9 +8681,6 @@ class RoutineService:
     ) -> dict[str, Any]:
         """Prepare exactly one fixed M3 destination from the persisted watch child."""
 
-        if not external_mutation_granted:
-            raise RoutineError("external_mutation_grant_required", status_code=403)
-
         routine = await self._routine(routine_id, owner_principal_id)
         parent = await durable_job_repository.get_job(job_id)
         if (
@@ -8735,6 +8737,9 @@ class RoutineService:
         target = str(authority.get("github_target") or provenance.get("source_target") or "")
         if action not in {"create_issue", "create_comment"} or not repository or not target:
             raise RoutineError("routine_destination_binding_missing")
+        from src.extensions.github_consent import require_followthrough_consent
+        await require_followthrough_consent(principal=owner_principal_id, root=owner_session_id,
+            action=action, repository=repository, revision=authority.get("github_connection_revision"))
         connection = await GitHubFollowthroughService().get_connection(owner_principal_id)
         if (
             connection.get("mode") != "active"
@@ -9416,7 +9421,16 @@ class RoutineService:
                     )
                 parent_lease = current.get("lease") if isinstance(current.get("lease"), Mapping) else {}
             if m3_job.get("status") in {"awaiting_approval", "queued", "running"}:
-                if not external_mutation_granted:
+                try:
+                    from src.extensions.github_consent import require_followthrough_consent
+                    write_authority = m3_job.get("declared_authority") or {}
+                    await require_followthrough_consent(principal=owner_principal_id, root=owner_session_id,
+                        action=write_authority.get("action"), repository=write_authority.get("repository"),
+                        revision=write_authority.get("connection_revision"), binding=write_authority.get("github_consent"))
+                    github_consent_current = True
+                except Exception:
+                    github_consent_current = False
+                if not github_consent_current:
                     latest = await durable_job_repository.get_job(job_id) or current
                     if latest.get("status") == "running":
                         lease = latest.get("lease") or {}
@@ -9895,14 +9909,26 @@ def _procedure_http_error(exc: ProcedureV2Error) -> HTTPException:
 @routine_router.get("")
 async def list_routines(request: Request):
     operator = _operator(request)
-    return {"routines": await routine_service.list(owner_principal_id=operator.principal.principal_id, owner_session_id=operator.session_id)}
+    from src.auth.ownership import selected_read_scopes, selected_read_principal, RECOVERED_FIELDS
+    recovered = await selected_read_scopes(operator, "routine")
+    routines = await routine_service.list(owner_principal_id=operator.principal.principal_id, owner_session_id=operator.session_id)
+    for routine_id, historical_owner in recovered.items():
+        routine = await routine_service.read(routine_id, owner_principal_id=await selected_read_principal(operator, "routine", routine_id), owner_session_id=historical_owner)
+        routine.update(RECOVERED_FIELDS)
+        routines.append(routine)
+    return {"routines": routines}
 
 
 @routine_router.get("/{routine_id}")
 async def get_routine(routine_id: str, request: Request):
     operator = _operator(request)
+    from src.auth.ownership import selected_read_scopes, selected_read_principal, RECOVERED_FIELDS
+    recovered = await selected_read_scopes(operator, "routine")
     try:
-        return await routine_service.read(routine_id, owner_principal_id=operator.principal.principal_id, owner_session_id=operator.session_id)
+        routine = await routine_service.read(routine_id, owner_principal_id=(await selected_read_principal(operator, "routine", routine_id)) if routine_id in recovered else operator.principal.principal_id, owner_session_id=recovered.get(routine_id, operator.session_id))
+        if routine_id in recovered:
+            routine.update(RECOVERED_FIELDS)
+        return routine
     except RoutineError as exc:
         raise _http_error(exc) from exc
 
@@ -10122,6 +10148,100 @@ async def invoke_procedure_v2(routine_id: str, req: ProcedureV2InvokeRequest, re
         return JSONResponse(status_code=status_code, content=payload)
     except ProcedureV2Error as exc:
         raise _procedure_http_error(exc) from exc
+
+
+@routine_router.post("/{routine_id}/outcomes/{task_id}/feedback")
+async def record_procedure_outcome_feedback(
+    routine_id: str, task_id: str, req: ProcedureFeedbackRequest, request: Request,
+):
+    operator = _operator(request)
+    from src.memory.procedure_recommendations import record_procedure_feedback
+    from src.work_board.repository import BoardError
+    try:
+        async with db_engine.get_session() as db:
+            return await record_procedure_feedback(db, operator, routine_id=routine_id,
+                task_id=task_id, request=req)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@routine_router.get("/{routine_id}/outcomes")
+async def list_procedure_outcomes(routine_id: str, version: int, expected_routine_revision: int,
+                                 goal_id: str, expected_goal_revision: int, request: Request):
+    from src.memory.procedure_recommendations import resolve_scope, canonical_procedure_membership, MANUAL_DISCLOSURE, QUALITY_DISCLOSURE
+    from sqlalchemy import text
+    try:
+        async with db_engine.get_session() as db:
+            await db.execute(text("BEGIN"))
+            scope = await resolve_scope(db, _operator(request), routine_id=routine_id, version=version,
+                routine_revision=expected_routine_revision, goal_id=goal_id, goal_revision=expected_goal_revision)
+            token = await canonical_procedure_membership(db, scope)
+            return {"included_count": token["task_count"], "membership_digest": token["membership_digest"],
+                "manual_disclosure": MANUAL_DISCLOSURE, "quality_disclosure": QUALITY_DISCLOSURE,
+                "outcomes": [{"task_id": item["task"]["task_id"], "task_revision": item["task"]["task_revision"],
+                    "status": item["task"]["status"], "attempt_id": item["attempt"]["attempt_id"] if item["attempt"] else None,
+                    "attempt_fence": item["attempt"]["fencing_token"] if item["attempt"] else None,
+                    "feedback": item["effective_feedback_tip"]["label"] if item["effective_feedback_tip"] else None,
+                    "feedback_event_id": item["feedback_tip"]["event_id"] if item["feedback_tip"] else None,
+                    "feedback_current": item["effective_feedback_tip"] is not None,
+                    "feedback_history_label": item["feedback_tip"]["label"] if item["feedback_tip"] else None,
+                    "feedback_history_count": item["feedback_count"], "feedback_allowed": item["feedback_allowed"],
+                    "reason_code": "feedback_outcome_stale" if item["feedback_tip"] and not item["effective_feedback_tip"] else None}
+                    for item in token["members"]]}
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@routine_router.post("/{routine_id}/recommendations")
+async def prepare_procedure_recommendation(routine_id: str, req: ProcedureRecommendationRequest, request: Request):
+    from src.memory.procedure_recommendation_job import prepare_recommendation
+    operator = _operator(request)
+    try:
+        return await prepare_recommendation(operator, routine_id, req)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@routine_router.get("/{routine_id}/recommendations")
+async def find_procedure_recommendation(routine_id: str, version: int, expected_routine_revision: int,
+                                       goal_id: str, expected_goal_revision: int, request_uuid: str, request: Request):
+    from src.memory.procedure_recommendation_job import find_recommendation
+    try:
+        req = ProcedureRecommendationRequest(version=version, expected_routine_revision=expected_routine_revision,
+            goal_id=goal_id, expected_goal_revision=expected_goal_revision, request_uuid=request_uuid)
+        return await find_recommendation(_operator(request), routine_id, req)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@routine_router.get("/{routine_id}/recommendations/{job_id}")
+async def inspect_procedure_recommendation(routine_id: str, job_id: str, request: Request):
+    from src.memory.procedure_recommendation_job import inspect_recommendation
+    operator = _operator(request)
+    try:
+        return await inspect_recommendation(operator, routine_id, job_id)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@routine_router.post("/{routine_id}/recommendations/{job_id}/cancel")
+async def cancel_procedure_recommendation(routine_id: str, job_id: str, req: ProcedureRecommendationCancelRequest, request: Request):
+    from src.memory.procedure_recommendation_job import cancel_recommendation
+    try:
+        return await cancel_recommendation(_operator(request), routine_id, job_id, req)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@routine_router.get("/{routine_id}/preference")
+async def read_current_procedure_preference(routine_id: str, version: int, expected_routine_revision: int,
+                                          goal_id: str, expected_goal_revision: int, request: Request):
+    from src.memory.procedure_selection import current_procedure_preference
+    try:
+        return await current_procedure_preference(_operator(request), routine_id=routine_id, version=version,
+            routine_revision=expected_routine_revision, goal_id=goal_id, goal_revision=expected_goal_revision)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
 
 
 @routine_router.post("/{routine_id}/schedule-v2")

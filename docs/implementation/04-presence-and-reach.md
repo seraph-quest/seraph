@@ -175,6 +175,63 @@ includes redacted attempt history; timeout or lease ambiguity remains
 `unknown` until an explicit operator reconciliation, and the browser
 conversation remains the continuity surface.
 
+## Paired Telegram Task Controls (Branch-Local #920 Partial)
+
+The task inspector can queue and deliver a neutral notice through the existing
+paired Telegram outbox. The notice contains no task title, body, source, goal
+text, or approval arguments. An explicit **Review status (send metadata)**
+callback returns status enums and revision metadata, bounded to 1,024 bytes.
+After the canonical callback transaction commits, the existing transport
+automatically attempts to deliver Review details/buttons and Deny/Cancel
+outcomes through their durable outbox records. The callback and poll receipt
+report canonical decision status, delivery status and spinner acknowledgment
+separately. Delivery uncertainty preserves the decision and the same outbox;
+callback replay cannot resend an Unknown delivery or repeat a task action.
+The current pending approval can expose **Deny this request**; a running task
+can expose **Cancel this attempt**. Approval, retry, unblock and uncertain-effect
+settlement continue in the authenticated cockpit. This boundary is
+`telegram.task-control.v1`, with an explicit `no_learning` outcome.
+
+Each opaque callback expires within five minutes and no later than the current
+operator session, pairing, transit consent or approval. Callback data is within
+the Telegram Bot API's [1–64 byte limit](https://core.telegram.org/bots/api#inlinekeyboardbutton),
+checked against the official API on October 3, 2026. Raw nonces remain only in
+private outbox markup; public outbox readback exposes no button authority.
+The canonical writer rechecks the current authenticated owner, operator session,
+paired actor and private chat, root identity, goal/task revisions, proven message
+delivery and exact approval or original attempt binding. Admission permits at
+most 20 consumed callbacks per minute and an 8,192-byte callback payload.
+Message identifiers alone grant no authority.
+Syntactically valid rejected or stale callback query IDs receive a best-effort
+empty spinner acknowledgment using only the current owner's scoped token,
+active pairing and unexpired transit consent.
+Acknowledgment neither grants task authority nor discloses private reasons;
+revoked or unavailable credentials can still prevent this transport operation.
+
+Deny consumes the nonce and resolves the exact pending approval in one SQLite
+writer, shared with the cockpit approval API. Cancel consumes the nonce and
+records the original canonical cancel intent in the same writer; the existing
+dispatcher performs cleanup afterward. Restart or replay reads only that stored
+intent and original attempt, without creating another intent or dispatching
+cleanup again. Cancellation is confirmed only when canonical task and attempt
+readback prove it; entered work or lost cleanup responses remain **Unknown**.
+An uncertain Telegram send remains a separate **Unknown** delivery outcome,
+blocks task callbacks and is never automatically resent. The operator can send
+an explicit fresh notice from the inspector, retiring its old pending controls.
+
+The provider-free validation uses actual authenticated APIs, file-backed SQLite,
+encrypted synthetic pairing tokens, canonical approvals, native runtime
+admission/cancellation, and durable outbox records with intercepted Telegram
+HTTP. Native cancellation tests pause execution before child dispatch or before
+child effects, then exercise the real cancellation service and conservative
+Unknown readback. Owner/root changes, nonce races, stale revisions, revoked
+pairing, expiry, out-of-order updates, attempt-fence drift, send response loss,
+acknowledgment loss and restart are covered. The managed cockpit journey uses
+the recording adapter, with an isolated workspace and nonlocal network denial.
+Live Telegram delivery, bot polling and account interoperability remain
+unverified; this branch-local implementation is **Partial**, pending independent
+review and the integration path to `develop`.
+
 ## Working On Now
 
 - [x] this workstream shipped `native-desktop-shell-v1`
@@ -198,6 +255,14 @@ conversation remains the continuity surface.
 - [x] this workstream now also ships `browser-provider-usability-proof-v1`
 
 ## Native Daemon Operations
+
+[ADR-008](./decisions/008-portable-core-and-consented-context.md) defines macOS
+and Linux as peer core-host targets. The native daemon and macOS permission
+guidance below describe the existing Mac-specific implementation, not verified
+Linux capture. Selected task context remains Planned until its typed attachment,
+local privacy preview and per-platform adapter receipts are implemented. That
+attachment path must not enter general screenshot observation or automatic
+analysis. Missing optional capture services must not prevent core operation.
 
 Native desktop presence is optional and is controlled by `DAEMON_ENABLED` in
 the selected `.env.*` file. `DAEMON_ENABLED=false` is a configured-off state, not

@@ -258,6 +258,21 @@ def try_acquire_repo_repair_capacity(
     return None
 
 
+def clear_exact_repo_repair_quarantine(workspace_root, *, job_id: str, attempt_id: str, fencing_token: int, authority_digest: str) -> None:
+    """Clear the exact process-local descriptor only after durable settlement."""
+    root = str(canonical_workspace_root(workspace_root))
+    lane = _QUARANTINED_LANES.get(root)
+    if lane is None:
+        return
+    if lane._quarantine_job_id != job_id or lane._descriptor is None:
+        raise RepoRepairCapacityError("repository cleanup quarantine owner changed")
+    marker = json.loads(os.pread(lane._descriptor, 4096, 0))
+    if any(marker.get(key) != value for key,value in {"job_id":job_id,"attempt_id":attempt_id,
+            "fence_token":fencing_token,"authority_digest":authority_digest}.items()):
+        raise RepoRepairCapacityError("repository cleanup quarantine binding changed")
+    lane.clear_quarantine()
+
+
 def repo_repair_capacity_wait_reason(workspace_root: str | os.PathLike[str]) -> str | None:
     try:
         root = str(canonical_workspace_root(workspace_root))

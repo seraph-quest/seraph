@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 import hashlib
 import ipaddress
 import json
+from decimal import Decimal
 import logging
 import math
 import os
@@ -1598,11 +1599,15 @@ def _governed_openai_chat_completion(
     headers = {"content-type": "application/json"}
     if api_key:
         headers["authorization"] = f"Bearer {api_key}"
+    from src.model_fabric.accounting import assert_current_inference_policy, capture_response_usage
+    assert_current_inference_policy()
     with httpx.Client(follow_redirects=False, timeout=httpx.Timeout(remaining)) as client:
         response = client.post(candidate.endpoint, headers=headers, json=body)
     # A synchronous provider call cannot be force-killed from the event loop;
     # discard its result if the operator was revoked while it was in flight.
+    capture_response_usage(response)
     assert_runtime_not_revoked()
+    assert_current_inference_policy()
     if 300 <= response.status_code < 400:
         raise RuntimeError("model_fabric_redirect_denied")
     response.raise_for_status()
@@ -1618,6 +1623,79 @@ def _governed_openai_chat_completion(
         message = ChatMessage.from_dict(message_payload, raw=payload)
     except (KeyError, IndexError, TypeError, ValueError) as error:
         raise RuntimeError("model_fabric_invalid_response") from error
+    return SimpleNamespace(choices=[SimpleNamespace(message=message)]), payload
+
+
+async def _governed_research_chat_completion(
+    *, decision: Any, context: Any, body: dict[str, Any], api_key: str | None,
+) -> tuple[SimpleNamespace, dict[str, Any]]:
+    """One governed POST with an absolute deadline and fixed raw-byte envelope.
+
+    Model output is nonstreaming JSON; only its HTTP transfer is streamed. No
+    SDK, candidate loop, fallback, redirect or retry occurs in this helper.
+    """
+    import httpx
+    from src.model_fabric.accounting import assert_current_inference_policy, capture_response_usage
+
+    assert_runtime_not_revoked()
+    if decision is None or not decision.allowed or decision.selected is None:
+        raise NoCompliantModelRouteError()
+    candidate = decision.selected
+    if candidate.adapter != "openai_compatible_chat" or context.fallback_allowed:
+        raise ProviderProfileConfigurationError("research requires one governed chat target")
+    remaining = float(context.deadline_at) - time.time()
+    if remaining <= 0:
+        raise TimeoutError("model_fabric_deadline_exceeded")
+    headers = {"content-type": "application/json", "accept-encoding": "identity"}
+    if api_key:
+        headers["authorization"] = f"Bearer {api_key}"
+    assert_current_inference_policy()
+    # Final policy work consumes the original deadline; it never grants a
+    # fresh relative timeout before the provider transfer begins.
+    remaining = float(context.deadline_at) - time.time()
+    if remaining <= 0:
+        raise TimeoutError("model_fabric_deadline_exceeded")
+    transfer_deadline = asyncio.get_running_loop().time() + remaining
+    async with asyncio.timeout_at(transfer_deadline):
+        async with httpx.AsyncClient(follow_redirects=False, trust_env=False,
+                timeout=httpx.Timeout(remaining)) as client:
+            async with client.stream("POST", candidate.endpoint, headers=headers, json=body) as incoming:
+                if incoming.headers.get("content-encoding", "identity").lower() != "identity":
+                    raise RuntimeError("research_response_encoding_denied")
+                declared = incoming.headers.get("content-length")
+                length = None
+                if declared is not None:
+                    try:
+                        length = int(declared)
+                    except ValueError as error:
+                        raise RuntimeError("research_response_length_invalid") from error
+                    if not 0 <= length <= 64 * 1024:
+                        raise RuntimeError("research_response_envelope_exceeded")
+                content = bytearray()
+                async for chunk in incoming.aiter_raw(chunk_size=8192):
+                    if len(content) + len(chunk) > 64 * 1024:
+                        raise RuntimeError("research_response_envelope_exceeded")
+                    content.extend(chunk)
+                if length is not None and len(content) != length:
+                    raise RuntimeError("research_response_truncated")
+                response = httpx.Response(incoming.status_code, headers=incoming.headers,
+                    content=bytes(content), request=incoming.request)
+    capture_response_usage(response)
+    assert_runtime_not_revoked()
+    assert_current_inference_policy()
+    if 300 <= response.status_code < 400:
+        raise RuntimeError("model_fabric_redirect_denied")
+    response.raise_for_status()
+    payload = response.json()
+    try:
+        raw_message = payload["choices"][0]["message"]
+        if not isinstance(raw_message, dict) or not isinstance(raw_message.get("content"), str) or raw_message.get("tool_calls"):
+            raise ValueError("research requires literal assistant content")
+        if len(raw_message["content"].encode("utf-8")) > 16 * 1024:
+            raise ValueError("research child output exceeds its finite allowance")
+        message = ChatMessage.from_dict({**raw_message, "role": "assistant"}, raw=payload)
+    except (KeyError, IndexError, TypeError, ValueError) as error:
+        raise RuntimeError("model_fabric_invalid_research_response") from error
     return SimpleNamespace(choices=[SimpleNamespace(message=message)]), payload
 
 
@@ -4663,6 +4741,8 @@ async def stream_completion_with_fallback(
         if timeout_seconds <= 0:
             raise TimeoutError("model_fabric_deadline_exceeded")
         async with httpx.AsyncClient(follow_redirects=False, timeout=timeout_seconds) as client:
+            from src.model_fabric.accounting import assert_current_inference_policy, capture_inference_usage
+            assert_current_inference_policy()
             async with client.stream(
                 "POST", candidate.endpoint, headers=headers, json=transport_body
             ) as response:
@@ -4674,7 +4754,8 @@ async def stream_completion_with_fallback(
                     if data == "[DONE]":
                         break
                     try:
-                        event = json.loads(data)
+                        event = json.loads(data, parse_float=Decimal)
+                        capture_inference_usage(event)
                         delta = event["choices"][0]["delta"].get("content")
                     except (KeyError, IndexError, TypeError, json.JSONDecodeError):
                         continue

@@ -22,7 +22,7 @@ from types import MappingProxyType
 from typing import Any, Literal, Mapping
 import uuid
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from sqlalchemy import func, select
 
 from src.approval.repository import approval_repository, fingerprint_tool_call
@@ -161,6 +161,9 @@ class CapabilitySpec:
     secret_like: bool = True
 
 
+from src.work_board.authored_packages import is_tool_package, is_authored, capability_spec, stage_package_readiness
+
+
 class TypedInputError(ValueError):
     """A task's immutable workspace JSON input failed pre-admission checks."""
 
@@ -275,6 +278,16 @@ class _GoalSnapshotInput(BaseModel):
 
     file_path: str = Field(min_length=1, max_length=512)
 
+    @field_validator("file_path")
+    @classmethod
+    def validate_output_path(cls, value: str) -> str:
+        from src.tools.filesystem_tool import _is_secret_like_workspace_path
+
+        path = normalize_workspace_relative_path(value)
+        if _is_secret_like_workspace_path(path):
+            raise ValueError("Snapshot output must not name a secret-like workspace path")
+        return path
+
 
 class _SourceWatchInput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -369,6 +382,26 @@ class CalendarObservationInput(BaseModel):
     max_events_per_scan: int = Field(..., ge=1, le=10)
 
 
+class CalendarRescheduleTime(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    dateTime: str = Field(min_length=1, max_length=128)
+    timeZone: str = Field(min_length=1, max_length=128)
+
+
+class CalendarRescheduleInput(BaseModel):
+    """Opaque selection/grant plus literal times; provider IDs stay private."""
+    model_config = ConfigDict(extra="forbid", strict=True)
+    schema_version: Literal[1] = 1
+    consent_id: str = Field(min_length=1, max_length=256)
+    expected_consent_revision: int = Field(ge=1)
+    event_binding_id: str = Field(min_length=1, max_length=256)
+    expected_event_binding_revision: int = Field(ge=1)
+    goal_id: str = Field(min_length=1, max_length=256)
+    goal_revision: int = Field(ge=1)
+    new_start: CalendarRescheduleTime
+    new_end: CalendarRescheduleTime
+
+
 class MailWatchInput(BaseModel):
     """Scheduler-only, metadata-only Gmail watch configuration."""
 
@@ -413,6 +446,7 @@ _TYPED_INPUT_MODELS: dict[str, type[BaseModel]] = {
     "guardian-routine.v2": _RoutineV2Input,
     "calendar.meeting-prep.v1": CalendarMeetingPrepInput,
     "calendar.observe_due_events.v1": CalendarObservationInput,
+    "calendar.event.reschedule.v1": CalendarRescheduleInput,
     "gmail.scan_metadata.v1": MailWatchInput,
     "work.mail-reply-draft.v1": MailReplyDraftInput,
 }
@@ -468,6 +502,25 @@ def _reject_authority_input_keys(value: Any, *, path: str = "input") -> None:
 
 
 def _typed_input_model(capability_id: str) -> type[BaseModel] | None:
+    if capability_id == "work.context.selected_text.v1":
+        from src.workflows.selected_context_contract import Metadata
+        return Metadata
+    from src.work_board.authored_packages import is_authored
+    if is_authored(capability_id):
+        from src.work_board.tool_package_contracts import AuthoredJsonInput
+        return AuthoredJsonInput
+    if capability_id == "work.document-compare.v1":
+        from src.work_board.document_compare_contracts import DocumentCompareInput
+        return DocumentCompareInput
+    if is_tool_package(capability_id):
+        from src.work_board.tool_package_contracts import JsonFormatInput
+        return JsonFormatInput
+    if capability_id == "work.research-dossier.v1":
+        from src.work_board.research_contracts import ResearchDossierInput
+        return ResearchDossierInput
+    if capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+        from src.work_board.pipeline_contracts import EvidenceConsumerInput
+        return EvidenceConsumerInput
     model_type = _TYPED_INPUT_MODELS.get(capability_id)
     if model_type is not None:
         return model_type
@@ -492,13 +545,24 @@ def _typed_input_model(capability_id: str) -> type[BaseModel] | None:
 
 
 REGISTERED_CAPABILITIES: dict[str, CapabilitySpec] = {
+    "work.context.selected_text.v1": CapabilitySpec(
+        "work.context.selected_text.v1", "browser-selected-text-v1",
+        blocked_reason="selected_context_exact_operator_control_required",
+        input_category="operator", secret_like=False),
+    "work.document-compare.v1": CapabilitySpec("work.document-compare.v1", "1", secret_like=False),
+    "work.json-format.v1": CapabilitySpec("work.json-format.v1", "1", secret_like=False),
+    "work.research-dossier.v1": CapabilitySpec("work.research-dossier.v1", "1", secret_like=False),
+    "work.evidence-dossier.v1": CapabilitySpec("work.evidence-dossier.v1", "1", secret_like=False),
+    "work.local-evidence-report.v1": CapabilitySpec("work.local-evidence-report.v1", "1", secret_like=False),
     GOAL_SNAPSHOT_CAPABILITY: CapabilitySpec(
         GOAL_SNAPSHOT_CAPABILITY,
         GOAL_SNAPSHOT_VERSION,
+        secret_like=False,
     ),
     "guardian.research-watch.v1": CapabilitySpec(
         "guardian.research-watch.v1",
         "1",
+        secret_like=False,
     ),
     "engineering.repo-change.v1": CapabilitySpec(
         "engineering.repo-change.v1",
@@ -542,6 +606,11 @@ REGISTERED_CAPABILITIES: dict[str, CapabilitySpec] = {
         input_category="scheduler",
         secret_like=False,
     ),
+    "calendar.event.reschedule.v1": CapabilitySpec(
+        "calendar.event.reschedule.v1", "calendar-exact-reschedule-v1",
+        blocked_reason="calendar_exact_operator_control_required",
+        input_category="task", secret_like=False,
+    ),
     "gmail.scan_metadata.v1": CapabilitySpec(
         "gmail.scan_metadata.v1",
         "1",
@@ -575,7 +644,8 @@ def validate_capability_input(
     """
 
     normalized_capability = _text(capability_id)
-    spec = REGISTERED_CAPABILITIES.get(normalized_capability)
+    from src.work_board.authored_packages import capability_spec, is_authored, staged_registration
+    spec = capability_spec(normalized_capability)
     if spec is None:
         raise TypedInputError("capability_unregistered", "the task names no registered capability")
     if spec.input_category != "task" and not (allow_scheduler and spec.input_category == "scheduler"):
@@ -590,6 +660,8 @@ def validate_capability_input(
         validated = model_type.model_validate(dict(raw))
     except ValidationError as exc:
         raise TypedInputError("typed_input_invalid", "typed input does not match the capability schema") from exc
+    if is_authored(normalized_capability):
+        staged_registration(normalized_capability).adapter.input(validated.json_text.encode("utf-8"))
     return validated.model_dump(mode="json", exclude_none=True)
 
 
@@ -602,7 +674,13 @@ def registered_executor_id(capability_id: str) -> str | None:
     derived value before admitting executable work.
     """
 
-    capability = REGISTERED_CAPABILITIES.get(_text(capability_id))
+    if is_authored(_text(capability_id)):
+        # Pure namespace projection only. Exact registration is staged by
+        # input/task/readiness and native authority fences, never by this
+        # lane-string comparison inside a canonical writer.
+        return f"seraph-work-board:{_text(capability_id)}"
+    from src.work_board.authored_packages import capability_spec
+    capability = capability_spec(_text(capability_id))
     if capability is None:
         return None
     return f"seraph-work-board:{capability.capability_id}"
@@ -3010,6 +3088,8 @@ class WorkBoardDispatcher:
         async with self.session_provider() as db:
             detail = await self.repository.get_detail(db, owner, task_id)
             task = detail["task"]
+            if task.capability_id == "work.document-compare.v1":
+                await self.repository.require_generic_recovery_allowed(db, task)
             parent_ids = list(detail.get("parents") or [])
             if task.task_revision != int(expected_revision):
                 raise BoardError("stale_revision", "The task changed before retry preflight", status_code=409)
@@ -3110,12 +3190,10 @@ class WorkBoardDispatcher:
                     operator = await authenticate_session(task.owner_session_id, touch=False)
                 except AuthFailure as exc:
                     gate_error(exc.code, "The GitHub owner session is no longer valid")
-                grants = {
-                    _text(getattr(grant, "value", grant))
-                    for grant in (getattr(getattr(operator, "principal", None), "grants", ()) or ())
-                }
-                if AuthorityGrant.EXTERNAL_MUTATION.value not in grants:
-                    gate_error("external_mutation_grant_required", "The GitHub external mutation grant is not current")
+                from src.extensions.github_consent import require_followthrough_consent
+                await require_followthrough_consent(principal=task.owner_principal_id,
+                    root=task.owner_session_id, action=inputs["action"],
+                    repository=connection["repository"], revision=inputs["connection_revision"])
             elif capability == "guardian-routine.v1":
                 from src.workflows.routines import routine_service
 
@@ -3295,6 +3373,7 @@ class WorkBoardDispatcher:
         *,
         expected_revision: int,
         reason: str = "operator_cancelled",
+        intent_guard=None,
     ) -> BoardAttemptProjection:
         """Persist cancellation, clean up the adapter, then reconcile safely."""
 
@@ -3325,7 +3404,9 @@ class WorkBoardDispatcher:
         binding_job_id = await self._lookup_linked_binding(task, active, inputs)
         if binding_job_id != job_id:
             raise BoardError("workflow_identity_conflict", "The durable run binding does not match this attempt")
-        if _text(task.capability_id) == GOAL_SNAPSHOT_CAPABILITY:
+        if _text(task.capability_id) == "browser.public-task.v1":
+            expected_identity = self._persisted_browser_identity(task, active, inputs, projection)
+        elif _text(task.capability_id) == GOAL_SNAPSHOT_CAPABILITY:
             expected_identity = self._expected_identity_for_task(
                 task,
                 active,
@@ -3362,6 +3443,7 @@ class WorkBoardDispatcher:
                 lease_owner=active.lease_owner or self.runner_id,
                 actor_principal_id=self.runner_id,
                 actor_session_id=self.runner_session,
+                intent_guard=intent_guard,
             )
         task = intent.task
 
@@ -3490,6 +3572,54 @@ class WorkBoardDispatcher:
         capability = _text(task.capability_id)
         receipts: list[dict[str, Any]] = []
         try:
+            if capability == "work.document-compare.v1":
+                worker = self._active_worker_tasks.get((task.task_id, attempt.attempt_id))
+                if worker is not None and worker is not asyncio.current_task() and not worker.done():
+                    worker.cancel()
+                    try:
+                        await asyncio.wait_for(asyncio.shield(worker),timeout=5)
+                    except asyncio.CancelledError:pass
+                    except asyncio.TimeoutError:return receipts,False
+                from src.work_board.document_compare_native import cleanup_proven, reconcile_reap
+                latest = await self.jobs.get_job(_text(attempt.workflow_run_id))
+                proven = isinstance(latest,Mapping) and cleanup_proven(task,attempt,latest)
+                if proven:
+                    latest = await reconcile_reap(self.jobs,task,attempt)
+                receipts.append({"job_id":attempt.workflow_run_id,"status":"cancelled" if proven else "unknown",
+                    "reason_code":"document_parser_reaped" if proven else "document_parser_quiescence_unknown"})
+                return receipts,bool(proven)
+            if is_tool_package(capability):
+                worker = self._active_worker_tasks.get((task.task_id, attempt.attempt_id))
+                if worker is not None and worker is not asyncio.current_task() and not worker.done():
+                    worker.cancel()
+                    try:
+                        await asyncio.wait_for(asyncio.shield(worker), timeout=5)
+                    except asyncio.CancelledError:
+                        pass
+                    except asyncio.TimeoutError:
+                        return receipts, False
+                from src.work_board.tool_package_native import cleanup_proven
+                latest = await self.jobs.get_job(_text(attempt.workflow_run_id))
+                proven = isinstance(latest, Mapping) and cleanup_proven(task, attempt, latest)
+                receipts.append({"job_id":attempt.workflow_run_id,"status":"cancelled" if proven else "unknown",
+                    "reason_code":"tool_package_reaped" if proven else "tool_package_cleanup_unproven"})
+                return receipts, bool(proven)
+            if capability in {"browser.public-task.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+                worker = self._active_worker_tasks.get((task.task_id, attempt.attempt_id))
+                if worker is not None and worker is not asyncio.current_task() and not worker.done():
+                    worker.cancel()
+                    try:
+                        await asyncio.wait_for(asyncio.shield(worker), timeout=5)
+                    except asyncio.CancelledError:
+                        pass
+                    except asyncio.TimeoutError:
+                        return receipts, False
+                latest = await self.jobs.get_job(_text(attempt.workflow_run_id))
+                if capability == "browser.public-task.v1":
+                    return receipts, isinstance(latest, Mapping) and _browser_cleanup_receipt_proven(latest)
+                # A missing process-local worker with a running durable lease
+                # after restart is uncertain until that exact lease settles.
+                return receipts, bool(worker is not None and worker.done()) or _status(latest) in {"accepted", "queued", "succeeded", "cancelled", "blocked", "failed"}
             if capability == GOAL_SNAPSHOT_CAPABILITY:
                 worker = self._active_worker_tasks.get((task.task_id, attempt.attempt_id))
                 if worker is not None and worker is not asyncio.current_task() and not worker.done():
@@ -3753,6 +3883,15 @@ class WorkBoardDispatcher:
     async def _effective_runtime(self, task: WorkBoardTask) -> int:
         """Resolve the current goal admission deadline, never from card input."""
 
+        if task.pipeline_operation_id:
+            from src.work_board.pipelines import runtime_guard, utc, now
+            _row, operation = await runtime_guard(task, session_provider=self.session_provider)
+            remaining = int((utc(datetime.fromisoformat(operation["deadline_at"])) - now()).total_seconds())
+            hard_cap = 180 if task.capability_id == "browser.public-task.v1" else 30
+            if remaining < 1:
+                raise BoardError("pipeline_expired", "The original operation has no remaining execution time", status_code=409)
+            return min(hard_cap, remaining)
+
         async with self.session_provider() as db:
             goal = (
                 await db.execute(
@@ -3768,7 +3907,9 @@ class WorkBoardDispatcher:
             return min(DEFAULT_RUNTIME_SECONDS, 180) if _text(task.capability_id) == "browser.public-task.v1" else DEFAULT_RUNTIME_SECONDS
         budget = deserialize_admission_budget(goal)
         configured = int(getattr(budget, "max_runtime_seconds", DEFAULT_RUNTIME_SECONDS)) if budget else DEFAULT_RUNTIME_SECONDS
-        hard_cap = 180 if _text(task.capability_id) == "browser.public-task.v1" else MAX_RUNTIME_SECONDS
+        hard_cap = (180 if _text(task.capability_id) == "browser.public-task.v1" else
+            300 if _text(task.capability_id) == "work.research-dossier.v1" else
+            10 if is_tool_package(_text(task.capability_id)) else MAX_RUNTIME_SECONDS)
         return max(1, min(configured, hard_cap))
 
     async def _repo_repair_goal_window(self, task: WorkBoardTask) -> datetime | None:
@@ -3808,7 +3949,8 @@ class WorkBoardDispatcher:
                     )
                 )
             ).scalar_one_or_none()
-        return effective_browser_limits(goal)
+        attempts, outstanding = effective_browser_limits(goal)
+        return (attempts, 1) if task.pipeline_operation_id else (attempts, outstanding)
 
     async def _post_claim_readiness(
         self,
@@ -3830,6 +3972,7 @@ class WorkBoardDispatcher:
             return error, reason
         return await self._readiness(claim.task, _claimed_attempt=claim.attempt)
 
+    @stage_package_readiness
     async def _readiness(
         self,
         task: WorkBoardTask,
@@ -3843,6 +3986,13 @@ class WorkBoardDispatcher:
         persisted attempt count; callers cannot provide this context through
         an API input or a public retry request.
         """
+
+        if task.pipeline_operation_id or task.capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+            from src.work_board.pipelines import runtime_guard
+            try:
+                await runtime_guard(task, session_provider=self.session_provider)
+            except BoardError as exc:
+                return exc.code, str(exc)
 
         try:
             operator = await authenticate_session(task.owner_session_id, touch=False)
@@ -3967,7 +4117,7 @@ class WorkBoardDispatcher:
                     if not await current_handoff_is_verified(db, owner, parent, task, link):
                         return "handoff_materialization_required", _HANDOFF_RECONCILIATION_REASON
         capability_id = _text(task.capability_id)
-        spec = REGISTERED_CAPABILITIES.get(capability_id)
+        spec = capability_spec(capability_id)
         if spec is None:
             return "capability_unregistered", "The task names no registered Seraph capability"
         expected_executor = registered_executor_id(capability_id)
@@ -3979,9 +4129,9 @@ class WorkBoardDispatcher:
             return "executor_lane_mismatch", "The task executor does not match the registered capability lane"
         if not _text(task.typed_input_ref) or not _text(task.typed_input_digest):
             return "typed_input_missing", "The task has no complete typed input reference"
-        if capability_id == "browser.public-task.v1" and not _text(task.input_artifact_id):
+        if (capability_id in {"browser.public-task.v1", "work.research-dossier.v1", "work.json-format.v1", "work.document-compare.v1"} or is_authored(capability_id)) and not _text(task.input_artifact_id):
             return "browser_input_artifact_required", "Public browser tasks require a server-bound input artifact"
-        if capability_id == "browser.public-task.v1":
+        if capability_id in {"browser.public-task.v1", "work.research-dossier.v1", "work.json-format.v1", "work.document-compare.v1"} or is_authored(capability_id):
             # Browser inputs are resolved through the owner-bound artifact
             # lifecycle before promotion. This checks the current state,
             # expiry, task/goal/capability binding and bounded nofollow
@@ -4072,6 +4222,45 @@ class WorkBoardDispatcher:
 
         capability = _text(task.capability_id)
         try:
+            if capability == "work.document-compare.v1":
+                from src.work_board.document_pairs import source_pair
+                async with self.session_provider() as db:
+                    await source_pair(db, task, inputs)
+                return None, None
+            if is_tool_package(capability):
+                from src.execution.tool_package_profile import inspect_runtime
+                from src.work_board.tool_package_native import pack_binding, runtime_root
+                pack_binding(task)
+                inspect_runtime(runtime_root())
+                return None, None
+            if capability == "work.research-dossier.v1":
+                from src.workflows.research_provider import _target
+                from src.model_fabric.caller_context import build_canonical_inference_context
+                from src.llm_runtime import _governed_preflight_target_async
+                operator = await authenticate_session(task.owner_session_id, touch=False)
+                setup, _policy, target = _target()
+                principal = replace(operator.principal, job_id="research-prerequisite:"+task.task_id)
+                context = build_canonical_inference_context("readonly_research_child", payload=inputs,
+                    output_tokens=min(1024, setup.max_output_tokens), timeout_seconds=min(45, setup.timeout_seconds),
+                    principal=principal, session_id=task.owner_session_id, job_id=principal.job_id,
+                    request_id="research-prerequisite:"+task.task_id)
+                decision, _proofs = await _governed_preflight_target_async(target, context)
+                if decision is None or not decision.allowed:
+                    return "research_model_route_unavailable", "The fixed research route needs current governed capability proof"
+                snapshot = await self.jobs.inference_accounting_snapshot()
+                if snapshot["status"] != "ready" or snapshot.get("overrun_max_cost_microusd", 0):
+                    return "research_accounting_blocked", "Resolve existing accounting continuity or provider overrun before research"
+                return None, None
+            if capability in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+                from src.work_board.input_artifacts import resolve_input_artifact_for_task
+                from src.work_board.pipelines import runtime_guard
+                await runtime_guard(task, session_provider=self.session_provider)
+                async with self.session_provider() as pipeline_db:
+                    await resolve_input_artifact_for_task(pipeline_db,
+                        WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id),
+                        artifact_id=_text(task.input_artifact_id), capability_id=capability,
+                        goal_id=task.goal_id, goal_revision=task.goal_revision, expected_task_id=task.task_id)
+                return None, None
             if capability == GOAL_SNAPSHOT_CAPABILITY:
                 from src.agent.factory import get_tools
                 from src.workflows.manager import workflow_manager
@@ -4234,12 +4423,10 @@ class WorkBoardDispatcher:
                 if int(connection.get("revision") or 0) != int(inputs["connection_revision"]):
                     return "connection_revision_stale", "The GitHub connection revision changed"
                 operator = await authenticate_session(task.owner_session_id, touch=False)
-                grants = {
-                    _text(getattr(grant, "value", grant))
-                    for grant in (getattr(getattr(operator, "principal", None), "grants", ()) or ())
-                }
-                if AuthorityGrant.EXTERNAL_MUTATION.value not in grants:
-                    return "external_mutation_grant_required", "The external mutation grant is not current"
+                from src.extensions.github_consent import require_followthrough_consent
+                await require_followthrough_consent(principal=task.owner_principal_id,
+                    root=task.owner_session_id, action=inputs["action"],
+                    repository=connection["repository"], revision=inputs["connection_revision"])
                 return None, None
 
             if capability == "guardian-routine.v1":
@@ -4359,12 +4546,10 @@ class WorkBoardDispatcher:
             principal = getattr(operator, "principal", None)
             if _text(getattr(principal, "principal_id", None)) != _text(task.owner_principal_id):
                 return "owner_mismatch", "The procedure owner session belongs to a different operator"
-            grants = {
-                _text(getattr(grant, "value", grant))
-                for grant in (getattr(principal, "grants", ()) or ())
-            }
-            if AuthorityGrant.EXTERNAL_MUTATION.value not in grants:
-                return "external_mutation_grant_required", "The current session has no external mutation grant"
+            from src.extensions.github_consent import require_followthrough_consent
+            await require_followthrough_consent(principal=task.owner_principal_id,
+                root=task.owner_session_id, action=selected_version.get("source_action"),
+                repository=bound_repository or None, revision=connection["revision"])
             return None, None
         except AuthFailure as exc:
             return exc.code, "The procedure owner session is no longer valid"
@@ -4490,6 +4675,8 @@ class WorkBoardDispatcher:
         task, attempt = claim.task, claim.attempt
         result: dict[str, Any] = {"admitted": False, "completed": False, "blocked": False}
         runtime_seconds = await self._effective_runtime(task)
+        if _text(task.capability_id) == "work.research-dossier.v1":
+            return await self._admit_execute_research(claim, runtime_seconds=min(300, runtime_seconds))
         if _text(task.capability_id) == "browser.public-task.v1":
             max_attempts, max_outstanding_jobs = await self._effective_browser_limits(task)
             return await self._admit_execute_browser(
@@ -4719,6 +4906,14 @@ class WorkBoardDispatcher:
                     and _text(task.input_artifact_id) == _text(binding.get("input_artifact_id"))
                 ):
                     return False
+                if task.pipeline_operation_id:
+                    from src.work_board.pipelines import task_guard
+                    try:
+                        await task_guard(db, task, attempt=attempt)
+                    except BoardError:
+                        # This session contains only fence/authority reads and
+                        # the guard freeze; normal exit commits that freeze.
+                        return False
 
                 # Procedure-v2 Browser leaves are native children of the
                 # running parent board attempt.  Recheck that parent at every
@@ -4894,6 +5089,22 @@ class WorkBoardDispatcher:
                 )
         except Exception:
             return False
+
+    @staticmethod
+    def _persisted_browser_identity(task, attempt, inputs, projection):
+        """Recompute native identity using its admitted finite limits."""
+        authority = projection.get("declared_authority") or {}
+        limits = authority.get("limits") or {}
+        runtime, attempts, outstanding = (limits.get("runtime_seconds"), limits.get("max_attempts"), limits.get("max_outstanding_jobs"))
+        if type(runtime) is not int or not 1 <= runtime <= 180 or type(attempts) is not int or not 1 <= attempts <= 2 or type(outstanding) is not int or not 1 <= outstanding <= 16 or (task.pipeline_operation_id and outstanding != 1):
+            raise DurableJobIdempotencyConflict("native browser admitted limits invalid")
+        immutable = copy(task)
+        immutable.task_revision = int(attempt.task_revision_at_claim) + 1
+        expected = WorkBoardDispatcher._browser_expected_identity(immutable, attempt, inputs, projection,
+            runtime, max_attempts=attempts, max_outstanding_jobs=outstanding)
+        if any(projection.get(key) != expected[key] for key in ("input_digest", "authority_digest", "run_fingerprint")):
+            raise DurableJobIdempotencyConflict("native browser admitted digest changed")
+        return expected
 
     @staticmethod
     def _browser_expected_identity(
@@ -5123,6 +5334,7 @@ class WorkBoardDispatcher:
             linked_attempt = linked.attempt
             active_claim = BoardDispatchClaim(linked_task, linked_attempt, claim.event)
             execution_started = True
+            self._active_worker_tasks[(task.task_id, attempt.attempt_id)] = asyncio.current_task()
             execution = await runner.run(
                 task_id=linked_task.task_id,
                 attempt_id=linked_attempt.attempt_id,
@@ -5144,6 +5356,7 @@ class WorkBoardDispatcher:
                 durable_job_id=job_id,
             )
             cleanup_status = _text(execution.get("cleanup_status")) or "cleanup_unknown"
+            self._active_worker_tasks.pop((task.task_id, attempt.attempt_id), None)
             cleanup_verified = cleanup_status in {"cleanup_verified", "not_needed"}
             latest = await self.jobs.get_job(job_id)
             if not isinstance(latest, Mapping):
@@ -5239,6 +5452,7 @@ class WorkBoardDispatcher:
             await self._project_blocked(active_claim, "unknown_effect", "reconcile_admission_binding")
             result["blocked"] = True
         finally:
+            self._active_worker_tasks.pop((task.task_id, attempt.attempt_id), None)
             if owned_lane is not None:
                 if execution_started and not cleanup_verified:
                     owned_lane.quarantine(job_id or f"browser-task:{task.task_id}")
@@ -5268,6 +5482,126 @@ class WorkBoardDispatcher:
                 actor_principal_id=self.runner_id,
                 actor_session_id=self.runner_session,
             )
+
+    async def _complete_research_projection(self, parent_id, completed):
+        from src.work_board.research_artifacts import read
+        projection = await self.jobs.get_job(parent_id)
+        artifact = completed["dossier"]
+        read(artifact["file_path"], artifact["content_sha256"])
+        filtered = {**projection, "effects": [item for item in projection["effects"]
+            if item.get("target_path") == artifact["file_path"] and item.get("content_sha256") == artifact["content_sha256"]]}
+        proof = self._workflow_readback(filtered, parent_id)
+        if proof is None:
+            raise DurableJobError("research_actual_dossier_readback_required")
+        async with self.session_provider() as db:
+            task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == completed["task_id"]))
+            attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.attempt_id == completed["attempt_id"]))
+        await self._project(task, attempt, board_revision=completed["task_revision"],
+            status=WorkBoardStatus.review if task.requires_review else WorkBoardStatus.done,
+            outcome="succeeded", proof=proof,
+            result_refs=[{**proof, "learning": "no_learning", "target_path": artifact["file_path"]}],
+            artifact_refs=projection["artifacts"])
+
+    async def recover_research(self, owner, task_id, request):
+        from src.work_board.research_control import bound, reserve_recovery
+        from src.workflows.research_coordinator import continue_parent, freeze_quiescent
+        async with self.session_provider() as db:
+            task, attempt, parent = await bound(db, owner, task_id)
+            key = (task.task_id, attempt.attempt_id)
+            parent_id = parent.run_identity
+        active = self._active_worker_tasks.get(key)
+        if active is not None and not active.done():
+            return {"in_progress": True, "completed": False}
+        reservation = await reserve_recovery(self.jobs, owner, task_id, request)
+        phase_binding = reservation["binding"]
+        if phase_binding is None:
+            return {"replayed": True, "completed": reservation["completed"]}
+        # No await separates the second local check from registration. The
+        # durable phase generation still fences other processes/coordinators.
+        active = self._active_worker_tasks.get(key)
+        if active is not None and not active.done():
+            return {"in_progress": True, "completed": False}
+        self._active_worker_tasks[key] = asyncio.current_task()
+        try:
+            completed = await continue_parent(self.jobs, parent_id=parent_id, owner=self.runner_id,
+                phase_binding=phase_binding)
+            await self._complete_research_projection(parent_id, completed)
+            return {"completed": True, "replayed": reservation["replayed"]}
+        except BaseException:
+            current = await self.jobs.get_job(parent_id)
+            await asyncio.shield(freeze_quiescent(self.jobs, parent_id=parent_id, owner=self.runner_id,
+                phase_binding=phase_binding, expected_parent_revision=current["revision"],
+                reason="research_execution_requires_recovery"))
+            return {"completed": False, "blocked": True}
+        finally:
+            if self._active_worker_tasks.get(key) is asyncio.current_task():
+                self._active_worker_tasks.pop(key, None)
+
+    async def cancel_research(self, owner, task_id, request):
+        from src.work_board.research_control import request_cancel, finish_cancel
+        reserved = await request_cancel(self.jobs, owner, task_id, request)
+        worker = self._active_worker_tasks.get((task_id, reserved["attempt_id"]))
+        if worker is not None and not worker.done():
+            worker.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(worker), timeout=5)
+            except asyncio.TimeoutError:
+                return {"completed": False, "cancellation_pending": True, "reason": "actual_worker_completion_required"}
+            except asyncio.CancelledError:
+                if not worker.done():
+                    raise
+        return await finish_cancel(self.jobs, owner, task_id, request)
+
+    async def _admit_execute_research(self, claim: BoardDispatchClaim, *, runtime_seconds: int) -> dict[str, Any]:
+        """Admit the fixed native root before any source or model operation."""
+        from src.work_board.research_parent import spec_for, expected_identity
+        from src.workflows.research_coordinator import start_parent, continue_parent, freeze_quiescent
+        from src.workflows.research_native import checkpoint
+        from src.work_board.research_artifacts import read
+        task, attempt = claim.task, claim.attempt
+        inputs = _parse_typed_input(task)
+        # The immutable original Board attempt bounds first admission and
+        # recovery. A later pass cannot grant another execution window.
+        deadline = _utc_datetime(attempt.started_at) + timedelta(seconds=runtime_seconds)
+        spec = spec_for(task, attempt, inputs, deadline=deadline)
+        projection = await self.jobs.admit_job(spec)
+        expected = expected_identity(task, attempt, spec)
+        async with self.session_provider() as db:
+            linked = await self.repository.link_attempt_workflow_run(db, task.task_id, attempt.attempt_id,
+                workflow_run_id=spec.identity.job_id, expected_revision=task.task_revision,
+                board_fence=attempt.fencing_token, lease_owner=self.runner_id,
+                workflow_projection=projection, expected_identity=expected,
+                actor_principal_id=self.runner_id, actor_session_id=self.runner_session)
+        task, attempt = linked.task, linked.attempt
+        key = (task.task_id, attempt.attempt_id)
+        self._active_worker_tasks[key] = asyncio.current_task()
+        phase_binding = {}
+        try:
+            await self.jobs.queue_job(spec.identity.job_id)
+            parent = await self.jobs.claim_job(spec.identity.job_id, owner=self.runner_id, lease_seconds=30)
+            _creation, phase_binding = await start_parent(self.jobs, parent_id=spec.identity.job_id, owner=self.runner_id,
+                board_task=task, board_attempt=attempt, inputs=inputs)
+            completed = await continue_parent(self.jobs, parent_id=spec.identity.job_id, owner=self.runner_id,
+                phase_binding=phase_binding)
+            await self._complete_research_projection(spec.identity.job_id, completed)
+            return {"admitted": True, "completed": True, "blocked": False}
+        except BaseException as error:
+            # The awaited finite worker group has returned before this writer
+            # freezes unfinished rows. No cancellation success is claimed.
+            import traceback
+            frames = [(Path(frame.filename).name, frame.lineno, frame.name)
+                for frame in traceback.extract_tb(error.__traceback__)[-8:]]
+            logger.warning("research bounded execution blocked: code=%s frames=%s", _safe_error_code(error), frames)
+            parent = await self.jobs.get_job(spec.identity.job_id)
+            if checkpoint(parent, "research:creation") is not None:
+                await asyncio.shield(freeze_quiescent(self.jobs, parent_id=spec.identity.job_id,
+                    owner=self.runner_id, phase_binding=phase_binding, expected_parent_revision=parent["revision"],
+                    reason="research_execution_requires_recovery"))
+            else:
+                await self._project_blocked(claim, "unknown_effect", "research_admission_requires_recovery")
+            return {"admitted": True, "completed": False, "blocked": True}
+        finally:
+            self._active_worker_tasks.pop(key, None)
 
     async def _admit_execute_direct(
         self,
@@ -5471,9 +5805,23 @@ class WorkBoardDispatcher:
                 if not isinstance(projection, Mapping):
                     raise DurableJobError("durable_run_projection_missing_after_execution")
             safe_status = _status(adapter_result.get("status")) or _status(projection)
-            reason = _stable_reason_code(
-                _text(adapter_result.get("reason_code")) or _text(projection.get("failure_reason")),
-            )
+            raw_reason = _text(adapter_result.get("reason_code")) or _text(projection.get("failure_reason"))
+            from src.work_board.authored_packages import is_authored
+            authored_wait = is_authored(task.capability_id) and raw_reason in {
+                "authored_package_capacity_held", "authored_package_higher_priority_ready"}
+            reason = (raw_reason if task.capability_id == "work.document-compare.v1"
+                and raw_reason in {"document_parser_capacity_held", "document_higher_priority_ready"}
+                else raw_reason if authored_wait else _stable_reason_code(raw_reason))
+            if authored_wait and safe_status == "queued":
+                result["deferred"] = True
+                return result
+            if (task.capability_id == "work.document-compare.v1" and safe_status == "queued"
+                and reason in {"document_parser_capacity_held", "document_higher_priority_ready"}):
+                # This original bounded attempt owns queued work, not a
+                # failed parser. The next scheduler pass retries admission
+                # against the same job and deadline after actual quiescence.
+                result["deferred"] = True
+                return result
             unresolved = safe_status in {"unknown_external_effect", "cost_liability"} or _status(projection) in {
                 "unknown_external_effect",
                 "cost_liability",
@@ -5534,7 +5882,27 @@ class WorkBoardDispatcher:
                 result["awaiting_approval"] = True
                 return result
             direct_proof = self._direct_readback(adapter_result, projection, job_id)
+            if is_tool_package(task.capability_id) or task.capability_id == "work.document-compare.v1":
+                async with self.session_provider() as cancel_db:
+                    cancelled = await cancel_db.scalar(select(WorkBoardAttempt.cancel_requested_at).where(
+                        WorkBoardAttempt.attempt_id==attempt.attempt_id,WorkBoardAttempt.workflow_run_id==job_id,
+                        WorkBoardAttempt.fencing_token==attempt.fencing_token))
+                if cancelled is not None:
+                    # The explicit cancellation owner awaits this actual
+                    # worker and owns its terminal Board projection. Do not
+                    # race that writer with a second blocked projection.
+                    result["blocked"] = True
+                    return result
             if direct_proof is not None:
+                if task.capability_id == "work.document-compare.v1":
+                    from src.work_board.document_compare_native import read_output, stage_current
+                    await stage_current(self.jobs,task,attempt,inputs)
+                    receipt,_output=read_output(task,attempt,projection)
+                    if receipt["cipher_sha256"]!=direct_proof["content_sha256"]:
+                        raise BoardError("document_output_readback_required","The physical output differs from the native proof")
+                if task.capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+                    matching = await self._verify_cpu_completion(task, attempt, inputs, projection, direct_proof)
+                    adapter_result = {**dict(adapter_result), "artifact_refs": matching}
                 proof = direct_proof
                 target_status = WorkBoardStatus.review if task.requires_review else WorkBoardStatus.done
                 await self._project(
@@ -5568,6 +5936,15 @@ class WorkBoardDispatcher:
             result["blocked"] = True
         except Exception as exc:
             logger.info("work board direct adapter %s reconciliation blocked: %s", task.task_id, type(exc).__name__)
+            if task.capability_id == "work.document-compare.v1":
+                async with self.session_provider() as cancelled_db:
+                    cancelled = await cancelled_db.scalar(select(WorkBoardAttempt.cancel_requested_at).where(
+                        WorkBoardAttempt.attempt_id == attempt.attempt_id,
+                        WorkBoardAttempt.workflow_run_id == job_id,
+                        WorkBoardAttempt.fencing_token == attempt.fencing_token))
+                if cancelled is not None:
+                    result["blocked"] = True
+                    return result
             if linked_ok:
                 # Mail source/authority drift is a deterministic, pre-draft
                 # terminal outcome.  The direct adapter still owns its lease
@@ -5644,23 +6021,20 @@ class WorkBoardDispatcher:
             result["blocked"] = True
         return result
 
-    async def _current_external_mutation_grant(self, task: WorkBoardTask) -> bool:
-        """Re-authenticate the task owner at the GitHub adapter boundary."""
-
+    async def _current_github_consent(self, task: WorkBoardTask, projection=None) -> bool:
+        """Derive exact connection consent; this Boolean is only readiness."""
         try:
-            operator = await authenticate_session(task.owner_session_id, touch=False)
-        except AuthFailure:
+            from src.extensions.github_consent import require_followthrough_consent
+            authority = (projection or {}).get("declared_authority") or {}
+            inputs = _parse_typed_input(task)
+            await require_followthrough_consent(principal=task.owner_principal_id,
+                root=task.owner_session_id, action=authority.get("action") or inputs.get("action"),
+                repository=authority.get("repository"),
+                revision=authority.get("connection_revision") or inputs.get("connection_revision"),
+                binding=authority.get("github_consent") if projection else None)
+            return True
+        except Exception:
             return False
-        principal = getattr(operator, "principal", None)
-        if _text(getattr(operator, "session_id", None)) != _text(task.owner_session_id):
-            return False
-        if _text(getattr(principal, "principal_id", None)) != _text(task.owner_principal_id):
-            return False
-        grants = {
-            _text(getattr(grant, "value", grant))
-            for grant in (getattr(principal, "grants", ()) or ())
-        }
-        return AuthorityGrant.EXTERNAL_MUTATION.value in grants
 
     async def _resume_github_followthrough(
         self,
@@ -5795,7 +6169,7 @@ class WorkBoardDispatcher:
                 "reason_code": "approval_not_current",
                 "recovery_action": "retry_after_prerequisite",
             }
-        if not await self._current_external_mutation_grant(task):
+        if not await self._current_github_consent(task, projection):
             return projection, {
                 "status": "blocked",
                 "reason_code": "external_mutation_grant_required",
@@ -5845,6 +6219,22 @@ class WorkBoardDispatcher:
             "approval_id": approval_id,
         }
 
+    async def _verify_cpu_completion(self, task, attempt, inputs, projection, proof):
+        from src.work_board.pipeline_cpu import read_output
+        from src.work_board.pipelines import validate_cpu_current
+        await validate_cpu_current(task, attempt, inputs, session_provider=self.session_provider)
+        self._canonical_identity_from_projection(task, attempt, inputs, projection)
+        matching = [item for item in projection.get("artifacts", []) if isinstance(item, Mapping)
+            and item.get("content_sha256") == proof["content_sha256"] and item.get("exists")]
+        if len(matching) != 1 or not any(isinstance(effect, Mapping)
+            and effect.get("receipt_kind") == "readback" and effect.get("status") == "succeeded"
+            and effect.get("target_path") == matching[0].get("file_path")
+            and effect.get("content_sha256") == proof["content_sha256"] for effect in projection.get("effects", [])):
+            raise BoardError("pipeline_output_unverified", "The CPU output needs exact independent readback")
+        read_output(matching[0]["file_path"], proof["content_sha256"])
+        await self._consume_v2_leaf_artifact(task)
+        return matching
+
     async def _execute_direct_adapter(
         self,
         task: WorkBoardTask,
@@ -5856,6 +6246,44 @@ class WorkBoardDispatcher:
         procedure_binding: ProcedureChildBinding | None = None,
     ) -> Mapping[str, Any]:
         capability_id = _text(task.capability_id)
+        if capability_id == "work.document-compare.v1":
+            from src.work_board.document_compare_native import execute
+            if not admission_only:
+                self._active_worker_tasks[(task.task_id, attempt.attempt_id)] = asyncio.current_task()
+            try:
+                return await execute(task,attempt,inputs,jobs=self.jobs,runner=self.runner_id,
+                    deadline=_now()+timedelta(seconds=min(runtime_seconds,70)),admission_only=admission_only)
+            finally:
+                if not admission_only:self._active_worker_tasks.pop((task.task_id,attempt.attempt_id),None)
+        if is_tool_package(capability_id):
+            from src.work_board.tool_package_native import execute
+            if not admission_only:
+                self._active_worker_tasks[(task.task_id, attempt.attempt_id)] = asyncio.current_task()
+            try:
+                return await execute(task, attempt, inputs, jobs=self.jobs, runner=self.runner_id,
+                    deadline=_now()+timedelta(seconds=min(runtime_seconds,10)), admission_only=admission_only)
+            finally:
+                if not admission_only:
+                    self._active_worker_tasks.pop((task.task_id, attempt.attempt_id),None)
+        if capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+            from src.work_board.pipelines import runtime_guard, validate_cpu_current, validate_cpu_binding, utc
+            from src.work_board.pipeline_cpu import execute
+            _row, operation = await runtime_guard(task, attempt=attempt, session_provider=self.session_provider)
+            operation_deadline = utc(datetime.fromisoformat(operation["deadline_at"]))
+            deadline = min(operation_deadline, _now() + timedelta(seconds=min(runtime_seconds, 30)))
+            async def check_current(current_task, current_attempt, current_inputs):
+                await validate_cpu_current(current_task, current_attempt, current_inputs, session_provider=self.session_provider)
+            async def check_terminal(db, run):
+                await validate_cpu_binding(db, task, attempt, inputs)
+            if not admission_only:
+                self._active_worker_tasks[(task.task_id, attempt.attempt_id)] = asyncio.current_task()
+            try:
+                return await execute(task, attempt, inputs, jobs=self.jobs, runner=self.runner_id,
+                    deadline=deadline, admission_only=admission_only, validate_current=check_current,
+                    validate_terminal=check_terminal)
+            finally:
+                if not admission_only:
+                    self._active_worker_tasks.pop((task.task_id, attempt.attempt_id), None)
         board_binding = f"{task.task_id}:{attempt.attempt_id}"
         parent_handoffs = self._attempt_parent_handoffs(attempt)
         parent_handoff_digest = _text(getattr(attempt, "parent_handoff_digest", None)) or None
@@ -5957,7 +6385,7 @@ class WorkBoardDispatcher:
                 admit_only=admission_only,
             )
         if capability_id == "engineering.repo-repair.v1":
-            from src.workflows.repo_repair import RepoRepairService
+            from src.workflows.repo_repair import RepoRepairService, _executor_preflight
             from src.workflows.job_runtime import _digest as _durable_digest
 
             job_id, owner_principal, job_kind, service_id, binding_key = self._direct_job_identity(
@@ -5979,7 +6407,11 @@ class WorkBoardDispatcher:
                 # approval/execution boundary; probing it only on the event
                 # loop would make local/native execution block chat.
                 admission_sandbox = _build_repo_repair_executor_compat()
-                admission_preflight = await asyncio.to_thread(admission_sandbox.preflight)
+                admission_preflight = await asyncio.to_thread(
+                    _executor_preflight, admission_sandbox,
+                    {"repository_ref": inputs.get("repository_path"),
+                     "test_args": inputs.get("test_args"), "allowed_paths": inputs.get("allowed_paths")},
+                )
                 if not bool(getattr(admission_preflight, "ok", False)):
                     return {
                         "job_id": job_id,
@@ -6031,7 +6463,11 @@ class WorkBoardDispatcher:
                     budget_microusd=0,
                     budget_digest=_durable_digest({"budget_microusd": 0}),
                 )
-                admitted = await self.jobs.admit_job(spec)
+                admitted = await self.jobs.admit_job(
+                    spec,
+                    **({"repo_node_posture_expectation": json.loads(json.dumps(admission_preflight.posture))}
+                       if authority.get("sandbox_profile") == "repo-node24-npm-v1" else {}),
+                )
                 admitted_job = _text(admitted.get("job_id") or admitted.get("run_identity")) or job_id
                 if admitted_job != job_id:
                     raise DurableJobIdempotencyConflict("Repository repair admission returned a different durable root")
@@ -6061,7 +6497,11 @@ class WorkBoardDispatcher:
                     "admission_only": False,
                 }
             sandbox = _build_repo_repair_executor_compat()
-            preflight = await asyncio.to_thread(sandbox.preflight)
+            preflight = await asyncio.to_thread(
+                _executor_preflight, sandbox,
+                {"repository_ref": inputs.get("repository_path"),
+                 "test_args": inputs.get("test_args"), "allowed_paths": inputs.get("allowed_paths")},
+            )
             lease = projection.get("lease") if isinstance(projection.get("lease"), Mapping) else {}
             lease_owner = _text(lease.get("owner"))
             fencing_token = int(lease.get("fencing_token") or 0)
@@ -6440,12 +6880,22 @@ class WorkBoardDispatcher:
                     persisted_proposal.approval_id = approval_id
                     persisted_proposal.approval_fingerprint = approval_fingerprint
                     await proposal_db.flush()
+            node_expectation = None
+            if persisted_authority.get("sandbox_profile") == "repo-node24-npm-v1":
+                approval_preflight = await asyncio.to_thread(
+                    _executor_preflight, sandbox,
+                    {"repository_ref": inputs.get("repository_path"),
+                     "test_args": inputs.get("test_args"), "allowed_paths": inputs.get("allowed_paths")},
+                )
+                _assert_repo_repair_executor_authority(persisted_authority, sandbox, approval_preflight)
+                node_expectation = json.loads(json.dumps(approval_preflight.posture))
             bound = await self.jobs.bind_approval_id(
                 job_id,
                 approval_id,
                 owner=lease_owner,
                 fencing_token=fencing_token,
                 expected_revision=projection.get("revision"),
+                **({"repo_node_posture_expectation": node_expectation} if node_expectation is not None else {}),
             )
             # Binding the approval id is part of the durable authority, so it
             # advances the authority digest.  The approval row was created
@@ -6548,7 +6998,7 @@ class WorkBoardDispatcher:
                 issue_number=inputs.get("issue_number"),
                 idempotency_key=str(attempt_uuid),
             )
-            external_mutation_granted = await self._current_external_mutation_grant(task)
+            external_mutation_granted = await self._current_github_consent(task)
             if not external_mutation_granted:
                 if admission_only:
                     raise BoardError(
@@ -7975,7 +8425,7 @@ class WorkBoardDispatcher:
                     or int(terminal_task.goal_revision or 0) != int(task.goal_revision or 0)
                     or _text(terminal_attempt.workflow_run_id) != job_id
                     or _text(terminal_attempt.lease_owner) != _text(lease_owner)
-                    or int(terminal_attempt.fencing_token or 0) != int(fence)
+                    or int(terminal_attempt.fencing_token or 0) != int(attempt.fencing_token or 0)
                     or terminal_attempt.ended_at is not None
                     or terminal_attempt.cancel_requested_at is not None
                     or terminal_attempt.lease_expires_at is None
@@ -8339,6 +8789,15 @@ class WorkBoardDispatcher:
 
         capability_id = _text(task.capability_id)
         binding_key = f"{task.task_id}:{attempt.attempt_id}"
+        if capability_id == "work.document-compare.v1":
+            from src.work_board.document_compare_native import job_id, JOB_KIND
+            return job_id(task,attempt),task.owner_principal_id,JOB_KIND,None,binding_key
+        if is_tool_package(capability_id):
+            from src.work_board.tool_package_native import job_id, native_kind
+            return job_id(task,attempt),task.owner_principal_id,native_kind(task),None,binding_key
+        if capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+            from src.work_board.pipeline_cpu import job_id
+            return job_id(task, attempt), task.owner_principal_id, capability_id, None, binding_key
         if capability_id == "guardian-routine.v2":
             from src.workflows.procedure_v2_runtime import procedure_v2_runtime
 
@@ -8461,6 +8920,15 @@ class WorkBoardDispatcher:
         """Compute the service input digest where the adapter contract is closed."""
 
         capability_id = _text(task.capability_id)
+        if capability_id == "work.document-compare.v1":
+            from src.work_board.document_compare_native import immutable_inputs
+            return _safe_digest(immutable_inputs(task,inputs))
+        if is_tool_package(capability_id):
+            from src.work_board.tool_package_native import immutable_inputs
+            return _safe_digest(immutable_inputs(task,inputs))
+        if capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+            from src.work_board.pipeline_cpu import spec_for
+            return _safe_digest(spec_for(task, attempt, inputs, deadline=_now()).inputs)
         handoff_binding = WorkBoardDispatcher._direct_handoff_binding(attempt)
         if capability_id == "guardian-routine.v2":
             return _safe_digest(
@@ -8583,6 +9051,10 @@ class WorkBoardDispatcher:
         *,
         procedure_binding: ProcedureChildBinding | None = None,
     ) -> dict[str, Any]:
+        if task.capability_id == "work.document-compare.v1" or is_tool_package(task.capability_id):
+            if not isinstance(projection, Mapping):
+                raise DurableJobIdempotencyConflict("document expiry snapshot requires canonical admission")
+            return WorkBoardDispatcher._canonical_identity_from_projection(task, attempt, inputs, projection)
         expected_job_id, owner_principal_id, job_kind, service_id, binding_key = WorkBoardDispatcher._direct_job_identity(
             task,
             attempt,
@@ -8621,6 +9093,8 @@ class WorkBoardDispatcher:
         """Return the version used by the existing capability service."""
 
         capability = _text(task.capability_id)
+        if is_tool_package(capability):
+            return "1"
         return {
             "guardian.research-watch.v1": "1",
             "engineering.repo-change.v1": "engineering.repo-change.v1",
@@ -8638,6 +9112,14 @@ class WorkBoardDispatcher:
         attempt: WorkBoardAttempt,
         inputs: Mapping[str, Any],
     ) -> str:
+        if task.capability_id == "work.document-compare.v1":
+            raise DurableJobIdempotencyConflict("document expiry snapshot requires canonical admission")
+        if is_tool_package(task.capability_id):
+            from src.work_board.tool_package_native import authority_for
+            return _safe_digest(authority_for(task,attempt,inputs))
+        if task.capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+            from src.work_board.pipeline_cpu import spec_for
+            return _safe_digest(spec_for(task, attempt, inputs, deadline=_now()).declared_authority)
         if _text(task.capability_id) == "calendar.meeting-prep.v1":
             from src.integrations.google_calendar import calendar_authority_digest
 
@@ -8720,6 +9202,14 @@ class WorkBoardDispatcher:
         attempt: WorkBoardAttempt,
         inputs: Mapping[str, Any],
     ) -> str:
+        if task.capability_id == "work.document-compare.v1":
+            raise DurableJobIdempotencyConflict("document expiry snapshot requires canonical admission")
+        if is_tool_package(task.capability_id):
+            from src.work_board.tool_package_native import spec_for
+            return spec_for(task,attempt,inputs,deadline=_now()).run_fingerprint
+        if task.capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+            from src.work_board.pipeline_cpu import spec_for
+            return spec_for(task, attempt, inputs, deadline=_now()).run_fingerprint
         # Existing governed services use the canonical durable input digest as
         # their run fingerprint when they do not provide a separate one.
         return WorkBoardDispatcher._direct_input_digest(task, attempt, inputs)
@@ -8802,6 +9292,42 @@ class WorkBoardDispatcher:
             raise DurableJobIdempotencyConflict(
                 "adapter admission projection is missing canonical immutable digests"
             )
+        if task.capability_id == "work.document-compare.v1":
+            from src.work_board.document_compare_native import spec_for
+            original_deadline = _utc_datetime(datetime.fromisoformat(str(projection.get("deadline_at"))))
+            expected_spec = spec_for(task, attempt, inputs, deadline=original_deadline,
+                expiries=authority.get("execution_expiries"))
+            expected_digests = {"input_digest": WorkBoardDispatcher._direct_input_digest(task, attempt, inputs),
+                "authority_digest": _safe_digest(expected_spec.declared_authority),
+                "run_fingerprint": expected_spec.run_fingerprint}
+            if expected_spec.deadline_at != original_deadline or digests != expected_digests:
+                raise DurableJobIdempotencyConflict("document original execution window or admission digest changed")
+        elif is_tool_package(task.capability_id):
+            from src.work_board.tool_package_native import spec_for
+            original_deadline=_utc_datetime(datetime.fromisoformat(str(projection.get("deadline_at"))))
+            if is_authored(task.capability_id):
+                from src.work_board.authored_packages import load_registration,registration_scope
+                released=any(item.get("checkpoint_id")=="tool-package:process" and item.get("payload",{}).get("admission_status")=="admitted"
+                    for item in projection.get("checkpoints",[]))
+                registration=load_registration(task.capability_id,original_pin=authority.get("pack"),continuation=released)
+                with registration_scope(registration):
+                    expected_spec=spec_for(task,attempt,inputs,deadline=original_deadline,
+                        expiry_facts=authority.get("execution_expiries"))
+            else:
+                expected_spec=spec_for(task,attempt,inputs,deadline=original_deadline,
+                    expiry_facts=authority.get("execution_expiries"))
+            if (expected_spec.deadline_at!=original_deadline or digests!={
+                "input_digest":WorkBoardDispatcher._direct_input_digest(task,attempt,inputs),
+                "authority_digest":_safe_digest(expected_spec.declared_authority),"run_fingerprint":expected_spec.run_fingerprint}):
+                raise DurableJobIdempotencyConflict("tool package original execution window or admission digest changed")
+        elif task.capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+            expected_digests = {
+                "input_digest": WorkBoardDispatcher._direct_input_digest(task, attempt, inputs),
+                "authority_digest": WorkBoardDispatcher._direct_authority_digest(task, attempt, inputs),
+                "run_fingerprint": WorkBoardDispatcher._direct_run_fingerprint(task, attempt, inputs),
+            }
+            if digests != expected_digests:
+                raise DurableJobIdempotencyConflict("CPU evidence immutable admission digest changed")
         if _text(task.capability_id) == "engineering.repo-repair.v1":
             expected_authority = WorkBoardDispatcher._repo_repair_authority_payload(
                 task,
@@ -9075,9 +9601,13 @@ class WorkBoardDispatcher:
                 and not _text(projection.get("parent_run_identity"))
                 and not _text(projection.get("parent_job_id"))
             )
+        observation_completed = (
+            _text(authority.get("capability_id")) == "guardian.research-watch.v1"
+            and _status(result) in {"baseline_initialized", "rebaseline_required", "no_change"}
+        )
         if (
             _status(projection) != "succeeded"
-            or _status(result) not in {"succeeded", "completed"}
+            or (_status(result) not in {"succeeded", "completed"} and not observation_completed)
             or not lineage_ok
         ):
             return None
@@ -9461,6 +9991,7 @@ class WorkBoardDispatcher:
         block_reason: str | None = None,
         result_refs: Any = None,
         artifact_refs: Any = None,
+        reconciled_github_root: Mapping[str, Any] | None = None,
         lease_owner: str | None = None,
     ) -> BoardAttemptProjection:
         async with self.session_provider() as db:
@@ -9474,6 +10005,7 @@ class WorkBoardDispatcher:
                 status=status,
                 outcome=outcome,
                 verified_readback=dict(proof) if proof is not None else None,
+                reconciled_github_root=reconciled_github_root,
                 block_kind=block_kind,
                 block_reason=block_reason,
                 result_refs=result_refs,
@@ -9764,6 +10296,9 @@ class WorkBoardDispatcher:
             if status == "succeeded":
                 proof = self._workflow_readback(projection, workflow_run_id)
                 if proof is not None:
+                    if current.task.capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+                        await self._verify_cpu_completion(current.task, current.attempt,
+                            _parse_typed_input(current.task), projection, proof)
                     target = WorkBoardStatus.review if current.task.requires_review else WorkBoardStatus.done
                     await self._project(
                         current.task,
@@ -9802,6 +10337,13 @@ class WorkBoardDispatcher:
         if lookup is None:
             raise DurableJobError("durable_binding_lookup_unavailable")
         capability_id = _text(task.capability_id)
+        if capability_id == "browser.public-task.v1":
+            projection = await self.jobs.get_job(f"browser-task:{task.task_id}:{attempt.attempt_id}")
+            if not isinstance(projection, Mapping):
+                return None
+            expected = self._persisted_browser_identity(task, attempt, inputs, projection)
+            found = await lookup(**{key: expected[key] for key in ("owner_principal_id", "goal_id", "goal_revision", "idempotency_scope", "idempotency_key", "owner_kind", "service_id", "session_id", "operator_session_id", "job_kind", "capability_version", "input_digest", "authority_digest", "run_fingerprint")}, expected_job_id=expected["job_id"])
+            return expected["job_id"] if isinstance(found, Mapping) else None
         if capability_id == GOAL_SNAPSHOT_CAPABILITY:
             expected_job_id = f"work-board:{task.task_id}:{attempt.attempt_id}"
             owner_principal_id = DISPATCHER_PRINCIPAL
@@ -9818,7 +10360,7 @@ class WorkBoardDispatcher:
             expected_authority_digest = _safe_digest(spec.declared_authority)
             expected_run_fingerprint = spec.run_fingerprint
         else:
-            if capability_id in {"guardian-routine.v1", "engineering.repo-repair.v1"}:
+            if is_tool_package(capability_id) or capability_id in {"guardian-routine.v1", "engineering.repo-repair.v1", "calendar.meeting-prep.v1", "work.mail-reply-draft.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
                 # Routine invocation roots are already admitted and may be
                 # waiting on the operator approval boundary.  Re-entering
                 # RoutineService.invoke here (or rebuilding a repair Durable
@@ -9912,6 +10454,28 @@ class WorkBoardDispatcher:
             job_id = _text(attempt.workflow_run_id)
             if not job_id:
                 continue
+            if getattr(attempt, "ended_at", None) is not None:
+                # An explicit owning readback may settle an ended unknown
+                # GitHub attempt. This branch never prepares or executes work.
+                try:
+                    projection = await self.jobs.get_job(job_id)
+                    inputs = _parse_typed_input(task)
+                    expected = self._canonical_identity_from_projection(task, attempt, inputs, projection)
+                    bound = await self.jobs.get_by_idempotency_binding(
+                        expected_job_id=expected["job_id"],
+                        **{key: expected[key] for key in ("owner_principal_id", "owner_kind", "service_id", "goal_id", "goal_revision", "operator_session_id", "session_id", "job_kind", "capability_version", "idempotency_scope", "idempotency_key", "input_digest", "authority_digest", "run_fingerprint")})
+                    proof = self._workflow_readback(projection, job_id)
+                    if bound is None or _status(projection) != "succeeded" or proof is None:
+                        continue
+                    await self._project(task, attempt, board_revision=task.task_revision,
+                        status=WorkBoardStatus.review if task.requires_review else WorkBoardStatus.done,
+                        outcome="verified", proof=proof, reconciled_github_root=projection,
+                        result_refs=[{"job_id": job_id, "workflow_run_id": job_id, "status": "succeeded", "verified": True}],
+                        artifact_refs=projection.get("artifacts"))
+                    recovered.append(job_id)
+                except (BoardError, DurableJobError, ValueError, TypeError):
+                    logger.info("ended GitHub task %s retains its exact recovery block", task.task_id)
+                continue
             snapshot_revision: Any | None = None
             snapshot_fence: Any | None = None
             snapshot_owner: str = ""
@@ -9944,6 +10508,14 @@ class WorkBoardDispatcher:
                 )
                 snapshot_fence = snapshot_lease.get("fencing_token")
                 snapshot_owner = _text(snapshot_lease.get("owner"))
+
+                if is_tool_package(task.capability_id) and attempt.cancel_requested_at is None:
+                    from src.work_board.tool_package_native import live_original_owner
+                    if await live_original_owner(self.jobs,task,attempt):
+                        # A current native owner is still responsible for its
+                        # exact process. Deferral never adopts output, renews
+                        # authority or declares quiescence from a live lease.
+                        continue
 
                 # A linked row is recoverable only when the persisted durable
                 # admission still matches the exact per-capability root and
@@ -9989,6 +10561,10 @@ class WorkBoardDispatcher:
 
                 status = _status(projection)
                 effects = projection.get("effects") if isinstance(projection.get("effects"), list) else []
+                accounting_resume = False
+                if _text(task.capability_id) in {"calendar.meeting-prep.v1", "work.mail-reply-draft.v1"}:
+                    resume_check = getattr(self.jobs, "inference_precontact_resume_allowed", None)
+                    accounting_resume = bool(resume_check is not None and await resume_check(job_id))
                 unsafe_effect = status in {"unknown_external_effect", "cost_liability"} or any(
                     isinstance(effect, Mapping)
                     and _status(effect.get("status")) in {"unknown", "intent", "dispatched"}
@@ -10081,7 +10657,7 @@ class WorkBoardDispatcher:
                     and status == "queued"
                     and _repair_approval_resume_recovery_ready(projection)
                 )
-                if status in {"accepted", "queued"} and (not effects or repair_approval_resume):
+                if status in {"accepted", "queued"} and (not effects or repair_approval_resume or accounting_resume):
                     # The root was admitted before the process stopped. Resume
                     # its durable state under the same binding. Only the local
                     # deterministic GoalSnapshot worker is resumed here; the
@@ -10159,6 +10735,12 @@ class WorkBoardDispatcher:
                         # service only while the exact root is accepted or
                         # queued and its effect ledger is empty; this is the
                         # admission crash window and cannot replay an effect.
+                        if _text(task.capability_id) in {"calendar.meeting-prep.v1", "work.mail-reply-draft.v1"}:
+                            if status == "accepted":
+                                projection = await self.jobs.queue_job(job_id, expected_revision=projection.get("revision"))
+                            projection = await self.jobs.claim_job(job_id, owner=self.runner_id,
+                                lease_seconds=await self._effective_runtime(task), expected_state="queued",
+                                expected_revision=projection.get("revision"), expected_fencing_token=(projection.get("lease") or {}).get("fencing_token"))
                         adapter_result = await self._execute_direct_adapter(
                             task,
                             attempt,
@@ -10379,6 +10961,8 @@ class WorkBoardDispatcher:
                 if status == "succeeded":
                     proof = self._workflow_readback(projection, job_id)
                     if proof is not None:
+                        if task.capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+                            await self._verify_cpu_completion(task, attempt, inputs, projection, proof)
                         target = WorkBoardStatus.review if task.requires_review else WorkBoardStatus.done
                         await self._project(
                             task,
@@ -10522,6 +11106,15 @@ class WorkBoardDispatcher:
             if _text(effect.get("effect_type")) == "workflow_output":
                 continue
             details = effect.get("details") if isinstance(effect.get("details"), Mapping) else {}
+            # Fixed GitHub recovery also appends observation-only receipts.
+            # Their private artifact digest is not the canonical semantic
+            # effect proof used by the protected adoption receipt. Select the
+            # actual verified publication effect; the repository independently
+            # rechecks the persisted server READ-revision envelope.
+            if projection.get("job_kind") == "github_followthrough_v1" and (
+                effect.get("effect_type") != "github_publication" or details.get("verified") is not True
+            ):
+                continue
             # ``receipt_kind`` is the typed proof discriminator.  Details or
             # result booleans are intentionally ignored.
             if _text(effect.get("receipt_kind")) != "readback":

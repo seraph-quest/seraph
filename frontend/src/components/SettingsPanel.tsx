@@ -12,9 +12,15 @@ import { WorkflowPanel } from "./settings/WorkflowPanel";
 import { SourceWatchPanel } from "./settings/SourceWatchPanel";
 import { ArtifactStoragePanel } from "./settings/ArtifactStoragePanel";
 import { CalendarConnectionPanel } from "./settings/CalendarConnectionPanel";
+import { CalendarRescheduleProfiles } from "./settings/CalendarRescheduleProfiles";
+import { SelectedContextPairing } from "./settings/SelectedContextPairing";
+import { GitHubConnectionPanel } from "./settings/GitHubConnectionPanel";
+import { MoltbookConnectionPanel } from "./settings/MoltbookConnectionPanel";
+import { ForgejoTitlePanel } from "./settings/ForgejoTitlePanel";
 import { RepoSandboxPanel } from "./settings/RepoSandboxPanel";
 import { MailConnectionPanel } from "./settings/MailConnectionPanel";
 import { useOptionalOperatorAuth } from "./auth/OperatorAuthGate";
+import { appEventBus } from "../lib/appEventBus";
 
 interface SkillInfo {
   name: string;
@@ -137,7 +143,7 @@ interface McpServer {
   auth_hint: string;
 }
 
-type SettingsSection = "artifacts" | "general" | "native" | "repo-sandbox" | "policies" | "audit" | "workflows" | "guardian" | "calendar" | "mail" | "skills" | "discover" | "mcp";
+type SettingsSection = "artifacts" | "general" | "native" | "repo-sandbox" | "policies" | "audit" | "workflows" | "guardian" | "calendar" | "mail" | "github" | "moltbook" | "forgejo" | "skills" | "discover" | "mcp";
 
 const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string }> = [
   { id: "artifacts", label: "Screenshot/VLM" },
@@ -149,6 +155,9 @@ const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string }> = [
   { id: "workflows", label: "Workflows" },
   { id: "guardian", label: "Guardian" },
   { id: "calendar", label: "Calendar" },
+  { id: "github", label: "GitHub" },
+  { id: "moltbook", label: "Moltbook" },
+  { id: "forgejo", label: "Forgejo" },
   { id: "mail", label: "Mail" },
   { id: "skills", label: "Skills" },
   { id: "discover", label: "Discover" },
@@ -445,6 +454,17 @@ export function SettingsPanel() {
   const [installing, setInstalling] = useState<string | null>(null);
   const [configuringServer, setConfiguringServer] = useState<McpServer | null>(null);
   const [activeSection, setActiveSection] = useState<SettingsSection>("artifacts");
+  const accountingSessionRef = useRef(operatorAuth?.session);
+  accountingSessionRef.current = operatorAuth?.session;
+  useEffect(() => {
+    const inspectAccounting = (event: { principalId: string; sessionId: string }) => {
+      const session = accountingSessionRef.current;
+      if (!session || event.principalId !== session.principal_id || event.sessionId !== session.session_id || !(Date.parse(session.absolute_expires_at) > Date.now()) || !(Date.parse(session.idle_expires_at) > Date.now())) return;
+      setActiveSection("artifacts"); setSettingsPanelOpen(true);
+    };
+    appEventBus.on("settings:inspect-accounting", inspectAccounting);
+    return () => appEventBus.off("settings:inspect-accounting", inspectAccounting);
+  }, [setSettingsPanelOpen]);
   const wasOpenRef = useRef(false);
 
   useLayoutEffect(() => {
@@ -719,6 +739,7 @@ export function SettingsPanel() {
           {activeSection === "general" && <InterruptionModeToggle />}
 
           {activeSection === "native" && <DaemonStatus />}
+          {activeSection === "native" && <SelectedContextPairing ownerPrincipalId={operatorAuth?.session.principal_id} ownerSessionId={operatorAuth?.session.session_id}/>}
 
           {activeSection === "repo-sandbox" && <RepoSandboxPanel />}
 
@@ -738,6 +759,25 @@ export function SettingsPanel() {
 
           {activeSection === "calendar" && <CalendarConnectionPanel
             service="calendar_readonly"
+            ownerPrincipalId={operatorAuth?.session.principal_id ?? null}
+            ownerSessionId={operatorAuth?.session.session_id ?? null}
+          />}
+          {activeSection === "calendar" && <CalendarRescheduleProfiles
+            ownerPrincipalId={operatorAuth?.session.principal_id ?? null}
+            ownerSessionId={operatorAuth?.session.session_id ?? null}
+          />}
+
+          {activeSection === "github" && <GitHubConnectionPanel
+            ownerPrincipalId={operatorAuth?.session.principal_id ?? null}
+            ownerSessionId={operatorAuth?.session.session_id ?? null}
+          />}
+
+          {activeSection === "moltbook" && <MoltbookConnectionPanel
+            ownerPrincipalId={operatorAuth?.session.principal_id ?? null}
+            ownerSessionId={operatorAuth?.session.session_id ?? null}
+          />}
+
+          {activeSection === "forgejo" && <ForgejoTitlePanel
             ownerPrincipalId={operatorAuth?.session.principal_id ?? null}
             ownerSessionId={operatorAuth?.session.session_id ?? null}
           />}

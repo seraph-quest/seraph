@@ -2,11 +2,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
+import { RepoPublicationPanel } from "./RepoPublicationPanel";
 import type {
   RepoRepairExecutorKind,
   WorkBoardRepoRepairProjection,
   WorkBoardRepoRepairExecutorPosture,
   WorkBoardRepoRepairSourcePreview,
+  WorkBoardRepoRepairProcessCleanup,
 } from "../../types";
 
 interface RepoRepairInspectorProps {
@@ -66,6 +68,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 const REPO_REPAIR_EXECUTOR_KINDS: RepoRepairExecutorKind[] = ["local", "docker_rootless", "docker_rootful"];
 const REPO_SANDBOX_PROFILE = "repo-python-pytest-v1";
+const LOCAL_REPAIR_PROFILES = new Set([REPO_SANDBOX_PROFILE, "repo-node24-npm-v1", "repo-python-pytest-publication-v1"]);
 const LOCAL_HOST_ACCESS = "explicit_job_approval_required";
 
 const POSTURE_VALUES: Record<RepoRepairExecutorKind, {
@@ -140,7 +143,9 @@ function normalizeExecutorMetadata(payload: Record<string, unknown>): Pick<
   if (posture.kind !== undefined && posture.kind !== executorKind) {
     throw new Error("The repair status response has mismatched executor posture metadata.");
   }
-  if (posture.profile !== undefined && posture.profile !== REPO_SANDBOX_PROFILE) {
+  const selectedProfile = posture.profile ?? REPO_SANDBOX_PROFILE;
+  if (typeof selectedProfile !== "string"
+    || !(executorKind === "local" ? LOCAL_REPAIR_PROFILES.has(selectedProfile) : selectedProfile === REPO_SANDBOX_PROFILE)) {
     throw new Error("The repair status response has an unsupported executor profile.");
   }
   const imageDigest = posture.image_digest;
@@ -203,13 +208,28 @@ function normalizeExecutorMetadata(payload: Record<string, unknown>): Pick<
     ...(hostAccess === undefined ? {} : { host_access: hostAccess }),
     local_host_execution_required: effectiveLocalHost ?? executorKind === "local",
   };
+  if (posture.profile === "repo-node24-npm-v1") {
+    if (posture.execution_plan !== undefined) {
+      if (!isRecord(posture.execution_plan) || !Array.isArray(posture.execution_plan.commands) || posture.execution_plan.commands.length > 2) {
+        throw new Error("The Node repair execution plan is malformed.");
+      }
+      const commands = posture.execution_plan.commands;
+      if (commands.some((command) => !isRecord(command) || !["test", "build"].includes(String(command.script)) || typeof command.body !== "string" || command.body.length > 4096 || !Array.isArray(command.argv) || command.argv.length > 10 || command.argv.some((arg) => typeof arg !== "string" || arg.length > 512))) {
+        throw new Error("The Node repair command preview is malformed.");
+      }
+      postureValue.execution_plan = posture.execution_plan;
+    }
+    for (const key of ["node_version", "node_sha256", "npm_version", "dependency_limits", "process_supervision"]) {
+      postureValue[key] = posture[key];
+    }
+  }
   const optionalDigest = payload.executor_posture_digest;
   if (explicitExecutorKind
     ? (typeof optionalDigest !== "string" || !/^[0-9a-f]{64}$/.test(optionalDigest))
     : !isSafeDigest(optionalDigest)) {
     throw new Error("The repair status response has malformed posture digest metadata.");
   }
-  const expectedExecutorProfile = `${executorKind}:${REPO_SANDBOX_PROFILE}`;
+  const expectedExecutorProfile = `${executorKind}:${selectedProfile}`;
   if (explicitExecutorKind && payload.executor_profile !== expectedExecutorProfile) {
     throw new Error("The repair status response has an unsupported executor profile.");
   }
@@ -223,6 +243,12 @@ function normalizeExecutorMetadata(payload: Record<string, unknown>): Pick<
   };
   const preparationReady = readiness("preparation_ready");
   const executionReady = readiness("execution_ready");
+  if (selectedProfile === "repo-python-pytest-publication-v1" && preparationReady === true
+    && (posture.runtime_proof_available !== true
+      || typeof posture.publication_runtime_proof_sha256 !== "string"
+      || !/^[0-9a-f]{64}$/.test(posture.publication_runtime_proof_sha256))) {
+    throw new Error("The selected publication profile has no verified runtime proof.");
+  }
   if (explicitExecutorKind) {
     if (typeof payload.local_host_execution_required !== "boolean"
       || typeof preparationReady !== "boolean"
@@ -284,6 +310,38 @@ function isSafeNonNegativeInteger(value: unknown, maximum: number): value is num
 
 function isNullableBoundedString(value: unknown, maxBytes: number): value is string | null {
   return value === null || isBoundedString(value, maxBytes);
+}
+
+function normalizeProcessCleanup(
+  value: unknown,
+  projection: WorkBoardRepoRepairProjection,
+): WorkBoardRepoRepairProcessCleanup | null {
+  if (value === undefined || value === null) return null;
+  const fail = () => { throw new Error("The process cleanup receipt is malformed or belongs to another execution."); };
+  if (!isRecord(value)
+    || projection.status !== "unknown_external_effect"
+    || projection.executor_kind !== "local"
+    || projection.executor_posture?.profile !== "repo-node24-npm-v1") return fail();
+  const baseKeys = ["status", "physical_capacity_released", "cleanup_receipt_verified", "readback_scope"];
+  if (value.status === "held" || value.status === "unverified") {
+    if (Object.keys(value).some((key) => !baseKeys.includes(key))
+      || value.physical_capacity_released !== false || value.cleanup_receipt_verified !== false
+      || value.readback_scope !== null) return fail();
+    return { status: value.status, physical_capacity_released: false, cleanup_receipt_verified: false, readback_scope: null };
+  }
+  const releaseKeys = [...baseKeys, "job_id", "attempt_id", "fencing_token", "authority_digest", "process_cleanup_readback_sha256"];
+  if (value.status !== "released" || Object.keys(value).some((key) => !releaseKeys.includes(key))
+    || value.physical_capacity_released !== true || value.cleanup_receipt_verified !== true
+    || value.readback_scope !== "process_cleanup_only" || value.job_id !== projection.job_id
+    || !isBoundedString(value.job_id, 128) || !isBoundedString(value.attempt_id, 128)
+    || value.attempt_id !== projection.attempt_id || !isSafeNonNegativeInteger(value.fencing_token, Number.MAX_SAFE_INTEGER)
+    || value.fencing_token === 0 || !isSha256Digest(value.authority_digest)
+    || value.authority_digest !== projection.authority_digest || !isSha256Digest(value.process_cleanup_readback_sha256)) return fail();
+  return {
+    status: "released", physical_capacity_released: true, cleanup_receipt_verified: true, readback_scope: "process_cleanup_only",
+    job_id: value.job_id, attempt_id: value.attempt_id, fencing_token: value.fencing_token,
+    authority_digest: value.authority_digest, process_cleanup_readback_sha256: value.process_cleanup_readback_sha256,
+  };
 }
 
 class RepairRequestTimeout extends Error {
@@ -495,7 +553,9 @@ export function RepoRepairInspector({
     }
     ownerBindingRef.current = binding;
     const executorMetadata = normalizeExecutorMetadata(next as Record<string, unknown>);
-    return { ...(next as WorkBoardRepoRepairProjection), ...executorMetadata };
+    const normalized = { ...(next as WorkBoardRepoRepairProjection), ...executorMetadata };
+    if (!isRecord(normalized.execution)) throw new Error("The repair execution response is malformed.");
+    return { ...normalized, execution: { ...normalized.execution, process_cleanup: normalizeProcessCleanup(normalized.execution.process_cleanup, normalized) } };
   }
 
   async function readProjection(generation: number): Promise<WorkBoardRepoRepairProjection> {
@@ -801,6 +861,40 @@ export function RepoRepairInspector({
     }
   }
 
+  async function recoverProcessCleanup() {
+    const generation = generationRef.current;
+    const current = projection;
+    if (!hasCurrentBinding || !current || current.status !== "unknown_external_effect"
+      || current.executor_kind !== "local" || current.executor_posture?.profile !== "repo-node24-npm-v1"
+      || current.execution.process_cleanup?.physical_capacity_released === true) return;
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    let actionError: string | null = null;
+    try {
+      try {
+        const receipt = await requestJson(`${API_URL}/api/workflows/repo-change/${encodeURIComponent(jobId)}/recover`, { method: "POST" }, generation);
+        if (!isRecord(receipt) || receipt.status !== "unknown_external_effect") {
+          actionError = "Process cleanup remains unverified. Reconcile the original execution and refresh before another explicit recovery attempt.";
+        }
+      } catch (cause) {
+        if (cause instanceof StaleRepairRequest || !isCurrent(generation)) return;
+        actionError = `Recovery response uncertain or rejected: ${cause instanceof Error ? cause.message : "request unavailable"}. Refresh durable status before another explicit recovery attempt.`;
+      }
+      // A lost POST response cannot establish success. Only the safe durable
+      // GET can display released physical capacity; no resume or replay occurs.
+      const refreshed = await refresh(generation);
+      if (!isCurrent(generation)) return;
+      if (refreshed?.execution.process_cleanup?.physical_capacity_released === true) {
+        setNotice("Durable process cleanup verified. Physical capacity released; task, effect and cost liabilities remain Unknown.");
+      } else if (refreshed) {
+        setError(actionError ?? "Process cleanup has no durable verified release. Reconcile the original execution before another explicit recovery attempt.");
+      }
+    } finally {
+      if (isCurrent(generation)) setBusy(false);
+    }
+  }
+
   const projectionForRender = projection
     && hasCurrentBinding
     && projection.job_id === jobId
@@ -849,6 +943,8 @@ export function RepoRepairInspector({
     && ["awaiting_approval", "queued", "running"].includes(status),
   );
   const terminal = ["succeeded", "failed", "cancelled", "blocked", "unknown_external_effect", "cost_liability"].includes(status);
+  const processCleanup = projectionForRender.execution.process_cleanup;
+  const nodeCleanupRecovery = status === "unknown_external_effect" && executorKind === "local" && posture.profile === "repo-node24-npm-v1";
 
   return (
     <section className="rounded border border-cyan-400/30 bg-cyan-950/10 p-3" aria-label="Repository repair execution">
@@ -862,7 +958,7 @@ export function RepoRepairInspector({
       <div className="mt-2 grid gap-1 text-[11px]">
         <div>Root <span className="font-mono break-all">{projectionForRender.job_id}</span> · authority <span className="font-mono">{safeDigest(projectionForRender.authority_digest)}</span></div>
         <div>Executor: <span className="font-mono">{executorProfile}</span> · posture <span className="font-mono">{safeDigest(projectionForRender.executor_posture_digest)}</span></div>
-        <div>Preflight: {projectionForRender.preflight?.status === "verified" ? "verified" : `blocked or unknown${projectionForRender.preflight && typeof projectionForRender.preflight.reason === "string" ? ` · ${projectionForRender.preflight.reason}` : ""}`}</div>
+        {posture.profile === "repo-node24-npm-v1" ? <div>Recorded job preflight: {typeof projectionForRender.preflight?.status === "string" ? projectionForRender.preflight.status : "blocked"}</div> : <div>Preflight: {projectionForRender.preflight?.ok === true ? "verified" : `blocked or unknown${projectionForRender.preflight && typeof projectionForRender.preflight.reason === "string" ? ` · ${projectionForRender.preflight.reason}` : ""}`}</div>}
         <div>Preparation: {preparationReady ? "ready" : "blocked"} · execution: {executionReady ? "ready" : localHostExecution && preparationReady ? "awaiting exact host approval" : "blocked"}</div>
         <div>Posture: isolation {posture.isolation_claim ?? "unknown"} · network {posture.network_isolation ?? "unknown"} · resources {posture.resource_enforcement ?? "unknown"}</div>
         {localHostExecution && <div className="text-amber-200">Trusted host execution: no isolation guarantee. This job may access the host filesystem and network as the Seraph user after the exact approval.</div>}
@@ -907,6 +1003,15 @@ export function RepoRepairInspector({
           <div className="mt-1">Patch digest <span className="font-mono">{safeDigest(proposal.patch_sha256)}</span> · model profile {proposal.model_profile_id}</div>
           {approval && <div className="mt-1">Exact approval <span className="font-mono break-all">{approval.approval_id}</span> · {statusLabel(approval.status)}{approval.expires_at ? ` · expires ${new Date(approval.expires_at).toLocaleString()}` : ""}</div>}
           {localHostExecution && <div className="mt-1 text-amber-200">Host permission required: local filesystem and network access, host-user resource consumption, and bounded process execution are visible in the exact approval.</div>}
+          {posture.profile === "repo-node24-npm-v1" && <div className="mt-2" aria-label="Reviewed Node execution inputs">
+            <div>Node {String(posture.node_version ?? "unavailable")} · Linux process supervision · CPU, memory and PID ceilings unenforced.</div>
+            {isRecord(posture.execution_plan) && Array.isArray(posture.execution_plan.commands) && posture.execution_plan.commands.map((command) => isRecord(command) && <div key={String(command.script)} className="mt-1">
+              <div>{String(command.script)}: <code>{String(command.body)}</code></div>
+              <div className="font-mono break-all">Direct argv: {Array.isArray(command.argv) ? command.argv.join(" ") : "unavailable"}</div>
+            </div>)}
+            {isRecord(posture.execution_plan) && <div>Package {safeDigest(String(posture.execution_plan.package_sha256 ?? ""))} · lockfile {safeDigest(String(posture.execution_plan.lockfile_sha256 ?? ""))} · dependencies {safeDigest(String(posture.execution_plan.dependency_manifest_sha256 ?? ""))}</div>}
+            <div>npm and pre/post hooks are not executed. Existing dependencies are privately copied; no downloads.</div>
+          </div>}
           <div className="mt-2 flex flex-wrap gap-2">
             {approval?.status === "pending" && onOpenApprovals && <button type="button" className="cockpit-feedback-button" onClick={onOpenApprovals}>{localHostExecution ? "Approve local tests on this host" : "Review exact approval"}</button>}
             {approval?.status === "approved" && canResume && <button type="button" className="cockpit-feedback-button" onClick={() => void resumeApprovedProposal()} disabled={busy}>Resume approved repair</button>}
@@ -916,6 +1021,13 @@ export function RepoRepairInspector({
       )}
 
       <div className="mt-3 rounded border border-white/10 p-2">
+        {nodeCleanupRecovery && <div className="mb-3 rounded border border-amber-500/40 p-2" aria-label="Process cleanup recovery">
+          <div className="font-semibold">Process cleanup only</div>
+          <div className="mt-1">{processCleanup?.physical_capacity_released === true ? "Physical capacity released · durable cleanup receipt verified." : processCleanup?.status === "held" ? "Physical capacity held · process cleanup unverified." : "Physical capacity unverified · no verified process cleanup release."}</div>
+          <div className="mt-1">Task, effect and cost liabilities remain Unknown. Reconcile the exact sandbox effect before any retry.</div>
+          {processCleanup?.status === "released" && <div className="mt-1 text-[10px]">Original attempt {processCleanup.attempt_id} · fence {processCleanup.fencing_token} · cleanup digest {safeDigest(processCleanup.process_cleanup_readback_sha256)}</div>}
+          {processCleanup?.physical_capacity_released !== true && <button type="button" className="cockpit-feedback-button mt-2" onClick={() => void recoverProcessCleanup()} disabled={busy || loading}>Recover process cleanup</button>}
+        </div>}
         <div className="font-semibold">Sandbox readback</div>
         {projectionForRender.execution.readback ? (
           <div className="mt-1">{statusLabel(projectionForRender.execution.readback.status)} · {projectionForRender.execution.readback.verified ? "independently verified" : "verification unavailable"} · {projectionForRender.execution.readback.target_path ?? "target unavailable"}</div>
@@ -924,6 +1036,7 @@ export function RepoRepairInspector({
         {terminal && status !== "succeeded" && <div className="mt-2 rounded border border-amber-500/40 p-2" role="status">Recovery: {status === "unknown_external_effect" || status === "cost_liability" ? "reconcile the exact sandbox effect before any retry" : projectionForRender.recovery_action.replace(/_/g, " ")}.</div>}
       </div>
       {notice && <div className="mt-2 rounded border border-emerald-500/40 p-2" role="status">{notice}</div>}
+      {status === "succeeded" && hasCurrentBinding && ownerPrincipalId && ownerSessionId && <RepoPublicationPanel repair={projectionForRender} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} onOpenApprovals={onOpenApprovals} />}
       {error && <div className="mt-2 rounded border border-amber-500/40 p-2" role="alert">{error}</div>}
     </section>
   );

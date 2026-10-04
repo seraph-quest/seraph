@@ -4600,7 +4600,14 @@ def test_eval_inference_context_remains_fail_closed_without_principal():
             )
 
 
-def test_runtime_eval_scenarios_expose_expected_details():
+def test_runtime_eval_scenarios_expose_expected_details(monkeypatch):
+    # These deterministic scenarios intercept model transport and use literal
+    # test principals. Exercise bounded route/admission/trace behavior with the
+    # broker's isolated fixture mode; real #909 accounting is a separate proof.
+    from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
+    broker = RemoteInferenceAdmissionBroker(durable_accounting=False)
+    monkeypatch.setattr("src.llm_runtime.gpu_admission_broker", broker)
+    monkeypatch.setattr("src.model_fabric.execution.gpu_admission_broker", broker)
     summary = asyncio.run(
         run_runtime_evals(
             [

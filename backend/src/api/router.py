@@ -20,11 +20,15 @@ from src.api.goals import router as goals_router
 from src.api.guardian_inbox import router as guardian_inbox_router
 from src.api.mcp import router as mcp_router
 from src.api.memory import router as memory_router
+from src.api.moltbook import router as moltbook_router
+from src.api.forgejo import router as forgejo_router
+from src.api.task_evidence import router as task_evidence_router
 from src.api.model_fabric_settings import router as model_fabric_settings_router
 from src.api.nodes import router as nodes_router
 from src.api.operator import router as operator_router
 from src.api.profile import router as profile_router
 from src.api.sessions import router as sessions_router
+from src.api.selected_context import router as selected_context_router
 from src.api.observer import router as observer_router
 from src.api.settings import router as settings_router
 from src.api.skills import router as skills_router
@@ -55,6 +59,7 @@ api_router.include_router(chat_router, prefix="/api", tags=["chat"])
 api_router.include_router(extensions_router, prefix="/api", tags=["extensions"])
 api_router.include_router(evolution_router, prefix="/api", tags=["evolution"])
 api_router.include_router(sessions_router, prefix="/api", tags=["sessions"])
+api_router.include_router(selected_context_router, prefix="/api", tags=["selected-context"])
 api_router.include_router(goals_router, prefix="/api", tags=["goals"])
 api_router.include_router(guardian_inbox_router, prefix="/api", tags=["guardian-inbox"])
 api_router.include_router(profile_router, prefix="/api", tags=["profile"])
@@ -62,6 +67,9 @@ api_router.include_router(tools_router, prefix="/api", tags=["tools"])
 api_router.include_router(telegram_router, prefix="/api", tags=["telegram"])
 api_router.include_router(mcp_router, prefix="/api", tags=["mcp"])
 api_router.include_router(memory_router, prefix="/api", tags=["memory"])
+api_router.include_router(moltbook_router, prefix="/api", tags=["moltbook"])
+api_router.include_router(forgejo_router, prefix="/api", tags=["forgejo"])
+api_router.include_router(task_evidence_router, prefix="/api", tags=["task-evidence"])
 api_router.include_router(model_fabric_settings_router, prefix="/api", tags=["settings"])
 api_router.include_router(nodes_router, prefix="/api", tags=["nodes"])
 api_router.include_router(operator_router, prefix="/api", tags=["operator"])

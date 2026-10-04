@@ -22,6 +22,16 @@ describe("SourceWatchForm", () => {
     vi.restoreAllMocks();
   });
 
+  it("labels manual-only and paused schedules as disabled", async () => {
+    fetchMock.mockResolvedValue(response([
+      { id: "manual", goal_id: "goal-1", goal_revision: 1, plan_revision: 1, state: "active", write_mode: "approval_each_run", schedule: { cron: "0 8 * * *", timezone: "UTC", enabled: false, configured_enabled: false } },
+      { id: "paused", goal_id: "goal-1", goal_revision: 1, plan_revision: 1, state: "paused", write_mode: "approval_each_run", schedule: { cron: "0 8 * * *", timezone: "UTC", enabled: false, configured_enabled: true } },
+    ]));
+    render(<SourceWatchForm goal={{ id: "goal-1", title: "Goal", revision: 1 }} />);
+    expect(await screen.findByText(/manual only · scheduler disabled/)).toBeInTheDocument();
+    expect(screen.getByText(/schedule paused · scheduler disabled/)).toBeInTheDocument();
+  });
+
   it("loads the owner watches and creates a bounded HTTPS watch for the active goal", async () => {
     fetchMock
       .mockResolvedValueOnce(response([]))

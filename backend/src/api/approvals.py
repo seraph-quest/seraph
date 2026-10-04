@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel, ConfigDict, Field
 import json
 
 from src.approval.repository import approval_repository
@@ -299,7 +300,13 @@ async def approve_request(approval_id: str, request: Request):
     if pending is None:
         raise HTTPException(status_code=404, detail="Approval request not found")
     details = _require_approval_owner(request, pending, operator)
-    request = await approval_repository.resolve(approval_id, "approved")
+    from src.approval.repository import approval_decision_digest
+    try:
+        request = await approval_repository.resolve_exact(approval_id, "approved",
+            expected_digest=approval_decision_digest(pending),
+            owner_principal_id=operator.principal.principal_id, operator_session_id=operator.session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail={"code": "approval_binding_changed"}) from exc
     if request is None:
         raise HTTPException(status_code=404, detail="Approval request not found")
     if request.status != "approved":
@@ -349,7 +356,13 @@ async def deny_request(approval_id: str, request: Request):
     if pending is None:
         raise HTTPException(status_code=404, detail="Approval request not found")
     _require_approval_owner(request, pending, operator)
-    request = await approval_repository.resolve(approval_id, "denied")
+    from src.approval.repository import approval_decision_digest
+    try:
+        request = await approval_repository.resolve_exact(approval_id, "denied",
+            expected_digest=approval_decision_digest(pending),
+            owner_principal_id=operator.principal.principal_id, operator_session_id=operator.session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail={"code": "approval_binding_changed"}) from exc
     if request is None:
         raise HTTPException(status_code=404, detail="Approval request not found")
     if request.status != "denied":
@@ -382,3 +395,24 @@ async def deny_request(approval_id: str, request: Request):
         "causation_id": getattr(request, "causation_id", None),
         "attachment_refs": _approval_attachment_refs(request),
     }
+
+
+class ApprovalRevokeRequest(BaseModel):
+    model_config=ConfigDict(extra="forbid")
+    expected_revision: int = Field(ge=1)
+
+@router.post("/approvals/{approval_id}/revoke")
+async def revoke_unconsumed_approval(approval_id: str, body: ApprovalRevokeRequest, request: Request):
+    operator=_require_approval_operator(request)
+    row=await approval_repository.get(approval_id)
+    if row is None:
+        raise HTTPException(404,detail={"code":"approval_not_found"})
+    _require_approval_owner(request,row,operator)
+    try:
+        outcome=await approval_repository.revoke_unconsumed(approval_id,expected_revision=body.expected_revision,
+            owner_principal_id=operator.principal.principal_id,operator_session_id=operator.session_id)
+    except LookupError as exc:
+        raise HTTPException(404,detail={"code":"approval_not_found"}) from exc
+    except ValueError as exc:
+        raise HTTPException(409,detail={"code":"approval_revision_stale"}) from exc
+    return {"approval_id":approval_id,"outcome":outcome,"effect_revocation":"not_confirmed","no_learning":True}

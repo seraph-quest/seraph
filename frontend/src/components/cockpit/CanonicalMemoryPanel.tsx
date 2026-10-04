@@ -307,7 +307,8 @@ export function CanonicalMemoryPanel({ active = true, onOpenTask, onInspectLink,
                 <button type="button" onClick={() => onOpenTask(selected.safe_provenance.source_task_id as string)}>Open Work Board memory review</button>
               ) : null}
               {selected.tombstone ? <p className="cockpit-section-notice">This record is tombstoned and cannot be revived from this panel.</p> : null}
-              <div className="canonical-memory-controls">
+              {selected.ownership_access === "recovered_read_only" && <p className="cockpit-section-notice">Recovered original · read only. Previous permissions stay blocked; create and review fresh current-scope intent separately.</p>}
+              <fieldset className="canonical-memory-controls" disabled={selected.ownership_access === "recovered_read_only"}>
                 <label>Reason<input aria-label="Memory control reason" value={reason} maxLength={500} onChange={(event) => setReason(event.target.value)} /></label>
                 <div className="source-watch-actions">
                   <button type="button" onClick={() => void runControl("pin")}>Pin</button>
@@ -328,7 +329,7 @@ export function CanonicalMemoryPanel({ active = true, onOpenTask, onInspectLink,
                 </label>
                 <button type="button" onClick={() => void deleteExport()}>Delete/export record</button>
                 {onOpenMemoryControls ? <button type="button" onClick={onOpenMemoryControls}>Open acknowledged memory controls</button> : null}
-              </div>
+              </fieldset>
             </>
           )}
         </aside>

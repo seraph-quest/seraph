@@ -1,6 +1,7 @@
 """Tests for vault agent tools (src/tools/vault_tools.py)."""
 
 from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,6 +12,7 @@ def mock_vault_deps():
     with patch("src.tools.vault_tools.vault_repository") as mock_repo, \
          patch("src.tools.vault_tools.audit_repository") as mock_audit, \
          patch("src.tools.vault_tools.get_current_session_id", return_value="s1"), \
+         patch("src.tools.vault_tools.get_current_trust_principal", return_value=SimpleNamespace(principal_id="operator:root:test-owner", authenticated=True, revoked=False)), \
          patch("src.tools.vault_tools.get_current_tool_policy_mode", return_value="full"):
         mock_audit.log_event = AsyncMock()
         yield mock_repo, mock_audit

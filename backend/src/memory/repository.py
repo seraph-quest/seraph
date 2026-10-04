@@ -374,11 +374,11 @@ _M5_ROLLBACK_BINDING_SCHEMA_VERSION = "work-board-m5-rollback-binding.v2"
 _M5_SELECTION_BINDING_SCHEMA_VERSION = "work-board-m5-selection-binding.v3"
 
 
-def _m5_rollback_binding_key_id() -> str:
+def _m5_rollback_binding_key_id(*, _signing_key: bytes | None = None) -> str:
     """Return a non-secret identifier for the active rollback signing key."""
 
     return hashlib.sha256(
-        b"seraph-m5-rollback-key-id-v1:" + _effect_mac_key()
+        b"seraph-m5-rollback-key-id-v1:" + (_effect_mac_key() if _signing_key is None else _signing_key)
     ).hexdigest()[:24]
 
 
@@ -391,6 +391,7 @@ def _m5_rollback_binding_mac(
     owner_session_id: str,
     rollback_at: datetime | str,
     rollback_reason: str,
+    _signing_key: bytes | None = None,
 ) -> str:
     """Authenticate one operator rollback marker with existing server key material."""
 
@@ -410,7 +411,7 @@ def _m5_rollback_binding_mac(
         "owner_session_id": str(owner_session_id or "").strip(),
         "rollback_at": normalized_rollback_at,
         "rollback_reason": str(rollback_reason or "")[:500],
-        "key_id": _m5_rollback_binding_key_id(),
+        "key_id": _m5_rollback_binding_key_id(_signing_key=_signing_key),
     }
     if (
         not values["memory_id"]
@@ -426,7 +427,7 @@ def _m5_rollback_binding_mac(
             "version": _M5_ROLLBACK_BINDING_SCHEMA_VERSION,
             "rollback": values,
         },
-        key=_effect_mac_key(),
+        key=_effect_mac_key() if _signing_key is None else _signing_key,
     )
 def _m5_selection_scope(value: Any) -> dict[str, Any] | None:
     """Project the selection fields bound into an accepted M5 memory.
@@ -437,6 +438,30 @@ def _m5_selection_scope(value: Any) -> dict[str, Any] | None:
     malformed canonical projection fails closed.
     """
 
+    if isinstance(value, dict) and value.get("schema_version") == "procedure_preference.v1":
+        # This fixed schema authenticates an exact reviewed version and its
+        # COMPLETE outcome set. Extra JSON fields never silently become a
+        # signed preference. Ordinary M5 scope bytes remain unchanged below.
+        identities = ("owner_principal_id", "owner_session_id", "goal_id",
+            "routine_id", "version_id", "template_id")
+        revisions = ("goal_revision", "routine_revision", "version")
+        digests = ("source_context_digest", "plan_digest", "package_digest",
+            "copied_input_digest", "membership_digest", "bundle_digest")
+        expected = {"schema_version", "source_task_ids", *identities, *revisions, *digests}
+        if set(value) != expected or value.get("template_id") != "public-browser-check":
+            return None
+        if any(type(value[k]) is not str or not value[k] or len(value[k]) > 256 for k in identities):
+            return None
+        if any(type(value[k]) is not int or value[k] < 1 for k in revisions):
+            return None
+        if any(type(value[k]) is not str or not re.fullmatch(r"[a-f0-9]{64}", value[k]) for k in digests):
+            return None
+        ids = value["source_task_ids"]
+        if (not isinstance(ids, list) or not 1 <= len(ids) <= 20
+            or any(type(i) is not str or not i or len(i) > 256 for i in ids)
+            or ids != sorted(set(ids))):
+            return None
+        return {k: list(value[k]) if k == "source_task_ids" else value[k] for k in sorted(expected)}
     if not isinstance(value, dict) or value.get("schema_version") != _M5_SCOPE_SCHEMA_VERSION:
         return None
     required = {
@@ -566,10 +591,11 @@ def _m5_verified_source_binding(value: Any) -> dict[str, Any] | None:
     return normalized
 
 
-def _m5_selection_binding_key_id() -> str:
+def _m5_selection_binding_key_id(*, _signing_key: bytes | None = None) -> str:
     """Return a non-secret identifier for the active M5 signing key."""
 
-    return hashlib.sha256(b"seraph-m5-selection-key-id-v1:" + _effect_mac_key()).hexdigest()[:24]
+    key = _effect_mac_key() if _signing_key is None else _signing_key
+    return hashlib.sha256(b"seraph-m5-selection-key-id-v1:" + key).hexdigest()[:24]
 
 
 def _m5_selection_binding_mac(
@@ -589,6 +615,7 @@ def _m5_selection_binding_mac(
     lifecycle_state: str = "active",
     lifecycle_at: str | None = None,
     lifecycle_reason: str | None = None,
+    _signing_key: bytes | None = None,
 ) -> str:
     """Authenticate the accepted M5 selection with existing server key material."""
 
@@ -650,7 +677,7 @@ def _m5_selection_binding_mac(
             raise ValueError("M5 rollback lifecycle metadata is invalid")
         payload["lifecycle_at"] = normalized_lifecycle_at
         payload["lifecycle_reason"] = normalized_lifecycle_reason
-    return _mac(payload, key=_effect_mac_key())
+    return _mac(payload, key=_effect_mac_key() if _signing_key is None else _signing_key)
 
 
 def _m5_selection_binding_matches(
@@ -663,6 +690,7 @@ def _m5_selection_binding_matches(
     source_binding: Any,
     corrects_memory_id: str | None = None,
     recovered_from_proposal_id: str | None = None,
+    _signing_key: bytes | None = None,
 ) -> bool:
     """Confirm that an accepted proposal still matches canonical memory.
 
@@ -715,7 +743,7 @@ def _m5_selection_binding_matches(
     if expected_correction_id and canonical_correction["corrected_memory_previous_status"] != "active":
         return False
     try:
-        active_key_id = _m5_selection_binding_key_id()
+        active_key_id = _m5_selection_binding_key_id(_signing_key=_signing_key)
         stored_key_id = provenance.get("selection_binding_key_id")
         if not hmac.compare_digest(
             stored_key_id if isinstance(stored_key_id, str) else "", active_key_id
@@ -737,6 +765,7 @@ def _m5_selection_binding_matches(
             ],
             recovered_from_proposal_id=canonical_recovery_parent,
             lifecycle_state="active",
+            _signing_key=_signing_key,
         )
     except (CapabilityJournalError, TypeError, ValueError):
         return False
@@ -2238,6 +2267,7 @@ def _memory_record_scope_statement(
     kind: MemoryKind | str | None = None,
     status: MemoryStatus | str | None = MemoryStatus.active,
     cursor: tuple[datetime, str] | None = None,
+    recovered_read_scopes: dict[str, str] | None = None,
 ):
     """Build the owner-fenced SQL scope used by both record reads.
 
@@ -2254,8 +2284,9 @@ def _memory_record_scope_statement(
     if normalized_query is not None and len(normalized_query) > _MEMORY_RECORD_QUERY_MAX_LENGTH:
         raise ValueError("q must be at most 200 characters")
 
+    from src.auth.ownership import read_scope_clause
     conditions = [
-        Memory.source_session_id == normalized_owner,
+        read_scope_clause(Memory.id, Memory.source_session_id, normalized_owner, recovered_read_scopes or {}),
         _canonical_memory_without_tombstone_clause(),
         _canonical_memory_without_deletion_marker_clause(),
         *([Memory.status == normalized_status] if normalized_status is not None else []),
@@ -3430,6 +3461,7 @@ class MemoryRepository:
         expected_content_digest: str,
         expected_proposal_id: str,
         rollback_reason: str,
+        _signing_key: bytes | None = None,
     ) -> Memory:
         """Conditionally suppress an M5 memory inside its caller transaction."""
 
@@ -3454,7 +3486,7 @@ class MemoryRepository:
         if correction_binding is None:
             raise ValueError("correction_target_binding_invalid")
         try:
-            _m5_selection_binding_key_id()
+            _m5_selection_binding_key_id(_signing_key=_signing_key)
         except CapabilityJournalError:
             # A rollback of a memory without a correction target is still a
             # canonical operator action when the selection-MAC key is down.
@@ -3472,6 +3504,7 @@ class MemoryRepository:
                 source_binding=provenance.get("verified_source_binding"),
                 corrects_memory_id=correction_binding["corrects_memory_id"],
                 recovered_from_proposal_id=provenance.get("recovered_from_proposal_id"),
+                _signing_key=_signing_key,
             ):
                 raise ValueError("correction_target_binding_mismatch")
         normalized_rollback_reason = str(rollback_reason or "").strip()
@@ -3539,7 +3572,7 @@ class MemoryRepository:
         provenance["lifecycle_at"] = rollback_at_value
         provenance["lifecycle_reason"] = normalized_rollback_reason
         try:
-            provenance["selection_binding_key_id"] = _m5_selection_binding_key_id()
+            provenance["selection_binding_key_id"] = _m5_selection_binding_key_id(_signing_key=_signing_key)
             provenance["selection_binding_mac"] = _m5_selection_binding_mac(
                 proposal_id=str(provenance.get("proposal_id") or ""),
                 accepted_content_digest=actual_digest,
@@ -3557,6 +3590,7 @@ class MemoryRepository:
                     "corrected_memory_content_digest"
                 ],
                 recovered_from_proposal_id=provenance.get("recovered_from_proposal_id"),
+                _signing_key=_signing_key,
                 lifecycle_state="rolled_back",
                 lifecycle_at=rollback_at_value,
                 lifecycle_reason=normalized_rollback_reason,
@@ -3590,7 +3624,7 @@ class MemoryRepository:
                 # the canonical timestamp above is the field covered by the
                 # MAC.
                 "at": rollback_at_value,
-                "key_id": _m5_rollback_binding_key_id(),
+                "key_id": _m5_rollback_binding_key_id(_signing_key=_signing_key),
             }
             signed_rollback_marker["binding_mac"] = _m5_rollback_binding_mac(
                 memory_id=memory.id,
@@ -3600,6 +3634,7 @@ class MemoryRepository:
                 owner_session_id=owner_session_id,
                 rollback_at=rollback_at_value,
                 rollback_reason=normalized_rollback_reason,
+                _signing_key=_signing_key,
             )
         except (CapabilityJournalError, TypeError, ValueError):
             signed_rollback_marker = None
@@ -3643,6 +3678,7 @@ class MemoryRepository:
                         MemoryProposal.goal_revision == int(goal_revision),
                         MemoryProposal.source_context_digest == source_context_digest,
                         MemoryProposal.status == MemoryProposalStatus.accepted,
+                        MemoryProposal.schema_version != "procedure_recommendation.v1",
                     )
                     .order_by(MemoryProposal.proposal_id.asc())
                     .limit(max(1, min(int(limit), 3)))
@@ -4864,6 +4900,7 @@ class MemoryRepository:
         query: str | None = None,
         kind: MemoryKind | str | None = None,
         status: MemoryStatus | str = MemoryStatus.active,
+        recovered_read_scopes: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Return an authenticated owner's metadata-first memory page.
 
@@ -4885,6 +4922,7 @@ class MemoryRepository:
             query=normalized_query,
             kind=kind,
             status=status,
+            recovered_read_scopes=recovered_read_scopes,
         )
 
         async with get_session() as db:
@@ -4913,6 +4951,7 @@ class MemoryRepository:
                     kind=kind,
                     status=status,
                     cursor=scan_cursor,
+                    recovered_read_scopes=recovered_read_scopes,
                 ).options(
                     defer(Memory.content),
                     defer(Memory.summary),
@@ -4950,14 +4989,15 @@ class MemoryRepository:
             has_next = len(visible_rows) > normalized_limit or scan_truncated
             page_rows = visible_rows[:normalized_limit]
             source_by_memory: dict[str, list[MemorySource]] = {}
+            truncated_memory_ids = set()
             if page_rows:
-                source_by_memory, truncated_memory_ids = await _load_memory_record_sources(
-                    db,
-                    memory_ids=[memory.id for memory in page_rows],
-                    owner_session_id=str(owner_session_id).strip(),
-                )
-            else:
-                truncated_memory_ids = set()
+                for source_owner in {str(memory.source_session_id) for memory in page_rows}:
+                    sources, truncated = await _load_memory_record_sources(
+                        db, memory_ids=[memory.id for memory in page_rows if memory.source_session_id == source_owner],
+                        owner_session_id=source_owner,
+                    )
+                    source_by_memory.update(sources)
+                    truncated_memory_ids.update(truncated)
             summary_previews = await _load_memory_record_previews(
                 db,
                 memory_ids=[memory.id for memory in page_rows],
@@ -4968,7 +5008,7 @@ class MemoryRepository:
                 await _memory_record_projection(
                     db,
                     memory,
-                    owner_session_id=str(owner_session_id).strip(),
+                    owner_session_id=str(memory.source_session_id).strip(),
                     sources=source_by_memory.get(memory.id, []),
                     sources_truncated=memory.id in truncated_memory_ids,
                     summary_preview=summary_previews.get(memory.id, (None, False)),
@@ -4976,6 +5016,11 @@ class MemoryRepository:
                 )
                 for memory in page_rows
             ]
+            if recovered_read_scopes:
+                from src.auth.ownership import RECOVERED_FIELDS
+                for record in records:
+                    if record["id"] in recovered_read_scopes:
+                        record.update(RECOVERED_FIELDS)
             next_cursor = None
             if has_next and page_rows:
                 if scan_truncated and last_scanned_cursor is not None:

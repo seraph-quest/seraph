@@ -363,9 +363,24 @@ class WorkBoardProposalRequest(WorkBoardBaseModel):
         return _safe_opaque_identifier(value, field_name="idempotency_key") or ""
 
 
+class WorkBoardSpecificationEvidenceReplacement(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    expected_packet_revision: int = Field(ge=1)
+    expected_packet_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    acknowledge_execution_use: bool
+
+    @field_validator("acknowledge_execution_use")
+    @classmethod
+    def require_explicit_execution_use(cls, value: bool) -> bool:
+        if value is not True:
+            raise ValueError("Explicit execution-use acknowledgment is required")
+        return value
+
+
 class WorkBoardProposalAccept(WorkBoardBaseModel):
     expected_proposal_revision: int = Field(ge=1)
     expected_parent_revision: int = Field(ge=1)
+    execution_replacement: WorkBoardSpecificationEvidenceReplacement | None = None
 
 
 class WorkBoardProposalReject(WorkBoardBaseModel):

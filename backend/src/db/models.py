@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import Boolean, Column, Index, Integer, Text, UniqueConstraint, text
+from sqlalchemy import Boolean, CheckConstraint, Column, Index, Integer, Text, UniqueConstraint, text
 from sqlmodel import Field, SQLModel, Relationship
 
 
@@ -445,6 +445,54 @@ class CalendarReadConsent(SQLModel, table=True):
     consent_digest: str = Field(default="", index=True, max_length=128)
     created_at: datetime = Field(default_factory=_now, index=True)
     updated_at: datetime = Field(default_factory=_now, index=True)
+
+
+class CalendarRescheduleConsent(SQLModel, table=True):
+    """Finite exact write permission; never execution or effect authority.
+
+    Expired active grants deliberately retain their unique slot until an
+    explicit local revoke. No readonly grant is automatically promoted.
+    """
+
+    __tablename__ = "calendar_reschedule_consents"
+    __table_args__ = (
+        UniqueConstraint("owner_principal_id", "original_root_session_id", "creation_request_uuid",
+            name="ux_calendar_reschedule_consent_request"),
+        Index("ux_calendar_reschedule_active_grant", "owner_principal_id", "original_root_session_id", "event_binding_id",
+            unique=True, sqlite_where=text("state = 'active'"), postgresql_where=text("state = 'active'")),
+        CheckConstraint("state IN ('active', 'revoked')", name="ck_calendar_reschedule_consent_state"),
+        CheckConstraint("revision > 0 AND goal_revision > 0 AND event_binding_revision > 0 AND read_connection_revision > 0 AND write_connection_revision > 0", name="ck_calendar_reschedule_consent_revisions"),
+    )
+
+    consent_id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_principal_id: str = Field(index=True)
+    original_root_session_id: str = Field(index=True)
+    goal_id: str = Field(index=True)
+    goal_revision: int
+    read_connection_id: str = Field(index=True)
+    read_connection_revision: int
+    write_connection_id: str = Field(index=True)
+    write_connection_revision: int
+    profile_binding_digest: str = Field(max_length=64)
+    account_identity_digest: str = Field(max_length=64)
+    selected_calendar_id_private: str = Field(sa_type=Text)
+    selected_calendar_digest: str = Field(max_length=64)
+    event_binding_id: str = Field(index=True)
+    event_binding_revision: int
+    event_identity_digest: str = Field(max_length=128)
+    owned_event_read_allowed: bool = Field(default=False)
+    calendar_list_metadata_read_allowed: bool = Field(default=False)
+    one_conditional_reschedule_allowed: bool = Field(default=False)
+    expires_at: datetime = Field(index=True)
+    state: str = Field(default="active", index=True)
+    revision: int = Field(default=1)
+    creation_request_uuid: str = Field(max_length=36)
+    creation_request_digest: str = Field(max_length=64)
+    consent_digest: str = Field(max_length=64)
+    revocation_request_uuid: Optional[str] = Field(default=None, max_length=36)
+    revocation_request_digest: Optional[str] = Field(default=None, max_length=64)
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
 
 
 class MailLabelBinding(SQLModel, table=True):
@@ -930,6 +978,14 @@ class GitHubFollowthroughConnection(SQLModel, table=True):
     mode: str = Field(default="disabled", index=True)
     active_job_id: Optional[str] = Field(default=None, index=True)
     active_fence: Optional[int] = Field(default=None, index=True)
+    consent_id: Optional[str] = Field(default=None)
+    consent_owner_session_id: Optional[str] = Field(default=None)
+    consent_actions_json: Optional[str] = Field(default=None)
+    consent_issued_at: Optional[datetime] = Field(default=None)
+    consent_expires_at: Optional[datetime] = Field(default=None)
+    consent_connection_revision: Optional[int] = Field(default=None)
+    consent_payload_digest: Optional[str] = Field(default=None)
+    consent_revoked_at: Optional[datetime] = Field(default=None)
     created_at: datetime = Field(default_factory=_now, index=True)
     updated_at: datetime = Field(default_factory=_now, index=True)
 
@@ -1201,6 +1257,10 @@ class WorkBoardTask(SQLModel, table=True):
     # authority for state/digest; this opaque pointer makes owner-scoped task
     # projections and the task/artifact CAS cheap without exposing input bytes.
     input_artifact_id: Optional[str] = Field(default=None, index=True)
+    # Metadata-only reviewed proposal binding; the task and durable native
+    # job remain execution authority, never the proposal itself.
+    pipeline_operation_id: Optional[str] = Field(default=None, index=True)
+    pipeline_slot: Optional[str] = Field(default=None, index=True)
     typed_input_ref: Optional[str] = Field(default=None, index=True)
     typed_input_digest: Optional[str] = Field(default=None, index=True)
     executor_id: Optional[str] = Field(default=None, index=True)
@@ -1294,6 +1354,10 @@ class WorkBoardInputArtifact(SQLModel, table=True):
     consumed_at: Optional[datetime] = Field(default=None, index=True)
     revision: int = Field(default=1, index=True)
     metadata_digest: Optional[str] = Field(default=None, index=True)
+    # ADR017 private pair reservation/quota/generation metadata. Source bytes
+    # remain encrypted files; this is the existing canonical owner row.
+    document_metadata_json: Optional[str] = Field(default=None)
+    document_reserved_bytes: int = Field(default=0)
 
 
 class RepoRepairSourcePacket(SQLModel, table=True):
@@ -1572,6 +1636,10 @@ class WorkBoardEvent(SQLModel, table=True):
     """Append-only safe metadata event with a global monotonic cursor."""
 
     __tablename__ = "work_board_events"
+    __table_args__ = (
+        Index("ux_work_board_events_mutation_key", "owner_principal_id",
+              "owner_session_id", "mutation_idempotency_key", unique=True),
+    )
 
     event_id: Optional[int] = Field(
         default=None,
@@ -1584,7 +1652,45 @@ class WorkBoardEvent(SQLModel, table=True):
     actor_session_id: Optional[str] = Field(default=None, index=True)
     kind: str = Field(index=True)
     metadata_json: str = Field(default="{}")
+    # Ordinary historical events keep NULL. Explicit evidence mutations bind
+    # a canonical UUID and complete request digest in this same immutable row.
+    mutation_idempotency_key: Optional[str] = Field(default=None, max_length=36)
+    mutation_request_digest: Optional[str] = Field(default=None, max_length=64)
     created_at: datetime = Field(default_factory=_now, index=True)
+
+
+class WorkBoardEvidenceDependency(SQLModel, table=True):
+    """Active exact source/span execution preconditions, never fact text.
+
+    Replacement/revocation removes rows in the task CAS. Prior bounded token
+    metadata remains only in immutable WorkBoardEvent history.
+    """
+
+    __tablename__ = "work_board_evidence_dependencies"
+    __table_args__ = (
+        UniqueConstraint("task_id", "source_kind", "canonical_source_id", "span_digest",
+                         name="ux_work_board_evidence_task_source_span"),
+        Index("ix_work_board_evidence_owner_source", "owner_principal_id",
+              "owner_session_id", "source_kind", "canonical_source_id", "task_id"),
+    )
+
+    dependency_id: str = Field(default_factory=_uuid, primary_key=True)
+    task_id: str = Field(foreign_key="work_board_tasks.task_id", index=True)
+    owner_principal_id: str = Field(index=True)
+    owner_session_id: str = Field(index=True)
+    goal_id: str = Field(index=True)
+    source_kind: str = Field(max_length=64)
+    canonical_source_id: str = Field(max_length=256)
+    source_id: str = Field(max_length=64)
+    source_digest: str = Field(max_length=64)
+    span_digest: str = Field(max_length=64)
+    resolved_token_json: str = Field(max_length=8192)
+    packet_revision: int = Field(ge=1)
+    packet_digest: str = Field(max_length=64)
+    binding_task_revision: int = Field(ge=1)
+    executor_input_digest: str = Field(max_length=64)
+    pipeline_operation_id: Optional[str] = Field(default=None, max_length=256)
+    pipeline_slot: Optional[str] = Field(default=None, max_length=256)
 
 
 class WorkBoardProposal(SQLModel, table=True):
@@ -1634,6 +1740,8 @@ class WorkBoardProposal(SQLModel, table=True):
     status: str = Field(default="pending_inference", index=True)
     proposal_json: str = Field(default="{}")
     proposal_digest: str = Field(default="", index=True)
+    # Server-resolved text-free actually used evidence; NULL is historical.
+    evidence_use_snapshot_json: Optional[str] = Field(default=None)
     estimated_cost: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=_now, index=True)
     expires_at: datetime = Field(index=True)
@@ -1679,6 +1787,10 @@ class WorkBoardHandoff(SQLModel, table=True):
 class WorkflowRunState(SQLModel, table=True):
     __tablename__ = "workflow_run_states"
     __table_args__ = (
+        Index("ix_workflow_run_states_source_task", "job_kind", "owner_principal_id",
+            "operator_session_id", "source_task_id"),
+        Index("ix_workflow_run_states_selected_context_quota", "job_kind", "owner_principal_id",
+            "selected_context_reserved_bytes"),
         Index(
             "ux_workflow_run_states_idempotency_binding",
             "idempotency_binding",
@@ -1727,6 +1839,11 @@ class WorkflowRunState(SQLModel, table=True):
     goal_revision: Optional[int] = Field(default=None, index=True)
     plan_revision: Optional[int] = Field(default=None, index=True)
     candidate_id: Optional[str] = Field(default=None, index=True)
+    # Address projection only. Selected context checks immutable native
+    # authority before using this field to locate a private task attachment.
+    source_task_id: Optional[str] = Field(default=None)
+    # Quota address projection only; charged until positively verified cleanup.
+    selected_context_reserved_bytes: Optional[int] = Field(default=None)
     capability_version: str = Field(default="workflow-v1", index=True)
     input_digest: Optional[str] = Field(default=None, index=True)
     authority_digest: Optional[str] = Field(default=None, index=True)
@@ -1755,8 +1872,62 @@ class WorkflowRunState(SQLModel, table=True):
     checkpoint_receipts_json: str = Field(default="[]")
     artifact_receipts_json: str = Field(default="[]")
     effect_receipts_json: str = Field(default="[]")
+    # Protected, server-minted GitHub GET authority. Never accepted from a
+    # caller mapping or exposed as an execution grant.
+    github_read_revision_json: Optional[str] = Field(default=None)
+    github_read_observation_history_json: Optional[str] = Field(default=None)
+    github_capacity_closure_json: Optional[str] = Field(default=None)
     result_digest: Optional[str] = Field(default=None)
     result_summary: Optional[str] = Field(default=None)
+
+
+class InferenceAccountingOwner(SQLModel, table=True):
+    """Deployment budget metadata owned by DurableJobRepository."""
+
+    __tablename__ = "inference_accounting_owners"
+    id: str = Field(default="deployment", primary_key=True)
+    deployment_id: str = Field(default_factory=_uuid, unique=True)
+    ceiling_microusd: int
+    settings_revision: int = Field(default=1)
+    settings_history_json: str = Field(default="[]")
+    revision: int = Field(default=1)
+    ledger_digest: str = Field(default="")
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+
+class InferenceCostReservation(SQLModel, table=True):
+    """Accounting evidence for a canonical job, never a second job lifecycle."""
+
+    __tablename__ = "inference_cost_reservations"
+    operation_id: str = Field(primary_key=True)
+    deployment_id: str = Field(index=True)
+    job_id: str = Field(index=True)
+    owner_id: str = Field(index=True)
+    goal_id: Optional[str] = Field(default=None, index=True)
+    goal_revision: Optional[int] = None
+    payload_digest: str
+    policy_digest: str
+    runtime_path: str
+    profile_id: str
+    period_id: str = Field(index=True)
+    settings_revision: int
+    ceiling_microusd: int
+    bound_microusd: int
+    owner_ceiling_microusd: Optional[int] = None
+    sequence: int = Field(index=True)
+    priority: int
+    deadline_at: datetime
+    state: str = Field(default="reserved", index=True)
+    job_fencing_token: int
+    contact_started_at: Optional[datetime] = None
+    actual_cost_microusd: Optional[int] = None
+    provider_operation_id: Optional[str] = None
+    evidence_json: str = Field(default="[]")
+    recovery_reason: Optional[str] = None
+    revision: int = Field(default=1)
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
 
 
 class WorkflowStepState(SQLModel, table=True):
@@ -2506,6 +2677,9 @@ class TelegramTransportOutbox(SQLModel, table=True):
     content_digest: str = Field(index=True)
     kind: str = Field(default="text", index=True)
     attachment_refs_json: str = Field(default="[]")
+    # Private control markup: bearer callbacks never appear in status/audit.
+    task_control_markup_json: Optional[str] = Field(default=None)
+    task_control_markup_digest: Optional[str] = Field(default=None)
     status: str = Field(default="queued", index=True)
     attempt_count: int = Field(default=0, index=True)
     max_attempts: int = Field(default=3, index=True)
@@ -2550,6 +2724,44 @@ class TelegramDeliveryAttempt(SQLModel, table=True):
     error_code: Optional[str] = Field(default=None, index=True)
     started_at: datetime = Field(default_factory=_now, index=True)
     finished_at: Optional[datetime] = Field(default=None, index=True)
+
+
+class TelegramTaskCallback(SQLModel, table=True):
+    """One finite, exact, paired task control; wire nonces remain in outbox only."""
+
+    __tablename__ = "telegram_task_callbacks"
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    nonce_digest: str = Field(unique=True, index=True)
+    owner_principal_id: str = Field(index=True)
+    operator_session_id: str = Field(index=True)
+    pairing_id: str = Field(index=True)
+    transit_reference: str
+    actor_id: int
+    chat_id: int
+    root_digest: str
+    task_id: str = Field(index=True)
+    task_revision: int
+    goal_id: str
+    goal_revision: int
+    outbox_id: str = Field(index=True)
+    effect: str
+    effect_digest: str
+    approval_id: Optional[str] = Field(default=None)
+    approval_digest: Optional[str] = Field(default=None)
+    attempt_id: Optional[str] = Field(default=None)
+    workflow_run_id: Optional[str] = Field(default=None)
+    workflow_binding_digest: Optional[str] = Field(default=None)
+    board_fence: Optional[int] = Field(default=None)
+    lease_owner: Optional[str] = Field(default=None)
+    cancel_event_id: Optional[int] = Field(default=None)
+    status: str = Field(default="pending", index=True)
+    query_id: Optional[str] = Field(default=None, index=True)
+    update_id: Optional[int] = Field(default=None)
+    request_digest: Optional[str] = Field(default=None)
+    result_json: str = Field(default="{}")
+    expires_at: datetime = Field(index=True)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    consumed_at: Optional[datetime] = Field(default=None, index=True)
 
 
 # ─── ScreenObservation ─────────────────────────────────
@@ -2617,6 +2829,10 @@ class PairedEdgeArtifact(SQLModel, table=True):
 
 class Secret(SQLModel, table=True):
     __tablename__ = "secrets"
+
+    # Null is a legacy/system secret; never attributable to a browser login.
+    owner_principal_id: Optional[str] = Field(default=None, index=True)
+    revoked_at: Optional[datetime] = Field(default=None, index=True)
 
     id: str = Field(default_factory=_uuid, primary_key=True)
     key: str = Field(unique=True, index=True)
@@ -2796,6 +3012,10 @@ class OperatorSession(SQLModel, table=True):
 
     id: str = Field(default_factory=_uuid, primary_key=True)
     token_hash: str = Field(unique=True, index=True)
+    principal_id: str = Field(default_factory=lambda: "operator:root:" + _uuid(), unique=True, index=True)
+    legacy_owner_principal_id: Optional[str] = Field(default=None)
+    # Data continuity only. Never an authentication or execution-session alias.
+    operator_identity_id: Optional[str] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=_now, index=True)
     last_seen_at: datetime = Field(default_factory=_now, index=True)
     idle_expires_at: datetime = Field(index=True)
@@ -2814,3 +3034,84 @@ class OperatorSession(SQLModel, table=True):
             index=True,
         ),
     )
+
+
+class OperatorIdentity(SQLModel, table=True):
+    __tablename__ = "operator_identities"
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    created_at: datetime = Field(default_factory=_now)
+    revoked_at: Optional[datetime] = Field(default=None)
+
+
+class OperatorContinuityCredential(SQLModel, table=True):
+    __tablename__ = "operator_continuity_credentials"
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    identity_id: str = Field(foreign_key="operator_identities.id", index=True)
+    token_hash: str = Field(unique=True, index=True)
+    kind: str = Field(index=True)
+    expires_at: datetime
+    revoked_at: Optional[datetime] = Field(default=None)
+    created_at: datetime = Field(default_factory=_now)
+
+
+class OperatorRecoveryJournal(SQLModel, table=True):
+    __tablename__ = "operator_recovery_journals"
+    __table_args__ = (Index("ux_operator_recovery_identity_key", "identity_id", "idempotency_key", unique=True),)
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    identity_id: str = Field(foreign_key="operator_identities.id", index=True)
+    current_session_id: str = Field(index=True)
+    idempotency_key: str
+    request_digest: str
+    selections_json: str
+    state: str = Field(default="confirmed", index=True)
+    fresh_work_json: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_now)
+    rolled_back_at: Optional[datetime] = Field(default=None)
+
+
+class MoltbookConnection(SQLModel, table=True):
+    """One optional owner-scoped account; secret values remain in the Vault."""
+    __tablename__ = "moltbook_connections"
+    __table_args__ = (Index("ux_moltbook_connection_owner", "owner_principal_id", unique=True),)
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_principal_id: str = Field(index=True)
+    owner_session_id: str = Field(index=True)
+    revision: int = Field(default=1)
+    mode: str = Field(default="pending_claim")
+    account_id: str = Field(default="")
+    account_name: str = Field(default="")
+    vault_key: str = Field(default="", max_length=256)
+    credential_binding: str = Field(default="", max_length=128)
+    consent_json: str = Field(default="{}")
+    active_job_id: Optional[str] = Field(default=None)
+    active_deadline_at: Optional[datetime] = Field(default=None)
+    active_payload_digest: str = Field(default="", max_length=128)
+    cooldown_until: Optional[datetime] = Field(default=None)
+    setup_key: str = Field(default="", max_length=128)
+    setup_digest: str = Field(default="", max_length=128)
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+
+class ForgejoConnection(SQLModel, table=True):
+    """Fixed-site optional configuration; authority remains in native stores."""
+    __tablename__ = "forgejo_connections"
+    __table_args__ = (Index("ux_forgejo_connection_owner", "owner_principal_id", unique=True),)
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_principal_id: str = Field(index=True)
+    owner_session_id: str = Field(index=True)
+    revision: int = Field(default=1)
+    state: str = Field(default="configured")
+    site_profile: str = Field(default="seraph.forgejo.codeberg-title.v1")
+    provider_version: str = Field(default="15.0.9")
+    credential_vault_key: str = Field(default="", max_length=256)
+    credential_binding: str = Field(default="", max_length=128)
+    session_vault_key: str = Field(default="", max_length=256)
+    session_binding: str = Field(default="", max_length=128)
+    provider_user_id: Optional[int] = Field(default=None)
+    provider_login: str = Field(default="", max_length=128)
+    read_consent_revision: int = Field(default=0)
+    read_consent_expires_at: Optional[datetime] = Field(default=None)
+    provisioning_job_id: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)

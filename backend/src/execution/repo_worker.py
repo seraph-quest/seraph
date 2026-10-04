@@ -372,6 +372,22 @@ def tree_digest(root: Path) -> str:
     return digest.hexdigest()
 
 
+def _publication_files(root: Path) -> list[dict[str, Any]]:
+    """Attest actual materialized test inputs, including effective Git modes."""
+    result = []
+    for relative, _, directory, metadata in _walk_tree(root):
+        if directory or relative == ".git" or relative.startswith(".git/"):
+            continue
+        descriptor, opened = _open_source_regular_file(root, relative, expected_stat=metadata)
+        with os.fdopen(descriptor, "rb") as handle:
+            raw = handle.read(MAX_FILE_BYTES + 1)
+            _assert_stable_file(opened, os.fstat(handle.fileno()))
+        if len(raw) > MAX_FILE_BYTES:
+            raise WorkerInputError("publication materialization exceeds file bound")
+        result.append({"path": relative, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(), "mode": "100755" if opened.st_mode & 0o111 else "100644"})
+    return sorted(result, key=lambda item: item["path"])
+
+
 def _copy_snapshot(source: Path, target: Path) -> None:
     entries = _walk_tree(source)
     target.mkdir(parents=True, exist_ok=True)
@@ -719,11 +735,13 @@ def run_job(
     before_spawn: Callable[[], None] | None = None,
     deadline_at: float | None = None,
     expected_identity: Mapping[str, str] | None = None,
+    publication_runtime: Mapping[str, Any] | None = None,
 ) -> int:
     output = Path(output_root or "/out")
     try:
         job = _read_bounded_job_json(job_file)
-        if job.get("profile") != PROFILE:
+        selected_profile = str(job.get("profile") or "")
+        if selected_profile != PROFILE and not (selected_profile == "repo-python-pytest-publication-v1" and backend_kind == "local" and publication_runtime is not None):
             raise WorkerInputError("unsupported worker profile")
         if backend_kind not in {"local", "docker_rootless", "docker_rootful"}:
             raise WorkerInputError("worker backend kind is invalid")
@@ -760,6 +778,7 @@ def run_job(
         if time.monotonic() >= deadline_at:
             raise WorkerInputError("worker wall deadline expired during staging")
         base_digest = tree_digest(workspace)
+        publication_base_files = _publication_files(workspace)
         expected_snapshot_digest = str(job.get("snapshot_digest") or "").strip()
         if not expected_snapshot_digest or expected_snapshot_digest != base_digest:
             raise WorkerInputError("snapshot digest does not match the approved preview")
@@ -872,12 +891,26 @@ def run_job(
             pytest_argv = [pytest_executable, "-I", "-B", "-c", _LOCAL_PYTEST_BOOTSTRAP, *test_args]
             pytest_environment = dict(environment or {})
             pytest_environment.pop("PYTHONPATH", None)
+        publication_tested_files = _publication_files(workspace)
+        # Legacy command exposure is unchanged. Full ambient environments are
+        # not silently certified; only a reviewed explicitly selected bounded
+        # runtime can provide publication-grade environment evidence.
+        publication_env = {"available": False, "reason": "publication_runtime_profile_unavailable"}
+        if publication_runtime is not None:
+            from src.execution.repo_publication_runtime import argv, child_environment, verify
+            runtime_root = publication_runtime["root"]
+            captured = publication_runtime["captured"]
+            verify(runtime_root, captured, deadline_at=deadline_at)
+            pytest_environment = child_environment(workspace.parent)
+            runtime_readback_path = output / "python-runtime-readback.json"
+            pytest_argv = argv(runtime_root, captured, runtime_readback_path, test_args)
+            publication_env = {"available": True, "profile": selected_profile, "configuration_revision": publication_runtime["configuration_revision"], "runtime_binding": "bounded_exposed_python_closure", "runtime_proof": captured["proof"], "runtime_files": sorted([record["file"] for record in captured["records"]], key=lambda item: item["path"]), "effective_environment": pytest_environment, "effective_argv": pytest_argv}
         code, stdout, stderr, timed_out = _run_fixed(
             pytest_argv,
             cwd=workspace,
             timeout=max(0.01, deadline_at - time.monotonic()),
             cpu_seconds=cpu_seconds,
-            allowed_executables=("/usr/local/bin/pytest", pytest_executable),
+            allowed_executables=("/usr/local/bin/pytest", pytest_executable, pytest_argv[0]),
             environment=pytest_environment,
             deadline_at=deadline_at,
             apply_cpu_limit=backend_kind != "local",
@@ -950,7 +983,7 @@ def run_job(
             (output / "diff.patch").write_bytes(diff)
         diff_sha256 = hashlib.sha256(diff).hexdigest()
         manifest = {
-            "profile": PROFILE,
+            "profile": selected_profile,
             "backend_kind": backend_kind,
             "status": "succeeded" if code == 0 and not timed_out and not stdout_truncated and not stderr_truncated else "failed",
             "exit_code": code,
@@ -970,10 +1003,35 @@ def run_job(
             "stdout_truncated": stdout_truncated,
             "stderr_truncated": stderr_truncated,
         }
+        publication_env_after = {"available": False, "reason": "publication_runtime_profile_unavailable"}
+        if publication_runtime is not None:
+            verify(runtime_root, captured, deadline_at=deadline_at)
+            descriptor, initial = _open_source_regular_file(output, "python-runtime-readback.json")
+            with os.fdopen(descriptor, "rb") as handle:
+                runtime_readback = json.loads(handle.read(64 * 1024))
+                _assert_stable_file(initial, os.fstat(handle.fileno()))
+            if runtime_readback.get("effective_environment") != pytest_environment or runtime_readback.get("bootstrap_sha256") != captured["proof"]["bootstrap_sha256"] or runtime_readback.get("loaded_libpython_sha256") != captured["proof"]["libpython_sha256"] or runtime_readback.get("loaded_libpython_path") != str(runtime_root / "lib" / captured["proof"]["libpython_name"]):
+                raise WorkerInputError("actual bounded runtime execution proof invalid")
+            publication_env["actual_execution"] = runtime_readback
+            publication_env_after = dict(publication_env)
+        manifest["publication_test_input"] = {
+            "schema": "seraph.repo-publication.tested-input.v1",
+            "job_id": str(job.get("job_id") or ""),
+            "authority_digest": str(job.get("authority_digest") or ""),
+            "base_digest": base_digest,
+            "patch_sha256": actual_patch_sha256,
+            "base_files": publication_base_files,
+            "tested_files": publication_tested_files,
+            "output_files": _publication_files(workspace),
+            "environment": publication_env,
+            "environment_unchanged": publication_env.get("available") is True and publication_env == publication_env_after,
+            "test_args": test_args,
+            "exit_code": code,
+        }
         execution_identity = {
             "schema": "seraph.repo_repair_execution_identity.v1",
             "backend_kind": backend_kind,
-            "profile": PROFILE,
+            "profile": selected_profile,
             "job_id": str(job.get("job_id") or ""),
             "authority_digest": str(job.get("authority_digest") or ""),
             "worker_source_sha256": worker_source_digest,
@@ -1032,6 +1090,7 @@ def run_local_job(
     before_spawn: Callable[[], None] | None = None,
     deadline_at: float | None = None,
     expected_identity: Mapping[str, str] | None = None,
+    publication_runtime: Mapping[str, Any] | None = None,
 ) -> int:
     """Run the fixed worker against server-owned local staged roots.
 
@@ -1052,6 +1111,7 @@ def run_local_job(
         before_spawn=before_spawn,
         deadline_at=deadline_at,
         expected_identity=expected_identity,
+        publication_runtime=publication_runtime,
     )
 
 

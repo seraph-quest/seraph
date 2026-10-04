@@ -155,6 +155,7 @@ async def _configure_governed_openrouter_test_route() -> None:
             status="ready",
         )
     )
+    await durable_job_repository.configure_inference_accounting(setup.spend_ceiling_microusd)
     from src.llm_runtime import _provider_profile
 
     profile = _provider_profile("openrouter")
@@ -264,6 +265,7 @@ async def _seed_canonical_repair(
     db.add(
         OperatorSession(
             id=owner.session_id,
+            principal_id=owner.principal_id,
             token_hash=hashlib.sha256(f"token:{run_id}".encode()).hexdigest(),
             created_at=now - timedelta(minutes=1),
             last_seen_at=now,
@@ -432,6 +434,9 @@ async def test_repo_repair_real_input_producer_reaches_private_source_review(
     monkeypatch.setattr(settings, "openrouter_provider_only", True)
     monkeypatch.setattr(settings, "openrouter_allowed_upstreams", "anthropic")
     monkeypatch.setattr(settings, "default_model", "openrouter/anthropic/claude-sonnet-4")
+    monkeypatch.setenv("SERAPH_WORKSPACE_LIFECYCLE_PATH", str(tmp_path / "deployment-lifecycle"))
+    from src.workspace.production import ProductionWorkspace, prepare_lifecycle_directory
+    prepare_lifecycle_directory(ProductionWorkspace(host_root=workspace))
     await _configure_governed_openrouter_test_route()
     if real_sandbox:
         sandbox_settings = effective_sandbox_settings
@@ -557,7 +562,8 @@ async def test_repo_repair_real_input_producer_reaches_private_source_review(
         content = json.dumps(_proposal_for_digest(base_digest), sort_keys=True)
         message = SimpleNamespace(role="assistant", content=content)
         response = SimpleNamespace(choices=[SimpleNamespace(message=message)])
-        return response, {"choices": [{"message": {"role": "assistant", "content": content}}]}
+        return response, {"id": "gen-repair-producer", "usage": {"cost": "0.0000101"},
+            "choices": [{"message": {"role": "assistant", "content": content}}]}
 
     def execute_job(_sandbox, job, *, before_dispatch=None):
         nonlocal sandbox_calls
@@ -2047,7 +2053,8 @@ async def test_inspect_rejects_changed_request_against_server_input(async_db, tm
 
 
 @pytest.mark.asyncio
-async def test_inspect_rejects_revoked_operator_session(async_db, tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize("invalid_root", ["revoked", "foreign_principal", "legacy_shared_role", "expired", "tombstone"])
+async def test_inspect_rejects_invalid_operator_root(async_db, tmp_path: Path, monkeypatch, invalid_root):
     workspace = tmp_path / "workspace"
     (workspace / "repo" / "src").mkdir(parents=True)
     (workspace / "repo" / "src" / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
@@ -2059,7 +2066,7 @@ async def test_inspect_rejects_revoked_operator_session(async_db, tmp_path: Path
         workspace_dir=str(workspace),
         clock=lambda: now,
     )
-    owner = WorkBoardOwner(principal_id="operator:single", session_id="session:revoked")
+    owner = WorkBoardOwner(principal_id="operator:root:repair-test", session_id="session:revoked")
     async with async_db() as db:
         await _seed_canonical_repair(
             db,
@@ -2074,7 +2081,16 @@ async def test_inspect_rejects_revoked_operator_session(async_db, tmp_path: Path
         )
         operator_session = await db.get(OperatorSession, owner.session_id)
         assert operator_session is not None
-        operator_session.revoked_at = now
+        if invalid_root == "revoked":
+            operator_session.revoked_at = now
+        elif invalid_root == "foreign_principal":
+            operator_session.principal_id = "operator:root:another-root"
+        elif invalid_root == "legacy_shared_role":
+            operator_session.principal_id = "operator:single"
+        elif invalid_root == "expired":
+            operator_session.idle_expires_at = now
+        else:
+            operator_session.is_bearer_tombstone = True
         await db.flush()
         with pytest.raises(RepoRepairError) as blocked:
             await service.inspect_and_prepare(

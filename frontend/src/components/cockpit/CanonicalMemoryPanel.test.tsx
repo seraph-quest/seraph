@@ -33,6 +33,20 @@ describe("CanonicalMemoryPanel", () => {
   });
   afterEach(() => vi.unstubAllGlobals());
 
+  it("preserves recovered memory content and fences all historic mutations", async () => {
+    const recovered = { ...memory, ownership_access: "recovered_read_only", execution_block_reason: "current_scope_review_required" };
+    fetchMock.mockImplementation((input: RequestInfo | URL) => Promise.resolve(response(String(input).includes("/records/memory-1")
+      ? { record: recovered } : { records: [recovered], next_cursor: null, last_confirmed_at: recovered.last_confirmed_at })));
+    render(<CanonicalMemoryPanel />);
+    fireEvent.click(await screen.findByTestId("memory-record-memory-1"));
+    await screen.findByText("Keep updates concise.");
+    expect(screen.getByText(/Recovered original/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Pin" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Save correction" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Delete/export record" })).toBeDisabled();
+    expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(true);
+  });
+
   it("searches, opens redacted provenance, and sends reason-bound existing controls", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);

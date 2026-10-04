@@ -1130,6 +1130,7 @@ _WORKFLOW_REPLAY_BLOCK_REASONS = frozenset(
     }
 )
 _WORKFLOW_SAFE_REFUSAL_CODES = _WORKFLOW_REPLAY_BLOCK_REASONS | {
+    "document_original_attempt_required",
     "workflow_control_refused",
     "workflow_control_action_unsupported",
     "workflow_control_failed",
@@ -3776,6 +3777,8 @@ async def _load_typed_workflow_run_for_control(
     durable_run = await durable_job_repository.get_job(run_identity)
     if durable_run is None:
         return None
+    if durable_run.get("job_kind") == "forgejo_issue_title_v1":
+        raise HTTPException(status_code=409, detail="forgejo_fixed_private_controls_required")
     run = _canonical_workflow_projection_input(durable_run)
     if not isinstance(run, dict):
         return None
@@ -3839,6 +3842,10 @@ async def _control_typed_workflow_run(
     goal_detail = await _workflow_current_goal_binding_detail(run)
     if goal_detail is not None:
         raise HTTPException(status_code=409, detail=goal_detail)
+    if run.get("job_kind") == "document_invoice_compare_v1" and action != "audit":
+        raise HTTPException(status_code=409, detail="document_original_attempt_required")
+    if run.get("job_kind") in {"local_json_format", "local_authored_json"} and action != "audit":
+        raise HTTPException(status_code=409, detail="tool_package_original_attempt_required")
     lease = run.get("lease") if isinstance(run.get("lease"), dict) else {}
     lease_owner = str(lease.get("owner") or "").strip() or None
     try:
@@ -4955,7 +4962,7 @@ async def _list_workflow_runs(
         typed_runs = await durable_job_repository.list_jobs(limit=limit, session_id=session_id)
     except Exception:
         typed_runs = []
-    durable_runs.extend(typed_runs)
+    durable_runs.extend(run for run in typed_runs if run.get("job_kind") != "forgejo_issue_title_v1")
     completed_by_identity = {
         str(run.get("run_identity") or run.get("id")): run
         for run in completed
@@ -5355,7 +5362,7 @@ def _repo_change_write_artifact(
         raise RepoSandboxError("repository job artifact identity is invalid")
     if namespace not in {"repo-change", "repo-repair"}:
         raise RepoSandboxError("repository result artifact namespace is not allowed")
-    if name not in {"manifest.json", "readback.json", "diff.patch", "pytest.stdout", "pytest.stderr"}:
+    if name not in {"manifest.json", "readback.json", "diff.patch", "pytest.stdout", "pytest.stderr", "build.stdout", "build.stderr"}:
         raise RepoSandboxError("repository result artifact name is not allowed")
     if not isinstance(payload, bytes):
         raise RepoSandboxError("repository result artifact must be bytes")
@@ -5882,6 +5889,16 @@ def _repo_change_error_code(exc: BaseException) -> str:
     if isinstance(exc, RepoSandboxError):
         return "repo_sandbox_execution_failed"
     return "repo_change_execution_error"
+
+
+def _repo_change_execution_failure_status(exc: BaseException, authority: Mapping[str, Any]) -> str:
+    """Keep selected Node cleanup uncertainty visible; preserve legacy mapping."""
+    if isinstance(exc, RepoSandboxError):
+        if authority.get("sandbox_profile") == "repo-node24-npm-v1" and exc.terminal_status == "unknown_external_effect":
+            return "unknown_external_effect"
+        if exc.terminal_status == "failed":
+            return "failed"
+    return "blocked"
 
 
 def _repo_change_patch_error_code(exc: BaseException) -> str:
@@ -6958,7 +6975,7 @@ async def _execute_repo_change_claimed_inner(
                         await record_repo_phase(phase, error_phase=True, retry=retry)
                     except Exception:
                         break
-        failure_status = "failed" if isinstance(exc, RepoSandboxError) and exc.terminal_status == "failed" else "blocked"
+        failure_status = _repo_change_execution_failure_status(exc, authority)
         error_code = _repo_change_error_code(exc)
         try:
             await durable_job_repository.transition_job(
@@ -7061,7 +7078,10 @@ async def _execute_repo_change_claimed_inner(
             cleanup_checkpoint = await record_repo_phase("cleanup_verified", retry=retry)
             revision = int(cleanup_checkpoint.get("revision") or revision)
         written: dict[str, str] = {}
-        for name in ("manifest.json", "readback.json", "diff.patch", "pytest.stdout", "pytest.stderr"):
+        output_names = ("manifest.json", "readback.json", "diff.patch", "pytest.stdout", "pytest.stderr")
+        if authority.get("sandbox_profile") == "repo-node24-npm-v1":
+            output_names += ("build.stdout", "build.stderr")
+        for name in output_names:
             payload = outputs.get(name)
             if not isinstance(payload, bytes):
                 continue
@@ -7338,7 +7358,7 @@ async def _resolve_repo_repair_proposal(
         }
     }
     try:
-        current_preflight = await asyncio.to_thread(_executor_preflight, sandbox)
+        current_preflight = await asyncio.to_thread(_executor_preflight, sandbox, authority_projection)
     except Exception as exc:
         raise HTTPException(
             status_code=409,
@@ -7452,6 +7472,24 @@ async def _resume_verified_repo_execution(
         proof_kind=proof_kind,
         execution_deadline_at=execution_deadline_at,
     )
+    if resolved_authority.get("sandbox_profile") == "repo-node24-npm-v1":
+        # Capacity proof comes from an independently fetched canonical row,
+        # never from the adapter result or a client-supplied projection.
+        canonical = await durable_job_repository.get_job(str(current.get("job_id") or ""))
+        original = claimed.get("declared_authority") or {}
+        original_attempt = original.get("attempt_id") or original.get("work_board_attempt_id")
+        canonical_authority = (canonical or {}).get("declared_authority") or {}
+        canonical_attempt = canonical_authority.get("attempt_id") or canonical_authority.get("work_board_attempt_id")
+        if (
+            canonical is not None
+            and canonical.get("job_id") == current.get("job_id") == result.get("job_id")
+            and canonical.get("status") == result.get("status")
+            and canonical.get("authority_digest") == claimed.get("authority_digest")
+            and bool(claimed.get("authority_digest"))
+            and bool(original_attempt) and canonical_attempt == original_attempt
+            and (canonical.get("lease") or {}).get("fencing_token") == (claimed.get("lease") or {}).get("fencing_token")
+        ):
+            result = {**result, "job": canonical}
     if str(result.get("status") or "") in {"succeeded", "failed"}:
         async with get_session() as db:
             persisted = await db.get(RepoRepairProposalRow, proposal.proposal_id)
@@ -8016,15 +8054,22 @@ async def _safe_repo_repair_projection(
     executor_kind = str(authority.get("executor_kind") or "docker_rootless")
     raw_posture = authority.get("executor_posture")
     raw_posture = dict(raw_posture) if isinstance(raw_posture, Mapping) else {}
-    preflight_receipt = preflight.get("receipt") if isinstance(preflight, Mapping) else None
+    preflight_receipt = preflight.get("receipt", preflight) if isinstance(preflight, Mapping) else None
+    preparation_ready = isinstance(preflight_receipt, Mapping) and preflight_receipt.get("ok") is True
+    public_preflight = dict(preflight_receipt) if isinstance(preflight_receipt, Mapping) else {
+        "ok": False, "status": "blocked", "reason": "stored_preflight_unavailable",
+    }
+    if authority.get("sandbox_profile") == "repo-node24-npm-v1":
+        public_preflight["status"] = str(public_preflight.get("status") or "blocked")
+        public_preflight["evidence_basis"] = "recorded_job_preflight"
     display_posture, raw_posture = _executor_posture_projection(
         settings.repo_sandbox,
         {
-            "ok": preflight_receipt.get("ok") is True if isinstance(preflight_receipt, Mapping) else False,
+            "ok": preparation_ready,
             "posture": raw_posture,
             "posture_digest": authority.get("executor_posture_digest"),
             "profile": authority.get("sandbox_profile") or raw_posture.get("profile"),
-            "image_digest": authority.get("sandbox_image_digest"),
+            "image_digest": (None if executor_kind == "local" and authority.get("sandbox_profile") == "repo-node24-npm-v1" else authority.get("sandbox_image_digest")),
         },
         executor_kind=executor_kind,
         limits_digest_value=(
@@ -8068,6 +8113,23 @@ async def _safe_repo_repair_projection(
                 ),
             }
     status = str(job.get("status") or "blocked")
+    process_cleanup = None
+    if authority.get("sandbox_profile") == "repo-node24-npm-v1" and status == "unknown_external_effect":
+        process_cleanup = {"status": "unverified", "physical_capacity_released": False,
+                           "cleanup_receipt_verified": False, "readback_scope": None}
+        try:
+            from src.workflows.repo_repair import _authority_digest, _proposal_authority_payload
+
+            if proposal is None or _authority_digest(_proposal_authority_payload(proposal)) != proposal.authority_digest:
+                raise RepoSandboxError("repository repair immutable proposal authority changed")
+            cleanup_authority = await _repo_change_recovery_authority(dict(job))
+            dispatch_ok, _, dispatch = _repo_change_dispatch_contract(dict(job), cleanup_authority)
+            if dispatch_ok and dispatch is not None:
+                process_cleanup = await durable_job_repository.node_process_cleanup_projection(
+                    job_id, expected_revision=int(job["revision"]), original_dispatch=dispatch,
+                )
+        except (DurableJobError, RepoSandboxError, OSError, ValueError, TypeError):
+            pass
     reason = str(job.get("failure_reason") or "")
     effects = job.get("effects") if isinstance(job.get("effects"), list) else []
     artifacts = job.get("artifacts") if isinstance(job.get("artifacts"), list) else []
@@ -8140,7 +8202,10 @@ async def _safe_repo_repair_projection(
         "required_permissions": list(authority.get("required_permissions") or []),
         "local_host_execution_required": bool(authority.get("local_host_execution_required")),
         "limits": authority.get("limits") if isinstance(authority.get("limits"), Mapping) else {},
-        "preflight": preflight,
+        "preflight": public_preflight,
+        "preflight_raw": preflight,
+        "preparation_ready": preparation_ready,
+        "execution_ready": preparation_ready and executor_kind != "local",
         "source_packet": (
             {
                 "packet_id": packet.id,
@@ -8188,6 +8253,7 @@ async def _safe_repo_repair_projection(
         "execution": {
             "artifacts": safe_artifacts,
             "readback": readback,
+            "process_cleanup": process_cleanup,
             "memory_status": "no_learning",
             "provider_contacted": proposal is not None,
         },
@@ -9054,6 +9120,35 @@ async def cancel_repo_change(job_id: str, req: RepoChangeCancelRequest, request:
     )
 
 
+async def _repo_change_reconcile_node_process_cleanup(job: dict[str, Any], operator: Any) -> dict[str, Any] | None:
+    """Consume original cancelled ECHILD proof without adopting task output."""
+    declared = job.get("declared_authority") or {}
+    if job.get("job_kind") != "engineering.repo-repair.v1" or declared.get("sandbox_profile") != "repo-node24-npm-v1":
+        return None
+    from src.workflows.job_runtime import NodeProcessCleanupSettlement
+    from src.workflows.repair_capacity import clear_exact_repo_repair_quarantine
+    try:
+        authority = await _repo_change_recovery_authority(job)
+        dispatch_ok, _, dispatch = _repo_change_dispatch_contract(job, authority)
+        if not dispatch_ok or dispatch is None:
+            return None
+        settled = await durable_job_repository.settle_node_process_cleanup(NodeProcessCleanupSettlement(
+            job_id=str(job["job_id"]), expected_revision=int(job["revision"]),
+            owner_principal_id=str(operator.principal.principal_id), owner_session_id=str(operator.session_id),
+            authority=authority, dispatch=dispatch,
+        ))
+        # The repository transaction committed before physical quarantine clear.
+        clear_exact_repo_repair_quarantine(settings.workspace_dir, job_id=str(job["job_id"]),
+            attempt_id=str(dispatch["attempt_id"]), fencing_token=int(dispatch["fencing_token"]),
+            authority_digest=str(job["authority_digest"]))
+        return {"status":"unknown_external_effect", "durable_status":"unknown_external_effect", "job":settled,
+                "recovery":"physical_process_cleanup_reconciled", "readback_scope":"process_cleanup_only",
+                "cleanup_receipt_verified":True, "physical_capacity_released":True,
+                "operator_action":"reconcile_task_and_cost_liability", "learning":"no_learning", "operator_visible":True}
+    except (DurableJobError, RepoSandboxError, OSError, ValueError, TypeError):
+        return None
+
+
 async def _recover_repo_change_after_restart_inner(
     *,
     job: dict[str, Any],
@@ -9072,6 +9167,9 @@ async def _recover_repo_change_after_restart_inner(
     if local_finalized is not None:
         return local_finalized
     if status == "unknown_external_effect":
+        process_cleanup = await _repo_change_reconcile_node_process_cleanup(job, operator)
+        if process_cleanup is not None:
+            return process_cleanup
         return {
             "status": "blocked",
             "durable_status": status,

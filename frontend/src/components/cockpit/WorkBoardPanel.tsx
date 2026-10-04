@@ -18,6 +18,7 @@ import { TaskApprovalReview } from "./TaskApprovalReview";
 import { ArtifactPipelineReview } from "./ArtifactPipelineReview";
 import { ResearchDossierPanel } from "./ResearchDossierPanel";
 import { JsonFormatterPanel } from "./JsonFormatterPanel";
+import { DocumentComparisonPanel } from "./DocumentComparisonPanel";
 import { TaskEffectRecovery } from "./TaskEffectRecovery";
 import { TaskEvidencePanel } from "./TaskEvidencePanel";
 import { TelegramTaskNotice } from "./TelegramTaskNotice";
@@ -847,6 +848,7 @@ function WorkBoardPanel({
   const [browserTaskOpen, setBrowserTaskOpen] = useState(Boolean(pendingBrowserAtMount));
   const [researchOpen, setResearchOpen] = useState(false);
   const [formatterOpen, setFormatterOpen] = useState(false);
+  const [documentOpen, setDocumentOpen] = useState(false);
   const [browserTaskReceipt, setBrowserTaskReceipt] = useState<BrowserTaskSubmissionReceipt | null>(null);
   const [calendarPrepOpen, setCalendarPrepOpen] = useState(Boolean(pendingCalendarAtMount));
   const [calendarPrepReceipt, setCalendarPrepReceipt] = useState<CalendarPrepResponse | null>(null);
@@ -3155,6 +3157,7 @@ function WorkBoardPanel({
             Research dossier
           </button>
           <button type="button" className="cockpit-feedback-button" onClick={() => setFormatterOpen(true)}>Isolated JSON formatter</button>
+          <button type="button" className="cockpit-feedback-button" onClick={() => setDocumentOpen(true)}>Private invoice comparison</button>
           <button type="button" className="cockpit-feedback-button" onClick={() => { setCalendarPrepReceipt(null); setCalendarPrepOpen(true); }}>
             Calendar meeting prep
           </button>
@@ -4091,15 +4094,19 @@ function WorkBoardPanel({
                 </div>
               </section>
 
-              <WorkBoardMemoryReview
+              {selectedTask.capability_id === "work.document-compare.v1" ? <section aria-label="Document comparison memory policy" className="mt-3 text-xs">
+                This private comparison has an explicit no_learning policy. Its native receipt and verified report record that result; no memory proposal is created.
+              </section> : <WorkBoardMemoryReview
                 task={selectedTask}
                 ownerPrincipalId={ownerPrincipalId}
                 ownerSessionId={ownerSessionId}
-              />
+              />}
               {selectedTask.capability_id === "work.research-dossier.v1" && <ResearchDossierPanel
                 key={`research-inspector:${ownerPrincipalId}:${ownerSessionId}:${selectedTask.task_id}`}
                 task={selectedTask} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
                 onChanged={async () => { await refreshSnapshot(); }} />}
+              {selectedTask.capability_id === "work.document-compare.v1" && <DocumentComparisonPanel
+                ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} task={selectedTask} />}
               {selectedTask.capability_id === "work.json-format.v1" && <JsonFormatterPanel
                 key={`formatter-inspector:${ownerPrincipalId}:${ownerSessionId}:${selectedTask.task_id}`}
                 task={selectedTask} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
@@ -4215,6 +4222,11 @@ function WorkBoardPanel({
         goals={allGoals} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
         onClose={() => setFormatterOpen(false)} onCreated={async (task) => {
           setFormatterOpen(false);await refreshSnapshot();if (!stoppedRef.current) openTask(task.task_id);
+        }} />}
+      {documentOpen && <DocumentComparisonPanel key={`${ownerPrincipalId}:${ownerSessionId}:document-create`}
+        goals={allGoals} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
+        onClose={() => setDocumentOpen(false)} onCreated={async (task) => {
+          setDocumentOpen(false); await refreshSnapshot(); if (!stoppedRef.current) openTask(task.task_id);
         }} />}
       {researchOpen && <ResearchDossierPanel key={`${ownerPrincipalId}:${ownerSessionId}:research-create`}
         goals={allGoals} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}

@@ -129,6 +129,9 @@ def _metadata_digest(row: WorkBoardInputArtifact) -> str:
                 "expires_at": _utc(row.expires_at).isoformat(),
                 "consumed_at": _utc(row.consumed_at).isoformat() if row.consumed_at else None,
                 "revision": row.revision,
+                **({"document_metadata_json": row.document_metadata_json,
+                    "document_reserved_bytes": row.document_reserved_bytes}
+                    if row.capability_id == "work.document-compare.v1" else {}),
             }
         )
     ).hexdigest()
@@ -633,6 +636,8 @@ async def prepare_input_artifact(
     """
 
     observed_at = _utc(now or _now())
+    if request.capability_id == "work.document-compare.v1":
+        raise BoardError("document_pair_reservation_required", "Select and stream a private document pair first", status_code=422)
     inputs, _payload_hex, payload_digest = await _validate_request(
         db,
         owner,
@@ -1243,6 +1248,12 @@ async def delete_input_artifact(
     artifact_id: str,
     expected_revision: int | None = None,
 ) -> InputArtifactMetadata:
+    row = await db.scalar(select(WorkBoardInputArtifact).where(
+        WorkBoardInputArtifact.artifact_id == artifact_id,
+        WorkBoardInputArtifact.owner_principal_id == owner.principal_id,
+        WorkBoardInputArtifact.owner_session_id == owner.session_id))
+    if row is not None and row.capability_id == "work.document-compare.v1":
+        raise BoardError("document_pair_cleanup_required", "Use the private pair discard control to verify physical cleanup")
     return await _set_terminal_state(
         db,
         owner,

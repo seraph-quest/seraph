@@ -37,6 +37,8 @@ async function capture(tab){
       return {text,origin:location.origin,path:location.pathname,url:location.href,captured_at:Math.floor(Date.now()/1000)};
     }});
     const value=results[0];if(!value?.documentId||value.frameId!==0)throw Error("Stable top-frame document identity unavailable");
+    const result=value.result;
+    if(value.error||!result||Object.keys(result).sort().join()!=="captured_at,origin,path,text,url"||['text','origin','path','url'].some(key=>typeof result[key]!=="string"||!result[key])||!Number.isInteger(result.captured_at)||result.captured_at<=0||new TextEncoder().encode(result.text).length>32768)throw Error("Protected or unsupported selection");
     pendingDraft={...value.result,tab_id:tab.id,document_id:value.documentId,expires_at:Date.now()+300000};
     setTimeout(()=>{pendingDraft=null;},300000);
     await chrome.storage.session.remove(["metadata","receipt","error"]);

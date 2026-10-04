@@ -25,6 +25,8 @@ from src.vault.repository import vault_repository
 
 AGENT_ID = "d2be783a-0c27-4bd1-a99c-3f908d57e319"
 DUMMY_KEY = "moltbook_local_private_dummy_key"
+DUMMY_KEY_B = "moltbook_local_private_other_key"
+AGENT_ID_B = "e0d5cf84-8a0c-4ce4-8253-6a6d6b3ef9b1"
 
 
 def home_document():
@@ -62,7 +64,8 @@ class LocalTCPTransport(httpx.AsyncBaseTransport):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode",["positive","stale_goal","vault_drift","input_drift","revoke","expired_root",
     "wrong_identity","home_drop","home_redirect","set_cookie","secret_echo","goal_after_home",
-    "root_refresh","dns_private","dns_mixed","cancel_unattempted","cancel_staged","foreign_owner"])
+    "root_refresh","dns_private","dns_mixed","cancel_unattempted","cancel_staged","foreign_owner",
+    "vault_after_home","cancel_running","policy_before_adoption","cancel_dns","home_html"])
 async def test_actual_private_home_chromium_owner_job_readback_restart(accounting_db,monkeypatch,mode):
     from src.api import auth,goals,moltbook
     root,db_engine,factory = accounting_db
@@ -107,11 +110,13 @@ async def test_actual_private_home_chromium_owner_job_readback_restart(accountin
         method,path,_=first.split()
         headers={key.lower():value for key,value in (line.split(": ",1) for line in lines if ": " in line)}
         assert headers["host"] == "www.moltbook.com"
-        assert headers["authorization"] == "Bearer "+DUMMY_KEY
+        assert headers["authorization"] in {"Bearer "+DUMMY_KEY,"Bearer "+DUMMY_KEY_B}
+        other_key=headers["authorization"] == "Bearer "+DUMMY_KEY_B
         assert method == "GET"
         calls.append(path)
         if path == "/api/v1/agents/me":
-            value={"success":True,"agent":{"id":"98858248-baca-47a7-b362-05ae2ab5ccf4" if mode == "wrong_identity" and len(calls)>2 else AGENT_ID,"name":"FixtureAgent"}}
+            identity=AGENT_ID_B if other_key else "98858248-baca-47a7-b362-05ae2ab5ccf4" if mode == "wrong_identity" and len(calls)>2 else AGENT_ID
+            value={"success":True,"agent":{"id":identity,"name":"FixtureAgent"}}
         elif path == "/api/v1/agents/status": value={"status":"claimed"}
         elif path == "/api/v1/home":
             deliveries.append("one_due_briefing")
@@ -123,6 +128,14 @@ async def test_actual_private_home_chromium_owner_job_readback_restart(accountin
             if mode == "root_refresh":
                 refreshed=await client.post("/api/auth/refresh")
                 assert refreshed.status_code == 200,refreshed.text
+            if mode == "vault_after_home":
+                async with factory.accounting_sessions() as db:
+                    connection=await db.scalar(select(MoltbookConnection).where(MoltbookConnection.owner_principal_id==principal))
+                    key=connection.vault_key
+                await vault_repository.store(key,"moltbook_local_rotated_dummy",owner_principal_id=principal)
+            if mode == "cancel_running":
+                staged.set()
+                await release.wait()
         else: raise AssertionError("unapproved fixture route")
         body=canonical(value)
         status=b"302 Found" if mode == "home_redirect" and path == "/api/v1/home" else b"200 OK"
@@ -131,7 +144,11 @@ async def test_actual_private_home_chromium_owner_job_readback_restart(accountin
             if mode == "home_redirect": extra=b"Location: http://127.0.0.1/private\r\n"
             if mode == "set_cookie": extra=b"Set-Cookie: forbidden=fixture-only; HttpOnly\r\n"
         transmitted=body[:3] if mode == "home_drop" and path == "/api/v1/home" else body
-        writer.write(b"HTTP/1.1 "+status+b"\r\nContent-Type: application/json\r\n"+extra+b"Content-Length: "+str(len(body)).encode()+b"\r\nConnection: close\r\n\r\n"+transmitted)
+        content_type=b"application/json"
+        if mode == "home_html" and path == "/api/v1/home":
+            body=transmitted=b"<html><body>Login page, not the approved document</body></html>"
+            content_type=b"text/html"
+        writer.write(b"HTTP/1.1 "+status+b"\r\nContent-Type: "+content_type+b"\r\n"+extra+b"Content-Length: "+str(len(body)).encode()+b"\r\nConnection: close\r\n\r\n"+transmitted)
         await writer.drain(); writer.close(); await writer.wait_closed()
     listener=await asyncio.start_server(server,"127.0.0.1",0)
     port=listener.sockets[0].getsockname()[1]
@@ -141,6 +158,10 @@ async def test_actual_private_home_chromium_owner_job_readback_restart(accountin
         private_browser=MoltbookPrivateBrowserReader(local_transport=transport,resolver=resolver))
     if mode in {"dns_private","dns_mixed"}:
         service.private_browser.resolver=lambda host,port:["127.0.0.1"] if mode == "dns_private" else ["93.184.216.34","127.0.0.1"]
+    if mode == "cancel_dns":
+        async def pending_dns(host,port):
+            staged.set();await release.wait();return ["93.184.216.34"]
+        service.private_browser.resolver=pending_dns
     monkeypatch.setattr(moltbook,"moltbook_service",service)
     app=FastAPI(); app.add_middleware(OperatorAuthMiddleware)
     app.include_router(auth.router,prefix="/api/auth"); app.include_router(goals.router,prefix="/api")
@@ -171,9 +192,12 @@ async def test_actual_private_home_chromium_owner_job_readback_restart(accountin
             assert inspected.status_code == 200 and inspected.json()["status"] == "succeeded",inspected.text
             assert calls == ["/api/v1/agents/me","/api/v1/agents/status"]
             private_consent={**consent,"request_key":"private-consent","expected_revision":2,"actions":["private_home"],"private_bookkeeping_ack":True}
-            for bad in [False,1,"true"]:
-                denied=await client.post("/api/capabilities/moltbook/connection/private-home-consent",json={**private_consent,"private_bookkeeping_ack":bad})
-                assert denied.status_code == 422,denied.text
+            for field in ("private_bookkeeping_ack", "personal_noncommercial", "no_redistribution"):
+                for bad in [False,1,"true"]:
+                    denied=await client.post("/api/capabilities/moltbook/connection/private-home-consent",json={**private_consent,field:bad})
+                    assert denied.status_code == 422,denied.text
+                    unchanged=await client.get("/api/capabilities/moltbook/connection")
+                    assert unchanged.json()["revision"] == 2
             granted=await client.post("/api/capabilities/moltbook/connection/private-home-consent",json=private_consent)
             assert granted.status_code == 200,granted.text
             request.update(operation="private_home",request_key="home",expected_revision=3)
@@ -192,7 +216,22 @@ async def test_actual_private_home_chromium_owner_job_readback_restart(accountin
                     imported=await other.put("/api/capabilities/moltbook/connection",json={"vault_key":"private-home-dummy","request_key":"foreign-import"})
                     assert imported.status_code == 409,imported.text
                     assert calls == ["/api/v1/agents/me","/api/v1/agents/status"]
-                print(json.dumps({"mode":mode,"actual_authenticated_foreign_root":"denied","contacts":len(calls),"workspace":str(root)}))
+                    other_goal=(await other.post("/api/goals",json={"title":"Other owner's bounded identity inspection"})).json()
+                    other_principal=other_goal["owner_principal_id"]
+                    assert other_principal != principal
+                    await vault_repository.store("private-home-other",DUMMY_KEY_B,owner_principal_id=other_principal)
+                    assert (await other.put("/api/capabilities/moltbook/connection",json={"vault_key":"private-home-other","request_key":"other-import"})).status_code == 200
+                    assert (await other.post("/api/capabilities/moltbook/connection/consent",json={**consent,"goal_id":other_goal["id"],"request_key":"other-inspect-consent"})).status_code == 200
+                    other_job=await other.post("/api/capabilities/moltbook/reads",json={"operation":"inspect","fields":{},"request_key":"other-inspect",
+                        "goal_id":other_goal["id"],"goal_revision":1,"expected_revision":2})
+                    assert other_job.status_code == 200,other_job.text
+                    assert (await execute(other,other_job.json()["job_id"])).json()["status"] == "succeeded"
+                    own=(await other.get("/api/capabilities/moltbook/connection")).json()
+                    assert own["account_id"] == AGENT_ID_B and own["account_name"] == "FixtureAgent"
+                    assert (await client.get("/api/capabilities/moltbook/connection")).json()["account_id"] == AGENT_ID
+                    assert (await other.get(f"/api/capabilities/moltbook/jobs/{job_id}/output")).status_code in {403,404}
+                print(json.dumps({"mode":mode,"actual_authenticated_foreign_root":"denied","two_actual_vault_keys_and_native_inspections":True,
+                    "same_name_different_stable_uuid":True,"contacts":len(calls),"workspace":str(root)}))
                 return
             if mode == "cancel_unattempted":
                 cancelled=await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/cancel",json={"request_key":"cancel-precontact",
@@ -202,12 +241,17 @@ async def test_actual_private_home_chromium_owner_job_readback_restart(accountin
                 assert (await client.get("/api/capabilities/moltbook/connection")).json()["active_job_id"] is None
                 print(json.dumps({"mode":mode,"status":"cancelled","new_contacts":0,"workspace":str(root)}))
                 return
-            if mode == "cancel_staged":
+            if mode in {"cancel_staged","policy_before_adoption"}:
                 actual_read=service.private_browser.read
                 async def cancel_after_actual_read(**kwargs):
                     result=await actual_read(**kwargs)
-                    staged.set()
-                    await release.wait()
+                    if mode == "policy_before_adoption":
+                        # Real positive Chromium/cleanup, then actual current
+                        # server policy changes before the publication CAS.
+                        monkeypatch.setattr(settings,"browser_site_blocklist","www.moltbook.com")
+                    else:
+                        staged.set()
+                        await release.wait()
                     return result
                 service.private_browser.read=cancel_after_actual_read
             if mode == "stale_goal":
@@ -240,22 +284,32 @@ async def test_actual_private_home_chromium_owner_job_readback_restart(accountin
                     assert run.status == "accepted" and run.attempt_count == 0 and json.loads(run.artifact_receipts_json) == []
                 print(json.dumps({"mode":mode,"job_id":job_id,"new_contacts":0,"outcome":"Root expired; no invocation","workspace":str(root)}))
                 return
-            if mode == "cancel_staged":
+            if mode in {"cancel_staged","cancel_running","cancel_dns"}:
                 executing=asyncio.create_task(execute(client,job_id))
                 await asyncio.wait_for(staged.wait(),20)
                 original=(await client.get(f"/api/capabilities/moltbook/jobs/{job_id}")).json()
                 cancelled=await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/cancel",json={"request_key":"cancel-before-artifact",
                     "expected_revision":original["revision"],"fencing_token":original["lease"]["fencing_token"]})
-                assert cancelled.status_code == 200 and cancelled.json()["status"] == "cancelled",cancelled.text
+                assert cancelled.status_code == 200,cancelled.text
                 release.set()
                 try: completed=await executing
                 except (asyncio.CancelledError,RuntimeError) as exc:
                     execution_result=type(exc).__name__
                 else: execution_result="HTTP "+str(completed.status_code)
                 actual=(await client.get(f"/api/capabilities/moltbook/jobs/{job_id}")).json()
-                assert actual["status"] == "cancelled" and actual["artifacts"] == []
-                assert calls[2:] == ["/api/v1/agents/me","/api/v1/home","/api/v1/agents/me"]
-                assert (await client.get("/api/capabilities/moltbook/connection")).json()["active_job_id"] is None
+                assert actual["artifacts"] == []
+                connection=(await client.get("/api/capabilities/moltbook/connection")).json()
+                if mode == "cancel_staged":
+                    assert actual["status"] == "cancelled"
+                    assert calls[2:] == ["/api/v1/agents/me","/api/v1/home","/api/v1/agents/me"]
+                    assert connection["active_job_id"] is None
+                elif mode == "cancel_running":
+                    assert actual["status"] == "unknown_external_effect"
+                    assert calls[2:] == ["/api/v1/agents/me","/api/v1/home"]
+                    assert connection["active_job_id"] == job_id
+                else:
+                    assert len(calls) == 2 and actual["status"] in {"cancelled","unknown_external_effect"}
+                    assert connection["active_job_id"] == (None if actual["status"] == "cancelled" else job_id)
                 print(json.dumps({"mode":mode,"status":actual["status"],"cancelled_execute_request":execution_result,
                     "contacts":len(calls),"checkpoints":actual["checkpoints"],"workspace":str(root)}))
                 return
@@ -277,9 +331,11 @@ async def test_actual_private_home_chromium_owner_job_readback_restart(accountin
                     assert calls[2:] == ["/api/v1/agents/me"] and deliveries == []
                     assert actual["status"] == "blocked" and connection_now.json()["active_job_id"] is None
                 else:
-                    assert calls[2:] == ["/api/v1/agents/me","/api/v1/home"] and len(deliveries) == 1
+                    expected=["/api/v1/agents/me","/api/v1/home"]
+                    if mode == "policy_before_adoption":expected.append("/api/v1/agents/me")
+                    assert calls[2:] == expected and len(deliveries) == 1
                     assert actual["status"] != "succeeded"
-                    if mode in {"home_drop","home_redirect","goal_after_home","root_refresh"}:
+                    if mode in {"home_drop","home_redirect","goal_after_home","root_refresh","vault_after_home","policy_before_adoption"}:
                         assert connection_now.json()["active_job_id"] == job_id
                     if mode in {"home_drop","home_redirect"}:
                         assert actual["status"] == "unknown_external_effect"
@@ -325,6 +381,9 @@ def test_default_production_gate_and_bounded_document():
         MoltbookPrivateBrowserReader().require_available()
     with pytest.raises(MoltbookError): parse_document(b'{"x":1,"x":2}')
     with pytest.raises(MoltbookError): parse_document(b'{"x":NaN}')
+    with pytest.raises(MoltbookError): parse_document(b'{"x":'+b'"'+b'x'*65536+b'"}')
+    with pytest.raises(MoltbookError): parse_document(canonical({"x":[0]*1025}))
+    with pytest.raises(MoltbookError): parse_document(b'{"x":'+b'['*9+b'0'+b']'*9+b'}')
     value=home_document(); value["activity_on_your_posts"] *= 11
     with pytest.raises(MoltbookError):
         cited_projection(value,account_name="FixtureAgent",raw_digest="a"*64,dom_digest="b"*64,observed_at="local")
@@ -332,14 +391,17 @@ def test_default_production_gate_and_bounded_document():
 
 def test_complete_ten_post_citations_fit_one_source_bound_and_reject_foreign_reference():
     value=home_document()
-    value["activity_on_your_posts"] *= 10
-    for row in value["activity_on_your_posts"]: row["latest_commenters"] = ["a","b","c","d"]
+    value["activity_on_your_posts"] = [json.loads(json.dumps(value["activity_on_your_posts"][0])) for _ in range(10)]
+    for index,row in enumerate(value["activity_on_your_posts"]):
+        row.update(post_id=f"37dce414-9c76-4d7f-8b14-c56ca70c7e{index:02d}",post_title="t"*512,
+            preview="p"*2048,submolt_name="c"*30,latest_commenters=["n"*128]*4)
     data,citations=cited_projection(value,account_name="FixtureAgent",raw_digest="a"*64,dom_digest="b"*64,observed_at="local")
     payload={"data":data,"citations":citations,"source":{"id":"h","observed_at":"2026-10-04T01:00:00+00:00",
         "response_sha256":"a"*64,"browser_source_sha256":"b"*64,"browser_dom_sha256":"c"*64,
         "canonical_json_sha256":"d"*64,"equal_transport_and_browser_source":True}}
     validate_projection(payload)
     assert len(citations) == 103 and len(canonical({"source":payload["source"],"citations":citations})) <= 16384
+    assert len(canonical(payload)) <= 65536 and len(canonical(value)) <= 65536
     for target in ["source", "value"]:
         bad=json.loads(json.dumps(payload))
         if target == "source": bad["citations"][-1]["source_id"] = "foreign"

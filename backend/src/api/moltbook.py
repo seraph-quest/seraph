@@ -48,9 +48,11 @@ class Revision(Strict):
 class PrivateHomeConsent(Consent):
     actions: list[Literal["private_home"]] = Field(min_length=1, max_length=1)
     duration_seconds: int = Field(ge=30, le=300)
+    personal_noncommercial: StrictBool
+    no_redistribution: StrictBool
     private_bookkeeping_ack: StrictBool
 
-    @field_validator("private_bookkeeping_ack")
+    @field_validator("personal_noncommercial", "no_redistribution", "private_bookkeeping_ack")
     @classmethod
     def require_ack(cls, value):
         if value is not True: raise ValueError("explicit private Home bookkeeping acknowledgment required")

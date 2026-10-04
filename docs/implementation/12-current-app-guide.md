@@ -1402,10 +1402,14 @@ crash-proof execution.
 
 [ADR-018](./decisions/018-fixed-moltbook-private-browser-read.md) accepts one
 optional private Home document read through actual isolated Chromium and the
-existing owner connection. This branch-local target is **Planned**, not Shipped
-truth. Production Home is blocked until separately authorized effect, identity
-linkage and account/site acceptance evidence exists; existing registration keys
-and claim material are outside local validation.
+existing owner connection. The branch-local implementation has mechanically
+verified local authenticated TCP, Chromium, encrypted readback and operator
+controls; it is not Shipped production-account truth. Normal production execution
+is hard blocked: providing a key or consent cannot enable live Home. Activation
+requires separately authorized effect, identity linkage and account/site evidence
+and a reviewed production execution path. Existing registration keys and claim
+material are outside local validation; the fixed agents/me alternative remains
+an unimplemented fallback, never a silent replacement for approved Home.
 
 The separately unchecked finite consent names account summary and own-post
 activity fields and explains that the complete Home response is fetched while
@@ -1422,6 +1426,13 @@ JSON pointer and value digest within 16 KiB provenance. Only the allowlisted
 result is retained encrypted (64 KiB plaintext/96 KiB ciphertext); discarded
 role text, unrelated feeds and raw headers stay ephemeral. Private readback
 requires current Root/Goal/connection authority and never grants model context.
+Original job history and exact applied-request replay stay read only after a
+cold restart; a new execution cannot inherit the prior deadline or consent.
+Expired or revoked authority denies private decryption. In-flight cancellation
+can positively close Chromium while transfer closure remains Unknown; that
+uncertainty keeps the exact reservation and browser lane quarantined. Local
+response fixtures and Linux-host proof establish neither production effects nor
+macOS host readiness, and no measured-quality or learning claim is made.
 
 ### Optional Moltbook adapter target
 

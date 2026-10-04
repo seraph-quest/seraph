@@ -338,3 +338,12 @@ Unknown without replay; missing production evidence blocks production only.
 The acceptance/proof mapping above governs local validation. Complete native,
 private-artifact, UI and negative receipts plus a fresh independent whole review
 are required; fixtures do not establish production account acceptance.
+
+The implemented local-test constructor is not a production activation switch.
+Normal production execution stays hard blocked even with a provisioned key and
+finite consent. A separately reviewed account/effect gate and production path
+are required; the agents/me fallback has not been implemented. Closed private
+publication and readback validate the fixed output schema, exact one-source
+citations and encrypted bytes. Positive browser closure alone cannot settle an
+unclosed transfer: cancellation retains Unknown and the exact reservation/lane
+until complete positive closure is established.

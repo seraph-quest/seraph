@@ -1,5 +1,6 @@
 export const utf8=value=>new TextEncoder().encode(value);
 export async function sha(value){return hex(await crypto.subtle.digest("SHA-256",typeof value==="string"?utf8(value):value));}
+export async function sourceRevision(source){return sha(JSON.stringify(["seraph.selected-context.source.v1",source.origin,source.path,source.document_id,0,source.captured_at]));}
 function hex(value){return [...new Uint8Array(value)].map(x=>x.toString(16).padStart(2,"0")).join("");}
 function ordered(value){if(Array.isArray(value))return value.map(ordered);if(value&&typeof value==="object")return Object.keys(value).sort().map(k=>[k,ordered(value[k])]);return value;}
 function ascii(value){return JSON.stringify(value).replace(/[\u007f-\uffff]/g,c=>`\\u${c.charCodeAt(0).toString(16).padStart(4,"0")}`);}

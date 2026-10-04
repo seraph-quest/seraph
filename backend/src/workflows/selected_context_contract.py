@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 CAPABILITY_ID = "work.context.selected_text.v1"
 JOB_KIND = "selected_context_v1"
 VERSION = "browser-selected-text-v1"
-ADAPTER_BUILD_DIGEST = "fd8337cf5302b2963da4037c341ba375dde4bd4910484cc01df1a24016c872ba"
+ADAPTER_BUILD_DIGEST = "9b8462729bca4c5083be9b15c4aa21da9318924b58df17c1d1ec86a2af302972"
 COMPANION_ORIGIN = "chrome-extension://agjkohpodkhhflnioopocboanalpgajn"
 PAIRED_PATHS = frozenset("/api/context/selected-text/paired/" + action for action in ("target", "prepare", "ticket", "upload"))
 MAX_TEXT_BYTES = 32768

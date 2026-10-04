@@ -75,6 +75,8 @@ async def test_actual_signed_native_private_read_and_tombstone(accounting_db,rea
         url="/api/context/selected-text/tasks/selected-task/captures/"+job["job_id"]
         receipt=(await client.get(url)).json()
         approved=await client.post(url+"/decision",json={"decision":"approved","expected_digest":receipt["approval_decision_digest"]});assert approved.status_code==200,approved.text
+        changed=await signed("upload",{"metadata":metadata,"text":text+" changed"})
+        assert changed.status_code==422 and changed.json()["detail"]["code"]=="selected_context_content_changed"
         result=await signed("upload",{"metadata":metadata,"text":text});assert result.status_code==200,result.text
         assert result.json()["status"]=="succeeded" and result.json()["no_learning"] is True
         private=await client.get(url+"/private");assert private.status_code==200,private.text;assert private.json()["text"]==text

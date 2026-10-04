@@ -222,6 +222,79 @@ async def test_actual_operator_draft_approval_send_one_post_sqlite_reopen(accoun
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["auxiliary_rollback", "duplicate_observation", "stale_recovery_goal"])
+async def test_actual_readonly_observation_atomicity_and_replay(accounting_db, real_auth, monkeypatch, boundary):
+    import asyncio
+    from src.integrations import mail_reply_runtime as runtime
+    pure_reply_writer_guard(monkeypatch)
+    client, post, google, model_calls, preview, body, owner = await prepared_flow(accounting_db, real_auth, monkeypatch)
+    root, engine, factory = accounting_db
+    started=asyncio.Event();release=asyncio.Event();running=None
+    try:
+        google.drop_send=True
+        response=await client.post("/api/capabilities/mail/reply-sends/"+preview["job_id"]+"/execute",json={})
+        assert response.status_code>=400
+        original=(await client.get("/api/capabilities/mail/reply-sends/"+preview["job_id"])).json()
+        assert original["status"]=="unknown_external_effect" and original["transport_quiescent"] is True
+        profiles=(await client.get("/api/capabilities/mail/reply-profiles")).json()["profiles"]
+        read=next(row for row in profiles if row["service"]==READ_SERVICE)
+        async with factory.accounting_sessions() as db:
+            db.add(Goal(id="mail-atomic-observation-goal",title="Finite readonly observation",status="active",revision=1,
+                owner_principal_id=owner["principal_id"],owner_session_id=owner["session_id"],
+                admission_budget_json=serialize_admission_budget(GoalAdmissionBudget(reviewed_grant=True,grant_id="mail-atomic-observation",max_outstanding_jobs=1,max_attempts=1,max_runtime_seconds=120))))
+            row=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==preview["job_id"]))
+            before=(row.revision,row.effect_receipts_json,row.status,row.checkpoint_context_json)
+        request={"expected_original_revision":original["revision"],"read_connection_id":read["connection_id"],"expected_read_revision":read["revision"],
+            "goal_id":"mail-atomic-observation-goal","goal_revision":1,"acknowledge_readonly_recovery":True,"request_uuid":"atomic-observation-once"}
+        endpoint="/api/capabilities/mail/reply-sends/"+preview["job_id"]+"/observe"
+        contacts_before=len(google.calls)
+        if boundary=="auxiliary_rollback":
+            complete=DurableJobRepository.complete_mail_observation_in_session
+            async def fail_after_completion(self,db,run,**kwargs):
+                result=await complete(self,db,run,**kwargs)
+                raise RuntimeError("intercepted atomic auxiliary completion commit failure")
+            monkeypatch.setattr(DurableJobRepository,"complete_mail_observation_in_session",fail_after_completion)
+            result=await client.post(endpoint,json=request)
+            assert result.status_code>=400
+            async with factory.accounting_sessions() as db:
+                row=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==preview["job_id"]))
+                assert (row.revision,row.effect_receipts_json,row.status,row.checkpoint_context_json)==before
+                aux=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.job_kind==runtime.OBSERVATION_KIND))
+                assert aux.status!="succeeded" and json.loads(aux.artifact_receipts_json)==[]
+        elif boundary=="stale_recovery_goal":
+            async with factory.accounting_sessions() as db:
+                goal=await db.get(Goal,"mail-atomic-observation-goal");goal.revision+=1
+            result=await client.post(endpoint,json=request)
+            assert result.status_code>=400 and len(google.calls)==contacts_before
+        else:
+            handle=google.handle
+            async def hold_search(req):
+                response=await handle(req)
+                if req.url.path.endswith("/messages") and "in:sent" in req.url.params.get("q",""):
+                    started.set();await release.wait()
+                return response
+            real=__import__("src.integrations.gmail_send",fromlist=["GmailReplyAdapter"]).GmailReplyAdapter
+            monkeypatch.setattr(runtime,"GmailReplyAdapter",lambda *args,**kwargs:real(*args,transport=httpx.MockTransport(hold_search),resolver=lambda host,port:["93.184.216.34"],**kwargs))
+            running=asyncio.create_task(client.post(endpoint,json=request));await asyncio.wait_for(started.wait(),timeout=30)
+            count=len(google.calls);duplicate=await client.post(endpoint,json=request)
+            assert duplicate.status_code==200 and duplicate.json()["status"]=="running" and len(google.calls)==count
+            release.set();result=await asyncio.wait_for(running,timeout=10)
+            assert result.status_code==200 and result.json()["outcome"]=="verified_sent_observation"
+            count=len(google.calls);replay=await client.post(endpoint,json=request)
+            assert replay.status_code==200 and replay.json()["job_id"]==result.json()["job_id"] and len(google.calls)==count
+        await engine.dispose()
+        reopened=(await client.get("/api/capabilities/mail/reply-sends/"+preview["job_id"])).json()
+        assert reopened["status"]=="unknown_external_effect"
+        assert len(reopened.get("observations", []))==(1 if boundary=="duplicate_observation" else 0)
+        assert len([call for call in google.calls if call[0]=="POST" and call[1].endswith("/messages/send")])==1 and len(model_calls)==5
+        (root/("mail-observation-"+boundary+".json")).write_text(json.dumps({"boundary":boundary,"original_before":original,"original_reopened":reopened,"response_status":result.status_code,"response":result.json(),"contacts":google.calls},indent=2))
+    finally:
+        release.set()
+        if running is not None and not running.done():running.cancel();await asyncio.gather(running,return_exceptions=True)
+        await client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_unknown_send_readonly_recovery_old_goal_deadline_preserved(accounting_db, real_auth, monkeypatch):
     client, post, google, model_calls, preview, body, owner = await prepared_flow(accounting_db, real_auth, monkeypatch)
     root, engine, factory = accounting_db

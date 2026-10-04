@@ -344,6 +344,17 @@ function safeString(value: unknown, field: string, max = 1024): string {
   return value;
 }
 
+function plainText(value: unknown, field: string, max: number): string {
+  // Mail bodies are literal text and commonly contain line breaks. Keep the
+  // bounded scalar contract while rejecting controls other than tab/CR/LF.
+  if (typeof value !== "string" || !value.trim() || value.length > max
+    || new TextEncoder().encode(value).byteLength > max
+    || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)) {
+    fail(`The Mail receipt has an invalid ${field}.`);
+  }
+  return value;
+}
+
 function nullableString(value: unknown, field: string, max = 1024): string | null {
   return value === null ? null : safeString(value, field, max);
 }
@@ -608,7 +619,7 @@ function readResponse(value: unknown): MailMessageReadResponse {
     thread_key: opaqueId(value.thread_key, "thread key"),
     message_revision: digest(value.message_revision, "message revision"),
     subject: safeString(value.subject, "message subject", 500),
-    plain_text: safeString(value.plain_text, "message body", 64 * 1024),
+    plain_text: plainText(value.plain_text, "message body", 64 * 1024),
     truncated: booleanValue(value.truncated, "truncation status"),
     read_status: safeString(value.read_status, "read status", 64),
     received_at: value.received_at === null ? null : timestamp(value.received_at, "received time"),
@@ -663,7 +674,7 @@ function draftResponse(value: unknown): MailDraftResponse {
   return {
     status: "verified",
     task_id: opaqueId(value.task_id, "task ID"),
-    draft: { subject: safeString(draft.subject, "draft subject", 500), plainbody: safeString(draft.plainbody, "draft body", 64 * 1024), caveats: listOfStrings(draft.caveats, "draft caveats", 16) },
+    draft: { subject: safeString(draft.subject, "draft subject", 500), plainbody: plainText(draft.plainbody, "draft body", 64 * 1024), caveats: listOfStrings(draft.caveats, "draft caveats", 16) },
     message_revision: digest(value.message_revision, "message revision"),
     memory_status: "no_learning",
     sent: value.sent === false ? false : fail("A Mail draft cannot be marked sent."),

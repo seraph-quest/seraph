@@ -928,17 +928,46 @@ Gmail usefulness, send operation, and paid model canary remain
 **external-unverified**. See the M7 mail wire contract in issue #890 for the
 exact request, recovery, privacy, and readback boundaries.
 
-### Exact Gmail reply send: accepted architecture
+### Exact Gmail reply send
 
-**Planned:** [ADR-016](./decisions/016-exact-gmail-reply-send.md) defines a
-separately imported and explicitly consented reply-read/reply-send credential
-pair, exact scope and mailbox identity verification on every phase, private
-plain-text preview, canonical approval and one native send POST. Independent
-Sent-mailbox readback proves only the sender's Sent state. Unknown sends never
-resend; original-live-session recovery uses a separate finite readonly Goal and
-auxiliary job while preserving original status, deadlines and liability. Legacy
-Mail reads remain separate. Implementation and managed acceptance are pending;
-this paragraph does not claim live Gmail usefulness or Shipped behavior.
+**Partial:** The [ADR-016](./decisions/016-exact-gmail-reply-send.md) operator
+path imports two separate grants in Settings → Mail: readonly + identity and
+send + identity. Importing credentials grants no provider contact. Choose a
+current finite Goal and explicitly verify both grants against the same mailbox.
+Every refresh requires the exact observed scopes and the same stable identity;
+legacy Mail source access remains separate.
+
+Open a completed private Mail draft in the Work Board inspector. Load the local
+reply profiles, explicitly authorize a source/identity read, and prepare the
+private preview. It shows the verified sender, one recipient, original Subject,
+literal saved body and expiry. Local copy edits are not sent. Approve these
+exact bytes separately, then send once. The original native operation has a
+120-second deadline, one attempt and at most 14 contacts across preview and
+execution. Strict independent readback proves the sender's Sent-mailbox state;
+recipient delivery is not proven. Attachments, HTML, aliases and automatic
+learning are excluded.
+
+An uncertain send remains **Unknown; no resend**. Inspect the original receipt
+manually after response loss or reload. Cancellation waits for actual owned
+transport closure and cannot erase a possibly accepted send. With the original
+live operator session, explicitly select a separate current finite readonly
+RecoveryGoal and authorize one Sent observation (at most nine contacts). Its
+auxiliary job and bounded observation history can confirm Sent state while the
+original status, deadline, Goal, approval, write effect and liability remain
+unchanged. A revoked/replaced operator Root, unproven worker closure, incomplete
+or ambiguous search, or unavailable private artifact blocks this path. A new
+Root cannot adopt the old send authority.
+
+Focused acceptance uses actual authenticated SQLite, encrypted Vault/private
+artifacts, canonical draft admission/accounting, approval, native send and
+readonly recovery. Only external Google HTTP is intercepted for send/recovery;
+draft preparation separately intercepts the governed OpenRouter HTTP setup
+route and records real usage/effective-route receipts. The managed UI verifies
+literal multiline rendering, separate approval, sender Sent readback, an
+accepted-response-loss Unknown send, separate readonly observation and manual
+reload inspection. This is branch-local implementation evidence, not a live
+Gmail or Shipped claim. Provider search indexing, changes between source read and send,
+and human review of untrusted incoming Reply-To remain explicit limitations.
 
 ### Reviewed source-change follow-up
 

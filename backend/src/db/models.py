@@ -1306,6 +1306,10 @@ class WorkBoardInputArtifact(SQLModel, table=True):
     consumed_at: Optional[datetime] = Field(default=None, index=True)
     revision: int = Field(default=1, index=True)
     metadata_digest: Optional[str] = Field(default=None, index=True)
+    # ADR017 private pair reservation/quota/generation metadata. Source bytes
+    # remain encrypted files; this is the existing canonical owner row.
+    document_metadata_json: Optional[str] = Field(default=None)
+    document_reserved_bytes: int = Field(default=0)
 
 
 class RepoRepairSourcePacket(SQLModel, table=True):

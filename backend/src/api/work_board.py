@@ -73,6 +73,7 @@ from src.work_board import triage as triage_service
 from src.work_board import pipelines as pipeline_service
 from src.work_board.pipeline_contracts import PipelinePreviewRequest, PipelineAcceptRequest, PipelineAdvanceRequest, PipelineRevisionRequest, PipelineReuseRequest, REPORT
 from src.work_board.tool_package_contracts import ToolPackageRecoverRequest
+from src.work_board.document_compare_contracts import DocumentPairReserve, DocumentPairMutation
 from src.work_board.time import serialize_utc_datetime
 from src.security.trust_contract import AuthorityGrant
 from src.security.site_policy import _parse_rules
@@ -2079,6 +2080,73 @@ async def create_work_board_input_artifact(
             status_code=503,
             detail={"code": "board_storage_unavailable", "recovery": "Check the workspace database readiness receipt and retry."},
         ) from exc
+
+
+@router.post("/document-pairs")
+async def reserve_document_pair(request: Request, body: DocumentPairReserve):
+    from src.work_board.document_pairs import reserve
+    try:
+        async with get_session() as db:
+            return await reserve(db, _owner(_operator(request)), body)
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.get("/document-pairs/{identifier}")
+async def read_document_pair(request: Request, identifier: str):
+    from src.work_board.document_pairs import owned, projection
+    try:
+        async with get_session() as db:
+            row, _value = await owned(db, _owner(_operator(request)), identifier)
+            return projection(row)
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.put("/document-pairs/{identifier}/sources/{slot}")
+async def upload_document_source(request: Request, identifier: str, slot: str, expected_revision: int = Query(ge=1)):
+    from src.work_board.document_pairs import upload
+    if request.headers.get("content-type", "").split(";", 1)[0] != "application/octet-stream":
+        raise HTTPException(status_code=415, detail={"code": "document_raw_stream_required"})
+    try:
+        async with get_session() as db:
+            return await upload(db, _owner(_operator(request)), identifier, expected_revision, slot, request.stream())
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.post("/document-pairs/{identifier}/complete")
+async def complete_document_pair(request: Request, identifier: str, body: DocumentPairMutation):
+    from src.work_board.document_pairs import complete
+    try:
+        async with get_session() as db:
+            return await complete(db, _owner(_operator(request)), identifier, body.expected_revision)
+    except BoardError as exc:
+        _raise_board_error(exc)
+
+
+@router.get("/tasks/{task_id}/document-output/{slot}")
+async def read_document_comparison_output(request: Request, task_id: str, slot: str):
+    from src.work_board.document_compare_native import read_output
+    from src.work_board.document_pairs import owned, authority
+    from src.work_board.pipelines import root_binding
+    if slot not in {"report","csv","manifest"}:raise HTTPException(status_code=404)
+    owner=_owner(_operator(request))
+    try:
+        async with get_session() as db:
+            task=await WorkBoardRepository().get_task(db,owner,task_id)
+            if task.capability_id!="work.document-compare.v1" or task.status not in {WorkBoardStatus.done,WorkBoardStatus.review}:
+                raise BoardError("document_output_unavailable","A verified comparison output is required",status_code=409)
+            row,value=await owned(db,owner,task.input_artifact_id)
+            await authority(db,owner,row,value,dict(root_binding()))
+            attempt=await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id==task_id)
+                .order_by(WorkBoardAttempt.created_at.desc()).limit(1))
+            run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==attempt.workflow_run_id)) if attempt else None
+            if run is None or run.status!="succeeded":raise BoardError("document_output_unavailable","The original job is not verified",status_code=409)
+            receipt,output=read_output(task,attempt,run)
+            text=json.dumps(output[slot],sort_keys=True) if slot=="manifest" else output[slot]
+            return {"text":text,"sha256":hashlib.sha256(text.encode()).hexdigest(),"cipher_sha256":receipt["cipher_sha256"],"no_learning":True}
+    except BoardError as exc:_raise_board_error(exc)
 
 
 @router.get("/input-artifacts/{artifact_id}")

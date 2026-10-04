@@ -41,6 +41,26 @@ async def test_final_authority_callback_after_dns_blocks_contact():
 
 
 @pytest.mark.asyncio
+async def test_generic_wrapper_keeps_handoff_and_final_authority_callbacks():
+    order = []
+    async def handoff_check():
+        order.append("handoff")
+    async def resolver(_host, _port):
+        order.append("dns")
+        return [PUBLIC_ADDRESS]
+    async def authority_check():
+        order.append("authority")
+    async def contact(_request):
+        order.append("contact")
+        return httpx.Response(200, content=b"bounded")
+    response = await request_pinned_https("https://example.com/held",
+        resolver=resolver, transport=httpx.MockTransport(contact),
+        handoff_check=handoff_check, authority_check=authority_check)
+    assert response.content == b"bounded"
+    assert order == ["handoff", "dns", "handoff", "authority", "contact", "handoff", "handoff"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "addresses",
     [

@@ -2553,6 +2553,12 @@ async def apply_memory_proposal_action(
     corrects_memory_id: str | None = None,
     preferred_capability_id: str | None = None,
 ) -> dict[str, Any]:
+    # Procedure preferences require their specialized staged, Root-bound
+    # branch. Reject before the generic writer or source/redaction helpers.
+    async with get_session() as schema_db:
+        schema_row = await schema_db.get(MemoryProposal, proposal_id)
+        if schema_row is not None and schema_row.schema_version == "procedure_recommendation.v1":
+            raise ValueError("procedure_preference_requires_specialized_review")
     action = str(action or "").strip().lower()
     if action not in {"accept", "edit_accept", "reject", "rollback", "recover"}:
         raise ValueError("unknown_proposal_action")

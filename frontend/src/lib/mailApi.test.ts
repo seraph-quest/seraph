@@ -6,6 +6,8 @@ import {
   createMailWatch,
   getMailConnectionRecovery,
   getMailReplyRecovery,
+  getMailReplyDraft,
+  readMailMessage,
   getMailWatchRecovery,
   listMailConnections,
   validateMailConnectionResponse,
@@ -46,6 +48,35 @@ describe("mailApi", () => {
     await expect(listMailConnections()).resolves.toEqual([connection]);
     expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("/api/capabilities/mail/connections"), expect.objectContaining({ method: "GET", credentials: "include" }));
     expect(JSON.stringify(fetchMock.mock.calls[0])).not.toContain("owner_principal");
+  });
+
+  it("preserves literal multiline draft bytes and rejects other controls", async () => {
+    const draft = { status: "verified", task_id: "task-1", draft: {
+      subject: "Re: Subject", plainbody: "First line\n<script>literal()</script>\r\n\tLast line",
+      caveats: [],
+    }, message_revision: "a".repeat(64), memory_status: "no_learning", sent: false, saved_to_provider: false };
+    fetchMock.mockResolvedValueOnce(response(draft));
+    await expect(getMailReplyDraft("task-1")).resolves.toMatchObject({ draft: { plainbody: draft.draft.plainbody } });
+    for (const plainbody of ["bad\u0000body", "bad\u000bbody", "x".repeat(65537), "é".repeat(32769)]) {
+      fetchMock.mockResolvedValueOnce(response({ ...draft, draft: { ...draft.draft, plainbody } }));
+      await expect(getMailReplyDraft("task-1")).rejects.toBeInstanceOf(MailApiError);
+    }
+  });
+
+  it("accepts bounded multiline private source text through the sibling read path", async () => {
+    const payload = { source_binding_id: "source-1", message_key: "message-1", thread_key: "thread-1",
+      message_revision: "a".repeat(64), subject: "Subject", plain_text: "First\n<script>literal()</script>\nLast",
+      truncated: false, read_status: "verified", received_at: null, fetched_at: "2026-10-04T00:00:00Z",
+      provenance: { connection_id: "connection-1", connection_revision: 1, consent_id: "consent-1",
+        source_consent_revision: 1, memory_status: "no_learning", egress: "local_only" },
+      provider_contact: true, control_job_id: "job-1" };
+    const request = { connection_id: "connection-1", expected_connection_revision: 1, mail_consent_id: "consent-1",
+      expected_source_consent_revision: 1, message_binding_id: "source-1", expected_message_revision: "a".repeat(64),
+      acknowledge_selected_body_read: true as const, request_uuid: "read-once" };
+    fetchMock.mockResolvedValueOnce(response(payload));
+    await expect(readMailMessage("source-1", request)).resolves.toMatchObject({ plain_text: payload.plain_text });
+    fetchMock.mockResolvedValueOnce(response({ ...payload, plain_text: "bad\u0000body" }));
+    await expect(readMailMessage("source-1", request)).rejects.toBeInstanceOf(MailApiError);
   });
 
   it("keeps credentials in the one setup request and rejects malformed metadata", async () => {

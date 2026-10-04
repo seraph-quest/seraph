@@ -459,6 +459,48 @@ execution, memory superiority, or production readiness.
 
 ### Reviewed procedures v2 (M6 #889) {#reviewed-procedures-v2-m6-889-branch-local-target}
 
+[ADR-015](./decisions/015-reviewed-procedure-preferences.md) accepts a narrow
+reviewed-learning target: explicit feedback on matching manual invocations may
+propose a Goal/version-local preference for an existing `public-browser-check`
+version. The integration-branch implementation counts the complete matching
+manual population before filtering: two distinct native readback-verified
+outcomes with current Helpful feedback and no current Harmful feedback can
+produce a proposal. Corrections append an exact predecessor-bound decision;
+failed, unreviewed, stale, and unresolved members remain visible and cannot
+become successful votes. Insufficient evidence returns `no_learning`.
+Feedback is enabled only after the current attempt ends. A decision binds the
+exact task revision, latest ended attempt ID, and fence; later changes retain
+the full history but make the old decision ineffective. The Library labels
+stale historical feedback separately, and a new explicit correction requires
+the historical tip and a reason. Historical replay cannot restore eligibility;
+stale feedback records `feedback_outcome_stale` and `no_learning`.
+
+The Library runs the provider-free `memory.procedure-recommendation.v1`
+capability through the existing routine API and durable native job runtime.
+Its Inspector declares local read/artifact permissions, zero inference budget,
+one attempt, no automatic retry, a maximum 120-second original deadline,
+20 manual invocations, 100 feedback events, and 128 KiB of serialized metadata.
+Private source proofs have 4 MiB individual and 16 MiB aggregate bounds. An
+explicit owned cancellation creates no preference or positive readback.
+
+Preview, acknowledgment, signed canonical-memory adoption, and rollback remain
+separate explicit actions. Future selection rechecks the complete current
+population and exact original owner/Root, Goal, reviewed version, package, and
+source bindings; another matching invocation or correction makes an old
+preference unavailable. Selection loads reviewed version metadata only and
+never authorizes or starts invocation or scheduling. Rollback retains the
+outcomes, corrections, proposal, and signed memory history.
+
+Preview and adopted Library suggestions both display the exact included list
+and count, explain that scheduled invocations are excluded, and disclose that
+the deterministic preference is not a measured quality improvement. The actual
+isolated managed journey exercised native parent/fixed-leaf execution, feedback,
+insufficient evidence, adoption, read-only selection/reload, Harmful correction,
+and rollback. Public HTTP responses were intercepted and nonlocal sockets denied;
+no model or account contact occurred. This is branch-local implementation
+evidence; whole independent review and Shipped `develop` truth remain separate
+gates.
+
 The #889 reviewed procedure surface turns verified Work Board outcomes into reusable,
 owner-bound procedures. It has exactly three registered templates:
 
@@ -952,6 +994,55 @@ mechanics; CPU-only/keyless OpenRouter operation, a real Google account, live
 Gmail usefulness, send operation, and paid model canary remain
 **external-unverified**. See the M7 mail wire contract in issue #890 for the
 exact request, recovery, privacy, and readback boundaries.
+
+### Exact Gmail reply send
+
+**Partial:** The [ADR-016](./decisions/016-exact-gmail-reply-send.md) operator
+path imports two separate grants in Settings → Mail: readonly + identity and
+send + identity. Importing credentials grants no provider contact. Choose a
+current finite Goal and explicitly verify both grants against the same mailbox.
+Every refresh requires the exact observed scopes and the same stable identity;
+legacy Mail source access remains separate.
+
+Open a completed private Mail draft in the Work Board inspector. Load the local
+reply profiles, explicitly authorize a source/identity read, and prepare the
+private preview. It shows the verified sender, one recipient, original Subject,
+literal saved body and expiry. Local copy edits are not sent. Approve these
+exact bytes separately, then send once. The original native operation has a
+120-second deadline, one attempt and at most 14 contacts across preview and
+execution. Strict independent readback proves the sender's Sent-mailbox state;
+recipient delivery is not proven. Attachments, HTML, aliases and automatic
+learning are excluded.
+
+An uncertain send remains **Unknown; no resend**. Inspect the original receipt
+manually after response loss or reload. Cancellation waits for actual owned
+transport closure and cannot erase a possibly accepted send. With the original
+live operator session, explicitly select a separate current finite readonly
+RecoveryGoal and authorize one Sent observation (at most nine contacts). Its
+auxiliary job and bounded observation history can confirm Sent state while the
+original status, deadline, Goal, approval, write effect and liability remain
+unchanged. A revoked/replaced operator Root, unproven worker closure, incomplete
+or ambiguous search, or unavailable private artifact blocks this path. A new
+Root cannot adopt the old send authority.
+
+Readonly recovery requires the original worker's versioned transport-closure
+receipt, bound to that send's intent, execution fence and complete contact
+history. Every new contact invalidates prior-phase closure in its reservation
+transaction. A response-lost reservation can qualify when its actual HTTP client
+has positively closed; an expired lease, generic restart recovery or an empty
+process registry cannot establish closure. Older receipts without this proof
+remain blocked for recovery; the app does not reconstruct or resend them.
+
+Focused acceptance uses actual authenticated SQLite, encrypted Vault/private
+artifacts, canonical draft admission/accounting, approval, native send and
+readonly recovery. Only external Google HTTP is intercepted for send/recovery;
+draft preparation separately intercepts the governed OpenRouter HTTP setup
+route and records real usage/effective-route receipts. The managed UI verifies
+literal multiline rendering, separate approval, sender Sent readback, an
+accepted-response-loss Unknown send, separate readonly observation and manual
+reload inspection. This is branch-local implementation evidence, not a live
+Gmail or Shipped claim. Provider search indexing, changes between source read and send,
+and human review of untrusted incoming Reply-To remain explicit limitations.
 
 ### Reviewed source-change follow-up
 

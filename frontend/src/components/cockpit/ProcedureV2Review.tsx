@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ProcedurePreferenceReview } from "./ProcedurePreferenceReview";
 
 import {
   createReadConsent,
@@ -1459,9 +1460,10 @@ export function ProcedureV2Review({
     if (!context || !packagePreview?.review_id || packageApproval?.status !== "approved") return;
     if (packagePreview.routine_id !== context.routineId || packagePreview.version !== context.version
       || !packagePreview.digest
+      || !packagePreview.manifest.version.trim()
       || packageApproval.digest !== packagePreview.digest
       || packageApproval.pack_id !== packagePreview.pack_id
-      || packageApproval.version !== String(context.version)) {
+      || packageApproval.version !== packagePreview.manifest.version) {
       setError("Package activation is blocked until the reviewed approval, exact version, and package digest match the current routine readback.");
       return;
     }
@@ -1954,6 +1956,11 @@ export function ProcedureV2Review({
       </div>
 
       {prepared && routine ? <div className="mt-3 grid gap-3 rounded border border-white/10 p-3">
+        {routineActive && templateId === "public-browser-check" && ownerPrincipalId && ownerSessionId && selectedGoal?.revision ?
+          <ProcedurePreferenceReview ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
+            scope={{ routineId: routine.id, version: currentVersion, routineRevision: routine.revision,
+              goalId: selectedGoal.id, goalRevision: selectedGoal.revision }}
+            onSelectVersion={(version) => { void loadExistingRoutine(routine.id, version); }} /> : null}
         <div className="font-semibold">2. Review, install, and activate the exact package</div>
         <div className="text-xs">Binding <span className="font-mono">{prepared.bindingId}</span> · routine <span className="font-mono">{prepared.routineId}</span> · revision {routine.revision} · state {routine.state} · package {routine.package?.status ?? "unknown"}</div>
         {routine.state === "revoked" ? <div className="rounded border border-red-500/40 p-2" role="alert">This procedure is revoked permanently. Prepare a new version from a fresh verified source.</div> : null}

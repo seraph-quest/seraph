@@ -89,6 +89,26 @@ async def test_actual_authored_time_ledger_native_reopen_private_read(accounting
             raise
     monkeypatch.setattr(tool_package_native,"execute",traced_execute)
     records={}
+    if authored_fixture=="two-goal-race":
+        from contextlib import contextmanager
+        import time,traceback
+        from src.extensions.capability_pack import CapabilityPackLifecycle
+        original_lock=CapabilityPackLifecycle._state_lock
+        lock_trace=[]
+        @contextmanager
+        def observed_lock(store,*,shared=False):
+            entry={"start":time.monotonic(),"shared":shared,"caller":[item.name for item in traceback.extract_stack(limit=5)[:-1]]}
+            if len(lock_trace)<2048:lock_trace.append(entry)
+            try:
+                with original_lock(store,shared=shared):
+                    entry["acquired"]=time.monotonic()
+                    yield
+            except Exception as error:
+                entry["error"]=type(error).__name__
+                raise
+            finally:entry["end"]=time.monotonic()
+        monkeypatch.setattr(CapabilityPackLifecycle,"_state_lock",observed_lock)
+        records["lifecycle_lock_trace"]=lock_trace
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url="http://test",headers={"origin":"http://localhost:3001"}) as client:
         async def post(path,payload):
             for exact_try in range(5):

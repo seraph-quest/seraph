@@ -454,6 +454,16 @@ async def run_owned(operator, ident, execute_operation):
     task.add_done_callback(completed)
     try:
         return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        # An explicit native cancellation may stop this owned provider
+        # callback. Return its settled original receipt to the waiting caller
+        # only when the canonical cancellation exists. Caller disconnects
+        # never cancel the shielded worker or manufacture settlement.
+        if task.cancelled():
+            current = await get_run(operator, ident)
+            if state(current).get("cancel_requested") is True:
+                return await snapshot(operator, ident)
+        raise
     finally:
         if task.done() and _active_workers.get(ident) is task:
             _active_workers.pop(ident, None)

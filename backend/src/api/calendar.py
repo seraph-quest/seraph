@@ -1087,7 +1087,7 @@ async def list_connections(request: Request):
             await _assert_live_operator_session(db, owner)
         except CalendarControlError as exc:
             raise _control_http_error(exc) from exc
-        rows = (await db.execute(select(GoogleServiceConnection).where(GoogleServiceConnection.owner_principal_id == owner.principal_id, GoogleServiceConnection.owner_session_id == owner.session_id).order_by(GoogleServiceConnection.created_at.desc()).limit(50))).scalars().all()
+        rows = (await db.execute(select(GoogleServiceConnection).where(GoogleServiceConnection.owner_principal_id == owner.principal_id, GoogleServiceConnection.owner_session_id == owner.session_id, GoogleServiceConnection.service == "calendar_readonly").order_by(GoogleServiceConnection.created_at.desc()).limit(50))).scalars().all()
         return {"connections": [_metadata(row) for row in rows]}
 
 

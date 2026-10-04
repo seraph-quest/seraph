@@ -1,5 +1,6 @@
 """Actual auth/API/SQLite/Vault/task/approval/jobs; only Google HTTP simulated."""
 from copy import deepcopy
+import asyncio
 from datetime import datetime,timedelta,timezone
 import json
 import uuid
@@ -13,7 +14,7 @@ from tests.test_inference_accounting import accounting_db
 from tests.test_research_native_vertical import real_auth
 from tests.test_calendar_reschedule_contract import ACCOUNT,CALENDAR,source_event,timed
 from src.auth.middleware import OperatorAuthMiddleware
-from src.db.models import Goal,WorkflowRunState,CalendarRescheduleConsent,WorkBoardTask
+from src.db.models import Goal,WorkflowRunState,CalendarRescheduleConsent,WorkBoardTask,GoogleServiceConnection,ApprovalRequest
 from src.goals.contracts import GoalAdmissionBudget
 from src.goals.repository import serialize_admission_budget
 from src.integrations.calendar_reschedule_contract import READ_SERVICE,SEND_SERVICE,SCOPES
@@ -27,7 +28,7 @@ def ident(): return str(uuid.uuid4())
 class Google:
     def __init__(self):
         self.calls=[]; self.event=source_event(); self.event["summary"]="Exact owned event"
-        self.patch=None; self.conflict=False; self.lose_response=False
+        self.patch=None; self.conflict=False; self.lose_response=False; self.patch_entered=None; self.patch_release=None
 
     async def handle(self,request):
         self.calls.append({"method":request.method,"host":request.url.host,"path":request.url.path,
@@ -52,6 +53,9 @@ class Google:
                 return httpx.Response(412,json={"error":{"code":412}})
             self.event.update(start=self.patch["start"],end=self.patch["end"],etag='"new"',sequence=2)
             self.event["extendedProperties"]["private"].update(self.patch["extendedProperties"]["private"])
+            if self.patch_entered is not None:
+                self.patch_entered.set()
+                await asyncio.wait_for(self.patch_release.wait(),timeout=10)
             if self.lose_response: raise httpx.ReadError("simulated accepted conditional PATCH response lost")
             return httpx.Response(200,json=deepcopy(self.event))
         assert request.method=="GET"
@@ -100,6 +104,14 @@ async def prepared(accounting_db,monkeypatch):
     for role in SCOPES:
         profiles[role]=(await post(base+"profiles",{"service":role,"label":role,"client_id":"synthetic-client","refresh_token":role,
             "declared_scopes":sorted(SCOPES[role]),"acknowledge_separate_identity_profile":True,"idempotency_key":ident()}))["profile"]
+    # The legacy selector must never relabel an owned write profile as
+    # readonly; its endpoint and the new two-profile endpoint stay disjoint.
+    before=len(google.calls)
+    selector=await client.get("/api/calendar/connections")
+    assert selector.status_code==200 and [row["connection_id"] for row in selector.json()["connections"]]==[legacy["connection_id"]],selector.text
+    dedicated=await client.get("/api/"+base+"profiles")
+    assert dedicated.status_code==200 and {row["service"] for row in dedicated.json()["profiles"]}==set(SCOPES),dedicated.text
+    assert len(google.calls)==before
     pair={"read_connection_id":profiles[READ_SERVICE]["connection_id"],"expected_read_revision":profiles[READ_SERVICE]["revision"],
         "write_connection_id":profiles[SEND_SERVICE]["connection_id"],"expected_write_revision":profiles[SEND_SERVICE]["revision"],
         "event_binding_id":selected["event_binding_id"],"expected_event_binding_revision":selected["event_binding_revision"],
@@ -172,3 +184,66 @@ async def test_actual_native_conditional_write_readback_and_readonly_original_li
         assert read.json()["model_used"] is False and read.json()["no_learning"] is True and "preview" not in read.json()
         (root/("calendar-native-"+mode+"-receipt.json")).write_text(json.dumps({"result":actual,"reopened":read.json(),"wire":google.patch,"contacts":google.calls},indent=2))
     finally: await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed",["consent_revoked","goal_revision","profile_revoked","root_logout"])
+async def test_current_authority_denies_contact_and_private_bytes(accounting_db,real_auth,monkeypatch,changed):
+    root,engine,factory=accounting_db
+    client,post,google,preview,proposal,grant,permission,owner=await prepared(accounting_db,monkeypatch)
+    base="capabilities/calendar/reschedule/"; ident_original=preview["job_id"]
+    before=len(google.calls)
+    try:
+        if changed=="consent_revoked":
+            await post(base+"consents/"+grant["consent_id"]+"/revoke",{"expected_revision":grant["revision"],"idempotency_key":ident()})
+        elif changed=="profile_revoked":
+            await post(base+"profiles/"+permission["write_connection_id"]+"/revoke",{"expected_revision":permission["expected_write_revision"],"idempotency_key":ident()})
+        elif changed=="goal_revision":
+            async with factory.accounting_sessions() as db:
+                goal=await db.get(Goal,"calendar-native-goal"); goal.revision+=1
+        else:
+            response=await client.post("/api/auth/logout",json={}); assert response.status_code==204,response.text
+        result=await client.get("/api/"+base+"operations/"+ident_original+"/private")
+        if changed=="root_logout": assert result.status_code==401,result.text
+        else:
+            assert result.status_code==200,result.text
+            assert result.json()["private_read_available"] is False and "preview" not in result.json(),result.json()
+        denied=await client.post("/api/"+base+"operations/"+ident_original+"/execute",json={})
+        assert denied.status_code in {401,409},denied.text
+        assert len(google.calls)==before and google.patch is None
+        async with factory.accounting_sessions() as db:
+            run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==ident_original))
+            assert run.status=="paused" and "intent" not in json.loads(run.checkpoint_context_json)
+            approval=await db.get(ApprovalRequest,preview["preview"]["approval_id"])
+            assert approval.status=="approved"
+        target=root/("calendar-denied-"+changed+"-receipt.json")
+        target.write_text(json.dumps({"private":result.json(),"execute":denied.json(),"contacts_before":before,"contacts_after":len(google.calls),"patch":google.patch},indent=2))
+    finally: await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_execute_owns_one_actual_patch_and_cancel_waits_for_close(accounting_db,real_auth,monkeypatch):
+    root,engine,factory=accounting_db
+    client,post,google,preview,proposal,grant,permission,owner=await prepared(accounting_db,monkeypatch)
+    google.patch_entered=asyncio.Event(); google.patch_release=asyncio.Event()
+    base="/api/capabilities/calendar/reschedule/operations/"+preview["job_id"]
+    first=asyncio.create_task(client.post(base+"/execute",json={}))
+    try:
+        await asyncio.wait_for(google.patch_entered.wait(),timeout=10)
+        replay=await client.post(base+"/execute",json={}); assert replay.status_code==200,replay.text
+        assert replay.json()["status"]=="running" and replay.json()["transport_quiescent"] is False
+        cancel=await client.post(base+"/cancel",json={"expected_revision":replay.json()["revision"],"request_uuid":ident()})
+        assert cancel.status_code==200,cancel.text
+        actual=cancel.json()
+        assert actual["status"]=="unknown_external_effect" and actual["contact_may_have_occurred"] is True and actual["transport_quiescent"] is True,actual
+        await first
+        assert sum(call["method"]=="PATCH" for call in google.calls)==1
+        calls=len(google.calls); final=await client.post(base+"/execute",json={})
+        assert final.status_code==200 and final.json()["status"]=="unknown_external_effect" and len(google.calls)==calls
+        target=root/"calendar-concurrent-cancel-receipt.json"
+        target.write_text(json.dumps({"replay":replay.json(),"cancel":actual,"final":final.json(),"contacts":google.calls},indent=2))
+    finally:
+        google.patch_release.set()
+        if not first.done(): first.cancel()
+        await asyncio.gather(first,return_exceptions=True)
+        await client.aclose()

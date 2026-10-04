@@ -1558,3 +1558,7 @@ behavior, live claimed-account usefulness or successful live public outreach.
 - [ADR-004: GPU Core And Paired Mac Edge](./decisions/004-gpu-core-mac-edge-topology.md)
 - [ADR-008: Portable Core And Consented Context](./decisions/008-portable-core-and-consented-context.md)
 - [ADR-006: OpenRouter-only inference phase](./decisions/006-openrouter-only-inference-phase.md)
+
+### Exact Forgejo issue title transaction target
+
+[ADR-021](./decisions/021-exact-forgejo-issue-title.md) accepts one ordinary-issue title edit through the real Forgejo v15.0.9 editor, using backend-only session secrets and an exact separately approved title. This branch-local target remains incomplete until actual local execution and whole review. Live Codeberg is mechanically blocked pending separate account/site/version acceptance. Provider title history and notifications remain; the provider offers no atomic revision CAS or idempotency key. A lost response stays Unknown, read-only observation never resubmits, and reversal requires a new exact approval. Configuration grants neither Goal budget nor mutation permission.

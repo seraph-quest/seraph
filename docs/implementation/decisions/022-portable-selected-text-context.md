@@ -91,6 +91,13 @@ Jobs are priority 60, runtime 15 seconds, max attempts 1, outstanding 1 per owne
 retain at most 2 MiB selected text per owner. Changed authority rejects rather than
 retargeting or renewing the ticket.
 
+The finite retention implementation additionally caps charged captures at 64
+per owner. A nullable reserved-byte projection on the same native job is charged
+atomically at admission and remains charged through uncertainty. An indexed
+read of at most 65 scalar rows rejects malformed or over-bound quota; no historical
+JSON scan or second ledger. Tombstone plus positively verified capture-owned
+cleanup releases the charge. Other job kinds and legacy rows remain NULL.
+
 ### Canonical identity, locator and pure publication
 
 Run identity derives from owner principal plus capture UUID in a fixed domain,
@@ -127,7 +134,9 @@ memory update. Generic job artifact/input/evidence/model paths deny this produce
 Current-owner Task Inspector readback rechecks all current authority and immutable
 locator/pair/Vault/file proofs before decrypting. Clear cached plaintext on denial
 or owner/Task change. Discard first commits an irreversible native tombstone,
-then performs bounded outside-writer credential/file cleanup. Failed cleanup is
+then performs bounded outside-writer capture-owned private-file cleanup. Shared
+pair credentials, the owner Vault master key and unrelated artifacts remain
+owned by their separate explicit controls. Failed cleanup is
 visible and retryable locally without renewing read/send authority. Encrypted
 audit remnants may remain; no physical erasure guarantee.
 
@@ -150,6 +159,12 @@ admission and non-resurrection. Verify populated-database migration and indexed
 query plan. Record unavailable macOS runtime proof honestly. No live account,
 provider, model, GPU or Mac device is a prerequisite for local acceptance.
 
-Official Chrome activeTab, scripting, contextMenus, match-pattern and storage
-documentation and the W3C Selection API were checked on 2026-10-04 in the reviewed
-design. Recheck unstable API claims when implementing their actual adapter.
+Official primary sources checked on 2026-10-04 in the reviewed design and
+implementation intake:
+
+- [Chrome activeTab](https://developer.chrome.com/docs/extensions/develop/concepts/activeTab)
+- [Chrome scripting](https://developer.chrome.com/docs/extensions/reference/api/scripting)
+- [Chrome contextMenus](https://developer.chrome.com/docs/extensions/reference/api/contextMenus)
+- [Chrome match patterns](https://developer.chrome.com/docs/extensions/develop/concepts/match-patterns)
+- [Chrome storage](https://developer.chrome.com/docs/extensions/reference/api/storage)
+- [W3C Selection API](https://w3c.github.io/selection-api/)

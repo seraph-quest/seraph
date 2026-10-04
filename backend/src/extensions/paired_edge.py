@@ -320,6 +320,29 @@ async def verify_pairing_credential(
         reference=reference,
         name=name,
     )
+    await resolve_pairing_secret(entry, state, extension_id=extension_id,
+        reference=reference, presented_credential=presented_credential)
+    owner_principal_id = str(entry.get("owner_principal_id") or "").strip()
+    from src.auth.service import authenticate_principal, AuthFailure
+    try:
+        await authenticate_principal(owner_principal_id)
+    except AuthFailure as exc:
+        raise ValueError("pairing_owner_reconnect_required") from exc
+    return entry, state
+
+
+async def resolve_pairing_secret(entry, state, *, extension_id, reference, presented_credential):
+    """Exact current generation; owned markers can never fall back to NULL.
+
+    Positively legacy entries retain their prior generic ingress contract.
+    Selected context requires the owned marker and rejects that legacy branch.
+    """
+    owner_principal_id = str(entry.get("owner_principal_id") or "").strip()
+    if not owner_principal_id:
+        raise ValueError("pairing_owner_missing")
+    marker = entry.get("credential_owner_scope_version")
+    if marker not in {None, "legacy-unowned-v0", "owner-v1"}:
+        raise ValueError("pairing_credential_scope_unsupported")
     credential_ref = entry.get("credential_ref")
     if not isinstance(credential_ref, str) or not credential_ref.startswith(PAIRING_CREDENTIAL_PREFIX):
         raise ValueError("credential_not_configured")
@@ -333,20 +356,18 @@ async def verify_pairing_credential(
         if not hmac.compare_digest(credential_ref, legacy_ref):
             raise ValueError("credential_ref_invalid")
         key = legacy_key
-    stored = await vault_repository.get(key)
-    if stored is None:
-        raise ValueError("credential_unavailable")
-    if not hmac.compare_digest(stored, presented_credential):
+    if state.credential_fingerprint and not hmac.compare_digest(
+        scoped_credential_fingerprint(presented_credential, entry.get("credential_scope", "")), state.credential_fingerprint):
         raise ValueError("authentication_failed")
-    owner_principal_id = str(entry.get("owner_principal_id") or "").strip()
-    if not owner_principal_id:
-        raise ValueError("pairing_owner_missing")
-    from src.auth.service import authenticate_principal, AuthFailure
-    try:
-        await authenticate_principal(owner_principal_id)
-    except AuthFailure as exc:
-        raise ValueError("pairing_owner_reconnect_required") from exc
-    return entry, state
+    if marker == "owner-v1" and entry.get("credential_vault_key") != key:
+        raise ValueError("credential_ref_invalid")
+    snapshot = await vault_repository.snapshot(key,
+        owner_principal_id=owner_principal_id if marker == "owner-v1" else None)
+    if snapshot is None:
+        raise ValueError("credential_unavailable")
+    if not hmac.compare_digest(snapshot.value, presented_credential):
+        raise ValueError("authentication_failed")
+    return snapshot
 
 
 def _token() -> str:
@@ -390,7 +411,10 @@ async def create_pairing(
     if not transition.accepted:
         raise ValueError(transition.reason_code)
     key = _credential_key(extension_id, reference, pairing_id, raw_credential)
-    await vault_repository.store(key, raw_credential, description="paired edge credential")
+    if not isinstance(owner_principal_id, str) or not owner_principal_id.strip():
+        raise ValueError("pairing_owner_missing")
+    await vault_repository.store(key, raw_credential, description="paired edge credential",
+        owner_principal_id=owner_principal_id)
     credential_ref = f"{PAIRING_CREDENTIAL_PREFIX}{hashlib.sha256(key.encode()).hexdigest()[:24]}"
     entry = pairing_entry_from_state(
         transition.state,
@@ -401,6 +425,8 @@ async def create_pairing(
         label=label,
         policy=effective_policy,
     )
+    entry["credential_owner_scope_version"] = "owner-v1"
+    entry["credential_vault_key"] = key
     set_node_adapter_pairing_entry(
         payload,
         extension_id=extension_id,
@@ -422,6 +448,8 @@ async def rotate_pairing(
     expected_revision: int | None = None,
 ) -> tuple[dict[str, Any], str, int]:
     entry, current = current_pairing(payload, extension_id=extension_id, reference=reference, name=name)
+    await resolve_pairing_secret(entry, current, extension_id=extension_id,
+        reference=reference, presented_credential=current_credential)
     scope = entry.get("credential_scope")
     if not isinstance(scope, str) or not scope:
         raise ValueError("credential_scope_missing")
@@ -439,9 +467,6 @@ async def rotate_pairing(
         if not hmac.compare_digest(stored_ref, legacy_ref):
             raise ValueError("credential_ref_invalid")
         key = legacy_key
-    stored = await vault_repository.get(key)
-    if stored is None or not hmac.compare_digest(stored, current_credential):
-        raise ValueError("current_credential_invalid")
     if current.credential_fingerprint and not hmac.compare_digest(active_fingerprint, current.credential_fingerprint):
         raise ValueError("current_credential_invalid")
     raw_credential = _token()
@@ -455,7 +480,8 @@ async def rotate_pairing(
     if not transition.accepted:
         raise ValueError(transition.reason_code)
     new_key = _credential_key(extension_id, reference, current.pairing_id, raw_credential)
-    await vault_repository.store(new_key, raw_credential, description="paired edge credential")
+    await vault_repository.store(new_key, raw_credential, description="paired edge credential",
+        owner_principal_id=entry["owner_principal_id"])
     entry = pairing_entry_from_state(
         transition.state,
         base_entry=entry,
@@ -466,6 +492,9 @@ async def rotate_pairing(
         owner_principal_id=str(entry.get("owner_principal_id") or ""),
         policy=_policy_from_entry(entry),
     )
+    entry["credential_owner_scope_version"] = "owner-v1"
+    entry["credential_vault_key"] = new_key
+    entry.pop("selected_context_target", None)
     set_node_adapter_pairing_entry(
         payload,
         extension_id=extension_id,
@@ -525,11 +554,8 @@ async def authenticate_edge_request(
         if not hmac.compare_digest(credential_ref, legacy_ref):
             raise ValueError("credential_ref_invalid")
         key = legacy_key
-    stored = await vault_repository.get(key)
-    if stored is None or not isinstance(presented_credential, str) or not presented_credential:
-        raise ValueError("authentication_required")
-    if not hmac.compare_digest(stored, presented_credential):
-        raise ValueError("authentication_failed")
+    await resolve_pairing_secret(entry, state, extension_id=extension_id,
+        reference=reference, presented_credential=presented_credential)
     owner_principal_id = str(entry.get("owner_principal_id") or "").strip()
     if not owner_principal_id:
         raise ValueError("pairing_owner_missing")

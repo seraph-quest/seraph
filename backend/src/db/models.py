@@ -1787,6 +1787,10 @@ class WorkBoardHandoff(SQLModel, table=True):
 class WorkflowRunState(SQLModel, table=True):
     __tablename__ = "workflow_run_states"
     __table_args__ = (
+        Index("ix_workflow_run_states_source_task", "job_kind", "owner_principal_id",
+            "operator_session_id", "source_task_id"),
+        Index("ix_workflow_run_states_selected_context_quota", "job_kind", "owner_principal_id",
+            "selected_context_reserved_bytes"),
         Index(
             "ux_workflow_run_states_idempotency_binding",
             "idempotency_binding",
@@ -1835,6 +1839,11 @@ class WorkflowRunState(SQLModel, table=True):
     goal_revision: Optional[int] = Field(default=None, index=True)
     plan_revision: Optional[int] = Field(default=None, index=True)
     candidate_id: Optional[str] = Field(default=None, index=True)
+    # Address projection only. Selected context checks immutable native
+    # authority before using this field to locate a private task attachment.
+    source_task_id: Optional[str] = Field(default=None)
+    # Quota address projection only; charged until positively verified cleanup.
+    selected_context_reserved_bytes: Optional[int] = Field(default=None)
     capability_version: str = Field(default="workflow-v1", index=True)
     input_digest: Optional[str] = Field(default=None, index=True)
     authority_digest: Optional[str] = Field(default=None, index=True)

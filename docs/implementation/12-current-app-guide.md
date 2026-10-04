@@ -434,6 +434,48 @@ execution, memory superiority, or production readiness.
 
 ### Reviewed procedures v2 (M6 #889) {#reviewed-procedures-v2-m6-889-branch-local-target}
 
+[ADR-015](./decisions/015-reviewed-procedure-preferences.md) accepts a narrow
+reviewed-learning target: explicit feedback on matching manual invocations may
+propose a Goal/version-local preference for an existing `public-browser-check`
+version. The integration-branch implementation counts the complete matching
+manual population before filtering: two distinct native readback-verified
+outcomes with current Helpful feedback and no current Harmful feedback can
+produce a proposal. Corrections append an exact predecessor-bound decision;
+failed, unreviewed, stale, and unresolved members remain visible and cannot
+become successful votes. Insufficient evidence returns `no_learning`.
+Feedback is enabled only after the current attempt ends. A decision binds the
+exact task revision, latest ended attempt ID, and fence; later changes retain
+the full history but make the old decision ineffective. The Library labels
+stale historical feedback separately, and a new explicit correction requires
+the historical tip and a reason. Historical replay cannot restore eligibility;
+stale feedback records `feedback_outcome_stale` and `no_learning`.
+
+The Library runs the provider-free `memory.procedure-recommendation.v1`
+capability through the existing routine API and durable native job runtime.
+Its Inspector declares local read/artifact permissions, zero inference budget,
+one attempt, no automatic retry, a maximum 120-second original deadline,
+20 manual invocations, 100 feedback events, and 128 KiB of serialized metadata.
+Private source proofs have 4 MiB individual and 16 MiB aggregate bounds. An
+explicit owned cancellation creates no preference or positive readback.
+
+Preview, acknowledgment, signed canonical-memory adoption, and rollback remain
+separate explicit actions. Future selection rechecks the complete current
+population and exact original owner/Root, Goal, reviewed version, package, and
+source bindings; another matching invocation or correction makes an old
+preference unavailable. Selection loads reviewed version metadata only and
+never authorizes or starts invocation or scheduling. Rollback retains the
+outcomes, corrections, proposal, and signed memory history.
+
+Preview and adopted Library suggestions both display the exact included list
+and count, explain that scheduled invocations are excluded, and disclose that
+the deterministic preference is not a measured quality improvement. The actual
+isolated managed journey exercised native parent/fixed-leaf execution, feedback,
+insufficient evidence, adoption, read-only selection/reload, Harmful correction,
+and rollback. Public HTTP responses were intercepted and nonlocal sockets denied;
+no model or account contact occurred. This is branch-local implementation
+evidence; whole independent review and Shipped `develop` truth remain separate
+gates.
+
 The #889 reviewed procedure surface turns verified Work Board outcomes into reusable,
 owner-bound procedures. It has exactly three registered templates:
 

@@ -125,6 +125,63 @@ class ConnectionVerify(_Strict):
     request_uuid: str = Field(min_length=1, max_length=256)
 
 
+class ReplyConnectionCreate(_Strict):
+    service: Literal["gmail_reply_read", "gmail_reply_send"]
+    label: str = Field(min_length=1, max_length=200)
+    client_id: str = Field(min_length=1, max_length=4096)
+    client_secret: str | None = Field(default=None, max_length=4096)
+    refresh_token: str = Field(min_length=1, max_length=8192)
+    declared_scopes: list[str] = Field(min_length=3, max_length=3)
+    acknowledge_separate_identity_profile: Literal[True]
+    idempotency_key: str = Field(min_length=1, max_length=256)
+
+
+class ReplyPairVerify(_Strict):
+    read_connection_id: str = Field(min_length=1, max_length=256)
+    expected_read_revision: int = Field(ge=1)
+    send_connection_id: str = Field(min_length=1, max_length=256)
+    expected_send_revision: int = Field(ge=1)
+    goal_id: str = Field(min_length=1, max_length=256)
+    goal_revision: int = Field(ge=1)
+    acknowledge_identity_read: Literal[True]
+    request_uuid: str = Field(min_length=1, max_length=256)
+    priority: int = Field(default=60, ge=0, le=100)
+
+
+class ReplySendPreview(_Strict):
+    task_id: str = Field(min_length=1, max_length=256)
+    expected_message_revision: str = Field(min_length=1, max_length=128)
+    read_connection_id: str = Field(min_length=1, max_length=256)
+    expected_read_revision: int = Field(ge=1)
+    send_connection_id: str = Field(min_length=1, max_length=256)
+    expected_send_revision: int = Field(ge=1)
+    acknowledge_identity_source_read: Literal[True]
+    acknowledge_exact_reply_send: Literal[True]
+    request_uuid: str = Field(min_length=1, max_length=256)
+    priority: int = Field(default=60, ge=0, le=100)
+
+
+class ReplyDecision(_Strict):
+    decision: Literal["approved", "denied"]
+    expected_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class ReplyCancel(_Strict):
+    expected_revision: int = Field(ge=1)
+    request_uuid: str = Field(min_length=1, max_length=256)
+
+
+class ReplyObservation(_Strict):
+    expected_original_revision: int = Field(ge=1)
+    read_connection_id: str = Field(min_length=1, max_length=256)
+    expected_read_revision: int = Field(ge=1)
+    goal_id: str = Field(min_length=1, max_length=256)
+    goal_revision: int = Field(ge=1)
+    acknowledge_readonly_recovery: Literal[True]
+    request_uuid: str = Field(min_length=1, max_length=256)
+    priority: int = Field(default=60, ge=0, le=100)
+
+
 class LabelsRefresh(_Strict):
     connection_id: str = Field(min_length=1, max_length=256)
     expected_connection_revision: int = Field(ge=1)
@@ -2768,6 +2825,252 @@ async def get_reply_draft(request: Request, task_id: str) -> dict[str, Any]:
             "sent": False,
             "saved_to_provider": False,
         }
+
+
+def _reply_profile_metadata(row):
+    return {"connection_id": row.connection_id, "service": row.service, "label": row.label,
+        "revision": row.revision, "state": row.state, "scope_status": row.scope_status,
+        "declared_scopes": json.loads(row.declared_scopes_json),
+        "verified_setup_job_id": row.verified_setup_job_id, "provider_contact": False,
+        "setup_is_send_permission": False}
+
+
+@router.get("/capabilities/mail/reply-profiles")
+async def list_reply_profiles(request: Request):
+    from src.integrations.mail_reply_send import current_root
+    operator = _operator(request)
+    async with get_session() as db:
+        await current_root(db, operator)
+        rows = (await db.execute(select(GoogleServiceConnection).where(
+            GoogleServiceConnection.owner_principal_id == operator.principal.principal_id,
+            GoogleServiceConnection.owner_session_id == operator.session_id,
+            GoogleServiceConnection.service.in_(["gmail_reply_read", "gmail_reply_send"])
+        ).order_by(GoogleServiceConnection.created_at.desc()).limit(32))).scalars().all()
+        return {"profiles": [_reply_profile_metadata(row) for row in rows], "provider_contact": False}
+
+
+@router.post("/capabilities/mail/reply-profiles")
+async def create_reply_profile(request: Request):
+    from src.integrations.gmail_send import SCOPES, digest as exact_digest
+    from src.integrations.mail_reply_send import current_root
+    from src.integrations.mail_reply_runtime import writer
+    operator = _operator(request)
+    body = await _json_body(request, ReplyConnectionCreate)
+    if (len(set(body.declared_scopes)) != 3 or frozenset(body.declared_scopes) != SCOPES[body.service]
+        or any(not _credential_value_allowed(value) for value in (body.client_id, body.refresh_token, body.client_secret or "x"))):
+        raise HTTPException(status_code=422, detail={"code": "mail_reply_profile_invalid"})
+    request_digest = exact_digest(body.model_dump())
+    credentials = {"client_id": body.client_id, "client_secret": body.client_secret, "refresh_token": body.refresh_token}
+    async with _MAIL_CONNECTION_CREATE_LOCK:
+        async with writer() as db:
+            await current_root(db, operator)
+            row = (await db.execute(select(GoogleServiceConnection).where(
+                GoogleServiceConnection.owner_principal_id == operator.principal.principal_id,
+                GoogleServiceConnection.owner_session_id == operator.session_id,
+                GoogleServiceConnection.setup_idempotency_key == body.idempotency_key))).scalar_one_or_none()
+            if row is not None:
+                if row.setup_request_digest != request_digest or row.service != body.service:
+                    raise HTTPException(status_code=409, detail={"code": "mail_reply_setup_conflict"})
+                if row.state == "active":
+                    return {"profile": _reply_profile_metadata(row)}
+                if row.state != "preparing":
+                    raise HTTPException(status_code=409, detail={"code": "mail_reply_setup_blocked"})
+            else:
+                row = GoogleServiceConnection(owner_principal_id=operator.principal.principal_id,
+                    owner_session_id=operator.session_id, service=body.service, label=body.label,
+                    vault_secret_key="gmail-reply:"+secrets.token_urlsafe(24),
+                    credential_fingerprint=exact_digest(credentials),
+                    declared_scopes_json=json.dumps(sorted(SCOPES[body.service])),
+                    setup_idempotency_key=body.idempotency_key, setup_request_digest=request_digest,
+                    state="preparing", revision=1)
+                db.add(row)
+                await db.flush()
+            ident, key = row.connection_id, row.vault_secret_key
+        # Encryption/Vault audit and its own session are OUTSIDE this writer.
+        raw = json.dumps(credentials, sort_keys=True)
+        prior = await vault_repository.get(key, owner_principal_id=operator.principal.principal_id)
+        if prior is None:
+            await vault_repository.store(key, raw, description="Separate exact Gmail reply identity profile",
+                owner_principal_id=operator.principal.principal_id)
+        elif prior != raw:
+            raise HTTPException(status_code=409, detail={"code": "mail_reply_setup_conflict"})
+        async with writer() as db:
+            await current_root(db, operator)
+            row = await db.get(GoogleServiceConnection, ident, populate_existing=True)
+            if row is None or row.setup_request_digest != request_digest or row.state != "preparing":
+                raise HTTPException(status_code=409, detail={"code": "mail_reply_setup_changed"})
+            row.state = "active"
+            row.revision += 1
+            row.updated_at = _now()
+            return {"profile": _reply_profile_metadata(row)}
+
+
+@router.get("/capabilities/mail/reply-profiles/recovery/{idempotency_key}")
+async def recover_reply_profile(request: Request, idempotency_key: str):
+    from src.integrations.mail_reply_send import current_root
+    operator = _operator(request)
+    if not _SAFE_REQUEST.fullmatch(idempotency_key):
+        raise HTTPException(status_code=422, detail={"code": "mail_request_invalid"})
+    async with get_session() as db:
+        await current_root(db, operator)
+        row = (await db.execute(select(GoogleServiceConnection).where(
+            GoogleServiceConnection.owner_principal_id == operator.principal.principal_id,
+            GoogleServiceConnection.owner_session_id == operator.session_id,
+            GoogleServiceConnection.service.in_(["gmail_reply_read", "gmail_reply_send"]),
+            GoogleServiceConnection.setup_idempotency_key == idempotency_key))).scalar_one_or_none()
+        return {"profile": _reply_profile_metadata(row) if row else None, "provider_contact": False}
+
+
+@router.post("/capabilities/mail/reply-profiles/{connection_id}/revoke")
+async def revoke_reply_profile(request: Request, connection_id: str):
+    from src.integrations.mail_reply_send import current_root
+    from src.integrations.mail_reply_runtime import writer
+    operator = _operator(request)
+    body = await _json_body(request, ConnectionControl)
+    request_digest = digest([connection_id, body.model_dump()])
+    async with writer() as db:
+        await current_root(db, operator)
+        row = await db.get(GoogleServiceConnection, connection_id, populate_existing=True)
+        if (row is None or row.owner_principal_id != operator.principal.principal_id
+            or row.owner_session_id != operator.session_id or row.service not in {"gmail_reply_read", "gmail_reply_send"}):
+            raise HTTPException(status_code=404, detail={"code": "mail_reply_profile_missing"})
+        if row.revoke_idempotency_key:
+            if row.revoke_request_digest != request_digest:
+                raise HTTPException(status_code=409, detail={"code": "mail_reply_revoke_conflict"})
+            return {"profile": _reply_profile_metadata(row)}
+        if row.revision != body.expected_revision:
+            raise HTTPException(status_code=409, detail={"code": "mail_reply_revision_changed"})
+        row.state = "revoked"
+        row.revision += 1
+        row.revoke_idempotency_key = body.idempotency_key
+        row.revoke_request_digest = request_digest
+        row.updated_at = _now()
+        # Keeping quarantined encrypted bytes is deliberate: revocation is
+        # immediately canonical and never authorizes another Vault egress.
+        return {"profile": _reply_profile_metadata(row), "credential_cleanup": "encrypted_quarantine"}
+
+
+async def _reply_expected_pair(operator, body, *, send=True):
+    from src.integrations.mail_reply_runtime import pair_snapshots
+    rows = await pair_snapshots(operator, body.read_connection_id, body.send_connection_id if send else None)
+    if rows[0]["revision"] != body.expected_read_revision or (send and rows[1]["revision"] != body.expected_send_revision):
+        raise HTTPException(status_code=409, detail={"code": "mail_reply_revision_changed"})
+
+
+@router.get("/capabilities/mail/reply-operations/recovery/{kind}/{request_uuid}")
+async def recover_reply_operation(request: Request, kind: str, request_uuid: str):
+    from src.integrations import mail_reply_runtime as runtime
+    if kind not in {runtime.IDENTITY_KIND, runtime.SEND_KIND, runtime.OBSERVATION_KIND} or not _SAFE_REQUEST.fullmatch(request_uuid):
+        raise HTTPException(status_code=422, detail={"code": "mail_request_invalid"})
+    operator = _operator(request)
+    try:
+        return {"job": await runtime.snapshot(operator, runtime.job_id(operator, kind, request_uuid)), "provider_contact": False}
+    except runtime.DurableJobNotFound:
+        return {"job": None, "provider_contact": False}
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/capabilities/mail/reply-profiles/verify-pair")
+async def verify_reply_pair(request: Request):
+    from src.integrations import mail_reply_runtime as runtime
+    operator = _operator(request)
+    body = await _json_body(request, ReplyPairVerify)
+    try:
+        request_binding = runtime.digest(body.model_dump())
+        replay = await runtime.request_replay(operator, kind=runtime.IDENTITY_KIND, request_uuid=body.request_uuid, request_binding=request_binding)
+        if replay is not None:
+            return replay
+        await _reply_expected_pair(operator, body)
+        return await runtime.run_owned(operator, runtime.job_id(operator, runtime.IDENTITY_KIND, body.request_uuid),
+            lambda: runtime.verify_pair(operator, request_uuid=body.request_uuid,
+                goal_id=body.goal_id, goal_revision=body.goal_revision, priority=body.priority, request_binding=request_binding,
+                read_connection_id=body.read_connection_id, send_connection_id=body.send_connection_id))
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/capabilities/mail/reply-sends/preview")
+async def preview_reply_send(request: Request):
+    from src.integrations import mail_reply_runtime as runtime
+    operator = _operator(request)
+    body = await _json_body(request, ReplySendPreview)
+    try:
+        request_binding = runtime.digest(body.model_dump())
+        replay = await runtime.request_replay(operator, kind=runtime.SEND_KIND, request_uuid=body.request_uuid, request_binding=request_binding)
+        if replay is not None:
+            return replay
+        await _reply_expected_pair(operator, body)
+        staged = await runtime.stage_source(operator, body.task_id)
+        if staged["message_revision"] != body.expected_message_revision:
+            raise HTTPException(status_code=409, detail={"code": "mail_reply_source_changed"})
+        return await runtime.run_owned(operator, runtime.job_id(operator, runtime.SEND_KIND, body.request_uuid),
+            lambda: runtime.preview(operator, task_id=body.task_id, read_connection_id=body.read_connection_id,
+                send_connection_id=body.send_connection_id, request_uuid=body.request_uuid, priority=body.priority, request_binding=request_binding))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.get("/capabilities/mail/reply-sends/{job_id}")
+async def get_reply_send(request: Request, job_id: str):
+    from src.integrations.mail_reply_runtime import snapshot
+    try:
+        return await snapshot(_operator(request), job_id)
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/capabilities/mail/reply-sends/{job_id}/decision")
+async def decide_reply_send(request: Request, job_id: str):
+    from src.integrations.mail_reply_runtime import decide
+    body = await _json_body(request, ReplyDecision)
+    try:
+        return await decide(_operator(request), job_id, decision=body.decision, expected_digest=body.expected_digest)
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/capabilities/mail/reply-sends/{job_id}/execute")
+async def execute_reply_send(request: Request, job_id: str):
+    from src.integrations import mail_reply_runtime as runtime
+    operator = _operator(request)
+    # No caller supplies a MIME resource, recipient, approval or provider URL.
+    await _json_body(request, _Strict)
+    try:
+        return await runtime.run_owned(operator, job_id, lambda: runtime.execute(operator, job_id))
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/capabilities/mail/reply-sends/{job_id}/cancel")
+async def cancel_reply_send(request: Request, job_id: str):
+    from src.integrations.mail_reply_runtime import cancel
+    body = await _json_body(request, ReplyCancel)
+    try:
+        return await cancel(_operator(request), job_id, request_uuid=body.request_uuid, expected_revision=body.expected_revision)
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/capabilities/mail/reply-sends/{job_id}/observe")
+async def observe_reply_send(request: Request, job_id: str):
+    from src.integrations import mail_reply_runtime as runtime
+    operator = _operator(request)
+    body = await _json_body(request, ReplyObservation)
+    try:
+        request_binding = runtime.digest(body.model_dump())
+        replay = await runtime.request_replay(operator, kind=runtime.OBSERVATION_KIND, request_uuid=body.request_uuid, request_binding=request_binding)
+        if replay is not None:
+            return replay
+        await _reply_expected_pair(operator, body, send=False)
+        return await runtime.run_owned(operator, runtime.job_id(operator, runtime.OBSERVATION_KIND, body.request_uuid),
+            lambda: runtime.observe(operator, original_job_id=job_id,
+                expected_original_revision=body.expected_original_revision, read_connection_id=body.read_connection_id,
+                goal_id=body.goal_id, goal_revision=body.goal_revision, request_uuid=body.request_uuid, priority=body.priority, request_binding=request_binding))
+    except Exception as exc:
+        raise _error(exc) from exc
 
 
 @router.post("/capabilities/mail/watches", response_model=None)

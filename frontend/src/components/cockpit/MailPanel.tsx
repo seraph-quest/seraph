@@ -1,3 +1,4 @@
+import { MailReplySendPanel } from "./MailReplySendPanel";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
@@ -146,7 +147,7 @@ function clearPendingReply(ownerScope: string | null, messageBindingId: string):
   }
 }
 
-function DraftPanel({ taskId, ownerPrincipalId, ownerSessionId }: Omit<MailPanelProps, "mailOrigin" | "goalId" | "goalRevision">) {
+function DraftPanel({ taskId, ownerPrincipalId, ownerSessionId, goalId, goalRevision }: Omit<MailPanelProps, "mailOrigin">) {
   const ownerScope = ownerPrincipalId && ownerSessionId ? `${ownerPrincipalId}\u0000${ownerSessionId}` : null;
   const mountedRef = useRef(true);
   const generationRef = useRef(0);
@@ -227,11 +228,12 @@ function DraftPanel({ taskId, ownerPrincipalId, ownerSessionId }: Omit<MailPanel
 
   return (
     <section className="rounded border border-cyan-500/30 bg-cyan-950/10 p-3" aria-label="Private Mail draft review">
-      <div className="flex flex-wrap items-center justify-between gap-2"><div><div className="font-semibold">Private Mail draft</div><div className="text-[10px] text-retro-text/60">Task {taskId} · owner-scoped readback · no send capability</div></div><button type="button" className="cockpit-feedback-button" onClick={() => void loadDraft()} disabled={loading}>{loading ? "Refreshing…" : "Refresh draft readback"}</button></div>
+      <div className="flex flex-wrap items-center justify-between gap-2"><div><div className="font-semibold">Private Mail draft</div><div className="text-[10px] text-retro-text/60">Task {taskId} · owner-scoped readback · local draft · exact send requires separate review</div></div><button type="button" className="cockpit-feedback-button" onClick={() => void loadDraft()} disabled={loading}>{loading ? "Refreshing…" : "Refresh draft readback"}</button></div>
       {error && <div className="mt-2 rounded border border-amber-500/40 p-2 text-[10px]" role="alert">{error}{unknown ? " The original task identity is retained; no replacement request was created." : ""}</div>}
       {draft?.status === "pending" && <div className="mt-2 rounded border border-amber-500/40 p-2 text-[10px]" role="status">Draft execution is still pending. {draft.recovery_action ?? "Refresh canonical readback when ready."}</div>}
       {draft?.status === "blocked" && <div className="mt-2 rounded border border-amber-500/40 p-2 text-[10px]" role="status">Draft execution is blocked. {draft.recovery_action ?? "Reconcile the existing task before any new request."}</div>}
       {draft?.status === "verified" && draft.draft && <div className="mt-2 grid gap-2"><label className="text-[10px]">Subject<input className="cockpit-input mt-1 w-full" maxLength={500} value={subject} onChange={(event) => setSubject(event.currentTarget.value)} /></label><label className="text-[10px]">Plain-text draft<textarea className="cockpit-input mt-1 w-full" rows={8} maxLength={64 * 1024} value={plainbody} onChange={(event) => setPlainbody(event.currentTarget.value)} /></label>{draft.draft.caveats.length > 0 && <div className="text-[10px] text-amber-200">Caveats: {draft.draft.caveats.join(" · ")}</div>}<div className="flex flex-wrap gap-2"><button type="button" className="cockpit-feedback-button" onClick={() => void copyDraft()}>Copy local draft</button><span className="text-[10px] text-retro-text/60 self-center">Verified local artifact · sent: no · provider draft: no · memory: no learning</span></div>{copyStatus && <div className="text-[10px]" role="status">{copyStatus}</div>}</div>}
+      {draft?.status === "verified" && draft.draft && draft.message_revision && <MailReplySendPanel taskId={taskId} messageRevision={draft.message_revision} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} goalId={goalId} goalRevision={goalRevision} />}
     </section>
   );
 }
@@ -504,7 +506,7 @@ function PrivateMailReview({ ownerPrincipalId, ownerSessionId, origin, goalId, g
       {replyError && <div className="mt-2 rounded border border-amber-500/40 p-2 text-[10px]" role="alert">{replyError}</div>}
       {pendingReply && <div className="mt-2 text-[10px] text-amber-200" role="status">A reply admission is pending reconciliation. The original opaque request key is retained; no replacement task will be created.</div>}
       {pendingReply && !replyTaskId && <button type="button" className="cockpit-feedback-button mt-2" disabled={replyBusy} onClick={() => void reconcileReply()}>{replyBusy ? "Reconciling original draft…" : "Reconcile original draft"}</button>}
-      {replyTaskId && <div className="mt-2"><DraftPanel taskId={replyTaskId} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} /></div>}
+      {replyTaskId && <div className="mt-2"><DraftPanel taskId={replyTaskId} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} goalId={goalId} goalRevision={goalRevision} /></div>}
     </section>
   );
 }
@@ -513,5 +515,5 @@ export function MailPanel({ taskId, ownerPrincipalId, ownerSessionId, mailOrigin
   if (mailOrigin) {
     return <PrivateMailReview origin={mailOrigin} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} goalId={goalId} goalRevision={goalRevision} />;
   }
-  return <DraftPanel taskId={taskId} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} />;
+  return <DraftPanel taskId={taskId} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} goalId={goalId} goalRevision={goalRevision} />;
 }

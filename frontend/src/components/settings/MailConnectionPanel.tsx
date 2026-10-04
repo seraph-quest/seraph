@@ -31,6 +31,7 @@ import {
   withMailDeadline as bounded,
   verifyMailConnection,
 } from "../../lib/mailApi";
+import { MailReplyProfiles } from "./MailReplyProfiles";
 import type { GoalInfo } from "../../types";
 
 const GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly" as const;
@@ -894,6 +895,7 @@ export function MailConnectionPanel({ ownerPrincipalId, ownerSessionId }: MailCo
 
   return (
     <section className="px-1" aria-label="Mail connection and private source controls">
+      <MailReplyProfiles ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} goals={goals} />
       <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-1">Gmail read-only Mail</div>
       <p className="text-[9px] text-retro-text/50 mb-3">Credentials are write-only setup material. Metadata reads stay local and provider-free until you explicitly verify, refresh labels, scan, or read one selected message.</p>
 

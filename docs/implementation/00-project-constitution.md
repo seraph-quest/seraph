@@ -86,6 +86,7 @@ The following architecture decisions are normative:
 13. [ADR-013: Fixed reviewed local tool package](./decisions/013-fixed-reviewed-local-tool-package.md)
 14. [ADR-014: Bounded evidence dependencies](./decisions/014-bounded-evidence-dependencies.md)
 15. [ADR-015: Reviewed procedure preferences](./decisions/015-reviewed-procedure-preferences.md)
+16. [ADR-016: Exact Gmail reply send and readonly reconciliation](./decisions/016-exact-gmail-reply-send.md)
 
 Changing a locked decision requires a superseding ADR, a tracked issue, an
 independent Critic/Contrarian review, and updates to every affected active doc.

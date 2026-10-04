@@ -36,6 +36,7 @@ from src.memory.control import (
 from src.memory.decay import summarize_memory_reconciliation_state
 from src.memory.providers import list_memory_provider_inventory
 from src.memory.repository import memory_repository
+from src.memory.procedure_preferences import ProcedurePreferenceActionRequest
 from src.security.trust_contract import AuthorityGrant, PrincipalType
 
 router = APIRouter()
@@ -475,6 +476,28 @@ async def get_memory_task_decision_capabilities(http_request: Request):
 
     authenticated_memory_context(http_request)
     return {"capabilities": m5_registered_capability_contracts()}
+
+
+@router.get("/memory/procedure-preferences/{proposal_id}")
+async def get_procedure_preference(http_request: Request, proposal_id: str):
+    authenticated_memory_context(http_request)
+    from src.memory.procedure_preferences import inspect_preference
+    from src.work_board.repository import BoardError
+    try:
+        return await inspect_preference(http_request.state.operator, proposal_id)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@router.post("/memory/procedure-preferences/{proposal_id}/actions")
+async def act_on_procedure_preference(http_request: Request, proposal_id: str, request: ProcedurePreferenceActionRequest):
+    authenticated_memory_context(http_request)
+    from src.memory.procedure_preferences import apply_preference_action
+    from src.work_board.repository import BoardError
+    try:
+        return await apply_preference_action(http_request.state.operator, proposal_id, request)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
 
 
 @router.post("/memory/task-proposals/{proposal_id}/actions")

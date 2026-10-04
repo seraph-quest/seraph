@@ -11,11 +11,11 @@ The [#899 program](https://github.com/seraph-quest/seraph/issues/899) extends th
 existing cockpit with a connected operator journey: keep an owned workspace,
 choose a finite Goal, inspect effective permissions, queue a typed task, review
 an exact approval where required, and open its verified result. Tasks, native
-jobs, artifacts and memory keep their existing canonical owners. The complete
-reviewed program revision must merge to `develop` before its additions are
-Shipped there; an open feature branch or configured adapter alone does not
-establish availability. [Development Status](./STATUS.md) records scope and
-remaining proof boundaries.
+jobs, artifacts and memory keep their existing canonical owners. Availability
+depends on the installed `develop` revision containing the complete reviewed
+program merge; an open feature branch or configured adapter alone does not
+establish Shipped availability. [Development Status](./STATUS.md) records scope
+and remaining proof boundaries.
 
 Start with the guided first result and use the Work board's attention and task
 inspector controls to inspect approvals, source evidence, output and recovery.
@@ -36,9 +36,9 @@ execution remains unverified where no platform receipt exists.
 
 Connected controls make narrow effects explicit: one reviewed Gmail reply or
 owned nonrecurring timed Calendar reschedule without attendees, a paired Telegram
-task control, or the fixed
-Forgejo issue-title transaction. A lost response keeps the original Unknown
-receipt; a separately permitted read-only observation cannot replay that write.
+task control, or the fixed Forgejo issue-title transaction. A lost response keeps
+the original Unknown receipt; a separately permitted read-only observation cannot
+replay that write.
 Local Forgejo acceptance does not authorize production Codeberg, and local
 revocation does not prove site logout. The optional Chromium companion attaches
 only deliberately selected ordinary text after offline preview/redaction,
@@ -49,22 +49,26 @@ sensitive webpage. Recheck current permission before private reads, and use
 the original receipt's bounded cleanup/recovery control rather than recreating
 uncertain work. Continuity recovery never renews old execution authority.
 
-Reviewed authored capability packages are **Planned** under
+Reviewed authored capability packages implement the bounded profile in
 [ADR-020](./decisions/020-reviewed-authored-capability-packages.md) and
 [#924](https://github.com/seraph-quest/seraph/issues/924). Static author/validate
 commands produce data-only contracts; execution requires exact package review,
 approval and activation through the existing optional isolated JSON Work job.
 The first package summarizes a bounded time ledger. Unsupported execution
-profiles remain visibly blocked while the shared core and package review work.
-This target does not change shipped `develop` truth.
+profiles remain visibly blocked while the shared core and static package review
+remain usable. Actual Linux sandbox receipts do not establish macOS isolated
+execution. Package installation alone never grants execution authority; profile
+availability follows the reviewed installed revision described above.
 
-The private invoice PDF/CSV comparison target is **Planned** under
+Private invoice PDF/CSV comparison implements the bounded profile in
 [ADR-017](./decisions/017-private-bounded-document-comparison.md) and
 [#923](https://github.com/seraph-quest/seraph/issues/923). Its one bounded literal
 line-total comparison produces cited formulas and private derived output.
-Structural checks do not certify files malware-clean. This branch must complete
-private ingestion, native child supervision, readback and cockpit proof before
-changing shipped `develop` truth.
+Linux receipts cover private ingestion, native child supervision, readback and
+the cockpit flow. Structural checks do not certify files malware-clean, and
+literal comparison does not establish general document understanding. Missing
+or ineffective parser resource limits block this profile; macOS native execution
+remains unverified. Availability follows the reviewed installed revision above.
 
 The accepted operator flow selects one PDF and one CSV against a bounded Goal,
 reserves their immutable private pair, and creates the typed comparison on the
@@ -1213,12 +1217,18 @@ adapter when cloud consent and capability configuration are present, and feed
 report infrastructure. Capture, analysis, and report synthesis are separate
 stages and expose separate failures.
 
-**Planned:** explicitly selected desktop context on macOS or Linux attaches
-reviewed content to an exact owned task under ADR-008. Existing Mac-native
-capture remains a separate implementation fact. Optional paired edges and
-local capture adapters require their own readiness receipts; pairing must not
-implicitly authorize execution or data egress. Task attachments must bypass
-general screenshot observation and automatic analysis.
+The optional [selected-text companion](https://github.com/seraph-quest/seraph/issues/926)
+implements ADR-022's ordinary top-frame Chromium text profile within
+[ADR-008](./decisions/008-portable-core-and-consented-context.md). A deliberate
+gesture, offline preview with deletion-only redaction, current paired Task/Goal
+permission and exact native approval precede encrypted private attachment.
+Current-owner reads and tombstone-first discard remain separate from historical
+execution success. Attachments bypass screenshot observation, model analysis,
+learning and generic model ingestion. Linux companion receipts do not establish
+macOS execution or native desktop capture; missing adapters block capture while
+the portable core remains usable. Pairing alone grants neither execution nor
+data egress, and protected-surface checks cannot identify every sensitive page.
+Availability follows the reviewed installed revision described above.
 
 ## Memory
 

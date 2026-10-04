@@ -22,11 +22,12 @@ dense shipped-state record.
 
 The [#899 program](https://github.com/seraph-quest/seraph/issues/899) joins
 existing goals, tasks, native jobs, approvals, artifacts and canonical memory
-into complete bounded operator journeys. Its additions remain **Planned** for
-`develop` until the final independently reviewed program PR merges there.
-Integration-branch receipts establish only their named implementation boundaries;
-they do not establish that every milestone is accepted or deployed. After that
-merge, the reviewed revision defines availability within the limits below.
+into complete bounded operator journeys. Availability depends on the installed
+`develop` revision containing the final independently reviewed program merge.
+Before that merge, integration-branch receipts establish only their named
+implementation boundaries; configuration alone does not establish Shipped
+availability. The implemented profiles retain the runtime and proof limits below
+after merge.
 The [Current App Guide](./12-current-app-guide.md) describes the operator flow;
 the Constitution and ADRs remain the target authority.
 
@@ -66,8 +67,8 @@ screenshots, clipboard and background capture, records no learning or analysis,
 and cannot guarantee that an ordinary webpage contains no sensitive text.
 
 These mechanical receipts do not measure live model quality, production
-reliability, comparative advantage or universal security. The required final
-program review and combined documentation build remain integration gates;
+reliability, comparative advantage or universal security. Independent program
+review and the combined documentation build gate promotion to `develop`;
 milestone review and PR state belong to GitHub, not this inventory.
 
 ## Epic #736/#775 OpenRouter inference phase

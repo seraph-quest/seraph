@@ -814,7 +814,7 @@ and Docker resource enforcement remain **external-unverified**. The original
 repository is not claimed changed,
 and this capability remains Partial within those explicit proof limits.
 
-### Reviewed public evidence pipelines (#914)
+### Reviewed public evidence pipelines (#914) {#reviewed-public-evidence-pipelines-914-branch-local-target}
 
 The existing task inspector offers a reviewed, fixed chain from
 `browser.public-task.v1` to `work.evidence-dossier.v1` and
@@ -1260,8 +1260,10 @@ untrusted D1 context with `no_learning` and no automatic model/evidence ingestio
 The companion's absence or unsupported protected surface is visibly blocked and
 does not prevent either macOS or Linux from hosting the CPU core. Browser privacy
 checks require operator review and cannot guarantee that ordinary prose has no
-secrets. This accepted target is **Planned**; actual Linux companion and macOS
-execution receipts remain separate implementation gates.
+secrets. This bounded profile is **Partial**, available with the installed
+reviewed program revision. Actual Linux Chromium companion receipts establish
+the selected browser journey; macOS execution and native desktop capture remain
+unverified.
 
 ## Memory
 
@@ -1447,7 +1449,8 @@ readable in the literal UI after restart, with one attempt and its unchanged
 deadline. Separate actual SQLite cases prove cancellation, logout/current Goal
 revocation, finished-output recovery and lifecycle contention. No provider
 transport was intercepted or contacted, and no macOS isolation proof is claimed.
-Independent cumulative review remains the whole-milestone gate.
+Availability requires the installed reviewed program revision and the selected
+runtime's verified readiness; new-host containment still requires its own proof.
 
 ## Actions, Workflows, And Extensions
 

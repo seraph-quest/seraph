@@ -5,6 +5,21 @@ title: Current App Guide
 
 # Current App Guide
 
+The optional selected-text companion target is **Planned** under
+[ADR-022](./decisions/022-portable-selected-text-context.md) and
+[#926](https://github.com/seraph-quest/seraph/issues/926). Its branch implementation
+has an actual Linux Chromium journey: deliberate ordinary-page selection,
+offline deletion-only redaction, exact Task/finite Goal permission and native
+approval, signed send, encrypted private readback and capture-owned discard.
+Settings uses the existing optional device pairing; legacy pairings require
+explicit rotation. The Task inspector lists metadata and performs fresh current
+authority checks for private reads. No screenshot, model analysis or learning
+is created. Missing companions are locally blocked; macOS companion execution
+has not been verified. Each target lasts at most 120 seconds, each text is at
+most 32 KiB, and the owner quota is 64 charged captures / 2 MiB. Unsettled
+physical publication or uncertain cleanup retains its charge and reports
+`blocked_cleanup`; manual retry never renews the original authority or deadline.
+
 The private invoice PDF/CSV comparison target is **Planned** under
 [ADR-017](./decisions/017-private-bounded-document-comparison.md) and
 [#923](https://github.com/seraph-quest/seraph/issues/923). Its one bounded literal

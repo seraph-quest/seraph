@@ -6,6 +6,9 @@ import time
 import uuid
 import sqlite3
 import shutil
+import asyncio
+import threading
+import copy
 import httpx
 import pytest
 from fastapi import FastAPI
@@ -23,6 +26,10 @@ from src.goals.repository import serialize_admission_budget
 from src.vault import crypto
 from src.workflows.selected_context_contract import ADAPTER_BUILD_DIGEST, COMPANION_ORIGIN, SelectedContextError, signature
 from src.workflows import selected_context_files as files
+from src.workflows import selected_context_runtime as runtime
+from src.workflows.selected_context_contract import PairLocator, Metadata, digest
+from src.extensions.state import held_extension_state_lock, save_extension_state_payload, ExtensionStateBusy
+from src.vault.repository import vault_repository
 
 
 def ident():return str(uuid.uuid4())
@@ -93,4 +100,75 @@ async def test_actual_signed_native_private_read_and_tombstone(accounting_db,rea
             run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==job["job_id"]))
             assert run.selected_context_reserved_bytes==0 and run.status=="cancelled"
     finally:
+        await device.aclose();await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_signed_ingress_and_vault_before_json_authority_race(accounting_db,real_auth,monkeypatch):
+    root,factory,client,device,signed,metadata,text=await setup(accounting_db,monkeypatch)
+    try:
+        assert (await signed("prepare",metadata,{"Origin":"chrome-extension://wrong"})).status_code==403
+        assert (await signed("prepare",metadata,{"Cookie":"irrelevant=1"})).status_code==403
+        for path,value in [("schema_version",True),("schema_version",1.0),("privacy_reviewed",1)]:
+            bad=copy.deepcopy(metadata);bad[path]=value
+            assert (await signed("prepare",bad)).status_code==422
+        bad=copy.deepcopy(metadata);bad["target"]["task_id"]="another-task"
+        assert (await signed("prepare",bad)).status_code in {403,409}
+        async with runtime.stage_pair(PairLocator.model_validate(metadata["pair"])) as (proof,credential):
+            with pytest.raises(ExtensionStateBusy):
+                save_extension_state_payload(load_extension_state_payload(),expected_revision=proof.state_revision)
+            # Actual owner Vault invalidation while JSON still has the generation.
+            assert await vault_repository.delete(proof.entry["credential_vault_key"],owner_principal_id=metadata["target"]["owner_principal_id"])
+            with pytest.raises(SelectedContextError,match="credential_changed"):
+                async with runtime.writer() as db:
+                    await runtime.assert_target(db,proof)
+        assert (await signed("prepare",metadata)).status_code==403
+        async with factory.accounting_sessions() as db:
+            assert not (await db.scalars(select(WorkflowRunState).where(WorkflowRunState.job_kind=="selected_context_v1"))).all()
+    finally:
+        await device.aclose();await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_physical_publication_retains_quota_until_settled(accounting_db,real_auth,monkeypatch):
+    root,factory,client,device,signed,metadata,text=await setup(accounting_db,monkeypatch)
+    entered=threading.Event();release=threading.Event();original_publish=files.publish
+    def delayed_publish(ref,ciphertext):
+        entered.set()
+        assert release.wait(10),"owned test publication barrier timed out"
+        original_publish(ref,ciphertext)
+    pending=None
+    try:
+        job=(await signed("prepare",metadata)).json();ident=job["job_id"]
+        url="/api/context/selected-text/tasks/selected-task/captures/"+ident
+        receipt=(await client.get(url)).json()
+        assert (await client.post(url+"/decision",json={"decision":"approved","expected_digest":receipt["approval_decision_digest"]})).status_code==200
+        monkeypatch.setattr(files,"publish",delayed_publish)
+        pending=asyncio.create_task(signed("upload",{"metadata":metadata,"text":text}))
+        async with asyncio.timeout(5):
+            while not entered.is_set():
+                await asyncio.sleep(.01)
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):await pending
+        receipt=(await client.get(url)).json();assert receipt["cleanup_state"]=="blocked_cleanup" and receipt["tombstone"]
+        body={"expected_revision":receipt["revision"],"request_uuid":str(uuid.uuid4())}
+        blocked=await client.post(url+"/discard",json=body);assert blocked.status_code==503,blocked.text
+        async with factory.accounting_sessions() as db:
+            row=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==ident))
+            assert row.status=="cancelled" and row.selected_context_reserved_bytes==len(text.encode())
+            immutable=(row.deadline_at,row.declared_authority_json,row.input_digest,row.fencing_token)
+        release.set()
+        await asyncio.wait_for(asyncio.shield(runtime._publications[ident][1]),5)
+        assert not list(root.glob("artifacts/context/private/selected-text/*.enc"))
+        cleaned=await client.post(url+"/discard",json=body);assert cleaned.status_code==200,cleaned.text
+        assert cleaned.json()["cleanup_state"]=="verified_unavailable"
+        assert (await signed("upload",{"metadata":metadata,"text":text})).status_code==410
+        async with factory.accounting_sessions() as db:
+            row=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==ident))
+            assert row.status=="cancelled" and row.selected_context_reserved_bytes==0
+            assert immutable==(row.deadline_at,row.declared_authority_json,row.input_digest,row.fencing_token)
+    finally:
+        release.set()
+        if pending and not pending.done():
+            pending.cancel()
         await device.aclose();await client.aclose()

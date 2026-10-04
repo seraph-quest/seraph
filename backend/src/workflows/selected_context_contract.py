@@ -39,6 +39,13 @@ def deny(code: str, status: int = 409):
 class Closed(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
+    @field_validator("schema_version", "frame_id", mode="before", check_fields=False)
+    @classmethod
+    def literal_integer(cls, value):
+        if type(value) is not int:
+            raise ValueError("literal integer required")
+        return value
+
 
 class PairLocator(Closed):
     extension_id: Identifier

@@ -6,12 +6,14 @@ in native input, checkpoints, audit, generic evidence or model projections.
 from __future__ import annotations
 
 import asyncio
+import anyio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
 import time
+import threading
 import uuid
 
 from sqlalchemy import select, text, func, update, or_
@@ -27,6 +29,30 @@ from src.goals.repository import deserialize_admission_budget
 from src.workflows.job_runtime import durable_job_repository, DurableJobIdentity, DurableJobSpec, _serialize, _assert_canonical_goal_fence
 from src.workflows import selected_context_files as files
 from src.workflows.selected_context_contract import *
+
+# Physical settlement only; authority remains the canonical native row. A
+# cancelled await never cancels a filesystem thread or proves file absence.
+_publications = {}
+
+
+def _publish_and_verify(ref, ciphertext, plaintext, aborted):
+    try:
+        if aborted.is_set():
+            return
+        files.publish(ref, ciphertext)
+        if not aborted.is_set() and files.read(ref) != plaintext:
+            deny("selected_context_readback_changed")
+    finally:
+        if aborted.is_set():
+            files.discard(ref)
+
+
+def publication_settled(ident, checkpoint):
+    pin = checkpoint.get("physical_publication")
+    if pin is None or pin.get("settled") is True:
+        return True
+    operation = _publications.get(ident)
+    return operation is not None and operation[0] == pin.get("id") and operation[1].done()
 
 
 def session():
@@ -193,6 +219,9 @@ async def bind_target(operator, task_id, body):
             if grant is None or grant.reviewed_grant is not True or not utc(grant.period_started_at) <= now() < utc(grant.period_expires_at):
                 deny("selected_context_finite_goal_required")
             expiry = int(min(time.time() + 120, operator.idle_expires_at.timestamp(), operator.absolute_expires_at.timestamp(), utc(grant.period_expires_at).timestamp()))
+            if proof.entry.get("expires_at"):
+                pair_expiry = datetime.fromisoformat(proof.entry["expires_at"].replace("Z", "+00:00"))
+                expiry = min(expiry, int(utc(pair_expiry).timestamp()))
         previous = proof.entry.get("selected_context_target", {})
         target = Target(schema_version=1, target_revision=int(previous.get("target_revision", 0)) + 1,
             owner_principal_id=operator.principal.principal_id, original_root_session_id=operator.session_id,
@@ -436,10 +465,15 @@ async def upload(proof, body):
                     if checkpoint.get("file"):
                         deny("selected_context_upload_already_reserved")
                     checkpoint["file"] = ref
+                    operation_id = uuid.uuid4().hex
+                    checkpoint["physical_publication"] = {"id": operation_id, "settled": False}
                     await cas(db, run, {"checkpoint_context_json": canonical(checkpoint)})
-                await asyncio.to_thread(files.publish, ref, ciphertext)
-                if await asyncio.to_thread(files.read, ref) != body.text:
-                    deny("selected_context_readback_changed")
+                aborted = threading.Event()
+                operation = asyncio.create_task(asyncio.to_thread(_publish_and_verify, ref, ciphertext, body.text, aborted))
+                # Observe errors even after a timed-out request; no late SQL writes.
+                operation.add_done_callback(lambda task: task.exception() if not task.cancelled() else None)
+                _publications[ident] = (operation_id, operation, aborted)
+                await asyncio.shield(operation)
                 async with writer() as db:
                     run, checkpoint, original = await run_for_owner(db, proof.operator, ident)
                     await current_capture(db, proof, run, checkpoint, original)
@@ -448,36 +482,48 @@ async def upload(proof, body):
                     if approval.status != "approved" or approval_decision_digest(approval) != approved_digest or checkpoint.get("file") != ref:
                         deny("selected_context_exact_approval_changed")
                     approval.status = "consumed"
+                    checkpoint["physical_publication"]["settled"] = True
                     await cas(db, run, {"status": "succeeded", "finished_at": now(), "lease_owner": None, "lease_expires_at": None,
+                        "checkpoint_context_json": canonical(checkpoint),
                         "result_digest": metadata.reviewed_utf8_sha256, "result_summary": "Verified private D1 selected text; no learning or analysis",
                         "artifact_receipts_json": canonical([{"artifact_id": ident + ":private-text", "producer": JOB_KIND,
                             "artifact_type": "selected_context_private_v1", "file_path": ref["path"],
                             "content_sha256": ref["ciphertext_digest"], "plaintext_bytes": len(raw), "verified": True,
                             "instruction_authority": False, "analysis_eligible": False, "no_learning": True}])})
         except BaseException:
-            # Revoke visibility FIRST, then settle only capture-owned bytes.
-            async with writer() as db:
-                run = await durable_job_repository._fetch(db, ident)
-                checkpoint = state(run)
-                if run.status == "running" and not checkpoint.get("tombstone"):
-                    checkpoint["tombstone"] = {"reason": "upload_failed", "at": int(time.time())}
-                    checkpoint["cleanup_state"] = "blocked_cleanup"
-                    await cas(db, run, {"status": "cancelled", "checkpoint_context_json": canonical(checkpoint), "lease_owner": None, "lease_expires_at": None})
-            cleanup = ref is None
-            if ref is not None:
-                try:
-                    async with asyncio.timeout(5):
-                        cleanup = await asyncio.to_thread(files.discard, ref)
-                except (OSError, SelectedContextError, TimeoutError):
-                    cleanup = False
-            async with writer() as db:
-                run = await durable_job_repository._fetch(db, ident)
-                checkpoint = state(run)
-                if checkpoint.get("tombstone", {}).get("reason") == "upload_failed":
-                    checkpoint["cleanup_state"] = "verified_unavailable" if cleanup else "blocked_cleanup"
-                    await cas(db, run, {"checkpoint_context_json": canonical(checkpoint),
-                        "selected_context_reserved_bytes": 0 if cleanup else run.selected_context_reserved_bytes})
+            operation = _publications.get(ident)
+            if operation is not None:
+                operation[2].set()
+            # ASGI cancellation scopes must not interrupt local tombstoning.
+            with anyio.CancelScope(shield=True):
+                # Revoke visibility FIRST, then settle only capture-owned bytes.
+                async with writer() as db:
+                    run = await durable_job_repository._fetch(db, ident)
+                    checkpoint = state(run)
+                    if run.status == "running" and not checkpoint.get("tombstone"):
+                        checkpoint["tombstone"] = {"reason": "upload_failed", "at": int(time.time())}
+                        checkpoint["cleanup_state"] = "blocked_cleanup"
+                        await cas(db, run, {"status": "cancelled", "checkpoint_context_json": canonical(checkpoint), "lease_owner": None, "lease_expires_at": None})
+                cleanup = ref is None
+                if ref is not None and publication_settled(ident, checkpoint):
+                    try:
+                        async with asyncio.timeout(5):
+                            cleanup = await asyncio.to_thread(files.discard, ref)
+                    except (OSError, SelectedContextError, TimeoutError):
+                        cleanup = False
+                async with writer() as db:
+                    run = await durable_job_repository._fetch(db, ident)
+                    checkpoint = state(run)
+                    if checkpoint.get("tombstone", {}).get("reason") == "upload_failed":
+                        checkpoint["cleanup_state"] = "verified_unavailable" if cleanup else "blocked_cleanup"
+                        if cleanup and checkpoint.get("physical_publication"):
+                            checkpoint["physical_publication"]["settled"] = True
+                        await cas(db, run, {"checkpoint_context_json": canonical(checkpoint),
+                            "selected_context_reserved_bytes": 0 if cleanup else run.selected_context_reserved_bytes})
+                if cleanup:
+                    _publications.pop(ident, None)
             raise
+        _publications.pop(ident, None)
     return await inspect(proof, ident)
 
 
@@ -504,7 +550,7 @@ async def discard(proof, ident, body, *, task_id):
     try:
         with files.capture_lock(ident):
             async with asyncio.timeout(5):
-                cleanup = ref is None or await asyncio.to_thread(files.discard, ref)
+                cleanup = publication_settled(ident, checkpoint) and (ref is None or await asyncio.to_thread(files.discard, ref))
     except (OSError, SelectedContextError, TimeoutError):
         pass
     async with writer() as db:
@@ -513,8 +559,12 @@ async def discard(proof, ident, body, *, task_id):
         if checkpoint.get("tombstone", {}).get("request_uuid") != body.request_uuid:
             deny("selected_context_discard_conflict")
         checkpoint["cleanup_state"] = "verified_unavailable" if cleanup else "blocked_cleanup"
+        if cleanup and checkpoint.get("physical_publication"):
+            checkpoint["physical_publication"]["settled"] = True
         await cas(db, run, {"checkpoint_context_json": canonical(checkpoint),
             "selected_context_reserved_bytes": 0 if cleanup else run.selected_context_reserved_bytes})
+        if cleanup:
+            _publications.pop(ident, None)
         result = metadata_projection(run, checkpoint, metadata)
     result["encrypted_audit_bytes_may_remain"] = True
     result["physical_erasure_verified"] = False

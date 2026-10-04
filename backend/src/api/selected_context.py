@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import time
 from fastapi import APIRouter, Request, HTTPException
+from fastapi.routing import APIRoute
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from src.auth.service import AuthenticatedOperator, AuthFailure
 from src.db.models import WorkflowRunState, WorkBoardTask
@@ -10,13 +12,31 @@ from src.extensions.state import load_extension_state_payload
 from src.extensions.node_adapters import list_node_adapter_inventory
 from src.api.nodes import _node_inventory_for_owner
 from src.workflows import selected_context_runtime as runtime
+from src.workflows.job_runtime import DurableJobError
 from src.workflows.selected_context_contract import (
     BindTarget, Decision, Discard, Metadata, SignedQuery, TicketQuery, Upload,
     SelectedContextError, MAX_ENVELOPE_BYTES, JOB_KIND, parse_body,
     verify_signature, job_id, deny, COMPANION_ORIGIN,
 )
 
-router = APIRouter(prefix="/context/selected-text")
+class SelectedContextRoute(APIRoute):
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+        async def scoped(request):
+            try:
+                return await handler(request)
+            except SelectedContextError as exc:
+                return JSONResponse({"detail": {"code": exc.code, "automatic_retry": False}}, status_code=exc.status)
+            except AuthFailure:
+                return JSONResponse({"detail": {"code": "selected_context_current_root_denied", "automatic_retry": False}}, status_code=403)
+            except DurableJobError:
+                return JSONResponse({"detail": {"code": "selected_context_native_authority_denied", "automatic_retry": False}}, status_code=409)
+            except OSError:
+                return JSONResponse({"detail": {"code": "selected_context_private_storage_unavailable", "automatic_retry": False}}, status_code=503)
+        return scoped
+
+
+router = APIRouter(prefix="/context/selected-text", route_class=SelectedContextRoute)
 
 
 def operator(request):

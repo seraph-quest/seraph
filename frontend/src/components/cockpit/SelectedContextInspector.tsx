@@ -7,7 +7,7 @@ interface Pair { extension_id: string; reference: string; name: string; pairing:
 interface Capture { job_id: string; kind: string; source_task_id: string; status: string; revision: number; deadline_at: string; source: {origin: string; path: string}; reviewed_utf8_sha256: string; reviewed_byte_count: number; approval_status?: string; approval_decision_digest?: string; cleanup_state?: string; tombstone?: {request_uuid?: string; original_expected_revision?: number}; text?: string }
 const base="/api/context/selected-text";
 async function call<T>(path:string, method="GET", body?:unknown):Promise<T>{
-  const r=await apiFetch(`${API_URL}${base}${path}`,{method,...(body?{headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}:{})});
+  const r=await apiFetch(`${API_URL}${base}${path}`,{method,signal:AbortSignal.timeout(20000),...(body?{headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}:{})});
   if(!r.ok){const v=await r.json().catch(()=>({}));throw Error(v.detail?.code??"selected_context_unavailable");}return r.json() as Promise<T>;
 }
 export function SelectedContextInspector({task,ownerPrincipalId,ownerSessionId}:{task:WorkBoardTask;ownerPrincipalId?:string|null;ownerSessionId?:string|null}){
@@ -15,9 +15,9 @@ export function SelectedContextInspector({task,ownerPrincipalId,ownerSessionId}:
   const [captures,setCaptures]=useState<Capture[]>([]),[message,setMessage]=useState(""),[busy,setBusy]=useState(false),[cursor,setCursor]=useState<string|null>(null);
   const generation=useRef(0);const scoped=`${ownerPrincipalId}:${ownerSessionId}:${task.task_id}`;
   const owned=task.owner_principal_id===ownerPrincipalId&&task.owner_session_id===ownerSessionId;
-  function bound(c:Capture){if(c.kind!=="selected_context_v1"||c.source_task_id!==task.task_id||!/^selected-context:[a-f0-9]{32}$/.test(c.job_id))throw Error("selected_context_locator_changed");return c;}
+  function bound(c:Capture){if(c.kind!=="selected_context_v1"||c.source_task_id!==task.task_id||!/^selected-context:[a-f0-9]{32}$/.test(c.job_id)||!Number.isInteger(c.revision)||!Number.isInteger(c.reviewed_byte_count)||c.reviewed_byte_count<1||c.reviewed_byte_count>32768||!/^[a-f0-9]{64}$/.test(c.reviewed_utf8_sha256)||!Number.isFinite(Date.parse(c.deadline_at)))throw Error("selected_context_locator_changed");return c;}
   function clear(){setCaptures(v=>v.map(c=>({...c,text:undefined})));}
-  useEffect(()=>{generation.current++;setPairs([]);setPair("");setAck(false);setCaptures([]);setMessage("");setCursor(null);return()=>{generation.current++;};},[scoped]);
+  useEffect(()=>{generation.current++;setBusy(false);setPairs([]);setPair("");setAck(false);setCaptures([]);setMessage("");setCursor(null);return()=>{generation.current++;};},[scoped]);
   useEffect(()=>{window.addEventListener("blur",clear);document.addEventListener("visibilitychange",clear);return()=>{window.removeEventListener("blur",clear);document.removeEventListener("visibilitychange",clear);};},[]);
   useEffect(()=>{if(!captures.some(c=>c.text))return;const timer=setTimeout(clear,Math.max(0,Math.min(...captures.filter(c=>c.text).map(c=>Date.parse(c.deadline_at)))-Date.now()));return()=>clearTimeout(timer);},[captures]);
   async function run(fn:(v:number)=>Promise<void>){if(busy||!owned)return;const v=generation.current;setBusy(true);setMessage("");clear();try{await fn(v);}catch(e){if(v===generation.current){clear();setMessage(e instanceof Error?e.message:"Attachment unavailable");}}finally{if(v===generation.current)setBusy(false);}}

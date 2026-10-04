@@ -4,6 +4,8 @@ import asyncio
 from datetime import datetime,timedelta,timezone
 import json
 import uuid
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 
 import httpx
 import pytest
@@ -247,3 +249,121 @@ async def test_concurrent_execute_owns_one_actual_patch_and_cancel_waits_for_clo
         if not first.done(): first.cancel()
         await asyncio.gather(first,return_exceptions=True)
         await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure",["none","exception","no_op"])
+async def test_revoke_owner_vault_cleanup_and_original_unknown_history(accounting_db,real_auth,monkeypatch,failure):
+    root,engine,factory=accounting_db
+    client,post,google,preview,proposal,grant,permission,owner=await prepared(accounting_db,monkeypatch)
+    from src.vault import vault_repository
+    from src.api import calendar_reschedule as controls
+    original_id=preview["job_id"]; base="/api/capabilities/calendar/reschedule/"
+    try:
+        google.lose_response=True
+        lost=await client.post(base+"operations/"+original_id+"/execute",json={});assert lost.status_code==409,lost.text
+        async def original_row():
+            async with factory.accounting_sessions() as db:
+                row=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==original_id))
+                return {column.name:getattr(row,column.name) for column in WorkflowRunState.__table__.columns}
+        before=await original_row();assert before["status"]=="unknown_external_effect"
+        async with factory.accounting_sessions() as db:
+            connection=await db.get(GoogleServiceConnection,permission["write_connection_id"])
+            key=connection.vault_secret_key;setup_uuid=connection.setup_idempotency_key
+        assert await vault_repository.snapshot(key,owner_principal_id=owner["principal_id"]) is not None
+        assert await vault_repository.snapshot(key,owner_principal_id="different-owner") is None
+        in_writer=ContextVar("calendar_cleanup_native_writer",default=False);real_writer=runtime.writer
+        @asynccontextmanager
+        async def tracked_writer():
+            async with real_writer() as db:
+                token=in_writer.set(True)
+                try:yield db
+                finally:in_writer.reset(token)
+        monkeypatch.setattr(runtime,"writer",tracked_writer)
+        real_delete=vault_repository.delete;real_snapshot=vault_repository.snapshot;calls=[];fail_cleanup=failure!="none"
+        async def deletion(target,*,owner_principal_id):
+            assert not in_writer.get();assert target==key and owner_principal_id==owner["principal_id"]
+            calls.append("delete")
+            # Local authority must already be unusable before Vault I/O starts.
+            async with factory.accounting_sessions() as db:
+                row=await db.get(GoogleServiceConnection,permission["write_connection_id"])
+                assert row.state in {"blocked_cleanup","revoked"}
+            if fail_cleanup:
+                if failure=="exception":raise OSError("forced local credential cleanup failure")
+                return False
+            return await real_delete(target,owner_principal_id=owner_principal_id)
+        async def snapshot(target,*,owner_principal_id):
+            assert not in_writer.get();return await real_snapshot(target,owner_principal_id=owner_principal_id)
+        monkeypatch.setattr(vault_repository,"delete",deletion);monkeypatch.setattr(vault_repository,"snapshot",snapshot)
+        initial={"expected_revision":permission["expected_write_revision"],"idempotency_key":ident()}
+        before_contacts=len(google.calls)
+        first=await client.post(base+"profiles/"+permission["write_connection_id"]+"/revoke",json=initial)
+        if failure=="none":
+            assert first.status_code==200 and first.json()["credential_cleanup"]=="verified_unavailable",first.text
+        else:
+            assert first.status_code==503 and first.json()["detail"]["credential_cleanup"]=="blocked_cleanup",first.text
+            rows=(await client.get(base+"profiles")).json()["profiles"];blocked=next(row for row in rows if row["connection_id"]==permission["write_connection_id"])
+            assert blocked["state"]=="blocked_cleanup" and blocked["cleanup_retry"]["idempotency_key"]==initial["idempotency_key"]
+            assert await real_snapshot(key,owner_principal_id=owner["principal_id"]) is not None
+            bad={**blocked["cleanup_retry"],"idempotency_key":ident()}
+            conflict=await client.post(base+"profiles/"+permission["write_connection_id"]+"/revoke",json=bad)
+            assert conflict.status_code==409 and len(calls)==1,conflict.text
+            private=await client.get(base+"operations/"+original_id+"/private")
+            assert private.status_code==200 and private.json()["private_read_available"] is False and "preview" not in private.json()
+            assert await original_row()==before and len(google.calls)==before_contacts
+            fail_cleanup=False
+            retry=await client.post(base+"profiles/"+permission["write_connection_id"]+"/revoke",json=blocked["cleanup_retry"])
+            assert retry.status_code==200 and retry.json()["credential_cleanup"]=="verified_unavailable",retry.text
+        assert await vault_repository.snapshot(key,owner_principal_id=owner["principal_id"]) is None
+        assert await vault_repository.get(key,owner_principal_id=owner["principal_id"]) is None
+        # Exact initial duplicate may only reconcile; it never renews authority.
+        duplicate=await client.post(base+"profiles/"+permission["write_connection_id"]+"/revoke",json=initial)
+        assert duplicate.status_code==200 and duplicate.json()["profile"]["state"]=="revoked",duplicate.text
+        old_import={"service":SEND_SERVICE,"label":SEND_SERVICE,"client_id":"synthetic-client","client_secret":None,"refresh_token":SEND_SERVICE,
+            "declared_scopes":sorted(SCOPES[SEND_SERVICE]),"acknowledge_separate_identity_profile":True,"idempotency_key":setup_uuid}
+        imported=await client.post(base+"profiles",json=old_import);assert imported.status_code==409,imported.text
+        pair={name:permission[name] for name in ("read_connection_id","expected_read_revision","write_connection_id","expected_write_revision","event_binding_id","expected_event_binding_revision","goal_id","goal_revision","acknowledge_identity_and_selected_calendar_read")}
+        pair["request_uuid"]=ident();denied=await client.post(base+"profiles/verify-pair",json=pair);assert denied.status_code==409,denied.text
+        private=await client.get(base+"operations/"+original_id+"/private")
+        assert private.status_code==200 and private.json()["private_read_available"] is False and "preview" not in private.json()
+        replay=await client.post(base+"operations/"+original_id+"/execute",json={});assert replay.status_code==200 and replay.json()["status"]=="unknown_external_effect",replay.text
+        assert await original_row()==before and len(google.calls)==before_contacts and sum(c["method"]=="PATCH" for c in google.calls)==1
+        (root/("calendar-vault-cleanup-"+failure+"-receipt.json")).write_text(json.dumps({"first":first.json(),"duplicate":duplicate.json(),"import_denied":imported.json(),"pair_denied":denied.json(),"private":private.json(),"original_history_unchanged":True,"vault_snapshot_unavailable":True,"contacts_before":before_contacts,"contacts_after":len(google.calls),"patch_count":1,"vault_calls_outside_writer":calls},indent=2))
+    finally:await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_logout_after_vault_cleanup_cannot_adopt_or_restore_profile(accounting_db,real_auth,monkeypatch):
+    root,engine,factory=accounting_db
+    client,post,google,preview,proposal,grant,permission,owner=await prepared(accounting_db,monkeypatch)
+    from src.vault import vault_repository
+    base="/api/capabilities/calendar/reschedule/";original_id=preview["job_id"]
+    try:
+        google.lose_response=True
+        lost=await client.post(base+"operations/"+original_id+"/execute",json={});assert lost.status_code==409,lost.text
+        async with factory.accounting_sessions() as db:
+            run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==original_id))
+            before={column.name:getattr(run,column.name) for column in WorkflowRunState.__table__.columns}
+            row=await db.get(GoogleServiceConnection,permission["write_connection_id"]);key=row.vault_secret_key
+        actual_delete=vault_repository.delete
+        async def delete_then_logout(target,*,owner_principal_id):
+            deleted=await actual_delete(target,owner_principal_id=owner_principal_id)
+            # Actual authenticated logout commits while the cleanup request
+            # already holds its original request-scoped authenticated operator.
+            logged_out=await client.post("/api/auth/logout",json={});assert logged_out.status_code==204
+            return deleted
+        monkeypatch.setattr(vault_repository,"delete",delete_then_logout)
+        request={"expected_revision":permission["expected_write_revision"],"idempotency_key":ident()};contacts=len(google.calls)
+        result=await client.post(base+"profiles/"+permission["write_connection_id"]+"/revoke",json=request)
+        assert result.status_code==401 and result.json()["detail"]["code"]=="session_revoked",result.text
+        assert await vault_repository.snapshot(key,owner_principal_id=owner["principal_id"]) is None
+        async with factory.accounting_sessions() as db:
+            row=await db.get(GoogleServiceConnection,permission["write_connection_id"])
+            assert row.state=="blocked_cleanup" and row.revision==request["expected_revision"]+1
+            assert row.revoke_idempotency_key==request["idempotency_key"] and row.revoke_request_digest
+            run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==original_id))
+            assert {column.name:getattr(run,column.name) for column in WorkflowRunState.__table__.columns}==before
+        retry=await client.post(base+"profiles/"+permission["write_connection_id"]+"/revoke",json=request);assert retry.status_code==401,retry.text
+        assert len(google.calls)==contacts
+        (root/"calendar-vault-cleanup-logout-receipt.json").write_text(json.dumps({"result":result.json(),"retry":retry.json(),"vault_snapshot_unavailable":True,"profile_state":"blocked_cleanup","original_revoke_identity_retained":True,"original_history_unchanged":True,"contacts_before":contacts,"contacts_after":len(google.calls),"physical_erasure_verified":False},indent=2))
+    finally:await client.aclose()

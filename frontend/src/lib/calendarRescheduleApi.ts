@@ -8,6 +8,7 @@ export interface RescheduleProfile {
   state: "preparing" | "active" | "revoked" | "blocked_cleanup";
   scope_status: string; declared_scopes: string[]; verified_setup_job_id: string | null;
   provider_contact: false; setup_is_write_permission: false;
+  cleanup_retry?: { expected_revision: number; idempotency_key: string; revoke_request_digest: string } | null;
 }
 export interface ExactEventTime { dateTime: string; timeZone: string }
 export interface RescheduleConsent {
@@ -60,6 +61,12 @@ export function rescheduleProfile(value: unknown): RescheduleProfile {
     || !["preparing", "active", "revoked", "blocked_cleanup"].includes(String(v.state)) || !string(v.scope_status) || !nullable(v.verified_setup_job_id)
     || v.provider_contact !== false || v.setup_is_write_permission !== false || !Array.isArray(v.declared_scopes)
     || JSON.stringify([...v.declared_scopes].sort()) !== JSON.stringify(rescheduleScopes(v.service as RescheduleRole).sort())) invalid();
+  if (v.cleanup_retry !== undefined && v.cleanup_retry !== null) {
+    const retry=record(v.cleanup_retry);
+    if (v.state!=="blocked_cleanup" || !int(retry.expected_revision) || retry.expected_revision!==v.revision
+      || !/^[a-f0-9-]{36}$/.test(String(retry.idempotency_key)) || !digestPattern.test(String(retry.revoke_request_digest))
+      || Object.keys(retry).length!==3) invalid();
+  }
   return v as unknown as RescheduleProfile;
 }
 export function rescheduleConsent(value: unknown): RescheduleConsent {

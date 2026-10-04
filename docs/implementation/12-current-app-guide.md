@@ -1033,6 +1033,16 @@ resends a write or observation. Expired active reschedule permission must be
 explicitly revoked locally before a fresh grant; expiry never renews permission.
 All reschedule and recovery results explicitly use no model and no learning.
 
+Reschedule profile revocation invalidates local authority before credential
+cleanup. Owner-scoped Vault deletion and verified unavailable readback happen
+outside the native SQLite writer. An interrupted or failed cleanup appears as
+`blocked_cleanup`, which permits no provider contacts or private preview reads.
+Settings refreshes that metadata and offers an explicit bounded local retry of
+the original revoke UUID/digest with the current profile revision. Cleanup never
+renews profile authority or changes original native execution history. A verified
+unavailable credential is logical cleanup; encrypted audit bytes may remain and
+physical erasure is not claimed.
+
 ### Exact Gmail reply send
 
 **Partial:** The [ADR-016](./decisions/016-exact-gmail-reply-send.md) operator

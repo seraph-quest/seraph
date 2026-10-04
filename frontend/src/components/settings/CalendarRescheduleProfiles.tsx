@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { importRescheduleProfile, listRescheduleProfiles, recoverRescheduleProfile, rescheduleScopes, revokeRescheduleProfile } from "../../lib/calendarRescheduleApi";
 import type { RescheduleProfile, RescheduleRole } from "../../lib/calendarRescheduleApi";
+import { CalendarApiError } from "../../lib/calendar";
 
 interface Props { ownerPrincipalId?: string | null; ownerSessionId?: string | null }
 
@@ -91,10 +92,21 @@ export function CalendarRescheduleProfiles({ ownerPrincipalId, ownerSessionId }:
       } else setMessage("Original import is absent or unfinished. Keep this receipt key; no automatic import occurred.");
     })}>Inspect original profile import</button></p>}
     {profiles.map(profile => <div key={profile.connection_id} className="text-[11px] mt-2">{profile.label} · {profile.service} · {profile.state} · {profile.scope_status}
-      <button className="cockpit-feedback-button" disabled={busy || profile.state !== "active" || storageBlocked} onClick={() => void run(async (signal, version) => {
-        await revokeRescheduleProfile(profile.connection_id, { expected_revision: profile.revision, idempotency_key: crypto.randomUUID() }, signal);
-        await refresh(signal, version);
-      })}>Revoke reschedule profile</button>
+      {profile.state==="blocked_cleanup"&&<p>Authority is revoked. Vault credential cleanup is unverified; encrypted audit bytes may remain. Explicit local cleanup retry sends no provider request.</p>}
+      <button className="cockpit-feedback-button" disabled={busy || !(profile.state === "active" || profile.state==="blocked_cleanup"&&profile.cleanup_retry) || storageBlocked} onClick={() => void run(async (signal, version) => {
+        const control=profile.state==="blocked_cleanup"?profile.cleanup_retry:{ expected_revision: profile.revision, idempotency_key: crypto.randomUUID() };
+        if(!control)return;
+        try {
+          await revokeRescheduleProfile(profile.connection_id, control, signal);
+          await refresh(signal, version);
+          if(version===generation.current)setMessage("Local authority revoked and Vault credential unavailable. Encrypted audit bytes may remain; no physical erasure or provider contact is claimed.");
+        } catch(error) {
+          if(error instanceof CalendarApiError&&error.code==="calendar_reschedule_credential_cleanup_blocked") {
+            await refresh(signal,version);
+            if(version===generation.current)setMessage("Local authority is revoked. Cleanup is blocked; inspect metadata and explicitly retry this same cleanup. No automatic retry occurred.");
+          } else throw error;
+        }
+      })}>{profile.state==="blocked_cleanup"?"Retry original local credential cleanup":"Revoke reschedule profile"}</button>
     </div>)}
     {storageBlocked && <p role="alert">Private setup receipt storage is unavailable. Imports are blocked.</p>}
     {message && <p role="status">{message}</p>}

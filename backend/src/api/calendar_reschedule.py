@@ -41,6 +41,10 @@ class Control(Strict):
     idempotency_key: str=Field(pattern=UUID_PATTERN)
 
 
+class ProfileRevokeControl(Control):
+    revoke_request_digest: str|None=Field(default=None,pattern=r"^[a-f0-9]{64}$")
+
+
 class Pair(Strict):
     read_connection_id: str=Field(min_length=1,max_length=256)
     expected_read_revision: int=Field(ge=1)
@@ -129,7 +133,9 @@ def error(exc):
 def profile(row):
     return {"connection_id":row.connection_id,"service":row.service,"label":row.label,"revision":row.revision,"state":row.state,
         "scope_status":row.scope_status,"declared_scopes":json.loads(row.declared_scopes_json),"verified_setup_job_id":row.verified_setup_job_id,
-        "provider_contact":False,"setup_is_write_permission":False}
+        "provider_contact":False,"setup_is_write_permission":False,
+        "cleanup_retry": {"expected_revision":row.revision,"idempotency_key":row.revoke_idempotency_key,
+            "revoke_request_digest":row.revoke_request_digest} if row.state=="blocked_cleanup" and row.revoke_idempotency_key and row.revoke_request_digest else None}
 
 
 @router.get("/profiles")
@@ -190,16 +196,51 @@ async def recover_profile(request:Request,request_uuid:str):
 
 @router.post("/profiles/{connection_id}/revoke")
 async def revoke_profile(request:Request,connection_id:str):
-    owner=operator(request); inner=await body(request,Control); request_digest=runtime.digest([connection_id,inner.model_dump()])
+    owner=operator(request); inner=await body(request,ProfileRevokeControl)
+    try: return await _revoke_profile(owner,connection_id,inner)
+    except Exception as exc: raise error(exc) from exc
+
+
+async def _revoke_profile(owner,connection_id,inner):
+    request_digest=runtime.digest([connection_id,inner.model_dump(exclude={"revoke_request_digest"})])
     async with runtime.writer() as db:
         await current_root(db,owner); row=await db.get(GoogleServiceConnection,connection_id,populate_existing=True)
         if row is None or row.owner_principal_id!=owner.principal.principal_id or row.owner_session_id!=owner.session_id or row.service not in SCOPES: raise HTTPException(404,detail={"code":"calendar_reschedule_profile_unavailable"})
         if row.revoke_idempotency_key:
-            if row.revoke_request_digest!=request_digest: raise HTTPException(409,detail={"code":"calendar_reschedule_revoke_conflict"})
+            retry=inner.revoke_request_digest is not None
+            if row.revoke_idempotency_key!=inner.idempotency_key or row.state not in {"revoked","blocked_cleanup"} or (retry and (inner.revoke_request_digest!=row.revoke_request_digest or inner.expected_revision!=row.revision)) or (not retry and row.revoke_request_digest!=request_digest):
+                raise HTTPException(409,detail={"code":"calendar_reschedule_revoke_conflict"})
         else:
+            if inner.revoke_request_digest is not None: raise HTTPException(409,detail={"code":"calendar_reschedule_revoke_conflict"})
             if row.revision!=inner.expected_revision: raise HTTPException(409,detail={"code":"calendar_reschedule_revision_changed"})
-            row.state="revoked"; row.revision+=1; row.revoke_idempotency_key=inner.idempotency_key; row.revoke_request_digest=request_digest; row.updated_at=runtime.now()
-        return {"profile":profile(row),"credential_cleanup":"encrypted_quarantine"}
+            # A crash or denied final CAS keeps authority revoked and cleanup
+            # visibly unfinished. Never do Vault/crypto/filesystem I/O here.
+            row.state="blocked_cleanup"; row.revision+=1; row.revoke_idempotency_key=inner.idempotency_key; row.revoke_request_digest=request_digest; row.verified_setup_job_id=None; row.updated_at=runtime.now()
+        key,revision,frozen_digest=row.vault_secret_key,row.revision,row.revoke_request_digest
+    cleanup_ok=False
+    try:
+        async with asyncio.timeout(5):
+            await vault_repository.delete(key,owner_principal_id=owner.principal.principal_id)
+            cleanup_ok=await vault_repository.snapshot(key,owner_principal_id=owner.principal.principal_id) is None
+    except Exception:
+        # Credential deletion/verification failure is local, bounded and
+        # retryable only with this original owner/Root/revoke identity.
+        pass
+    async with runtime.writer() as db:
+        await current_root(db,owner); row=await db.get(GoogleServiceConnection,connection_id,populate_existing=True)
+        if row is None or row.owner_principal_id!=owner.principal.principal_id or row.owner_session_id!=owner.session_id or row.service not in SCOPES or row.vault_secret_key!=key or row.revoke_idempotency_key!=inner.idempotency_key or row.revoke_request_digest!=frozen_digest:
+            raise HTTPException(409,detail={"code":"calendar_reschedule_revoke_conflict"})
+        if row.revision!=revision:
+            # Another exact cleanup may have converged while I/O awaited.
+            # Its verified terminal state wins; never downgrade it or renew.
+            if row.state!="revoked" or not cleanup_ok: raise HTTPException(409,detail={"code":"calendar_reschedule_revision_changed"})
+        elif row.state!=("revoked" if cleanup_ok else "blocked_cleanup"):
+            row.state="revoked" if cleanup_ok else "blocked_cleanup"; row.revision+=1; row.updated_at=runtime.now()
+        result=profile(row)
+    if not cleanup_ok:
+        raise HTTPException(503,detail={"code":"calendar_reschedule_credential_cleanup_blocked","message":"Local authority is revoked; Vault credential cleanup remains unverified. Refresh metadata and explicitly retry the original cleanup.",
+            "recovery_action":"retry_cleanup","provider_contact":False,"credential_cleanup":"blocked_cleanup","encrypted_audit_bytes_may_remain":True,"physical_erasure_verified":False})
+    return {"profile":result,"provider_contact":False,"credential_cleanup":"verified_unavailable","encrypted_audit_bytes_may_remain":True,"physical_erasure_verified":False}
 
 
 async def expected_pair(owner,inner, *, write=True):

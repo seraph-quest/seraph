@@ -230,7 +230,7 @@ describe("RepoRepairForm", () => {
     const callsAfterFailure = postCalls(fetchMock);
     expect(callsAfterFailure).toHaveLength(2);
     const firstTaskBody = String(callsAfterFailure[1]?.[1]?.body);
-    fireEvent.click(screen.getByRole("button", { name: "Retry exact request" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Retry exact request" }));
     await waitFor(() => expect(onCreated).toHaveBeenCalled());
     const calls = postCalls(fetchMock);
     expect(calls).toHaveLength(3);

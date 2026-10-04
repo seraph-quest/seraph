@@ -195,6 +195,7 @@ describe("GuardianInboxPanel", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Refresh" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "Snooze" }));
     await waitFor(() => expect(screen.getByText("Snooze recorded.")).toBeInTheDocument());
     expect(screen.queryByRole("button", { name: "Accept follow-up" })).not.toBeInTheDocument();

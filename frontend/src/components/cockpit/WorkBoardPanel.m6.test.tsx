@@ -337,7 +337,7 @@ describe("WorkBoardPanel M6 governed procedure controls", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Open task Verified follow-through" }));
     fireEvent.click(await screen.findByRole("button", { name: "Preview procedure" }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("Independent readback is not verified.");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Evidence is unavailable or changed. Reload the task and review its source permissions.");
     expect(screen.queryByRole("region", { name: "Governed procedure preview" })).not.toBeInTheDocument();
   });
 
@@ -580,7 +580,7 @@ describe("WorkBoardPanel M6 governed procedure controls", () => {
     fireEvent.change(await screen.findByRole("combobox", { name: "Existing governed procedure" }), { target: { value: "routine-1" } });
     fireEvent.click(await screen.findByRole("button", { name: "Invoke governed procedure" }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(/receipt was not confirmed/i);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Evidence is unavailable or changed. Reload the task and review its source permissions.");
     expect(invocationBodies).toHaveLength(1);
     const firstRequest = invocationBodies[0];
     expect(screen.getByRole("button", { name: "Retry invocation and reconcile" })).toBeInTheDocument();
@@ -635,7 +635,7 @@ describe("WorkBoardPanel M6 governed procedure controls", () => {
     await waitFor(() => expect(invokeButton).toBeEnabled());
     fireEvent.click(invokeButton);
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(/could not be persisted/i);
+    expect(await screen.findByText(/exact invocation request could not be persisted/i)).toBeInTheDocument();
     expect(invokeCalls).toBe(0);
   });
 
@@ -675,7 +675,7 @@ describe("WorkBoardPanel M6 governed procedure controls", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Open task Verified follow-through" }));
     fireEvent.change(await screen.findByRole("combobox", { name: "Existing governed procedure" }), { target: { value: "routine-1" } });
     fireEvent.click(await screen.findByRole("button", { name: "Invoke governed procedure" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("The selected source watch revision is stale.");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Evidence is unavailable or changed. Reload the task and review its source permissions.");
 
   });
 

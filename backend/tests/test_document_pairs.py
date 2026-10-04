@@ -146,6 +146,9 @@ async def test_authenticated_private_pair_reserve_stream_seal_and_exact_bind(acc
                 await asyncio.wait_for(ready.wait(),timeout=10)
                 task_id=task.json()['task']['task_id']
                 second=WorkBoardDispatcher(jobs=DurableJobRepository(),session_provider=factory.accounting_sessions)
+                # Same-process service fixture with independent process-local
+                # lookup. The owning instance retains its real worker task.
+                second._active_worker_tasks={}
                 assert not second._active_worker_tasks
                 monkeypatch.setattr(work_board,"dispatcher",second)
                 state=await client.get(f'/api/work-board/tasks/{task_id}/document-comparison')
@@ -192,7 +195,13 @@ async def test_authenticated_private_pair_reserve_stream_seal_and_exact_bind(acc
                     assert sum('document-child' in document_compare_native.checkpoints(row) for row in rows)==1
                 release.set();receipt=await asyncio.wait_for(running,timeout=10)
                 resumed=await second.run_pass()
-                assert resumed['completed']==1,resumed
+                assert resumed['reconciled']>=1,resumed
+                completed=await client.get('/api/work-board/tasks/'+next_task.json()['task']['task_id'])
+                assert completed.json()['task']['status']=='done',completed.text
+                async with factory() as db:
+                    rows=list((await db.scalars(select(WorkflowRunState).where(WorkflowRunState.job_kind=='document_invoice_compare_v1'))).all())
+                    succeeded=next(row for row in rows if row.status=='succeeded')
+                    assert succeeded.failure_reason is None
             else:receipt=await dispatcher.run_pass()
             detail=await client.get('/api/work-board/tasks/'+task.json()['task']['task_id'])
             (root/'document-native-readback.json').write_text(json.dumps({"dispatch":receipt,"detail":detail.json()},indent=2))

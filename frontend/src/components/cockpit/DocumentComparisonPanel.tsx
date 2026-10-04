@@ -8,7 +8,7 @@ const CAPABILITY = "work.document-compare.v1";
 type Descriptor = { size_bytes: number; sha256: string };
 type Pair = { artifact_id: string; revision: number; pair_state: string; uploaded: string[]; goal_id: string; goal_revision: number; typed_input_digest: string | null; ingest_deadline: string; reason_code?: string };
 type Pending = { request: { schema_version: 1; operation: "compare-line-totals-by-sku"; goal_id: string; goal_revision: number; idempotency_key: string; pdf: Descriptor; csv: Descriptor; no_learning: true }; pair: string | null; taskKey: string };
-type NativeState = { task_revision: number; status: string; cleanup_proven: boolean; recoverable: boolean; retryable: boolean; report_available: boolean; reason_code: string | null; recovery_limit: string; deadline_at: string };
+type NativeState = { task_revision: number; status: string; cleanup_proven: boolean; quiescence_recorded: boolean; recoverable: boolean; retryable: boolean; report_available: boolean; reason_code: string | null; recovery_limit: string; deadline_at: string };
 interface Props { ownerPrincipalId?: string | null; ownerSessionId?: string | null; task?: WorkBoardTask; goals?: GoalInfo[]; onClose?: () => void; onCreated?: (task: WorkBoardTask) => void | Promise<void> }
 
 async function request(path: string, body?: unknown, method = "POST") {
@@ -118,6 +118,11 @@ export function DocumentComparisonPanel({ ownerPrincipalId, ownerSessionId, task
         void request(`/tasks/${task.task_id}/document-comparison`,undefined,"GET").then(value => {if(version===generation.current)setNative(value as NativeState);}).catch(failure => {if(version===generation.current)setError(String(failure));}).finally(() => {if(version===generation.current)setBusy(false);});
       }}>Read original parser and recovery state</button>
       {native && <p>{native.status} · {native.reason_code ?? "original attempt"} · parser cleanup {native.cleanup_proven ? "verified" : "unknown; capacity held"} · original window ends {native.deadline_at}. {native.recovery_limit}</p>}
+      {native?.status === "cancelled" && <p>Comparison cancelled; no external action was performed. The blocked card preserves its cancellation record. Parser capacity is {native.quiescence_recorded ? "released with the recorded reap witness" : "held pending a recorded exact reap witness"}.</p>}
+      <button type="button" disabled={busy || !native || native.quiescence_recorded} onClick={() => {
+        if(!native)return;const version=generation.current;setBusy(true);setError(null);
+        void request(`/tasks/${task.task_id}/document-comparison/reconcile`,{expected_revision:native.task_revision,idempotency_key:crypto.randomUUID()}).then(value => {if(version===generation.current)setNative(value.document_comparison as NativeState);}).catch(failure => {if(version===generation.current)setError(String(failure));}).finally(() => {if(version===generation.current)setBusy(false);});
+      }}>Verify original parser reap and release capacity</button>
       <button type="button" disabled={busy || !native?.recoverable} onClick={() => {
         if(!native)return;const version=generation.current;setBusy(true);setError(null);
         recovery.current ??= {expected_revision:native.task_revision,idempotency_key:crypto.randomUUID()};

@@ -41,6 +41,8 @@ async def snapshot(db, owner, task_id):
     proven = cleanup_proven(task, attempt, projection)
     recoverable = False; retryable = False; authorized = False
     reason = run.failure_reason
+    if run.status == "cancelled":
+        reason = "document_cancelled_reaped" if proven else "document_cancelled_quiescence_unknown"
     try:
         staged = await stage(db, task, attempt, run, inputs(task))
         await current(db, task, attempt, run, staged, require_lease=False)

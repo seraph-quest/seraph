@@ -251,8 +251,23 @@ async def execute(task,attempt,inputs,*,jobs,runner,deadline,admission_only):
         history=json.loads(run.checkpoint_receipts_json)
         history.append({"checkpoint_id":"document-capacity","payload":binding,"safe":True})
         run.checkpoint_receipts_json=canonical(history).decode();await db.flush()
-    projection=await jobs.claim_job(spec.identity.job_id,owner=runner,lease_seconds=35,
-        expected_revision=projection["revision"],expected_fencing_token=(projection.get("lease") or {}).get("fencing_token",0),claim_authority_check=claim)
+    try:
+        projection=await jobs.claim_job(spec.identity.job_id,owner=runner,lease_seconds=35,
+            expected_revision=projection["revision"],expected_fencing_token=(projection.get("lease") or {}).get("fencing_token",0),claim_authority_check=claim)
+    except BoardError as exc:
+        if exc.code not in {"document_parser_capacity_held","document_higher_priority_ready"}:raise
+        async with jobs._session() as db:
+            await db.execute(text("BEGIN IMMEDIATE"));waiting=await jobs._fetch(db,spec.identity.job_id)
+            await current(db,task,attempt,waiting,staged)
+            if waiting.status!="queued" or waiting.lease_owner is not None:
+                raise BoardError("document_queue_wait_changed","The original queued comparison changed")
+            changed=await db.execute(update(WorkflowRunState).execution_options(synchronize_session=False).where(
+                WorkflowRunState.run_identity==waiting.run_identity,WorkflowRunState.revision==waiting.revision,
+                WorkflowRunState.status=="queued",WorkflowRunState.lease_owner.is_(None))
+                .values(failure_reason=exc.code,updated_at=now(),revision=waiting.revision+1))
+            if changed.rowcount!=1:raise BoardError("document_queue_wait_changed","The original queue receipt changed")
+            await db.refresh(waiting);held=_serialize_job(waiting)
+        return {**held,"job_id":spec.identity.job_id,"status":"queued","admission_only":False,"reason_code":exc.code}
     fence=int(projection["lease"]["fencing_token"]); process=None; parent=-1
     try:
         path=directory_path(task.input_artifact_id)/"unused"
@@ -417,7 +432,9 @@ async def adopt_output(jobs,task,attempt,inputs,runner,fence):
             .values(status="succeeded",artifact_receipts_json=canonical(artifacts).decode(),effect_receipts_json=canonical(effects).decode(),
                 result_digest=_digest({"status":"succeeded","no_learning":True,"output_sha256":receipt["cipher_sha256"]}),
                 result_summary="Selected private PDF/CSV compared with cited exact Decimal formulas; no_learning",
-                finished_at=stamp,updated_at=stamp,lease_owner=None,lease_expires_at=None,revision=run.revision+1))
+                finished_at=stamp,updated_at=stamp,heartbeat_at=stamp,
+                failure_reason=None if run.failure_reason in {"document_parser_capacity_held","document_higher_priority_ready"} else run.failure_reason,
+                lease_owner=None,lease_expires_at=None,revision=run.revision+1))
         if changed.rowcount!=1:raise BoardError("document_adoption_fence_changed","The original output changed before adoption")
         await db.flush();await db.refresh(run);finished=run
         projection=_serialize(finished)

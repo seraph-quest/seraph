@@ -5753,9 +5753,17 @@ class WorkBoardDispatcher:
                 if not isinstance(projection, Mapping):
                     raise DurableJobError("durable_run_projection_missing_after_execution")
             safe_status = _status(adapter_result.get("status")) or _status(projection)
-            reason = _stable_reason_code(
-                _text(adapter_result.get("reason_code")) or _text(projection.get("failure_reason")),
-            )
+            raw_reason = _text(adapter_result.get("reason_code")) or _text(projection.get("failure_reason"))
+            reason = (raw_reason if task.capability_id == "work.document-compare.v1"
+                and raw_reason in {"document_parser_capacity_held", "document_higher_priority_ready"}
+                else _stable_reason_code(raw_reason))
+            if (task.capability_id == "work.document-compare.v1" and safe_status == "queued"
+                and reason in {"document_parser_capacity_held", "document_higher_priority_ready"}):
+                # This original bounded attempt owns queued work, not a
+                # failed parser. The next scheduler pass retries admission
+                # against the same job and deadline after actual quiescence.
+                result["deferred"] = True
+                return result
             unresolved = safe_status in {"unknown_external_effect", "cost_liability"} or _status(projection) in {
                 "unknown_external_effect",
                 "cost_liability",
@@ -5870,6 +5878,15 @@ class WorkBoardDispatcher:
             result["blocked"] = True
         except Exception as exc:
             logger.info("work board direct adapter %s reconciliation blocked: %s", task.task_id, type(exc).__name__)
+            if task.capability_id == "work.document-compare.v1":
+                async with self.session_provider() as cancelled_db:
+                    cancelled = await cancelled_db.scalar(select(WorkBoardAttempt.cancel_requested_at).where(
+                        WorkBoardAttempt.attempt_id == attempt.attempt_id,
+                        WorkBoardAttempt.workflow_run_id == job_id,
+                        WorkBoardAttempt.fencing_token == attempt.fencing_token))
+                if cancelled is not None:
+                    result["blocked"] = True
+                    return result
             if linked_ok:
                 # Mail source/authority drift is a deterministic, pre-draft
                 # terminal outcome.  The direct adapter still owns its lease

@@ -228,14 +228,14 @@ chat reports that it was blocked before provider contact and tells the operator
 which setup controls are missing. That state does not imply an uncertain
 provider outcome and does not trigger an automatic retry.
 
-Home also has a branch-local **Your first verified result** journey: choose
+Home also has a bounded **Your first verified result** journey: choose
 a deterministic local snapshot or public-source baseline plus snapshot, review
 the $0 model cost and finite permissions, queue a typed task through the managed
 dispatcher, and explicitly open its independently verified result. Progress is
 owner/session-scoped in the existing activity ledger. The public watch starts
 with scheduling disabled and is paused after observation. A baseline is not a
 material-change dossier; both starters record `no_learning`. This remains
-Partial on the open integration branch. The managed keyless local journey and
+Partial within its declared profile limits. The managed keyless local journey and
 artifact digest are verified; live public-source usefulness remains unverified. See
 [Guided First Result Setup](./first-result-setup.md) for bounds and recovery.
 
@@ -430,8 +430,7 @@ historical scopes can be migrated.
 The #900 ownership implementation adds a separately reviewed private continuity
 credential and exact read-only recovery contract, described in
 [Operator ownership and recovery](./19-operator-ownership-and-recovery.md).
-This is branch-local intended post-program behavior until reviewed promotion to
-`develop`; it never restores prior grants,
+Availability requires the installed reviewed program revision; it never restores prior grants,
 adopts ambiguous legacy history, or substitutes a retired execution root.
 
 The task inspector also exposes local, goal-scoped
@@ -439,7 +438,7 @@ The task inspector also exposes local, goal-scoped
 revalidated against canonical records and verified artifacts before inspection
 or explicit model-context adoption. Exact selected historical records remain
 read only, and historic/private source egress remains blocked for the generic
-strategist purpose. This is branch-local intended post-program behavior;
+strategist purpose. Availability requires the installed reviewed program revision;
 provider usefulness remains externally unverified.
 
 `/api/runtime/status` and `/api/settings/artifact-storage` are the active
@@ -459,7 +458,7 @@ cross-surface identity, selected voice/messaging channels, and outcome-first UX
 need Epic #736 milestones. Existing canaries or deterministic receipts do not
 make those product capabilities complete.
 
-### Operator work board (Epic #864 M6 branch-local target)
+### Operator work board (Epic #864 M6)
 
 The M4 work-board slice adds an authenticated, single-operator Kanban surface
 under `/api/work-board`. Seraph's SQLModel/SQLite workspace remains the
@@ -478,7 +477,7 @@ are never replayed automatically. Manual Specify and Decompose requests are
 provider-governed proposals that remain staged until operator acceptance; a
 missing route, authority, or budget is visible as a blocked recovery state.
 
-#### Bounded execution evidence (#917 branch-local target)
+#### Bounded execution evidence (#917)
 
 The existing task evidence inspector can bind an exact reviewed packet for
 execution with a separate unchecked acknowledgment. This grants no model
@@ -509,7 +508,8 @@ The isolated October 3 operator journey exercised governed generation,
 acceptance, native browser readback, future artifact use, correction, safety
 pause and explicit rebinding with no learning. Model and public HTTP responses
 were intercepted and nonlocal sockets denied; live provider quality remains
-unverified. This is branch-local Target evidence, not Shipped `develop` truth.
+unverified. These receipts establish the bounded profile; availability requires
+the installed reviewed program revision.
 
 Epic #864 M5 adds a candidate from a verified task outcome only after
 independent readback. The candidate keeps its task, attempt, workflow, artifact,
@@ -529,8 +529,8 @@ exact same-card preview, approves it through Pending approvals, and resumes the
 same durable routine parent. The card reaches Done only after independent
 readback.
 
-This section describes the Epic #864 M6 integration-branch target while its
-aggregate PR is under review. It does not claim full Hermes parity, autonomous
+Availability of these bounded work-board profiles requires the installed
+reviewed program revision. They do not claim full Hermes parity, autonomous
 execution, memory superiority, or production readiness.
 
 ### Reviewed procedures v2 (M6 #889) {#reviewed-procedures-v2-m6-889-branch-local-target}
@@ -538,7 +538,7 @@ execution, memory superiority, or production readiness.
 [ADR-015](./decisions/015-reviewed-procedure-preferences.md) accepts a narrow
 reviewed-learning target: explicit feedback on matching manual invocations may
 propose a Goal/version-local preference for an existing `public-browser-check`
-version. The integration-branch implementation counts the complete matching
+version. The bounded implementation counts the complete matching
 manual population before filtering: two distinct native readback-verified
 outcomes with current Helpful feedback and no current Harmful feedback can
 produce a proposal. Corrections append an exact predecessor-bound decision;
@@ -573,9 +573,9 @@ the deterministic preference is not a measured quality improvement. The actual
 isolated managed journey exercised native parent/fixed-leaf execution, feedback,
 insufficient evidence, adoption, read-only selection/reload, Harmful correction,
 and rollback. Public HTTP responses were intercepted and nonlocal sockets denied;
-no model or account contact occurred. This is branch-local implementation
-evidence; whole independent review and Shipped `develop` truth remain separate
-gates.
+no model or account contact occurred. These receipts establish the bounded
+preference profile; availability requires the installed reviewed program revision.
+They do not establish measured quality improvement.
 
 The #889 reviewed procedure surface turns verified Work Board outcomes into reusable,
 owner-bound procedures. It has exactly three registered templates:
@@ -647,7 +647,8 @@ absent. Governed model work, where the selected meeting path requires it, still
 uses the active OpenRouter admission, consent, and budget checks; this branch
 has not performed a live provider or account canary.
 
-This remains **Partial** and is not Shipped `develop` truth. On October 1, 2026,
+This remains **Partial** within the declared execution and provider-proof limits.
+On October 1, 2026,
 the managed CPU-host journey prepared, reviewed, installed and activated a
 public-browser procedure, then executed its native leaf and verified both the
 parent and leaf readbacks. The leaf artifact hash matched the stored file.
@@ -666,9 +667,9 @@ validation.
 
 ### Governed repository repair (M4 #887) {#governed-repository-repair-m4-887-branch-local-target}
 
-The #912 branch target adds the explicit `repo-node24-npm-v1` profile behind
+The #912 bounded profile adds explicit `repo-node24-npm-v1` execution behind
 this same Work/API/durable-job journey. [ADR-007](decisions/007-bounded-node-repair-supervision.md)
-owns its accepted contract; it is not shipped `develop` truth.
+owns its accepted contract; availability requires the installed reviewed program revision.
 [Optional Node Repository Repair](./optional-node-repair.md) describes installed
 runtime selection, finite selectors, exact approval and unknown recovery. Settings select
 an already installed absolute Node 24 executable. Only finite inspected `npm
@@ -760,7 +761,7 @@ Saving selectors never starts Docker or changes host resource limits. A legacy
 settings document without an executor selector remains rootless-only until the
 operator explicitly selects another backend.
 
-The tested-publication integration branch implements the accepted
+The bounded tested-publication profile implements the accepted
 [tested repair publication](./decisions/009-tested-repository-publication.md)
 and [finite GitHub consent](./decisions/011-finite-github-connection-consent.md)
 targets. Its selected `repo-python-pytest-publication-v1` profile reports the
@@ -785,8 +786,8 @@ against new writes. Reload discovers owned history without automatic consent,
 publication, reconciliation or closure. An ambiguously answered close request
 retains its exact body and key; only the server's consistent canonical
 inspection can identify an applied receipt or permit explicit discard of a
-permanently rejected request. These are branch-local capability contracts,
-not a claim of shipped `develop` behavior or live GitHub/provider usefulness.
+permanently rejected request. These bounded capability contracts require the
+installed reviewed program revision and do not establish live GitHub/provider usefulness.
 
 This remains **Partial**. Intercepted model transport and executor
 mechanics prove request, authority, recovery, and readback contracts only. A
@@ -810,9 +811,9 @@ Its deterministic model transport is intercepted. Local execution intentionally
 has no OS confinement. Provider/account usefulness, live OpenRouter quality,
 and Docker resource enforcement remain **external-unverified**. The original
 repository is not claimed changed,
-and this capability remains Partial rather than Shipped `develop` truth.
+and this capability remains Partial within those explicit proof limits.
 
-### Reviewed public evidence pipelines (#914 branch-local target)
+### Reviewed public evidence pipelines (#914)
 
 The existing task inspector offers a reviewed, fixed chain from
 `browser.public-task.v1` to `work.evidence-dossier.v1` and
@@ -858,7 +859,7 @@ finite chain; broader DAGs, model planning, publication and PDF/CSV export are
 outside its contract. [ADR-010](./decisions/010-reviewed-artifact-pipelines.md)
 owns the accepted target.
 
-### Finite evidence research (#901 branch-local target)
+### Finite evidence research (#901)
 
 The Work Board offers a finite research dossier form and a focused task
 inspector. Select a current Goal, one or two perspective instructions, and at
@@ -888,8 +889,8 @@ blocks mutations; the full retained request is bounded to 16 KiB.
 
 The dossier is served as verified `text/plain` and rendered literally.
 Citation checks establish matching supplied spans and digests, not semantic
-truth. Every result records `no_learning`. This capability remains a
-branch-local **Target** and **Partial** operational evidence. The October 3
+truth. Every result records `no_learning`. This capability remains **Partial**
+within its declared source and provider-proof limits. The October 3
 managed CPU-host journey used actual operator authentication, governed settings
 and capability admission, public HTTPS source reads, two native child jobs,
 settled accounting, durable input consumption and physical dossier readback.
@@ -1040,7 +1041,7 @@ calendar events, send communications, or learn preferences from meeting content.
 
 ### Bounded Gmail source, watch, and reply drafting (M7 #890) {#bounded-gmail-source-watch-and-reply-drafting-m7-890-branch-local-target}
 
-The branch adds an owner- and session-bound Gmail readonly path with encrypted
+The bounded profile adds an owner- and session-bound Gmail readonly path with encrypted
 credentials, explicit source and model consent, opaque local message bindings,
 bounded metadata watches, and private reply drafts. A watch uses the existing
 governed scheduler with the exact `hourly` or `6h` cadence shape, starts in
@@ -1081,8 +1082,8 @@ same-original-Root readonly observation preserves original liabilities. This
 branch implementation is **Partial**: actual authenticated SQLite/Vault/native
 jobs, approval, encrypted artifacts and managed operator UI have been exercised
 with only external Google HTTP/DNS simulated. Live Google remains
-**external-unverified**, and the whole implementation still requires independent
-review before integration; this is not Shipped `develop` truth.
+**external-unverified**; availability of the bounded profile requires the
+installed reviewed program revision.
 
 In Settings, import separate exact read and write profiles. In Calendar meeting
 preparation, readonly event selection may leave model consent unchecked;
@@ -1161,8 +1162,8 @@ draft preparation separately intercepts the governed OpenRouter HTTP setup
 route and records real usage/effective-route receipts. The managed UI verifies
 literal multiline rendering, separate approval, sender Sent readback, an
 accepted-response-loss Unknown send, separate readonly observation and manual
-reload inspection. This is branch-local implementation evidence, not a live
-Gmail or Shipped claim. Provider search indexing, changes between source read and send,
+reload inspection. These receipts establish bounded implementation behavior,
+not live Gmail usefulness. Provider search indexing, changes between source read and send,
 and human review of untrusted incoming Reply-To remain explicit limitations.
 
 ### Reviewed source-change follow-up
@@ -1273,9 +1274,9 @@ page counts are labelled as such, failed refreshes preserve last-known data,
 and unavailable queue or spend evidence remains unavailable. Pending approvals
 open the existing approval surface.
 
-Home's branch-local **Needs attention** snapshot deduplicates current-root task approvals, unknown outcomes, blocked or failed work, stale verification, and linked Inbox decisions. It retains last-confirmed metadata and uses explicit refresh. Attention opens the existing task inspector, rechecks the exact approval or owning readback, and returns keyboard focus to its originating Home or Inbox context. Recovered history remains read only. Pending approval timestamps include UTC offsets, so valid approvals retain their expiry instant in browsers in other timezones. Verified GitHub readback converges the original latest attempt only while the original owner, goal and connection authority remain valid; authority changes preserve settled-effect truth and a specific blocked task reason. Cost recovery links to Settings only after the owning API advertises the exact job/goal control. See [Attention and Recovery](./attention-recovery.md).
+Home's bounded **Needs attention** snapshot deduplicates current-root task approvals, unknown outcomes, blocked or failed work, stale verification, and linked Inbox decisions. It retains last-confirmed metadata and uses explicit refresh. Attention opens the existing task inspector, rechecks the exact approval or owning readback, and returns keyboard focus to its originating Home or Inbox context. Recovered history remains read only. Pending approval timestamps include UTC offsets, so valid approvals retain their expiry instant in browsers in other timezones. Verified GitHub readback converges the original latest attempt only while the original owner, goal and connection authority remain valid; authority changes preserve settled-effect truth and a specific blocked task reason. Cost recovery links to Settings only after the owning API advertises the exact job/goal control. See [Attention and Recovery](./attention-recovery.md).
 
-The rendered Warsaw browser journey is mechanically verified through real ASGI HTTP/WebSocket handlers and retained SQLite/artifacts, with intercepted public-source/GitHub transport and an explicit server-side test permission. Recreating that ASGI app against the same database proves persisted recovery. The branch-local tested-publication milestone separately verifies a managed backend restart, native Git production, response-loss recovery and explicit capacity closure against retained SQLite/artifacts, with simulated GitHub HTTP and non-local sockets denied. Governed GitHub Settings creates finite Root-bound write consent; the attention UI does not create it. Readback and capacity closure use separate explicit acknowledgments and preserve Unknown effect, cost and no-learning truth after consent stops or the Goal changes. Live external usefulness remains unverified.
+The rendered Warsaw browser journey is mechanically verified through real ASGI HTTP/WebSocket handlers and retained SQLite/artifacts, with intercepted public-source/GitHub transport and an explicit server-side test permission. Recreating that ASGI app against the same database proves persisted recovery. The bounded tested-publication profile separately verifies a managed backend restart, native Git production, response-loss recovery and explicit capacity closure against retained SQLite/artifacts, with simulated GitHub HTTP and non-local sockets denied. Governed GitHub Settings creates finite Root-bound write consent; the attention UI does not create it. Readback and capacity closure use separate explicit acknowledgments and preserve Unknown effect, cost and no-learning truth after consent stops or the Goal changes. Live external usefulness remains unverified.
 
 This remains **Partial**; live provider and external-account usefulness remain
 explicitly **external-unverified**.
@@ -1350,8 +1351,8 @@ provenance, conflict, deletion, export, and failure handling.
 
 ## Fixed reviewed local JSON formatter
 
-**Status:** Target on the Epic integration branch; this is not a `develop`
-Shipped claim. [ADR-013](./decisions/013-fixed-reviewed-local-tool-package.md)
+**Status:** Partial; availability requires the installed reviewed program
+revision and the declared host/profile proof. [ADR-013](./decisions/013-fixed-reviewed-local-tool-package.md)
 defines one optional fixed package, `seraph.tool.json-format` v1.0.0, exposed as
 `work.json-format.v1`. Work → **Isolated JSON formatter** shows its exact manifest,
 content digest, permissions and limits. Select a current Goal, review and
@@ -1565,11 +1566,11 @@ crash-proof execution.
 
 ## Failure And Recovery
 
-### Fixed private Moltbook browser read target
+### Fixed private Moltbook browser read profile
 
 [ADR-018](./decisions/018-fixed-moltbook-private-browser-read.md) accepts one
 optional private Home document read through actual isolated Chromium and the
-existing owner connection. The branch-local implementation has mechanically
+existing owner connection. The bounded implementation has mechanically
 verified local authenticated TCP, Chromium, encrypted readback and operator
 controls; it is not Shipped production-account truth. Normal production execution
 is hard blocked: providing a key or consent cannot enable live Home. Activation
@@ -1601,9 +1602,9 @@ uncertainty keeps the exact reservation and browser lane quarantined. Local
 response fixtures and Linux-host proof establish neither production effects nor
 macOS host readiness, and no measured-quality or learning claim is made.
 
-### Optional Moltbook adapter target
+### Optional Moltbook adapter profile
 
-The branch-local `work.moltbook.v1` adapter uses **Settings → Moltbook** and
+The bounded `work.moltbook.v1` adapter uses **Settings → Moltbook** and
 existing owner Vault, Goal, approval and durable-job records. Linux and macOS
 core operation does not depend on Moltbook. Selecting a Vault credential is
 local configuration with no Goal or remote-use permission implied. Account
@@ -1683,8 +1684,15 @@ admission replay, with no new provider contact or deadline renewal. A bounded
 owner/login-scoped job reference supports explicit local refresh after reload;
 it stores no credential, content or verification secret and grants no authority.
 Completed exact admission replay is read-only; new work still requires current
-consent and source review. This target does not claim shipped `develop`
-behavior, live claimed-account usefulness or successful live public outreach.
+consent and source review. On October 4, 2026, the human-claimed `seraphquest`
+account published one transparent introduction; its full public post and feed
+membership were verified at [the published post](https://www.moltbook.com/post/9637612d-bb5b-458e-9cdb-0d52e27fe48a).
+One bounded feedback GET returned seven comments, treated as untrusted external
+content. The original native Unknown state, history and reservation remain
+unchanged; the subsequent full-readback correction is independent of that
+original job. Availability depends on the installed reviewed `develop`
+revision. This single event establishes no general provider quality or
+usefulness claim.
 
 - Trust effective API/UI state, not a default provider label.
 - Keep settings usable through partial metadata failure and show last-known state.

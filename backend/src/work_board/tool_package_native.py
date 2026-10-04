@@ -395,9 +395,12 @@ def binds(task, attempt, run, *, staged=None):
         return (run.run_identity==job_id(task,attempt) and run.job_kind==native_kind(task) and run.capability_version=="1"
             and run.owner_kind=="user" and run.owner_principal_id==task.owner_principal_id
             and run.session_id==task.owner_session_id and run.operator_session_id==task.owner_session_id
+            and run.goal_id==task.goal_id and run.goal_revision==task.goal_revision
             and run.input_digest==expected_input_digest and run.run_fingerprint==expected_fingerprint
             and run.authority_digest==digest(canonical(authority)) and authority["board_task_id"]==task.task_id
             and authority["board_attempt_id"]==attempt.attempt_id and authority["capability_id"]==task.capability_id
+            and authority["principal"]==task.owner_principal_id and authority["session_id"]==task.owner_session_id
+            and authority["goal_id"]==task.goal_id and authority["goal_revision"]==task.goal_revision
             and authority["pack"]["pack_id"]==package_id(task)
             and (is_authored(task.capability_id) or authority["pack"]["version"]=="1.0.0")
             and len(authority["pack"]["digest"])==64
@@ -634,6 +637,33 @@ async def claim_authored_capacity(db, run):
     records.append({"checkpoint_id":"authored-package:capacity","payload":{"job_id":run.run_identity,
         "owner_principal_id":run.owner_principal_id,"pack_id":package,"authority_digest":run.authority_digest},"safe":True})
     run.checkpoint_receipts_json=canonical(records).decode();await db.flush()
+
+
+async def live_original_owner(jobs,task,attempt):
+    """Defer to an exact leased owner; this grants no replay or cleanup proof."""
+    from src.work_board.repository import BoardError
+    try:
+        async with authority_guard(jobs,task,attempt) as staged:
+            async with jobs._session() as db:
+                run=await jobs._fetch(db,job_id(task,attempt))
+                deadline=lambda value:value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+                if (run.status!="running" or not run.lease_owner or not run.lease_expires_at
+                    or deadline(run.lease_expires_at)<=now() or run.fencing_token<1
+                    or attempt.cancel_requested_at is not None or not binds(task,attempt,run,staged=staged)):
+                    return False
+                records=json.loads(run.checkpoint_receipts_json)
+                reserved=[item.get("payload") for item in records if item.get("checkpoint_id")=="tool-package:reservation"]
+                process=[item.get("payload") for item in records if item.get("checkpoint_id")=="tool-package:process"]
+                if (len(reserved)!=1 or len(process)!=1 or type(reserved[0]) is not dict or type(process[0]) is not dict
+                    or process[0].get("admission_status")!="admitted" or not process[0].get("supervisor_pid")
+                    or not process[0].get("supervisor_start") or reserved[0].get("fence")!=run.fencing_token
+                    or reserved[0].get("job_id")!=run.run_identity
+                    or any(process[0].get(key)!=value for key,value in reserved[0].items())):
+                    return False
+                await current(db,task,attempt,run,staged=staged)
+                return True
+    except (ToolPackageBlocked,BoardError,OSError,ValueError,KeyError,TypeError,AttributeError):
+        return False
 
 
 async def execute(task, attempt, inputs, *, jobs, runner, deadline, admission_only):

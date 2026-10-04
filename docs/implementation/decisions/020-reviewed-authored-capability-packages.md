@@ -83,6 +83,12 @@ CPU lane: different owners/packages may execute independently. A bounded
 owner history scan fails closed at 4096 rows or malformed original bindings.
 Ordinary dispatcher priority is the scheduling boundary; cross-instance
 priority fairness is not established by this package-local capacity fence.
+Generic reconciliation defers to an exact current native owner with a live
+lease and persisted released-process binding. It validates historical pins
+outside the writer and current original Root/Goal/task/attempt facts in SQL;
+cancellation takes precedence. Deferral proves neither output nor cleanup,
+and never renews, replays or adopts. An expired or invalid lease remains an
+explicit recovery/Unknown boundary until actual process proof is available.
 
 Apply current private-read authority to both formatter and authored output
 GET/snapshot availability. Physical verified output and a final canonical check

@@ -9272,8 +9272,17 @@ class WorkBoardDispatcher:
         elif is_tool_package(task.capability_id):
             from src.work_board.tool_package_native import spec_for
             original_deadline=_utc_datetime(datetime.fromisoformat(str(projection.get("deadline_at"))))
-            expected_spec=spec_for(task,attempt,inputs,deadline=original_deadline,
-                expiry_facts=authority.get("execution_expiries"))
+            if is_authored(task.capability_id):
+                from src.work_board.authored_packages import load_registration,registration_scope
+                released=any(item.get("checkpoint_id")=="tool-package:process" and item.get("payload",{}).get("admission_status")=="admitted"
+                    for item in projection.get("checkpoints",[]))
+                registration=load_registration(task.capability_id,original_pin=authority.get("pack"),continuation=released)
+                with registration_scope(registration):
+                    expected_spec=spec_for(task,attempt,inputs,deadline=original_deadline,
+                        expiry_facts=authority.get("execution_expiries"))
+            else:
+                expected_spec=spec_for(task,attempt,inputs,deadline=original_deadline,
+                    expiry_facts=authority.get("execution_expiries"))
             if (expected_spec.deadline_at!=original_deadline or digests!={
                 "input_digest":WorkBoardDispatcher._direct_input_digest(task,attempt,inputs),
                 "authority_digest":_safe_digest(expected_spec.declared_authority),"run_fingerprint":expected_spec.run_fingerprint}):
@@ -10318,7 +10327,7 @@ class WorkBoardDispatcher:
             expected_authority_digest = _safe_digest(spec.declared_authority)
             expected_run_fingerprint = spec.run_fingerprint
         else:
-            if capability_id in {"guardian-routine.v1", "engineering.repo-repair.v1", "calendar.meeting-prep.v1", "work.mail-reply-draft.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+            if is_tool_package(capability_id) or capability_id in {"guardian-routine.v1", "engineering.repo-repair.v1", "calendar.meeting-prep.v1", "work.mail-reply-draft.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
                 # Routine invocation roots are already admitted and may be
                 # waiting on the operator approval boundary.  Re-entering
                 # RoutineService.invoke here (or rebuilding a repair Durable
@@ -10466,6 +10475,14 @@ class WorkBoardDispatcher:
                 )
                 snapshot_fence = snapshot_lease.get("fencing_token")
                 snapshot_owner = _text(snapshot_lease.get("owner"))
+
+                if is_tool_package(task.capability_id) and attempt.cancel_requested_at is None:
+                    from src.work_board.tool_package_native import live_original_owner
+                    if await live_original_owner(self.jobs,task,attempt):
+                        # A current native owner is still responsible for its
+                        # exact process. Deferral never adopts output, renews
+                        # authority or declares quiescence from a live lease.
+                        continue
 
                 # A linked row is recoverable only when the persisted durable
                 # admission still matches the exact per-capability root and

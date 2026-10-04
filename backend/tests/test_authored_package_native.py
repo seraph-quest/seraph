@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import asyncio
 
 import httpx
 import pytest
@@ -19,7 +20,7 @@ from src.workflows.job_runtime import DurableJobRepository
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("authored_fixture",["time-ledger","tiny-copy"])
+@pytest.mark.parametrize("authored_fixture",["time-ledger","tiny-copy","two-goal-race"])
 async def test_actual_authored_time_ledger_native_reopen_private_read(accounting_db, monkeypatch, authored_fixture):
     from src.api import auth, capability_packs, goals, work_board
     root,engine,factory=accounting_db
@@ -51,7 +52,15 @@ async def test_actual_authored_time_ledger_native_reopen_private_read(accounting
         "proc_before":before,"proc_after":True,"mode":"0700","entries":[],
         "immutable_execute_restored":["bwrap","rootfs/runtime/bin/isolated-python","rootfs/lib64/ld-linux-x86-64.so.2"]}))
     package_root=root/"selected-package"
-    scaffold_adapter(package_root,package_id="local.time-ledger-summary" if authored_fixture=="time-ledger" else "local.test-json-copy",display_name="Time ledger summary" if authored_fixture=="time-ledger" else "Test-only JSON copy")
+    scaffold_adapter(package_root,package_id="local.test-json-copy" if authored_fixture=="tiny-copy" else "local.time-ledger-summary",display_name="Test-only JSON copy" if authored_fixture=="tiny-copy" else "Time ledger summary")
+    if authored_fixture=="two-goal-race":
+        # A reviewed test-only barrier uses the one precreated output inode.
+        # No new writable mountpoint or runner/profile option is introduced.
+        from src.extensions.authored_adapter import canonical,sha256
+        original_code=(package_root/"adapter.py").read_bytes()
+        code=b'import json,time\nwith open("/input.json",encoding="utf-8") as source: barrier_input=json.load(source)\nif barrier_input["rows"]:\n with open("/out/result.json","w",encoding="utf-8") as output: json.dump({"barrier":True},output)\n while True:\n  with open("/out/result.json",encoding="utf-8") as output: released=json.load(output)\n  if released.get("barrier") is False: break\n  time.sleep(.01)\n'+original_code
+        descriptor=json.loads((package_root/"adapters/adapter.json").read_bytes());descriptor["code_sha256"]=sha256(code)
+        (package_root/"adapter.py").write_bytes(code);(package_root/"adapters/adapter.json").write_bytes(canonical(descriptor))
     if authored_fixture=="tiny-copy":
         # Second data-only contract proves resolver/runner generality. The
         # authored bytes are never imported, compiled or executed on the host.
@@ -117,6 +126,101 @@ async def test_actual_authored_time_ledger_native_reopen_private_read(accounting
         created=await post("/api/work-board/tasks",{"title":"Actual authored ledger summary","capability_id":cap,
             "goal_id":goal["id"],"goal_revision":1,"status":"todo","input_artifact_id":artifact["artifact_id"],"idempotency_key":"authored-task"})
         task_id=created["task"]["task_id"]
+        if authored_fixture=="two-goal-race":
+            first_pass=asyncio.create_task(dispatcher.run_pass())
+            barrier_path=None
+            try:
+                async with asyncio.timeout(4):
+                    while barrier_path is None:
+                        for path in (root/"artifacts/tool-package-runs").glob("*/out/result.json"):
+                            try:observed=json.loads(path.read_bytes())
+                            except (ValueError,FileNotFoundError):continue
+                            if observed=={"barrier":True}:barrier_path=path;break
+                        await asyncio.sleep(.01)
+                async with factory.accounting_sessions() as db:
+                    first_task=await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id==task_id))
+                    first_attempt=await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id==task_id))
+                    first_run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==first_attempt.workflow_run_id))
+                    first_identity=(first_run.run_identity,first_run.deadline_at,first_run.run_fingerprint)
+                    assert first_run.status=="running" and first_run.attempt_count==1
+                assert await tool_package_native.live_original_owner(jobs,first_task,first_attempt)
+                # Current live authority is copied to separate real SQLite
+                # databases for negatives; the actual owner is never mutated.
+                import sqlite3
+                from contextlib import asynccontextmanager
+                from sqlalchemy.ext.asyncio import create_async_engine,AsyncSession
+                from sqlalchemy.orm import sessionmaker
+                from datetime import datetime,timezone,timedelta
+                from src.db.models import Goal
+                negatives={}
+                for mutation in ("lease_expired","goal_revision","cancel_intent","malformed_authority"):
+                    copied=root/("live-native-"+mutation+".db")
+                    with sqlite3.connect("file:"+str(root/"seraph.db")+"?mode=ro",uri=True) as origin,sqlite3.connect(copied) as target_db:
+                        origin.backup(target_db)
+                    copy_engine=create_async_engine("sqlite+aiosqlite:///"+str(copied))
+                    copy_factory=sessionmaker(copy_engine,class_=AsyncSession,expire_on_commit=False)
+                    @asynccontextmanager
+                    async def copy_sessions():
+                        async with copy_factory() as db:
+                            try:yield db;await db.commit()
+                            except BaseException:await db.rollback();raise
+                    copy_jobs=DurableJobRepository();copy_jobs._session=copy_sessions
+                    assert await tool_package_native.live_original_owner(copy_jobs,first_task,first_attempt)
+                    async with copy_sessions() as db:
+                        copied_run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==first_identity[0]))
+                        if mutation=="lease_expired":copied_run.lease_expires_at=datetime.now(timezone.utc)-timedelta(seconds=1)
+                        elif mutation=="goal_revision":(await db.get(Goal,goal["id"])).revision+=1
+                        elif mutation=="cancel_intent":(await db.get(WorkBoardAttempt,first_attempt.attempt_id)).cancel_requested_at=datetime.now(timezone.utc)
+                        else:copied_run.declared_authority_json="{}"
+                    negatives[mutation]=await tool_package_native.live_original_owner(copy_jobs,first_task,first_attempt)
+                    assert negatives[mutation] is False
+                    await copy_engine.dispose()
+                records["live_owner_copy_negatives"]={"results":negatives,"scope":"copied actual running SQLite, original owner unchanged"}
+                second_goal=await post("/api/goals",{"title":"Second independent Goal for same owner/package","admission_budget":{"reviewed_grant":True,"grant_id":"authored-second-goal","max_outstanding_jobs":1,"max_attempts":1,"max_runtime_seconds":10}})
+                second_review=await post(f"/api/capability-packs/{pack_id}/review",{"goal_id":second_goal["id"],"goal_revision":1,"root_path":str(package_root),"content_digest":packet["content_digest"],"authority_digest":packet["authority_digest"],"acknowledge_unsigned_local":True})
+                second_approval=await post(f"/api/capability-packs/{pack_id}/approvals",{"action":"activate","goal_id":second_goal["id"],"digest":packet["content_digest"],"version":"1.0.0","content_digest":packet["content_digest"],"authority_digest":packet["authority_digest"]})
+                second_id=second_approval["approval"]["approval_id"]
+                await post(f"/api/capability-packs/{pack_id}/approvals/{second_id}/approve",{})
+                await post(f"/api/capability-packs/{pack_id}/activate",{"manifest":packet["manifest"],"root_path":str(package_root),"goal_id":second_goal["id"],"review_id":second_review["review"]["review_id"],"approval_id":second_id,"content_digest":packet["content_digest"],"authority_digest":packet["authority_digest"]})
+                second_input=await post("/api/work-board/input-artifacts",{"schema_version":1,"capability_id":cap,"goal_id":second_goal["id"],"goal_revision":1,"input":{"schema_version":1,"json_text":json.dumps({"schema_version":1,"rows":[]}),"no_learning":True},"idempotency_key":"two-goal-second-input"})
+                second_task=await post("/api/work-board/tasks",{"title":"Second package claim waits for real reap","capability_id":cap,"goal_id":second_goal["id"],"goal_revision":1,"status":"todo","input_artifact_id":second_input["artifact_id"],"idempotency_key":"two-goal-second-task"})
+                # Two dispatcher instances in one process share actual SQLite;
+                # this is not an independent-process parent-death proof.
+                second_dispatcher=WorkBoardDispatcher(jobs=DurableJobRepository(),session_provider=factory.accounting_sessions)
+                waiting=await second_dispatcher.run_pass()
+                async with factory.accounting_sessions() as db:
+                    second_attempt=await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id==second_task["task"]["task_id"]))
+                    second_run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==second_attempt.workflow_run_id))
+                    second_identity=(second_run.run_identity,second_run.deadline_at,second_run.run_fingerprint)
+                    assert second_run.status=="queued" and second_run.failure_reason=="authored_package_capacity_held",waiting
+                    assert second_run.attempt_count==0 and json.loads(second_run.effect_receipts_json)==[]
+                    still_first=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==first_identity[0]))
+                    assert still_first.status=="running" and first_identity==(still_first.run_identity,still_first.deadline_at,still_first.run_fingerprint)
+                descriptor=os.open(barrier_path,os.O_WRONLY|os.O_NOFOLLOW)
+                try:assert os.write(descriptor,b'{"barrier":false}')==17
+                finally:os.close(descriptor)
+                await first_pass
+                completed_second=await second_dispatcher.run_pass()
+                async with factory.accounting_sessions() as db:
+                    for identity in (first_identity,second_identity):
+                        row=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==identity[0]))
+                        assert row.status=="succeeded" and row.attempt_count==1 and identity==(row.run_identity,row.deadline_at,row.run_fingerprint),completed_second
+                first_output=await client.get(f"/api/work-board/tasks/{task_id}/tool-package-output")
+                second_output=await client.get(f"/api/work-board/tasks/{second_task['task']['task_id']}/tool-package-output")
+                assert first_output.status_code==200 and first_output.json()==vector["output"]
+                assert second_output.status_code==200 and second_output.json()=={"schema_version":1,"groups":[],"total_minutes":0}
+                records["two_goal_barrier"]={"first_identity":str(first_identity),"second_identity":str(second_identity),"waiting":waiting,"completed_second":completed_second,"first_output":first_output.json(),"second_output":second_output.json(),"source_barrier_observed":True,"registry_scope":"two dispatcher instances in one process"}
+                (root/"actual-authored-api.json").write_text(json.dumps(records,indent=2))
+                return
+            finally:
+                if not first_pass.done():
+                    if barrier_path is not None:
+                        descriptor=os.open(barrier_path,os.O_WRONLY|os.O_NOFOLLOW)
+                        try:os.write(descriptor,b'{"barrier":false}')
+                        finally:os.close(descriptor)
+                    first_pass.cancel()
+                    try:await first_pass
+                    except asyncio.CancelledError:pass
         dispatch=await dispatcher.run_pass()
         records["dispatch"]=dispatch
         detail=await client.get(f"/api/work-board/tasks/{task_id}")

@@ -245,7 +245,7 @@ async def revoke_consent(request:Request,consent_id:str):
 
 @router.post("/tasks")
 async def create_task(request:Request):
-    from src.work_board.contracts import WorkBoardOwner,WorkBoardInputArtifactCreate,WorkBoardTaskCreate
+    from src.work_board.contracts import WorkBoardOwner,WorkBoardInputArtifactCreate,WorkBoardTaskCreate,WorkBoardStatus
     from src.work_board.dispatcher import validate_capability_input
     from src.work_board.input_artifacts import prepare_input_artifact
     from src.work_board.repository import WorkBoardRepository
@@ -265,8 +265,8 @@ async def create_task(request:Request):
             metadata=await prepare_input_artifact(db,board_owner,WorkBoardInputArtifactCreate(schema_version=1,capability_id="calendar.event.reschedule.v1",
                 goal_id=typed["goal_id"],goal_revision=typed["goal_revision"],input=typed,idempotency_key=inner.request_uuid))
             task=await WorkBoardRepository().create_task(db,board_owner,WorkBoardTaskCreate(title=inner.title,body="One literal owned-event reschedule; exact preview and approval required; no learning.",
-                goal_id=typed["goal_id"],goal_revision=typed["goal_revision"],capability_id="calendar.event.reschedule.v1",input_artifact_id=metadata.artifact_id,
-                typed_input_ref=metadata.typed_input_ref,typed_input_digest=metadata.typed_input_digest,priority=60,idempotency_scope="calendar-exact-reschedule",idempotency_key=inner.request_uuid),
+                status=WorkBoardStatus.todo,goal_id=typed["goal_id"],goal_revision=typed["goal_revision"],capability_id="calendar.event.reschedule.v1",input_artifact_id=metadata.artifact_id,
+                priority=60,idempotency_scope="calendar-exact-reschedule",idempotency_key=inner.request_uuid),
                 origin_session_id=owner.session_id,publication_authority_check=publication_authority)
             return {"task":await _safe_task_payload(task.task,db=db),"idempotent_replay":task.idempotent_replay,"provider_contact":False}
     except Exception as exc: raise error(exc) from exc

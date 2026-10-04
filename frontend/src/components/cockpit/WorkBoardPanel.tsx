@@ -4246,6 +4246,8 @@ function WorkBoardPanel({
       {calendarPrepOpen && (
         <CalendarPrepForm
           key={pendingCreateScope ?? "anonymous"}
+          ownerPrincipalId={ownerPrincipalId}
+          ownerSessionId={ownerSessionId}
           goals={allGoals}
           initialPending={pendingCalendarAtMount}
           onPendingChange={setCalendarPending}

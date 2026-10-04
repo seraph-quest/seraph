@@ -88,7 +88,7 @@ export function rescheduleJob(value: unknown): RescheduleJob {
   if (v.preview !== undefined) {
     if (v.private_read_available !== true) invalid();
     const p = record(v.preview);
-    if (!string(p.approval_id) || !string(p.approval_status) || !digestPattern.test(String(p.decision_digest)) || !Number.isFinite(p.expires_at)
+    if (!string(p.approval_id) || !string(p.approval_status) || !digestPattern.test(String(p.decision_digest)) || typeof p.expires_at!=="number" || !Number.isFinite(p.expires_at)
       || !digestPattern.test(String(p.request_digest)) || !digestPattern.test(String(p.source_digest)) || !digestPattern.test(String(p.protected_digest))
       || !string(p.account_email, 254) || !string(p.calendar_id, 1024) || !string(p.event_id, 512) || !string(p.title, 1024, true) || !string(p.source_etag, 512)
       || !/^seraphReschedule_[a-f0-9]{24}$/.test(String(p.marker_key)) || !digestPattern.test(String(p.marker_value))
@@ -119,6 +119,7 @@ export function recoverRescheduleProfile(uuid: string, signal?: AbortSignal) { r
 export function revokeRescheduleProfile(id: string, body: unknown, signal?: AbortSignal) { return request("/profiles/" + encodeURIComponent(id) + "/revoke", value => rescheduleProfile(record(value).profile), body, signal); }
 export function verifyReschedulePair(body: unknown, signal?: AbortSignal) { return request("/profiles/verify-pair", rescheduleJob, body, signal); }
 export function createRescheduleConsent(body: unknown, signal?: AbortSignal) { return request("/consents", value => rescheduleConsent(record(value).consent), body, signal); }
+export function listRescheduleConsents(signal?: AbortSignal) { return request("/consents", value => { const v = record(value); if (v.provider_contact !== false || !Array.isArray(v.consents) || v.consents.length > 32) invalid(); return v.consents.map(rescheduleConsent); }, undefined, signal); }
 export function revokeRescheduleConsent(id: string, body: unknown, signal?: AbortSignal) { return request("/consents/" + encodeURIComponent(id) + "/revoke", value => rescheduleConsent(record(value).consent), body, signal); }
 export function createRescheduleTask(body: unknown, signal?: AbortSignal) { return request("/tasks", value => { const v = record(value), task = record(v.task); if (!string(task.task_id) || !int(task.task_revision)) invalid(); return task as { task_id: string; task_revision: number }; }, body, signal); }
 export function previewReschedule(body: unknown, signal?: AbortSignal) { return request("/operations/preview", rescheduleJob, body, signal); }

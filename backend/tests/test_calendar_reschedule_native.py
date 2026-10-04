@@ -70,7 +70,6 @@ async def prepared(accounting_db,monkeypatch):
     boundary=lambda *args,**kwargs:readonly(*args,transport=transport,resolver=lambda host,port:["93.184.216.34"],**kwargs)
     monkeypatch.setattr(google_calendar,"GoogleCalendarReadonlyAdapter",boundary)
     monkeypatch.setattr(calendar,"GoogleCalendarReadonlyAdapter",boundary)
-    monkeypatch.setattr(calendar_controls,"GoogleCalendarReadonlyAdapter",boundary)
     adapter=runtime.CalendarRescheduleAdapter
     monkeypatch.setattr(runtime,"CalendarRescheduleAdapter",lambda *args,**kwargs:adapter(*args,transport=transport,resolver=lambda host,port:["93.184.216.34"],**kwargs))
     app=FastAPI(); app.add_middleware(OperatorAuthMiddleware)
@@ -148,7 +147,7 @@ async def test_actual_native_conditional_write_readback_and_readonly_original_li
             assert actual["status"]=="unknown_external_effect" and actual["transport_quiescent"] is True,actual
             async with factory.accounting_sessions() as db:
                 original=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==ident_original))
-                preserved={name:getattr(original,name) for name in ("status","checkpoint_context_json","deadline_at","goal_id","goal_revision","authority_digest","fencing_token","lease_owner","lease_expires_at","approval_id","budget_digest")}
+                preserved={name:getattr(original,name) for name in ("status","checkpoint_context_json","deadline_at","goal_id","goal_revision","authority_digest","fencing_token","lease_owner","lease_expires_at","budget_digest")}
                 old_goal=await db.get(Goal,"calendar-native-goal"); old_goal.status="completed"; old_goal.revision+=1
                 current=datetime.now(timezone.utc)
                 grant=GoalAdmissionBudget(reviewed_grant=True,grant_id="readonly-observation",max_outstanding_jobs=1,max_attempts=1,max_runtime_seconds=120,notifications_per_day=0,

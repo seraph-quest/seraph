@@ -37,6 +37,7 @@ from src.db.models import (
 )
 from src.vault import redaction as vault_redaction
 from src.goals.repository import deserialize_admission_budget
+from src.work_board.authored_packages import stage_package_request, is_authored, is_tool_package
 from src.work_board.contracts import (
     WORK_BOARD_AUTHENTICATED_BLOCK_KINDS,
     WorkBoardActionRequest,
@@ -1111,6 +1112,7 @@ class WorkBoardRepository:
         _validate_opaque_identifier(request.origin_thread_id, field="origin_thread_id", max_length=256)
         _validate_digest(request.typed_input_digest, field="typed_input_digest")
 
+    @stage_package_request
     async def create_task(
         self,
         db: AsyncSession,
@@ -1144,7 +1146,7 @@ class WorkBoardRepository:
                 request = request.model_copy(update={"executor_id": expected_executor})
         if (
             request.status is WorkBoardStatus.todo
-            and request.capability_id in {"browser.public-task.v1", "work.research-dossier.v1", "work.json-format.v1", "work.document-compare.v1"}
+            and (request.capability_id in {"browser.public-task.v1", "work.research-dossier.v1", "work.json-format.v1", "work.document-compare.v1"} or is_authored(request.capability_id))
             and not request.input_artifact_id
         ):
             raise BoardError(
@@ -1154,7 +1156,7 @@ class WorkBoardRepository:
             )
         artifact = None
         document_stage = None
-        if request.capability_id == "work.document-compare.v1" and request.input_artifact_id:
+        if (request.capability_id == "work.document-compare.v1" or is_authored(request.capability_id)) and request.input_artifact_id:
             from src.work_board.input_artifacts import resolve_input_artifact_for_task, _metadata_digest
             artifact = await resolve_input_artifact_for_task(db, owner,
                 artifact_id=request.input_artifact_id, goal_id=request.goal_id,
@@ -1740,13 +1742,13 @@ class WorkBoardRepository:
         return BoardMutation(task, event)
 
     async def require_generic_recovery_allowed(self, db: AsyncSession, task: WorkBoardTask) -> None:
-        if task.capability_id in {"work.research-dossier.v1", "work.json-format.v1", "work.document-compare.v1"}:
+        if task.capability_id in {"work.research-dossier.v1", "work.json-format.v1", "work.document-compare.v1"} or is_authored(task.capability_id):
             linked = await db.scalar(select(WorkBoardAttempt.attempt_id).where(
                 WorkBoardAttempt.task_id == task.task_id, WorkBoardAttempt.workflow_run_id.is_not(None)).limit(1))
             if linked is not None:
                 code = {"work.research-dossier.v1": "research_original_attempt_required",
                         "work.json-format.v1": "tool_package_original_attempt_required",
-                        "work.document-compare.v1": "document_original_attempt_required"}[task.capability_id]
+                        "work.document-compare.v1": "document_original_attempt_required"}.get(task.capability_id,"tool_package_original_attempt_required")
                 raise BoardError(code,
                     "Use explicit capability recovery on the original attempt", status_code=409)
 
@@ -3503,7 +3505,7 @@ class WorkBoardRepository:
             authority=await stage(db,task,attempt,run,_parse_typed_input(task))
             receipt,_output=read_output(task,attempt,run)
             return await self._project_attempt(db,task_id,attempt_id,_document_stage=(authority,receipt,run.checkpoint_receipts_json),**kwargs)
-        if task is not None and task.capability_id=="work.json-format.v1" and status in {WorkBoardStatus.review,WorkBoardStatus.done}:
+        if task is not None and is_tool_package(task.capability_id) and status in {WorkBoardStatus.review,WorkBoardStatus.done}:
             from src.work_board.tool_package_native import session_authority_guard,stage_readback
             attempt=await db.get(WorkBoardAttempt,attempt_id,populate_existing=True)
             run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==attempt.workflow_run_id)) if attempt else None
@@ -3794,14 +3796,14 @@ class WorkBoardRepository:
                 "unknown_effect_requires_reconciliation",
                 "An unresolved outcome cannot be projected as Review or Done",
             )
-        if task.capability_id in {"work.research-dossier.v1", "work.json-format.v1"} and status in {WorkBoardStatus.review, WorkBoardStatus.done}:
+        if (task.capability_id == "work.research-dossier.v1" or is_tool_package(task.capability_id)) and status in {WorkBoardStatus.review, WorkBoardStatus.done}:
             from src.work_board.input_artifacts import consume_input_artifact, resolve_input_artifact_for_task
             from src.workflows.research_guard import assert_research_operator_session
             run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == attempt.workflow_run_id))
             if run is None:
                 raise BoardError("research_readback_required", "The original research root is unavailable", status_code=409)
             await assert_research_operator_session(db, run, now=observed_at)
-            if task.capability_id=="work.json-format.v1":
+            if is_tool_package(task.capability_id):
                 from src.work_board.tool_package_native import verified_output, current
                 await current(db,task,attempt,run,staged=_tool_stage[0] if _tool_stage else None)
                 artifact,_raw=verified_output(task,attempt,run,staged=_tool_stage[1] if _tool_stage else None)
@@ -3810,7 +3812,7 @@ class WorkBoardRepository:
                 artifact, _raw = await verified_dossier(db, task, attempt, run)
             if artifact["content_sha256"] != proof_digest:
                 raise BoardError("research_readback_required", "The physical dossier differs from this attempt's proof", status_code=409)
-            if task.capability_id=="work.json-format.v1":
+            if is_tool_package(task.capability_id):
                 from src.db.models import WorkBoardInputArtifact
                 input_row=await db.get(WorkBoardInputArtifact,task.input_artifact_id,populate_existing=True)
             else:

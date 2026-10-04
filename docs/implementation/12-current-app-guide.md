@@ -5,6 +5,15 @@ title: Current App Guide
 
 # Current App Guide
 
+Reviewed authored capability packages are **Planned** under
+[ADR-020](./decisions/020-reviewed-authored-capability-packages.md) and
+[#924](https://github.com/seraph-quest/seraph/issues/924). Static author/validate
+commands produce data-only contracts; execution requires exact package review,
+approval and activation through the existing optional isolated JSON Work job.
+The first package summarizes a bounded time ledger. Unsupported execution
+profiles remain visibly blocked while the shared core and package review work.
+This target does not change shipped `develop` truth.
+
 The private invoice PDF/CSV comparison target is **Planned** under
 [ADR-017](./decisions/017-private-bounded-document-comparison.md) and
 [#923](https://github.com/seraph-quest/seraph/issues/923). Its one bounded literal

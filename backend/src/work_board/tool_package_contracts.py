@@ -21,3 +21,17 @@ class ToolPackageRecoverRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
     expected_revision: int = Field(ge=1)
     idempotency_key: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
+
+
+class AuthoredJsonInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    schema_version: Literal[1]
+    json_text: str = Field(min_length=1, max_length=32768)
+    no_learning: Literal[True]
+
+    @field_validator("json_text")
+    @classmethod
+    def finite_json(cls, value):
+        from src.extensions.authored_adapter import json_value
+        json_value(value.encode("utf-8"), maximum=32768)
+        return value

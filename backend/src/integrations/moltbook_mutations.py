@@ -412,13 +412,23 @@ async def execute_write(service, owner, job_id, *, execution):
             # The documented community feed is the public visibility proof.
             # Exact-ID GET alone may return hidden owner content. One bounded
             # page, no pagination/retry: absent membership remains unconfirmed.
-            page = await call(service, adapter, owner, job_id, lease, "feed", {"sort": "new", "limit": 1,
+            page = await call(service, adapter, owner, job_id, lease, "feed", {"sort": "new", "limit": 10,
                 "community": fields["community"]}, credential, deadline)
             posts = page.get("posts")
-            if not isinstance(posts, list) or len(posts) > 1: raise MoltbookError("moltbook_public_feed_readback_bound")
+            if not isinstance(posts, list) or len(posts) > 10: raise MoltbookError("moltbook_public_feed_readback_bound")
             matches = [safe_content(post) for post in posts if isinstance(post, dict) and post.get("id") == value["content_id"]]
             if len(matches) != 1: raise MoltbookError("moltbook_public_listing_membership_unconfirmed")
-            observed = matches[0]
+            member = matches[0]
+            if (member.get("community") != fields["community"] or member["explicitly_hidden"]
+                or member["visibility"] in {"pending", "failed"}):
+                raise MoltbookError("moltbook_public_listing_membership_unconfirmed")
+            # A public feed may contain only a truncated preview. Membership
+            # proves public listing, not full approved text equality. Read the
+            # exact known ID once within the original six-contact allowance.
+            response = await call(service, adapter, owner, job_id, lease, "post", {"post_id": value["content_id"]}, credential, deadline)
+            if not isinstance(response.get("post"), dict):
+                raise MoltbookError("moltbook_exact_post_readback_incomplete")
+            observed = safe_content(response["post"])
         else:
             response = await call(service, adapter, owner, job_id, lease, "comments", {"post_id": fields["post_id"], "sort": "new", "limit": 10}, credential, deadline)
             matches = [c for c in comments_flat(response) if c["id"] == value["content_id"]]

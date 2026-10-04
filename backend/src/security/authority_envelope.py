@@ -668,6 +668,11 @@ def filesystem_path_allowed(
         resolved = candidate.resolve(strict=False)
     except (OSError, RuntimeError):
         return BoundaryCheck(False, "filesystem_path_unresolvable")
+    # This attachment is D1 data, never a generic agent filesystem input.
+    # The focused current-owner endpoint uses its own no-follow file contract.
+    parts = resolved.parts
+    if any(parts[i:i + 3] == ("artifacts", "context", "private") for i in range(len(parts) - 2)):
+        return BoundaryCheck(False, "selected_context_private_ingestion_denied", str(resolved))
     if not allow_symlinks and _path_has_symlink(candidate):
         return BoundaryCheck(False, "filesystem_symlink_blocked", str(resolved))
     for raw_root in _strings(allowed_paths):

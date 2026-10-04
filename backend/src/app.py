@@ -506,6 +506,11 @@ def create_app() -> FastAPI:
             "code": "extension_state_busy", "message": "Extension state is busy; explicitly retry after the current operation closes",
             "recovery_action": "explicit_retry", "automatic_retry": False}})
     app.add_exception_handler(ExtensionStateBusy, extension_state_busy)
+    from src.workflows.selected_context_contract import SelectedContextError
+    async def selected_context_failure(_request, error):
+        return JSONResponse(status_code=error.status, content={"detail": {
+            "code": error.code, "automatic_retry": False, "recovery_action": "explicit_review_or_discard"}})
+    app.add_exception_handler(SelectedContextError, selected_context_failure)
 
     # Keep the authentication boundary outside API handlers so model and
     # capability authority cannot depend on model discretion. WebSocket

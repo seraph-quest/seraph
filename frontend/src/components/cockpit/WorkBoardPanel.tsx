@@ -10,6 +10,7 @@ import { BrowserTaskForm } from "./BrowserTaskForm";
 import type { BrowserTaskSubmissionReceipt, PendingBrowserSubmission } from "./BrowserTaskForm";
 import { CalendarPrepForm } from "./CalendarPrepForm";
 import { CalendarRescheduleInspector } from "./CalendarRescheduleInspector";
+import { SelectedContextInspector } from "./SelectedContextInspector";
 import type { PendingCalendarSubmission } from "./CalendarPrepForm";
 import { RepoRepairForm } from "./RepoRepairForm";
 import type { PendingRepoRepairSubmission, RepoRepairSubmissionReceipt } from "./RepoRepairForm";
@@ -4100,6 +4101,7 @@ function WorkBoardPanel({
                 </div>
               </section>
 
+              <SelectedContextInspector key={`selected-context:${ownerPrincipalId}:${ownerSessionId}:${selectedTask.task_id}`} task={selectedTask} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}/>
               {selectedTask.capability_id === "work.document-compare.v1" ? <section aria-label="Document comparison memory policy" className="mt-3 text-xs">
                 This private comparison has an explicit no_learning policy. Its native receipt and verified report record that result; no memory proposal is created.
               </section> : <WorkBoardMemoryReview

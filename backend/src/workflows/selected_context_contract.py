@@ -14,6 +14,9 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 CAPABILITY_ID = "work.context.selected_text.v1"
 JOB_KIND = "selected_context_v1"
 VERSION = "browser-selected-text-v1"
+ADAPTER_BUILD_DIGEST = "92d37e9ce5829ba8d82c34649d4f2f6c6dc7e313ba32b455d6a96eccdd51486a"
+COMPANION_ORIGIN = "chrome-extension://agjkohpodkhhflnioopocboanalpgajn"
+PAIRED_PATHS = frozenset("/api/context/selected-text/paired/" + action for action in ("target", "prepare", "ticket", "upload"))
 MAX_TEXT_BYTES = 32768
 MAX_ENVELOPE_BYTES = 49152
 MAX_RETAINED_BYTES = 2 * 1024 * 1024
@@ -178,6 +181,8 @@ def verify_signature(credential: str, action: str, body: dict, supplied: str):
 
 def validate_metadata(metadata: Metadata):
     current = int(time.time())
+    if metadata.adapter_build_digest != ADAPTER_BUILD_DIGEST:
+        deny("selected_context_adapter_build_unsupported", 422)
     if not metadata.privacy_reviewed or not metadata.source.reviewed_origin or not metadata.source.protected_surface_checked:
         deny("selected_context_privacy_review_required", 422)
     if not current < metadata.expires_at <= min(current + 120, metadata.target.expires_at):

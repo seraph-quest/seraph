@@ -499,6 +499,9 @@ def _reject_authority_input_keys(value: Any, *, path: str = "input") -> None:
 
 
 def _typed_input_model(capability_id: str) -> type[BaseModel] | None:
+    if capability_id == "work.context.selected_text.v1":
+        from src.workflows.selected_context_contract import Metadata
+        return Metadata
     if capability_id == "work.document-compare.v1":
         from src.work_board.document_compare_contracts import DocumentCompareInput
         return DocumentCompareInput
@@ -535,6 +538,10 @@ def _typed_input_model(capability_id: str) -> type[BaseModel] | None:
 
 
 REGISTERED_CAPABILITIES: dict[str, CapabilitySpec] = {
+    "work.context.selected_text.v1": CapabilitySpec(
+        "work.context.selected_text.v1", "browser-selected-text-v1",
+        blocked_reason="selected_context_exact_operator_control_required",
+        input_category="operator", secret_like=False),
     "work.document-compare.v1": CapabilitySpec("work.document-compare.v1", "1", secret_like=False),
     "work.json-format.v1": CapabilitySpec("work.json-format.v1", "1", secret_like=False),
     "work.research-dossier.v1": CapabilitySpec("work.research-dossier.v1", "1", secret_like=False),

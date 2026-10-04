@@ -92,6 +92,11 @@ class AdmissionProof:
     metadata: Metadata
 
 
+@dataclass(frozen=True)
+class OwnerProof:
+    operator: AuthenticatedOperator
+
+
 @asynccontextmanager
 async def stage_pair(locator, *, credential=None, operator=None, require_target=True):
     """Hold the shared config generation across outside-writer staging/CAS."""
@@ -278,6 +283,20 @@ def metadata_projection(run, checkpoint, metadata):
         "private_read_available": False, "provider_contact": False}
 
 
+def approval_binding(row):
+    return digest([row.id, row.owner_principal_id, row.operator_session_id,
+        row.session_id, row.tool_name, row.fingerprint, row.details_json,
+        str(row.expires_at), row.action, row.risk_level])
+
+
+async def exact_approval(db, run, checkpoint):
+    bound = checkpoint.get("approval", {})
+    row = await db.get(ApprovalRequest, bound.get("id"), populate_existing=True)
+    if row is None or row.owner_principal_id != run.owner_principal_id or row.operator_session_id != run.operator_session_id or row.tool_name != CAPABILITY_ID or row.fingerprint != bound.get("fingerprint") or approval_binding(row) != bound.get("binding_digest") or row.expires_at is None or utc(row.expires_at) <= now():
+        deny("selected_context_exact_approval_changed", 403)
+    return row
+
+
 async def prepare(proof, metadata):
     validate_metadata(metadata)
     if metadata.pair != proof.locator or metadata.target != proof.target:
@@ -331,7 +350,8 @@ async def prepare(proof, metadata):
             return metadata_projection(run, checkpoint, metadata)
         if run.status != "accepted" or approval.id != approval_id:
             deny("selected_context_approval_changed")
-        checkpoint["approval"] = {"id": approval_id, "fingerprint": fingerprint, "decision_digest": approval_decision_digest(approval)}
+        checkpoint["approval"] = {"id": approval_id, "fingerprint": fingerprint,
+            "binding_digest": approval_binding(approval), "decision_digest": approval_decision_digest(approval)}
         await cas(db, run, {"status": "paused", "checkpoint_context_json": canonical(checkpoint)})
     return await inspect(proof, ident)
 
@@ -371,8 +391,12 @@ async def decide(proof, ident, body):
         await current_capture(db, proof, run, checkpoint, metadata)
         if run.status != "paused":
             deny("selected_context_approval_phase_changed")
-        await approval_repository.resolve_exact_in_session(db, checkpoint["approval"]["id"],
-            body.decision, expected_digest=body.expected_digest)
+        await exact_approval(db, run, checkpoint)
+        try:
+            await approval_repository.resolve_exact_in_session(db, checkpoint["approval"]["id"],
+                body.decision, expected_digest=body.expected_digest)
+        except ValueError:
+            deny("selected_context_exact_approval_changed", 409)
     return await inspect(proof, ident)
 
 
@@ -389,9 +413,10 @@ async def upload(proof, body):
                 deny("selected_context_capture_conflict")
             if run.status == "succeeded":
                 return metadata_projection(run, checkpoint, original)
-            approval = await db.get(ApprovalRequest, checkpoint["approval"]["id"], populate_existing=True)
+            approval = await exact_approval(db, run, checkpoint)
             if run.status != "paused" or approval is None or approval.status != "approved" or approval.owner_principal_id != run.owner_principal_id or approval.operator_session_id != run.operator_session_id:
                 deny("selected_context_exact_approval_required", 403)
+            approved_digest = approval_decision_digest(approval)
             admitted = _serialize(run)
         queued = await durable_job_repository.queue_job(ident, expected_state="paused", expected_revision=admitted["revision"])
         worker = "selected-context:" + uuid.uuid4().hex
@@ -418,8 +443,8 @@ async def upload(proof, body):
                     run, checkpoint, original = await run_for_owner(db, proof.operator, ident)
                     await current_capture(db, proof, run, checkpoint, original)
                     durable_job_repository._assert_lease(run, owner=worker, fencing_token=fence)
-                    approval = await db.get(ApprovalRequest, checkpoint["approval"]["id"], populate_existing=True)
-                    if approval is None or approval.status != "approved" or checkpoint.get("file") != ref:
+                    approval = await exact_approval(db, run, checkpoint)
+                    if approval.status != "approved" or approval_decision_digest(approval) != approved_digest or checkpoint.get("file") != ref:
                         deny("selected_context_exact_approval_changed")
                     approval.status = "consumed"
                     await cas(db, run, {"status": "succeeded", "finished_at": now(), "lease_owner": None, "lease_expires_at": None,
@@ -429,11 +454,7 @@ async def upload(proof, body):
                             "content_sha256": ref["ciphertext_digest"], "plaintext_bytes": len(raw), "verified": True,
                             "instruction_authority": False, "analysis_eligible": False, "no_learning": True}])})
         except BaseException:
-            if ref is not None:
-                try:
-                    await asyncio.to_thread(files.discard, ref)
-                except OSError:
-                    pass
+            # Revoke visibility FIRST, then settle only capture-owned bytes.
             async with writer() as db:
                 run = await durable_job_repository._fetch(db, ident)
                 checkpoint = state(run)
@@ -441,6 +462,20 @@ async def upload(proof, body):
                     checkpoint["tombstone"] = {"reason": "upload_failed", "at": int(time.time())}
                     checkpoint["cleanup_state"] = "blocked_cleanup"
                     await cas(db, run, {"status": "cancelled", "checkpoint_context_json": canonical(checkpoint), "lease_owner": None, "lease_expires_at": None})
+            cleanup = ref is None
+            if ref is not None:
+                try:
+                    async with asyncio.timeout(5):
+                        cleanup = await asyncio.to_thread(files.discard, ref)
+                except (OSError, SelectedContextError, TimeoutError):
+                    cleanup = False
+            async with writer() as db:
+                run = await durable_job_repository._fetch(db, ident)
+                checkpoint = state(run)
+                if checkpoint.get("tombstone", {}).get("reason") == "upload_failed":
+                    checkpoint["cleanup_state"] = "verified_unavailable" if cleanup else "blocked_cleanup"
+                    await cas(db, run, {"checkpoint_context_json": canonical(checkpoint),
+                        "selected_context_reserved_bytes": 0 if cleanup else run.selected_context_reserved_bytes})
             raise
     return await inspect(proof, ident)
 

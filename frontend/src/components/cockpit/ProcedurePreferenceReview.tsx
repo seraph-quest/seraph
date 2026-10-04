@@ -35,6 +35,26 @@ function saveStored(key: string, value: Stored) {
   sessionStorage.setItem(key, raw);
 }
 
+function feedbackHistory(outcomes: ProcedureOutcome[]) {
+  if (outcomes.some((item) => item.feedback_history_count === undefined)) return "Feedback history/correction counts were not recorded in this receipt.";
+  return `Feedback history: ${outcomes.reduce((count, item) => count + item.feedback_history_count!, 0)} events · ${outcomes.reduce((count, item) => count + Math.max(0, item.feedback_history_count! - 1), 0)} corrections`;
+}
+
+function OutcomeSnapshot({ label, snapshot }: { label: string; snapshot: (Review | ProcedureRecommendation) & { helpful_count?: number; harmful_count?: number; reason_code?: string } }) {
+  return <section aria-label={label} className="my-2 rounded border border-white/10 p-2">
+    <h4>{label}</h4><p>Immutable saved evidence; current live feedback is shown separately.</p>
+    <p>{snapshot.manual_disclosure}</p><p>{snapshot.quality_disclosure}</p>
+    <p>Included manual invocations: {snapshot.included_count} · Helpful: {snapshot.helpful_count ?? snapshot.outcomes.filter(item => item.verified && item.feedback === "helpful").length} · Harmful: {snapshot.harmful_count ?? snapshot.outcomes.filter(item => item.feedback === "harmful").length}</p>
+    <p>{feedbackHistory(snapshot.outcomes)}</p><p>Saved outcome: {snapshot.status} · {snapshot.reason_code ?? "reason not recorded"}</p>
+    <ul>{snapshot.outcomes.map(item => <li key={item.task_id}>
+      {item.task_id} · revision {item.task_revision} · {item.status} · {item.verified === true ? "native verified" : item.verified === false ? "native unverified" : "verification not recorded"}
+      {` · feedback ${item.feedback ?? "unreviewed"} · reason ${item.reason_code ?? "not recorded"}`}
+      {item.feedback_history_label && !item.feedback_current ? <span> · stale historical {item.feedback_history_label}; ineffective for this saved outcome</span> : null}
+      <span> · history events {item.feedback_history_count ?? "not recorded"} · corrections {item.feedback_history_count === undefined ? "not recorded" : Math.max(0, item.feedback_history_count - 1)}</span>
+    </li>)}</ul>
+  </section>;
+}
+
 export function ProcedurePreferenceReview({ ownerPrincipalId, ownerSessionId, scope, onSelectVersion }: Props) {
   const key = useMemo(() => `seraph.procedure-preference:${JSON.stringify([ownerPrincipalId, ownerSessionId,
     scope.routineId, scope.version, scope.routineRevision, scope.goalId, scope.goalRevision])}`,
@@ -116,20 +136,23 @@ export function ProcedurePreferenceReview({ ownerPrincipalId, ownerSessionId, sc
   };
   const outcomes = bound?.list?.outcomes ?? [];
   const review = bound?.review;
-  const disclosure = review ?? bound?.list;
   return <section aria-label="Procedure outcome preference" className="rounded border border-white/10 p-3">
     <h3 className="font-semibold">Review a procedure preference</h3>
     <p>Explicit Helpful or Harmful feedback can suggest this reviewed version. It grants no permission and starts no invocation or schedule.</p>
-    {disclosure ? <div role="status"><p>{disclosure.manual_disclosure}</p><p>{disclosure.quality_disclosure}</p><p>Included manual invocations: {disclosure.included_count}</p></div> : null}
+    <section aria-label="Current live procedure outcomes">
+    <h4>Current live outcomes (not the approved snapshot)</h4>
+    {bound?.list ? <div role="status"><p>{bound.list.manual_disclosure}</p><p>{bound.list.quality_disclosure}</p><p>Included manual invocations: {bound.list.included_count}</p><p>{feedbackHistory(outcomes)}</p></div> : null}
     <ul>{outcomes.map((outcome) => <li key={outcome.task_id} className="mt-2">
       <span className="font-mono">{outcome.task_id}</span> · {outcome.status} · feedback {outcome.feedback ?? "unreviewed"}
       {outcome.feedback_history_label && !outcome.feedback_current ? <span> · historical {outcome.feedback_history_label} is stale for the current outcome; a new explicit decision is required</span> : null}
       {!outcome.feedback_allowed ? <span> · feedback unavailable until the current attempt has ended</span> : null}
+      <span> · history events {outcome.feedback_history_count ?? "not recorded"} · corrections {outcome.feedback_history_count === undefined ? "not recorded" : Math.max(0, outcome.feedback_history_count - 1)}</span>
+      {outcome.reason_code ? <span> · reason {outcome.reason_code}</span> : null}
       <button type="button" disabled={busy || Boolean(bound?.pending) || !outcome.feedback_allowed || Boolean(outcome.feedback_event_id) && !reason.trim()}
         onClick={() => void send({ kind: "feedback", outcome, label: "helpful", reason, mutationUuid: crypto.randomUUID() })}>Helpful</button>
       <button type="button" disabled={busy || Boolean(bound?.pending) || !outcome.feedback_allowed || Boolean(outcome.feedback_event_id) && !reason.trim()}
         onClick={() => void send({ kind: "feedback", outcome, label: "harmful", reason, mutationUuid: crypto.randomUUID() })}>Harmful</button>
-    </li>)}</ul>
+    </li>)}</ul></section>
     <label>Feedback correction or rollback reason<input aria-label="Procedure feedback reason" value={reason} maxLength={500} disabled={busy} onChange={(event) => setReason(event.currentTarget.value)} /></label>
     <button type="button" disabled={busy || !bound || Boolean(bound.pending)} onClick={() => void send({ kind: "recommend", body: {
       version: scope.version, expected_routine_revision: scope.routineRevision, goal_id: scope.goalId,
@@ -138,6 +161,7 @@ export function ProcedurePreferenceReview({ ownerPrincipalId, ownerSessionId, sc
     {bound?.recommendation ? <p role="status">Saved recommendation receipt: {bound.recommendation.status} · {bound.recommendation.reason_code}.
       {review ? ` Current review: ${review.status}.` : " This receipt records no_learning and creates no canonical preference."}
       {review?.status === "rolled_back" ? " The preference is rolled back; historical adoption is retained." : null}</p> : null}
+    {bound?.recommendation ? <OutcomeSnapshot label="Immutable recommendation evidence" snapshot={bound.recommendation} /> : null}
     {bound?.recommendation && ["accepted", "queued", "running", "blocked"].includes(bound.recommendation.job_status)
       && bound.recommendation.job_revision && bound.recommendation.fencing_token !== undefined ?
       <button type="button" disabled={busy || Boolean(bound.pending && bound.pending.kind !== "recommend")}
@@ -146,15 +170,13 @@ export function ProcedurePreferenceReview({ ownerPrincipalId, ownerSessionId, sc
           expected_goal_revision: scope.goalRevision, request_uuid: crypto.randomUUID(),
           expected_job_revision: job.job_revision!, expected_fencing_token: job.fencing_token!,
         } }); }}>Cancel owned recommendation</button> : null}
-    {review ? <div><p>{review.preview_text}</p><p>Review {review.status} · revision {review.revision}</p>
+    {review ? <div><OutcomeSnapshot label="Immutable proposal evidence" snapshot={review} /><p>{review.preview_text}</p><p>Review {review.status} · revision {review.revision}</p>
       <label><input type="checkbox" checked={acknowledged} disabled={busy || Boolean(bound?.pending)} onChange={(event) => setAcknowledgment({ key, checked: event.currentTarget.checked })} />I understand this changes future suggestions only and grants no execution authority.</label>
       {review.status === "proposed" ? <><button type="button" disabled={!acknowledged || busy || Boolean(bound?.pending)} onClick={() => act("accept")}>Adopt reviewed preference</button><button type="button" disabled={!acknowledged || busy || Boolean(bound?.pending)} onClick={() => act("reject")}>Reject preference</button></> : null}
       {review.status === "accepted" ? <button type="button" disabled={!acknowledged || busy || !reason.trim() || Boolean(bound?.pending)} onClick={() => act("rollback")}>Roll back preference</button> : null}
     </div> : null}
     {bound?.selection?.status === "suggested" && bound.selection.review ? <div aria-label="Adopted Library suggestion">
-      <p>Suggested reviewed version {bound.selection.suggested_version}</p><p>{bound.selection.review.manual_disclosure}</p><p>{bound.selection.review.quality_disclosure}</p>
-      <p>Included manual invocations: {bound.selection.review.included_count}</p>
-      <ul>{bound.selection.review.outcomes.map((item) => <li key={item.task_id}>{item.task_id} · {item.feedback ?? "unreviewed"} · {item.verified ? "native verified" : "unverified"}</li>)}</ul>
+      <p>Suggested reviewed version {bound.selection.suggested_version}</p><OutcomeSnapshot label="Adopted preference evidence" snapshot={bound.selection.review} />
       <button type="button" disabled={busy} onClick={() => { if (bound.selection?.suggested_version) onSelectVersion?.(bound.selection.suggested_version); }}>Select suggested reviewed version</button>
     </div> : bound?.selection?.status === "blocked" ? <p role="status">Preference unavailable · {bound.selection.reason_code}</p> : null}
     {bound?.pending ? <p role="alert">An unconfirmed {bound.pending.kind} request is retained. <button type="button" disabled={busy} onClick={() => void send(bound.pending!)}>Retry exact review request</button></p> : null}

@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { procedurePreferences, type ProcedurePreferenceReview as Review, type ProcedurePreferenceScope } from "../../lib/procedurePreferences";
@@ -10,9 +10,9 @@ const quality = "This deterministic preference is not a measured quality improve
 const outcomes = [1, 2].map((number) => ({ task_id: `manual-${number}`, task_revision: 5, status: "done", attempt_id: `attempt-${number}`,
   attempt_fence: 1, feedback: "helpful" as const, feedback_event_id: number, verified: true,
   feedback_allowed: true, feedback_current: true, feedback_history_label: "helpful" as const, feedback_history_count: 1 }));
-const review: Review = { proposal_id: "proposal", owner_principal_id: "owner", owner_session_id: "root", revision: 1,
+const review: Review & { helpful_count: number; harmful_count: number } = { proposal_id: "proposal", owner_principal_id: "owner", owner_session_id: "root", revision: 1,
   status: "proposed", preview_text: "Suggest reviewed version 1, selection only.", preview_text_digest: "a".repeat(64),
-  bundle_digest: "b".repeat(64), included_count: 2, outcomes, manual_disclosure: manual, quality_disclosure: quality };
+  bundle_digest: "b".repeat(64), included_count: 2, helpful_count: 2, harmful_count: 0, outcomes, manual_disclosure: manual, quality_disclosure: quality };
 const props = { ownerPrincipalId: "owner", ownerSessionId: "root", scope };
 const acknowledgment = "I understand this changes future suggestions only and grants no execution authority.";
 
@@ -31,12 +31,60 @@ beforeEach(() => {
 });
 
 async function preview() {
-  await screen.findByText("Included manual invocations: 2");
+  await within(screen.getByLabelText("Current live procedure outcomes")).findByText("Included manual invocations: 2");
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Preview outcome recommendation" })); });
   await screen.findByText(review.preview_text);
 }
 
 describe("explicit procedure preference review", () => {
+  it("shows the exact immutable verified evidence and server vote/history counts before acknowledgment without substituting the live list", async () => {
+    const saved = { ...review, included_count: 3, helpful_count: 2, harmful_count: 1,
+      outcomes: [{ ...outcomes[0], reason_code: "native_verified", feedback_history_count: 3 }, outcomes[1],
+        { ...outcomes[0], task_id: "saved-failed", verified: false, feedback: "harmful" as const,
+          reason_code: "outcome_not_verified", feedback_history_count: 1 }] };
+    vi.mocked(procedurePreferences.review).mockResolvedValue(saved);
+    vi.mocked(procedurePreferences.outcomes).mockResolvedValue({ included_count: 1,
+      outcomes: [{ ...outcomes[0], task_id: "live-changed", feedback: "harmful", feedback_history_count: 4 }],
+      manual_disclosure: manual, quality_disclosure: quality });
+    render(<ProcedurePreferenceReview {...props} />);
+    await within(screen.getByLabelText("Current live procedure outcomes")).findByText("Included manual invocations: 1");
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Preview outcome recommendation" })); });
+    const snapshot = await screen.findByLabelText("Immutable proposal evidence");
+    expect(snapshot).toHaveTextContent("Included manual invocations: 3 · Helpful: 2 · Harmful: 1");
+    expect(snapshot).toHaveTextContent("Feedback history: 5 events · 2 corrections");
+    expect(snapshot).toHaveTextContent("manual-1 · revision 5 · done · native verified");
+    expect(snapshot).toHaveTextContent("saved-failed · revision 5 · done · native unverified");
+    expect(snapshot).toHaveTextContent("reason outcome_not_verified");
+    expect(snapshot).not.toHaveTextContent("live-changed");
+    const live = screen.getByLabelText("Current live procedure outcomes");
+    expect(live).toHaveTextContent("live-changed"); expect(live).toHaveTextContent("Feedback history: 4 events · 3 corrections");
+    const ack = screen.getByRole("checkbox", { name: acknowledgment });
+    expect(snapshot.compareDocumentPosition(ack) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(ack).not.toBeChecked(); expect(screen.getByRole("button", { name: "Adopt reviewed preference" })).toBeDisabled();
+    expect(procedurePreferences.act).not.toHaveBeenCalled();
+  });
+
+  it("shows no-learning reasons and stale saved feedback without inventing unrecorded historical counts from current outcomes", async () => {
+    const { feedback_history_count, ...historical } = outcomes[0];
+    const saved = { job_id: "job", job_status: "succeeded", status: "no_learning", proposal_id: null,
+      reason_code: "feedback_outcome_stale", included_count: 1, helpful_count: 0, harmful_count: 0,
+      outcomes: [{ ...historical, feedback: null, feedback_current: false, verified: false, reason_code: "feedback_outcome_stale" }],
+      manual_disclosure: manual, quality_disclosure: quality };
+    vi.mocked(procedurePreferences.recommend).mockResolvedValue(saved);
+    vi.mocked(procedurePreferences.inspectJob).mockResolvedValue(saved);
+    render(<ProcedurePreferenceReview {...props} />);
+    await within(screen.getByLabelText("Current live procedure outcomes")).findByText("Included manual invocations: 2");
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Preview outcome recommendation" })); });
+    const snapshot = await screen.findByLabelText("Immutable recommendation evidence");
+    expect(snapshot).toHaveTextContent("Included manual invocations: 1 · Helpful: 0 · Harmful: 0");
+    expect(snapshot).toHaveTextContent("Saved outcome: no_learning · feedback_outcome_stale");
+    expect(snapshot).toHaveTextContent("stale historical helpful; ineffective for this saved outcome");
+    expect(snapshot).toHaveTextContent("Feedback history/correction counts were not recorded in this receipt.");
+    expect(snapshot).toHaveTextContent("history events not recorded · corrections not recorded");
+    expect(screen.queryByRole("checkbox", { name: acknowledgment })).not.toBeInTheDocument();
+    expect(procedurePreferences.act).not.toHaveBeenCalled();
+  });
+
   it("discovers a retained active native request using GET and cancels only its displayed revision and fence", async () => {
     const body = { version: 1, expected_routine_revision: 3, goal_id: "goal", expected_goal_revision: 1,
       request_uuid: "5c4ad444-aeeb-4fab-802d-b7282bb6b7dd" };
@@ -54,7 +102,7 @@ describe("explicit procedure preference review", () => {
     expect(procedurePreferences.cancel).toHaveBeenCalledWith(scope, "job", expect.objectContaining({
       expected_job_revision: 3, expected_fencing_token: 1, goal_id: "goal", expected_goal_revision: 1,
     }));
-    await screen.findByText(/cancelled · cancelled/);
+    await screen.findByText(/Saved recommendation receipt: cancelled · cancelled/);
     expect(screen.queryByRole("button", { name: "Cancel owned recommendation" })).not.toBeInTheDocument();
     expect(procedurePreferences.act).not.toHaveBeenCalled();
   });
@@ -62,7 +110,7 @@ describe("explicit procedure preference review", () => {
     const selected = vi.fn();
     render(<ProcedurePreferenceReview {...props} onSelectVersion={selected} />);
     await preview();
-    expect(screen.getByText(manual)).toBeVisible(); expect(screen.getByText(quality)).toBeVisible();
+    expect(within(screen.getByLabelText("Immutable proposal evidence")).getByText(manual)).toBeVisible(); expect(within(screen.getByLabelText("Immutable proposal evidence")).getByText(quality)).toBeVisible();
     expect(screen.getByRole("button", { name: "Adopt reviewed preference" })).toBeDisabled();
     expect(procedurePreferences.act).not.toHaveBeenCalled();
     vi.mocked(procedurePreferences.selection).mockResolvedValue({ status: "suggested", reason_code: "adopted_reviewed_procedure_preference", suggested_version: 1, suggested_version_id: "version", review: { ...review, status: "accepted", revision: 2 } });
@@ -88,7 +136,7 @@ describe("explicit procedure preference review", () => {
     expect(screen.getByRole("button", { name: "Adopt reviewed preference" })).toBeEnabled();
     current.rerender(<ProcedurePreferenceReview {...props} ownerSessionId="different-root" />);
     expect(screen.queryByText(review.preview_text)).not.toBeInTheDocument();
-    await screen.findByText("Included manual invocations: 2");
+    await within(screen.getByLabelText("Current live procedure outcomes")).findByText("Included manual invocations: 2");
     expect(procedurePreferences.act).not.toHaveBeenCalled();
   });
 
@@ -108,7 +156,7 @@ describe("explicit procedure preference review", () => {
   });
 
   it("requires an explicit reason before appending corrected feedback", async () => {
-    render(<ProcedurePreferenceReview {...props} />); await screen.findByText("Included manual invocations: 2");
+    render(<ProcedurePreferenceReview {...props} />); await within(screen.getByLabelText("Current live procedure outcomes")).findByText("Included manual invocations: 2");
     expect(screen.getAllByRole("button", { name: "Harmful" })[0]).toBeDisabled();
     fireEvent.change(screen.getByRole("textbox", { name: "Procedure feedback reason" }), { target: { value: "The check missed an operator requirement" } });
     await act(async () => { fireEvent.click(screen.getAllByRole("button", { name: "Harmful" })[0]); });
@@ -125,7 +173,7 @@ describe("explicit procedure preference review", () => {
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Check current outcome state" })); });
     expect(await screen.findByText(/Saved recommendation receipt: proposed/)).toHaveTextContent("Current review: rolled_back");
     expect(screen.getByText(/historical adoption is retained/)).toBeVisible();
-    expect(screen.getByText(/manual-1/).closest("li")).toHaveTextContent("feedback harmful");
+    expect(within(screen.getByLabelText("Current live procedure outcomes")).getByText(/manual-1/).closest("li")).toHaveTextContent("feedback harmful");
     expect(screen.queryByLabelText("Adopted Library suggestion")).not.toBeInTheDocument();
     expect(procedurePreferences.recommend).toHaveBeenCalledTimes(1);
     expect(procedurePreferences.act).not.toHaveBeenCalled();

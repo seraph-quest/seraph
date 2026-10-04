@@ -286,7 +286,8 @@ def metadata_projection(run, checkpoint, metadata):
 def approval_binding(row):
     return digest([row.id, row.owner_principal_id, row.operator_session_id,
         row.session_id, row.tool_name, row.fingerprint, row.details_json,
-        str(row.expires_at), row.action, row.risk_level])
+        utc(row.expires_at).isoformat() if row.expires_at is not None else None,
+        row.action, row.risk_level])
 
 
 async def exact_approval(db, run, checkpoint):

@@ -9,6 +9,7 @@ import { fetchGuardianInboxItem } from "../../lib/guardianInbox";
 import { BrowserTaskForm } from "./BrowserTaskForm";
 import type { BrowserTaskSubmissionReceipt, PendingBrowserSubmission } from "./BrowserTaskForm";
 import { CalendarPrepForm } from "./CalendarPrepForm";
+import { CalendarRescheduleInspector } from "./CalendarRescheduleInspector";
 import type { PendingCalendarSubmission } from "./CalendarPrepForm";
 import { RepoRepairForm } from "./RepoRepairForm";
 import type { PendingRepoRepairSubmission, RepoRepairSubmissionReceipt } from "./RepoRepairForm";
@@ -3446,6 +3447,11 @@ function WorkBoardPanel({
                   />
                 )}
 
+              {selectedTask.capability_id === "calendar.event.reschedule.v1"
+                && selectedTask.owner_principal_id === ownerPrincipalId && selectedTask.owner_session_id === ownerSessionId
+                && selectedTask.ownership_access !== "recovered_read_only" && <CalendarRescheduleInspector
+                  taskId={selectedTask.task_id} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} goals={allGoals}
+                />}
               {selectedTask.capability_id === "work.mail-reply-draft.v1" && (
                 <MailPanel
                   taskId={selectedTask.task_id}
@@ -4266,6 +4272,8 @@ function WorkBoardPanel({
       {calendarPrepOpen && (
         <CalendarPrepForm
           key={pendingCreateScope ?? "anonymous"}
+          ownerPrincipalId={ownerPrincipalId}
+          ownerSessionId={ownerSessionId}
           goals={allGoals}
           initialPending={pendingCalendarAtMount}
           onPendingChange={setCalendarPending}

@@ -2009,6 +2009,59 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         if not _rowcount_is_one(changed):
             raise DurableJobLeaseError("Mail observation changed before atomic completion")
 
+    async def complete_calendar_observation_in_session(
+        self, db, run, *, owner: str, fencing_token: int, observation: Mapping[str, Any],
+    ) -> None:
+        """Compose fixed readonly Calendar recovery with its original-row CAS.
+
+        The Calendar writer validates original provenance and current Root in the
+        same transaction. This seam retains the auxiliary's ordinary current
+        Goal, native lease, deadline, kind and revision fences, and never
+        finalizes or changes the original reschedule job.
+        """
+        if (run.job_kind != "calendar_reschedule_observation_v1"
+            or run.capability_version != "calendar-exact-reschedule-v1" or run.status != "running"
+            or observation.get("outcome") not in {"verified_reschedule_observation", "unknown_observation"}
+            or observation.get("no_learning") is not True
+            or observation.get("auxiliary_job_id") != run.run_identity):
+            raise DurableJobTransitionError("exact Calendar observation binding is required")
+        self._assert_lease(run, owner=owner, fencing_token=fencing_token)
+        if _deadline_expired(run):
+            raise DurableJobTransitionError("job deadline has expired")
+        await _assert_canonical_goal_fence(db, goal_id=run.goal_id,
+            goal_revision=run.goal_revision, owner_kind=run.owner_kind,
+            owner_principal_id=run.owner_principal_id, session_id=run.session_id,
+            authority=run.declared_authority_json)
+        # This readonly kind cannot carry caller-seeded evidence obligations.
+        # Inspect canonical dependencies without filesystem work in the writer.
+        if _json_load(run.dependencies_json, []) or _job_has_unsafe_effects(
+            _effect_ledger_or_raise(run.effect_receipts_json)):
+            raise DurableJobTransitionError("Calendar observation retains unresolved dependencies or effects")
+        checkpoint = _json_load(run.checkpoint_context_json, {})
+        private_ref = observation.get("private_artifact")
+        if (not isinstance(private_ref, dict) or set(private_ref) != {"path", "digest"}
+            or checkpoint.get("private_artifacts", {}).get("observation") != private_ref):
+            raise DurableJobTransitionError("Calendar observation artifact reservation changed")
+        # Physical encryption/publish/readback and actual awaited transport
+        # completion were staged by the fixed Calendar worker before this writer.
+        checkpoint.update(outcome=observation["outcome"], transport_quiescent=True)
+        artifacts = [{"artifact_type": "calendar_exact_reschedule", "file_path": private_ref["path"],
+            "content_sha256": private_ref["digest"], "exists": True, "no_learning": True}]
+        now = _utc_now()
+        conditions = [WorkflowRunState.id == run.id,
+            WorkflowRunState.revision == _revision(run), WorkflowRunState.status == "running",
+            WorkflowRunState.lease_owner == owner, WorkflowRunState.lease_expires_at > now,
+            WorkflowRunState.fencing_token == fencing_token]
+        _append_goal_fence_condition(conditions, run)
+        changed = await db.execute(update(WorkflowRunState).where(*conditions).values(
+            status="succeeded", result_digest=_digest(observation),
+            artifact_receipts_json=_canonical(artifacts), checkpoint_context_json=_canonical(checkpoint),
+            result_summary=observation["outcome"], finished_at=now, updated_at=now,
+            heartbeat_at=now, lease_owner=None, lease_expires_at=None,
+            revision=WorkflowRunState.revision + 1).execution_options(synchronize_session=False))
+        if not _rowcount_is_one(changed):
+            raise DurableJobLeaseError("Calendar observation changed before atomic completion")
+
     async def _assert_routine_publication_admission_guard(
         self,
         db: Any,

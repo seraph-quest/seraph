@@ -1007,6 +1007,51 @@ Gmail usefulness, send operation, and paid model canary remain
 **external-unverified**. See the M7 mail wire contract in issue #890 for the
 exact request, recovery, privacy, and readback boundaries.
 
+### Exact owned-calendar reschedule
+
+[ADR-019](./decisions/019-exact-calendar-reschedule.md) accepts one literal
+owned-event reschedule through separate exact owned-event/calendar-list identity
+profiles, current owner/source proof, one approved conditional PATCH and strict
+independent readback. Response loss remains Unknown with no resend; a separate
+same-original-Root readonly observation preserves original liabilities. This
+branch implementation is **Partial**: actual authenticated SQLite/Vault/native
+jobs, approval, encrypted artifacts and managed operator UI have been exercised
+with only external Google HTTP/DNS simulated. Live Google remains
+**external-unverified**, and the whole implementation still requires independent
+review before integration; this is not Shipped `develop` truth.
+
+In Settings, import separate exact read and write profiles. In Calendar meeting
+preparation, readonly event selection may leave model consent unchecked;
+preparation and scheduled observation still require their explicit model grant.
+Select the returned event, verify the exact profile pair, and confirm the three
+unchecked finite reschedule permissions. Enter RFC3339 seconds with a literal
+UTC offset and an explicit IANA timezone. Create the native task and preview,
+approve its exact content, then execute once. Requested `sendUpdates=none` does
+not promise that Google reminders or other provider behavior cannot send messages.
+
+The owned task detail exposes the separate Calendar native job. Its local
+Root/task-scoped identifiers are discovery hints: canonical metadata must match
+the selected task before private content or controls become available. Metadata
+remains inspectable after the original Goal closes, while private preview access
+uses current permission checks. For an original Unknown with proved transport
+closure, choose a new reviewed finite recovery Goal and explicitly acknowledge
+four readonly contacts through the exact original read profile. The auxiliary
+observation appears separately and never changes the original Unknown, deadline,
+authority or write liability. Neither response loss nor reopening automatically
+resends a write or observation. Expired active reschedule permission must be
+explicitly revoked locally before a fresh grant; expiry never renews permission.
+All reschedule and recovery results explicitly use no model and no learning.
+
+Reschedule profile revocation invalidates local authority before credential
+cleanup. Owner-scoped Vault deletion and verified unavailable readback happen
+outside the native SQLite writer. An interrupted or failed cleanup appears as
+`blocked_cleanup`, which permits no provider contacts or private preview reads.
+Settings refreshes that metadata and offers an explicit bounded local retry of
+the original revoke UUID/digest with the current profile revision. Cleanup never
+renews profile authority or changes original native execution history. A verified
+unavailable credential is logical cleanup; encrypted audit bytes may remain and
+physical erasure is not claimed.
+
 ### Exact Gmail reply send
 
 **Partial:** The [ADR-016](./decisions/016-exact-gmail-reply-send.md) operator

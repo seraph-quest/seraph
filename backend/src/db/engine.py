@@ -108,6 +108,7 @@ OPERATOR_REQUIRED_TABLES = (
     "work_board_decision_receipts",
     "google_service_connections",
     "calendar_read_consents",
+    "calendar_reschedule_consents",
     "mail_label_bindings",
     "mail_read_consents",
     "mail_message_bindings",

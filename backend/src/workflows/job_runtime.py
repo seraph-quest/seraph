@@ -1984,6 +1984,16 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         if _json_load(run.dependencies_json, []) or _job_has_unsafe_effects(
             _effect_ledger_or_raise(run.effect_receipts_json)):
             raise DurableJobTransitionError("Mail observation retains unresolved dependencies or effects")
+        checkpoint = _json_load(run.checkpoint_context_json, {})
+        private_ref = observation.get("private_artifact")
+        if (not isinstance(private_ref, dict) or set(private_ref) != {"path", "digest"}
+            or checkpoint.get("private_artifacts", {}).get("observation") != private_ref):
+            raise DurableJobTransitionError("Mail observation artifact reservation changed")
+        # Physical encryption/publish/readback and actual awaited transport
+        # completion were staged by the fixed Mail worker before this writer.
+        checkpoint.update(outcome=observation["outcome"], transport_quiescent=True)
+        artifacts = [{"artifact_type": "mail_exact_reply", "file_path": private_ref["path"],
+            "content_sha256": private_ref["digest"], "exists": True, "no_learning": True}]
         now = _utc_now()
         conditions = [WorkflowRunState.id == run.id,
             WorkflowRunState.revision == _revision(run), WorkflowRunState.status == "running",
@@ -1992,6 +2002,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         _append_goal_fence_condition(conditions, run)
         changed = await db.execute(update(WorkflowRunState).where(*conditions).values(
             status="succeeded", result_digest=_digest(observation),
+            artifact_receipts_json=_canonical(artifacts), checkpoint_context_json=_canonical(checkpoint),
             result_summary=observation["outcome"], finished_at=now, updated_at=now,
             heartbeat_at=now, lease_owner=None, lease_expires_at=None,
             revision=WorkflowRunState.revision + 1).execution_options(synchronize_session=False))

@@ -348,6 +348,9 @@ async def snapshot(operator, ident):
     result = {"job_id": ident, "kind": run.job_kind, "status": run.status,
         "revision": run.revision, "deadline_at": utc(run.deadline_at).isoformat(),
         "goal_id": run.goal_id, "goal_revision": run.goal_revision,
+        "request_uuid": run.idempotency_key,
+        "source_task_id": arguments(run).get("source", {}).get("task_id"),
+        "original_job_id": arguments(run).get("original_job_id"),
         "outcome": checkpoint.get("outcome"), "contact_may_have_occurred": checkpoint.get("contact_may_have_occurred", False),
         "contacts_spent": len(checkpoint.get("contacts", [])), "no_learning": True,
         "failure_reason": run.failure_reason}

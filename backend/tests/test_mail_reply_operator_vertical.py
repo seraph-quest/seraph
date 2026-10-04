@@ -197,6 +197,7 @@ async def prepared_flow(accounting_db, real_auth, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_actual_operator_draft_approval_send_one_post_sqlite_reopen(accounting_db, real_auth, monkeypatch):
+    pure_reply_writer_guard(monkeypatch)
     client, post, google, model_calls, preview, body, owner = await prepared_flow(accounting_db, real_auth, monkeypatch)
     root, engine, factory = accounting_db
     try:
@@ -218,3 +219,136 @@ async def test_actual_operator_draft_approval_send_one_post_sqlite_reopen(accoun
         (root/"mail-reply-operator-readback.json").write_text(json.dumps({"preview":preview,"sent":sent,"reopened":reopened.json(),"google_contacts":google.calls,"model_calls":len(model_calls),"post_resource":google.sent},indent=2))
     finally:
         await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_unknown_send_readonly_recovery_old_goal_deadline_preserved(accounting_db, real_auth, monkeypatch):
+    client, post, google, model_calls, preview, body, owner = await prepared_flow(accounting_db, real_auth, monkeypatch)
+    root, engine, factory = accounting_db
+    try:
+        google.drop_send = True
+        unknown = await client.post("/api/capabilities/mail/reply-sends/"+preview["job_id"]+"/execute", json={})
+        assert unknown.status_code >= 400
+        original = (await client.get("/api/capabilities/mail/reply-sends/"+preview["job_id"])).json()
+        assert original["status"] == "unknown_external_effect" and original["transport_quiescent"] is True
+        posts = [call for call in google.calls if call[0]=="POST" and call[1].endswith("/messages/send")]
+        assert len(posts)==1 and len(model_calls)==5
+        async with factory.accounting_sessions() as db:
+            run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==preview["job_id"]))
+            # Explicit persisted fault/clock-boundary fixture: expire the old
+            # immutable deadline, close/change its Goal; recovery never rewrites them.
+            run.deadline_at = datetime.now(timezone.utc)-timedelta(seconds=1)
+            goal = await db.get(Goal,"mail-actual-goal")
+            goal.status="completed";goal.revision+=1
+            db.add(Goal(id="mail-recovery-goal",title="Finite readonly observation",status="active",revision=1,
+                owner_principal_id=owner["principal_id"],owner_session_id=owner["session_id"],
+                admission_budget_json=serialize_admission_budget(GoalAdmissionBudget(reviewed_grant=True,grant_id="readonly-recovery-grant",max_outstanding_jobs=1,max_attempts=1,max_runtime_seconds=120))))
+            before={key:getattr(run,key) for key in ("status","deadline_at","goal_id","goal_revision","fencing_token","attempt_count","declared_authority_json","authority_digest","budget_digest","checkpoint_context_json","lease_owner","lease_expires_at")}
+        profiles = (await client.get("/api/capabilities/mail/reply-profiles")).json()["profiles"]
+        read = next(row for row in profiles if row["service"]==READ_SERVICE)
+        request={"expected_original_revision":original["revision"],"read_connection_id":read["connection_id"],"expected_read_revision":read["revision"],
+            "goal_id":"mail-recovery-goal","goal_revision":1,"acknowledge_readonly_recovery":True,"request_uuid":"readonly-observation-once"}
+        recovered = await post("reply-sends/"+preview["job_id"]+"/observe",request)
+        assert recovered["outcome"]=="verified_sent_observation" and recovered["status"]=="succeeded" and recovered["contacts_spent"]==5
+        contacts=len(google.calls)
+        repeated=await post("reply-sends/"+preview["job_id"]+"/observe",request)
+        assert repeated["job_id"]==recovered["job_id"] and len(google.calls)==contacts
+        await engine.dispose()
+        async with factory.accounting_sessions() as db:
+            run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==preview["job_id"]))
+            assert all(str(getattr(run,key))==str(value) or (key=="deadline_at" and getattr(run,key).replace(tzinfo=timezone.utc)==value) for key,value in before.items())
+            effects=json.loads(run.effect_receipts_json)
+            assert effects[0]["status"]=="unknown" and len(effects[0]["observation_history"])==1
+            aux=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==recovered["job_id"]))
+            assert json.loads(aux.artifact_receipts_json)[0]["exists"] is True and aux.status=="succeeded"
+        after=(await client.get("/api/capabilities/mail/reply-sends/"+preview["job_id"])).json()
+        assert after["status"]=="unknown_external_effect" and after["observations"][0]["outcome"]=="verified_sent_observation"
+        await post("reply-sends/"+preview["job_id"]+"/execute",{})
+        assert len(google.calls)==contacts and len(model_calls)==5
+        (root/"mail-unknown-recovery-readback.json").write_text(json.dumps({"unknown":original,"auxiliary":recovered,"original_after":after,"contacts":google.calls,"send_posts":len(posts),"model_setup_calls":5},indent=2))
+    finally:
+        await client.aclose()
+
+
+def pure_reply_writer_guard(monkeypatch):
+    """Assert new Mail writers never perform staging I/O or nested sessions."""
+    from contextlib import asynccontextmanager
+    from contextvars import ContextVar
+    from pathlib import Path
+    import builtins
+    import os
+    from src.integrations import mail_reply_runtime as runtime
+    from src.db import engine
+    from src.vault import crypto as vault_crypto
+    inside=ContextVar("inside_exact_mail_writer",default=False)
+    original_writer=runtime.writer
+    @asynccontextmanager
+    async def writer():
+        assert not inside.get(), "nested immediate Mail writer"
+        async with original_writer() as db:
+            token=inside.set(True)
+            try:yield db
+            finally:inside.reset(token)
+    monkeypatch.setattr(runtime,"writer",writer)
+    def guarded(original):
+        def call(*args,**kwargs):
+            assert not inside.get(), "physical staging inside immediate Mail writer"
+            return original(*args,**kwargs)
+        return call
+    for target,name in ((Path,"open"),(Path,"read_bytes"),(Path,"read_text"),(builtins,"open"),(os,"open"),(vault_crypto,"decrypt"),(runtime,"decrypt")):
+        monkeypatch.setattr(target,name,guarded(getattr(target,name)))
+    original_session=engine.get_session
+    def session():
+        assert not inside.get(), "nested session inside immediate Mail writer"
+        return original_session()
+    monkeypatch.setattr(engine,"get_session",session)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["goal_revision", "logout", "vault_rotation", "approval_attachments", "missing_actual_thread"])
+async def test_actual_reply_precontact_authority_and_pure_writer_negatives(accounting_db, real_auth, monkeypatch, fault):
+    pure_reply_writer_guard(monkeypatch)
+    client, post, google, model_calls, preview, body, owner = await prepared_flow(accounting_db, real_auth, monkeypatch)
+    root, engine, factory = accounting_db
+    try:
+        from src.db.models import ApprovalRequest, GoogleServiceConnection
+        from src.vault import vault_repository
+        if fault=="goal_revision":
+            changed=await client.patch("/api/goals/mail-actual-goal",json={"title":"Changed current Goal","expected_revision":1})
+            assert changed.status_code==200,changed.text
+        elif fault=="logout":
+            assert (await client.post("/api/auth/logout")).status_code==204
+        elif fault=="vault_rotation":
+            async with factory.accounting_sessions() as db:
+                row=await db.get(GoogleServiceConnection,body["send_connection_id"])
+                key=row.vault_secret_key
+            await vault_repository.store(key,json.dumps({"client_id":"dummy-client","client_secret":None,"refresh_token":"rotated-send"}),owner_principal_id=owner["principal_id"])
+        elif fault=="approval_attachments":
+            async with factory.accounting_sessions() as db:
+                approval=await db.get(ApprovalRequest,preview["preview"]["approval_id"])
+                approval.attachment_refs_json=json.dumps([{"path":"/must-never-be-read"}])
+        else:
+            original_handle=google.handle
+            async def missing_thread(request):
+                response=await original_handle(request)
+                if request.url.path.endswith("/messages/original-id") and request.url.params.get("format")=="raw":
+                    payload=json.loads(response.content);payload.pop("threadId")
+                    return httpx.Response(200,json=payload)
+                return response
+            # The already constructed MockTransport calls its saved handler.
+            google.handle=missing_thread
+            from src.integrations import mail_reply_runtime
+            real_reply=__import__("src.integrations.gmail_send",fromlist=["GmailReplyAdapter"]).GmailReplyAdapter
+            monkeypatch.setattr(mail_reply_runtime,"GmailReplyAdapter",lambda *args,**kwargs:real_reply(*args,transport=httpx.MockTransport(missing_thread),resolver=lambda host,port:["93.184.216.34"],**kwargs))
+        contacts=len(google.calls)
+        denied=await client.post("/api/capabilities/mail/reply-sends/"+preview["job_id"]+"/execute",json={})
+        assert denied.status_code>=400
+        assert google.sent is None and len(model_calls)==5
+        if fault in {"goal_revision","logout","vault_rotation"}:assert len(google.calls)==contacts
+        async with factory.accounting_sessions() as db:
+            run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==preview["job_id"]))
+            assert "intent" not in json.loads(run.checkpoint_context_json) and json.loads(run.effect_receipts_json)==[]
+            approval=await db.get(ApprovalRequest,preview["preview"]["approval_id"])
+            assert approval.status=="approved"
+        (root/("mail-negative-"+fault+".json")).write_text(json.dumps({"fault":fault,"status":denied.status_code,"response":denied.json(),"google_contacts":google.calls,"send_posts":0,"model_setup_calls":5},indent=2))
+    finally:await client.aclose()

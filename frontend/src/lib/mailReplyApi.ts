@@ -7,6 +7,7 @@ export interface ReplyProfile {
   verified_setup_job_id: string | null; provider_contact: false; setup_is_send_permission: false;
 }
 export interface ReplyJob {
+  request_uuid:string; source_task_id:string|null; original_job_id:string|null; cancel_request_uuid:string|null;
   job_id: string; kind: string; status: string; revision: number; deadline_at: string;
   goal_id: string; goal_revision: number; outcome: string | null; contacts_spent: number;
   contact_may_have_occurred: boolean; transport_quiescent: boolean; cancel_requested: boolean;
@@ -37,7 +38,7 @@ export function replyProfile(value: unknown): ReplyProfile {
 }
 export function replyJob(value: unknown): ReplyJob {
   const v=record(value);
-  if (!text(v.job_id) || !["mail_reply_send_v1","mail_reply_identity_v1","mail_reply_observation_v1"].includes(String(v.kind)) || !text(v.status)
+  if (!text(v.request_uuid) || (v.source_task_id!==null&&!text(v.source_task_id)) || (v.original_job_id!==null&&!text(v.original_job_id)) || (v.cancel_request_uuid!==null&&!text(v.cancel_request_uuid)) || !text(v.job_id) || !["mail_reply_send_v1","mail_reply_identity_v1","mail_reply_observation_v1"].includes(String(v.kind)) || !text(v.status)
     || !integer(v.revision,1) || !text(v.deadline_at) || !Number.isFinite(Date.parse(v.deadline_at)) || !text(v.goal_id) || !integer(v.goal_revision,1)
     || !integer(v.contacts_spent) || (v.contacts_spent as number)>14 || typeof v.contact_may_have_occurred!=="boolean"
     || typeof v.transport_quiescent!=="boolean" || typeof v.cancel_requested!=="boolean" || v.no_learning!==true
@@ -65,3 +66,4 @@ export function previewReply(body:unknown,signal?:AbortSignal) { return mailRequ
 export function readReply(id:string,signal?:AbortSignal) { return mailRequest(base+"reply-sends/"+encodeURIComponent(id),request("",undefined,signal),replyJob); }
 export function actReply(id:string,action:"decision"|"execute"|"cancel"|"observe",body:unknown,signal?:AbortSignal) { return mailRequest(base+"reply-sends/"+encodeURIComponent(id)+"/"+action,request("",body,signal),replyJob); }
 export function recoverReplyOperation(kind:string,uuid:string,signal?:AbortSignal) { return mailRequest(base+"reply-operations/recovery/"+encodeURIComponent(kind)+"/"+encodeURIComponent(uuid),request("",undefined,signal),value=>{const v=record(value);if(v.provider_contact!==false)throw new MailApiError(200,"recovery_invalid","Operation readback is unconfirmed.");return v.job===null?null:replyJob(v.job);}); }
+export function listReplyRecoveryGoals(signal?:AbortSignal):Promise<{id:string;title:string;revision:number}[]> {return mailRequest("/api/goals/tree",request("",undefined,signal),value=>{const results:{id:string;title:string;revision:number}[]=[];let count=0;function visit(nodes:unknown,depth:number){if(!Array.isArray(nodes)||depth>10)throw new MailApiError(200,"recovery_goals_invalid","Current finite Goals are unavailable.");for(const item of nodes){if(++count>128)throw new MailApiError(200,"recovery_goals_bound","The Goal list exceeds this finite selector.");const g=record(item);if(g.status==="active"&&text(g.id)&&text(g.title,500)&&integer(g.revision,1)&&g.admission_budget){results.push({id:g.id,title:g.title,revision:g.revision});}if(g.children!==undefined)visit(g.children,depth+1);}}visit(value,0);return results;});}

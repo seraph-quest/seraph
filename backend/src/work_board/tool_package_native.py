@@ -574,6 +574,7 @@ async def execute(task, attempt, inputs, *, jobs, runner, deadline, admission_on
     else:
         facts=projection["declared_authority"].get("execution_expiries")
         deadline=datetime.fromisoformat(projection["deadline_at"])
+        if deadline.tzinfo is None:deadline=deadline.replace(tzinfo=timezone.utc)
     spec=spec_for(task,attempt,inputs,deadline=deadline,expiry_facts=facts)
     if projection is None:
         projection=await jobs.admit_job(spec)

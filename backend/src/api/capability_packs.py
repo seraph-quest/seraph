@@ -159,28 +159,6 @@ async def inspect_authored_package(req: AuthoredInspectRequest, request: Request
         raise HTTPException(status_code=422,detail={"code":"authored_package_static_contract_invalid"})
 
 
-@router.post("/capability-packs/{pack_id}/review")
-async def review_authored_package(pack_id: str, req: AuthoredReviewRequest, request: Request):
-    _operator,principal_id,session_id=_operator_identity(request)
-    if req.acknowledge_unsigned_local is not True:
-        raise HTTPException(status_code=403,detail={"code":"authored_package_unsigned_acknowledgement_required"})
-    try:
-        packet=_authored_packet(req.root_path)
-        if (packet["pack_id"]!=pack_id or packet["content_digest"]!=req.content_digest or
-            packet["authority_digest"]!=req.authority_digest):
-            raise ValueError("authored_package_exact_review_changed")
-        from src.db.engine import get_session
-        from src.work_board.repository import WorkBoardRepository
-        from src.work_board.contracts import WorkBoardOwner
-        async with get_session() as db:
-            await WorkBoardRepository._validate_goal(db,WorkBoardOwner(principal_id=principal_id,session_id=session_id),
-                goal_id=req.goal_id,goal_revision=req.goal_revision)
-        return _store().review(packet["manifest"],root_path=req.root_path,goal_id=req.goal_id,
-            reviewed_by=principal_id,authority_expansion_approved=True)
-    except (OSError,ValueError,KeyError,TypeError):
-        raise HTTPException(status_code=409,detail={"code":"authored_package_exact_review_changed"})
-
-
 @router.get("/capability-packs/seraph.tool.json-format/profile")
 async def fixed_formatter_profile(request: Request):
     _operator, principal_id, session_id = _operator_identity(request)
@@ -226,6 +204,28 @@ async def fixed_formatter_review(req: FixedFormatterReviewRequest, request: Requ
             reviewed_by=principal_id,authority_expansion_approved=True)
     except CapabilityPackLifecycleError as exc:
         raise _lifecycle_http_error(exc) from exc
+
+
+@router.post("/capability-packs/{pack_id}/review")
+async def review_authored_package(pack_id: str, req: AuthoredReviewRequest, request: Request):
+    _operator,principal_id,session_id=_operator_identity(request)
+    if req.acknowledge_unsigned_local is not True:
+        raise HTTPException(status_code=403,detail={"code":"authored_package_unsigned_acknowledgement_required"})
+    try:
+        packet=_authored_packet(req.root_path)
+        if (packet["pack_id"]!=pack_id or packet["content_digest"]!=req.content_digest or
+            packet["authority_digest"]!=req.authority_digest):
+            raise ValueError("authored_package_exact_review_changed")
+        from src.db.engine import get_session
+        from src.work_board.repository import WorkBoardRepository
+        from src.work_board.contracts import WorkBoardOwner
+        async with get_session() as db:
+            await WorkBoardRepository._validate_goal(db,WorkBoardOwner(principal_id=principal_id,session_id=session_id),
+                goal_id=req.goal_id,goal_revision=req.goal_revision)
+        return _store().review(packet["manifest"],root_path=req.root_path,goal_id=req.goal_id,
+            reviewed_by=principal_id,authority_expansion_approved=True)
+    except (OSError,ValueError,KeyError,TypeError):
+        raise HTTPException(status_code=409,detail={"code":"authored_package_exact_review_changed"})
 
 
 def _operator_identity(request: Request) -> tuple[Any, str, str]:

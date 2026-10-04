@@ -40,6 +40,15 @@ async def test_actual_authored_time_ledger_native_reopen_private_read(accounting
     shutil.copytree(bundle,target)
     os.chmod(target/"bwrap",0o700)
     os.chmod(target/"rootfs/runtime/bin/isolated-python",0o700)
+    os.chmod(target/"rootfs/lib64/ld-linux-x86-64.so.2",0o700)
+    # #916 profile-probe-r10 creates this empty mountpoint; its managed
+    # receipt retention copied files only, omitting empty directories.
+    before=(target/"rootfs/proc").exists()
+    (target/"rootfs/proc").mkdir(mode=0o700)
+    (root/"runtime-directory-restoration.json").write_text(json.dumps({
+        "reference":"#916 profile-probe-r10.py:41; retain-managed-r1.py files-only",
+        "proc_before":before,"proc_after":True,"mode":"0700","entries":[],
+        "immutable_execute_restored":["bwrap","rootfs/runtime/bin/isolated-python","rootfs/lib64/ld-linux-x86-64.so.2"]}))
     package_root=root/"selected-package"
     scaffold_adapter(package_root,package_id="local.time-ledger-summary",display_name="Time ledger summary")
     app=FastAPI();app.add_middleware(OperatorAuthMiddleware)
@@ -47,6 +56,15 @@ async def test_actual_authored_time_ledger_native_reopen_private_read(accounting
     for router in (capability_packs.router,goals.router,work_board.router):app.include_router(router,prefix="/api")
     jobs=DurableJobRepository();dispatcher=WorkBoardDispatcher(jobs=jobs,session_provider=factory.accounting_sessions)
     monkeypatch.setattr(work_board,"dispatcher",dispatcher)
+    from src.work_board import tool_package_native
+    actual_execute=tool_package_native.execute
+    async def traced_execute(*args,**kwargs):
+        try:return await actual_execute(*args,**kwargs)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            raise
+    monkeypatch.setattr(tool_package_native,"execute",traced_execute)
     records={}
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url="http://test",headers={"origin":"http://localhost:3001"}) as client:
         async def post(path,payload):

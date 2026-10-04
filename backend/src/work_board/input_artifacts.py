@@ -40,6 +40,7 @@ from src.work_board.repository import (
     WorkBoardRepository,
 )
 from src.workspace import canonical_workspace_root
+from src.work_board.authored_packages import capability_spec, stage_package_request
 
 
 INPUT_ARTIFACT_SCHEMA_VERSION = 1
@@ -335,7 +336,7 @@ async def _validate_request(
         )
     except TypedInputError as exc:
         raise _raise_input_error(exc) from exc
-    spec = REGISTERED_CAPABILITIES.get(request.capability_id)
+    spec = capability_spec(request.capability_id)
     if spec is None or spec.secret_like:
         raise BoardError("secret_like_capability_blocked", "This capability cannot use public typed input storage", status_code=422)
     if spec.input_category == "scheduler" and not allow_scheduler:
@@ -619,6 +620,7 @@ def _cleanup_required_error(
     )
 
 
+@stage_package_request
 async def prepare_input_artifact(
     db: AsyncSession,
     owner: WorkBoardOwner,
@@ -758,7 +760,7 @@ async def prepare_input_artifact(
         goal_id=request.goal_id,
         goal_revision=request.goal_revision,
         capability_id=request.capability_id,
-        capability_version=REGISTERED_CAPABILITIES[request.capability_id].version,
+        capability_version=capability_spec(request.capability_id).version,
         idempotency_key=request.idempotency_key,
         payload_sha256=payload_digest,
         typed_input_ref=typed_input_ref,
@@ -820,7 +822,7 @@ async def resolve_input_artifact_for_task(
         raise BoardError("input_artifact_expired", "The input artifact has expired", status_code=409)
     if row.goal_id != goal_id or int(row.goal_revision) != int(goal_revision) or row.capability_id != capability_id:
         raise BoardError("input_artifact_binding_mismatch", "The input artifact binding does not match the task", status_code=409)
-    expected_version = REGISTERED_CAPABILITIES.get(capability_id)
+    expected_version = capability_spec(capability_id)
     if expected_version is None or row.capability_version != expected_version.version:
         raise BoardError("input_artifact_capability_stale", "The input artifact capability version is stale", status_code=409)
     if expected_version.input_category != "task":
@@ -929,7 +931,7 @@ async def resolve_input_artifact_for_copy(
         raise BoardError("input_artifact_binding_mismatch", "The input artifact binding does not match the reviewed plan", status_code=409)
     if _utc(row.expires_at) <= _utc(now or _now()):
         raise BoardError("input_artifact_expired", "The input artifact has expired", status_code=409)
-    expected_version = REGISTERED_CAPABILITIES.get(capability_id)
+    expected_version = capability_spec(capability_id)
     if expected_version is None or row.capability_version != expected_version.version:
         raise BoardError("input_artifact_capability_stale", "The input artifact capability version is stale", status_code=409)
     if _metadata_digest(row) != row.metadata_digest:

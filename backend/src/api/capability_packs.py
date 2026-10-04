@@ -118,6 +118,69 @@ class FixedFormatterReviewRequest(BaseModel):
     authority_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class AuthoredInspectRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    root_path: str = Field(min_length=1, max_length=4096)
+
+
+class AuthoredReviewRequest(FixedFormatterReviewRequest):
+    root_path: str = Field(min_length=1, max_length=4096)
+    acknowledge_unsigned_local: bool
+
+
+def _authored_packet(root_path):
+    from pathlib import Path
+    from src.extensions.authored_adapter import read_member, load_adapter
+    from src.extensions.capability_pack import parse_capability_pack_manifest, validate_capability_pack_package, capability_pack_digest
+    root=Path(root_path)
+    manifest=parse_capability_pack_manifest(read_member(root,"manifest.yaml",65536).decode())
+    checked=validate_capability_pack_package(root,manifest=manifest)
+    if not checked["ok"] or not manifest.contributes.adapters:
+        raise ValueError("authored_package_static_contract_invalid")
+    adapter=load_adapter(root,manifest)
+    from src.execution.tool_package_profile import inspect_runtime
+    from src.work_board.tool_package_native import runtime_root
+    try:
+        profile={"status":"available",**inspect_runtime(runtime_root())}
+    except (OSError,ValueError,RuntimeError):
+        profile={"status":"blocked","reason":"tool_package_profile_unavailable"}
+    return {"pack_id":manifest.id,"manifest":manifest.model_dump(mode="json"),"root_path":str(root),
+        "content_digest":capability_pack_digest(root),"authority_digest":manifest.authority_digest,
+        "descriptor":adapter.descriptor,"code_text":adapter.code.decode(),"profile":profile,
+        "publisher_verified":False,"signature_status":"unsigned-local","no_learning":True}
+
+
+@router.post("/capability-packs/authored/inspect")
+async def inspect_authored_package(req: AuthoredInspectRequest, request: Request):
+    _operator_identity(request)
+    try:
+        return _authored_packet(req.root_path)
+    except (OSError,ValueError,KeyError,TypeError):
+        raise HTTPException(status_code=422,detail={"code":"authored_package_static_contract_invalid"})
+
+
+@router.post("/capability-packs/{pack_id}/review")
+async def review_authored_package(pack_id: str, req: AuthoredReviewRequest, request: Request):
+    _operator,principal_id,session_id=_operator_identity(request)
+    if req.acknowledge_unsigned_local is not True:
+        raise HTTPException(status_code=403,detail={"code":"authored_package_unsigned_acknowledgement_required"})
+    try:
+        packet=_authored_packet(req.root_path)
+        if (packet["pack_id"]!=pack_id or packet["content_digest"]!=req.content_digest or
+            packet["authority_digest"]!=req.authority_digest):
+            raise ValueError("authored_package_exact_review_changed")
+        from src.db.engine import get_session
+        from src.work_board.repository import WorkBoardRepository
+        from src.work_board.contracts import WorkBoardOwner
+        async with get_session() as db:
+            await WorkBoardRepository._validate_goal(db,WorkBoardOwner(principal_id=principal_id,session_id=session_id),
+                goal_id=req.goal_id,goal_revision=req.goal_revision)
+        return _store().review(packet["manifest"],root_path=req.root_path,goal_id=req.goal_id,
+            reviewed_by=principal_id,authority_expansion_approved=True)
+    except (OSError,ValueError,KeyError,TypeError):
+        raise HTTPException(status_code=409,detail={"code":"authored_package_exact_review_changed"})
+
+
 @router.get("/capability-packs/seraph.tool.json-format/profile")
 async def fixed_formatter_profile(request: Request):
     _operator, principal_id, session_id = _operator_identity(request)

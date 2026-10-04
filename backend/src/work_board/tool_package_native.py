@@ -18,10 +18,76 @@ from src.extensions.capability_pack import CapabilityPackLifecycle, capability_p
 from src.work_board.contracts import WorkBoardOwner
 from src.work_board.repository import WorkBoardRepository
 from src.work_board.tool_package_contracts import JsonFormatInput
+from src.work_board.authored_packages import is_authored, load_registration
 from src.workflows.job_runtime import DurableJobIdentity, DurableJobSpec
 from src.workspace import canonical_workspace_root
 
 PREFIX = "artifacts/work-board/tool-package/"
+
+
+def package_id(task):
+    return task.capability_id[5:].rsplit(".", 2)[0] if is_authored(task.capability_id) else PACKAGE_ID
+
+
+def native_kind(task):
+    return "local_authored_json" if is_authored(task.capability_id) else JOB_KIND
+
+
+def input_model(task, inputs):
+    from src.work_board.tool_package_contracts import AuthoredJsonInput
+    return (AuthoredJsonInput if is_authored(task.capability_id) else JsonFormatInput).model_validate(dict(inputs))
+
+
+def adapter_for(task, *, lifecycle=None, state=None, original_pin=None, continuation=False):
+    registration=None
+    if lifecycle is None and state is None:
+        from src.work_board.authored_packages import staged_registration
+        try:registration=staged_registration(task.capability_id)
+        except ValueError:pass
+        if registration is not None and original_pin is not None and registration.pin!=original_pin:
+            raise ToolPackageBlocked("tool_package_original_pin_changed")
+    if registration is None:
+        registration = load_registration(task.capability_id, lifecycle=lifecycle, state=state,
+            original_pin=original_pin, continuation=continuation)
+    if (registration.pointer["goal_id"] != task.goal_id or
+        registration.pointer["owner_principal_id"] != task.owner_principal_id or
+        registration.pointer["session_id"] != task.owner_session_id):
+        raise ToolPackageBlocked("tool_package_exact_review_required")
+    return registration
+
+
+def adapter_pin(registration):
+    descriptor = registration.adapter.descriptor
+    return {key: descriptor[key] for key in ("code_sha256", "input_schema_sha256", "output_schema_sha256",
+        "profile_contract_version", "adapter_id")} | {"descriptor_sha256": registration.adapter.descriptor_sha256}
+
+
+async def execution_expiries(db, task):
+    from src.db.models import Goal
+    from src.goals.repository import deserialize_admission_budget
+    goal=await db.get(Goal,task.goal_id,populate_existing=True)
+    session=await db.get(OperatorSession,task.owner_session_id,populate_existing=True)
+    artifact=await db.get(WorkBoardInputArtifact,task.input_artifact_id,populate_existing=True)
+    if goal is None or session is None or artifact is None:
+        raise ToolPackageBlocked("tool_package_authority_window_unavailable")
+    budget=deserialize_admission_budget(goal)
+    utc=lambda value:value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+    return {key:utc(value).isoformat() if value is not None else None for key,value in
+        {"artifact":artifact.expires_at,"goal":goal.due_date,"budget":budget.period_expires_at if budget else None,
+         "root_absolute":session.absolute_expires_at,"root_idle":session.idle_expires_at}.items()}
+
+
+def expiry_cap(facts):
+    if (type(facts) is not dict or set(facts)!={"artifact","goal","budget","root_absolute","root_idle"} or
+        any(facts[key] is None for key in ("artifact","root_absolute","root_idle"))):
+        raise ToolPackageBlocked("tool_package_original_expiry_required")
+    try:
+        values=[datetime.fromisoformat(value) for value in facts.values() if type(value) is str]
+        if len(values)!=sum(value is not None for value in facts.values()) or any(value.tzinfo is None for value in values):
+            raise ValueError()
+        return min(values)
+    except (ValueError,TypeError):
+        raise ToolPackageBlocked("tool_package_original_expiry_invalid")
 
 
 def now():
@@ -42,10 +108,12 @@ def runtime_binding():
 
 
 def job_id(task, attempt):
-    return "json-format:"+digest(canonical([task.task_id, attempt.attempt_id]))[:40]
+    return ("authored-json:" if is_authored(task.capability_id) else "json-format:")+digest(canonical([task.task_id, attempt.attempt_id]))[:40]
 
 
-def pack_binding(task, *, lifecycle=None, state=None):
+def pack_binding(task, *, lifecycle=None, state=None, original_pin=None, continuation=False):
+    if is_authored(task.capability_id):
+        return adapter_for(task,lifecycle=lifecycle,state=state,original_pin=original_pin,continuation=continuation).pin
     lifecycle = lifecycle or CapabilityPackLifecycle()
     if state is None:
         with lifecycle._state_lock(shared=True):
@@ -64,31 +132,35 @@ def pack_binding(task, *, lifecycle=None, state=None):
 
 
 def immutable_inputs(task, inputs):
-    model = JsonFormatInput.model_validate(dict(inputs))
+    model = input_model(task, inputs)
     if not task.input_artifact_id or not task.typed_input_digest:
         raise ToolPackageBlocked("tool_package_input_artifact_required")
     return {"input_artifact_id":task.input_artifact_id, "typed_input_digest":task.typed_input_digest,
         "json_sha256":digest(model.json_text.encode()), "no_learning":True}
 
 
-def authority_for(task, attempt, inputs):
+def authority_for(task, attempt, inputs, *, expiry_facts=None):
     from src.work_board.pipelines import root_binding
     metadata = runtime_binding()
     return {"principal":task.owner_principal_id, "owner_kind":"user", "session_id":task.owner_session_id,
-        "goal_id":task.goal_id, "goal_revision":task.goal_revision, "capability_id":CAPABILITY,
+        "goal_id":task.goal_id, "goal_revision":task.goal_revision, "capability_id":task.capability_id,
         "capability_version":"1", "board_task_id":task.task_id,"board_attempt_id":attempt.attempt_id,
         "input_artifact_id":task.input_artifact_id, "typed_input_digest":task.typed_input_digest,
         "live_root_digest":digest(canonical(root_binding())), "pack":pack_binding(task),
-        "runtime":metadata, "permissions":["workspace_read","workspace_write"],"no_learning":True}
+        "runtime":metadata, "permissions":["workspace_read","workspace_write"],"no_learning":True,
+        **({"adapter":adapter_pin(adapter_for(task))} if is_authored(task.capability_id) else {})}
 
 
-def spec_for(task, attempt, inputs, *, deadline):
+def spec_for(task, attempt, inputs, *, deadline, expiry_facts=None):
     first=attempt.started_at.replace(tzinfo=timezone.utc) if attempt.started_at.tzinfo is None else attempt.started_at
     deadline=min(deadline,first+timedelta(seconds=10))
     safe_inputs = immutable_inputs(task, inputs)
     authority = authority_for(task, attempt, inputs)
+    if expiry_facts is not None:
+        deadline=min(deadline,expiry_cap(expiry_facts))
+        authority["execution_expiries"]=expiry_facts
     return DurableJobSpec(identity=DurableJobIdentity(job_id=job_id(task,attempt), owner_kind="user",
-        owner_principal_id=task.owner_principal_id, job_kind=JOB_KIND, capability_version="1",
+        owner_principal_id=task.owner_principal_id, job_kind=native_kind(task), capability_version="1",
         idempotency_scope="work-board-attempt", idempotency_key=f"{task.task_id}:{attempt.attempt_id}"),
         inputs=safe_inputs, session_id=task.owner_session_id, operator_session_id=task.owner_session_id,
         goal_id=task.goal_id, goal_revision=task.goal_revision, priority=task.priority,
@@ -106,6 +178,8 @@ class AuthorityStage:
     authority_json: str
     input_binding: tuple
     pack_state_digest: str
+    input_digest: str | None
+    run_fingerprint: str | None
 
 
 def bounded_pack_state(lifecycle):
@@ -117,10 +191,13 @@ def bounded_pack_state(lifecycle):
 
 
 def pack_state_digest(state, authority):
-    pointer=state["active"].get(PACKAGE_ID)
+    pack_id=authority["pack"]["pack_id"]
+    pointer=state["active"].get(pack_id)
+    if is_authored(authority.get("capability_id")):
+        pointer={key:pointer.get(key) for key in ("status","pack_id","goal_id","owner_principal_id","session_id")} if isinstance(pointer,dict) else None
     package=authority["pack"]
-    return digest(canonical([pointer,state.get("versions",{}).get(PACKAGE_ID,{}).get(package["digest"]),
-        state.get("reviews",{}).get(package["review_id"]),state.get("revoked",{}).get(PACKAGE_ID)]))
+    return digest(canonical([pointer,state.get("versions",{}).get(pack_id,{}).get(package["digest"]),
+        state.get("reviews",{}).get(package["review_id"]),state.get("revoked",{}).get(pack_id)]))
 
 
 def input_row_binding(row):
@@ -136,18 +213,36 @@ async def stage_authority(db,task,attempt,run,*,lifecycle,state,full=True):
     authority=json.loads(run.declared_authority_json)
     if authority["live_root_digest"]!=digest(canonical(root_binding())):
         raise ToolPackageBlocked("tool_package_original_root_changed")
+    expected_digest=None;expected_fingerprint=None
     if full:
-        resolved=await resolve_input_artifact_for_task(db,owner,artifact_id=task.input_artifact_id,
-            capability_id=CAPABILITY,goal_id=task.goal_id,goal_revision=task.goal_revision,expected_task_id=task.task_id)
+        registration=None
+        if is_authored(task.capability_id):
+            from src.work_board.authored_packages import registration_scope
+            released=any(item.get("checkpoint_id")=="tool-package:process" and item.get("payload",{}).get("admission_status")=="admitted"
+                for item in json.loads(run.checkpoint_receipts_json))
+            registration=adapter_for(task,lifecycle=lifecycle,state=state,original_pin=authority["pack"],continuation=released)
+            if adapter_pin(registration)!=authority.get("adapter"):
+                raise ToolPackageBlocked("tool_package_adapter_pin_changed")
+            with registration_scope(registration):
+                resolved=await resolve_input_artifact_for_task(db,owner,artifact_id=task.input_artifact_id,
+                    capability_id=task.capability_id,goal_id=task.goal_id,goal_revision=task.goal_revision,expected_task_id=task.task_id)
+        else:
+            resolved=await resolve_input_artifact_for_task(db,owner,artifact_id=task.input_artifact_id,
+                capability_id=task.capability_id,goal_id=task.goal_id,goal_revision=task.goal_revision,expected_task_id=task.task_id)
         row=resolved.row
+        immutable=immutable_inputs(task,resolved.input)
+        expected_digest=digest(canonical(immutable))
+        expected_fingerprint=digest(canonical({"task":task.task_id,"attempt":attempt.attempt_id,"inputs":immutable,"authority":authority}))
+        if run.input_digest!=expected_digest or run.run_fingerprint!=expected_fingerprint:
+            raise ToolPackageBlocked("tool_package_original_input_changed")
         if row.payload_sha256!=task.typed_input_digest:
             raise ToolPackageBlocked("tool_package_input_changed")
-        if authority["pack"]!=pack_binding(task,lifecycle=lifecycle,state=state) or authority["runtime"]!=runtime_binding():
+        if authority["pack"]!=(registration.pin if registration else pack_binding(task,lifecycle=lifecycle,state=state)) or authority["runtime"]!=runtime_binding():
             raise ToolPackageBlocked("tool_package_review_or_profile_changed")
     else:
         row=await db.get(WorkBoardInputArtifact,task.input_artifact_id,populate_existing=True)
         if row is None:raise ToolPackageBlocked("tool_package_input_changed")
-    return AuthorityStage(_STAGE_SEAL,run.run_identity,run.declared_authority_json,input_row_binding(row),pack_state_digest(state,authority))
+    return AuthorityStage(_STAGE_SEAL,run.run_identity,run.declared_authority_json,input_row_binding(row),pack_state_digest(state,authority),expected_digest,expected_fingerprint)
 
 
 @asynccontextmanager
@@ -185,6 +280,14 @@ async def current(db, task, attempt, run, *, require_lease=True, staged=None):
         OperatorSession.is_bearer_tombstone.is_(False),OperatorSession.idle_expires_at>stamp,
         OperatorSession.absolute_expires_at>stamp))
     authority=json.loads(run.declared_authority_json)
+    facts=authority.get("execution_expiries")
+    if facts is not None:
+        original_cap=expiry_cap(facts)
+        live=await execution_expiries(db,task)
+        if (any(live[key]!=facts[key] for key in ("artifact","goal","budget","root_absolute")) or
+            datetime.fromisoformat(live["root_idle"])<datetime.fromisoformat(facts["root_idle"]) or
+            (run.deadline_at.replace(tzinfo=timezone.utc) if run.deadline_at.tzinfo is None else run.deadline_at)>original_cap):
+            raise ToolPackageBlocked("tool_package_original_execution_window_changed")
     if session is None:
         raise ToolPackageBlocked("tool_package_original_root_inactive")
     current_task=await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id==task.task_id)
@@ -194,7 +297,7 @@ async def current(db, task, attempt, run, *, require_lease=True, staged=None):
     deadline=run.deadline_at.replace(tzinfo=timezone.utc) if run.deadline_at.tzinfo is None else run.deadline_at
     if (current_task is None or current_attempt is None or deadline<=stamp
         or current_task.owner_principal_id!=task.owner_principal_id or current_task.owner_session_id!=task.owner_session_id
-        or current_task.capability_id!=CAPABILITY or current_task.goal_id!=task.goal_id
+        or current_task.capability_id!=task.capability_id or current_task.goal_id!=task.goal_id
         or current_task.goal_revision!=task.goal_revision or current_task.task_revision!=task.task_revision
         or current_task.status!=WorkBoardStatus.running or current_attempt.task_id!=task.task_id
         or current_attempt.workflow_run_id!=run.run_identity or current_attempt.ended_at is not None
@@ -205,6 +308,8 @@ async def current(db, task, attempt, run, *, require_lease=True, staged=None):
         raise ToolPackageBlocked("tool_package_current_attempt_changed")
     if staged is None or staged.seal is not _STAGE_SEAL or staged.job!=run.run_identity or staged.authority_json!=run.declared_authority_json:
         raise ToolPackageBlocked("tool_package_staged_authority_required")
+    if staged.input_digest is not None and (run.input_digest!=staged.input_digest or run.run_fingerprint!=staged.run_fingerprint):
+        raise ToolPackageBlocked("tool_package_original_input_changed")
     row=await db.get(WorkBoardInputArtifact,task.input_artifact_id,populate_existing=True)
     if row is None or input_row_binding(row)!=staged.input_binding or row.payload_sha256!=task.typed_input_digest:
         raise ToolPackageBlocked("tool_package_input_changed")
@@ -243,7 +348,7 @@ async def record_cleanup(jobs, *, task, attempt, runner, request, stage, reserva
         original=next((item["payload"] for item in records if item.get("checkpoint_id")=="tool-package:reservation"),None)
         started=next((item["payload"] for item in records if item.get("checkpoint_id")=="tool-package:process"),None)
         authority=json.loads(run.declared_authority_json)
-        if (original!=reservation or run.job_kind!=JOB_KIND or run.owner_principal_id!=task.owner_principal_id
+        if (original!=reservation or run.job_kind!=native_kind(task) or run.owner_principal_id!=task.owner_principal_id
             or run.session_id!=task.owner_session_id or authority["board_task_id"]!=task.task_id
             or authority["board_attempt_id"]!=attempt.attempt_id or run.fencing_token!=request["fence"]
             or run.lease_owner!=runner or not isinstance(started,dict)
@@ -266,21 +371,29 @@ async def record_cleanup(jobs, *, task, attempt, runner, request, stage, reserva
         if changed.rowcount!=1:raise ToolPackageBlocked("tool_package_cleanup_cas_changed")
 
 
-def binds(task, attempt, run):
+def binds(task, attempt, run, *, staged=None):
     """Completed history binds to admitted immutable identity, not an active pointer."""
     try:
-        from src.work_board.dispatcher import _parse_typed_input
-        inputs=immutable_inputs(task,_parse_typed_input(task))
         authority=json.loads(run.declared_authority_json)
-        expected_fingerprint=digest(canonical({"task":task.task_id,"attempt":attempt.attempt_id,
-            "inputs":inputs,"authority":authority}))
-        return (run.run_identity==job_id(task,attempt) and run.job_kind==JOB_KIND and run.capability_version=="1"
+        if staged is not None:
+            if staged.seal is not _STAGE_SEAL or not staged.input_digest or not staged.run_fingerprint:return False
+            if isinstance(staged,AuthorityStage) and (staged.job!=run.run_identity or staged.authority_json!=run.declared_authority_json):return False
+            if isinstance(staged,ReadbackStage) and staged.binding!=readback_binding(task,attempt,run):return False
+            expected_input_digest=staged.input_digest;expected_fingerprint=staged.run_fingerprint
+        else:
+            from src.work_board.dispatcher import _parse_typed_input
+            inputs=immutable_inputs(task,_parse_typed_input(task))
+            expected_input_digest=digest(canonical(inputs))
+            expected_fingerprint=digest(canonical({"task":task.task_id,"attempt":attempt.attempt_id,
+                "inputs":inputs,"authority":authority}))
+        return (run.run_identity==job_id(task,attempt) and run.job_kind==native_kind(task) and run.capability_version=="1"
             and run.owner_kind=="user" and run.owner_principal_id==task.owner_principal_id
             and run.session_id==task.owner_session_id and run.operator_session_id==task.owner_session_id
-            and run.input_digest==digest(canonical(inputs)) and run.run_fingerprint==expected_fingerprint
+            and run.input_digest==expected_input_digest and run.run_fingerprint==expected_fingerprint
             and run.authority_digest==digest(canonical(authority)) and authority["board_task_id"]==task.task_id
-            and authority["board_attempt_id"]==attempt.attempt_id and authority["capability_id"]==CAPABILITY
-            and authority["pack"]["pack_id"]==PACKAGE_ID and authority["pack"]["version"]=="1.0.0"
+            and authority["board_attempt_id"]==attempt.attempt_id and authority["capability_id"]==task.capability_id
+            and authority["pack"]["pack_id"]==package_id(task)
+            and (is_authored(task.capability_id) or authority["pack"]["version"]=="1.0.0")
             and len(authority["pack"]["digest"])==64
             and authority["runtime"]["profile"]==PROFILE and authority["no_learning"] is True)
     except (OSError,KeyError,TypeError,ValueError):
@@ -293,15 +406,67 @@ class ReadbackStage:
     binding: tuple
     artifact: dict
     raw: bytes
+    input_digest: str
+    run_fingerprint: str
 
 
 def readback_binding(task,attempt,run):
     return tuple(tuple(str(getattr(row,column.name)) for column in row.__table__.columns) for row in (task,attempt,run))
 
 
-def stage_readback(task,attempt,run):
-    artifact,raw=verified_output(task,attempt,run)
-    return ReadbackStage(_STAGE_SEAL,readback_binding(task,attempt,run),dict(artifact),raw)
+def stage_readback(task,attempt,run,*,registration=None):
+    artifact,raw=verified_output(task,attempt,run,registration=registration)
+    from src.work_board.dispatcher import _parse_typed_input
+    inputs=immutable_inputs(task,_parse_typed_input(task))
+    fingerprint=digest(canonical({"task":task.task_id,"attempt":attempt.attempt_id,
+        "inputs":inputs,"authority":json.loads(run.declared_authority_json)}))
+    return ReadbackStage(_STAGE_SEAL,readback_binding(task,attempt,run),dict(artifact),raw,digest(canonical(inputs)),fingerprint)
+
+
+async def private_read_current(db,task,attempt,run,*,staged):
+    """Pure SQL private-read authority, separate from completed execution expiry."""
+    task=await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id==task.task_id).execution_options(populate_existing=True))
+    attempt=await db.get(WorkBoardAttempt,attempt.attempt_id,populate_existing=True)
+    run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==run.run_identity).execution_options(populate_existing=True))
+    if (task is None or attempt is None or run is None or staged.seal is not _STAGE_SEAL or
+        staged.binding!=readback_binding(task,attempt,run)):
+        raise ToolPackageBlocked("tool_package_staged_readback_changed")
+    owner=WorkBoardOwner(principal_id=task.owner_principal_id,session_id=task.owner_session_id)
+    goal=await WorkBoardRepository._validate_goal(db,owner,goal_id=task.goal_id,goal_revision=task.goal_revision)
+    from src.goals.repository import deserialize_admission_budget
+    budget=deserialize_admission_budget(goal)
+    stamp=now()
+    for value in (goal.due_date,budget.period_expires_at if budget else None):
+        if value is not None and (value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value)<=stamp:
+            raise ToolPackageBlocked("tool_package_goal_window_expired")
+    session=await db.scalar(select(OperatorSession.id).where(OperatorSession.id==task.owner_session_id,
+        OperatorSession.principal_id==task.owner_principal_id,OperatorSession.revoked_at.is_(None),
+        OperatorSession.replaced_by_id.is_(None),OperatorSession.is_bearer_tombstone.is_(False),
+        OperatorSession.idle_expires_at>stamp,OperatorSession.absolute_expires_at>stamp))
+    if session is None:
+        raise ToolPackageBlocked("tool_package_original_root_inactive")
+    if run.status!="succeeded" or task.status not in {WorkBoardStatus.done,WorkBoardStatus.review} or attempt.ended_at is None or not binds(task,attempt,run,staged=staged):
+        raise ToolPackageBlocked("tool_package_native_readback_required")
+
+
+@asynccontextmanager
+async def private_read_guard(db,task,attempt,run):
+    """Lifecycle fence spans physical stage and final canonical private-read check."""
+    from src.work_board.pipelines import root_binding
+    lifecycle=CapabilityPackLifecycle()
+    with lifecycle._state_lock(shared=True):
+        state=bounded_pack_state(lifecycle)
+        authority=json.loads(run.declared_authority_json)
+        if authority["live_root_digest"]!=digest(canonical(root_binding())):
+            raise ToolPackageBlocked("tool_package_original_root_changed")
+        registration=None
+        if is_authored(task.capability_id):
+            registration=adapter_for(task,lifecycle=lifecycle,state=state,original_pin=authority["pack"],continuation=True)
+        elif authority["pack"]!=pack_binding(task,lifecycle=lifecycle,state=state):
+            raise ToolPackageBlocked("tool_package_exact_review_required")
+        staged=stage_readback(task,attempt,run,registration=registration)
+        await private_read_current(db,task,attempt,run,staged=staged)
+        yield staged
 
 
 @asynccontextmanager
@@ -310,21 +475,45 @@ async def session_authority_guard(db,task,attempt,run):
     deadline=run.deadline_at.replace(tzinfo=timezone.utc) if run.deadline_at.tzinfo is None else run.deadline_at
     with lifecycle._state_lock(shared=True):
         async with asyncio.timeout(max(0,(deadline-now()).total_seconds())):
-            staged=await stage_authority(db,task,attempt,run,lifecycle=lifecycle,state=bounded_pack_state(lifecycle))
-            yield staged
+            state=bounded_pack_state(lifecycle)
+            staged=await stage_authority(db,task,attempt,run,lifecycle=lifecycle,state=state)
+            if is_authored(task.capability_id):
+                from src.work_board.authored_packages import registration_scope
+                registration=adapter_for(task,lifecycle=lifecycle,state=state,
+                    original_pin=json.loads(run.declared_authority_json)["pack"],continuation=True)
+                with registration_scope(registration):yield staged
+            else:yield staged
 
 
-def verified_output(task, attempt, run, *, staged=None):
+def verified_output(task, attempt, run, *, staged=None, registration=None):
     if staged is not None:
         if staged.seal is not _STAGE_SEAL or staged.binding!=readback_binding(task,attempt,run):
             raise ToolPackageBlocked("tool_package_staged_readback_changed")
+        if not binds(task,attempt,run,staged=staged):
+            raise ToolPackageBlocked("tool_package_staged_readback_changed")
         return dict(staged.artifact),staged.raw
-    if json.loads(run.declared_authority_json)["pack"]["digest"]!=capability_pack_digest(source_package().parent):
+    authority=json.loads(run.declared_authority_json)
+    if is_authored(task.capability_id) and registration is None:
+        from src.work_board.authored_packages import staged_registration
+        try:registration=staged_registration(task.capability_id)
+        except ValueError:registration=adapter_for(task,original_pin=authority["pack"],continuation=True)
+        if registration.pin!=authority["pack"]:
+            raise ToolPackageBlocked("tool_package_original_pin_changed")
+    if registration and adapter_pin(registration)!=authority.get("adapter"):
+        raise ToolPackageBlocked("tool_package_adapter_pin_changed")
+    if not registration and authority["pack"]["digest"]!=capability_pack_digest(source_package().parent):
         raise ToolPackageBlocked("tool_package_package_changed")
     if run.status!="succeeded" or not binds(task,attempt,run):
         raise ToolPackageBlocked("tool_package_native_readback_required")
     from src.work_board.dispatcher import _parse_typed_input
-    expected=expected_output(JsonFormatInput.model_validate(_parse_typed_input(task)).json_text.encode())
+    if registration:
+        candidates=[item for item in json.loads(run.artifact_receipts_json) if item.get("artifact_type")=="tool_package_json" and item.get("exists") is True]
+        if len(candidates)!=1:
+            raise ToolPackageBlocked("tool_package_native_readback_required")
+        expected=read_output(candidates[0]["file_path"],candidates[0]["content_sha256"])
+        registration.adapter.output(expected)
+    else:
+        expected=expected_output(JsonFormatInput.model_validate(_parse_typed_input(task)).json_text.encode())
     sha=digest(expected)
     records=json.loads(run.checkpoint_receipts_json)
     reservation=[item["payload"] for item in records if item.get("checkpoint_id")=="tool-package:reservation"]
@@ -335,7 +524,7 @@ def verified_output(task, attempt, run, *, staged=None):
     if (len(reservation)!=1 or len(cleanup)!=1 or len(artifacts)!=1
         or cleanup[0].get("cleanup_proven") is not True or cleanup[0].get("job_id")!=run.run_identity
         or cleanup[0].get("fence")!=reservation[0].get("fence")
-        or reservation[0].get("content_sha256")!=sha or reservation[0].get("file_path")!=artifacts[0].get("file_path")
+        or (not registration and reservation[0].get("content_sha256")!=sha) or reservation[0].get("file_path")!=artifacts[0].get("file_path")
         or not any(effect.get("receipt_kind")=="readback" and effect.get("status")=="succeeded"
             and effect.get("target_path")==artifacts[0]["file_path"] and effect.get("content_sha256")==sha
             and effect.get("readback_id") and effect.get("verified_at") for effect in effects)
@@ -350,7 +539,7 @@ def cleanup_proven(task, attempt, projection):
     No local registry absence, expired lease, or terminal label proves reap.
     Accepted/queued admission with no reserved process is proven prelaunch.
     """
-    if (projection.get("job_id")!=job_id(task,attempt) or projection.get("job_kind")!=JOB_KIND
+    if (projection.get("job_id")!=job_id(task,attempt) or projection.get("job_kind")!=native_kind(task)
         or projection.get("owner",{}).get("principal_id")!=task.owner_principal_id
         or projection.get("session_id")!=task.owner_session_id):return False
     records=projection.get("checkpoints",[])
@@ -370,16 +559,29 @@ def cleanup_proven(task, attempt, projection):
 async def execute(task, attempt, inputs, *, jobs, runner, deadline, admission_only):
     from src.execution.tool_package_runner import prepare,execute as isolated_execute
     from src.work_board.input_artifacts import _write_payload
-    model=JsonFormatInput.model_validate(dict(inputs))
-    spec=spec_for(task,attempt,inputs,deadline=deadline)
-    projection=await jobs.get_job(spec.identity.job_id)
+    model=input_model(task,inputs)
+    registration=adapter_for(task) if is_authored(task.capability_id) else None
+    if registration:
+        registration.adapter.input(model.json_text.encode())
+        async with jobs._session() as input_db:
+            row=await input_db.get(WorkBoardInputArtifact,task.input_artifact_id)
+            if row is None or row.capability_version!="1:"+registration.pointer["digest"]:
+                raise ToolPackageBlocked("tool_package_queued_version_stale")
+    projection=await jobs.get_job(job_id(task,attempt))
+    if projection is None:
+        async with jobs._session() as window_db:
+            facts=await execution_expiries(window_db,task)
+    else:
+        facts=projection["declared_authority"].get("execution_expiries")
+        deadline=datetime.fromisoformat(projection["deadline_at"])
+    spec=spec_for(task,attempt,inputs,deadline=deadline,expiry_facts=facts)
     if projection is None:
         projection=await jobs.admit_job(spec)
-        CapabilityPackLifecycle().register_job(PACKAGE_ID,goal_id=task.goal_id,job_id=spec.identity.job_id,
+        CapabilityPackLifecycle().register_job(package_id(task),goal_id=task.goal_id,job_id=spec.identity.job_id,
             owner_principal_id=task.owner_principal_id,session_id=task.owner_session_id,
             request_contract={"native_job_id":spec.identity.job_id,"input_digest":digest(canonical(spec.inputs)),
                 "authority_digest":digest(canonical(spec.declared_authority)),"deadline_at":projection["deadline_at"]},
-            required_tools=["json_format"],required_filesystem=["workspace_read","workspace_write"])
+            required_tools=["isolated_json_adapter" if registration else "json_format"],required_filesystem=["workspace_read","workspace_write"])
     elif (projection["input_digest"]!=digest(canonical(spec.inputs)) or projection["run_fingerprint"]!=spec.run_fingerprint
         or projection["declared_authority"]!=spec.declared_authority):
         raise ToolPackageBlocked("tool_package_admission_drift")
@@ -394,14 +596,15 @@ async def execute(task, attempt, inputs, *, jobs, runner, deadline, admission_on
     fence=projection["lease"]["fencing_token"]
     original_deadline=datetime.fromisoformat(projection["deadline_at"])
     if original_deadline.tzinfo is None:original_deadline=original_deadline.replace(tzinfo=timezone.utc)
-    expected=expected_output(model.json_text.encode());sha=digest(expected)
-    reference=PREFIX+digest(canonical([task.task_id,attempt.attempt_id]))+"-"+sha+".json"
+    expected=None if registration else expected_output(model.json_text.encode())
+    sha=None if registration else digest(expected)
+    reference=PREFIX+digest(canonical([task.task_id,attempt.attempt_id]))+("-authored" if registration else "-"+sha)+".json"
     stage=canonical_workspace_root(settings.workspace_dir)/"artifacts/tool-package-runs"/(digest(canonical(spec.identity.job_id))+f"-{fence}")
     stage.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
     request,metadata=prepare(stage,runtime_root(),raw=model.json_text.encode(),job_id=spec.identity.job_id,
-        fence=fence,deadline=original_deadline)
+        fence=fence,deadline=original_deadline,reviewed_adapter=registration.adapter if registration else None)
     reservation={"schema":1,"job_id":spec.identity.job_id,"fence":fence,"stage_ref":str(stage.relative_to(canonical_workspace_root(settings.workspace_dir))),
-        "file_path":reference,"content_sha256":sha,"byte_count":len(expected),"dispatch_binding_sha256":digest(request["token"].encode()),
+        "file_path":reference,"content_sha256":sha,"byte_count":len(expected) if expected is not None else None,"dispatch_binding_sha256":digest(request["token"].encode()),
         "runtime_digest":metadata["runtime_digest"],"package_sha256":metadata["package_sha256"],"no_learning":True}
     await jobs.record_checkpoint(spec.identity.job_id,checkpoint_id="tool-package:reservation",state=reservation,
         checkpoint_payload=reservation,owner=runner,fencing_token=fence)
@@ -451,7 +654,7 @@ async def execute(task, attempt, inputs, *, jobs, runner, deadline, admission_on
         if denial is not None:
             raise ToolPackageBlocked("tool_package_current_authority_denied") from denial
         CapabilityPackLifecycle()._set_local_job_status(spec.identity.job_id,status="running",expected_statuses={"accepted","queued"},
-            pack_id=PACKAGE_ID,owner_principal_id=task.owner_principal_id,session_id=task.owner_session_id,
+            pack_id=package_id(task),owner_principal_id=task.owner_principal_id,session_id=task.owner_session_id,
             expected_digest=spec.declared_authority["pack"]["digest"])
         dispatch_committed.set()
     with CapabilityPackLifecycle()._state_lock(shared=True):
@@ -487,7 +690,10 @@ async def execute(task, attempt, inputs, *, jobs, runner, deadline, admission_on
             reason="tool_package_execution_failed" if cleanup else "tool_package_cleanup_unproven")
         return {**finished,"admission_only":False,"reason_code":"tool_package_execution_failed" if cleanup else "tool_package_cleanup_required"}
     actual=read_private(stage,"out/result.json",MAX_OUTPUT)
-    if actual!=expected:raise ToolPackageBlocked("tool_package_output_readback_failed")
+    if registration:
+        registration.adapter.output(actual)
+        expected=actual
+    elif actual!=expected:raise ToolPackageBlocked("tool_package_output_readback_failed")
     return await adopt_output(jobs,task,attempt,runner,reference,expected,fence)
 
 
@@ -511,7 +717,7 @@ async def adopt_output(jobs,task,attempt,runner,reference,expected,fence):
         if read_output(reference,sha)!=expected:
             raise ToolPackageBlocked("tool_package_output_changed")
         record=build_artifact_record(file_path=reference,artifact_type="tool_package_json",
-            producer=JOB_KIND,run_id=identity,session_id=task.owner_session_id,content=expected)
+            producer=native_kind(task),run_id=identity,session_id=task.owner_session_id,content=expected)
         artifact={key:record[key] for key in ("artifact_id","artifact_type","file_path","producer",
             "content_sha256","size_bytes","exists")}
         async with jobs._session() as db:
@@ -522,14 +728,14 @@ async def adopt_output(jobs,task,attempt,runner,reference,expected,fence):
                 owner_kind=run.owner_kind,owner_principal_id=run.owner_principal_id,
                 session_id=run.session_id,authority=run.declared_authority_json)
             jobs._assert_lease(run,owner=runner,fencing_token=fence)
-            if run.status!="running" or not binds(task,attempt,run):
+            if run.status!="running" or not binds(task,attempt,run,staged=staged):
                 raise ToolPackageBlocked("tool_package_adoption_binding_changed")
             projection=_serialize(run)
             reservations=[item.get("payload") for item in projection["checkpoints"]
                 if item.get("checkpoint_id")=="tool-package:reservation"]
             if (not cleanup_proven(task,attempt,projection) or len(reservations)!=1
                 or reservations[0].get("file_path")!=reference
-                or reservations[0].get("content_sha256")!=sha or reservations[0].get("fence")!=fence):
+                or (not is_authored(task.capability_id) and reservations[0].get("content_sha256")!=sha) or reservations[0].get("fence")!=fence):
                 raise ToolPackageBlocked("tool_package_exact_artifact_cleanup_required")
             effects=_effect_ledger_or_raise(run.effect_receipts_json)
             if _job_has_unsafe_effects(effects):
@@ -570,6 +776,6 @@ async def adopt_output(jobs,task,attempt,runner,reference,expected,fence):
                 "from":"running","to":"succeeded","fencing_token":fence,
                 "revision":refreshed.revision,"operator_visible":True})
     CapabilityPackLifecycle()._set_local_job_status(identity,status="succeeded",expected_statuses={"running"},
-        pack_id=PACKAGE_ID,owner_principal_id=task.owner_principal_id,session_id=task.owner_session_id,
+        pack_id=package_id(task),owner_principal_id=task.owner_principal_id,session_id=task.owner_session_id,
         expected_digest=pack_binding(task)["digest"],details={"no_learning":True,"cleanup_proven":True,"output_sha256":sha})
     return {**finished,"admission_only":False,"artifact_refs":finished.get("artifacts",[]),"memory_status":"no_learning"}

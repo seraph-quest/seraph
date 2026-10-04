@@ -161,6 +161,9 @@ class CapabilitySpec:
     secret_like: bool = True
 
 
+from src.work_board.authored_packages import is_tool_package, is_authored, capability_spec, stage_package_readiness
+
+
 class TypedInputError(ValueError):
     """A task's immutable workspace JSON input failed pre-admission checks."""
 
@@ -478,10 +481,14 @@ def _reject_authority_input_keys(value: Any, *, path: str = "input") -> None:
 
 
 def _typed_input_model(capability_id: str) -> type[BaseModel] | None:
+    from src.work_board.authored_packages import is_authored
+    if is_authored(capability_id):
+        from src.work_board.tool_package_contracts import AuthoredJsonInput
+        return AuthoredJsonInput
     if capability_id == "work.document-compare.v1":
         from src.work_board.document_compare_contracts import DocumentCompareInput
         return DocumentCompareInput
-    if capability_id == "work.json-format.v1":
+    if is_tool_package(capability_id):
         from src.work_board.tool_package_contracts import JsonFormatInput
         return JsonFormatInput
     if capability_id == "work.research-dossier.v1":
@@ -604,7 +611,8 @@ def validate_capability_input(
     """
 
     normalized_capability = _text(capability_id)
-    spec = REGISTERED_CAPABILITIES.get(normalized_capability)
+    from src.work_board.authored_packages import capability_spec, is_authored, staged_registration
+    spec = capability_spec(normalized_capability)
     if spec is None:
         raise TypedInputError("capability_unregistered", "the task names no registered capability")
     if spec.input_category != "task" and not (allow_scheduler and spec.input_category == "scheduler"):
@@ -619,6 +627,8 @@ def validate_capability_input(
         validated = model_type.model_validate(dict(raw))
     except ValidationError as exc:
         raise TypedInputError("typed_input_invalid", "typed input does not match the capability schema") from exc
+    if is_authored(normalized_capability):
+        staged_registration(normalized_capability).adapter.input(validated.json_text.encode("utf-8"))
     return validated.model_dump(mode="json", exclude_none=True)
 
 
@@ -631,7 +641,13 @@ def registered_executor_id(capability_id: str) -> str | None:
     derived value before admitting executable work.
     """
 
-    capability = REGISTERED_CAPABILITIES.get(_text(capability_id))
+    if is_authored(_text(capability_id)):
+        # Pure namespace projection only. Exact registration is staged by
+        # input/task/readiness and native authority fences, never by this
+        # lane-string comparison inside a canonical writer.
+        return f"seraph-work-board:{_text(capability_id)}"
+    from src.work_board.authored_packages import capability_spec
+    capability = capability_spec(_text(capability_id))
     if capability is None:
         return None
     return f"seraph-work-board:{capability.capability_id}"
@@ -3539,7 +3555,7 @@ class WorkBoardDispatcher:
                 receipts.append({"job_id":attempt.workflow_run_id,"status":"cancelled" if proven else "unknown",
                     "reason_code":"document_parser_reaped" if proven else "document_parser_quiescence_unknown"})
                 return receipts,bool(proven)
-            if capability == "work.json-format.v1":
+            if is_tool_package(capability):
                 worker = self._active_worker_tasks.get((task.task_id, attempt.attempt_id))
                 if worker is not None and worker is not asyncio.current_task() and not worker.done():
                     worker.cancel()
@@ -3860,7 +3876,7 @@ class WorkBoardDispatcher:
         configured = int(getattr(budget, "max_runtime_seconds", DEFAULT_RUNTIME_SECONDS)) if budget else DEFAULT_RUNTIME_SECONDS
         hard_cap = (180 if _text(task.capability_id) == "browser.public-task.v1" else
             300 if _text(task.capability_id) == "work.research-dossier.v1" else
-            10 if _text(task.capability_id) == "work.json-format.v1" else MAX_RUNTIME_SECONDS)
+            10 if is_tool_package(_text(task.capability_id)) else MAX_RUNTIME_SECONDS)
         return max(1, min(configured, hard_cap))
 
     async def _repo_repair_goal_window(self, task: WorkBoardTask) -> datetime | None:
@@ -3923,6 +3939,7 @@ class WorkBoardDispatcher:
             return error, reason
         return await self._readiness(claim.task, _claimed_attempt=claim.attempt)
 
+    @stage_package_readiness
     async def _readiness(
         self,
         task: WorkBoardTask,
@@ -4067,7 +4084,7 @@ class WorkBoardDispatcher:
                     if not await current_handoff_is_verified(db, owner, parent, task, link):
                         return "handoff_materialization_required", _HANDOFF_RECONCILIATION_REASON
         capability_id = _text(task.capability_id)
-        spec = REGISTERED_CAPABILITIES.get(capability_id)
+        spec = capability_spec(capability_id)
         if spec is None:
             return "capability_unregistered", "The task names no registered Seraph capability"
         expected_executor = registered_executor_id(capability_id)
@@ -4079,9 +4096,9 @@ class WorkBoardDispatcher:
             return "executor_lane_mismatch", "The task executor does not match the registered capability lane"
         if not _text(task.typed_input_ref) or not _text(task.typed_input_digest):
             return "typed_input_missing", "The task has no complete typed input reference"
-        if capability_id in {"browser.public-task.v1", "work.research-dossier.v1", "work.json-format.v1", "work.document-compare.v1"} and not _text(task.input_artifact_id):
+        if (capability_id in {"browser.public-task.v1", "work.research-dossier.v1", "work.json-format.v1", "work.document-compare.v1"} or is_authored(capability_id)) and not _text(task.input_artifact_id):
             return "browser_input_artifact_required", "Public browser tasks require a server-bound input artifact"
-        if capability_id in {"browser.public-task.v1", "work.research-dossier.v1", "work.json-format.v1", "work.document-compare.v1"}:
+        if capability_id in {"browser.public-task.v1", "work.research-dossier.v1", "work.json-format.v1", "work.document-compare.v1"} or is_authored(capability_id):
             # Browser inputs are resolved through the owner-bound artifact
             # lifecycle before promotion. This checks the current state,
             # expiry, task/goal/capability binding and bounded nofollow
@@ -4177,7 +4194,7 @@ class WorkBoardDispatcher:
                 async with self.session_provider() as db:
                     await source_pair(db, task, inputs)
                 return None, None
-            if capability == "work.json-format.v1":
+            if is_tool_package(capability):
                 from src.execution.tool_package_profile import inspect_runtime
                 from src.work_board.tool_package_native import pack_binding, runtime_root
                 pack_binding(task)
@@ -5826,7 +5843,7 @@ class WorkBoardDispatcher:
                 result["awaiting_approval"] = True
                 return result
             direct_proof = self._direct_readback(adapter_result, projection, job_id)
-            if task.capability_id in {"work.json-format.v1", "work.document-compare.v1"}:
+            if is_tool_package(task.capability_id) or task.capability_id == "work.document-compare.v1":
                 async with self.session_provider() as cancel_db:
                     cancelled = await cancel_db.scalar(select(WorkBoardAttempt.cancel_requested_at).where(
                         WorkBoardAttempt.attempt_id==attempt.attempt_id,WorkBoardAttempt.workflow_run_id==job_id,
@@ -6199,7 +6216,7 @@ class WorkBoardDispatcher:
                     deadline=_now()+timedelta(seconds=min(runtime_seconds,70)),admission_only=admission_only)
             finally:
                 if not admission_only:self._active_worker_tasks.pop((task.task_id,attempt.attempt_id),None)
-        if capability_id == "work.json-format.v1":
+        if is_tool_package(capability_id):
             from src.work_board.tool_package_native import execute
             if not admission_only:
                 self._active_worker_tasks[(task.task_id, attempt.attempt_id)] = asyncio.current_task()
@@ -8736,9 +8753,9 @@ class WorkBoardDispatcher:
         if capability_id == "work.document-compare.v1":
             from src.work_board.document_compare_native import job_id, JOB_KIND
             return job_id(task,attempt),task.owner_principal_id,JOB_KIND,None,binding_key
-        if capability_id == "work.json-format.v1":
-            from src.work_board.tool_package_native import job_id
-            return job_id(task,attempt),task.owner_principal_id,"local_json_format",None,binding_key
+        if is_tool_package(capability_id):
+            from src.work_board.tool_package_native import job_id, native_kind
+            return job_id(task,attempt),task.owner_principal_id,native_kind(task),None,binding_key
         if capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
             from src.work_board.pipeline_cpu import job_id
             return job_id(task, attempt), task.owner_principal_id, capability_id, None, binding_key
@@ -8867,7 +8884,7 @@ class WorkBoardDispatcher:
         if capability_id == "work.document-compare.v1":
             from src.work_board.document_compare_native import immutable_inputs
             return _safe_digest(immutable_inputs(task,inputs))
-        if capability_id == "work.json-format.v1":
+        if is_tool_package(capability_id):
             from src.work_board.tool_package_native import immutable_inputs
             return _safe_digest(immutable_inputs(task,inputs))
         if capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
@@ -8995,7 +9012,7 @@ class WorkBoardDispatcher:
         *,
         procedure_binding: ProcedureChildBinding | None = None,
     ) -> dict[str, Any]:
-        if task.capability_id == "work.document-compare.v1":
+        if task.capability_id == "work.document-compare.v1" or is_tool_package(task.capability_id):
             if not isinstance(projection, Mapping):
                 raise DurableJobIdempotencyConflict("document expiry snapshot requires canonical admission")
             return WorkBoardDispatcher._canonical_identity_from_projection(task, attempt, inputs, projection)
@@ -9037,6 +9054,8 @@ class WorkBoardDispatcher:
         """Return the version used by the existing capability service."""
 
         capability = _text(task.capability_id)
+        if is_tool_package(capability):
+            return "1"
         return {
             "guardian.research-watch.v1": "1",
             "engineering.repo-change.v1": "engineering.repo-change.v1",
@@ -9056,7 +9075,7 @@ class WorkBoardDispatcher:
     ) -> str:
         if task.capability_id == "work.document-compare.v1":
             raise DurableJobIdempotencyConflict("document expiry snapshot requires canonical admission")
-        if task.capability_id == "work.json-format.v1":
+        if is_tool_package(task.capability_id):
             from src.work_board.tool_package_native import authority_for
             return _safe_digest(authority_for(task,attempt,inputs))
         if task.capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
@@ -9146,7 +9165,7 @@ class WorkBoardDispatcher:
     ) -> str:
         if task.capability_id == "work.document-compare.v1":
             raise DurableJobIdempotencyConflict("document expiry snapshot requires canonical admission")
-        if task.capability_id == "work.json-format.v1":
+        if is_tool_package(task.capability_id):
             from src.work_board.tool_package_native import spec_for
             return spec_for(task,attempt,inputs,deadline=_now()).run_fingerprint
         if task.capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
@@ -9244,7 +9263,16 @@ class WorkBoardDispatcher:
                 "run_fingerprint": expected_spec.run_fingerprint}
             if expected_spec.deadline_at != original_deadline or digests != expected_digests:
                 raise DurableJobIdempotencyConflict("document original execution window or admission digest changed")
-        elif task.capability_id in {"work.json-format.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+        elif is_tool_package(task.capability_id):
+            from src.work_board.tool_package_native import spec_for
+            original_deadline=_utc_datetime(datetime.fromisoformat(str(projection.get("deadline_at"))))
+            expected_spec=spec_for(task,attempt,inputs,deadline=original_deadline,
+                expiry_facts=authority.get("execution_expiries"))
+            if (expected_spec.deadline_at!=original_deadline or digests!={
+                "input_digest":WorkBoardDispatcher._direct_input_digest(task,attempt,inputs),
+                "authority_digest":_safe_digest(expected_spec.declared_authority),"run_fingerprint":expected_spec.run_fingerprint}):
+                raise DurableJobIdempotencyConflict("tool package original execution window or admission digest changed")
+        elif task.capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
             expected_digests = {
                 "input_digest": WorkBoardDispatcher._direct_input_digest(task, attempt, inputs),
                 "authority_digest": WorkBoardDispatcher._direct_authority_digest(task, attempt, inputs),

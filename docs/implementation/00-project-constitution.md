@@ -90,6 +90,7 @@ The following architecture decisions are normative:
 17. [ADR-017: Private bounded document comparison](./decisions/017-private-bounded-document-comparison.md)
 18. [ADR-018: Fixed Moltbook private browser read](./decisions/018-fixed-moltbook-private-browser-read.md)
 19. [ADR-019: Exact owned-calendar reschedule](./decisions/019-exact-calendar-reschedule.md)
+20. [ADR-020: Reviewed authored capability packages](./decisions/020-reviewed-authored-capability-packages.md)
 21. [ADR-021: Exact Forgejo issue title transaction](./decisions/021-exact-forgejo-issue-title.md)
 
 Changing a locked decision requires a superseding ADR, a tracked issue, an

@@ -3844,6 +3844,8 @@ async def _control_typed_workflow_run(
         raise HTTPException(status_code=409, detail=goal_detail)
     if run.get("job_kind") == "document_invoice_compare_v1" and action != "audit":
         raise HTTPException(status_code=409, detail="document_original_attempt_required")
+    if run.get("job_kind") in {"local_json_format", "local_authored_json"} and action != "audit":
+        raise HTTPException(status_code=409, detail="tool_package_original_attempt_required")
     lease = run.get("lease") if isinstance(run.get("lease"), dict) else {}
     lease_owner = str(lease.get("owner") or "").strip() or None
     try:

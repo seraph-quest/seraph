@@ -19,6 +19,7 @@ import { TaskApprovalReview } from "./TaskApprovalReview";
 import { ArtifactPipelineReview } from "./ArtifactPipelineReview";
 import { ResearchDossierPanel } from "./ResearchDossierPanel";
 import { JsonFormatterPanel } from "./JsonFormatterPanel";
+import { isAuthoredCapability } from "../../lib/toolPackage";
 import { DocumentComparisonPanel } from "./DocumentComparisonPanel";
 import { TaskEffectRecovery } from "./TaskEffectRecovery";
 import { TaskEvidencePanel } from "./TaskEvidencePanel";
@@ -849,6 +850,7 @@ function WorkBoardPanel({
   const [browserTaskOpen, setBrowserTaskOpen] = useState(Boolean(pendingBrowserAtMount));
   const [researchOpen, setResearchOpen] = useState(false);
   const [formatterOpen, setFormatterOpen] = useState(false);
+  const [authoredPackageOpen, setAuthoredPackageOpen] = useState(false);
   const [documentOpen, setDocumentOpen] = useState(false);
   const [browserTaskReceipt, setBrowserTaskReceipt] = useState<BrowserTaskSubmissionReceipt | null>(null);
   const [calendarPrepOpen, setCalendarPrepOpen] = useState(Boolean(pendingCalendarAtMount));
@@ -3158,6 +3160,7 @@ function WorkBoardPanel({
             Research dossier
           </button>
           <button type="button" className="cockpit-feedback-button" onClick={() => setFormatterOpen(true)}>Isolated JSON formatter</button>
+          <button type="button" className="cockpit-feedback-button" onClick={() => setAuthoredPackageOpen(true)}>Reviewed authored package</button>
           <button type="button" className="cockpit-feedback-button" onClick={() => setDocumentOpen(true)}>Private invoice comparison</button>
           <button type="button" className="cockpit-feedback-button" onClick={() => { setCalendarPrepReceipt(null); setCalendarPrepOpen(true); }}>
             Calendar meeting prep
@@ -3323,7 +3326,7 @@ function WorkBoardPanel({
       )}
 
       {selectedTask && createPortal(
-        <aside hidden={createOpen || browserTaskOpen || researchOpen || formatterOpen || calendarPrepOpen || repoRepairOpen} ref={taskDetailPanelRef} role="region" aria-label={`Task details for ${selectedTask.title}`} tabIndex={-1} className="fixed inset-y-0 right-0 z-[190] h-full w-full max-w-2xl overflow-y-auto border-l border-white/15 bg-slate-950 p-4 text-slate-100 shadow-2xl">
+        <aside hidden={createOpen || browserTaskOpen || researchOpen || formatterOpen || authoredPackageOpen || calendarPrepOpen || repoRepairOpen} ref={taskDetailPanelRef} role="region" aria-label={`Task details for ${selectedTask.title}`} tabIndex={-1} className="fixed inset-y-0 right-0 z-[190] h-full w-full max-w-2xl overflow-y-auto border-l border-white/15 bg-slate-950 p-4 text-slate-100 shadow-2xl">
             <div className="sticky top-0 z-10 -mx-4 -mt-4 mb-4 flex flex-wrap items-center justify-between gap-2 border-b border-white/10 bg-slate-950/95 px-4 py-3 backdrop-blur">
               <div className="min-w-0 flex-1 break-words">
                 <div className="text-[10px] uppercase tracking-wide opacity-70">{STATUS_LABELS[selectedTask.status]} · revision {selectedTask.task_revision}</div>
@@ -4100,8 +4103,8 @@ function WorkBoardPanel({
                 </div>
               </section>
 
-              {selectedTask.capability_id === "work.document-compare.v1" ? <section aria-label="Document comparison memory policy" className="mt-3 text-xs">
-                This private comparison has an explicit no_learning policy. Its native receipt and verified report record that result; no memory proposal is created.
+              {selectedTask.capability_id === "work.document-compare.v1" || selectedTask.capability_id === "work.json-format.v1" || isAuthoredCapability(selectedTask.capability_id??"") ? <section aria-label="Private native memory policy" className="mt-3 text-xs">
+                This private native capability has an explicit no_learning policy. Its native receipt and verified output record that result; no memory proposal is created.
               </section> : <WorkBoardMemoryReview
                 task={selectedTask}
                 ownerPrincipalId={ownerPrincipalId}
@@ -4113,7 +4116,7 @@ function WorkBoardPanel({
                 onChanged={async () => { await refreshSnapshot(); }} />}
               {selectedTask.capability_id === "work.document-compare.v1" && <DocumentComparisonPanel
                 ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} task={selectedTask} />}
-              {selectedTask.capability_id === "work.json-format.v1" && <JsonFormatterPanel
+              {(selectedTask.capability_id === "work.json-format.v1" || isAuthoredCapability(selectedTask.capability_id??"")) && <JsonFormatterPanel
                 key={`formatter-inspector:${ownerPrincipalId}:${ownerSessionId}:${selectedTask.task_id}`}
                 task={selectedTask} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
                 onChanged={async () => { await refreshSnapshot(); }} />}
@@ -4228,6 +4231,11 @@ function WorkBoardPanel({
         goals={allGoals} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
         onClose={() => setFormatterOpen(false)} onCreated={async (task) => {
           setFormatterOpen(false);await refreshSnapshot();if (!stoppedRef.current) openTask(task.task_id);
+        }} />}
+      {authoredPackageOpen && <JsonFormatterPanel authored key={`${ownerPrincipalId}:${ownerSessionId}:authored-create`}
+        goals={allGoals} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
+        onClose={() => setAuthoredPackageOpen(false)} onCreated={async (task) => {
+          setAuthoredPackageOpen(false);await refreshSnapshot();if (!stoppedRef.current) openTask(task.task_id);
         }} />}
       {documentOpen && <DocumentComparisonPanel key={`${ownerPrincipalId}:${ownerSessionId}:document-create`}
         goals={allGoals} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}

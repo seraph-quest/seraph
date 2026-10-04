@@ -28,7 +28,8 @@ def private_write(root: Path, name: str, raw: bytes):
 
 
 def prepare(stage: Path, runtime_root: Path, *, raw: bytes, job_id: str, fence: int,
-            deadline: datetime, preflight: bool = False, _attack_package: bytes | None = None):
+            deadline: datetime, preflight: bool = False, _attack_package: bytes | None = None,
+            reviewed_adapter=None):
     """Only an internal OS-proof call may select adversarial package bytes.
 
     Production native admission never accepts this argument or a source path.
@@ -36,7 +37,12 @@ def prepare(stage: Path, runtime_root: Path, *, raw: bytes, job_id: str, fence: 
     """
     from src.execution.repo_sandbox import _open_trusted_directory
     metadata = inspect_runtime(runtime_root)
-    if not preflight and _attack_package is None:
+    if reviewed_adapter is not None:
+        from src.extensions.authored_adapter import AuthoredAdapter
+        if type(reviewed_adapter) is not AuthoredAdapter or preflight or _attack_package is not None:
+            raise ToolPackageBlocked("tool_package_reviewed_adapter_invalid")
+        reviewed_adapter.input(raw)
+    elif not preflight and _attack_package is None:
         expected_output(raw)
     remaining = deadline.astimezone(timezone.utc).timestamp()-time.time()
     if not 0 < remaining <= MAX_SECONDS:
@@ -48,7 +54,8 @@ def prepare(stage: Path, runtime_root: Path, *, raw: bytes, job_id: str, fence: 
     os.close(descriptor)
     output = stage/"out"
     output.mkdir(mode=0o700)
-    package = source_package().read_bytes() if _attack_package is None else _attack_package
+    package = (reviewed_adapter.code if reviewed_adapter is not None else
+        source_package().read_bytes() if _attack_package is None else _attack_package)
     if len(package) > 32768 or len(raw) > 32768:
         raise ToolPackageBlocked("tool_package_staging_limit")
     token = secrets.token_hex(32)
@@ -60,7 +67,7 @@ def prepare(stage: Path, runtime_root: Path, *, raw: bytes, job_id: str, fence: 
     private_write(stage, "input.json", raw)
     private_write(output, "result.json", b"")
     private_write(stage, "request.json", canonical(request))
-    return request, metadata
+    return request, {**metadata, "package_sha256": digest(package)}
 
 
 async def execute(stage: Path, request: dict, *, before_dispatch):

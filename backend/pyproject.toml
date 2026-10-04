@@ -29,6 +29,8 @@ dependencies = [
     # Phase 3 — The Observer
     "apscheduler>=3.11.0,<4.0.0",
     "Pillow>=11.0.0",
+    # Fixed optional deterministic document parser (ADR-017)
+    "pypdf==6.19.0",
     # Phase 3.5 — Context Window
     "tiktoken>=0.8",
     # Vault

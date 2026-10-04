@@ -534,12 +534,22 @@ class ForgejoNative:
             else:lane.quarantine(job_id)
 
     async def cancel(self, owner, job_id, *, expected_revision, fencing_token):
+        request={"expected_revision":expected_revision,"fencing_token":fencing_token}
+        projected=await self.snapshot(owner,job_id)
+        previous=projected["forgejo"].get("cancel_request")
+        if previous is not None:
+            if previous!=request:raise ForgejoError("forgejo_cancel_request_changed")
+            return projected  # Historical exact retry; never a new grant.
         async def guard(db,run):
-            await self.current(db,owner,run)
             value=journal(run)
+            unstarted=(run.status=="accepted" and not value["calls"] and "execution_request" not in value
+                and run.attempt_count==0 and run.lease_owner is None and run.lease_expires_at is None)
+            # Expiry never frees a job. This explicit cancellation proves the
+            # exact canonical unstarted state under all current READ guards.
+            await self.current(db,owner,run,read_only=unstarted)
             if run.revision!=expected_revision or run.fencing_token!=fencing_token:
                 raise ForgejoError("forgejo_cancel_revision_changed")
-            value["cancel_requested"]=True;save(run,value);db.add(run)
+            value.update(cancel_requested=True,cancel_request=request);save(run,value);db.add(run)
         # Running cancellation first persists its exact request, then the
         # directly owned task is cancelled and proves resource cleanup.
         async with engine.get_session() as db:

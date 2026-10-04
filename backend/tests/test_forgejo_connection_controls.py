@@ -14,10 +14,17 @@ from src.vault.repository import vault_repository
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["configure_revoke", "vault_stage_drift", "root_replaced"])
+@pytest.mark.parametrize("mode", ["configure_revoke", "vault_stage_drift", "root_replaced", "expired_unstarted", "expired_started"])
 async def test_actual_auth_vault_connection_cas_without_provider_contact(accounting_db, monkeypatch, mode):
     from src.api import auth, forgejo, goals
     from src.integrations import forgejo_controls
+    if mode.startswith("expired_"):
+        from src.browser.forgejo_profile import ForgejoTitleBrowser
+        class DeniedTransport(httpx.AsyncBaseTransport):
+            async def handle_async_request(self,request):
+                raise AssertionError("negative fixture forbids every provider contact")
+        service=forgejo_controls.ForgejoService(browser=ForgejoTitleBrowser(local_transport=DeniedTransport(),resolver=lambda h,p:["1.1.1.1"]))
+        monkeypatch.setattr(forgejo,"forgejo_service",service)
     root, db_engine, factory = accounting_db
     os.chmod(root, 0o700)
     monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", False)
@@ -67,7 +74,44 @@ async def test_actual_auth_vault_connection_cas_without_provider_contact(account
         monkeypatch.setattr(vault_repository, "snapshot", staged)
         saved = await client.put("/api/capabilities/forgejo/connection",
                                  json={"vault_key": "forgejo-input", "expected_revision": 0})
-        if mode != "configure_revoke":
+        if mode.startswith("expired_"):
+            assert saved.status_code==200,saved.text
+            assert (await client.put("/api/capabilities/forgejo/connection/read-consent",json={
+                "expected_revision":1,"duration_seconds":900,"read_ack":True})).status_code==200
+            import uuid
+            prepared=await client.post("/api/capabilities/forgejo/jobs",json={"operation":"provision","fields":{},
+                "request_key":str(uuid.uuid4()),"goal_id":goal.json()["id"],"goal_revision":goal.json()["revision"],"expected_revision":1})
+            assert prepared.status_code==200,prepared.text
+            bound=prepared.json()
+            if mode=="expired_started":
+                with pytest.raises(AssertionError,match="negative fixture forbids"):
+                    await client.post("/api/capabilities/forgejo/jobs/"+bound["job_id"]+"/execute",json={
+                        "expected_revision":bound["revision"],"fencing_token":bound["lease"]["fencing_token"]})
+                bound=(await client.get("/api/capabilities/forgejo/jobs/"+bound["job_id"])).json()
+                assert bound["status"]=="unknown_external_effect" and bound["attempt_count"]==1
+            # Declared expiry test boundary: shorten this actual admitted job's
+            # deadline only. Never extend authority or insert a success proof.
+            from datetime import datetime,timedelta,timezone
+            from sqlmodel import select
+            from src.db.models import WorkflowRunState
+            async with factory.accounting_sessions() as db:
+                run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==bound["job_id"]))
+                run.deadline_at=datetime.now(timezone.utc)-timedelta(seconds=1);db.add(run)
+            before=(await client.get("/api/capabilities/forgejo/jobs/"+bound["job_id"])).json()
+            body={"expected_revision":before["revision"],"fencing_token":before["lease"]["fencing_token"]}
+            cancelled=await client.post("/api/capabilities/forgejo/jobs/"+bound["job_id"]+"/cancel",json=body)
+            if mode=="expired_unstarted":
+                assert cancelled.status_code==200,cancelled.text
+                assert cancelled.json()["status"]=="cancelled" and cancelled.json()["forgejo"]["calls"]==[]
+                assert cancelled.json()["forgejo"]["capacity_closed"]
+                replay=await client.post("/api/capabilities/forgejo/jobs/"+bound["job_id"]+"/cancel",json=body)
+                assert replay.status_code==200 and replay.json()==cancelled.json()
+            else:
+                assert cancelled.status_code==409,cancelled.text
+                assert (await client.get("/api/capabilities/forgejo/jobs/"+bound["job_id"])).json()==before
+            (root/(mode+"-receipt.json")).write_text(json.dumps({"boundary":"actual Root/Goal/Vault/admission; job deadline shortened for expiry negative only; no provider contact or success proof","before":before,"status":cancelled.status_code,"after":cancelled.json()},indent=2))
+            os.chmod(root/(mode+"-receipt.json"),0o600)
+        elif mode != "configure_revoke":
             assert saved.status_code in {403, 409}, saved.text
             assert (await client.get("/api/capabilities/forgejo/connection")).json()["configured"] is False
         else:

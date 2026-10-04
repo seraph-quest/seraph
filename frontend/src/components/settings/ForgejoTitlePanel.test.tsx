@@ -8,7 +8,8 @@ const connection = { configured: true, connection_id: "fixed", revision: 1, stat
   provider_user_id: 1, provider_login: "fixture", read_consent_revision: 1,
   read_consent_expires_at: new Date(Date.now() + 600000).toISOString(), available: true, no_learning: true };
 const job = { job_id: id, revision: 12, status: "unknown_external_effect", deadline_at: "2026-10-04T01:00:00Z",
-  goal_id: "goal", owner_principal_id: "owner", operator_session_id: "root", lease: { fencing_token: 1 },
+  attempt_count: 1,
+  goal_id: "goal", owner: { kind: "user", principal_id: "owner" }, operator_session_id: "root", lease: { fencing_token: 1 },
   declared_authority: { operation: "title" }, approval: null, forgejo: { phase: "unknown", capacity_closed: false } };
 const response = (value: unknown) => Promise.resolve(new Response(JSON.stringify(value), { status: 200 }));
 function metadata(url: unknown) {
@@ -43,6 +44,34 @@ describe("fixed Forgejo title controls", () => {
     view.rerender(<ForgejoTitlePanel ownerPrincipalId="owner" ownerSessionId="other" />);
     await waitFor(() => expect((screen.getByLabelText("Acknowledge Forgejo finite private reads") as HTMLInputElement).checked).toBe(false));
     expect(fetch.mock.calls.every(([, init]) => !(init as RequestInit | undefined)?.method)).toBe(true);
+  });
+  it("rejects a genuine canonical-shaped job whose owner differs from the current Root", async () => {
+    sessionStorage.setItem(scope + ".job", id);
+    const fetch = vi.fn((url: unknown, _init?: RequestInit) => response(String(url).includes("/jobs/")
+      ? { ...job, owner: { kind: "user", principal_id: "another-owner" } } : metadata(url)));
+    vi.stubGlobal("fetch", fetch);
+    render(<ForgejoTitlePanel ownerPrincipalId="owner" ownerSessionId="root" />);
+    await screen.findByText(/Forgejo job belongs to another Root/);
+    expect(screen.queryByLabelText("Original Forgejo job")).toBeNull();
+    expect(fetch.mock.calls.every(([, init]) => !(init as RequestInit | undefined)?.method)).toBe(true);
+  });
+  it("retains the expired execution packet until explicit canonical unstarted cancellation succeeds", async () => {
+    const original = { method: "POST", path: `/jobs/${id}/execute`, body: { expected_revision: 12, fencing_token: 1 } };
+    sessionStorage.setItem(scope + ".pending", JSON.stringify(original)); sessionStorage.setItem(scope + ".job", id);
+    let finish: (value: Response) => void = () => undefined;
+    const fetch = vi.fn((url: unknown, init?: RequestInit) => {
+      if (String(url).endsWith("/cancel") && init?.method === "POST") return new Promise<Response>(resolve => { finish = resolve; });
+      return response(String(url).includes("/jobs/") ? { ...job, status: "accepted", attempt_count: 0, forgejo: { phase: "prepared" } } : metadata(url));
+    }); vi.stubGlobal("fetch", fetch);
+    render(<ForgejoTitlePanel ownerPrincipalId="owner" ownerSessionId="root" />);
+    await screen.findByLabelText("Original Forgejo job");
+    fireEvent.click(screen.getByRole("button", { name: "Cancel original job" }));
+    await waitFor(() => expect(sessionStorage.getItem(scope + ".cancel-pending")).not.toBeNull());
+    expect(JSON.parse(sessionStorage.getItem(scope + ".pending")!)).toEqual(original);
+    finish(new Response(JSON.stringify({ ...job, status: "cancelled", attempt_count: 0, forgejo: { phase: "cancelled", capacity_closed: true } }), { status: 200 }));
+    await waitFor(() => expect(sessionStorage.getItem(scope + ".pending")).toBeNull());
+    expect(sessionStorage.getItem(scope + ".cancel-pending")).toBeNull();
+    expect(fetch.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
   });
   it("retains exact body on a lost response, reload does not POST, and only explicit retry repeats the same request", async () => {
     const bodies: string[] = [];

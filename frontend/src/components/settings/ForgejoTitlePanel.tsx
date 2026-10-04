@@ -9,7 +9,8 @@ type Connection = { configured: boolean; connection_id: string | null; revision:
   provider_user_id: number | null; provider_login: string; read_consent_revision: number;
   read_consent_expires_at: string | null; available: boolean; no_learning: true };
 type Job = { job_id: string; revision: number; status: string; deadline_at: string; goal_id: string;
-  owner_principal_id: string; operator_session_id: string; lease: { fencing_token: number };
+  attempt_count: number;
+  owner: { kind: string; principal_id: string }; operator_session_id: string; lease: { fencing_token: number };
   declared_authority: { operation: string }; approval: { id: string; status: string } | null;
   forgejo: { phase: string; plaintext_digest?: string; capacity_closed?: boolean;
     execution_request?: { expected_revision: number; fencing_token: number } } };
@@ -104,7 +105,7 @@ export function ForgejoTitlePanel({ ownerPrincipalId, ownerSessionId }: {
 
   function acceptJob(value: Job, current: number) {
     if (current !== generation.current || !scope) return;
-    if (!jobPattern.test(value.job_id) || value.owner_principal_id !== ownerPrincipalId
+    if (!jobPattern.test(value.job_id) || value.owner?.kind !== "user" || value.owner.principal_id !== ownerPrincipalId
       || value.operator_session_id !== ownerSessionId) throw Error("Forgejo job belongs to another Root");
     sessionStorage.setItem(scope + ".job", value.job_id);
     setJob(value); setOutput(null);
@@ -116,7 +117,8 @@ export function ForgejoTitlePanel({ ownerPrincipalId, ownerSessionId }: {
     setLoadedScope(null); setConnection(null); setJob(null); setOutput(null); setPending(null); setError(null); setBusy(false);
     setGoals([]); setKeys([]); setGoalId(""); setVaultKey(""); setReadAck(false); setExactAck(false); setRecoveryAck(false);
     if (!scope) return () => abort.abort();
-    try { setPending(pendingValue(sessionStorage.getItem(scope + ".pending"))); }
+    try { setPending(pendingValue(sessionStorage.getItem(scope + ".cancel-pending"))
+      ?? pendingValue(sessionStorage.getItem(scope + ".pending"))); }
     catch (failure) { setError(String(failure)); return () => abort.abort(); }
     const timer = window.setTimeout(() => abort.abort(), 15000);
     void Promise.all([request("/connection", {}, abort.signal),
@@ -149,8 +151,10 @@ export function ForgejoTitlePanel({ ownerPrincipalId, ownerSessionId }: {
     const command = next ?? pending;
     if (!command) return;
     const raw = JSON.stringify(command); pendingValue(raw);
-    sessionStorage.setItem(scope + ".pending", raw);
-    if (sessionStorage.getItem(scope + ".pending") !== raw) throw Error("Exact request retention failed");
+    const cancelling = command.path.endsWith("/cancel");
+    const storageKey = scope + (cancelling ? ".cancel-pending" : ".pending");
+    sessionStorage.setItem(storageKey, raw);
+    if (sessionStorage.getItem(storageKey) !== raw) throw Error("Exact request retention failed");
     setPending(command); setBusy(true); setError(null);
     const current = generation.current;
     try {
@@ -159,7 +163,9 @@ export function ForgejoTitlePanel({ ownerPrincipalId, ownerSessionId }: {
       if (current !== generation.current) return;
       if (value.job_id) acceptJob(value, current);
       else setConnection(value as Connection);
-      sessionStorage.removeItem(scope + ".pending"); setPending(null);
+      sessionStorage.removeItem(storageKey);
+      if (cancelling && value.status === "cancelled") sessionStorage.removeItem(scope + ".pending");
+      setPending(null);
     } catch (failure) { if (current === generation.current) setError(String(failure)); }
     finally { if (current === generation.current) setBusy(false); }
   }
@@ -195,6 +201,9 @@ export function ForgejoTitlePanel({ ownerPrincipalId, ownerSessionId }: {
       goal_revision: selectedGoal?.revision, expected_revision: connection?.revision, ...extras } });
   const target = output?.target;
   const approvedTarget = target && job?.declared_authority.operation === "preview" && output?.no_change !== true;
+  const pendingUnstartedExecution = !!job && job.status === "accepted" && job.attempt_count === 0
+    && !job.forgejo.execution_request && pending?.path === `/jobs/${job.job_id}/execute`
+    && pending.body.expected_revision === job.revision && pending.body.fencing_token === job.lease.fencing_token;
   return <section aria-label="Forgejo issue title transaction" className="space-y-3">
     <h3>Forgejo issue title</h3>
     <p>One ordinary issue title, reviewed literally before one Save. No payment, generated actions or learning.</p>
@@ -218,7 +227,7 @@ export function ForgejoTitlePanel({ ownerPrincipalId, ownerSessionId }: {
     <button disabled={!ready || connection?.state !== "active" || !repositoryOwner || !repository || !title} onClick={() => prepare("preview", { owner: repositoryOwner, repository, issue_index: Number(issueIndex), new_title: title })}>Prepare title preview job</button>
     {job && <div aria-label="Original Forgejo job"><p>{job.job_id} · {job.status} · {job.forgejo.phase} · no_learning</p><p>Original deadline: {job.deadline_at}</p>
       <button disabled={busy || !!pending || job.status !== "accepted" || (job.declared_authority.operation === "title" && job.approval?.status !== "approved")} onClick={() => void act({ method: "POST", path: `/jobs/${job.job_id}/execute`, body: { expected_revision: job.revision, fencing_token: job.lease.fencing_token } })}>Run original job once</button>
-      <button disabled={busy || !!pending || !["accepted", "running"].includes(job.status)} onClick={() => void act({ method: "POST", path: `/jobs/${job.job_id}/cancel`, body: { expected_revision: job.revision, fencing_token: job.lease.fencing_token } })}>Cancel original job</button>
+      <button disabled={busy || (!!pending && !pendingUnstartedExecution) || !["accepted", "running"].includes(job.status)} onClick={() => void act({ method: "POST", path: `/jobs/${job.job_id}/cancel`, body: { expected_revision: job.revision, fencing_token: job.lease.fencing_token } })}>Cancel original job</button>
       <button disabled={busy || job.status !== "succeeded"} onClick={() => void readOutput()}>Read protected receipt</button>
       {job.approval && <><p>Exact title approval: {job.approval.status}</p><label><input aria-label="Acknowledge exact Forgejo title edit" type="checkbox" checked={exactAck} onChange={event => setExactAck(event.target.checked)} />Approve the saved preview’s exact title, numeric issue and one original Save, with the disclosed race and history effects.</label><button disabled={busy || !!pending || !exactAck || job.approval.status !== "pending"} onClick={() => void act({ method: "POST", path: `/jobs/${job.job_id}/approve`, body: { approval_id: job.approval?.id, decision: "approved", exact_ack: true } })}>Approve exact title edit</button></>}
       {job.status === "unknown_external_effect" && <><p>Original title effect is Unknown. Capacity remains reserved; equality cannot prove who made the edit.</p><label><input aria-label="Acknowledge Forgejo read-only recovery" type="checkbox" checked={recoveryAck} onChange={event => setRecoveryAck(event.target.checked)} />Allow a separate bounded GET-only observation; do not repeat Save.</label><button disabled={busy || !!pending || !recoveryAck || !connection?.available} onClick={() => void act({ method: "POST", path: `/jobs/${job.job_id}/read-only-recovery`, body: { expected_revision: connection?.revision, original_job_revision: job.revision, original_fencing_token: job.lease.fencing_token, request_key: crypto.randomUUID(), read_ack: true } })}>Prepare read-only recovery</button></>}

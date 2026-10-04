@@ -443,6 +443,12 @@ outcomes with current Helpful feedback and no current Harmful feedback can
 produce a proposal. Corrections append an exact predecessor-bound decision;
 failed, unreviewed, stale, and unresolved members remain visible and cannot
 become successful votes. Insufficient evidence returns `no_learning`.
+Feedback is enabled only after the current attempt ends. A decision binds the
+exact task revision, latest ended attempt ID, and fence; later changes retain
+the full history but make the old decision ineffective. The Library labels
+stale historical feedback separately, and a new explicit correction requires
+the historical tip and a reason. Historical replay cannot restore eligibility;
+stale feedback records `feedback_outcome_stale` and `no_learning`.
 
 The Library runs the provider-free `memory.procedure-recommendation.v1`
 capability through the existing routine API and durable native job runtime.

@@ -9,6 +9,10 @@ export interface ProcedureOutcome {
   attempt_fence?: number | null;
   feedback: "helpful" | "harmful" | null;
   feedback_event_id: number | null;
+  feedback_allowed?: boolean;
+  feedback_current?: boolean;
+  feedback_history_label?: "helpful" | "harmful" | null;
+  feedback_history_count?: number;
   verified?: boolean;
   reason_code?: string;
 }

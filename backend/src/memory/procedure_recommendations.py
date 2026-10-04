@@ -194,7 +194,9 @@ async def canonical_procedure_membership(db, scope: ProcedureScope) -> dict[str,
             or metadata.get("task_id") != event.task_id or not event.mutation_request_digest):
             raise BoardError("procedure_feedback_invalid", "The canonical feedback chain no longer matches this exact procedure")
         chain.append({"event_id": event.event_id, "request_digest": event.mutation_request_digest,
-            "supersedes_event_id": expected, "label": metadata["label"], "metadata_digest": digest(metadata)})
+            "supersedes_event_id": expected, "label": metadata["label"], "metadata_digest": digest(metadata),
+            "task_revision": metadata.get("task_revision"), "attempt_id": metadata.get("attempt_id"),
+            "attempt_fence": metadata.get("attempt_fence")})
     def job_token(row):
         fields = _fields(row, ("run_identity", "revision", "fencing_token", "status", "job_kind", "input_digest", "authority_digest", "parent_job_id", "parent_fencing_token", "result_digest"))
         if fields is not None:
@@ -226,6 +228,11 @@ async def canonical_procedure_membership(db, scope: ProcedureScope) -> dict[str,
             WorkBoardAttempt.task_id == leaf_task.task_id).order_by(
             WorkBoardAttempt.created_at.desc(), WorkBoardAttempt.attempt_id.desc()).limit(1))).scalar_one_or_none() if leaf_task else None
         chain = feedback[task.task_id]
+        tip = chain[-1] if chain else None
+        feedback_allowed = bool(attempt and attempt.ended_at and attempt.outcome
+            and _value(task.status) in {"done", "blocked", "archived"})
+        tip_current = bool(tip and feedback_allowed and tip["task_revision"] == task.task_revision
+            and tip["attempt_id"] == attempt.attempt_id and tip["attempt_fence"] == attempt.fencing_token)
         members.append({"task": _fields(task, ("task_id", "task_revision", "status", "capability_id", "typed_input_digest", "input_artifact_id", "idempotency_payload_digest")),
             "input": _fields(artifact, ("artifact_id", "revision", "metadata_digest", "payload_sha256", "state", "bound_task_id", "bound_task_revision")),
             "attempt": _fields(attempt, ("attempt_id", "fencing_token", "outcome", "workflow_run_id", "ended_at")),
@@ -233,7 +240,8 @@ async def canonical_procedure_membership(db, scope: ProcedureScope) -> dict[str,
             "leaf_task": _fields(leaf_task, ("task_id", "task_revision", "status", "owner_principal_id", "owner_session_id", "goal_id", "goal_revision", "capability_id", "input_artifact_id", "typed_input_digest")),
             "leaf_attempt": _fields(leaf_attempt, ("attempt_id", "task_id", "fencing_token", "outcome", "workflow_run_id", "ended_at", "task_revision_at_claim")),
             "leaf_input": _fields(leaf_input, ("artifact_id", "revision", "metadata_digest", "payload_sha256", "state", "bound_task_id", "bound_task_revision")),
-            "feedback_count": len(chain), "feedback_tip": chain[-1] if chain else None, "feedback_digest": digest(chain)})
+            "feedback_count": len(chain), "feedback_tip": tip, "effective_feedback_tip": tip if tip_current else None,
+            "feedback_allowed": feedback_allowed, "feedback_digest": digest(chain)})
     version_row = await db.get(GuardianRoutineVersion, scope.version_id, populate_existing=True)
     provenance = bounded_json(version_row.source_provenance_json, {}) if version_row else {}
     source_refs = provenance.get("source_refs")
@@ -286,6 +294,8 @@ async def record_procedure_feedback(db, operator: AuthenticatedOperator, *, rout
     if member is None or member["task"]["task_revision"] != request.expected_task_revision:
         raise BoardError("procedure_task_stale", "The exact matching invocation changed")
     attempt = member["attempt"]
+    if not member["feedback_allowed"]:
+        raise BoardError("procedure_feedback_outcome_pending", "Feedback requires the current ended invocation attempt and outcome")
     if ((attempt["attempt_id"] if attempt else None) != request.expected_attempt_id
         or (attempt["fencing_token"] if attempt else None) != request.expected_attempt_fence):
         raise BoardError("procedure_attempt_stale", "The latest invocation attempt changed")
@@ -365,9 +375,10 @@ class PreparedProcedureBundle:
         helpful = sum(item["verified"] and item["feedback"] == "helpful" for item in outcomes)
         harmful = sum(item["feedback"] == "harmful" for item in outcomes)
         pending = any(item["unresolved"] for item in outcomes)
-        reason = ("procedure_outcome_unresolved" if pending else "harmful_feedback" if harmful
+        stale_feedback = any(item.get("feedback_history_label") and not item.get("feedback_current") for item in outcomes)
+        reason = ("procedure_outcome_unresolved" if pending else "feedback_outcome_stale" if stale_feedback else "harmful_feedback" if harmful
             else "insufficient_helpful_outcomes" if helpful < 2 else "reviewed_outcomes_support_preference")
-        return {"schema": PROPOSAL_SCHEMA, "status": "blocked" if pending else "proposed" if helpful >= 2 and not harmful else "no_learning",
+        return {"schema": PROPOSAL_SCHEMA, "status": "blocked" if pending else "proposed" if helpful >= 2 and not harmful and not stale_feedback else "no_learning",
             "reason_code": reason, "scope": asdict(self.scope), "outcomes": outcomes,
             "included_count": len(outcomes), "helpful_count": helpful, "harmful_count": harmful,
             "membership_digest": bounded_json(self.membership_json)["membership_digest"],
@@ -497,13 +508,16 @@ async def stage_procedure_bundle(operator: AuthenticatedOperator, *, routine_id:
                 if proof is None:
                     raise BoardError("procedure_leaf_readback_missing", "Native browser output/readback/cleanup proof is unavailable")
                 verified = True
-            tip = member["feedback_tip"]
+            tip = member["effective_feedback_tip"]
+            history_tip = member["feedback_tip"]
             outcomes.append({"task_id": task_id, "task_revision": task.task_revision, "status": _value(task.status),
                 "attempt_id": attempt.attempt_id if attempt else None, "verified": verified, "unresolved": unresolved,
-                "feedback": tip["label"] if tip else None, "feedback_event_id": tip["event_id"] if tip else None,
+                "feedback": tip["label"] if tip else None, "feedback_event_id": history_tip["event_id"] if history_tip else None,
+                "feedback_current": tip is not None, "feedback_history_label": history_tip["label"] if history_tip else None,
+                "feedback_history_count": member["feedback_count"], "feedback_allowed": member["feedback_allowed"],
                 "readback_id": proof.get("readback_id") if proof else None,
                 "artifact_digest": proof.get("artifact_sha256") if proof else None,
-                "reason_code": "native_verified" if verified else "outcome_not_verified"})
+                "reason_code": "feedback_outcome_stale" if history_tip and not tip else "native_verified" if verified else "outcome_not_verified"})
     async with db_engine.get_session() as db:
         current_scope = await resolve_scope(db, operator, routine_id=routine_id, version=version,
             routine_revision=routine_revision, goal_id=goal_id, goal_revision=goal_revision)

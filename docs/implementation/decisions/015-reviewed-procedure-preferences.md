@@ -26,6 +26,14 @@ parent and fixed browser leaf readbacks and current explicit Helpful feedback.
 Any current Harmful feedback vetoes the preference. Feedback corrections append
 a replacement Helpful/Harmful decision with a reason and exact current event
 CAS; execution, negative outcomes and earlier feedback remain immutable history.
+New feedback requires the current ended invocation attempt and outcome. Its
+decision applies only to the exact current task revision, latest attempt ID,
+and fence. A later revision or attempt leaves the complete feedback chain
+visible but ineffective and records `feedback_outcome_stale`/`no_learning` until
+an explicit current-outcome correction names the historical tip and supplies a
+reason. An exact historical request replay writes nothing and does not regrant
+eligibility. The Library disables feedback before an attempt ends and separates
+historical feedback from the current decision.
 Failed, blocked, cancelled, unverified, stale and unreviewed outcomes are shown
 and never count as positive votes. Any running or unresolved invocation blocks
 recommendation and adoption. Insufficient evidence records `no_learning`.

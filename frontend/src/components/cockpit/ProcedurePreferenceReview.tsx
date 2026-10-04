@@ -123,9 +123,11 @@ export function ProcedurePreferenceReview({ ownerPrincipalId, ownerSessionId, sc
     {disclosure ? <div role="status"><p>{disclosure.manual_disclosure}</p><p>{disclosure.quality_disclosure}</p><p>Included manual invocations: {disclosure.included_count}</p></div> : null}
     <ul>{outcomes.map((outcome) => <li key={outcome.task_id} className="mt-2">
       <span className="font-mono">{outcome.task_id}</span> · {outcome.status} · feedback {outcome.feedback ?? "unreviewed"}
-      <button type="button" disabled={busy || Boolean(bound?.pending) || Boolean(outcome.feedback) && !reason.trim()}
+      {outcome.feedback_history_label && !outcome.feedback_current ? <span> · historical {outcome.feedback_history_label} is stale for the current outcome; a new explicit decision is required</span> : null}
+      {!outcome.feedback_allowed ? <span> · feedback unavailable until the current attempt has ended</span> : null}
+      <button type="button" disabled={busy || Boolean(bound?.pending) || !outcome.feedback_allowed || Boolean(outcome.feedback_event_id) && !reason.trim()}
         onClick={() => void send({ kind: "feedback", outcome, label: "helpful", reason, mutationUuid: crypto.randomUUID() })}>Helpful</button>
-      <button type="button" disabled={busy || Boolean(bound?.pending) || Boolean(outcome.feedback) && !reason.trim()}
+      <button type="button" disabled={busy || Boolean(bound?.pending) || !outcome.feedback_allowed || Boolean(outcome.feedback_event_id) && !reason.trim()}
         onClick={() => void send({ kind: "feedback", outcome, label: "harmful", reason, mutationUuid: crypto.randomUUID() })}>Harmful</button>
     </li>)}</ul>
     <label>Feedback correction or rollback reason<input aria-label="Procedure feedback reason" value={reason} maxLength={500} disabled={busy} onChange={(event) => setReason(event.currentTarget.value)} /></label>

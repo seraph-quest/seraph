@@ -8,7 +8,8 @@ const scope: ProcedurePreferenceScope = { routineId: "routine", version: 1, rout
 const manual = "Only matching manual invocations are counted. Governed scheduled invocations are excluded.";
 const quality = "This deterministic preference is not a measured quality improvement.";
 const outcomes = [1, 2].map((number) => ({ task_id: `manual-${number}`, task_revision: 5, status: "done", attempt_id: `attempt-${number}`,
-  attempt_fence: 1, feedback: "helpful" as const, feedback_event_id: number, verified: true }));
+  attempt_fence: 1, feedback: "helpful" as const, feedback_event_id: number, verified: true,
+  feedback_allowed: true, feedback_current: true, feedback_history_label: "helpful" as const, feedback_history_count: 1 }));
 const review: Review = { proposal_id: "proposal", owner_principal_id: "owner", owner_session_id: "root", revision: 1,
   status: "proposed", preview_text: "Suggest reviewed version 1, selection only.", preview_text_digest: "a".repeat(64),
   bundle_digest: "b".repeat(64), included_count: 2, outcomes, manual_disclosure: manual, quality_disclosure: quality };
@@ -127,6 +128,27 @@ describe("explicit procedure preference review", () => {
     expect(screen.getByText(/manual-1/).closest("li")).toHaveTextContent("feedback harmful");
     expect(screen.queryByLabelText("Adopted Library suggestion")).not.toBeInTheDocument();
     expect(procedurePreferences.recommend).toHaveBeenCalledTimes(1);
+    expect(procedurePreferences.act).not.toHaveBeenCalled();
+  });
+
+  it("disables feedback for unattempted and nonterminal outcomes and requires a reason to replace a stale historical vote", async () => {
+    vi.mocked(procedurePreferences.outcomes).mockResolvedValue({ included_count: 3, manual_disclosure: manual, quality_disclosure: quality,
+      outcomes: [{ ...outcomes[0], task_id: "unattempted", attempt_id: null, attempt_fence: null, status: "todo", feedback: null,
+        feedback_event_id: null, feedback_allowed: false, feedback_current: false, feedback_history_label: null },
+        { ...outcomes[0], task_id: "running", status: "running", feedback_allowed: false },
+        { ...outcomes[1], task_revision: 6, feedback: null, feedback_current: false, reason_code: "feedback_outcome_stale" }] });
+    render(<ProcedurePreferenceReview {...props} />);
+    await screen.findByText("Included manual invocations: 3");
+    expect(screen.getAllByRole("button", { name: "Helpful" }).every(button => button.hasAttribute("disabled"))).toBe(true);
+    expect(screen.getByText(/historical helpful is stale for the current outcome/)).toBeVisible();
+    expect(procedurePreferences.feedback).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByRole("textbox", { name: "Procedure feedback reason" }), { target: { value: "Reviewed the changed current outcome" } });
+    const helpful = screen.getAllByRole("button", { name: "Helpful" });
+    expect(helpful[0]).toBeDisabled(); expect(helpful[1]).toBeDisabled(); expect(helpful[2]).toBeEnabled();
+    await act(async () => { fireEvent.click(helpful[2]); });
+    expect(procedurePreferences.feedback).toHaveBeenCalledWith(scope, expect.objectContaining({
+      task_revision: 6, attempt_id: "attempt-2", attempt_fence: 1, feedback_event_id: 2,
+    }), "helpful", "Reviewed the changed current outcome", expect.any(String));
     expect(procedurePreferences.act).not.toHaveBeenCalled();
   });
 });

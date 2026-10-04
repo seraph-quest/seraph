@@ -27,7 +27,7 @@ from tests.test_procedure_v2_native_vertical import _activate_v2_routine, _seed_
 pytestmark = [pytest.mark.asyncio, pytest.mark.parametrize("async_db", ["file"], indirect=True)]
 
 
-@pytest.mark.parametrize("barrier", ["normal", "writer_io", "feedback", "phantom", "root_revoked", "root_expired", "goal_changed", "input_changed", "readback_changed", "finalization_phantom", "package_paused", "cancel", "selection_phantom"])
+@pytest.mark.parametrize("barrier", ["normal", "writer_io", "feedback", "feedback_binding", "phantom", "root_revoked", "root_expired", "goal_changed", "input_changed", "readback_changed", "finalization_phantom", "package_paused", "cancel", "selection_phantom"])
 async def test_two_real_manual_invocations_yield_verified_feedback_bundle(async_db, monkeypatch, tmp_path: Path, barrier):
     from playwright.async_api import async_playwright
     tmp_path.chmod(0o700)
@@ -64,6 +64,17 @@ async def test_two_real_manual_invocations_yield_verified_feedback_bundle(async_
             admitted, status = await routines.invoke_v2(prepared["routine_id"], invocation,
                 owner_principal_id=owner.principal_id, owner_session_id=owner.session_id)
             assert status == 201
+            if barrier == "feedback_binding":
+                async with async_db() as db:
+                    pending = (await db.execute(select(WorkBoardTask).where(WorkBoardTask.task_id == admitted["task_id"]))).scalar_one()
+                    premature = ProcedureFeedbackRequest(version=1, expected_routine_revision=revision,
+                        goal_id=source["goal_id"], expected_goal_revision=1, expected_task_revision=pending.task_revision,
+                        expected_attempt_id=None, expected_attempt_fence=None, label="helpful", mutation_uuid=str(uuid4()))
+                    with pytest.raises(BoardError, match="current ended invocation"):
+                        await record_procedure_feedback(db, operator, routine_id=prepared["routine_id"],
+                            task_id=pending.task_id, request=premature)
+                async with async_db() as db:
+                    assert not (await db.execute(select(WorkBoardEvent).where(WorkBoardEvent.mutation_idempotency_key == premature.mutation_uuid))).scalars().all()
             result = await dispatcher.run_pass()
             assert result["completed"] >= 1, result
             async with async_db() as db:
@@ -126,6 +137,74 @@ async def test_two_real_manual_invocations_yield_verified_feedback_bundle(async_
         action = ProcedurePreferenceActionRequest(action="accept", expected_revision=review["revision"],
             expected_preview_text_digest=review["preview_text_digest"], expected_bundle_digest=review["bundle_digest"],
             acknowledged_selection_only=True, mutation_uuid=str(uuid4()))
+        if barrier == "feedback_binding":
+            from src.work_board.contracts import WorkBoardCommentCreate
+            async def comment_current():
+                async with async_db() as db:
+                    task = (await db.execute(select(WorkBoardTask).where(WorkBoardTask.task_id == task_ids[0]))).scalar_one()
+                    await source["repository"].add_comment(db, owner, task.task_id,
+                        WorkBoardCommentCreate(expected_revision=task.task_revision, body="Explicit operator context correction"))
+            async def correct_current(staged):
+                member = next(item for item in json.loads(staged.membership_json)["members"] if item["task"]["task_id"] == task_ids[0])
+                request = ProcedureFeedbackRequest(version=1, expected_routine_revision=revision,
+                    goal_id=source["goal_id"], expected_goal_revision=1,
+                    expected_task_revision=member["task"]["task_revision"],
+                    expected_attempt_id=member["attempt"]["attempt_id"], expected_attempt_fence=member["attempt"]["fencing_token"],
+                    supersedes_event_id=member["feedback_tip"]["event_id"], label="helpful",
+                    reason="Reviewed the exact current outcome after the operator context correction", mutation_uuid=str(uuid4()))
+                async with async_db() as db:
+                    result = await record_procedure_feedback(db, operator, routine_id=prepared["routine_id"], task_id=task_ids[0], request=request)
+                return request, result
+            async def stage_current():
+                return await stage_procedure_bundle(operator, routine_id=prepared["routine_id"], version=1,
+                    routine_revision=revision, goal_id=source["goal_id"], goal_revision=1)
+            await comment_current()
+            stale = await stage_current()
+            stale_projection = stale.projection()
+            assert stale_projection["status"] == "no_learning" and stale_projection["reason_code"] == "feedback_outcome_stale"
+            assert stale_projection["helpful_count"] == 1
+            item = next(item for item in stale_projection["outcomes"] if item["task_id"] == task_ids[0])
+            assert item["verified"] and item["feedback"] is None and item["feedback_history_label"] == "helpful"
+            with pytest.raises(BoardError):
+                await apply_preference_action(operator, review["proposal_id"], action)
+            async with async_db() as db:
+                assert not (await db.execute(select(Memory))).scalars().all()
+                assert (await db.get(MemoryProposal, review["proposal_id"])).status == "proposed"
+            correction, corrected = await correct_current(stale)
+            eligible = await stage_current()
+            assert eligible.projection()["helpful_count"] == 2 and eligible.projection()["status"] == "proposed"
+            renewed = await prepare_recommendation(operator, prepared["routine_id"], recommendation_request.model_copy(update={"request_uuid": str(uuid4())}))
+            renewed_review = await inspect_preference(operator, renewed["proposal_id"])
+            renewed_action = action.model_copy(update={"expected_revision": renewed_review["revision"],
+                "expected_preview_text_digest": renewed_review["preview_text_digest"], "expected_bundle_digest": renewed_review["bundle_digest"],
+                "mutation_uuid": str(uuid4())})
+            accepted = await apply_preference_action(operator, renewed_review["proposal_id"], renewed_action)
+            assert accepted["status"] == "accepted"
+            assert (await current_procedure_preference(operator, routine_id=prepared["routine_id"], version=1,
+                routine_revision=revision, goal_id=source["goal_id"], goal_revision=1))["status"] == "suggested"
+            await comment_current()
+            assert (await current_procedure_preference(operator, routine_id=prepared["routine_id"], version=1,
+                routine_revision=revision, goal_id=source["goal_id"], goal_revision=1))["status"] == "blocked"
+            async with async_db() as db:
+                assert (await record_procedure_feedback(db, operator, routine_id=prepared["routine_id"], task_id=task_ids[0], request=correction))["idempotent_replay"] is True
+            stale_again = await stage_current()
+            assert stale_again.projection()["status"] == "no_learning"
+            final_correction, final_result = await correct_current(stale_again)
+            final_bundle = await stage_current()
+            assert final_bundle.projection()["status"] == "proposed" and final_bundle.projection()["helpful_count"] == 2
+            assert json.loads(final_bundle.membership_json)["feedback_count"] == 4
+            rolled = await apply_preference_action(operator, accepted["proposal_id"], renewed_action.model_copy(update={
+                "action": "rollback", "expected_revision": accepted["revision"], "reason": "Historical preference rollback after exact feedback test", "mutation_uuid": str(uuid4())}))
+            assert rolled["status"] == "rolled_back"
+            path = tmp_path / "native-feedback-binding-receipt.json"
+            path.write_text(json.dumps({"preexecution_feedback_rejected_without_event": True,
+                "stale_proposal_adoption_rejected": True, "accepted_preference_selection_rejected_after_revision_change": True,
+                "historical_exact_replay_did_not_regrant": True, "new_current_correction_restores_eligibility": True,
+                "stale_projection": stale_projection, "final_projection": final_bundle.projection(),
+                "membership": json.loads(final_bundle.membership_json), "accepted": accepted, "rolled_back": rolled,
+                "boundary": "Genuine native successes and actual Board comment CAS task-revision changes; no invented attempts/success/memory; fixed public HTTP fixture, no quality claim"}, indent=2))
+            path.chmod(0o600)
+            return
         from src.memory import procedure_preferences as preferences
         from src.db import engine as db_engine
         if barrier in {"feedback", "phantom", "root_revoked", "root_expired", "goal_changed", "input_changed", "readback_changed", "package_paused"}:

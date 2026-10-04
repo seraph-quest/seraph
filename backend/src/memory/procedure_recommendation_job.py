@@ -296,8 +296,8 @@ async def prepare_recommendation(operator: AuthenticatedOperator, routine_id: st
                             raise BoardError("procedure_proposal_conflict", "The deterministic proposal identity changed")
                         return
                     membership = bounded_json(bundle.membership_json)
-                    anchor = next(item for item in membership["members"] if item["feedback_tip"]
-                        and item["feedback_tip"]["label"] == "helpful" and any(
+                    anchor = next(item for item in membership["members"] if item["effective_feedback_tip"]
+                        and item["effective_feedback_tip"]["label"] == "helpful" and any(
                             outcome["task_id"] == item["task"]["task_id"] and outcome["verified"] for outcome in output["outcomes"]))
                     text = preview_text(bundle)
                     row = MemoryProposal(proposal_id=proposal_id, schema_version=PROPOSAL_SCHEMA,

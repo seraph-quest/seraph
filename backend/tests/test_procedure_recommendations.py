@@ -18,7 +18,7 @@ from src.auth.service import create_session
 from src.browser.task_runner import BrowserTaskInput, _browser_input_digests
 from src.db.models import (
     Goal, GuardianRoutine, GuardianRoutineVersion, OperatorSession,
-    WorkBoardEvent, WorkBoardInputArtifact, WorkBoardStatus, WorkBoardTask,
+    WorkBoardEvent, WorkBoardInputArtifact, WorkBoardStatus, WorkBoardTask, WorkBoardAttempt,
 )
 from src.memory.procedure_recommendations import (
     FEEDBACK_KIND, ProcedureFeedbackRequest, assert_membership_unchanged,
@@ -76,9 +76,18 @@ async def _task(db, scope, name, *, status=WorkBoardStatus.blocked, scope_overri
     return task
 
 
+async def _ended_task(db, scope, name):
+    task = await _task(db, scope, name)
+    # Terminal failure metadata only: never a verified native receipt.
+    db.add(WorkBoardAttempt(attempt_id=f"attempt-{name}", task_id=name, fencing_token=1,
+        task_revision_at_claim=1, ended_at=datetime.now(timezone.utc), outcome="capability"))
+    await db.flush()
+    return task
+
+
 def _request(**changes):
     return ProcedureFeedbackRequest(version=1, expected_routine_revision=1,
-        goal_id="goal", expected_goal_revision=1, expected_task_revision=1,
+        goal_id="goal", expected_goal_revision=1, expected_task_revision=1, expected_attempt_id="attempt-manual", expected_attempt_fence=1,
         label="helpful", mutation_uuid=str(uuid4()), **changes)
 
 
@@ -122,7 +131,7 @@ async def test_failed_members_count_before_cap_and_scheduled_scope_is_excluded(a
 async def test_feedback_correction_is_append_only_exact_and_idempotent(async_db, monkeypatch):
     operator, scope = await _setup(async_db, monkeypatch)
     async with async_db() as db:
-        await _task(db, scope, "manual")
+        await _ended_task(db, scope, "manual")
     initial = _request()
     async with async_db() as db:
         first = await record_procedure_feedback(db, operator, routine_id="routine", task_id="manual", request=initial)
@@ -152,7 +161,7 @@ async def test_feedback_correction_is_append_only_exact_and_idempotent(async_db,
 async def test_feedback_insert_invalidates_staged_full_membership(async_db, monkeypatch):
     operator, scope = await _setup(async_db, monkeypatch)
     async with async_db() as db:
-        await _task(db, scope, "manual")
+        await _ended_task(db, scope, "manual")
     async with async_db() as db:
         staged = await canonical_procedure_membership(db, scope)
     async with async_db() as db:
@@ -165,7 +174,7 @@ async def test_feedback_insert_invalidates_staged_full_membership(async_db, monk
 async def test_revoked_root_cannot_append_even_exact_prior_feedback(async_db, monkeypatch):
     operator, scope = await _setup(async_db, monkeypatch)
     async with async_db() as db:
-        await _task(db, scope, "manual")
+        await _ended_task(db, scope, "manual")
     request = _request()
     async with async_db() as db:
         await record_procedure_feedback(db, operator, routine_id="routine", task_id="manual", request=request)
@@ -182,7 +191,7 @@ async def test_revoked_root_cannot_append_even_exact_prior_feedback(async_db, mo
 async def test_missing_canonical_input_is_blocking_member_not_filtered(async_db, monkeypatch):
     _, scope = await _setup(async_db, monkeypatch)
     async with async_db() as db:
-        task = await _task(db, scope, "manual")
+        task = await _ended_task(db, scope, "manual")
         task.input_artifact_id = None
         db.add(task)
     async with async_db() as db:
@@ -193,7 +202,7 @@ async def test_missing_canonical_input_is_blocking_member_not_filtered(async_db,
 async def test_pure_writer_inventory_and_feedback_do_not_open_files(async_db, monkeypatch):
     operator, scope = await _setup(async_db, monkeypatch)
     async with async_db() as db:
-        await _task(db, scope, "manual")
+        await _ended_task(db, scope, "manual")
     async with async_db() as db:
         def forbidden(*args, **kwargs):
             raise AssertionError("filesystem access inside canonical writer")
@@ -208,7 +217,7 @@ async def test_full_feedback_history_preserves_exact_replay_and_rejects_overflow
     operator, scope = await _setup(async_db, monkeypatch)
     original = _request()
     async with async_db() as db:
-        await _task(db, scope, "manual")
+        await _ended_task(db, scope, "manual")
     async with async_db() as db:
         result = await record_procedure_feedback(db, operator, routine_id="routine", task_id="manual", request=original)
     # Near-bound canonical metadata fixtures inherit the real first feedback
@@ -268,3 +277,45 @@ async def test_private_proof_and_metadata_bounds_fail_closed(async_db, monkeypat
         read_private_proof("proof.json", sha)
     with pytest.raises(BoardError, match="metadata"):
         bounded_json(canonical({"oversized": "x" * MAX_METADATA_BYTES}))
+
+
+@pytest.mark.parametrize("change", ["latest_attempt", "fence", "unended"])
+async def test_stale_attempt_feedback_is_history_until_explicit_current_correction(async_db, monkeypatch, change):
+    operator, scope = await _setup(async_db, monkeypatch)
+    async with async_db() as db:
+        await _ended_task(db, scope, "manual")
+    original = _request()
+    async with async_db() as db:
+        first = await record_procedure_feedback(db, operator, routine_id="routine", task_id="manual", request=original)
+    async with async_db() as db:
+        if change == "latest_attempt":
+            db.add(WorkBoardAttempt(attempt_id="attempt-next", task_id="manual", fencing_token=2,
+                task_revision_at_claim=1, ended_at=datetime.now(timezone.utc), outcome="capability"))
+        else:
+            attempt = await db.get(WorkBoardAttempt, "attempt-manual")
+            if change == "fence":
+                attempt.fencing_token = 2
+            else:
+                attempt.ended_at = None
+                attempt.outcome = None
+    async with async_db() as db:
+        member = (await canonical_procedure_membership(db, scope))["members"][0]
+        assert member["feedback_tip"]["event_id"] == first["event_id"]
+        assert member["feedback_tip"]["attempt_id"] == "attempt-manual"
+        assert member["feedback_tip"]["attempt_fence"] == 1
+        assert member["effective_feedback_tip"] is None
+        assert (await record_procedure_feedback(db, operator, routine_id="routine", task_id="manual", request=original))["idempotent_replay"] is True
+    correction = original.model_copy(update={"mutation_uuid": str(uuid4()), "supersedes_event_id": first["event_id"],
+        "expected_attempt_id": member["attempt"]["attempt_id"], "expected_attempt_fence": member["attempt"]["fencing_token"],
+        "reason": "Explicitly reviewed this current terminal failure metadata"})
+    async with async_db() as db:
+        if change == "unended":
+            with pytest.raises(BoardError, match="current ended invocation"):
+                await record_procedure_feedback(db, operator, routine_id="routine", task_id="manual", request=correction)
+            return
+        corrected = await record_procedure_feedback(db, operator, routine_id="routine", task_id="manual", request=correction)
+    async with async_db() as db:
+        token = await canonical_procedure_membership(db, scope)
+        assert token["feedback_count"] == 2
+        assert token["members"][0]["effective_feedback_tip"]["event_id"] == corrected["event_id"]
+        assert (await db.get(WorkBoardEvent, first["event_id"])).event_id == first["event_id"]

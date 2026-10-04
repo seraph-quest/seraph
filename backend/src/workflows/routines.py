@@ -10181,8 +10181,12 @@ async def list_procedure_outcomes(routine_id: str, version: int, expected_routin
                 "outcomes": [{"task_id": item["task"]["task_id"], "task_revision": item["task"]["task_revision"],
                     "status": item["task"]["status"], "attempt_id": item["attempt"]["attempt_id"] if item["attempt"] else None,
                     "attempt_fence": item["attempt"]["fencing_token"] if item["attempt"] else None,
-                    "feedback": item["feedback_tip"]["label"] if item["feedback_tip"] else None,
-                    "feedback_event_id": item["feedback_tip"]["event_id"] if item["feedback_tip"] else None}
+                    "feedback": item["effective_feedback_tip"]["label"] if item["effective_feedback_tip"] else None,
+                    "feedback_event_id": item["feedback_tip"]["event_id"] if item["feedback_tip"] else None,
+                    "feedback_current": item["effective_feedback_tip"] is not None,
+                    "feedback_history_label": item["feedback_tip"]["label"] if item["feedback_tip"] else None,
+                    "feedback_history_count": item["feedback_count"], "feedback_allowed": item["feedback_allowed"],
+                    "reason_code": "feedback_outcome_stale" if item["feedback_tip"] and not item["effective_feedback_tip"] else None}
                     for item in token["members"]]}
     except BoardError as exc:
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc

@@ -297,7 +297,6 @@ export function CalendarPrepForm({ goals, onCreated, onClose, onOpenSettings, in
     if (!selectedConnection || selectedConnection.state !== "active") return setError("Choose an active connection.");
     if (!selectedCalendarId || !calendarListRevision || !selectedCalendarIsCurrent) return setError("Verify the connection and choose one calendar from the current returned list.");
     if (!selectedGoal || revision === null) return setError("Choose an owned goal with a current revision.");
-    if (!allowRemoteModel) return setError("Explicitly allow the governed remote model before creating consent.");
     if (!hasRequiredAllowedFields) return setError("Summary, start, and end are required consent fields.");
     if (!expiry || new Date(expiry).getTime() <= Date.now() || new Date(expiry).getTime() > Date.now() + 7 * 24 * 60 * 60 * 1000) return setError("Consent expiry must be in the future and within seven days.");
     if (!Number.isInteger(window) || window < 5 || window > 1440) return setError("The consent window must be between 5 and 1440 minutes.");
@@ -311,7 +310,7 @@ export function CalendarPrepForm({ goals, onCreated, onClose, onOpenSettings, in
       allowed_fields: allowedFields,
       window_minutes: window,
       max_events: events,
-      allow_remote_model: true,
+      allow_remote_model: allowRemoteModel,
       expires_at: expiry,
       idempotency_key: idempotencyKey("calendar-consent"),
     };

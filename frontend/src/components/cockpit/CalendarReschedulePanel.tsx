@@ -72,6 +72,9 @@ export function CalendarReschedulePanel(props: Props) {
   async function accept(result: RescheduleJob, signal: AbortSignal, version: number) {
     if (generation.current !== version) return;
     retain({ kind: result.kind, uuid: result.request_uuid, jobId: result.job_id });
+    if (result.kind === "calendar_reschedule_v1" && result.source_task_id && ownerPrincipalId && ownerSessionId) {
+      sessionStorage.setItem(exact.rescheduleTaskReceiptKey(ownerPrincipalId, ownerSessionId, result.source_task_id), JSON.stringify({ jobId: result.job_id, uuid: result.request_uuid }));
+    }
     // Responses from actions never authorize cached private content.
     setJob({ ...result, preview: undefined });
     if (result.kind === "calendar_reschedule_v1" && result.private_read_available) {

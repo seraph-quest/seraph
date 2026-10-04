@@ -29,6 +29,7 @@ export interface RescheduleJob {
   job_id: string; request_uuid: string; kind: "calendar_reschedule_v1" | "calendar_reschedule_identity_v1" | "calendar_reschedule_observation_v1";
   status: string; revision: number; goal_id: string; goal_revision: number; deadline_at: string;
   source_task_id: string | null; original_job_id: string | null; outcome: string | null;
+  read_connection_id: string; read_connection_revision: number;
   contact_may_have_occurred: boolean; contacts_spent: number; transport_quiescent: boolean;
   cancel_requested: boolean; cancel_request_uuid: string | null; failure_reason: string | null;
   private_read_available: boolean; private_read_reason: string | null;
@@ -82,6 +83,7 @@ export function rescheduleJob(value: unknown): RescheduleJob {
   if (!string(v.job_id) || !string(v.request_uuid) || !["calendar_reschedule_v1", "calendar_reschedule_identity_v1", "calendar_reschedule_observation_v1"].includes(String(v.kind))
     || !string(v.status) || !int(v.revision) || !string(v.goal_id) || !int(v.goal_revision) || !stamp(v.deadline_at)
     || !nullable(v.source_task_id) || !nullable(v.original_job_id) || !nullable(v.outcome) || !nullable(v.failure_reason)
+    || !string(v.read_connection_id) || !int(v.read_connection_revision)
     || !nullable(v.cancel_request_uuid) || !nullable(v.private_read_reason) || !int(v.contacts_spent, 0) || Number(v.contacts_spent) > 13
     || [v.contact_may_have_occurred, v.transport_quiescent, v.cancel_requested, v.private_read_available].some(x => typeof x !== "boolean")
     || v.no_learning !== true || v.model_used !== false || v.effective_route !== "google_calendar_https") invalid();
@@ -127,3 +129,4 @@ export function readReschedule(id: string, signal?: AbortSignal) { return reques
 export function inspectPrivateReschedule(id: string, signal?: AbortSignal) { return request("/operations/" + encodeURIComponent(id) + "/private", rescheduleJob, undefined, signal); }
 export function actReschedule(id: string, action: "decision" | "execute" | "cancel" | "observe", body: unknown, signal?: AbortSignal) { return request("/operations/" + encodeURIComponent(id) + "/" + action, rescheduleJob, body, signal); }
 export function recoverRescheduleOperation(kind: RescheduleJob["kind"], uuid: string, signal?: AbortSignal) { return request("/operations/recovery/" + encodeURIComponent(kind) + "/" + encodeURIComponent(uuid), value => { const v = record(value); if (v.provider_contact !== false) invalid(); return v.job === null ? null : rescheduleJob(v.job); }, undefined, signal); }
+export function rescheduleTaskReceiptKey(principal: string, root: string, task: string) { return `seraph:calendar-reschedule-task:${encodeURIComponent(principal)}:${encodeURIComponent(root)}:${encodeURIComponent(task)}`; }

@@ -394,6 +394,8 @@ async def snapshot(operator, ident, *, include_private=False):
         "deadline_at":utc(run.deadline_at).isoformat(),"goal_id":run.goal_id,"goal_revision":run.goal_revision,
         "request_uuid":run.idempotency_key,"source_task_id":arguments(run).get("source",{}).get("task_id"),
         "original_job_id":arguments(run).get("original_job_id"),"outcome":checkpoint.get("outcome"),
+        "read_connection_id":arguments(run)["connections"][0]["connection_id"],
+        "read_connection_revision":arguments(run)["connections"][0]["revision"],
         "contact_may_have_occurred":checkpoint.get("contact_may_have_occurred",False),
         "contacts_spent":len(checkpoint.get("contacts",[])),"no_learning":True,"model_used":False,
         "effective_route":"google_calendar_https","failure_reason":run.failure_reason,

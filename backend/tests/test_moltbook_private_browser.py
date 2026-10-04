@@ -6,6 +6,7 @@ transport onto this owned TCP fixture. There is no mock browser or success row.
 import asyncio
 import json
 import os
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -17,7 +18,7 @@ from tests.moltbook_requests import execute
 from config.settings import settings
 from src.auth.middleware import OperatorAuthMiddleware
 from src.browser.moltbook_private_read import MoltbookPrivateBrowserReader, parse_document, cited_projection, validate_projection
-from src.db.models import Goal
+from src.db.models import Goal, MoltbookConnection, OperatorSession, WorkflowRunState
 from src.integrations.moltbook import MoltbookAdapter, MoltbookError, canonical, digest
 from src.integrations.moltbook_controls import MoltbookService
 from src.vault.repository import vault_repository
@@ -59,7 +60,9 @@ class LocalTCPTransport(httpx.AsyncBaseTransport):
 
 
 @pytest.mark.asyncio
-async def test_actual_private_home_chromium_owner_job_readback_restart(accounting_db,monkeypatch):
+@pytest.mark.parametrize("mode",["positive","stale_goal","vault_drift","input_drift","revoke","expired_root",
+    "wrong_identity","home_drop","home_redirect","set_cookie","secret_echo","goal_after_home"])
+async def test_actual_private_home_chromium_owner_job_readback_restart(accounting_db,monkeypatch,mode):
     from src.api import auth,goals,moltbook
     root,db_engine,factory = accounting_db
     os.chmod(root,0o700)
@@ -82,14 +85,25 @@ async def test_actual_private_home_chromium_owner_job_readback_restart(accountin
         assert headers["authorization"] == "Bearer "+DUMMY_KEY
         assert method == "GET"
         calls.append(path)
-        if path == "/api/v1/agents/me": value={"success":True,"agent":{"id":AGENT_ID,"name":"FixtureAgent"}}
+        if path == "/api/v1/agents/me":
+            value={"success":True,"agent":{"id":"98858248-baca-47a7-b362-05ae2ab5ccf4" if mode == "wrong_identity" and len(calls)>2 else AGENT_ID,"name":"FixtureAgent"}}
         elif path == "/api/v1/agents/status": value={"status":"claimed"}
         elif path == "/api/v1/home":
             deliveries.append("one_due_briefing")
             value=home_document()
+            if mode == "secret_echo": value["your_account"]["name"] = DUMMY_KEY
+            if mode == "goal_after_home":
+                changed=await client.patch("/api/goals/"+goal["id"],json={"expected_revision":1,"description":"Changed after actual Home contact"})
+                assert changed.status_code == 200,changed.text
         else: raise AssertionError("unapproved fixture route")
         body=canonical(value)
-        writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "+str(len(body)).encode()+b"\r\nConnection: close\r\n\r\n"+body)
+        status=b"302 Found" if mode == "home_redirect" and path == "/api/v1/home" else b"200 OK"
+        extra=b""
+        if path == "/api/v1/home":
+            if mode == "home_redirect": extra=b"Location: http://127.0.0.1/private\r\n"
+            if mode == "set_cookie": extra=b"Set-Cookie: forbidden=fixture-only; HttpOnly\r\n"
+        transmitted=body[:3] if mode == "home_drop" and path == "/api/v1/home" else body
+        writer.write(b"HTTP/1.1 "+status+b"\r\nContent-Type: application/json\r\n"+extra+b"Content-Length: "+str(len(body)).encode()+b"\r\nConnection: close\r\n\r\n"+transmitted)
         await writer.drain(); writer.close(); await writer.wait_closed()
     listener=await asyncio.start_server(server,"127.0.0.1",0)
     port=listener.sockets[0].getsockname()[1]
@@ -137,7 +151,67 @@ async def test_actual_private_home_chromium_owner_job_readback_restart(accountin
             assert prepared.status_code == 200,prepared.text
             job_id=prepared.json()["job_id"]
             assert prepared.json()["job_kind"] == "moltbook_private_home_v1"
+            if mode == "stale_goal":
+                changed=await client.patch("/api/goals/"+goal["id"],json={"expected_revision":1,"description":"Changed before native contact"})
+                assert changed.status_code == 200,changed.text
+            if mode == "vault_drift":
+                # Import copies the source key into the connection's own Vault
+                # row. Rotate that actual authority, not the unrelated input.
+                async with factory.accounting_sessions() as db:
+                    connection=await db.scalar(select(MoltbookConnection).where(MoltbookConnection.owner_principal_id==principal))
+                    connection_key=connection.vault_key
+                await vault_repository.store(connection_key,"moltbook_local_rotated_dummy",owner_principal_id=principal)
+            if mode == "input_drift":
+                authority=prepared.json()["declared_authority"]
+                path=root/"artifacts/moltbook"/(digest(job_id.encode())+".input.enc")
+                path.write_bytes(path.read_bytes()+b"changed")
+            if mode == "revoke":
+                revoked=await client.post("/api/capabilities/moltbook/connection/disable",json={"expected_revision":3})
+                assert revoked.status_code == 200 and revoked.json()["mode"] == "disabled"
+            if mode == "expired_root":
+                async with factory.accounting_sessions() as db:
+                    root_row=await db.scalar(select(OperatorSession).where(OperatorSession.principal_id==principal,
+                        OperatorSession.revoked_at.is_(None)))
+                    root_row.idle_expires_at=datetime.now(timezone.utc)-timedelta(seconds=1)
+                    db.add(root_row)
+                denied=await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/execute",json={"request_key":"expired-execute","expected_phase":"unattempted","fencing_token":0})
+                assert denied.status_code == 401 and len(calls) == 2
+                async with factory.accounting_sessions() as db:
+                    run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==job_id))
+                    assert run.status == "accepted" and run.attempt_count == 0 and json.loads(run.artifact_receipts_json) == []
+                print(json.dumps({"mode":mode,"job_id":job_id,"new_contacts":0,"outcome":"Root expired; no invocation","workspace":str(root)}))
+                return
             completed=await execute(client,job_id)
+            if mode != "positive":
+                assert completed.status_code in {403,409},completed.text
+                original=await client.get(f"/api/capabilities/moltbook/jobs/{job_id}")
+                assert original.status_code == 200,original.text
+                actual=original.json()
+                assert actual["artifacts"] == [] and actual["no_learning"] is True
+                connection_now=await client.get("/api/capabilities/moltbook/connection")
+                if mode in {"stale_goal","vault_drift","input_drift","revoke"}:
+                    assert len(calls) == 2 and deliveries == []
+                    assert actual["attempt_count"] == 0
+                elif mode == "wrong_identity":
+                    assert calls[2:] == ["/api/v1/agents/me"] and deliveries == []
+                    assert actual["status"] == "blocked" and connection_now.json()["active_job_id"] is None
+                else:
+                    assert calls[2:] == ["/api/v1/agents/me","/api/v1/home"] and len(deliveries) == 1
+                    assert actual["status"] != "succeeded"
+                    if mode in {"home_drop","home_redirect","goal_after_home"}:
+                        assert connection_now.json()["active_job_id"] == job_id
+                    if mode in {"home_drop","home_redirect"}:
+                        assert actual["status"] == "unknown_external_effect"
+                        count=len(calls)
+                        await db_engine.dispose()
+                        recovery=await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/recover")
+                        assert recovery.status_code == 409
+                        no_replay=await client.post(f"/api/capabilities/moltbook/jobs/{job_id}/execute",json={"request_key":"new-execute","expected_phase":"unattempted","fencing_token":actual["lease"]["fencing_token"]})
+                        assert no_replay.status_code == 409 and len(calls) == count
+                print(json.dumps({"mode":mode,"job_id":job_id,"actual_tcp_calls":calls,"home_deliveries":len(deliveries),
+                    "status":actual["status"],"no_learning":True,"reservation":connection_now.json().get("active_job_id"),
+                    "checkpoints":actual["checkpoints"],"workspace":str(root)}))
+                return
             assert completed.status_code == 200,completed.text
             assert completed.json()["status"] == "succeeded",completed.text
             assert calls[2:] == ["/api/v1/agents/me","/api/v1/home","/api/v1/agents/me"]

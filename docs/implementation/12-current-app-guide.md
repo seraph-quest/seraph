@@ -1398,6 +1398,26 @@ crash-proof execution.
 
 ## Failure And Recovery
 
+### Fixed private Moltbook browser read target
+
+[ADR-018](./decisions/018-fixed-moltbook-private-browser-read.md) accepts one
+optional private Home document read through actual isolated Chromium and the
+existing owner connection. This branch-local target is **Planned**, not Shipped
+truth. Production Home is blocked until separately authorized effect, identity
+linkage and account/site acceptance evidence exists; existing registration keys
+and claim material are outside local validation.
+
+The separately unchecked finite consent names account summary and own-post
+activity fields and explains that the complete Home response is fetched while
+role/unrelated instructions are discarded. Home may deliver/consume a due
+briefing and produce access bookkeeping; it is not side-effect-free and grants
+no role invocation, heartbeat, notification mark-read or business mutation.
+The fixed native job allows one Home contact and two identity checks, no redirect,
+refresh or replay after possible contact, with private field citations and
+explicit no_learning. Unknown contact/cleanup remains visible and reserved until
+positive exact settlement. Local acceptance requires an actual authenticated
+local TCP site and real Chromium; those receipts cannot waive production gates.
+
 ### Optional Moltbook adapter target
 
 The branch-local `work.moltbook.v1` adapter uses **Settings → Moltbook** and

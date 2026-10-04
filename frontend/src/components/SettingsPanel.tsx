@@ -13,6 +13,7 @@ import { SourceWatchPanel } from "./settings/SourceWatchPanel";
 import { ArtifactStoragePanel } from "./settings/ArtifactStoragePanel";
 import { CalendarConnectionPanel } from "./settings/CalendarConnectionPanel";
 import { CalendarRescheduleProfiles } from "./settings/CalendarRescheduleProfiles";
+import { SelectedContextPairing } from "./settings/SelectedContextPairing";
 import { GitHubConnectionPanel } from "./settings/GitHubConnectionPanel";
 import { MoltbookConnectionPanel } from "./settings/MoltbookConnectionPanel";
 import { ForgejoTitlePanel } from "./settings/ForgejoTitlePanel";
@@ -738,6 +739,7 @@ export function SettingsPanel() {
           {activeSection === "general" && <InterruptionModeToggle />}
 
           {activeSection === "native" && <DaemonStatus />}
+          {activeSection === "native" && <SelectedContextPairing ownerPrincipalId={operatorAuth?.session.principal_id} ownerSessionId={operatorAuth?.session.session_id}/>}
 
           {activeSection === "repo-sandbox" && <RepoSandboxPanel />}
 

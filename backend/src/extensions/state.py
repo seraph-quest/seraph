@@ -8,6 +8,8 @@ import fcntl
 import os
 import re
 import tempfile
+import stat
+from contextlib import contextmanager
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any
@@ -225,6 +227,39 @@ def _state_revision(payload: Mapping[str, Any]) -> int:
     return revision
 
 
+class ExtensionStateBusy(RuntimeError):
+    """Visible immediate contention; callers must not automatically retry."""
+    code = "extension_state_busy"
+
+
+@contextmanager
+def held_extension_state_lock(*, shared: bool):
+    """Nonblocking lock on the existing state inode, always outside SQL.
+
+    Both reader staging and every publication use this one lock. A synchronous
+    exclusive waiter cannot block an event loop holding an async shared scope.
+    """
+    path = state_path()
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    descriptor = os.open(path + ".lock", os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    acquired = False
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+            raise OSError("extension state lock ownership is unsafe")
+        os.fchmod(descriptor, 0o600)
+        try:
+            fcntl.flock(descriptor, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
+            acquired = True
+        except BlockingIOError as exc:
+            raise ExtensionStateBusy("extension_state_busy") from exc
+        yield
+    finally:
+        if acquired:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
 def save_extension_state_payload(
     payload: dict[str, Any],
     *,
@@ -248,11 +283,7 @@ def save_extension_state_payload(
     # The revision check and replacement must share an inter-process lock. A
     # temporary-file replace alone prevents torn JSON but still lets two
     # writers read the same revision and both report success.
-    lock_path = f"{path}.lock"
-    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-    try:
-        os.fchmod(lock_fd, 0o600)
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    with held_extension_state_lock(shared=False):
         current_revision = 0
         try:
             with open(path, "r", encoding="utf-8") as handle:
@@ -279,9 +310,6 @@ def save_extension_state_payload(
             except FileNotFoundError:
                 pass
         return new_revision
-    finally:
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        os.close(lock_fd)
 
 
 def extension_state_entries(payload: dict[str, Any]) -> dict[str, Any]:

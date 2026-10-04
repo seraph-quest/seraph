@@ -70,6 +70,7 @@ from src.extensions.state import (
     extension_lifecycle_entry,
     extension_quarantine_active,
     extension_state_entries,
+    held_extension_state_lock,
     load_extension_state_payload,
     mark_extension_governance_reviewed,
     save_extension_state_payload,
@@ -3765,7 +3766,10 @@ def remove_extension(extension_id: str) -> None:
                 _restore_extension_tree_from_backup(backup_root, target_root)
                 _restore_optional_file(skill_config_path, skill_config_before)
                 _restore_optional_file(workflow_config_path, workflow_config_before)
-                _restore_optional_file(state_path_snapshot, state_file_before)
+                # Participate in the same nonblocking state-file exclusion as
+                # ordinary saves; never overwrite a staged shared proof.
+                with held_extension_state_lock(shared=False):
+                    _restore_optional_file(state_path_snapshot, state_file_before)
                 _refresh_runtime()
                 skill_manager._disabled = set(skill_disabled_before)
                 workflow_manager._disabled = set(workflow_disabled_before)

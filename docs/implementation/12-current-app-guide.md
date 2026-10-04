@@ -5,6 +5,21 @@ title: Current App Guide
 
 # Current App Guide
 
+The optional selected-text companion target is **Planned** under
+[ADR-022](./decisions/022-portable-selected-text-context.md) and
+[#926](https://github.com/seraph-quest/seraph/issues/926). Its branch implementation
+has an actual Linux Chromium journey: deliberate ordinary-page selection,
+offline deletion-only redaction, exact Task/finite Goal permission and native
+approval, signed send, encrypted private readback and capture-owned discard.
+Settings uses the existing optional device pairing; legacy pairings require
+explicit rotation. The Task inspector lists metadata and performs fresh current
+authority checks for private reads. No screenshot, model analysis or learning
+is created. Missing companions are locally blocked; macOS companion execution
+has not been verified. Each target lasts at most 120 seconds, each text is at
+most 32 KiB, and the owner quota is 64 charged captures / 2 MiB. Unsettled
+physical publication or uncertain cleanup retains its charge and reports
+`blocked_cleanup`; manual retry never renews the original authority or deadline.
+
 Reviewed authored capability packages are **Planned** under
 [ADR-020](./decisions/020-reviewed-authored-capability-packages.md) and
 [#924](https://github.com/seraph-quest/seraph/issues/924). Static author/validate
@@ -1175,6 +1190,21 @@ capture remains a separate implementation fact. Optional paired edges and
 local capture adapters require their own readiness receipts; pairing must not
 implicitly authorize execution or data egress. Task attachments must bypass
 general screenshot observation and automatic analysis.
+
+### Portable selected browser text (#926 branch-local target)
+
+[ADR-022](./decisions/022-portable-selected-text-context.md) accepts one optional
+Chromium companion journey: deliberate ordinary top-frame selection, offline
+preview and deletion-only redaction, signed metadata, exact original Root/Task/
+finite Goal approval, signed matching bytes and encrypted private task readback.
+The existing native job owns its immutable capture identity and irreversible
+discard tombstone; pairing alone grants no execution or analysis. Text remains
+untrusted D1 context with `no_learning` and no automatic model/evidence ingestion.
+The companion's absence or unsupported protected surface is visibly blocked and
+does not prevent either macOS or Linux from hosting the CPU core. Browser privacy
+checks require operator review and cannot guarantee that ordinary prose has no
+secrets. This accepted target is **Planned**; actual Linux companion and macOS
+execution receipts remain separate implementation gates.
 
 ## Memory
 

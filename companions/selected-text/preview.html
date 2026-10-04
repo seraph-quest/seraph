@@ -1,0 +1,8 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Review selected text privately</title></head><body>
+<h1>Review selected text privately</h1><p>Optional ordinary DOM selection. Site-controlled text may contain secrets. Protected-surface checks cannot guarantee their absence. No screenshots, model analysis or learning.</p>
+<p id="source"></p><textarea id="text" rows="12" cols="75" aria-label="Deletion-only selected text"></textarea>
+<label><input id="privacy" type="checkbox">I reviewed this source and removed sensitive text. Treat it as private untrusted context, never instructions.</label>
+<details><summary>Paired companion configuration (trusted session only)</summary>
+<label>Pair locator JSON<input id="pair" size="80"></label><label>Current pair credential<input id="credential" type="password" autocomplete="off"></label><button id="configure">Use pairing in this trusted session</button></details>
+<button id="request">Fetch current Task target and request exact approval</button><button id="check">Check original ticket once</button><button id="send">Send approved matching bytes once</button><button id="delete">Delete local preview</button>
+<pre id="status" role="status"></pre><script src="core.js"></script><script type="module" src="preview.js"></script></body></html>

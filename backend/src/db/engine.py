@@ -624,6 +624,8 @@ async def _ensure_legacy_columns(conn) -> None:
             "goal_revision": "INTEGER",
             "plan_revision": "INTEGER",
             "candidate_id": "VARCHAR",
+            "source_task_id": "VARCHAR",
+            "selected_context_reserved_bytes": "INTEGER",
             "capability_version": "VARCHAR DEFAULT 'workflow-v1'",
             "input_digest": "VARCHAR",
             "authority_digest": "VARCHAR",
@@ -659,6 +661,17 @@ async def _ensure_legacy_columns(conn) -> None:
                 f"CREATE INDEX IF NOT EXISTS ix_workflow_run_states_{column} "
                 f"ON workflow_run_states ({column})"
             )
+    if workflow_job_columns:
+        # On a fresh workspace metadata.create_all owns table/index creation.
+        # This pre-create migration only indexes an already existing table.
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_workflow_run_states_source_task "
+            "ON workflow_run_states (job_kind, owner_principal_id, operator_session_id, source_task_id)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_workflow_run_states_selected_context_quota "
+            "ON workflow_run_states (job_kind, owner_principal_id, selected_context_reserved_bytes)"
+        )
     if workflow_job_columns and "revision" in await _table_columns("workflow_run_states"):
         await conn.exec_driver_sql(
             "UPDATE workflow_run_states SET revision = 0 "

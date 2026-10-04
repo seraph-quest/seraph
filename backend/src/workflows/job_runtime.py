@@ -1785,6 +1785,7 @@ def _serialize(run: WorkflowRunState, *, receipt: dict[str, Any] | None = None) 
         "goal_revision": getattr(run, "goal_revision", None),
         "plan_revision": getattr(run, "plan_revision", None),
         "candidate_id": getattr(run, "candidate_id", None),
+        "source_task_id": getattr(run, "source_task_id", None),
         "status": run.status,
         "priority": int(getattr(run, "priority", 50) or 0),
         "dependencies": _json_load(getattr(run, "dependencies_json", None), []),
@@ -1932,6 +1933,7 @@ class DurableJobSpec:
     goal_revision: int | None = None
     plan_revision: int | None = None
     candidate_id: str | None = None
+    source_task_id: str | None = None
     priority: int = 50
     dependencies: tuple[str, ...] = ()
     resource_claims: tuple[str, ...] = ()
@@ -2309,12 +2311,19 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
 
     async def admit_job(
         self, spec: DurableJobSpec, *, repo_node_posture_expectation: dict[str, Any] | None = None,
+        selected_context_admission=None,
         admission_authority_check: Callable[[Any, Any], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         # Internal server-only copy of actual selected Node preflight facts.
         # A separate method argument cannot be supplied by spec/request
         # serialization and is never persisted as durable authority itself.
         identity = spec.identity
+        if identity.job_kind == "selected_context_v1":
+            from src.workflows.selected_context_runtime import AdmissionProof
+            if not isinstance(selected_context_admission, AdmissionProof) or not spec.source_task_id:
+                raise DurableJobAdmissionDenied("selected_context_proof_required")
+        elif selected_context_admission is not None or spec.source_task_id is not None:
+            raise DurableJobAdmissionDenied("selected_context_proof_unexpected")
         if not spec.declared_authority:
             raise ValueError("declared_authority is required before admission")
         _validate_admission_authority(spec)
@@ -2396,6 +2405,18 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     admission_dependencies = None
             await db.rollback()
             transaction_started = False
+            if selected_context_admission is not None:
+                # The capture identity is independent from mutable Goal/Root/
+                # Task fields. Its exact primary lookup must precede ordinary
+                # Goal-derived dedupe, within this same admission transaction.
+                if dialect_name == "sqlite":
+                    await db.execute(text("BEGIN IMMEDIATE"))
+                    transaction_started = True
+                from src.workflows.selected_context_runtime import guard_admission
+                original = await guard_admission(db, spec, selected_context_admission)
+                if original is not None:
+                    db.expunge(original)
+                    return _deduped_admission(original, binding=original.idempotency_binding)
             if not _text(spec.goal_id) and spec.goal_revision is not None:
                 raise DurableJobTransitionError("goal_revision requires a canonical goal")
             if _text(spec.goal_id):
@@ -2403,7 +2424,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 # write transaction before reading the canonical goal so a
                 # goal update/delete cannot race admission. A row-locking
                 # backend serializes on the canonical goal row instead.
-                if dialect_name == "sqlite":
+                if dialect_name == "sqlite" and not transaction_started:
                     await db.execute(text("BEGIN IMMEDIATE"))
                     transaction_started = True
                 else:
@@ -2664,6 +2685,10 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 branch_depth=branch_depth,
                 run_fingerprint=run_fingerprint,
                 arguments_json=_canonical(safe_inputs),
+                checkpoint_context_json=(_canonical({"schema_version": 1,
+                    "metadata": spec.inputs,
+                    "pair_file_digest": selected_context_admission.pair.state_file_digest})
+                    if selected_context_admission is not None else None),
                 approval_context_json=_canonical(safe_authority),
                 record_schema_version=DURABLE_JOB_RECORD_SCHEMA_VERSION,
                 job_kind=identity.job_kind,
@@ -2674,6 +2699,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 goal_revision=spec.goal_revision,
                 plan_revision=spec.plan_revision,
                 candidate_id=spec.candidate_id,
+                source_task_id=spec.source_task_id,
+                selected_context_reserved_bytes=(spec.inputs["reviewed_byte_count"]
+                    if selected_context_admission is not None else None),
                 capability_version=identity.capability_version,
                 input_digest=input_digest,
                 authority_digest=authority_digest,

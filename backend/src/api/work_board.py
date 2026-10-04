@@ -124,13 +124,14 @@ async def recover_tool_package(request: Request,task_id: str,body: ToolPackageRe
 async def read_tool_package_output(request: Request,task_id: str):
     from fastapi import Response
     from src.work_board.tool_package_control import bound
-    from src.work_board.tool_package_native import verified_output
+    from src.work_board.tool_package_native import private_read_guard
     try:
         async with get_session() as db:
             task,attempt,run=await bound(db,_owner(_operator(request)),task_id)
             if attempt.ended_at is None or task.status not in {WorkBoardStatus.done,WorkBoardStatus.review}:
                 raise BoardError('tool_package_readback_pending','Independent formatter readback is not complete')
-            _artifact,raw=verified_output(task,attempt,run)
+            async with private_read_guard(db,task,attempt,run) as staged:
+                raw=staged.raw
         return Response(content=raw,media_type='text/plain',headers={'X-Content-Type-Options':'nosniff','Cache-Control':'no-store'})
     except BoardError as exc:
         _raise_board_error(exc)

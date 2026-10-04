@@ -13,6 +13,7 @@ type Job = { job_id: string; revision: number; status: string; deadline_at: stri
   owner: { kind: string; principal_id: string }; operator_session_id: string; lease: { fencing_token: number };
   declared_authority: { operation: string }; approval: { id: string; status: string } | null;
   forgejo: { phase: string; plaintext_digest?: string; capacity_closed?: boolean;
+    approval_scope?: { target: Target };
     execution_request?: { expected_revision: number; fencing_token: number } } };
 type Output = { target?: Target; no_change?: boolean; no_learning: true; readback_title?: string;
   observation_only?: boolean; observed_current_title?: string; original_unknown?: boolean;
@@ -108,7 +109,7 @@ export function ForgejoTitlePanel({ ownerPrincipalId, ownerSessionId }: {
     if (!jobPattern.test(value.job_id) || value.owner?.kind !== "user" || value.owner.principal_id !== ownerPrincipalId
       || value.operator_session_id !== ownerSessionId) throw Error("Forgejo job belongs to another Root");
     sessionStorage.setItem(scope + ".job", value.job_id);
-    setJob(value); setOutput(null);
+    setExactAck(false); setRecoveryAck(false); setJob(value); setOutput(null);
   }
 
   useEffect(() => {
@@ -161,8 +162,15 @@ export function ForgejoTitlePanel({ ownerPrincipalId, ownerSessionId }: {
       const value = await request(command.path, { method: command.method,
         headers: { "Content-Type": "application/json" }, body: JSON.stringify(command.body) });
       if (current !== generation.current) return;
+      if (cancelling && value.job_id !== command.path.slice(6, -7)) {
+        throw Error("Original cancellation is not canonically confirmed");
+      }
       if (value.job_id) acceptJob(value, current);
       else setConnection(value as Connection);
+      if (cancelling && value.status !== "cancelled") {
+        setError("Cancellation is not terminally confirmed; read the original state. Exact requests remain retained.");
+        return;
+      }
       sessionStorage.removeItem(storageKey);
       if (cancelling && value.status === "cancelled") sessionStorage.removeItem(scope + ".pending");
       setPending(null);
@@ -199,7 +207,7 @@ export function ForgejoTitlePanel({ ownerPrincipalId, ownerSessionId }: {
   const prepare = (operation: string, fields: Record<string, unknown> = {}, extras = {}) => void act({ method: "POST", path: "/jobs",
     body: { operation, fields, request_key: crypto.randomUUID(), goal_id: goalId,
       goal_revision: selectedGoal?.revision, expected_revision: connection?.revision, ...extras } });
-  const target = output?.target;
+  const target = output?.target ?? job?.forgejo.approval_scope?.target;
   const approvedTarget = target && job?.declared_authority.operation === "preview" && output?.no_change !== true;
   const pendingUnstartedExecution = !!job && job.status === "accepted" && job.attempt_count === 0
     && !job.forgejo.execution_request && pending?.path === `/jobs/${job.job_id}/execute`
@@ -230,7 +238,11 @@ export function ForgejoTitlePanel({ ownerPrincipalId, ownerSessionId }: {
       <button disabled={busy || (!!pending && !pendingUnstartedExecution) || !["accepted", "running"].includes(job.status)} onClick={() => void act({ method: "POST", path: `/jobs/${job.job_id}/cancel`, body: { expected_revision: job.revision, fencing_token: job.lease.fencing_token } })}>Cancel original job</button>
       <button disabled={busy || job.status !== "succeeded"} onClick={() => void readOutput()}>Read protected receipt</button>
       {job.approval && <><p>Exact title approval: {job.approval.status}</p><label><input aria-label="Acknowledge exact Forgejo title edit" type="checkbox" checked={exactAck} onChange={event => setExactAck(event.target.checked)} />Approve the saved preview’s exact title, numeric issue and one original Save, with the disclosed race and history effects.</label><button disabled={busy || !!pending || !exactAck || job.approval.status !== "pending"} onClick={() => void act({ method: "POST", path: `/jobs/${job.job_id}/approve`, body: { approval_id: job.approval?.id, decision: "approved", exact_ack: true } })}>Approve exact title edit</button></>}
-      {job.status === "unknown_external_effect" && <><p>Original title effect is Unknown. Capacity remains reserved; equality cannot prove who made the edit.</p><label><input aria-label="Acknowledge Forgejo read-only recovery" type="checkbox" checked={recoveryAck} onChange={event => setRecoveryAck(event.target.checked)} />Allow a separate bounded GET-only observation; do not repeat Save.</label><button disabled={busy || !!pending || !recoveryAck || !connection?.available} onClick={() => void act({ method: "POST", path: `/jobs/${job.job_id}/read-only-recovery`, body: { expected_revision: connection?.revision, original_job_revision: job.revision, original_fencing_token: job.lease.fencing_token, request_key: crypto.randomUUID(), read_ack: true } })}>Prepare read-only recovery</button></>}
+      {job.status === "unknown_external_effect" && <><p>{job.declared_authority.operation === "title"
+        ? "Original title effect is Unknown. Capacity remains reserved; equality cannot prove who made the edit."
+        : "Original session job outcome is Unknown. Capacity remains reserved; inspect its original history without starting another operation."}</p>
+        {job.declared_authority.operation === "title" && <><label><input aria-label="Acknowledge Forgejo read-only recovery" type="checkbox" checked={recoveryAck} onChange={event => setRecoveryAck(event.target.checked)} />Allow a separate bounded GET-only observation; do not repeat Save.</label><button disabled={busy || !!pending || !recoveryAck || !connection?.available} onClick={() => void act({ method: "POST", path: `/jobs/${job.job_id}/read-only-recovery`, body: { expected_revision: connection?.revision, original_job_revision: job.revision, original_fencing_token: job.lease.fencing_token, request_key: crypto.randomUUID(), read_ack: true } })}>Prepare read-only recovery</button></>}
+      </>}
     </div>}
     {target && <div aria-label="Verified Forgejo title preview"><p>Issue ID {target.issue_id} · repository ID {target.repository_id} · issue #{target.issue_index}</p><pre>Old title: {target.old_title}</pre><pre>Approved title: {target.new_title}</pre><p>Source revision: {target.updated_at}</p><p>{output?.no_change ? "No change: read-only preview" : "Exact saved preview; no atomic provider revision check"}</p><button disabled={!ready || !approvedTarget} onClick={() => prepare("title", {}, { preview_job_id: job?.job_id, preview_digest: job?.forgejo.plaintext_digest })}>Prepare independently approved title job</button></div>}
     {output?.readback_title && <p>Verified readback title: {output.readback_title} · no_learning</p>}

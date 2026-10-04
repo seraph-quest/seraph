@@ -121,4 +121,44 @@ describe("fixed Forgejo title controls", () => {
     expect(screen.getByRole("button", { name: "Prepare independently approved title job" }).hasAttribute("disabled")).toBe(false);
     expect(fetch.mock.calls.every(([, init]) => !(init as RequestInit | undefined)?.method)).toBe(true);
   });
+  it("shows the saved approval target before acknowledgment and resets it after another job is loaded", async () => {
+    sessionStorage.setItem(scope + ".job", id);
+    const target = { owner: "fixture", repository: "owned", repository_id: 9, issue_id: 21, issue_index: 3,
+      old_title: "Original approved source", new_title: "Exact approved destination", updated_at: "fixed", timeline_digest: "b".repeat(64) };
+    let loaded = { ...job, status: "accepted", declared_authority: { operation: "title" },
+      approval: { id: "approval", status: "pending" }, forgejo: { phase: "prepared", approval_scope: { target } } };
+    const fetch = vi.fn((url: unknown, _init?: RequestInit) => response(String(url).includes("/jobs/") ? loaded : metadata(url)));
+    vi.stubGlobal("fetch", fetch);
+    render(<ForgejoTitlePanel ownerPrincipalId="owner" ownerSessionId="root" />);
+    await screen.findByText("Approved title: Exact approved destination");
+    expect(screen.getByText("Old title: Original approved source")).toBeTruthy();
+    fireEvent.click(screen.getByLabelText("Acknowledge exact Forgejo title edit"));
+    loaded = { ...loaded, job_id: "forgejo:" + "b".repeat(40) };
+    fireEvent.click(screen.getByRole("button", { name: "Read current state" }));
+    await waitFor(() => expect((screen.getByLabelText("Acknowledge exact Forgejo title edit") as HTMLInputElement).checked).toBe(false));
+    expect(fetch.mock.calls.every(([, init]) => !init?.method)).toBe(true);
+  });
+  it("does not clear a retained execute packet when cancellation returns another job", async () => {
+    const original = { method: "POST", path: `/jobs/${id}/execute`, body: { expected_revision: 12, fencing_token: 1 } };
+    sessionStorage.setItem(scope + ".pending", JSON.stringify(original)); sessionStorage.setItem(scope + ".job", id);
+    const fetch = vi.fn((url: unknown, init?: RequestInit) => response(String(url).endsWith("/cancel") && init?.method === "POST"
+      ? { ...job, job_id: "forgejo:" + "b".repeat(40), status: "cancelled" }
+      : String(url).includes("/jobs/") ? { ...job, status: "accepted", attempt_count: 0, forgejo: { phase: "prepared" } } : metadata(url)));
+    vi.stubGlobal("fetch", fetch);
+    render(<ForgejoTitlePanel ownerPrincipalId="owner" ownerSessionId="root" />);
+    await screen.findByLabelText("Original Forgejo job");
+    fireEvent.click(screen.getByRole("button", { name: "Cancel original job" }));
+    await screen.findByText(/Original cancellation is not canonically confirmed/);
+    expect(JSON.parse(sessionStorage.getItem(scope + ".pending")!)).toEqual(original);
+    expect(sessionStorage.getItem(scope + ".cancel-pending")).not.toBeNull();
+  });
+  it("keeps a session-job Unknown distinct from title recovery", async () => {
+    sessionStorage.setItem(scope + ".job", id);
+    vi.stubGlobal("fetch", vi.fn((url: unknown) => response(String(url).includes("/jobs/")
+      ? { ...job, declared_authority: { operation: "provision" } } : metadata(url))));
+    render(<ForgejoTitlePanel ownerPrincipalId="owner" ownerSessionId="root" />);
+    await screen.findByText(/Original session job outcome is Unknown/);
+    expect(screen.queryByRole("button", { name: "Prepare read-only recovery" })).toBeNull();
+    expect(screen.queryByText(/Original title effect is Unknown/)).toBeNull();
+  });
 });

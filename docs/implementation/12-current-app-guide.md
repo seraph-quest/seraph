@@ -970,6 +970,16 @@ Gmail usefulness, send operation, and paid model canary remain
 **external-unverified**. See the M7 mail wire contract in issue #890 for the
 exact request, recovery, privacy, and readback boundaries.
 
+### Exact owned-calendar reschedule target
+
+[ADR-019](./decisions/019-exact-calendar-reschedule.md) accepts one literal
+owned-event reschedule through separate exact owned-event/calendar-list identity
+profiles, current owner/source proof, one approved conditional PATCH and strict
+independent readback. Response loss remains Unknown with no resend; a separate
+same-original-Root readonly observation preserves original liabilities. This
+accepted target is **Planned** until the owning implementation and actual
+validation receipts exist; it adds no live Google authorization or Shipped claim.
+
 ### Exact Gmail reply send
 
 **Partial:** The [ADR-016](./decisions/016-exact-gmail-reply-send.md) operator

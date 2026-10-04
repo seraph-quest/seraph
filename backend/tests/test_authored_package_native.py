@@ -58,7 +58,9 @@ async def test_actual_authored_time_ledger_native_reopen_private_read(accounting
         # No new writable mountpoint or runner/profile option is introduced.
         from src.extensions.authored_adapter import canonical,sha256
         original_code=(package_root/"adapter.py").read_bytes()
-        code=b'import json,time\nwith open("/input.json",encoding="utf-8") as source: barrier_input=json.load(source)\nif barrier_input["rows"]:\n with open("/out/result.json","w",encoding="utf-8") as output: json.dump({"barrier":True},output)\n while True:\n  with open("/out/result.json",encoding="utf-8") as output: released=json.load(output)\n  if released.get("barrier") is False: break\n  time.sleep(.01)\n'+original_code
+        # Futex timed lock waits are already permitted by the unchanged
+        # profile. time.sleep/clock_nanosleep is deliberately denied (r9).
+        code=b'import json,_thread\nwaiter=_thread.allocate_lock();waiter.acquire()\nwith open("/input.json",encoding="utf-8") as source: barrier_input=json.load(source)\nif barrier_input["rows"]:\n with open("/out/result.json","w",encoding="utf-8") as output: json.dump({"barrier":True},output)\n while True:\n  with open("/out/result.json",encoding="utf-8") as output: released=json.load(output)\n  if released.get("barrier") is False: break\n  waiter.acquire(timeout=.01)\n'+original_code
         descriptor=json.loads((package_root/"adapters/adapter.json").read_bytes());descriptor["code_sha256"]=sha256(code)
         (package_root/"adapter.py").write_bytes(code);(package_root/"adapters/adapter.json").write_bytes(canonical(descriptor))
     if authored_fixture=="tiny-copy":
@@ -89,7 +91,14 @@ async def test_actual_authored_time_ledger_native_reopen_private_read(accounting
     records={}
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url="http://test",headers={"origin":"http://localhost:3001"}) as client:
         async def post(path,payload):
-            response=await client.post(path,json=payload)
+            for exact_try in range(5):
+                response=await client.post(path,json=payload)
+                if response.status_code!=409 or response.json().get("detail",{}).get("code")!="capability_pack_lifecycle_busy":
+                    break
+                records.setdefault("lifecycle_busy_requests",[]).append({"path":path,"exact_try":exact_try,"response":response.json()})
+                # Only the exact short-lock conflict is retried; no admission,
+                # approval, task or immutable execution window is renewed.
+                await asyncio.sleep(.02)
             records[path]=response.json()
             (root/"actual-authored-api.json").write_text(json.dumps(records,indent=2))
             assert response.status_code==200,(response.status_code,response.text)

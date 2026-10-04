@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from src.api.capabilities import _require_authenticated_capability_operator
 from src.extensions.capability_pack import (
     CapabilityPackLifecycle,
+    CapabilityPackLifecycleBusy,
     CapabilityPackLifecycleError,
     canonical_digest,
 )
@@ -226,6 +227,8 @@ async def review_authored_package(pack_id: str, req: AuthoredReviewRequest, requ
                 goal_id=req.goal_id,goal_revision=req.goal_revision)
         return _store().review(packet["manifest"],root_path=req.root_path,goal_id=req.goal_id,
             reviewed_by=principal_id,authority_expansion_approved=True,goal_revision=req.goal_revision)
+    except CapabilityPackLifecycleBusy as exc:
+        raise _lifecycle_http_error(exc) from exc
     except (OSError,ValueError,KeyError,TypeError):
         raise HTTPException(status_code=409,detail={"code":"authored_package_exact_review_changed"})
 

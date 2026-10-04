@@ -3293,12 +3293,17 @@ class CapabilityPackLifecycle:
             versions = state["versions"].setdefault(pack.id, {})
             existing_version = versions.get(digest)
             if isinstance(existing_version, Mapping):
-                for field_name, expected in {
+                immutable_version_fields = {
                     "version": pack.version,
                     "goal_id": goal_id,
                     "authority_digest": pack.authority_digest,
                     "dependencies_digest": _dependencies_digest(pack),
-                }.items():
+                }
+                if pack.contributes.adapters:
+                    # Authored reviews bind each Goal independently; this record
+                    # holds latest metadata, while original reviews stay immutable.
+                    immutable_version_fields.pop("goal_id")
+                for field_name, expected in immutable_version_fields.items():
                     if existing_version.get(field_name) != expected:
                         raise CapabilityPackLifecycleError(
                             "digest is already bound to a different reviewed version, goal, or authority"
@@ -3322,6 +3327,7 @@ class CapabilityPackLifecycle:
             })
             versions[digest]["root_path"] = _safe_pack_path(root_path)
             if pack.contributes.adapters:
+                versions[digest]["goal_id"]=goal_id
                 versions[digest]["goal_revision"]=goal_revision
                 versions[digest]["review_id"]=review_id
                 versions[digest]["authored_contract"]=authored_contract
@@ -3382,7 +3388,7 @@ class CapabilityPackLifecycle:
             if not self._pointer_binding_valid(state, pack.id, existing):
                 raise CapabilityPackLifecycleError("active pointer binding is invalid")
             previous_digest = str(existing.get("digest") or "") or None
-            if existing.get("goal_id") != goal_id:
+            if existing.get("goal_id") != goal_id and not pack.contributes.adapters:
                 raise CapabilityPackLifecycleError("active pack is bound to a different goal")
             if existing.get("digest") == digest and existing.get("version") == pack.version and existing.get("goal_id") == goal_id and (not pack.contributes.adapters or existing.get("goal_revision")==review["goal_revision"]):
                 idempotent_existing = True
@@ -3432,6 +3438,7 @@ class CapabilityPackLifecycle:
         })
         record["root_path"] = _safe_pack_path(root_path)
         if pack.contributes.adapters:
+            record["goal_id"]=goal_id
             record["goal_revision"]=review["goal_revision"]
             record["review_id"]=review_id
             record["authored_contract"]=review["authored_contract"]

@@ -63,8 +63,11 @@ finite deadline. A queued old version becomes stale after update. An already
 released running job may continue only with its original staged bytes and
 historically approved nonrevoked pin under current original Root/Goal authority;
 this exception never grants a new process or replay. Every code/schema/resource
-change requires a fresh exact version-delta review and approval. Quarantine
-records its digest cause separately from operator revocation/uninstallation.
+change requires a fresh exact version-delta review and approval.
+Same authored bytes may receive a fresh review and approval for a different
+current Goal. Latest version metadata follows that review; an original active
+pointer and released job still validate their own immutable review and Goal.
+Quarantine records its digest cause separately from operator revocation/uninstallation.
 Only fresh reviewed rollback from digest quarantine may select a safe prior
 nonrevoked version; unsafe-version tombstones remain. Uninstall withdraws all
 installed-version authority and reads without erasing history or liabilities.

@@ -113,7 +113,10 @@ async def _prepare_actual_github_task(client, async_db, setup_workspace, monkeyp
     assert packet.dossier_artifact_id and packet.dossier_sha256
     auth = (await client.get("/api/auth/session")).json()
     await vault_repository.store("attention-github", "intercepted-only-not-a-real-token", owner_principal_id=auth["principal_id"])
-    connection = await client.put("/api/capabilities/github/connection", json={"repository": "example/repo", "vault_key": "attention-github", "mode": "active", "expected_revision": 0})
+    # A configured credential and test external grant do not confer connection
+    # consent. Explicitly review only the finite issue-write fixture action.
+    connection = await client.put("/api/capabilities/github/connection", json={"repository": "example/repo", "vault_key": "attention-github", "mode": "active", "expected_revision": 0,
+        "consent": {"acknowledged": True, "duration_seconds": 900, "actions": ["github_issue_write"]}})
     assert connection.status_code == 200, connection.text
     typed = {"schema_version": 1, "capability_id": "work.github-followthrough.v1", "input": {"dossier_artifact_id": packet.dossier_artifact_id, "dossier_sha256": packet.dossier_sha256, "connection_revision": connection.json()["revision"], "action": "create_issue", "title": "Attention verified follow-through", "body": "A bounded source-backed follow-through."}}
     content = json.dumps(typed, sort_keys=True, separators=(",", ":"))
@@ -180,7 +183,9 @@ async def test_actual_approval_unknown_readback_restart_and_owner_denial(client,
     assert owning.status_code == 200 and owning.json()["status"] == "unknown_external_effect"
     fail_readback[0] = False
     before = len(requests)
-    reconciled = await client.post(f"/api/capabilities/github/jobs/{job['job_id']}/reconcile", json={})
+    connection = (await client.get("/api/capabilities/github/connection")).json()
+    reconciled = await client.post(f"/api/capabilities/github/jobs/{job['job_id']}/reconcile", json={
+        "acknowledged_readback": True, "expected_connection_revision": connection["revision"]})
     assert reconciled.status_code == 200, reconciled.text
     assert reconciled.json()["status"] == "succeeded"
     assert reconciled.json()["operation_id"] == owning.json()["operation_id"]

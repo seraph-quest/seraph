@@ -3777,6 +3777,8 @@ async def _load_typed_workflow_run_for_control(
     durable_run = await durable_job_repository.get_job(run_identity)
     if durable_run is None:
         return None
+    if durable_run.get("job_kind") == "forgejo_issue_title_v1":
+        raise HTTPException(status_code=409, detail="forgejo_fixed_private_controls_required")
     run = _canonical_workflow_projection_input(durable_run)
     if not isinstance(run, dict):
         return None
@@ -4960,7 +4962,7 @@ async def _list_workflow_runs(
         typed_runs = await durable_job_repository.list_jobs(limit=limit, session_id=session_id)
     except Exception:
         typed_runs = []
-    durable_runs.extend(typed_runs)
+    durable_runs.extend(run for run in typed_runs if run.get("job_kind") != "forgejo_issue_title_v1")
     completed_by_identity = {
         str(run.get("run_identity") or run.get("id")): run
         for run in completed

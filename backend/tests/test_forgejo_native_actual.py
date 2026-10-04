@@ -24,7 +24,7 @@ class OwnedStream(httpx.AsyncByteStream):
 
 class ActualLoopback(httpx.AsyncBaseTransport):
     """Only logical Host+TLS SNI codeberg maps to the confined local provider."""
-    def __init__(self,port): self.port=port;self.requests=[]
+    def __init__(self,port): self.port=port;self.requests=[];self.lose_title_response=False
     async def handle_async_request(self,request):
         assert request.url.scheme=="https" and request.headers.get("host")=="codeberg.org"
         assert request.extensions.get("sni_hostname") in ("codeberg.org",b"codeberg.org")
@@ -35,6 +35,10 @@ class ActualLoopback(httpx.AsyncBaseTransport):
         try:response=await client.send(mapped,stream=True)
         except BaseException:
             await client.aclose();raise
+        if self.lose_title_response and request.method=="POST" and request.url.path.endswith("/title"):
+            self.lose_title_response=False
+            await response.aread();await response.aclose();await client.aclose()
+            raise httpx.ReadError("deliberately lost committed local title response",request=request)
         return httpx.Response(response.status_code,headers=response.headers,
             stream=OwnedStream(response,client),request=request)
     async def aclose(self):pass
@@ -93,8 +97,9 @@ async def test_actual_signed_provider_auth_vault_native_chrome_title(accounting_
             return response.json()
         provision=await execute(await prepare("provision"))
         assert provision["no_learning"] and len(provision["forgejo"]["calls"])==4
+        new_title="Native summary "+uuid.uuid4().hex[:8]
         preview=await execute(await prepare("preview",fields={"owner":credentials["user_name"],
-            "repository":"fixture925","issue_index":1,"new_title":"Approved native summary"}))
+            "repository":"fixture925","issue_index":1,"new_title":new_title}))
         read=await client.get("/api/capabilities/forgejo/jobs/"+preview["job_id"]+"/output")
         assert read.status_code==200,read.text
         from src.browser.forgejo_issue_title import digest
@@ -102,16 +107,69 @@ async def test_actual_signed_provider_auth_vault_native_chrome_title(accounting_
         approved=await client.post("/api/capabilities/forgejo/jobs/"+title["job_id"]+"/approve",
             json={"approval_id":title["approval"]["id"],"decision":"approved","exact_ack":True})
         assert approved.status_code==200,approved.text
+        execution_body={"expected_revision":approved.json()["revision"],"fencing_token":approved.json()["lease"]["fencing_token"]}
         title=await execute(approved.json())
         assert title["forgejo"]["cleanup"]["status"]=="verified"
         assert len([c for c in title["forgejo"]["calls"] if c["operation"]=="title_submission"])==1
         result=await client.get("/api/capabilities/forgejo/jobs/"+title["job_id"]+"/output")
         assert result.status_code==200,result.text
-        assert result.json()["readback_title"]=="Approved native summary"
+        assert result.json()["readback_title"]==new_title
         assert result.json()["matching_title_event_ids"] and result.json()["no_learning"]
         assert len([v for v in transport.requests if v[0]=="POST" and v[1].endswith("/title")])==1
+        count=len(transport.requests)
+        replay=await client.post("/api/capabilities/forgejo/jobs/"+title["job_id"]+"/execute",json=execution_body)
+        assert replay.status_code==200 and replay.json()["status"]=="succeeded"
+        assert len(transport.requests)==count
+        altered=await client.post("/api/capabilities/forgejo/jobs/"+title["job_id"]+"/execute",
+            json={**execution_body,"expected_revision":execution_body["expected_revision"]+1})
+        assert altered.status_code==409 and len(transport.requests)==count
+        cancelled=await prepare("preview",fields={"owner":credentials["user_name"],"repository":"fixture925",
+            "issue_index":1,"new_title":"Cancelled title"})
+        cancelled_response=await client.post("/api/capabilities/forgejo/jobs/"+cancelled["job_id"]+"/cancel",
+            json={"expected_revision":cancelled["revision"],"fencing_token":cancelled["lease"]["fencing_token"]})
+        assert cancelled_response.status_code==200 and cancelled_response.json()["status"]=="cancelled"
+        assert len(transport.requests)==count
+        loss_title="Lost response "+uuid.uuid4().hex[:8]
+        loss_preview=await execute(await prepare("preview",fields={"owner":credentials["user_name"],
+            "repository":"fixture925","issue_index":1,"new_title":loss_title}))
+        loss_output=await client.get("/api/capabilities/forgejo/jobs/"+loss_preview["job_id"]+"/output")
+        loss=await prepare("title",preview_job_id=loss_preview["job_id"],preview_digest=digest(loss_output.json()))
+        loss_approval=await client.post("/api/capabilities/forgejo/jobs/"+loss["job_id"]+"/approve",
+            json={"approval_id":loss["approval"]["id"],"decision":"approved","exact_ack":True})
+        assert loss_approval.status_code==200
+        loss_body={"expected_revision":loss_approval.json()["revision"],"fencing_token":loss_approval.json()["lease"]["fencing_token"]}
+        transport.lose_title_response=True
+        with pytest.raises(Exception):
+            await client.post("/api/capabilities/forgejo/jobs/"+loss["job_id"]+"/execute",json=loss_body)
+        original_response=await client.get("/api/capabilities/forgejo/jobs/"+loss["job_id"])
+        assert original_response.status_code==200,original_response.text
+        original=original_response.json()
+        assert original["status"]=="unknown_external_effect" and not original["forgejo"]["capacity_closed"]
+        assert original["forgejo"]["cleanup"]["status"]=="verified"
+        post_count=sum(v[0]=="POST" and v[1].endswith("/title") for v in transport.requests)
+        from src.db import engine
+        await engine.close_db()
+        service=ForgejoService(browser=ForgejoTitleBrowser(local_transport=transport,resolver=lambda h,p:["1.1.1.1"]))
+        monkeypatch.setattr(forgejo,"forgejo_service",service)
+        original_again=(await client.get("/api/capabilities/forgejo/jobs/"+loss["job_id"])).json()
+        assert original_again==original
+        replay=await client.post("/api/capabilities/forgejo/jobs/"+loss["job_id"]+"/execute",json=loss_body)
+        assert replay.status_code==200 and replay.json()["status"]=="unknown_external_effect"
+        recovered=await client.post("/api/capabilities/forgejo/jobs/"+loss["job_id"]+"/read-only-recovery",json={
+            "expected_revision":1,"original_job_revision":original["revision"],
+            "original_fencing_token":original["lease"]["fencing_token"],"request_key":str(uuid.uuid4()),"read_ack":True})
+        assert recovered.status_code==200,recovered.text
+        observation=await execute(recovered.json())
+        observed=await client.get("/api/capabilities/forgejo/jobs/"+observation["job_id"]+"/output")
+        assert observed.status_code==200,observed.text
+        assert observed.json()["observed_current_title"]==loss_title
+        assert observed.json()["original_unknown"] and not observed.json()["original_capacity_released"]
+        assert (await client.get("/api/capabilities/forgejo/jobs/"+loss["job_id"])).json()==original
+        assert sum(v[0]=="POST" and v[1].endswith("/title") for v in transport.requests)==post_count==2
         # Retained receipt contains only canonical nonsecret fields, never
         # response headers/auth cookies, Vault values or full provider HTML.
         (root/"actual-native-receipt.json").write_text(json.dumps({"goal":goal,
-            "provision":provision,"preview":preview,"title":title,"output":result.json()},indent=2))
+            "provision":provision,"preview":preview,"title":title,"output":result.json(),
+            "lost_response_original":original,"observation":observation,"observation_output":observed.json(),
+            "title_posts":post_count},indent=2))
         os.chmod(root/"actual-native-receipt.json",0o600)

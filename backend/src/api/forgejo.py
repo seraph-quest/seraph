@@ -114,6 +114,17 @@ async def inspect_job(request: Request, job_id: str):
     return await response(forgejo_service.native.snapshot(owner(request),job_id))
 
 
+@router.get("/requests/{request_key}")
+async def inspect_request(request: Request, request_key: str):
+    import uuid
+    from src.browser.forgejo_issue_title import digest
+    try:uuid.UUID(request_key)
+    except (ValueError,TypeError):raise HTTPException(422,detail={"code":"forgejo_request_uuid_required"}) from None
+    bound=owner(request)
+    job_id="forgejo:"+digest([bound.principal_id,bound.session_id,request_key])[:40]
+    return await response(forgejo_service.native.snapshot(bound,job_id))
+
+
 @router.get("/jobs/{job_id}/output")
 async def output(request: Request, job_id: str):
     return await response(forgejo_service.native.output(owner(request),job_id))

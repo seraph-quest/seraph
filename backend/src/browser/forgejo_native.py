@@ -341,6 +341,13 @@ class ForgejoNative:
     async def execute(self, owner, job_id, *, expected_revision, fencing_token):
         self.service.browser.require_available()
         projected=await self.snapshot(owner,job_id)
+        execution_request={"expected_revision":expected_revision,"fencing_token":fencing_token}
+        previous=projected["forgejo"].get("execution_request")
+        if previous is not None:
+            if previous!=execution_request:raise ForgejoError("forgejo_original_execution_request_changed")
+            # Exact historical request retry is an inspection, even after
+            # response loss/restart. It never claims, contacts or resumes.
+            return projected
         if (projected["status"]!="accepted" or projected["revision"]!=expected_revision
             or projected["lease"]["fencing_token"]!=fencing_token):
             raise ForgejoError("forgejo_original_execution_not_replayable")
@@ -368,7 +375,14 @@ class ForgejoNative:
         lease=None;cleanup={"status":"verified","browser_closed":True,"launch_attempted":False,
             "transport":{"status":"verified","requests_started":0,"requests_settled":0}};task=asyncio.current_task()
         try:
-            queued=await self.jobs.queue_job(job_id,expected_revision=expected_revision)
+            async with engine.get_session() as db:
+                await writer(db);run=await self.jobs._fetch(db,job_id);await self.current(db,owner,run)
+                value=journal(run)
+                if run.revision!=expected_revision or run.fencing_token!=fencing_token or value.get("execution_request"):
+                    raise ForgejoError("forgejo_original_execution_request_changed")
+                value["execution_request"]=execution_request;save(run,value);db.add(run)
+                queue_revision=run.revision
+            queued=await self.jobs.queue_job(job_id,expected_revision=queue_revision)
             runner="forgejo:"+uuid.uuid4().hex
             async def claim_guard(db,run):
                 await self.current(db,owner,run)

@@ -352,3 +352,69 @@ async def test_actual_reply_precontact_authority_and_pure_writer_negatives(accou
             assert approval.status=="approved"
         (root/("mail-negative-"+fault+".json")).write_text(json.dumps({"fault":fault,"status":denied.status_code,"response":denied.json(),"google_contacts":google.calls,"send_posts":0,"model_setup_calls":5},indent=2))
     finally:await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["paused_cancel", "active_post_cancel", "intent_rollback"])
+async def test_actual_mail_cancellation_and_approval_intent_rollback(accounting_db, real_auth, monkeypatch, boundary):
+    import asyncio
+    from src.integrations import mail_reply_runtime as runtime, mail_reply_send as kernel
+    from src.db.models import ApprovalRequest
+    pure_reply_writer_guard(monkeypatch)
+    client, post, google, model_calls, preview, body, owner = await prepared_flow(accounting_db, real_auth, monkeypatch)
+    root, engine, factory = accounting_db
+    started=asyncio.Event();closed=asyncio.Event();release=asyncio.Event();running=None
+    try:
+        if boundary=="paused_cancel":
+            result=await post("reply-sends/"+preview["job_id"]+"/cancel",{"expected_revision":preview["revision"],"request_uuid":"pause-cancel-once"})
+            assert result["status"]=="cancelled" and result["cancel_request_uuid"]=="pause-cancel-once"
+            assert google.sent is None
+        elif boundary=="intent_rollback":
+            real_cas=kernel.cas
+            async def fail_after_approval(db,run,values,**kwargs):
+                if "intent" in json.loads(values.get("checkpoint_context_json") or "{}"):
+                    approval=await db.get(ApprovalRequest,preview["preview"]["approval_id"])
+                    assert approval.status=="consumed"  # actual same-transaction consumer occurred
+                    raise RuntimeError("intercepted SQL commit boundary failure")
+                return await real_cas(db,run,values,**kwargs)
+            monkeypatch.setattr(kernel,"cas",fail_after_approval)
+            response=await client.post("/api/capabilities/mail/reply-sends/"+preview["job_id"]+"/execute",json={})
+            assert response.status_code>=400 and google.sent is None
+            async with factory.accounting_sessions() as db:
+                approval=await db.get(ApprovalRequest,preview["preview"]["approval_id"])
+                run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==preview["job_id"]))
+                assert approval.status=="approved" and "intent" not in json.loads(run.checkpoint_context_json) and json.loads(run.effect_receipts_json)==[]
+            result=(await client.get("/api/capabilities/mail/reply-sends/"+preview["job_id"])).json()
+            assert result["status"]=="blocked"
+        else:
+            original_handle=google.handle
+            async def hold_post(request):
+                response=await original_handle(request)
+                if request.url.path.endswith("/messages/send"):
+                    started.set()
+                    try:await release.wait()
+                    finally:closed.set()
+                return response
+            real_reply=__import__("src.integrations.gmail_send",fromlist=["GmailReplyAdapter"]).GmailReplyAdapter
+            monkeypatch.setattr(runtime,"GmailReplyAdapter",lambda *args,**kwargs:real_reply(*args,transport=httpx.MockTransport(hold_post),resolver=lambda host,port:["93.184.216.34"],**kwargs))
+            running=asyncio.create_task(client.post("/api/capabilities/mail/reply-sends/"+preview["job_id"]+"/execute",json={}))
+            await asyncio.wait_for(started.wait(),timeout=30)
+            current=(await client.get("/api/capabilities/mail/reply-sends/"+preview["job_id"])).json()
+            assert current["status"]=="running" and current["contact_may_have_occurred"] is True
+            result=await post("reply-sends/"+preview["job_id"]+"/cancel",{"expected_revision":current["revision"],"request_uuid":"active-cancel-once"})
+            await asyncio.wait_for(asyncio.gather(running,return_exceptions=True),timeout=5)
+            assert closed.is_set() and result["status"]=="unknown_external_effect" and result["transport_quiescent"] is True
+            assert result["contact_may_have_occurred"] is True and google.sent is not None
+        contacts=len(google.calls)
+        await engine.dispose()
+        reopened=(await client.get("/api/capabilities/mail/reply-sends/"+preview["job_id"])).json()
+        assert reopened["status"]==result["status"]
+        replay=await post("reply-sends/"+preview["job_id"]+"/execute",{})
+        assert replay["status"]==result["status"] and len(google.calls)==contacts
+        assert len([c for c in google.calls if c[0]=="POST" and c[1].endswith("/messages/send")])==(1 if boundary=="active_post_cancel" else 0)
+        (root/("mail-cancellation-"+boundary+".json")).write_text(json.dumps({"boundary":boundary,"result":result,"reopened":reopened,"contacts":google.calls,"model_setup_calls":len(model_calls),"actual_callback_closed":closed.is_set()},indent=2))
+    finally:
+        release.set()
+        if running is not None and not running.done():
+            running.cancel();await asyncio.gather(running,return_exceptions=True)
+        await client.aclose()

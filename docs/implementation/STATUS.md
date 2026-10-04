@@ -18,6 +18,58 @@ For a shorter reader-facing overview of the current app, start with
 [Current App Guide](./12-current-app-guide.md). This status page remains the
 dense shipped-state record.
 
+## Bounded operator workflows (program #899)
+
+The [#899 program](https://github.com/seraph-quest/seraph/issues/899) joins
+existing goals, tasks, native jobs, approvals, artifacts and canonical memory
+into complete bounded operator journeys. Its additions remain **Planned** for
+`develop` until the final independently reviewed program PR merges there.
+Integration-branch receipts establish only their named implementation boundaries;
+they do not establish that every milestone is accepted or deployed. After that
+merge, the reviewed revision defines availability within the limits below.
+The [Current App Guide](./12-current-app-guide.md) describes the operator flow;
+the Constitution and ADRs remain the target authority.
+
+| Operator outcome | Declared behavior and boundary |
+| --- | --- |
+| Return to work and recover interruptions | Stable ownership, separately reviewed continuity recovery, a guided first verified result and task attention controls preserve inspectable history. A fresh login does not restore expired execution grants or unknown-effect authority. |
+| Run bounded plans and research | Durable inference reservations, priorities, reviewed artifact dependencies and finite read-only research children retain owner, deadline, budget and recovery state. Verified child outputs gate parent adoption; uncertainty holds capacity or liability instead of triggering blind replay. |
+| Review practical execution | Tested repository publication, finite Python/Node repair profiles, exact-site private reading and literal PDF/CSV comparison produce reviewable native receipts and readback. Host-user execution is not OS isolation; optional Linux sandbox enforcement has its own readiness gate. |
+| Use evidence in the next decision | Source-bound working sets, evidence-conflict invalidation and explicit procedure recommendations recheck current provenance. Learning requires separate review; success alone does not authorize memory change or demonstrate improved decision quality. |
+| Understand and revoke capability authority | Effective grants and coordinated revocation expose current permission. Reviewed local and authored packages bind exact versions, digests, schemas and execution profiles; unavailable isolation, quarantine or changed authority blocks new dispatch. Installation alone is not executable trust. |
+| Supervise connected actions and attach context | Paired Telegram controls, one exact Gmail reply, one owned nonrecurring timed Calendar reschedule without attendees, the fixed Forgejo title transaction and deliberate ordinary Chromium text selection require their own finite permissions and approvals. Private outputs use current-owner reads and explicit cleanup; they do not become generic model inputs. |
+
+Readiness remains specific to the selected profile. The CPU core, canonical
+workspace and operator controls work without a local model, GPU, VLM service or
+optional companion. Remote inference uses the governed OpenRouter route and
+stays configuration-required without explicit credentials, upstream policy,
+consent, verified capability and budget. Linux optional isolation proof does not
+establish macOS execution: macOS remains a peer core-host target with unexecuted
+native/companion boundaries named by each adapter. No paid model, real Google
+account or Mac host is a prerequisite for local implementation acceptance.
+
+External-effect recovery preserves the original deadline, fence and liability.
+Gmail and Calendar read-only observations are separate outcomes alongside an
+original Unknown receipt; they never resend or silently declare the original
+write successful. Private-content availability is checked independently from
+historical success. Cleanup uncertainty remains visible and charged where the
+selected profile requires positive physical settlement.
+
+The [Forgejo title profile](https://github.com/seraph-quest/seraph/issues/925)
+uses a local pinned-service proof profile; production Codeberg remains blocked pending
+separate account/site/version acceptance. Local revoke invalidates Seraph's
+authority and credentials; it does not prove provider logout or undo history or
+notifications. The [selected-text companion](https://github.com/seraph-quest/seraph/issues/926)
+permits ordinary top-frame Chromium text with local preview and deletion-only
+redaction, exact Task/Goal approval and encrypted D1 attachment. It excludes
+screenshots, clipboard and background capture, records no learning or analysis,
+and cannot guarantee that an ordinary webpage contains no sensitive text.
+
+These mechanical receipts do not measure live model quality, production
+reliability, comparative advantage or universal security. The required final
+program review and combined documentation build remain integration gates;
+milestone review and PR state belong to GitHub, not this inventory.
+
 ## Epic #736/#775 OpenRouter inference phase
 
 This section records the accepted OpenRouter-only inference phase and its

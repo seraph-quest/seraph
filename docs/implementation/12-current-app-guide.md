@@ -5,6 +5,50 @@ title: Current App Guide
 
 # Current App Guide
 
+## From a goal to a verified result
+
+The [#899 program](https://github.com/seraph-quest/seraph/issues/899) extends the
+existing cockpit with a connected operator journey: keep an owned workspace,
+choose a finite Goal, inspect effective permissions, queue a typed task, review
+an exact approval where required, and open its verified result. Tasks, native
+jobs, artifacts and memory keep their existing canonical owners. The complete
+reviewed program revision must merge to `develop` before its additions are
+Shipped there; an open feature branch or configured adapter alone does not
+establish availability. [Development Status](./STATUS.md) records scope and
+remaining proof boundaries.
+
+Start with the guided first result and use the Work board's attention and task
+inspector controls to inspect approvals, source evidence, output and recovery.
+Evidence working sets make citations inspectable; reviewed dependencies prevent
+stale or conflicting evidence from silently driving later steps. Procedure
+recommendations require explicit outcome feedback and separate adoption.
+Ordinary successful execution does not grant learning authority. Deterministic
+outputs and connected private actions can record an explicit `no_learning`
+result without a model request.
+
+Settings separates CPU/core readiness from the optional OpenRouter route and
+execution adapters. Missing model setup stays configuration-required; no local
+GPU/model fallback is selected. Repository repair, publication, literal document
+comparison and reviewed package execution use their declared finite profiles.
+Optional Linux sandbox availability is checked separately from portable core
+operation; local host-user execution is not isolation. macOS native/companion
+execution remains unverified where no platform receipt exists.
+
+Connected controls make narrow effects explicit: one reviewed Gmail reply or
+owned nonrecurring timed Calendar reschedule without attendees, a paired Telegram
+task control, or the fixed
+Forgejo issue-title transaction. A lost response keeps the original Unknown
+receipt; a separately permitted read-only observation cannot replay that write.
+Local Forgejo acceptance does not authorize production Codeberg, and local
+revocation does not prove site logout. The optional Chromium companion attaches
+only deliberately selected ordinary text after offline preview/redaction,
+finite Task/Goal permission and exact native approval. Its private attachment
+is not screenshot observation, automatic memory or generic model context.
+Review the selected content: protected-surface checks cannot identify every
+sensitive webpage. Recheck current permission before private reads, and use
+the original receipt's bounded cleanup/recovery control rather than recreating
+uncertain work. Continuity recovery never renews old execution authority.
+
 Reviewed authored capability packages are **Planned** under
 [ADR-020](./decisions/020-reviewed-authored-capability-packages.md) and
 [#924](https://github.com/seraph-quest/seraph/issues/924). Static author/validate

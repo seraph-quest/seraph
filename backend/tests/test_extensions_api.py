@@ -3811,6 +3811,26 @@ async def test_update_workspace_connector_refreshes_packaged_mcp_server(client, 
         assert disconnect_mock.call_count == 1
 
 
+def test_remove_rollback_state_restore_respects_staged_shared_lock(extension_runtime,tmp_path):
+    from src.extensions import lifecycle
+    from src.extensions.state import held_extension_state_lock, state_path, ExtensionStateBusy
+    lifecycle.install_extension_path(str(_write_multi_mcp_connector_extension(tmp_path)))
+    path=Path(state_path());before=path.read_bytes();writes=[]
+    original=lifecycle._restore_optional_file
+    def observed_restore(target,contents):
+        if target==path:writes.append(target)
+        return original(target,contents)
+    with patch("src.extensions.lifecycle._save_state",side_effect=RuntimeError("owned restore test save refusal")),patch("src.extensions.lifecycle._restore_optional_file",side_effect=observed_restore):
+        with held_extension_state_lock(shared=True):
+            with pytest.raises(RuntimeError,match="lifecycle recovery was incomplete") as blocked:
+                lifecycle.remove_extension("seraph.multi-connector-pack")
+            assert isinstance(blocked.value.__cause__,ExtensionStateBusy)
+            assert not writes and path.read_bytes()==before
+        with pytest.raises(RuntimeError,match="owned restore test save refusal"):
+            lifecycle.remove_extension("seraph.multi-connector-pack")
+    assert len(writes)==1 and path.read_bytes()==before
+
+
 def test_extension_lifecycle_restores_mcp_state_on_update_rollback_and_remove_failure(
     extension_runtime,
     tmp_path,

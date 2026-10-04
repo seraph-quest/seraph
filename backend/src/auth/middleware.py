@@ -143,6 +143,15 @@ class OperatorAuthMiddleware(BaseHTTPMiddleware):
             if request.url.path.startswith("/api"):
                 return _auth_failure_response(request.url.path, "auth_not_configured", status_code=503)
             return await call_next(request)
+        from src.workflows.selected_context_contract import COMPANION_ORIGIN, PAIRED_PATHS
+        if request.method == "POST" and request.url.path in PAIRED_PATHS:
+            # Closed MV3 ingress only. Never grant browser cookie authority or
+            # broaden global CORS, nodes, absent-Origin or OPTIONS behavior.
+            boundary_error = validate_request_boundary(
+                host=request.headers.get("host", ""), origin=None, method="GET")
+            if boundary_error or request.headers.get("origin") != COMPANION_ORIGIN or "cookie" in request.headers:
+                return JSONResponse({"detail": {"code": "selected_context_transport_denied"}}, status_code=403)
+            return await call_next(request)
         boundary_error = validate_request_boundary(
             host=request.headers.get("host", ""),
             origin=request.headers.get("origin"),

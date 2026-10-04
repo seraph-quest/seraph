@@ -464,7 +464,7 @@ async def _artifact_sources(db, owner: WorkBoardOwner, task: WorkBoardTask,
                 return sources, sorted(set(blocked))[:MAX_SOURCES]
             candidate_count += 1
             kind = receipt["artifact_type"]
-            private = kind in {"mail_reply_draft", "calendar_meeting_prep_result", "moltbook_private_browser_read"}
+            private = kind in {"mail_reply_draft", "calendar_meeting_prep_result", "moltbook_private_browser_read", "forgejo_private_transaction"}
             try:
                 if source_task.capability_id == "guardian.research-watch.v1":
                     from src.work_board.dispatcher import _parse_typed_input

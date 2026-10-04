@@ -16,6 +16,7 @@ import { CalendarRescheduleProfiles } from "./settings/CalendarRescheduleProfile
 import { SelectedContextPairing } from "./settings/SelectedContextPairing";
 import { GitHubConnectionPanel } from "./settings/GitHubConnectionPanel";
 import { MoltbookConnectionPanel } from "./settings/MoltbookConnectionPanel";
+import { ForgejoTitlePanel } from "./settings/ForgejoTitlePanel";
 import { RepoSandboxPanel } from "./settings/RepoSandboxPanel";
 import { MailConnectionPanel } from "./settings/MailConnectionPanel";
 import { useOptionalOperatorAuth } from "./auth/OperatorAuthGate";
@@ -142,7 +143,7 @@ interface McpServer {
   auth_hint: string;
 }
 
-type SettingsSection = "artifacts" | "general" | "native" | "repo-sandbox" | "policies" | "audit" | "workflows" | "guardian" | "calendar" | "mail" | "github" | "moltbook" | "skills" | "discover" | "mcp";
+type SettingsSection = "artifacts" | "general" | "native" | "repo-sandbox" | "policies" | "audit" | "workflows" | "guardian" | "calendar" | "mail" | "github" | "moltbook" | "forgejo" | "skills" | "discover" | "mcp";
 
 const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string }> = [
   { id: "artifacts", label: "Screenshot/VLM" },
@@ -156,6 +157,7 @@ const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string }> = [
   { id: "calendar", label: "Calendar" },
   { id: "github", label: "GitHub" },
   { id: "moltbook", label: "Moltbook" },
+  { id: "forgejo", label: "Forgejo" },
   { id: "mail", label: "Mail" },
   { id: "skills", label: "Skills" },
   { id: "discover", label: "Discover" },
@@ -771,6 +773,11 @@ export function SettingsPanel() {
           />}
 
           {activeSection === "moltbook" && <MoltbookConnectionPanel
+            ownerPrincipalId={operatorAuth?.session.principal_id ?? null}
+            ownerSessionId={operatorAuth?.session.session_id ?? null}
+          />}
+
+          {activeSection === "forgejo" && <ForgejoTitlePanel
             ownerPrincipalId={operatorAuth?.session.principal_id ?? null}
             ownerSessionId={operatorAuth?.session.session_id ?? null}
           />}

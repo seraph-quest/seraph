@@ -3091,3 +3091,27 @@ class MoltbookConnection(SQLModel, table=True):
     setup_digest: str = Field(default="", max_length=128)
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
+
+
+class ForgejoConnection(SQLModel, table=True):
+    """Fixed-site optional configuration; authority remains in native stores."""
+    __tablename__ = "forgejo_connections"
+    __table_args__ = (Index("ux_forgejo_connection_owner", "owner_principal_id", unique=True),)
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_principal_id: str = Field(index=True)
+    owner_session_id: str = Field(index=True)
+    revision: int = Field(default=1)
+    state: str = Field(default="configured")
+    site_profile: str = Field(default="seraph.forgejo.codeberg-title.v1")
+    provider_version: str = Field(default="15.0.9")
+    credential_vault_key: str = Field(default="", max_length=256)
+    credential_binding: str = Field(default="", max_length=128)
+    session_vault_key: str = Field(default="", max_length=256)
+    session_binding: str = Field(default="", max_length=128)
+    provider_user_id: Optional[int] = Field(default=None)
+    provider_login: str = Field(default="", max_length=128)
+    read_consent_revision: int = Field(default=0)
+    read_consent_expires_at: Optional[datetime] = Field(default=None)
+    provisioning_job_id: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)

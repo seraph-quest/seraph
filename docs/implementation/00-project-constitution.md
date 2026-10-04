@@ -92,6 +92,7 @@ The following architecture decisions are normative:
 19. [ADR-019: Exact owned-calendar reschedule](./decisions/019-exact-calendar-reschedule.md)
 22. [ADR-022: Portable selected-text context](./decisions/022-portable-selected-text-context.md)
 20. [ADR-020: Reviewed authored capability packages](./decisions/020-reviewed-authored-capability-packages.md)
+21. [ADR-021: Exact Forgejo issue title transaction](./decisions/021-exact-forgejo-issue-title.md)
 
 Changing a locked decision requires a superseding ADR, a tracked issue, an
 independent Critic/Contrarian review, and updates to every affected active doc.

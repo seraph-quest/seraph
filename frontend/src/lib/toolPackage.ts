@@ -11,6 +11,7 @@ const sha=(v:unknown):v is string=>typeof v==="string"&&/^[a-f0-9]{64}$/.test(v)
 export interface ToolProfile { pack_id:string; manifest:Record<string,unknown>;root_path:string;content_digest:string;authority_digest:string;descriptor?:{capability_id:string;[key:string]:unknown};code_text?:string;publisher_verified?:false;signature_status?:"unsigned-local";profile:{status:string;reason?:string};lifecycle:Record<string,unknown>;no_learning:true }
 export interface ToolState {task_id:string;task_revision:number;board_fence:number;cancel_receipt:{attempt_id:string;board_fence:number;requested_revision:number;applied:true;cancel_requested_at:string}|null;attempt_id:string;job_id:string;status:string;deadline_at:string;cleanup_proven:boolean;recoverable:boolean;report_available:boolean;cancel_available:boolean;recovery_limit:string;no_learning:true}
 export type ToolPending=
+ |{kind:"review";goal_id:string;goal_revision:number;packet:ToolProfile}
  |{kind:"approve";goal_id:string;goal_revision:number;packet:ToolProfile;step:0|1|2|3;review_id:string|null;approval_id:string|null;action?:"activate"|"update"|"rollback"|"revoke"|"uninstall"}
  |{kind:"create";goal_id:string;goal_revision:number;json_text:string;input_key:string;task_key:string;artifact_id:string|null;capability_id?:string}
  |{kind:"control";task_id:string;action:"recover"|"cancel";revision:number;attempt_id:string;board_fence:number;key:string};
@@ -23,7 +24,9 @@ function profile(value:unknown):ToolProfile{
 }
 function validate(value:unknown):ToolPending{
  if(!record(value))throw Error("Retained formatter request corrupt");
- if(value.kind==="approve"){
+ if(value.kind==="review"){
+  if(Object.keys(value).sort().join()!==["kind","goal_id","goal_revision","packet"].sort().join()||!id(value.goal_id)||!Number.isSafeInteger(value.goal_revision)||Number(value.goal_revision)<1||!profile(value.packet).descriptor)throw Error("Retained authored static review corrupt");
+ }else if(value.kind==="approve"){
   const keys=["kind","goal_id","goal_revision","packet","step","review_id","approval_id"];
   if(value.action!==undefined){keys.push("action");if(!["activate","update","rollback","revoke","uninstall"].includes(String(value.action)))throw Error("Retained package action corrupt");}
   if(Object.keys(value).sort().join()!==keys.sort().join()||!id(value.goal_id)||!Number.isSafeInteger(value.goal_revision)||Number(value.goal_revision)<1||![0,1,2,3].includes(Number(value.step))||(value.review_id!==null&&!id(value.review_id))||(value.approval_id!==null&&!id(value.approval_id)))throw Error("Retained review request corrupt");profile(value.packet);
@@ -37,18 +40,26 @@ function validate(value:unknown):ToolPending{
  }else throw Error("Unknown retained formatter request");
  return value as unknown as ToolPending;
 }
-function scoped(key:string,pending:ToolPending){const parts=key.split(":");const scope=decodeURIComponent(parts[parts.length-1]??"");const authored=pending.kind==="approve"?Boolean(pending.packet.descriptor):pending.kind==="create"?Boolean(pending.capability_id):false;if(scope!==(pending.kind==="control"?pending.task_id:authored?"authored-create":"create"))throw Error("Package request belongs to another scope");}
+function scoped(key:string,pending:ToolPending){const parts=key.split(":");const scope=decodeURIComponent(parts[parts.length-1]??"");const authored=pending.kind==="review"||(pending.kind==="approve"?Boolean(pending.packet.descriptor):pending.kind==="create"?Boolean(pending.capability_id):false);if(scope!==(pending.kind==="control"?pending.task_id:authored?"authored-create":"create"))throw Error("Package request belongs to another scope");}
 export function readToolPending(key:string):ToolPending|null{const raw=sessionStorage.getItem(key);if(raw===null)return null;if(bytes(raw)>65536)throw Error("Retained formatter request exceeds 64 KiB");const value=validate(JSON.parse(raw));scoped(key,value);return value;}
 export function retainToolPending(key:string,pending:ToolPending){validate(pending);scoped(key,pending);const raw=JSON.stringify(pending);if(bytes(raw)>65536)throw Error("Full retained formatter request exceeds 64 KiB");sessionStorage.setItem(key,raw);if(sessionStorage.getItem(key)!==raw)throw Error("Request retention failed; no mutation sent");readToolPending(key);}
 async function request(path:string,body?:unknown,signal?:AbortSignal):Promise<unknown>{const response=await apiFetch(`${API_URL}${path}`,{signal,...(body?{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}:{})});if(!response.ok)throw Error(`Formatter requires current readback (${response.status}); retain and retry the exact request.`);return response.json();}
 export async function readToolProfile(signal?:AbortSignal){return profile(await request(PACK+"/profile",undefined,signal));}
 export async function readAuthoredProfile(rootPath:string,signal?:AbortSignal){if(!rootPath||rootPath.length>4096)throw Error("Selected package directory required");return profile(await request("/api/capability-packs/authored/inspect",{root_path:rootPath},signal));}
 function clear(key:string){sessionStorage.removeItem(key);if(sessionStorage.getItem(key)!==null)throw Error("Confirmed request could not be cleared");}
+async function reviewPackage(packet:ToolProfile,goal_id:string,goal_revision:number,signal?:AbortSignal){
+ const result=await request("/api/capability-packs/"+encodeURIComponent(packet.pack_id)+"/review",{goal_id,content_digest:packet.content_digest,authority_digest:packet.authority_digest,goal_revision,...(packet.descriptor?{root_path:packet.root_path,acknowledge_unsigned_local:true}:{})},signal);
+ if(!record(result)||!record(result.review)||!id(result.review.review_id))throw Error("Review receipt unavailable");
+ return result.review.review_id;
+}
 export async function submitTool(key:string,pending:ToolPending,signal?:AbortSignal):Promise<WorkBoardTask|null>{
  retainToolPending(key,pending);
+ if(pending.kind==="review"){
+  await reviewPackage(pending.packet,pending.goal_id,pending.goal_revision,signal);clear(key);return null;
+ }
  if(pending.kind==="approve"){
   const packet=pending.packet;const action=pending.action??"activate";const packPath="/api/capability-packs/"+encodeURIComponent(packet.pack_id);const base={goal_id:pending.goal_id,content_digest:packet.content_digest,authority_digest:packet.authority_digest};
-  if(pending.step===0){if(action==="revoke"||action==="uninstall"){pending={...pending,step:1};}else{const result=await request(packPath+"/review",{...base,goal_revision:pending.goal_revision,...(packet.descriptor?{root_path:packet.root_path,acknowledge_unsigned_local:true}:{})},signal);if(!record(result)||!record(result.review)||!id(result.review.review_id))throw Error("Review receipt unavailable");pending={...pending,step:1,review_id:result.review.review_id};}retainToolPending(key,pending);}
+  if(pending.step===0){if(action==="revoke"||action==="uninstall"){pending={...pending,step:1};}else{pending={...pending,step:1,review_id:await reviewPackage(packet,pending.goal_id,pending.goal_revision,signal)};}retainToolPending(key,pending);}
   if(pending.step===1){const result=await request(packPath+"/approvals",{...base,action,digest:packet.content_digest,version:packet.manifest.version},signal);if(!record(result)||!record(result.approval)||!id(result.approval.approval_id))throw Error("Approval receipt unavailable");pending={...pending,step:2,approval_id:result.approval.approval_id};retainToolPending(key,pending);}
   if(pending.step===2){await request(packPath+`/approvals/${pending.approval_id}/approve`,{},signal);pending={...pending,step:3};retainToolPending(key,pending);}
   if(pending.step===3){const body=action==="activate"||action==="update"?{...base,manifest:packet.manifest,root_path:packet.root_path,review_id:pending.review_id,approval_id:pending.approval_id}:action==="rollback"?{...base,approval_id:pending.approval_id}:{content_digest:packet.content_digest,authority_digest:packet.authority_digest,approval_id:pending.approval_id,...(action==="revoke"?{digest:packet.content_digest}:{})};await request(packPath+"/"+action,body,signal);}

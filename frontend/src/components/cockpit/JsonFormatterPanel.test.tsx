@@ -61,7 +61,7 @@ it("reviews unsigned authored bytes and dispatches the server-derived capability
  const created=vi.fn();render(<JsonFormatterPanel authored ownerPrincipalId="operator:one" ownerSessionId="session-one" goals={[{id:"goal-one",revision:1,title:"Ledger"} as GoalInfo]} onCreated={created}/>);
  fireEvent.change(screen.getByLabelText("Selected package directory"),{target:{value:"/private/selected-package"}});
  fireEvent.click(screen.getByRole("button",{name:"Refresh manifest and dependencies"}));await screen.findByText(/Selected capability:/);
- fireEvent.change(screen.getByLabelText("Formatter Goal"),{target:{value:"goal-one"}});
+ fireEvent.change(screen.getByLabelText("Authored package Goal"),{target:{value:"goal-one"}});
  fireEvent.click(screen.getByRole("checkbox"));fireEvent.click(screen.getByRole("button",{name:"Review and approve exact authored package"}));
  await waitFor(()=>expect(screen.getByRole("button",{name:"Create authored package task"})).toBeEnabled());
  fireEvent.change(screen.getByLabelText("JSON document"),{target:{value:'{"schema_version":1,"rows":[]}'}});
@@ -84,7 +84,7 @@ it("retains the exact authored update or safe rollback action before any lifecyc
  });
  render(<JsonFormatterPanel authored ownerPrincipalId="operator:one" ownerSessionId="session-one" goals={[{id:"goal-one",revision:1,title:"Ledger"} as GoalInfo]}/>);
  fireEvent.change(screen.getByLabelText("Selected package directory"),{target:{value:"/private/new-version"}});fireEvent.click(screen.getByRole("button",{name:"Refresh manifest and dependencies"}));await screen.findByText(/Selected capability:/);
- fireEvent.change(screen.getByLabelText("Formatter Goal"),{target:{value:"goal-one"}});fireEvent.click(screen.getByRole("checkbox"));fireEvent.click(screen.getByRole("button",{name:"Review and approve exact authored package"}));await waitFor(()=>expect(actions).toEqual(["update"]));await waitFor(()=>expect(screen.getByRole("checkbox")).toBeEnabled());
+ fireEvent.change(screen.getByLabelText("Authored package Goal"),{target:{value:"goal-one"}});fireEvent.click(screen.getByRole("checkbox"));fireEvent.click(screen.getByRole("button",{name:"Review and approve exact authored package"}));await waitFor(()=>expect(actions).toEqual(["update"]));await waitFor(()=>expect(screen.getByRole("checkbox")).toBeEnabled());
  quarantined=true;fireEvent.click(screen.getByRole("button",{name:"Refresh manifest and dependencies"}));await screen.findByText("Package state: quarantined");expect(screen.getByRole("button",{name:"Review and approve exact authored package"})).toBeDisabled();fireEvent.click(screen.getByRole("button",{name:"Review and approve safe rollback"}));await waitFor(()=>expect(actions).toEqual(["update","rollback"]));
  expect(vi.mocked(apiFetch).mock.calls.some(([url])=>String(url).endsWith("/update"))).toBe(true);
  expect(vi.mocked(apiFetch).mock.calls.some(([url])=>String(url).endsWith("/rollback"))).toBe(true);
@@ -96,4 +96,44 @@ it("removes cached literal output on current-read denial and immediately on owne
  deny=true;fireEvent.click(screen.getByRole("button",{name:"Read verified JSON output"}));await screen.findByRole("alert");expect(screen.queryByText('PRIVATE ORIGINAL OUTPUT')).toBeNull();expect(screen.getByRole("button",{name:"Read verified JSON output"})).toBeDisabled();
  deny=false;fireEvent.click(screen.getByRole("button",{name:"Refresh formatter state"}));await waitFor(()=>expect(screen.getByRole("button",{name:"Read verified JSON output"})).toBeEnabled());fireEvent.click(screen.getByRole("button",{name:"Read verified JSON output"}));await screen.findByText('PRIVATE ORIGINAL OUTPUT');
  mounted.rerender(<JsonFormatterPanel {...props} ownerPrincipalId="operator:other" ownerSessionId="other-root" task={{...task,task_id:"other-task"}}/>);expect(screen.queryByText('PRIVATE ORIGINAL OUTPUT')).toBeNull();
+});
+
+const blockedAuthoredPacket={pack_id:"local.time-ledger-summary",manifest:{id:"local.time-ledger-summary",version:"1.0.0"},root_path:"/private/selected-package",content_digest:"a".repeat(64),authority_digest:"b".repeat(64),descriptor:{capability_id:"pack.local.time-ledger-summary.summarize.v1"},code_text:"# literal authored code",publisher_verified:false,signature_status:"unsigned-local",profile:{status:"blocked",reason:"unsupported_host"},lifecycle:{active:{status:"active",goal_id:"goal-one",goal_revision:1,digest:"a".repeat(64)}},no_learning:true};
+const authoredProps={authored:true,ownerPrincipalId:"operator:one",ownerSessionId:"session-one",goals:[{id:"goal-one",revision:1,title:"Ledger"} as GoalInfo]};
+const staticKey=toolStorageKey("operator:one","session-one","authored-create");
+
+it("saves one retained static review on a blocked host without approval, activation or execution",async()=>{
+ const posts:{path:string;body:Record<string,unknown>}[]=[];
+ vi.mocked(apiFetch).mockImplementation(async(url,options)=>{
+  if(options?.method!=="POST")return new Response(JSON.stringify(state));
+  const path=String(url),body=JSON.parse(String(options?.body??"{}"));posts.push({path,body});
+  if(path.endsWith("/inspect"))return new Response(JSON.stringify(blockedAuthoredPacket));
+  expect(path).toMatch(/\/local.time-ledger-summary\/review$/);
+  expect(readToolPending(staticKey)).toMatchObject({kind:"review",goal_id:"goal-one",goal_revision:1,packet:blockedAuthoredPacket});
+  return new Response(JSON.stringify({review:{review_id:"durable-static-review"}}));
+ });
+ const mounted=render(<JsonFormatterPanel {...authoredProps}/>);
+ fireEvent.change(screen.getByLabelText("Selected package directory"),{target:{value:blockedAuthoredPacket.root_path}});fireEvent.click(screen.getByRole("button",{name:"Refresh manifest and dependencies"}));await screen.findByText(/unsupported_host/);
+ fireEvent.change(screen.getByLabelText("Authored package Goal"),{target:{value:"goal-one"}});fireEvent.click(screen.getByRole("checkbox"));
+ expect(screen.getByRole("button",{name:"Review and approve exact authored package"})).toBeDisabled();expect(screen.getByRole("button",{name:"Create authored package task"})).toBeDisabled();
+ fireEvent.click(screen.getByRole("button",{name:"Save static package review"}));await screen.findByText(/Static package review recorded for Goal goal-one/);
+ expect(posts.filter(p=>p.path.endsWith("/review"))).toEqual([{path:expect.stringMatching(/\/local.time-ledger-summary\/review$/),body:{goal_id:"goal-one",goal_revision:1,root_path:blockedAuthoredPacket.root_path,content_digest:blockedAuthoredPacket.content_digest,authority_digest:blockedAuthoredPacket.authority_digest,acknowledge_unsigned_local:true}}]);
+ expect(posts.every(p=>p.path.endsWith("/inspect")||p.path.endsWith("/review"))).toBe(true);expect(readToolPending(staticKey)).toBeNull();expect(screen.getByRole("button",{name:"Create authored package task"})).toBeDisabled();
+ mounted.rerender(<JsonFormatterPanel {...props}/>);await screen.findByRole("button",{name:"Refresh formatter state"});expect(screen.queryByRole("button",{name:"Save static package review"})).toBeNull();expect(screen.queryByText(/Static package review recorded/)).toBeNull();
+});
+
+it("retains a lost static review exactly across reload and isolates it from another owner",async()=>{
+ const bodies:string[]=[];
+ vi.mocked(apiFetch).mockImplementation(async(url,options)=>{
+  if(String(url).endsWith("/inspect"))return new Response(JSON.stringify(blockedAuthoredPacket));
+  expect(String(url)).toMatch(/\/local.time-ledger-summary\/review$/);bodies.push(String(options?.body));expect(readToolPending(staticKey)?.kind).toBe("review");
+  if(bodies.length===1)throw Error("Static review response lost");
+  return new Response(JSON.stringify({review:{review_id:"durable-static-review"}}));
+ });
+ const mounted=render(<JsonFormatterPanel {...authoredProps}/>);
+ fireEvent.change(screen.getByLabelText("Selected package directory"),{target:{value:blockedAuthoredPacket.root_path}});fireEvent.click(screen.getByRole("button",{name:"Refresh manifest and dependencies"}));await screen.findByText(/unsupported_host/);
+ fireEvent.change(screen.getByLabelText("Authored package Goal"),{target:{value:"goal-one"}});fireEvent.click(screen.getByRole("checkbox"));fireEvent.click(screen.getByRole("button",{name:"Save static package review"}));await screen.findByText("Static review response lost");
+ mounted.rerender(<JsonFormatterPanel {...authoredProps} ownerPrincipalId="operator:other" ownerSessionId="other-root"/>);expect(screen.queryByRole("button",{name:"Retry exact authored package request"})).toBeNull();expect(readToolPending(toolStorageKey("operator:other","other-root","authored-create"))).toBeNull();expect(readToolPending(staticKey)?.kind).toBe("review");expect(bodies).toHaveLength(1);
+ mounted.unmount();render(<JsonFormatterPanel {...authoredProps}/>);fireEvent.click(await screen.findByRole("button",{name:"Retry exact authored package request"}));await screen.findByText(/Static package review recorded for Goal goal-one/);
+ expect(readToolPending(staticKey)).toBeNull();expect(bodies).toHaveLength(2);expect(bodies[1]).toBe(bodies[0]);expect(vi.mocked(apiFetch).mock.calls.every(([url])=>String(url).endsWith("/inspect")||String(url).endsWith("/review"))).toBe(true);expect(screen.getByRole("button",{name:"Create authored package task"})).toBeDisabled();
 });

@@ -90,6 +90,7 @@ The following architecture decisions are normative:
 17. [ADR-017: Private bounded document comparison](./decisions/017-private-bounded-document-comparison.md)
 18. [ADR-018: Fixed Moltbook private browser read](./decisions/018-fixed-moltbook-private-browser-read.md)
 19. [ADR-019: Exact owned-calendar reschedule](./decisions/019-exact-calendar-reschedule.md)
+22. [ADR-022: Portable selected-text context](./decisions/022-portable-selected-text-context.md)
 
 Changing a locked decision requires a superseding ADR, a tracked issue, an
 independent Critic/Contrarian review, and updates to every affected active doc.

@@ -1167,6 +1167,21 @@ local capture adapters require their own readiness receipts; pairing must not
 implicitly authorize execution or data egress. Task attachments must bypass
 general screenshot observation and automatic analysis.
 
+### Portable selected browser text (#926 branch-local target)
+
+[ADR-022](./decisions/022-portable-selected-text-context.md) accepts one optional
+Chromium companion journey: deliberate ordinary top-frame selection, offline
+preview and deletion-only redaction, signed metadata, exact original Root/Task/
+finite Goal approval, signed matching bytes and encrypted private task readback.
+The existing native job owns its immutable capture identity and irreversible
+discard tombstone; pairing alone grants no execution or analysis. Text remains
+untrusted D1 context with `no_learning` and no automatic model/evidence ingestion.
+The companion's absence or unsupported protected surface is visibly blocked and
+does not prevent either macOS or Linux from hosting the CPU core. Browser privacy
+checks require operator review and cannot guarantee that ordinary prose has no
+secrets. This accepted target is **Planned**; actual Linux companion and macOS
+execution receipts remain separate implementation gates.
+
 ## Memory
 
 ### Cockpit navigation and canonical inspector

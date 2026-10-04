@@ -135,6 +135,10 @@ async def test_actual_authored_time_ledger_native_reopen_private_read(accounting
         output=await client.get(f"/api/work-board/tasks/{task_id}/tool-package-output")
         assert output.status_code==200 and output.json()==vector["output"],output.text
         records["state"]=state.json();records["output"]=output.json()
+        from src.extensions.capability_pack import CapabilityPackLifecycle
+        mirror=CapabilityPackLifecycle().status(pack_id,owner_principal_id=principal,session_id=session.id)
+        original_mirror=next(item for item in mirror["jobs"] if item["job_id"]==original[0])
+        assert original_mirror["status"]=="succeeded" and original_mirror["control_authority"]=="canonical_native_job"
         assert (await dispatcher.run_pass())["completed"]==0
         changed=await client.patch(f"/api/goals/{goal['id']}",json={"title":"Corrected current Goal","expected_revision":1})
         assert changed.status_code==200,changed.text

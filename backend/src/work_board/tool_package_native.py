@@ -194,10 +194,15 @@ def bounded_pack_state(lifecycle):
 def pack_state_digest(state, authority):
     pack_id=authority["pack"]["pack_id"]
     pointer=state["active"].get(pack_id)
-    if is_authored(authority.get("capability_id")):
-        pointer={key:pointer.get(key) for key in ("status","pack_id","goal_id","owner_principal_id","session_id")} if isinstance(pointer,dict) else None
     package=authority["pack"]
-    return digest(canonical([pointer,state.get("versions",{}).get(pack_id,{}).get(package["digest"]),
+    record=state.get("versions",{}).get(pack_id,{}).get(package["digest"])
+    if is_authored(authority.get("capability_id")):
+        pointer={key:pointer.get(key) for key in ("status","pack_id","owner_principal_id","session_id")} if isinstance(pointer,dict) else None
+        # Original Goal/revision is checked in SQL and the exact historical
+        # review below remains immutable. Latest version-review metadata must
+        # not cancel a released original process on another valid review.
+        record={key:value for key,value in record.items() if key not in {"goal_id","goal_revision","review_id"}} if isinstance(record,dict) else None
+    return digest(canonical([pointer,record,
         state.get("reviews",{}).get(package["review_id"]),state.get("revoked",{}).get(pack_id)]))
 
 
@@ -656,7 +661,8 @@ async def execute(task, attempt, inputs, *, jobs, runner, deadline, admission_on
         CapabilityPackLifecycle().register_job(package_id(task),goal_id=task.goal_id,job_id=spec.identity.job_id,
             owner_principal_id=task.owner_principal_id,session_id=task.owner_session_id,
             request_contract={"native_job_id":spec.identity.job_id,"input_digest":digest(canonical(spec.inputs)),
-                "authority_digest":digest(canonical(spec.declared_authority)),"deadline_at":projection["deadline_at"]},
+                "authority_digest":digest(canonical(spec.declared_authority)),"deadline_at":projection["deadline_at"],
+                "native_kind":native_kind(task),"pack_pin":spec.declared_authority["pack"]},
             required_tools=["isolated_json_adapter" if registration else "json_format"],required_filesystem=["workspace_read","workspace_write"])
     elif (projection["input_digest"]!=digest(canonical(spec.inputs)) or projection["run_fingerprint"]!=spec.run_fingerprint
         or projection["declared_authority"]!=spec.declared_authority):

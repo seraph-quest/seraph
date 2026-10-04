@@ -47,7 +47,7 @@ it("retains an uncertain cancellation when readback belongs to another attempt o
 it("reviews unsigned authored bytes and dispatches the server-derived capability with exact retained input",async()=>{
  const cap="pack.local.time-ledger-summary.summarize.v1",digest="a".repeat(64);let active=false;
  const calls:{path:string;body:Record<string,unknown>}[]=[];
- const packet=()=>({pack_id:"local.time-ledger-summary",manifest:{id:"local.time-ledger-summary",version:"1.0.0"},root_path:"/private/selected-package",content_digest:digest,authority_digest:"b".repeat(64),descriptor:{capability_id:cap,code_sha256:"c".repeat(64)},code_text:'print("<script>literal source</script>")',publisher_verified:false,signature_status:"unsigned-local",profile:{status:"available"},lifecycle:{active:active?{status:"active",goal_id:"goal-one",digest}:null},no_learning:true});
+ const packet=()=>({pack_id:"local.time-ledger-summary",manifest:{id:"local.time-ledger-summary",version:"1.0.0"},root_path:"/private/selected-package",content_digest:digest,authority_digest:"b".repeat(64),descriptor:{capability_id:cap,code_sha256:"c".repeat(64)},code_text:'print("<script>literal source</script>")',publisher_verified:false,signature_status:"unsigned-local",profile:{status:"available"},lifecycle:{active:active?{status:"active",goal_id:"goal-one",goal_revision:1,digest}:null},no_learning:true});
  vi.mocked(apiFetch).mockImplementation(async(url,options)=>{
   const path=String(url),body=JSON.parse(String(options?.body??"{}")) as Record<string,unknown>;calls.push({path,body});
   if(path.endsWith("/inspect"))return new Response(JSON.stringify(packet()));
@@ -70,6 +70,24 @@ it("reviews unsigned authored bytes and dispatches the server-derived capability
  expect(calls.find(c=>c.path.endsWith("/input-artifacts"))?.body).toMatchObject({capability_id:cap,input:{json_text:'{"schema_version":1,"rows":[]}',no_learning:true}});
  expect(calls.find(c=>c.path.endsWith("/tasks"))?.body).toMatchObject({capability_id:cap,input_artifact_id:"exact-input"});
  expect(sessionStorage.getItem(toolStorageKey("operator:one","session-one","authored-create"))).toBeNull();
+});
+
+it("retains the exact authored update or safe rollback action before any lifecycle POST",async()=>{
+ const digest="d".repeat(64),cap="pack.local.time-ledger-summary.summarize.v1";
+ let quarantined=false;const actions:string[]=[];
+ vi.mocked(apiFetch).mockImplementation(async(url,options)=>{
+  const path=String(url),body=JSON.parse(String(options?.body??"{}"));
+  if(path.endsWith("/inspect"))return new Response(JSON.stringify({pack_id:"local.time-ledger-summary",manifest:{id:"local.time-ledger-summary",version:"2.0.0"},root_path:"/private/new-version",content_digest:digest,authority_digest:"b".repeat(64),descriptor:{capability_id:cap},code_text:"# literal reviewed code",publisher_verified:false,signature_status:"unsigned-local",profile:{status:"available"},lifecycle:{active:{status:quarantined?"quarantined":"active",goal_id:"goal-one",goal_revision:1,digest:"a".repeat(64)}},no_learning:true}));
+  if(path.endsWith("/review"))return new Response(JSON.stringify({review:{review_id:"version-review"}}));
+  if(path.endsWith("/approvals")){actions.push(body.action);expect(readToolPending(toolStorageKey("operator:one","session-one","authored-create"))).toMatchObject({kind:"approve",action:body.action,packet:{content_digest:digest}});return new Response(JSON.stringify({approval:{approval_id:"version-approval"}}));}
+  return new Response('{}');
+ });
+ render(<JsonFormatterPanel authored ownerPrincipalId="operator:one" ownerSessionId="session-one" goals={[{id:"goal-one",revision:1,title:"Ledger"} as GoalInfo]}/>);
+ fireEvent.change(screen.getByLabelText("Selected package directory"),{target:{value:"/private/new-version"}});fireEvent.click(screen.getByRole("button",{name:"Refresh manifest and dependencies"}));await screen.findByText(/Selected capability:/);
+ fireEvent.change(screen.getByLabelText("Formatter Goal"),{target:{value:"goal-one"}});fireEvent.click(screen.getByRole("checkbox"));fireEvent.click(screen.getByRole("button",{name:"Review and approve exact authored package"}));await waitFor(()=>expect(actions).toEqual(["update"]));await waitFor(()=>expect(screen.getByRole("checkbox")).toBeEnabled());
+ quarantined=true;fireEvent.click(screen.getByRole("button",{name:"Refresh manifest and dependencies"}));await screen.findByText("Package state: quarantined");expect(screen.getByRole("button",{name:"Review and approve exact authored package"})).toBeDisabled();fireEvent.click(screen.getByRole("button",{name:"Review and approve safe rollback"}));await waitFor(()=>expect(actions).toEqual(["update","rollback"]));
+ expect(vi.mocked(apiFetch).mock.calls.some(([url])=>String(url).endsWith("/update"))).toBe(true);
+ expect(vi.mocked(apiFetch).mock.calls.some(([url])=>String(url).endsWith("/rollback"))).toBe(true);
 });
 
 it("removes cached literal output on current-read denial and immediately on owner/session/task change",async()=>{

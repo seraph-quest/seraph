@@ -63,7 +63,9 @@ def load_registration(capability_id, *, lifecycle=None, state=None, original_pin
     if not isinstance(pointer, dict) or pointer.get("status") != "active":
         raise ValueError("authored_package_inactive")
     selected = dict(pointer)
-    if original_pin is not None and selected.get("digest") != original_pin.get("digest"):
+    pin_keys=("pack_id","version","digest","goal_id","goal_revision","review_id","authority_digest",
+        "dependencies_digest","owner_principal_id","session_id")
+    if original_pin is not None and {key:selected.get(key) for key in pin_keys} != original_pin:
         if not continuation:
             raise ValueError("authored_package_queued_version_stale")
         record = state.get("versions", {}).get(package_id, {}).get(original_pin.get("digest"))

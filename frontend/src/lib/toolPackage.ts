@@ -11,7 +11,7 @@ const sha=(v:unknown):v is string=>typeof v==="string"&&/^[a-f0-9]{64}$/.test(v)
 export interface ToolProfile { pack_id:string; manifest:Record<string,unknown>;root_path:string;content_digest:string;authority_digest:string;descriptor?:{capability_id:string;[key:string]:unknown};code_text?:string;publisher_verified?:false;signature_status?:"unsigned-local";profile:{status:string;reason?:string};lifecycle:Record<string,unknown>;no_learning:true }
 export interface ToolState {task_id:string;task_revision:number;board_fence:number;cancel_receipt:{attempt_id:string;board_fence:number;requested_revision:number;applied:true;cancel_requested_at:string}|null;attempt_id:string;job_id:string;status:string;deadline_at:string;cleanup_proven:boolean;recoverable:boolean;report_available:boolean;cancel_available:boolean;recovery_limit:string;no_learning:true}
 export type ToolPending=
- |{kind:"approve";goal_id:string;goal_revision:number;packet:ToolProfile;step:0|1|2|3;review_id:string|null;approval_id:string|null}
+ |{kind:"approve";goal_id:string;goal_revision:number;packet:ToolProfile;step:0|1|2|3;review_id:string|null;approval_id:string|null;action?:"activate"|"update"|"rollback"|"revoke"|"uninstall"}
  |{kind:"create";goal_id:string;goal_revision:number;json_text:string;input_key:string;task_key:string;artifact_id:string|null;capability_id?:string}
  |{kind:"control";task_id:string;action:"recover"|"cancel";revision:number;attempt_id:string;board_fence:number;key:string};
 export function toolStorageKey(principal:string,session:string,scope:string){if(!id(principal)||!id(session)||!id(scope))throw Error("Current owner/session required");return `seraph.tool.json.v1:${encodeURIComponent(principal)}:${encodeURIComponent(session)}:${encodeURIComponent(scope)}`;}
@@ -24,7 +24,10 @@ function profile(value:unknown):ToolProfile{
 function validate(value:unknown):ToolPending{
  if(!record(value))throw Error("Retained formatter request corrupt");
  if(value.kind==="approve"){
-  if(Object.keys(value).sort().join()!==["kind","goal_id","goal_revision","packet","step","review_id","approval_id"].sort().join()||!id(value.goal_id)||!Number.isSafeInteger(value.goal_revision)||Number(value.goal_revision)<1||![0,1,2,3].includes(Number(value.step))||(value.review_id!==null&&!id(value.review_id))||(value.approval_id!==null&&!id(value.approval_id)))throw Error("Retained review request corrupt");profile(value.packet);
+  const keys=["kind","goal_id","goal_revision","packet","step","review_id","approval_id"];
+  if(value.action!==undefined){keys.push("action");if(!["activate","update","rollback","revoke","uninstall"].includes(String(value.action)))throw Error("Retained package action corrupt");}
+  if(Object.keys(value).sort().join()!==keys.sort().join()||!id(value.goal_id)||!Number.isSafeInteger(value.goal_revision)||Number(value.goal_revision)<1||![0,1,2,3].includes(Number(value.step))||(value.review_id!==null&&!id(value.review_id))||(value.approval_id!==null&&!id(value.approval_id)))throw Error("Retained review request corrupt");profile(value.packet);
+  if(value.action!==undefined&&value.action!=="activate"&&(!record(value.packet)||!record(value.packet.descriptor)))throw Error("Only authored lifecycle actions are supported here");
  }else if(value.kind==="create"){
   const keys=["kind","goal_id","goal_revision","json_text","input_key","task_key","artifact_id"];
   if(value.capability_id!==undefined){keys.push("capability_id");if(typeof value.capability_id!=="string"||!isAuthoredCapability(value.capability_id))throw Error("Retained authored capability corrupt");}
@@ -44,11 +47,11 @@ function clear(key:string){sessionStorage.removeItem(key);if(sessionStorage.getI
 export async function submitTool(key:string,pending:ToolPending,signal?:AbortSignal):Promise<WorkBoardTask|null>{
  retainToolPending(key,pending);
  if(pending.kind==="approve"){
-  const packet=pending.packet;const packPath="/api/capability-packs/"+encodeURIComponent(packet.pack_id);const base={goal_id:pending.goal_id,content_digest:packet.content_digest,authority_digest:packet.authority_digest};
-  if(pending.step===0){const result=await request(packPath+"/review",{...base,goal_revision:pending.goal_revision,...(packet.descriptor?{root_path:packet.root_path,acknowledge_unsigned_local:true}:{})},signal);if(!record(result)||!record(result.review)||!id(result.review.review_id))throw Error("Review receipt unavailable");pending={...pending,step:1,review_id:result.review.review_id};retainToolPending(key,pending);}
-  if(pending.step===1){const result=await request(packPath+"/approvals",{...base,action:"activate",digest:packet.content_digest,version:packet.manifest.version},signal);if(!record(result)||!record(result.approval)||!id(result.approval.approval_id))throw Error("Approval receipt unavailable");pending={...pending,step:2,approval_id:result.approval.approval_id};retainToolPending(key,pending);}
+  const packet=pending.packet;const action=pending.action??"activate";const packPath="/api/capability-packs/"+encodeURIComponent(packet.pack_id);const base={goal_id:pending.goal_id,content_digest:packet.content_digest,authority_digest:packet.authority_digest};
+  if(pending.step===0){if(action==="revoke"||action==="uninstall"){pending={...pending,step:1};}else{const result=await request(packPath+"/review",{...base,goal_revision:pending.goal_revision,...(packet.descriptor?{root_path:packet.root_path,acknowledge_unsigned_local:true}:{})},signal);if(!record(result)||!record(result.review)||!id(result.review.review_id))throw Error("Review receipt unavailable");pending={...pending,step:1,review_id:result.review.review_id};}retainToolPending(key,pending);}
+  if(pending.step===1){const result=await request(packPath+"/approvals",{...base,action,digest:packet.content_digest,version:packet.manifest.version},signal);if(!record(result)||!record(result.approval)||!id(result.approval.approval_id))throw Error("Approval receipt unavailable");pending={...pending,step:2,approval_id:result.approval.approval_id};retainToolPending(key,pending);}
   if(pending.step===2){await request(packPath+`/approvals/${pending.approval_id}/approve`,{},signal);pending={...pending,step:3};retainToolPending(key,pending);}
-  if(pending.step===3){await request(packPath+"/activate",{...base,manifest:packet.manifest,root_path:packet.root_path,review_id:pending.review_id,approval_id:pending.approval_id},signal);}
+  if(pending.step===3){const body=action==="activate"||action==="update"?{...base,manifest:packet.manifest,root_path:packet.root_path,review_id:pending.review_id,approval_id:pending.approval_id}:action==="rollback"?{...base,approval_id:pending.approval_id}:{content_digest:packet.content_digest,authority_digest:packet.authority_digest,approval_id:pending.approval_id,...(action==="revoke"?{digest:packet.content_digest}:{})};await request(packPath+"/"+action,body,signal);}
   clear(key);return null;
  }
  if(pending.kind==="create"){

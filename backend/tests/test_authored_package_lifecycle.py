@@ -83,3 +83,30 @@ def test_operator_revoke_and_uninstall_cannot_use_quarantine_rollback(tmp_path):
     assert set(store._load()["revoked"][PACK])=={d1,d2}
     with pytest.raises(CapabilityPackLifecycleError,match="active or paused"):
         store.rollback(PACK,goal_id="goal-one",**OWNER)
+
+
+def test_native_reference_reconciliation_preserves_only_exact_metadata(tmp_path):
+    # This is lifecycle metadata, not a native execution/output receipt. Actual
+    # native success and its mirror are checked in authenticated native tests.
+    store=CapabilityPackLifecycle(tmp_path/"lifecycle.json")
+    r1,m1=candidate(tmp_path,"1.0.0");install(store,r1,m1)
+    pin=load_registration(CAP,lifecycle=store).pin
+    identity="authored-json:"+"a"*40
+    from datetime import datetime,timezone,timedelta
+    contract={"native_job_id":identity,"native_kind":"local_authored_json","input_digest":"b"*64,
+        "authority_digest":"c"*64,"deadline_at":(datetime.now(timezone.utc)+timedelta(seconds=5)).isoformat(),"pack_pin":pin}
+    store.register_job(PACK,goal_id="goal-one",job_id=identity,request_contract=contract,
+        required_tools=["isolated_json_adapter"],required_filesystem=["workspace_read","workspace_write"],**OWNER)
+    store._set_local_job_status(identity,status="running")
+    before=store._load()["jobs"][identity]
+    assert store._native_job_reference_valid(store._load(),identity,before)
+    r2,m2=candidate(tmp_path,"2.0.0");install(store,r2,m2,"update")
+    assert store.reconcile(PACK,**OWNER)["changes"]==[]
+    assert store._load()["jobs"][identity]==before
+    assert store.status(PACK,**OWNER)["jobs"][0]["control_authority"]=="canonical_native_job"
+    # An altered kind/fingerprint cannot suppress ordinary reconciliation.
+    with store._state_lock():
+        state=store._load();state["jobs"][identity]["request_contract"]["native_kind"]="invented-native"
+        store._commit(state)
+    result=store.reconcile(PACK,**OWNER)
+    assert result["changes"][0]["status"]=="cancelled"

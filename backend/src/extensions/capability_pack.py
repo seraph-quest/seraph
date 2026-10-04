@@ -3153,7 +3153,7 @@ class CapabilityPackLifecycle:
         record_fields = tuple(canonical_record)
         if manifest.contributes.adapters:
             if type(record.get("goal_revision")) is not int or record["goal_revision"]<1 or type(pointer.get("goal_revision")) is not int or pointer["goal_revision"]<1:return False
-            record_fields=tuple(field for field in record_fields if field!="review_id")
+            record_fields=tuple(field for field in record_fields if field not in {"review_id","goal_id"})
         if any(record.get(field_name) != canonical_record[field_name] for field_name in record_fields):
             return False
         canonical_review = {
@@ -3978,6 +3978,43 @@ class CapabilityPackLifecycle:
             self._commit(state)
             return {"job": deepcopy(mutable_job), "receipt": receipt}
 
+    @staticmethod
+    def _native_job_reference_valid(state, job_id, job):
+        """Validate a mirror reference, never native execution or quiescence."""
+        contract=job.get("request_contract")
+        if not isinstance(contract,Mapping) or set(contract)!={"native_job_id","native_kind","input_digest","authority_digest","deadline_at","pack_pin"}:
+            return False
+        kind=contract.get("native_kind");pack_id=job.get("pack_id")
+        authored=kind=="local_authored_json"
+        if not authored and (kind!="local_json_format" or pack_id!="seraph.tool.json-format"):return False
+        prefix="authored-json:" if authored else "json-format:"
+        if contract.get("native_job_id")!=job_id or not re.fullmatch(re.escape(prefix)+r"[a-f0-9]{40}",job_id):return False
+        if any(not isinstance(contract.get(key),str) or not _DIGEST_RE.fullmatch(contract[key]) for key in ("input_digest","authority_digest")):return False
+        pin=contract.get("pack_pin")
+        fields={"pack_id","version","digest","goal_id","review_id","authority_digest","dependencies_digest","owner_principal_id","session_id"}
+        if authored:fields.add("goal_revision")
+        if not isinstance(pin,Mapping) or set(pin)!=fields:return False
+        if any(not isinstance(pin.get(key),str) or not 0<len(pin[key])<=256 for key in fields-{"goal_revision"}):return False
+        if any(pin.get(key)!=job.get(key) for key in ("pack_id","version","digest","goal_id","owner_principal_id","session_id")):return False
+        if any(not isinstance(pin.get(key),str) or not _DIGEST_RE.fullmatch(pin[key]) for key in ("digest","authority_digest","dependencies_digest")):return False
+        if authored and (type(pin.get("goal_revision")) is not int or pin["goal_revision"]<1):return False
+        record=state.get("versions",{}).get(pack_id,{}).get(pin.get("digest"))
+        review=state.get("reviews",{}).get(pin.get("review_id"))
+        if not isinstance(record,Mapping) or not isinstance(review,Mapping):return False
+        if any(record.get(key)!=pin.get(key) for key in ("pack_id","version","digest","authority_digest","dependencies_digest")):return False
+        if any(review.get(key)!=pin.get(key) for key in ("pack_id","version","digest","goal_id","authority_digest")):return False
+        if authored and review.get("goal_revision")!=pin.get("goal_revision"):return False
+        tools=["isolated_json_adapter"] if authored else ["json_format"]
+        authority=record.get("authority")
+        if not isinstance(authority,Mapping) or authority.get("tools")!=tools or job.get("required_tools")!=tools or job.get("required_filesystem")!=["workspace_read","workspace_write"]:return False
+        try:
+            deadline=datetime.fromisoformat(contract["deadline_at"])
+            mirror_deadline=datetime.fromisoformat(job["deadline_at"])
+            if deadline.tzinfo is None or mirror_deadline.tzinfo is None or deadline>mirror_deadline:return False
+        except (ValueError,TypeError,KeyError):return False
+        return job.get("request_fingerprint")==canonical_digest("capability-pack-job-v3",pack_id,job["goal_id"],job_id,
+            job["version"],job["digest"],dict(contract),tuple(tools),("workspace_read","workspace_write"))
+
     def reconcile(
         self,
         pack_id: str | None = None,
@@ -4006,6 +4043,11 @@ class CapabilityPackLifecycle:
                     continue
                 job_pack_id = str(raw_job.get("pack_id") or "")
                 if selected_pack is not None and job_pack_id != selected_pack:
+                    continue
+                if self._native_job_reference_valid(state,item_job_id,raw_job):
+                    # The reference points to canonical native controls. Generic
+                    # workflow metadata cannot guess process cleanup or alter
+                    # an original released pin after an approved update.
                     continue
                 job_status = str(raw_job.get("status") or "")
                 if job_status == "succeeded" and item_job_id not in state.get("local_executions", {}):
@@ -4618,7 +4660,10 @@ class CapabilityPackLifecycle:
                 ],
                 "revoked_digests": list(state["revoked"].get(pack_id, [])),
                 "digest_quarantines": deepcopy(state["authored_quarantines"].get(pack_id,{})),
-                "jobs": [deepcopy(job) for job in state["jobs"].values() if isinstance(job, Mapping) and job.get("pack_id") == pack_id],
+                "jobs": [{**deepcopy(job),**({"control_authority":"canonical_native_job",
+                    "recovery_action":"use original Work native controls; mirror metadata proves neither output nor cleanup"}
+                    if self._native_job_reference_valid(state,identity,job) else {})}
+                    for identity,job in state["jobs"].items() if isinstance(job, Mapping) and job.get("pack_id") == pack_id],
                 "local_executions": [
                     deepcopy(execution)
                     for execution in state.get("local_executions", {}).values()

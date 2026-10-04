@@ -17,6 +17,66 @@ from src.db.models import WorkBoardInputArtifact
 
 
 @pytest.mark.asyncio
+async def test_document_generic_recovery_preserves_linked_attempt(accounting_db):
+    from src.db.models import WorkBoardAttempt, WorkBoardTask, WorkBoardStatus
+    from src.work_board.contracts import WorkBoardActionRequest, WorkBoardOwner
+    from src.work_board.repository import BoardError, WorkBoardRepository
+    from src.work_board.review import unblock_task
+    _, _, factory = accounting_db
+    owner = WorkBoardOwner(principal_id="document-owner", session_id="document-session")
+    repository = WorkBoardRepository()
+    async with factory.accounting_sessions() as db:
+        task = WorkBoardTask(owner_principal_id=owner.principal_id, owner_session_id=owner.session_id,
+            goal_id="original-goal", capability_id="work.document-compare.v1", status=WorkBoardStatus.blocked,
+            block_kind="transient", block_source_status="todo", idempotency_key="document-linked")
+        db.add(task)
+        await db.flush()
+        db.add(WorkBoardAttempt(task_id=task.task_id, workflow_run_id="document-original-job", ended_at=task.created_at))
+        task_id = task.task_id
+    for action in ("retry", "unblock", "repository_retry", "review_unblock"):
+        async with factory.accounting_sessions() as db:
+            with pytest.raises(BoardError) as refused:
+                if action == "repository_retry":
+                    await repository.retry_task(db, owner, task_id, expected_revision=1)
+                elif action == "review_unblock":
+                    await unblock_task(db, owner, task_id, expected_revision=1, resolution="Known parser failure", repository=repository)
+                else:
+                    await repository.action_task(db, owner, task_id, WorkBoardActionRequest(action=action, expected_revision=1,
+                        resolution="Known parser failure" if action == "unblock" else None))
+            assert refused.value.code == "document_original_attempt_required"
+    async with factory.accounting_sessions() as db:
+        task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id))
+        assert task.status is WorkBoardStatus.blocked and task.task_revision == 1
+        attempts = list((await db.scalars(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == task_id))).all())
+        assert len(attempts) == 1 and attempts[0].workflow_run_id == "document-original-job"
+        unlinked = WorkBoardTask(owner_principal_id=owner.principal_id, owner_session_id=owner.session_id,
+            goal_id="original-goal", capability_id="work.document-compare.v1", idempotency_key="document-unlinked")
+        db.add(unlinked)
+        await db.flush()
+        await repository.require_generic_recovery_allowed(db, unlinked)
+
+
+@pytest.mark.asyncio
+async def test_document_typed_workflow_controls_require_original_executor(monkeypatch):
+    # Guard unit: canonical owner/identity/Goal checks are exercised separately
+    # by the authenticated copied-SQLite route receipt. No executor is called.
+    from src.api import workflows
+    from fastapi import HTTPException
+    async def current(*args, **kwargs):
+        return {"job_kind": "document_invoice_compare_v1"}
+    async def goal(*args):
+        return None
+    monkeypatch.setattr(workflows, "_load_typed_workflow_run_for_control", current)
+    monkeypatch.setattr(workflows, "_workflow_identity_binding_detail", lambda **kwargs: None)
+    monkeypatch.setattr(workflows, "_workflow_current_goal_binding_detail", goal)
+    for action in ("retry", "pause", "resume", "revoke"):
+        with pytest.raises(HTTPException) as refused:
+            await workflows._control_typed_workflow_run(run_identity="document-original-job", action=action,
+                run={}, principal_id="document-owner", session_id="document-session")
+        assert refused.value.status_code == 409 and refused.value.detail == "document_original_attempt_required"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mode",["ingest","native","recovery","interruption","cancel","unsupported"])
 async def test_authenticated_private_pair_reserve_stream_seal_and_exact_bind(accounting_db, monkeypatch,mode):
     from src.api import auth, goals, work_board

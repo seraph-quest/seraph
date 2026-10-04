@@ -3039,6 +3039,8 @@ class WorkBoardDispatcher:
         async with self.session_provider() as db:
             detail = await self.repository.get_detail(db, owner, task_id)
             task = detail["task"]
+            if task.capability_id == "work.document-compare.v1":
+                await self.repository.require_generic_recovery_allowed(db, task)
             parent_ids = list(detail.get("parents") or [])
             if task.task_revision != int(expected_revision):
                 raise BoardError("stale_revision", "The task changed before retry preflight", status_code=409)

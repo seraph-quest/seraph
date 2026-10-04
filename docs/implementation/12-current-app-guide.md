@@ -29,6 +29,9 @@ holds capacity; the original exact witness permits cleanup reconciliation.
 Recovery adopts recorded verified output without reparsing. Only a known
 terminated interruption may use the remaining original retry allowance;
 exit-zero with missing output remains lost-output/nonretryable in this version.
+Use the document inspector's original-attempt recovery controls. Generic board
+retry/unblock and workflow pause/resume/revoke/retry cannot replace a linked
+document attempt or bypass its retry and positive cleanup requirements.
 
 **Status:** Partial
 **Scope:** current `develop` baseline plus the accepted Epic #736/#775 target;

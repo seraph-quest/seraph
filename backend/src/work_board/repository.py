@@ -1740,11 +1740,14 @@ class WorkBoardRepository:
         return BoardMutation(task, event)
 
     async def require_generic_recovery_allowed(self, db: AsyncSession, task: WorkBoardTask) -> None:
-        if task.capability_id in {"work.research-dossier.v1", "work.json-format.v1"}:
+        if task.capability_id in {"work.research-dossier.v1", "work.json-format.v1", "work.document-compare.v1"}:
             linked = await db.scalar(select(WorkBoardAttempt.attempt_id).where(
                 WorkBoardAttempt.task_id == task.task_id, WorkBoardAttempt.workflow_run_id.is_not(None)).limit(1))
             if linked is not None:
-                raise BoardError("research_original_attempt_required" if task.capability_id=="work.research-dossier.v1" else "tool_package_original_attempt_required",
+                code = {"work.research-dossier.v1": "research_original_attempt_required",
+                        "work.json-format.v1": "tool_package_original_attempt_required",
+                        "work.document-compare.v1": "document_original_attempt_required"}[task.capability_id]
+                raise BoardError(code,
                     "Use explicit capability recovery on the original attempt", status_code=409)
 
     async def action_task(

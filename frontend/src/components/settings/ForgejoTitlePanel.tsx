@@ -166,7 +166,7 @@ export function ForgejoTitlePanel({ ownerPrincipalId, ownerSessionId }: {
         throw Error("Original cancellation is not canonically confirmed");
       }
       if (value.job_id) acceptJob(value, current);
-      else setConnection(value as Connection);
+      else { setConnection(value as Connection); setOutput(null); }
       if (cancelling && value.status !== "cancelled") {
         setError("Cancellation is not terminally confirmed; read the original state. Exact requests remain retained.");
         return;

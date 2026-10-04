@@ -161,4 +161,20 @@ describe("fixed Forgejo title controls", () => {
     expect(screen.queryByRole("button", { name: "Prepare read-only recovery" })).toBeNull();
     expect(screen.queryByText(/Original title effect is Unknown/)).toBeNull();
   });
+  it("clears the fetched private output when the connection is revoked", async () => {
+    sessionStorage.setItem(scope + ".job", id);
+    const fetch = vi.fn((url: unknown, init?: RequestInit) => response(String(url).endsWith("/revoke") && init?.method === "POST"
+      ? { ...connection, revision: 2, state: "revoked", read_consent_revision: 2, read_consent_expires_at: null }
+      : String(url).endsWith("/output") ? { observation_only: true, observed_current_title: "Private observed title", no_learning: true }
+      : String(url).includes("/jobs/") ? { ...job, status: "succeeded", declared_authority: { operation: "observe" } } : metadata(url)));
+    vi.stubGlobal("fetch", fetch);
+    render(<ForgejoTitlePanel ownerPrincipalId="owner" ownerSessionId="root" />);
+    await screen.findByLabelText("Original Forgejo job");
+    fireEvent.click(screen.getByRole("button", { name: "Read protected receipt" }));
+    await screen.findByText(/GET-only observed title: Private observed title/);
+    fireEvent.click(screen.getByRole("button", { name: "Revoke backend session" }));
+    await screen.findByText(/Connection: revoked/);
+    expect(screen.queryByText(/Private observed title/)).toBeNull();
+    expect(fetch.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+  });
 });

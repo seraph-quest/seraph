@@ -18,7 +18,7 @@ from urllib.parse import urlencode, urlsplit
 from config.settings import settings
 from src.browser.forgejo_issue_title import (
     ForgejoError, ORIGIN, MAX_CONTACTS, MAX_DOCUMENT_BYTES, MAX_ASSET_BYTES,
-    checked_assets, digest, bounded_timeline, require_issue_identity,
+    checked_assets, digest, timeline_response, require_issue_identity,
     require_browser_submission,
 )
 from src.security.http_transport import (
@@ -164,10 +164,12 @@ class ForgejoTitleBrowser:
         authorization = "Basic " + base64.b64encode((username + ":" + password).encode()).decode()
         contacts = 0
         mutation_started = False
+        save_armed = False
         submission_response = None
         route_failure = None
         navigations = 0
         denied_auxiliary = []
+        blocked_requests = []
         failure = None
         output = None
         async def fetch(operation, path, *, api=False, browser_headers=None, body=None, asset=None):
@@ -206,7 +208,7 @@ class ForgejoTitleBrowser:
             value = json.loads(response.content)
             require_issue_identity(value, target, title=title)
             timeline = await fetch("timeline_readback", target.api_path + "/timeline?page=1&limit=21", api=True)
-            events = bounded_timeline(json.loads(timeline.content))
+            events = timeline_response(timeline.content, timeline.headers)
             if initial and (value.get("updated_at") != target.updated_at or digest(events) != target.timeline_digest):
                 raise ForgejoError("forgejo_original_issue_revision_changed")
             return value, events
@@ -224,6 +226,7 @@ class ForgejoTitleBrowser:
                 page = await context.new_page()
                 async def route_guard(route, request):
                     nonlocal mutation_started, submission_response, route_failure, navigations
+                    path = None
                     try:
                         await check_current()
                         headers = {k.lower(): v for k, v in (await request.all_headers()).items()}
@@ -236,6 +239,7 @@ class ForgejoTitleBrowser:
                         if request.method == "POST":
                             require_browser_submission(target, url=request.url, method=request.method,
                                 body=request.post_data_buffer, headers=headers)
+                            if not save_armed: raise ForgejoError("forgejo_submission_before_reviewed_save")
                             if mutation_started: raise ForgejoError("forgejo_original_submission_not_replayable")
                             await identity()
                             await source(title=target.old_title, initial=True)
@@ -249,8 +253,21 @@ class ForgejoTitleBrowser:
                             if navigations >= 2: raise ForgejoError("forgejo_document_navigation_bound")
                             navigations += 1
                             response = await fetch("issue_document", path, browser_headers=headers)
+                            from src.browser.forgejo_bootstrap import validate_document
+                            validate_document(response.content, target.provider_login)
                         elif request.method == "GET" and path in asset_manifest and request.resource_type in {"script", "stylesheet", "font"}:
                             response = await fetch("fixed_asset", path, asset=asset_manifest[path])
+                        elif request.method == "GET" and (
+                            (path == "/assets/js/eventsource.sharedworker.js?v=15.0.9~gitea-1.22.0" and request.resource_type == "script")
+                            or (path == target.page_path+"/content-history/overview" and request.resource_type == "fetch")):
+                            # Source-pinned optional initializers are denied,
+                            # never supplied a fake provider response. The
+                            # notification worker cannot execute or contact its
+                            # background endpoint. Content history catches its
+                            # failed GET independently from the title editor.
+                            if len(denied_auxiliary) >= 32: raise ForgejoError("forgejo_auxiliary_request_bound")
+                            denied_auxiliary.append("notification_worker" if request.resource_type == "script" else "content_history")
+                            await route.abort(); return
                         elif request.method == "GET" and request.resource_type == "image":
                             # Images carry no title authority and are never sent
                             # to the provider; their denial is explicit audit.
@@ -266,10 +283,18 @@ class ForgejoTitleBrowser:
                         await route.fulfill(status=response.status_code, headers=safe_headers, body=response.content)
                     except BaseException as exc:
                         route_failure = exc
+                        if len(blocked_requests) < 8:
+                            blocked_requests.append({"method": request.method,
+                                "type": request.resource_type, "url_sha256": digest(request.url.encode()),
+                                "same_origin_path": path if path in {target.page_path+"/content-history/overview",
+                                    "/assets/js/eventsource.sharedworker.js?v=15.0.9~gitea-1.22.0",
+                                    "/assets/css/dropzone.5a752d14.css", "/assets/js/dropzone.8f90b3c1.js"} else None,
+                                "reason": getattr(exc, "reason", type(exc).__name__)})
                         await route.abort()
                 await context.route("**/*", route_guard)
                 context.on("page", lambda other: asyncio.create_task(other.close()) if other != page else None)
-                await page.goto(ORIGIN+target.page_path, wait_until="networkidle", timeout=30000)
+                await page.goto(ORIGIN+target.page_path, wait_until="domcontentloaded", timeout=10000)
+                await page.locator("body:not(.no-js)").wait_for(timeout=5000)
                 if route_failure is not None: raise route_failure
                 if await context.cookies(): raise ForgejoError("forgejo_browser_secret_state_present")
                 if (await page.locator(".repository.view.issue").count() != 1
@@ -284,8 +309,15 @@ class ForgejoTitleBrowser:
                 await check_current()
                 await page.locator("#issue-title-edit-show").click()
                 await page.locator("#issue-title-editor input").fill(target.new_title)
-                await page.locator("#issue-title-editor .primary.button").click()
-                await page.wait_for_load_state("networkidle", timeout=30000)
+                await check_current()
+                save_armed = True
+                try:
+                    async with page.expect_navigation(wait_until="domcontentloaded", timeout=10000):
+                        await page.locator("#issue-title-editor .primary.button").click()
+                except Exception:
+                    if route_failure is not None: raise route_failure
+                    raise
+                await page.locator("body:not(.no-js)").wait_for(timeout=5000)
                 if route_failure is not None: raise route_failure
                 if submission_response is None or not mutation_started:
                     raise ForgejoError("forgejo_original_submission_response_missing")
@@ -306,6 +338,7 @@ class ForgejoTitleBrowser:
                     "browser_dom_sha256": digest(html.encode()), "timeline_sha256": digest(events),
                     "matching_title_event_ids": [item["id"] for item in matching], "contacts": contacts,
                     "denied_auxiliary": denied_auxiliary, "no_learning": True,
+                    "degraded_background": "Notification worker and optional content history are denied before provider contact",
                     "provider_cas": False, "production_acceptance": "unverified_local_test_only"}
         except BaseException as exc:
             failure = exc
@@ -314,7 +347,7 @@ class ForgejoTitleBrowser:
             closed = await runner._close_launch_resources_bounded(resources, timeout_seconds=min(10, remaining))
             cleanup = {"status": "verified" if closed and marker.snapshot()["status"] == "verified" else "unknown",
                 "browser_closed": closed, "transport": marker.snapshot(), "possible_submission": mutation_started,
-                "no_persistent_storage": True}
+                "no_persistent_storage": True, "blocked_requests": blocked_requests}
             await cleanup_observer(cleanup)
         if cleanup["status"] != "verified": raise ForgejoError("forgejo_browser_or_transfer_cleanup_unknown")
         if failure is not None: raise failure

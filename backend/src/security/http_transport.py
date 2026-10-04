@@ -209,7 +209,7 @@ async def request_pinned_https(
         transport=transport, timeout_seconds=timeout_seconds,
         connect_timeout_seconds=connect_timeout_seconds, max_bytes=max_bytes,
         _lifecycle_marker=_lifecycle_marker, authority_check=authority_check,
-        handoff_check=handoff_check)
+        handoff_check=handoff_check, observe_redirect_response=observe_redirect_response)
 
 
 async def request_pinned_calendar_patch(
@@ -268,6 +268,7 @@ async def _request_pinned_https(
     _lifecycle_marker: _TransportLifecycleMarker | None = None,
     authority_check: Callable[[], Awaitable[None]] | None = None,
     handoff_check: Callable[[], Awaitable[None]] | None = None,
+    observe_redirect_response: bool = False,
 ) -> PinnedResponse:
     """Private shared transport for general reads/posts and the fixed PATCH.
 

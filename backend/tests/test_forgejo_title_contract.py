@@ -55,6 +55,17 @@ def test_complete_timeline_overflow_never_becomes_positive_truncated_proof():
     with pytest.raises(ForgejoError): bounded_timeline([{"id": 1}, {"id": 1}])
 
 
+def test_provider_nil_visible_timeline_requires_actual_zero_count_without_pagination():
+    from src.browser.forgejo_issue_title import timeline_response
+    assert timeline_response(b"null\n", {"x-total-count": "0"}) == []
+    assert timeline_response(b'[{"id":1}]', {"x-total-count": "1"}) == [{"id": 1}]
+    for content, headers in ((b"null", {}), (b"null", {"x-total-count": "1"}),
+                             (b"null", {"x-total-count": "0", "link": '<next>; rel="next"'}),
+                             (b'[{"id":1}]', {"x-total-count": "0"}),
+                             (b"{}", {"x-total-count": "0"})):
+        with pytest.raises(ForgejoError): timeline_response(content, headers)
+
+
 def test_assets_are_finite_exact_digest_inventory_not_wildcard():
     assert len(checked_assets({"/assets/js/index.js?v=fixed": {"sha256": "b" * 64, "bytes": 400}})) == 64
     for path in ("https://evil.example/a", "/assets/../secret", "/not-assets/a"):

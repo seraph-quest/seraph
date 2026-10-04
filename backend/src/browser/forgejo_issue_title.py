@@ -138,6 +138,27 @@ def bounded_timeline(value):
     return value
 
 
+def timeline_response(content, headers):
+    """Pinned handler's complete bounded visible page, including nil slice.
+
+    v15.0.9 returns JSON null for its empty nil apiComments slice and sets
+    X-Total-Count to the returned visible count. Never infer emptiness from
+    missing/invalid bytes, errors, pagination or a caller-supplied count.
+    """
+    if type(content) is not bytes or len(content) > MAX_DOCUMENT_BYTES:
+        raise ForgejoError("forgejo_complete_timeline_unavailable")
+    try: value = json.loads(content)
+    except (ValueError, UnicodeError):
+        raise ForgejoError("forgejo_complete_timeline_unavailable") from None
+    if headers.get("link"):
+        raise ForgejoError("forgejo_complete_timeline_unavailable")
+    count = headers.get("x-total-count")
+    if value is None and count == "0": value = []
+    if type(value) is not list or count != str(len(value)):
+        raise ForgejoError("forgejo_complete_timeline_unavailable")
+    return bounded_timeline(value)
+
+
 def checked_assets(manifest):
     if type(manifest) is not dict or not manifest or len(manifest) > MAX_ASSETS:
         raise ForgejoError("forgejo_asset_inventory_invalid")

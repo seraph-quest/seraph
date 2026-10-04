@@ -207,3 +207,70 @@ async def test_cancelled_physical_publication_retains_quota_until_settled(accoun
         if pending and not pending.done():
             pending.cancel()
         await device.aclose();await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_actual_signed_owner_root_goal_expiry_and_envelope_denials(accounting_db,real_auth,monkeypatch):
+    """Named ingress negatives on one real pair; no admitted success fixture."""
+    from src.workflows.selected_context_contract import MAX_ENVELOPE_BYTES
+    root,factory,client,device,signed,metadata,text=await setup(accounting_db,monkeypatch)
+    root.chmod(0o700)
+    outcomes=[]
+    async def empty_selection():
+        assert not list(root.glob("artifacts/context/private/selected-text/*.enc"))
+        async with factory.accounting_sessions() as db:
+            assert not (await db.scalars(select(WorkflowRunState).where(WorkflowRunState.job_kind=="selected_context_v1"))).all()
+            assert not (await db.scalars(select(ApprovalRequest))).all()
+            assert not (await db.scalars(select(ScreenObservation))).all()
+            task=await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id=="selected-task"))
+            assert task.status=="ready" and task.task_revision==1 and task.input_artifact_id is None
+            assert task.body=="No model analysis"
+    async def denied(name,response,status,code=None):
+        assert response.status_code in status,(name,response.text)
+        if code is not None:assert response.json()["detail"]["code"]==code,(name,response.text)
+        outcomes.append({"case":name,"status":response.status_code,"body":response.json()})
+        await empty_selection()
+    try:
+        # A genuinely different authenticated principal cannot bind this pair
+        # or inspect its owned Task. No copied operator cookie or forged row.
+        async with httpx.AsyncClient(transport=client._transport,base_url="http://test",headers={"origin":"http://localhost:3001"}) as foreign:
+            login=await foreign.post("/api/auth/login",json={"password":"research-vertical-private-secret","start_new_scope":True})
+            assert login.status_code==200 and login.json()["principal_id"]!=metadata["target"]["owner_principal_id"]
+            before=load_extension_state_payload()
+            response=await foreign.post("/api/context/selected-text/tasks/selected-task/target",json={
+                "pair":metadata["pair"],"expected_state_revision":before["revision"],"expected_task_revision":1,
+                "goal_id":"selected-goal","goal_revision":1,"acknowledge_local_selected_text":True})
+            await denied("foreign_operator_pair_owner",response,{404},"selected_context_pair_unavailable")
+            assert load_extension_state_payload()==before
+            response=await foreign.get("/api/context/selected-text/tasks/selected-task/captures")
+            await denied("foreign_operator_task",response,{404},"selected_context_task_unavailable")
+        for field,value in (("goal_id","different-goal"),("goal_revision",2),
+                            ("owner_principal_id",login.json()["principal_id"])):
+            bad=copy.deepcopy(metadata);bad["target"][field]=value
+            await denied("signed_wrong_"+field,await signed("prepare",bad),{409},"selected_context_target_changed")
+        expired=copy.deepcopy(metadata);expired["expires_at"]=int(time.time())-1
+        await denied("authentic_signed_expired_backlog",await signed("prepare",expired),{410},"selected_context_ticket_expired")
+        oversized=copy.deepcopy(metadata);oversized["padding"]="x"*MAX_ENVELOPE_BYTES
+        await denied("oversized_envelope",await signed("prepare",oversized),{413},"selected_context_envelope_bound")
+        async with runtime.stage_pair(PairLocator.model_validate(metadata["pair"])) as (_proof,credential):
+            # Real paired bearer, malformed JSON rejected before MAC/authority
+            # parsing; no malformed-body grant can exist.
+            headers={"authorization":"Bearer "+credential,"x-seraph-context-mac":signature(credential,"prepare",metadata),"content-type":"application/json"}
+        response=await device.post("/api/context/selected-text/paired/prepare",content=b'{"schema_version":',headers=headers)
+        await denied("malformed_envelope",response,{422},"selected_context_schema_invalid")
+        bad=copy.deepcopy(metadata);bad["reviewed_utf8_sha256"]="a"*64
+        await denied("changed_reviewed_digest",await signed("upload",{"metadata":bad,"text":text}),{422},"selected_context_content_changed")
+        await denied("changed_text_bytes",await signed("upload",{"metadata":metadata,"text":text+" changed"}),{422},"selected_context_content_changed")
+        # A real current canonical Goal correction must also fail the writer,
+        # not merely the caller-supplied target equality check above.
+        async with factory.accounting_sessions() as db:
+            goal=await db.get(Goal,"selected-goal");goal.revision+=1;db.add(goal)
+        await denied("canonical_goal_revision_changed",await signed("prepare",metadata),{409},"selected_context_native_authority_denied")
+        revoked=await client.post("/api/auth/logout")
+        assert revoked.status_code==204
+        await denied("original_root_revoked",await signed("prepare",metadata),{403},"selected_context_pair_authentication_denied")
+        (root.parent/"named-ingress-negative-receipts.json").write_text(json.dumps({
+            "boundary":"Actual Auth/SQLite/owner Vault pairing; no selected job, approval, ciphertext, Task adoption or ScreenObservation created.",
+            "outcomes":outcomes},indent=2))
+    finally:
+        await device.aclose();await client.aclose()

@@ -87,3 +87,15 @@ def test_package_static_boundaries(tmp_path, change):
     path.write_bytes(canonical(descriptor))
     result = validate_capability_pack_package(root, manifest=manifest)
     assert not result["ok"], result
+
+
+def test_static_review_packet_does_not_inspect_optional_runtime(tmp_path, monkeypatch):
+    from src.api.capability_packs import _authored_packet
+    from src.execution import tool_package_profile
+    root,manifest=package(tmp_path)
+    def unexpected_runtime(_):
+        raise AssertionError("Static review must not scan the optional executable runtime")
+    monkeypatch.setattr(tool_package_profile,"inspect_runtime",unexpected_runtime)
+    packet=_authored_packet(str(root),inspect_runtime_profile=False)
+    assert packet["pack_id"]==manifest.id and packet["profile"] is None
+    assert packet["descriptor"]["code_sha256"]==sha256((root/"adapter.py").read_bytes())

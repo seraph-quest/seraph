@@ -129,7 +129,7 @@ class AuthoredReviewRequest(FixedFormatterReviewRequest):
     acknowledge_unsigned_local: bool
 
 
-def _authored_packet(root_path):
+def _authored_packet(root_path, *, inspect_runtime_profile=True):
     from pathlib import Path
     from src.extensions.authored_adapter import read_member, load_adapter
     from src.extensions.capability_pack import parse_capability_pack_manifest, validate_capability_pack_package, capability_pack_digest
@@ -139,12 +139,14 @@ def _authored_packet(root_path):
     if not checked["ok"] or not manifest.contributes.adapters:
         raise ValueError("authored_package_static_contract_invalid")
     adapter=load_adapter(root,manifest)
-    from src.execution.tool_package_profile import inspect_runtime
-    from src.work_board.tool_package_native import runtime_root
-    try:
-        profile={"status":"available",**inspect_runtime(runtime_root())}
-    except (OSError,ValueError,RuntimeError):
-        profile={"status":"blocked","reason":"tool_package_profile_unavailable"}
+    profile=None
+    if inspect_runtime_profile:
+        from src.execution.tool_package_profile import inspect_runtime
+        from src.work_board.tool_package_native import runtime_root
+        try:
+            profile={"status":"available",**inspect_runtime(runtime_root())}
+        except (OSError,ValueError,RuntimeError):
+            profile={"status":"blocked","reason":"tool_package_profile_unavailable"}
     return {"pack_id":manifest.id,"manifest":manifest.model_dump(mode="json"),"root_path":str(root),
         "content_digest":capability_pack_digest(root),"authority_digest":manifest.authority_digest,
         "descriptor":adapter.descriptor,"code_text":adapter.code.decode(),"profile":profile,
@@ -215,7 +217,7 @@ async def review_authored_package(pack_id: str, req: AuthoredReviewRequest, requ
     if req.acknowledge_unsigned_local is not True:
         raise HTTPException(status_code=403,detail={"code":"authored_package_unsigned_acknowledgement_required"})
     try:
-        packet=_authored_packet(req.root_path)
+        packet=_authored_packet(req.root_path,inspect_runtime_profile=False)
         if (packet["pack_id"]!=pack_id or packet["content_digest"]!=req.content_digest or
             packet["authority_digest"]!=req.authority_digest):
             raise ValueError("authored_package_exact_review_changed")

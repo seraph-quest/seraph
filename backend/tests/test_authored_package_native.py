@@ -20,7 +20,7 @@ from src.workflows.job_runtime import DurableJobRepository
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("authored_fixture",["time-ledger","tiny-copy","two-goal-race"])
+@pytest.mark.parametrize("authored_fixture",["time-ledger","tiny-copy","two-goal-race","two-goal-lock-trace"])
 async def test_actual_authored_time_ledger_native_reopen_private_read(accounting_db, monkeypatch, authored_fixture):
     from src.api import auth, capability_packs, goals, work_board
     root,engine,factory=accounting_db
@@ -53,7 +53,7 @@ async def test_actual_authored_time_ledger_native_reopen_private_read(accounting
         "immutable_execute_restored":["bwrap","rootfs/runtime/bin/isolated-python","rootfs/lib64/ld-linux-x86-64.so.2"]}))
     package_root=root/"selected-package"
     scaffold_adapter(package_root,package_id="local.test-json-copy" if authored_fixture=="tiny-copy" else "local.time-ledger-summary",display_name="Test-only JSON copy" if authored_fixture=="tiny-copy" else "Time ledger summary")
-    if authored_fixture=="two-goal-race":
+    if authored_fixture in {"two-goal-race","two-goal-lock-trace"}:
         # A reviewed test-only barrier uses the one precreated output inode.
         # No new writable mountpoint or runner/profile option is introduced.
         from src.extensions.authored_adapter import canonical,sha256
@@ -89,7 +89,7 @@ async def test_actual_authored_time_ledger_native_reopen_private_read(accounting
             raise
     monkeypatch.setattr(tool_package_native,"execute",traced_execute)
     records={}
-    if authored_fixture=="two-goal-race":
+    if authored_fixture in {"two-goal-race","two-goal-lock-trace"}:
         from contextlib import contextmanager
         import time,traceback
         from src.extensions.capability_pack import CapabilityPackLifecycle
@@ -155,7 +155,7 @@ async def test_actual_authored_time_ledger_native_reopen_private_read(accounting
         created=await post("/api/work-board/tasks",{"title":"Actual authored ledger summary","capability_id":cap,
             "goal_id":goal["id"],"goal_revision":1,"status":"todo","input_artifact_id":artifact["artifact_id"],"idempotency_key":"authored-task"})
         task_id=created["task"]["task_id"]
-        if authored_fixture=="two-goal-race":
+        if authored_fixture in {"two-goal-race","two-goal-lock-trace"}:
             first_pass=asyncio.create_task(dispatcher.run_pass())
             barrier_path=None
             try:
@@ -182,7 +182,7 @@ async def test_actual_authored_time_ledger_native_reopen_private_read(accounting
                 from datetime import datetime,timezone,timedelta
                 from src.db.models import Goal
                 negatives={}
-                for mutation in ("lease_expired","goal_revision","cancel_intent","malformed_authority"):
+                for mutation in (("lease_expired","goal_revision","cancel_intent","malformed_authority") if authored_fixture=="two-goal-race" else ()):
                     copied=root/("live-native-"+mutation+".db")
                     with sqlite3.connect("file:"+str(root/"seraph.db")+"?mode=ro",uri=True) as origin,sqlite3.connect(copied) as target_db:
                         origin.backup(target_db)

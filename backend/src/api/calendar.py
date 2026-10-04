@@ -52,6 +52,8 @@ from src.scheduler.governed_schedules import (
 
 
 router = APIRouter()
+from src.api.calendar_reschedule import router as reschedule_router
+router.include_router(reschedule_router)
 repository = WorkBoardRepository()
 _MAX_SETUP_BYTES = 16 * 1024
 _ALLOWED_FIELDS = frozenset({"summary", "start", "end", "location", "description", "attendees"})

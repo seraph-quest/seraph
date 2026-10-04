@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import Boolean, Column, Index, Integer, Text, UniqueConstraint, text
+from sqlalchemy import Boolean, CheckConstraint, Column, Index, Integer, Text, UniqueConstraint, text
 from sqlmodel import Field, SQLModel, Relationship
 
 
@@ -445,6 +445,54 @@ class CalendarReadConsent(SQLModel, table=True):
     consent_digest: str = Field(default="", index=True, max_length=128)
     created_at: datetime = Field(default_factory=_now, index=True)
     updated_at: datetime = Field(default_factory=_now, index=True)
+
+
+class CalendarRescheduleConsent(SQLModel, table=True):
+    """Finite exact write permission; never execution or effect authority.
+
+    Expired active grants deliberately retain their unique slot until an
+    explicit local revoke. No readonly grant is automatically promoted.
+    """
+
+    __tablename__ = "calendar_reschedule_consents"
+    __table_args__ = (
+        UniqueConstraint("owner_principal_id", "original_root_session_id", "creation_request_uuid",
+            name="ux_calendar_reschedule_consent_request"),
+        Index("ux_calendar_reschedule_active_grant", "owner_principal_id", "original_root_session_id", "event_binding_id",
+            unique=True, sqlite_where=text("state = 'active'"), postgresql_where=text("state = 'active'")),
+        CheckConstraint("state IN ('active', 'revoked')", name="ck_calendar_reschedule_consent_state"),
+        CheckConstraint("revision > 0 AND goal_revision > 0 AND event_binding_revision > 0 AND read_connection_revision > 0 AND write_connection_revision > 0", name="ck_calendar_reschedule_consent_revisions"),
+    )
+
+    consent_id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_principal_id: str = Field(index=True)
+    original_root_session_id: str = Field(index=True)
+    goal_id: str = Field(index=True)
+    goal_revision: int
+    read_connection_id: str = Field(index=True)
+    read_connection_revision: int
+    write_connection_id: str = Field(index=True)
+    write_connection_revision: int
+    profile_binding_digest: str = Field(max_length=64)
+    account_identity_digest: str = Field(max_length=64)
+    selected_calendar_id_private: str = Field(sa_type=Text)
+    selected_calendar_digest: str = Field(max_length=64)
+    event_binding_id: str = Field(index=True)
+    event_binding_revision: int
+    event_identity_digest: str = Field(max_length=128)
+    owned_event_read_allowed: bool = Field(default=False)
+    calendar_list_metadata_read_allowed: bool = Field(default=False)
+    one_conditional_reschedule_allowed: bool = Field(default=False)
+    expires_at: datetime = Field(index=True)
+    state: str = Field(default="active", index=True)
+    revision: int = Field(default=1)
+    creation_request_uuid: str = Field(max_length=36)
+    creation_request_digest: str = Field(max_length=64)
+    consent_digest: str = Field(max_length=64)
+    revocation_request_uuid: Optional[str] = Field(default=None, max_length=36)
+    revocation_request_digest: Optional[str] = Field(default=None, max_length=64)
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
 
 
 class MailLabelBinding(SQLModel, table=True):

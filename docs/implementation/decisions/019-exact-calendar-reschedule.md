@@ -140,6 +140,26 @@ metadata/recovery retained. No inference/canonical memory write; explicit no_lea
 
 ## Consequences
 
+### Accepted finite write permission schema supplement
+
+Lead acceptance of the independently reviewed supplement r2
+(`826fb2d47acdd1f857984d671b864b450581b3762bed627d71b86e01839a0090`)
+permits one focused `CalendarRescheduleConsent` table and its bounded indexes.
+It binds server-derived owner/original Root, exact Goal/revision, read/write
+profile revisions and scope/identity/Vault metadata digests, encrypted selected
+calendar and event binding revisions, finite capped expiry, request/digest and
+active/revoked revision. It stores permission only; the native job checkpoint
+continues to own one-use intent, dispatch and original effect liability.
+No legacy readonly consent is promoted or reinterpreted and there is no backfill.
+
+One active grant per original owner/Root/event binding includes naturally
+expired active rows. Expiry blocks authority without changing or renewing the
+row. Explicit local revocation by the still-live original owner/Root releases
+the slot even when the old Goal/grant has closed or expired; it needs no provider
+contact or Vault secret read. Fresh regrant requires a new explicit UUID,
+current finite active Goal, verified exact pair and freshly confirmed
+acknowledgements. It cannot renew or adopt previous jobs or approvals.
+
 CPU core and existing Calendar/Mail paths remain usable without these grants.
 Strict ownership/schema/scope/closure policy can block ambiguous accounts or
 old receipts. Current-state observation cannot prove historical authorship or

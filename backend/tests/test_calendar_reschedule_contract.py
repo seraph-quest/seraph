@@ -11,6 +11,7 @@ from src.integrations.calendar_reschedule_contract import (
     READ_SERVICE, SEND_SERVICE, SCOPES, bounded_json, event, freeze, instant,
     owned_calendar, proposed_times, reschedule_readback, scopes,
 )
+from src.security.http_transport import request_pinned_calendar_patch, request_pinned_https, _TransportLifecycleMarker, PinnedTransportError
 
 ACCOUNT = {"sub":"ExactCaseSubject", "email":"operator@example.test", "issuer":"https://accounts.google.com"}
 CALENDAR = {"id":ACCOUNT["email"], "primary":True, "dataOwner":None, "accessRole":"owner", "timeZone":"Europe/Warsaw"}
@@ -127,7 +128,8 @@ async def test_fixed_conditional_wire_one_patch_and_no_calendar_metadata_endpoin
         return httpx.Response(412 if conflict else 200,json={} if conflict else observed(frozen))
     reservations=[]
     async def reserve(operation,service): reservations.append((operation,service))
-    adapter=CalendarRescheduleAdapter(service=SEND_SERVICE,credentials={"client_id":"synthetic","refresh_token":"synthetic"},deadline=datetime.now(timezone.utc)+timedelta(seconds=30),contact=reserve,transport=httpx.MockTransport(provider),resolver=lambda host,port:["93.184.216.34"])
+    async def validate(operation,service): assert operation in {"refresh","identity","calendar","patch"} and service==SEND_SERVICE
+    adapter=CalendarRescheduleAdapter(service=SEND_SERVICE,credentials={"client_id":"synthetic","refresh_token":"synthetic"},deadline=datetime.now(timezone.utc)+timedelta(seconds=30),contact=reserve,preflight=validate,transport=httpx.MockTransport(provider),resolver=lambda host,port:["93.184.216.34"])
     await adapter.request("refresh"); await adapter.request("identity")
     await adapter.request("calendar",calendar_id=CALENDAR["id"])
     kwargs={"calendar_id":CALENDAR["id"],"event_id":frozen["source"]["id"],"resource":frozen["resource"],"etag":frozen["source_etag"]}
@@ -137,3 +139,45 @@ async def test_fixed_conditional_wire_one_patch_and_no_calendar_metadata_endpoin
     with pytest.raises(CalendarIntegrationError): await adapter.request("patch",**kwargs)
     assert len(calls)==4 and reservations==[(operation,SEND_SERVICE) for operation in ("refresh","identity","calendar","patch")]
     assert adapter.marker.snapshot()["status"]=="verified"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase",["early","final","response_loss"])
+async def test_patch_permission_denial_and_lost_response_positive_actual_close(phase):
+    frozen=frozen_event(); counts={"dns":0,"http":0,"closed":0,"early":0,"final":0}
+    marker=_TransportLifecycleMarker()
+    def resolve(host,port):
+        counts["dns"]+=1
+        assert host=="www.googleapis.com" and port==443
+        return ["93.184.216.34"]
+    async def provider(request):
+        counts["http"]+=1
+        assert request.method=="PATCH"
+        raise httpx.ReadError("simulated response lost after acceptance")
+    class Boundary(httpx.MockTransport):
+        async def aclose(self):
+            await super().aclose()
+            counts["closed"]+=1
+    async def early():
+        counts["early"]+=1
+        if phase=="early": raise RuntimeError("permission revoked before DNS")
+    async def final():
+        counts["final"]+=1
+        if phase=="final": raise RuntimeError("permission revoked before stream")
+    with pytest.raises(httpx.ReadError if phase=="response_loss" else RuntimeError):
+        await request_pinned_calendar_patch(calendar_id=CALENDAR["id"],event_id=frozen["source"]["id"],etag=frozen["source_etag"],
+            start=frozen["resource"]["start"],end=frozen["resource"]["end"],marker_key=frozen["marker_key"],marker_value=frozen["marker_value"],
+            access_token="synthetic",authority_validate=early,authority_check=final,lifecycle_marker=marker,resolver=resolve,transport=Boundary(provider))
+    assert counts["http"]==(1 if phase=="response_loss" else 0)
+    assert counts["dns"]==(0 if phase=="early" else 1)
+    assert counts["closed"]==(0 if phase=="early" else 1)
+    proof=marker.snapshot()
+    assert proof["status"]=="verified" and proof["active_operations"]==proof["unsettled_operations"]==0
+    assert proof["requests_started"]==proof["requests_settled"]==(0 if phase=="early" else 1)
+
+
+@pytest.mark.asyncio
+async def test_general_pinned_surface_still_rejects_patch_before_dns():
+    def forbidden(host,port): raise AssertionError("DNS cannot run for general PATCH")
+    with pytest.raises(PinnedTransportError,match="only GET and POST"):
+        await request_pinned_https("https://www.googleapis.com/calendar/v3/calendars/a/events/b",method="PATCH",resolver=forbidden)

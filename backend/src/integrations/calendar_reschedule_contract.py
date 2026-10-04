@@ -10,7 +10,7 @@ import secrets
 from urllib.parse import quote, urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from src.security.http_transport import request_pinned_https, _TransportLifecycleMarker
+from src.security.http_transport import request_pinned_https, request_pinned_calendar_patch, _TransportLifecycleMarker
 from src.integrations.google_calendar import CalendarIntegrationError
 
 READ_SERVICE = "calendar_reschedule_read"
@@ -223,10 +223,11 @@ def reschedule_readback(value, frozen):
 
 class CalendarRescheduleAdapter:
     """Fixed one-token profile, actual owned transport and sole conditional PATCH."""
-    def __init__(self, *, service, credentials, deadline, contact, transport=None, resolver=None):
+    def __init__(self, *, service, credentials, deadline, contact, preflight=None, transport=None, resolver=None):
         if service not in SCOPES: fail("profile_invalid")
         self.service, self.credentials, self.deadline, self.contact = service, dict(credentials), deadline, contact
         self.transport, self.resolver = transport, resolver
+        self.preflight = preflight
         self.marker = _TransportLifecycleMarker()
         self.token = self.identity = None
         self.calendar_verified = None
@@ -256,6 +257,8 @@ class CalendarRescheduleAdapter:
                     url = "https://www.googleapis.com/calendar/v3/calendars/"+quote(calendar_id,safe="")+"/events/"+quote(provider_id(event_id),safe="")
                     if operation == "patch" and self.service == SEND_SERVICE:
                         if self.patch_started or type(resource) is not dict or set(resource)!={"start","end","extendedProperties"}: fail("patch_slot_consumed")
+                        props = resource["extendedProperties"]
+                        if type(props) is not dict or set(props)!={"private"} or type(props["private"]) is not dict or len(props["private"])!=1: fail("patch_resource_changed")
                         instant(resource["start"]); instant(resource["end"]); property_maps(resource["extendedProperties"])
                         self.patch_started = True
                         method, payload = "PATCH", {"json_body":resource}
@@ -268,7 +271,22 @@ class CalendarRescheduleAdapter:
         kwargs = {"method":method, "headers":{"Accept":"application/json",**headers}, "timeout_seconds":min(10,remaining), "max_bytes":MAX_RESPONSE, **payload, "_lifecycle_marker":self.marker, "authority_check":lambda:self.contact(operation,self.service)}
         if self.transport is not None: kwargs["transport"]=self.transport
         if self.resolver is not None: kwargs["resolver"]=self.resolver
-        async with asyncio.timeout(remaining): response = await request_pinned_https(url,**kwargs)
+        async with asyncio.timeout(remaining):
+            if operation == "patch":
+                if self.preflight is None: fail("native_preflight_required")
+                patch_kwargs = {"calendar_id":calendar_id,"event_id":event_id,"etag":etag,
+                    "start":resource["start"],"end":resource["end"],
+                    "marker_key":next(iter(resource["extendedProperties"]["private"])),
+                    "marker_value":next(iter(resource["extendedProperties"]["private"].values())),
+                    "access_token":self.token,"authority_validate":lambda:self.preflight(operation,self.service),
+                    "authority_check":kwargs["authority_check"],"lifecycle_marker":self.marker,
+                    "timeout_seconds":min(10,remaining)}
+                if self.transport is not None: patch_kwargs["transport"]=self.transport
+                if self.resolver is not None: patch_kwargs["resolver"]=self.resolver
+                response = await request_pinned_calendar_patch(**patch_kwargs)
+            else:
+                if self.preflight is not None: await self.preflight(operation,self.service)
+                response = await request_pinned_https(url,**kwargs)
         if operation == "patch" and response.status_code == 412: raise ConditionalConflict()
         if response.status_code in {400,401,403,404,405,409,410,412,422,429}: raise ProviderRefusal(response.status_code)
         if response.status_code != 200 or response.headers.get("content-type", "").split(";",1)[0].lower() != "application/json": fail("provider_response_uncertain")

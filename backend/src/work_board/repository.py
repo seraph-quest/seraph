@@ -1144,7 +1144,7 @@ class WorkBoardRepository:
                 request = request.model_copy(update={"executor_id": expected_executor})
         if (
             request.status is WorkBoardStatus.todo
-            and request.capability_id in {"browser.public-task.v1", "work.research-dossier.v1", "work.json-format.v1"}
+            and request.capability_id in {"browser.public-task.v1", "work.research-dossier.v1", "work.json-format.v1", "work.document-compare.v1"}
             and not request.input_artifact_id
         ):
             raise BoardError(
@@ -1153,6 +1153,13 @@ class WorkBoardRepository:
                 status_code=422,
             )
         artifact = None
+        document_stage = None
+        if request.capability_id == "work.document-compare.v1" and request.input_artifact_id:
+            from src.work_board.input_artifacts import resolve_input_artifact_for_task, _metadata_digest
+            artifact = await resolve_input_artifact_for_task(db, owner,
+                artifact_id=request.input_artifact_id, goal_id=request.goal_id,
+                goal_revision=request.goal_revision, capability_id=request.capability_id)
+            document_stage = (_metadata_digest(artifact.row), artifact.row.revision)
         if request.input_artifact_id or publication_authority_check is not None:
             # Reserve the writer before reading the owner/goal/artifact graph.
             # Those reads establish the authority that is bound by the task
@@ -1230,6 +1237,15 @@ class WorkBoardRepository:
             goal_id=request.goal_id,
             goal_revision=request.goal_revision,
         )
+        if document_stage is not None:
+            from src.db.models import WorkBoardInputArtifact
+            from src.work_board.input_artifacts import _metadata_digest
+            fresh = await db.get(WorkBoardInputArtifact, request.input_artifact_id, populate_existing=True)
+            if (fresh is None or (_metadata_digest(fresh), fresh.revision) != document_stage
+                or fresh.metadata_digest != document_stage[0] or fresh.state != "pending"):
+                raise BoardError("document_pair_binding_changed", "The staged pair changed before binding", status_code=409)
+            from src.work_board.input_artifacts import ResolvedInputArtifact
+            artifact = ResolvedInputArtifact(row=fresh, input=artifact.input, payload=artifact.payload)
         if request.input_artifact_id:
             if artifact is None:
                 from src.work_board.input_artifacts import resolve_input_artifact_for_task
@@ -1724,11 +1740,14 @@ class WorkBoardRepository:
         return BoardMutation(task, event)
 
     async def require_generic_recovery_allowed(self, db: AsyncSession, task: WorkBoardTask) -> None:
-        if task.capability_id in {"work.research-dossier.v1", "work.json-format.v1"}:
+        if task.capability_id in {"work.research-dossier.v1", "work.json-format.v1", "work.document-compare.v1"}:
             linked = await db.scalar(select(WorkBoardAttempt.attempt_id).where(
                 WorkBoardAttempt.task_id == task.task_id, WorkBoardAttempt.workflow_run_id.is_not(None)).limit(1))
             if linked is not None:
-                raise BoardError("research_original_attempt_required" if task.capability_id=="work.research-dossier.v1" else "tool_package_original_attempt_required",
+                code = {"work.research-dossier.v1": "research_original_attempt_required",
+                        "work.json-format.v1": "tool_package_original_attempt_required",
+                        "work.document-compare.v1": "document_original_attempt_required"}[task.capability_id]
+                raise BoardError(code,
                     "Use explicit capability recovery on the original attempt", status_code=409)
 
     async def action_task(
@@ -3475,6 +3494,15 @@ class WorkBoardRepository:
     async def project_attempt(self,db,task_id,attempt_id,**kwargs):
         status=kwargs.get("status")
         task=await self._find_task(db,task_id)
+        if task is not None and task.capability_id=="work.document-compare.v1" and status in {WorkBoardStatus.review,WorkBoardStatus.done}:
+            from src.work_board.document_compare_native import stage,read_output
+            from src.work_board.dispatcher import _parse_typed_input
+            attempt=await db.get(WorkBoardAttempt,attempt_id,populate_existing=True)
+            run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==attempt.workflow_run_id)) if attempt else None
+            if run is None:raise BoardError("document_output_readback_required","The original native comparison is unavailable")
+            authority=await stage(db,task,attempt,run,_parse_typed_input(task))
+            receipt,_output=read_output(task,attempt,run)
+            return await self._project_attempt(db,task_id,attempt_id,_document_stage=(authority,receipt,run.checkpoint_receipts_json),**kwargs)
         if task is not None and task.capability_id=="work.json-format.v1" and status in {WorkBoardStatus.review,WorkBoardStatus.done}:
             from src.work_board.tool_package_native import session_authority_guard,stage_readback
             attempt=await db.get(WorkBoardAttempt,attempt_id,populate_existing=True)
@@ -3507,6 +3535,7 @@ class WorkBoardRepository:
         actor_session_id: str | None = None,
         now: datetime | None = None,
         _tool_stage=None,
+        _document_stage=None,
     ) -> BoardAttemptProjection:
         """Project a reconciled attempt without overriding runtime authority."""
 
@@ -3741,6 +3770,15 @@ class WorkBoardRepository:
             if proof_receipt not in safe_receipts:
                 safe_receipts = [proof_receipt, *safe_receipts[:31]]
         safe_results = _safe_receipt_refs(result_refs, preserve_effect_ids=True)
+        if task.capability_id == "work.document-compare.v1" and status in {WorkBoardStatus.review,WorkBoardStatus.done}:
+            from src.work_board.document_compare_native import current
+            run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==attempt.workflow_run_id)
+                .execution_options(populate_existing=True))
+            if (_document_stage is None or run is None or run.status!="succeeded"
+                or run.checkpoint_receipts_json!=_document_stage[2]
+                or _document_stage[1]["cipher_sha256"]!=proof_digest):
+                raise BoardError("document_output_readback_required","The exact native output needs fresh physical readback")
+            await current(db,task,attempt,run,_document_stage[0])
         safe_artifacts = _safe_receipt_refs(artifact_refs, preserve_effect_ids=True)
         unresolved_receipt = any(
             str(item.get("status") or "") in _UNRESOLVED_RECEIPT_STATUSES

@@ -22,7 +22,9 @@ def host_limits():
         resource.setrlimit(resource.RLIMIT_AS, (ceiling, ceiling))
         resource.setrlimit(resource.RLIMIT_CPU, (10, 10))
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-        if resource.getrlimit(resource.RLIMIT_AS) != (ceiling, ceiling):
+        if (resource.getrlimit(resource.RLIMIT_AS) != (ceiling, ceiling)
+            or resource.getrlimit(resource.RLIMIT_CPU) != (10, 10)
+            or resource.getrlimit(resource.RLIMIT_CORE) != (0, 0)):
             return None
         positive = mmap.mmap(-1, 8 * 1024 * 1024); positive.close()
         try:

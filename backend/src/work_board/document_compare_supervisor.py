@@ -57,9 +57,12 @@ def main():
     except (ValueError, OSError, json.JSONDecodeError):
         reason="document_supervisor_interrupted"
     finally:
-        if parser.poll() is None:
+        if reason is not None and parser.poll() is None:
             parser.kill()
-        exit_code=parser.wait(timeout=5)
+        try:
+            exit_code=parser.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            parser.kill();exit_code=parser.wait(timeout=5);reason="document_parser_quiescence_timeout"
         witness={**binding,"supervisor_pid":os.getpid(),"parser_pid":parser.pid,
             "parser_exit":exit_code,"wait_reaped":True,"reason":reason}
         raw=json.dumps(witness,sort_keys=True,separators=(",",":")).encode()

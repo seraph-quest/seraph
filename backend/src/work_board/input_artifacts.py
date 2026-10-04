@@ -1248,6 +1248,12 @@ async def delete_input_artifact(
     artifact_id: str,
     expected_revision: int | None = None,
 ) -> InputArtifactMetadata:
+    row = await db.scalar(select(WorkBoardInputArtifact).where(
+        WorkBoardInputArtifact.artifact_id == artifact_id,
+        WorkBoardInputArtifact.owner_principal_id == owner.principal_id,
+        WorkBoardInputArtifact.owner_session_id == owner.session_id))
+    if row is not None and row.capability_id == "work.document-compare.v1":
+        raise BoardError("document_pair_cleanup_required", "Use the private pair discard control to verify physical cleanup")
     return await _set_terminal_state(
         db,
         owner,

@@ -1,6 +1,6 @@
 """Closed references-only document input; raw sources use separate streams."""
 from typing import Literal
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class DocumentSourceDescriptor(BaseModel):
@@ -30,7 +30,18 @@ class DocumentCompareInput(BaseModel):
     csv: DocumentSourceDescriptor
     no_learning: Literal[True]
 
+    @field_validator("csv")
+    @classmethod
+    def csv_bound(cls, value):
+        if value.size_bytes > 1024 * 1024:
+            raise ValueError("CSV exceeds the fixed 1 MiB limit")
+        return value
+
 
 class DocumentPairMutation(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
     expected_revision: int = Field(ge=1)
+
+
+class DocumentControlRequest(DocumentPairMutation):
+    idempotency_key: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")

@@ -9,7 +9,7 @@ from pathlib import Path
 import struct
 import sys
 import uuid
-from sqlalchemy import select
+from sqlalchemy import select, text, update
 from config.settings import settings
 from src.db.models import OperatorSession, WorkBoardAttempt, WorkBoardInputArtifact, WorkBoardStatus, WorkBoardTask, WorkflowRunState
 from src.work_board.contracts import WorkBoardOwner
@@ -204,8 +204,8 @@ async def execute(task,attempt,inputs,*,jobs,runner,deadline,admission_only):
         history=json.loads(run.checkpoint_receipts_json)
         history.append({"checkpoint_id":"document-capacity","payload":binding,"safe":True})
         run.checkpoint_receipts_json=canonical(history).decode();await db.flush()
-    projection=await jobs.claim_job(spec.identity.job_id,owner=runner,lease_seconds=70,
-        expected_revision=projection["revision"],expected_fencing_token=projection["fencing_token"],claim_authority_check=claim)
+    projection=await jobs.claim_job(spec.identity.job_id,owner=runner,lease_seconds=35,
+        expected_revision=projection["revision"],expected_fencing_token=(projection.get("lease") or {}).get("fencing_token",0),claim_authority_check=claim)
     fence=int(projection["lease"]["fencing_token"]); process=None; parent=-1
     try:
         path=directory_path(task.input_artifact_id)/"unused"
@@ -246,21 +246,7 @@ async def execute(task,attempt,inputs,*,jobs,runner,deadline,admission_only):
         if read_private(path,receipt,maximum=352*1024)!=plaintext:raise BoardError("document_output_readback_failed","The derived output failed physical readback")
         await jobs.record_checkpoint(spec.identity.job_id,checkpoint_id="document-output",state=receipt,
             checkpoint_payload={**receipt,"reference":reference,"plain_sha256":sha256(plaintext),"no_learning":True},owner=runner,fencing_token=fence)
-        await stage_current(jobs,task,attempt,inputs)
-        await jobs.record_artifact(spec.identity.job_id,file_path=reference,artifact_type="document_invoice_comparison_private",
-            content=read_ciphertext(path,receipt),owner=runner,fencing_token=fence)
-        staged=await stage_current(jobs,task,attempt,inputs)
-        async def terminal(db,run):await current(db,task,attempt,run,staged)
-        await jobs.record_readback(spec.identity.job_id,effect_type="document_invoice_comparison_private",
-            target_path=reference,target_digest=receipt["cipher_sha256"],content_sha256=receipt["cipher_sha256"],
-            readback_id="document-readback:"+binding["nonce"],verified_at=now().isoformat(),status="succeeded",
-            details={"verified":True,"no_learning":True,"plain_sha256":sha256(plaintext),"witness_sha256":witness_sha},
-            owner=runner,fencing_token=fence,readback_authority_check=terminal)
-        finished=await jobs.transition_job(spec.identity.job_id,"succeeded",owner=runner,fencing_token=fence,
-            result={"status":"succeeded","no_learning":True,"output_sha256":receipt["cipher_sha256"]},
-            result_summary="Selected private PDF/CSV compared with cited exact Decimal formulas; no_learning",
-            terminal_authority_check=terminal)
-        return {**finished,"job_id":spec.identity.job_id,"status":"succeeded","admission_only":False,"memory_status":"no_learning"}
+        return await adopt_output(jobs,task,attempt,inputs,runner,fence)
     except BaseException:
         # Closing the actual parent pipe lets the independent supervisor reap
         # and publish its witness even after this coroutine is cancelled.
@@ -313,3 +299,60 @@ def read_ciphertext(path,receipt):
     finally:
         if fd>=0:os.close(fd)
         os.close(parent)
+
+
+async def adopt_output(jobs,task,attempt,inputs,runner,fence):
+    """Stage exact physical proof, then atomically adopt under pure SQL fences."""
+    from src.artifacts.registry import build_artifact_record
+    from src.workflows.job_runtime import (_digest, _serialize, _effect_ledger_or_raise,
+        _job_has_unsafe_effects, _verified_readback_exists, _assert_canonical_goal_fence)
+    async with jobs._session() as db:
+        original=await jobs._fetch(db,job_id(task,attempt))
+        staged=await stage(db,task,attempt,original,inputs)
+        receipt,_output=read_output(task,attempt,original)
+        checkpoint_binding=original.checkpoint_receipts_json
+        binding=checkpoints(original)["document-child"]
+        actual,witness_sha=witness(binding)
+    if actual["parser_exit"]!=0 or actual["reason"] is not None:
+        raise BoardError("document_parser_output_unverified","The original parser did not finish normally")
+    ciphertext=read_ciphertext(canonical_workspace_root(settings.workspace_dir)/receipt["reference"],receipt)
+    record=build_artifact_record(file_path=receipt["reference"],artifact_type="document_invoice_comparison_private",
+        producer=JOB_KIND,run_id=job_id(task,attempt),session_id=task.owner_session_id,content=ciphertext)
+    artifact={key:record[key] for key in ("artifact_id","artifact_type","file_path","producer","content_sha256","size_bytes","exists")}
+    async with jobs._session() as db:
+        await db.execute(text("BEGIN IMMEDIATE"));run=await jobs._fetch(db,job_id(task,attempt))
+        await current(db,task,attempt,run,staged)
+        await _assert_canonical_goal_fence(db,goal_id=run.goal_id,goal_revision=run.goal_revision,
+            owner_kind=run.owner_kind,owner_principal_id=run.owner_principal_id,session_id=run.session_id,authority=run.declared_authority_json)
+        stamp=now()
+        if (run.status!="running" or run.lease_owner!=runner or run.fencing_token!=fence
+            or not run.lease_expires_at or utc(run.lease_expires_at)<=stamp
+            or run.checkpoint_receipts_json!=checkpoint_binding):
+            raise BoardError("document_adoption_fence_changed","The original output adoption lease changed")
+        effects=_effect_ledger_or_raise(run.effect_receipts_json)
+        if _job_has_unsafe_effects(effects):raise BoardError("document_effect_unknown","The original job requires reconciliation")
+        effect_id="eff_"+_digest({"job_id":run.run_identity,"receipt_kind":"readback","effect_type":"document_invoice_comparison_private",
+            "target_path":receipt["reference"],"target_digest":receipt["cipher_sha256"],"adapter_idempotency_key":""})[:24]
+        readback={"effect_id":effect_id,"receipt_kind":"readback","effect_type":"document_invoice_comparison_private",
+            "target_path":receipt["reference"],"target_digest":receipt["cipher_sha256"],"approval_id":None,
+            "adapter_idempotency_key":None,"status":"succeeded","content_sha256":receipt["cipher_sha256"],
+            "readback_id":"document-readback:"+binding["nonce"],"verified_at":stamp.isoformat(),"recorded_at":stamp.isoformat(),
+            "fencing_token":fence,"details":{"verified":True,"cleanup_proven":True,"no_learning":True,
+                "plain_sha256":receipt["plain_sha256"],"witness_sha256":witness_sha}}
+        effects=[item for item in effects if item.get("effect_id")!=effect_id]+[readback]
+        if not _verified_readback_exists(effects):raise BoardError("document_output_readback_required","The exact output readback is required")
+        artifacts=json.loads(run.artifact_receipts_json)
+        if not isinstance(artifacts,list) or any(not isinstance(item,dict) for item in artifacts):
+            raise BoardError("document_artifact_history_invalid","The original artifact history is invalid")
+        artifact["recorded_at"]=stamp.isoformat();artifacts=[item for item in artifacts if item.get("artifact_id")!=artifact["artifact_id"]]+[artifact]
+        changed=await db.execute(update(WorkflowRunState).execution_options(synchronize_session=False).where(WorkflowRunState.run_identity==run.run_identity,
+            WorkflowRunState.revision==run.revision,WorkflowRunState.status=="running",WorkflowRunState.lease_owner==runner,
+            WorkflowRunState.fencing_token==fence,WorkflowRunState.lease_expires_at>stamp,WorkflowRunState.deadline_at>stamp)
+            .values(status="succeeded",artifact_receipts_json=canonical(artifacts).decode(),effect_receipts_json=canonical(effects).decode(),
+                result_digest=_digest({"status":"succeeded","no_learning":True,"output_sha256":receipt["cipher_sha256"]}),
+                result_summary="Selected private PDF/CSV compared with cited exact Decimal formulas; no_learning",
+                finished_at=stamp,updated_at=stamp,lease_owner=None,lease_expires_at=None,revision=run.revision+1))
+        if changed.rowcount!=1:raise BoardError("document_adoption_fence_changed","The original output changed before adoption")
+        await db.flush();await db.refresh(run);finished=run
+        projection=_serialize(finished)
+    return {**projection,"job_id":job_id(task,attempt),"status":"succeeded","admission_only":False,"memory_status":"no_learning"}

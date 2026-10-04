@@ -30,7 +30,7 @@ export function DocumentComparisonPanel({ ownerPrincipalId, ownerSessionId, task
   const key = ownerPrincipalId && ownerSessionId ? `seraph.document-pair.v1:${encodeURIComponent(ownerPrincipalId)}:${encodeURIComponent(ownerSessionId)}` : null;
   useEffect(() => {
     generation.current += 1; setPdf(null); setCsv(null); setOutput(null); setPair(null); setError(null); setPending(null);
-    if (!key || task) return;
+    if (!key || task) return () => { generation.current += 1; };
     try {
       const raw = sessionStorage.getItem(key);
       if (raw) {
@@ -40,6 +40,7 @@ export function DocumentComparisonPanel({ ownerPrincipalId, ownerSessionId, task
         setPending(value); setGoalId(value.request.goal_id);
       }
     } catch { setError("Retained document request is unavailable. Keep its reservation for explicit cleanup."); }
+    return () => { generation.current += 1; };
   }, [key, task?.task_id]);
   function retain(value: Pending) {
     if (!key) throw Error("The current operator session is required.");
@@ -87,18 +88,36 @@ export function DocumentComparisonPanel({ ownerPrincipalId, ownerSessionId, task
       <label>Comparison CSV<input type="file" accept="text/csv,.csv" aria-label="Comparison CSV" disabled={busy} onChange={event => setCsv(event.target.files?.[0] ?? null)} /></label>
       {pending && <p>Original request retained. Reselect the exact files to read back and resume; source bytes are not stored in browser storage.</p>}
       {pair && <p>{pair.pair_state} · upload window ends {pair.ingest_deadline} · sources {pair.uploaded.join(", ") || "pending"}</p>}
+      {pending?.pair && <>
+        <button type="button" disabled={busy} onClick={() => {
+          const version=generation.current;setBusy(true);
+          void request(`/document-pairs/${pending.pair}`,undefined,"GET").then(value => {if(version===generation.current)setPair(value as Pair);}).catch(failure => {if(version===generation.current)setError(String(failure));}).finally(() => {if(version===generation.current)setBusy(false);});
+        }}>Read original pair state</button>
+        <button type="button" disabled={busy || !pair} onClick={() => {
+          if(!pair)return;const version=generation.current;setBusy(true);
+          void request(`/document-pairs/${pair.artifact_id}/retry`,{expected_revision:pair.revision}).then(value => {if(version===generation.current)setPair(value as Pair);}).catch(failure => {if(version===generation.current)setError(String(failure));}).finally(() => {if(version===generation.current)setBusy(false);});
+        }}>Verify cleanup and retry original upload</button>
+        <button type="button" disabled={busy || !pair} onClick={() => {
+          if(!pair)return;const version=generation.current;setBusy(true);
+          void request(`/document-pairs/${pair.artifact_id}/discard`,{expected_revision:pair.revision}).then(value => {
+            if(version!==generation.current)return;if(value.pair_state!=="deleted")throw Error("Positive private cleanup readback required.");
+            if(key)sessionStorage.removeItem(key);setPair(value as Pair);setPending(null);
+          }).catch(failure => {if(version===generation.current)setError(String(failure));}).finally(() => {if(version===generation.current)setBusy(false);});
+        }}>Discard unbound pair after verified cleanup</button>
+      </>}
       <button type="button" disabled={busy || !pdf || !csv || !goalId || !key} onClick={() => void submit()}>{busy ? "Verifying private pair…" : pending ? "Read back and resume original pair" : "Reserve private pair and create comparison"}</button>
       <button type="button" disabled={busy} onClick={onClose}>Close</button>
     </>}
     {task && <>
       <p>Comparison {task.status} · recovery and cancellation use this original task and its bounded attempt.</p>
       <button type="button" disabled={busy || !["done", "review"].includes(task.status)} onClick={() => {
-        setBusy(true); void request(`/tasks/${task.task_id}/document-output/report`, undefined, "GET").then(value => setOutput(value.text)).catch(failure => setError(String(failure))).finally(() => setBusy(false));
+        const version=generation.current;setBusy(true); void request(`/tasks/${task.task_id}/document-output/report`, undefined, "GET").then(value => {if(version===generation.current)setOutput(value.text);}).catch(failure => {if(version===generation.current)setError(String(failure));}).finally(() => {if(version===generation.current)setBusy(false);});
       }}>Read verified cited report</button>
       <button type="button" disabled={busy || !["done", "review"].includes(task.status)} onClick={() => {
-        setBusy(true); void request(`/tasks/${task.task_id}/document-output/csv`, undefined, "GET").then(value => {
+        const version=generation.current;setBusy(true); void request(`/tasks/${task.task_id}/document-output/csv`, undefined, "GET").then(value => {
+          if(version!==generation.current)return;
           const link = document.createElement("a"), url = URL.createObjectURL(new Blob([value.text], { type: "text/csv;charset=utf-8" })); link.href = url; link.download = "invoice-comparison.csv"; link.click(); URL.revokeObjectURL(url);
-        }).catch(failure => setError(String(failure))).finally(() => setBusy(false));
+        }).catch(failure => {if(version===generation.current)setError(String(failure));}).finally(() => {if(version===generation.current)setBusy(false);});
       }}>Download verified derived CSV</button>
       {output !== null && <pre className="whitespace-pre-wrap break-words text-xs" aria-label="Verified cited document report">{output}</pre>}
     </>}

@@ -5,9 +5,11 @@ generation and quota; elapsed time never proves a descriptor was closed.
 """
 from __future__ import annotations
 from datetime import timedelta
+import asyncio
 import hashlib
 import json
 import os
+import re
 import uuid
 from sqlalchemy import func, select
 from config.settings import settings
@@ -188,10 +190,12 @@ async def upload(db,owner,identifier,revision,slot,stream):
     row,value,token=await acquire_upload(db,owner,identifier,revision,slot)
     descriptor=value["input"][slot]; data=bytearray(); result=None; reason=None
     try:
-        async for chunk in stream:
-            if len(data)+len(chunk)>descriptor["size_bytes"]:
-                raise ValueError("document_source_size_mismatch")
-            data.extend(chunk)
+        remaining=(utc(__import__('datetime').datetime.fromisoformat(value['ingest_deadline']))-now()).total_seconds()
+        async with asyncio.timeout(max(0,remaining)):
+            async for chunk in stream:
+                if len(data)+len(chunk)>descriptor["size_bytes"]:
+                    raise ValueError("document_source_size_mismatch")
+                data.extend(chunk)
         raw=bytes(data)
         if len(raw)!=descriptor["size_bytes"] or sha256(raw)!=descriptor["sha256"]:
             raise ValueError("document_source_digest_mismatch")
@@ -252,3 +256,69 @@ async def source_pair(db,task,inputs):
         if sha256(raw)!=value["input"][slot]["sha256"]: raise BoardError("document_source_changed","The private source changed",status_code=409)
         result.append(raw)
     return tuple(result)
+
+
+def cleanup_generation(row,value):
+    """Remove a positively closed, unbound generation through held handles."""
+    path=source_path(row,value,"pdf")
+    try:parent,_leaf=_open_input_artifact_parent(path,create=False)
+    except FileNotFoundError:parent=-1
+    if parent>=0:
+        try:
+            names=os.listdir(parent)
+            if len(names)>8:raise OSError("document cleanup fragment bound")
+            expected=re.compile(rf"^g{value['generation']}-(pdf|csv)\.fernet$")
+            fragment=re.compile(rf"^\.g{value['generation']}-(pdf|csv)\.fernet\.[0-9a-f]{{32}}\.pending$")
+            checked=[]
+            for name in names:
+                if not expected.fullmatch(name) and not fragment.fullmatch(name):raise OSError("document cleanup foreign generation")
+                fd=os.open(name,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0),dir_fd=parent)
+                try:
+                    stat=os.fstat(fd)
+                    if not _private_input_file_metadata(stat) or stat.st_size>6*1024*1024:
+                        raise OSError("document cleanup file metadata")
+                    checked.append((name,stat))
+                finally:os.close(fd)
+            # Final name identity checks precede unlink, after actual writers
+            # are positively closed and the canonical tombstone is durable.
+            for name,original in checked:
+                current=os.stat(name,dir_fd=parent,follow_symlinks=False)
+                if any(getattr(current,k)!=getattr(original,k) for k in ("st_dev","st_ino","st_uid","st_mode","st_size","st_nlink")):
+                    raise OSError("document cleanup name replaced")
+                os.unlink(name,dir_fd=parent)
+            os.fsync(parent)
+            if os.listdir(parent):raise OSError("document cleanup directory not empty")
+        finally:os.close(parent)
+    from src.work_board.input_artifacts import _cleanup_private_input_file, _InputArtifactCleanupUnverified
+    try:
+        _cleanup_private_input_file(_payload_path(row),expected_digest=row.payload_sha256,expected_size=row.size_bytes)
+    except _InputArtifactCleanupUnverified as exc:
+        if exc.reason!="cleanup_target_missing":raise
+
+
+async def reset_unbound(db,owner,identifier,revision,*,retry):
+    staged_root=dict(root_binding());await _begin_immediate(db)
+    row,value=await owned(db,owner,identifier,revision=revision)
+    if value["root"]!=staged_root:raise BoardError("document_pair_root_changed","Cleanup must use the exact original workspace",status_code=409)
+    if row.bound_task_id:raise BoardError("document_bound_pair_retained","The task owns this immutable pair; cancel or recover its original attempt",status_code=409)
+    if value.get("live_writer"):
+        raise BoardError("document_upload_quiescence_unknown","The original writer has no positive quiescence receipt; capacity remains held",status_code=409)
+    if retry:
+        await authority(db,owner,row,value,staged_root,ingest=True)
+        if value["generation"]>=2:raise BoardError("document_upload_retry_limit","The two original upload generations are exhausted",status_code=409)
+    value["phase"]="cleanup_tombstone";value["reason"]="document_pair_cleanup_pending"
+    row.document_metadata_json=canonical(value).decode();row.metadata_digest=None;row.revision+=1
+    tombstone_revision=row.revision;await db.commit()
+    try:cleanup_generation(row,value)
+    except OSError as exc:
+        raise BoardError("document_pair_cleanup_required","The exact private generation still requires cleanup; quota is held",status_code=409) from exc
+    await _begin_immediate(db)
+    fresh,current=await owned(db,owner,identifier,revision=tombstone_revision)
+    if current!=value:raise BoardError("document_pair_revision_conflict","The cleanup tombstone changed",status_code=409)
+    if retry:
+        await authority(db,owner,fresh,current,staged_root,ingest=True)
+        current.update({"generation":current["generation"]+1,"phase":"reserved","sources":{},"live_writer":None,"reason":None})
+    else:
+        current.update({"phase":"deleted","sources":{},"reason":None});fresh.state="deleted";fresh.document_reserved_bytes=0
+    fresh.document_metadata_json=canonical(current).decode();fresh.revision+=1
+    await db.commit();return projection(fresh)

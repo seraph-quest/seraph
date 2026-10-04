@@ -21,7 +21,8 @@ async def test_authenticated_private_pair_reserve_stream_seal_and_exact_bind(acc
     from src.api import auth, goals, work_board
     from src.vault import crypto
     root, engine, factory = accounting_db
-    monkeypatch.setattr(crypto, "_fernet", Fernet(Fernet.generate_key()))
+    monkeypatch.setattr(crypto, "_fernet", None)
+    monkeypatch.setattr(settings, "vault_encryption_key", "")
     monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", False)
     monkeypatch.setattr(settings, "operator_auth_secret", "document-pair-isolated-test")
     monkeypatch.setattr(settings, "operator_auth_secret_hash", "")
@@ -102,6 +103,10 @@ async def test_authenticated_private_pair_reserve_stream_seal_and_exact_bind(acc
             csv_output=await client.get('/api/work-board/tasks/'+task.json()['task']['task_id']+'/document-output/csv')
             assert csv_output.status_code==200,csv_output.text
             assert 'MUG-03,csv_only,,,,' in csv_output.json()['text']
+            state=await client.get('/api/work-board/tasks/'+task.json()['task']['task_id']+'/document-comparison')
+            assert state.status_code==200,state.text
+            assert state.json()['cleanup_proven'] and state.json()['report_available']
+            assert not state.json()['recoverable'] and state.json()['no_learning']
         evidence=os.environ.get('SERAPH_DOCUMENT_TEST_EVIDENCE')
         if evidence:
             destination=Path(evidence)/mode; destination.mkdir(parents=True,exist_ok=False,mode=0o700)

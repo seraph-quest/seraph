@@ -74,11 +74,26 @@ maximum share one original70s job deadline capped by authority. Unknown child
 keeps capacity held; lease expiry/empty registry are not cleanup proof.
 This trusted subprocess is not an OS confidentiality or network sandbox.
 
+The fixed trusted supervisor inherits a held private directory descriptor and
+has only a nonce-bound, no-clobber witness write. It records the exact native
+job, input digest, generation, process identities and actual wait result. The
+parent persists both positive identities before source delivery. Witness reads
+validate private regular-file metadata and exact bindings before a pure SQL
+transition. The native execution lease is35s within the immutable70s window;
+recovery advances the Board revision to invalidate the old worker while retaining
+the original job, attempt, fence, count and deadline.
+
 Report64 KiB, CSV256 KiB and manifest32 KiB are immutable private outputs with
 reserved identities and exact readback before adoption. Recovery adopts complete
 reserved output without reparsing; explicit retry may rerun only a positively
 terminated transient interruption within the original allowance. Unsupported
 grammar/resource excess, partial output or authority/source drift remains blocked.
+An exit-zero witness without a complete recorded output remains visibly
+lost-output/nonretryable in this first version; a reap receipt alone cannot
+reconstruct a report or claim success. Retry requires a known terminated child
+and supervisor interruption, actual quiescence, and enough of the original
+window for another bounded launch and cleanup. Capacity remains charged until
+the exact positive witness is committed; lease age or absent PID is insufficient.
 
 ## Consequences
 

@@ -73,7 +73,7 @@ from src.work_board import triage as triage_service
 from src.work_board import pipelines as pipeline_service
 from src.work_board.pipeline_contracts import PipelinePreviewRequest, PipelineAcceptRequest, PipelineAdvanceRequest, PipelineRevisionRequest, PipelineReuseRequest, REPORT
 from src.work_board.tool_package_contracts import ToolPackageRecoverRequest
-from src.work_board.document_compare_contracts import DocumentPairReserve, DocumentPairMutation
+from src.work_board.document_compare_contracts import DocumentPairReserve, DocumentPairMutation, DocumentControlRequest
 from src.work_board.time import serialize_utc_datetime
 from src.security.trust_contract import AuthorityGrant
 from src.security.site_policy import _parse_rules
@@ -2146,6 +2146,49 @@ async def read_document_comparison_output(request: Request, task_id: str, slot: 
             receipt,output=read_output(task,attempt,run)
             text=json.dumps(output[slot],sort_keys=True) if slot=="manifest" else output[slot]
             return {"text":text,"sha256":hashlib.sha256(text.encode()).hexdigest(),"cipher_sha256":receipt["cipher_sha256"],"no_learning":True}
+    except BoardError as exc:_raise_board_error(exc)
+    except (OSError,ValueError,TypeError,KeyError):
+        raise HTTPException(status_code=409,detail={"code":"document_output_readback_required"})
+
+
+@router.get("/tasks/{task_id}/document-comparison")
+async def read_document_comparison_state(request: Request,task_id: str):
+    from src.work_board.document_compare_control import snapshot
+    try:
+        async with get_session() as db:
+            return await snapshot(db,_owner(_operator(request)),task_id)
+    except BoardError as exc:_raise_board_error(exc)
+    except (DurableJobError,OSError,ValueError,TypeError,KeyError):
+        raise HTTPException(status_code=409,detail={"code":"document_original_binding_required"})
+
+
+@router.post("/tasks/{task_id}/document-comparison/recover")
+async def recover_document_comparison(request: Request,task_id: str,body: DocumentControlRequest):
+    from src.work_board.document_compare_control import recover,snapshot
+    try:
+        owner=_owner(_operator(request));result=await recover(dispatcher,owner,task_id,body)
+        async with get_session() as db:
+            return {"recovery":result,"document_comparison":await snapshot(db,owner,task_id)}
+    except BoardError as exc:_raise_board_error(exc)
+    except (DurableJobError,OSError,ValueError,TypeError,KeyError):
+        raise HTTPException(status_code=409,detail={"code":"document_original_output_and_reap_required"})
+
+
+@router.post("/document-pairs/{identifier}/retry")
+async def retry_document_pair(request: Request, identifier: str, body: DocumentPairMutation):
+    from src.work_board.document_pairs import reset_unbound
+    try:
+        async with get_session() as db:
+            return await reset_unbound(db,_owner(_operator(request)),identifier,body.expected_revision,retry=True)
+    except BoardError as exc:_raise_board_error(exc)
+
+
+@router.post("/document-pairs/{identifier}/discard")
+async def discard_document_pair(request: Request, identifier: str, body: DocumentPairMutation):
+    from src.work_board.document_pairs import reset_unbound
+    try:
+        async with get_session() as db:
+            return await reset_unbound(db,_owner(_operator(request)),identifier,body.expected_revision,retry=False)
     except BoardError as exc:_raise_board_error(exc)
 
 

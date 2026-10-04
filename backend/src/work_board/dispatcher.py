@@ -9055,8 +9055,7 @@ class WorkBoardDispatcher:
         inputs: Mapping[str, Any],
     ) -> str:
         if task.capability_id == "work.document-compare.v1":
-            from src.work_board.document_compare_native import authority_for
-            return _safe_digest(authority_for(task,attempt,inputs))
+            raise DurableJobIdempotencyConflict("document expiry snapshot requires canonical admission")
         if task.capability_id == "work.json-format.v1":
             from src.work_board.tool_package_native import authority_for
             return _safe_digest(authority_for(task,attempt,inputs))
@@ -9146,8 +9145,7 @@ class WorkBoardDispatcher:
         inputs: Mapping[str, Any],
     ) -> str:
         if task.capability_id == "work.document-compare.v1":
-            from src.work_board.document_compare_native import spec_for
-            return spec_for(task,attempt,inputs,deadline=_now()).run_fingerprint
+            raise DurableJobIdempotencyConflict("document expiry snapshot requires canonical admission")
         if task.capability_id == "work.json-format.v1":
             from src.work_board.tool_package_native import spec_for
             return spec_for(task,attempt,inputs,deadline=_now()).run_fingerprint

@@ -184,6 +184,8 @@ function mockOperatorControlPlaneRuntime(runtime: Record<string, unknown>) {
 
 function renderLegacyCockpit(ui: Parameters<typeof render>[0]) {
   const result = render(ui);
+  // Navigate first: changing sections closes the advanced Windows workspace.
+  fireEvent.click(screen.getByTestId("cockpit-section-work"));
   // Existing deep-pane tests intentionally exercise the advanced Windows
   // workspace. Show all panes explicitly, then close the launcher drawer so
   // the test observes the same opt-in legacy surface an operator can reach.

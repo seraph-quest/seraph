@@ -30,6 +30,9 @@ const label = {
   state: "active",
 };
 
+// Positive consent fixtures stay finite and live relative to this test run.
+const fixtureExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+
 const consent = {
   consent_id: "consent-1",
   connection_id: "connection-1",
@@ -44,7 +47,7 @@ const consent = {
   model_egress_allowed: false,
   model_revision: 1,
   allowed_body_fields: ["subject", "plainbody", "replyintent"],
-  expires_at: "2026-10-02T12:00:00Z",
+  expires_at: fixtureExpiry,
   state: "active",
   revision: 1,
 };
@@ -63,7 +66,7 @@ function watchProjection(state: "active" | "paused" = "active", bindingRevision 
     label_ids: ["label-1"],
     cadence: { kind: "hourly", timezone: "UTC", daily_hour: null, daily_minute: null },
     binding_revision: bindingRevision,
-    expires_at: "2026-10-02T12:00:00Z",
+    expires_at: fixtureExpiry,
     state,
     watch_state: "active",
     baseline_complete: true,
@@ -91,7 +94,7 @@ function controlBinding(state: "active" | "paused" | "revoked", bindingRevision:
     consent_digest: "sha256:" + "b".repeat(64),
     cadence: { kind: "hourly", timezone: "UTC", daily_hour: null, daily_minute: null },
     binding_revision: bindingRevision,
-    expires_at: "2026-10-02T12:00:00Z",
+    expires_at: fixtureExpiry,
     state,
     last_slot_utc: null,
     created_at: "2026-10-01T08:00:00Z",

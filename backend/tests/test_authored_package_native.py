@@ -207,6 +207,10 @@ async def test_actual_authored_time_ledger_native_reopen_private_read(accounting
                     assert negatives[mutation] is False
                     await copy_engine.dispose()
                 records["live_owner_copy_negatives"]={"results":negatives,"scope":"copied actual running SQLite, original owner unchanged"}
+                repeated_review=await post(f"/api/capability-packs/{pack_id}/review",{"goal_id":goal["id"],"goal_revision":1,"root_path":str(package_root),"content_digest":packet["content_digest"],"authority_digest":packet["authority_digest"],"acknowledge_unsigned_local":True})
+                assert repeated_review["review"]==reviewed["review"]
+                assert await tool_package_native.live_original_owner(jobs,first_task,first_attempt)
+                records["identical_review_while_live"]={"original":reviewed["review"],"returned":repeated_review["review"],"current_original_owner":True}
                 second_goal=await post("/api/goals",{"title":"Second independent Goal for same owner/package","admission_budget":{"reviewed_grant":True,"grant_id":"authored-second-goal","max_outstanding_jobs":1,"max_attempts":1,"max_runtime_seconds":10}})
                 second_review=await post(f"/api/capability-packs/{pack_id}/review",{"goal_id":second_goal["id"],"goal_revision":1,"root_path":str(package_root),"content_digest":packet["content_digest"],"authority_digest":packet["authority_digest"],"acknowledge_unsigned_local":True})
                 second_approval=await post(f"/api/capability-packs/{pack_id}/approvals",{"action":"activate","goal_id":second_goal["id"],"digest":packet["content_digest"],"version":"1.0.0","content_digest":packet["content_digest"],"authority_digest":packet["authority_digest"]})

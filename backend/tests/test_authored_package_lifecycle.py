@@ -40,6 +40,29 @@ def install(store,root,manifest,action="activate"):
     return digest
 
 
+@pytest.mark.parametrize("field,value",[
+    ("reviewed_by","another-reviewer"),("authority_expansion_approved",False),
+    ("publisher_trust",{}),("dependencies",[]),("authored_contract",{}),
+    ("authority_digest","0"*64),("dependencies_digest","0"*64),
+])
+def test_historical_review_binding_conflict_never_overwrites(tmp_path,field,value):
+    store=CapabilityPackLifecycle(tmp_path/"lifecycle.json")
+    root,manifest=candidate(tmp_path,"1.0.0")
+    request=dict(root_path=root,goal_id="goal-one",goal_revision=1,reviewed_by="operator-one",authority_expansion_approved=True)
+    first=store.review(manifest,**request)["review"]
+    assert store.review(manifest,**request)["review"]==first
+    with store._state_lock():
+        state=store._load()
+        # Empty dependencies are the genuine original value; inject an
+        # unsupported extra dependency rather than mirroring the implementation.
+        state["reviews"][first["review_id"]][field]=["unreviewed"] if field=="dependencies" else value
+        store._commit(state)
+    before=store.state_path.read_bytes()
+    with pytest.raises(CapabilityPackLifecycleError,match="historical review binding conflicts"):
+        store.review(manifest,**request)
+    assert store.state_path.read_bytes()==before
+
+
 @pytest.mark.parametrize("publish_race",["restored","new-active"])
 def test_observed_integrity_survives_restoration_and_new_pointer(tmp_path,publish_race):
     store=CapabilityPackLifecycle(tmp_path/"lifecycle.json")

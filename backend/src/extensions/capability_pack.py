@@ -3289,7 +3289,16 @@ class CapabilityPackLifecycle:
             )
             if state_dependency_errors:
                 raise CapabilityPackLifecycleError("; ".join(state_dependency_errors))
-            state["reviews"][review_id] = review
+            if pack.contributes.adapters and review_id in state["reviews"]:
+                original_review=state["reviews"][review_id]
+                if (not isinstance(original_review,Mapping) or set(original_review)!=set(review)
+                    or not isinstance(original_review.get("reviewed_at"),str)
+                    or {key:value for key,value in original_review.items() if key!="reviewed_at"}
+                    != {key:value for key,value in review.items() if key!="reviewed_at"}):
+                    raise CapabilityPackLifecycleError("authored historical review binding conflicts")
+                review=deepcopy(dict(original_review))
+            else:
+                state["reviews"][review_id] = review
             versions = state["versions"].setdefault(pack.id, {})
             existing_version = versions.get(digest)
             if isinstance(existing_version, Mapping):

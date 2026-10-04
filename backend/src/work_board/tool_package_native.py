@@ -629,7 +629,7 @@ async def claim_authored_capacity(db, run):
             released=False
         if (reserved or effects or other.status not in {"accepted","queued","failed","cancelled"}) and not released:
             raise BoardError("authored_package_capacity_held","A prior job for this owner/package requires actual quiescence proof")
-        if other.status=="queued" and (other.priority,other.started_at,other.run_identity)<(run.priority,run.started_at,run.run_identity):
+        if other.status=="queued" and (-other.priority,other.started_at,other.run_identity)<(-run.priority,run.started_at,run.run_identity):
             raise BoardError("authored_package_higher_priority_ready","A higher priority ready job for this package owns the next turn")
     records=json.loads(run.checkpoint_receipts_json)
     if any(item.get("checkpoint_id")=="authored-package:capacity" for item in records):

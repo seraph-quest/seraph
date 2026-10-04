@@ -1,6 +1,6 @@
 """Real file-SQLite claim races; rows here do not claim parser execution."""
 import asyncio
-from datetime import datetime,timezone
+from datetime import datetime,timezone,timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -60,9 +60,51 @@ async def test_two_goal_claim_race_and_distinct_package(accounting_db):
 
 
 @pytest.mark.asyncio
-async def test_priority_tie_order_and_malformed_binding_fail_closed(accounting_db):
+@pytest.mark.parametrize("candidate_priority,peer_priority,blocked",[(80,100,True),(80,60,False),(60,80,True)])
+async def test_higher_numeric_priority_owns_next_claim(accounting_db,candidate_priority,peer_priority,blocked):
     _,_,factory=accounting_db
-    low=queued("low",priority=90);high=queued("high",priority=10)
+    candidate=queued("candidate",priority=candidate_priority)
+    peer=queued("peer",priority=peer_priority)
+    candidate.started_at=peer.started_at=datetime(2026,10,4,tzinfo=timezone.utc)
+    async with factory.accounting_sessions() as db:db.add_all([candidate,peer])
+    async with factory.accounting_sessions() as db:
+        await db.execute(text("BEGIN IMMEDIATE"))
+        row=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==candidate.run_identity))
+        if blocked:
+            with pytest.raises(BoardError) as denied:await claim_authored_capacity(db,row)
+            assert denied.value.code=="authored_package_higher_priority_ready"
+            assert row.checkpoint_receipts_json=="[]"
+        else:
+            await claim_authored_capacity(db,row)
+            assert '"checkpoint_id":"authored-package:capacity"' in row.checkpoint_receipts_json
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tie",["earlier-start","equal-start-id"])
+async def test_equal_priority_orders_earlier_start_then_identity(accounting_db,tie):
+    _,_,factory=accounting_db
+    first,last=sorted([queued("tie-one",priority=80),queued("tie-two",priority=80)],key=lambda row:row.run_identity)
+    first.started_at=last.started_at=datetime(2026,10,4,tzinfo=timezone.utc)
+    if tie=="earlier-start":
+        # The later identity still wins when it was ready first.
+        first.started_at+=timedelta(seconds=1)
+        first,last=last,first
+    async with factory.accounting_sessions() as db:db.add_all([first,last])
+    async with factory.accounting_sessions() as db:
+        await db.execute(text("BEGIN IMMEDIATE"))
+        later=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==last.run_identity))
+        with pytest.raises(BoardError) as denied:await claim_authored_capacity(db,later)
+        assert denied.value.code=="authored_package_higher_priority_ready"
+        assert later.checkpoint_receipts_json=="[]"
+        earlier=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==first.run_identity))
+        await claim_authored_capacity(db,earlier)
+        assert '"checkpoint_id":"authored-package:capacity"' in earlier.checkpoint_receipts_json
+
+
+@pytest.mark.asyncio
+async def test_malformed_binding_fail_closed(accounting_db):
+    _,_,factory=accounting_db
+    low=queued("low",priority=80);high=queued("high",priority=100)
     high.started_at=low.started_at
     async with factory.accounting_sessions() as db:db.add_all([low,high])
     async with factory.accounting_sessions() as db:

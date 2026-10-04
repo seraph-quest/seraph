@@ -9,6 +9,7 @@ from src.artifacts.registry import build_artifact_record
 from src.db import engine
 from src.db.models import MoltbookConnection
 from src.integrations.moltbook import JOB_KIND, MoltbookError, canonical, digest, identifier
+from src.browser.moltbook_private_read import JOB_KIND as PRIVATE_JOB_KIND
 from src.integrations.moltbook_controls import PREFIX, now, root_current, save_state, state, utc, writer
 from src.tools.filesystem_tool import _read_workspace_text_bounded, _safe_resolve
 
@@ -17,7 +18,7 @@ async def owned(service, db, owner, job_id):
     await root_current(db, owner.principal_id, owner.session_id)
     run = await service.jobs._fetch(db, job_id)
     if (run.owner_principal_id != owner.principal_id or run.operator_session_id != owner.session_id
-        or run.job_kind != JOB_KIND or run.capability_version != "1"):
+        or run.job_kind not in {JOB_KIND, PRIVATE_JOB_KIND} or run.capability_version != "1"):
         raise MoltbookError("moltbook_job_owner_mismatch", status_code=404)
     return run
 

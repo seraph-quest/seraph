@@ -21,7 +21,7 @@ from src.browser.forgejo_issue_title import (CAPABILITY, JOB_KIND, PROFILE, Forg
 from src.browser.forgejo_profile import BackendSession
 from src.browser.task_lane import try_acquire_browser_task_lane
 from src.db import engine
-from src.db.models import ApprovalRequest, ForgejoConnection, Secret, WorkflowRunState
+from src.db.models import ApprovalRequest, ForgejoConnection, Goal, Secret, WorkflowRunState
 from src.integrations.forgejo_controls import original_root, now, utc, writer, credential_payload
 from src.tools.filesystem_tool import _read_workspace_text_bounded, _safe_resolve
 from src.vault.crypto import decrypt, encrypt
@@ -533,6 +533,48 @@ class ForgejoNative:
             if cleanup["status"]=="verified":lane.release()
             else:lane.quarantine(job_id)
 
+    async def local_withdrawal_current(self, db, owner, run):
+        """Prove a never-started withdrawal using canonical rows only.
+
+        Provider consent, credentials and Goal revision/status grant execution,
+        not this zero-contact reduction of the original owner's authority.
+        """
+        await original_root(db,owner)
+        if (run.owner_kind!="user" or run.owner_principal_id!=owner.principal_id
+            or run.operator_session_id!=owner.session_id or run.job_kind!=JOB_KIND
+            or run.capability_version!="1"):
+            raise ForgejoError("forgejo_original_job_owner_changed",status_code=404)
+        goal=await db.get(Goal,run.goal_id,populate_existing=True)
+        if (goal is None or goal.owner_principal_id!=owner.principal_id
+            or goal.owner_session_id!=owner.session_id):
+            raise ForgejoError("forgejo_original_goal_owner_changed")
+        try:
+            authority=json.loads(run.declared_authority_json)
+            entries=json.loads(run.checkpoint_receipts_json)
+            value=journal(run)
+            empty_receipts=all(json.loads(raw)==[] for raw in (
+                run.effect_receipts_json,run.artifact_receipts_json,run.artifact_paths_json))
+            valid=(isinstance(authority,dict) and run.authority_digest==authority_digest(authority)
+                and authority.get("principal")==owner.principal_id
+                and authority.get("session_id")==owner.session_id
+                and authority.get("owner_kind")=="user" and authority.get("capability_id")==CAPABILITY
+                and authority.get("profile")==PROFILE and authority.get("no_learning") is True
+                and authority.get("operation") in {"provision","preview","title","observe"}
+                and run.input_digest==digest({"payload_ref":reference(run.run_identity,"input"),
+                    "payload_digest":authority["payload_digest"],"no_learning":True})
+                and len(entries)==1 and entries[0].get("safe") is True
+                and entries[0].get("fencing_token")==0 and run.fencing_token==0
+                and run.status=="accepted" and run.attempt_count==0
+                and run.lease_owner is None and run.lease_expires_at is None
+                and run.finished_at is None and run.result_digest is None and run.result_summary is None
+                and empty_receipts and value.get("calls")==[] and "execution_request" not in value
+                and "output_ref" not in value and "output_digest" not in value
+                and value.get("phase") in {"prepared","awaiting_exact_approval"}
+                and value.get("operation")==authority["operation"] and value.get("no_learning") is True)
+        except (TypeError,ValueError,KeyError,AttributeError):
+            valid=False
+        if not valid:raise ForgejoError("forgejo_never_started_withdrawal_unproven")
+
     async def cancel(self, owner, job_id, *, expected_revision, fencing_token):
         request={"expected_revision":expected_revision,"fencing_token":fencing_token}
         projected=await self.snapshot(owner,job_id)
@@ -542,13 +584,12 @@ class ForgejoNative:
             return projected  # Historical exact retry; never a new grant.
         async def guard(db,run):
             value=journal(run)
-            unstarted=(run.status=="accepted" and not value["calls"] and "execution_request" not in value
-                and run.attempt_count==0 and run.lease_owner is None and run.lease_expires_at is None)
-            # Expiry never frees a job. This explicit cancellation proves the
-            # exact canonical unstarted state under all current READ guards.
-            await self.current(db,owner,run,read_only=unstarted)
             if run.revision!=expected_revision or run.fencing_token!=fencing_token:
                 raise ForgejoError("forgejo_cancel_revision_changed")
+            if run.status=="accepted":
+                await self.local_withdrawal_current(db,owner,run)
+            else:
+                await self.current(db,owner,run)
             value.update(cancel_requested=True,cancel_request=request);save(run,value);db.add(run)
         # Running cancellation first persists its exact request, then the
         # directly owned task is cancelled and proves resource cleanup.

@@ -176,6 +176,15 @@ Duplicate execution UUID returns exact historical receipt; a different request
 cannot reuse the old effect. Another identical title could have been submitted
 by a different actor, so equality remains destination observation only.
 
+An accepted job may be explicitly withdrawn by its live original Root and
+owner after READ consent expires/is revoked, credential rotation, or an owned
+Goal revision/status change. The same SQL writer checks exact job revision and
+fence, immutable authority/input binding, the original Goal owner, and the
+protected never-started journal: zero attempts/fence, no lease, execution
+request, contacts, effects, artifacts or result. This local cancellation performs
+no provider/Vault/file access and grants no execution. Its exact historical
+retry remains read-only. Started or Unknown jobs cannot use this withdrawal.
+
 Precontact cancellation with proved no-contact and positive actual browser/
 transport quiescence can release its own reservation. Postcontact release
 requires complete positive effect settlement plus actual transfer and Chrome

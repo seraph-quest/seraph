@@ -62,7 +62,7 @@ from tests.test_research_native_vertical import real_auth, ResponseBytes
 from tests.test_guardian_opportunity_vertical import OpportunityHttpBoundary
 
 
-async def _actual_notification_intent(accounting_db, monkeypatch):
+async def _actual_notification_intent(accounting_db, monkeypatch, *, auth_cookies=None):
     import httpx
     from dataclasses import replace
     from datetime import datetime, timezone
@@ -111,6 +111,15 @@ async def _actual_notification_intent(accounting_db, monkeypatch):
         login=await client.post("/api/auth/login",json={"password":"research-vertical-private-secret"})
         assert login.status_code==200,login.text
         owner=login.json()
+        if auth_cookies is not None:
+            enrolled=await client.post("/api/auth/ownership/enroll")
+            assert enrolled.status_code==200,enrolled.text
+            authenticated=await client.get("/api/auth/session")
+            assert authenticated.status_code==200,authenticated.text
+            owner=authenticated.json()
+            for name in (settings.operator_auth_cookie_name, auth._continuity_cookie_name()):
+                auth_cookies[name]=client.cookies.get(name)
+                assert auth_cookies[name]
         for capability in ("text","structured_output","health","latency_ms"):
             response=await client.post("/api/settings/model-fabric/canary",json=dict(
                 profile_id="openrouter",capability=capability,timeout_seconds=30))
@@ -164,13 +173,14 @@ async def test_actual_intent_then_inbox_review_suppresses_claim(accounting_db,re
     from src.guardian import inbox
     from src.db.models import GuardianInboxDisposition
     sessions,owner,row,notification_id,queue=await _actual_notification_intent(accounting_db,monkeypatch)
+    caller_scope=dict(owner_principal_id=owner["principal_id"],operator_session_id=owner["session_id"])
     detail=await inbox.get_owned_item(owner_principal_id=owner["principal_id"],owner_session_id=owner["session_id"],item_id=row.id)
     until=now()+timedelta(minutes=20) if action=="snooze" else None
     result=await inbox.apply_action(owner_principal_id=owner["principal_id"],owner_session_id=owner["session_id"],
         item_id=row.id,action=action,expected_revision=detail["revision"],idempotency_key="actual-review-"+action,
         until=until)
     assert result["state"]==("snoozed" if until else "dismissed")
-    assert await queue.claim_next(worker_id="actual-native-daemon") is None
+    assert await queue.claim_next(worker_id="actual-native-daemon",**caller_scope) is None
     async with sessions() as db:
         intent=await db.get(NativeNotificationOutbox,notification_id)
         assert intent.status==("queued" if until else "cancelled")
@@ -183,7 +193,7 @@ async def test_actual_intent_then_inbox_review_suppresses_claim(accounting_db,re
         after=until+timedelta(seconds=1)
         monkeypatch.setattr("src.guardian.opportunities.now",lambda:after)
         monkeypatch.setattr("src.observer.native_notification_queue._utc_now",lambda:after)
-        claimed=await queue.claim_next(worker_id="actual-native-daemon")
+        claimed=await queue.claim_next(worker_id="actual-native-daemon",**caller_scope)
         assert claimed.id==notification_id and claimed.attempt_count==1 and claimed.fencing_token==1
         async with sessions() as db:
             intent=await db.get(NativeNotificationOutbox,notification_id)
@@ -196,36 +206,38 @@ async def test_actual_intent_then_inbox_review_suppresses_claim(accounting_db,re
 async def test_actual_claim_then_inbox_dismiss_is_unknown_no_replay(accounting_db,real_auth,monkeypatch,callback):
     from src.guardian import inbox
     sessions,owner,row,notification_id,queue=await _actual_notification_intent(accounting_db,monkeypatch)
-    claimed=await queue.claim_next(worker_id="actual-native-daemon")
+    caller_scope=dict(owner_principal_id=owner["principal_id"],operator_session_id=owner["session_id"])
+    claimed=await queue.claim_next(worker_id="actual-native-daemon",**caller_scope)
     assert claimed.id==notification_id
     if callback=="ack":
-        assert await queue.mark_display_attempted(notification_id,worker_id="actual-native-daemon",fencing_token=claimed.fencing_token)
+        assert await queue.mark_display_attempted(notification_id,worker_id="actual-native-daemon",fencing_token=claimed.fencing_token,**caller_scope)
     detail=await inbox.get_owned_item(owner_principal_id=owner["principal_id"],owner_session_id=owner["session_id"],item_id=row.id)
     await inbox.apply_action(owner_principal_id=owner["principal_id"],owner_session_id=owner["session_id"],
         item_id=row.id,action="dismiss",expected_revision=detail["revision"],idempotency_key="claimed-dismiss")
     # A foreign/stale daemon fence cannot use the new authority guard to
     # mutate the current holder's claim, even after the Inbox is dismissed.
     for bad_worker,bad_fence in (("foreign-daemon",claimed.fencing_token),("actual-native-daemon",claimed.fencing_token+1)):
-        assert await queue.mark_display_attempted(notification_id,worker_id=bad_worker,fencing_token=bad_fence) is False
-        assert await queue.ack(notification_id,worker_id=bad_worker,fencing_token=bad_fence) is False
+        assert await queue.mark_display_attempted(notification_id,worker_id=bad_worker,fencing_token=bad_fence,**caller_scope) is False
+        assert await queue.ack(notification_id,worker_id=bad_worker,fencing_token=bad_fence,**caller_scope) is False
     async with sessions() as db:
         assert (await db.get(NativeNotificationOutbox,notification_id)).status==("display_attempted" if callback=="ack" else "claimed")
     if callback=="handoff":
-        assert await queue.mark_display_attempted(notification_id,worker_id="actual-native-daemon",fencing_token=claimed.fencing_token) is False
+        assert await queue.mark_display_attempted(notification_id,worker_id="actual-native-daemon",fencing_token=claimed.fencing_token,**caller_scope) is False
     elif callback=="ack":
-        assert await queue.ack(notification_id,worker_id="actual-native-daemon",fencing_token=claimed.fencing_token) is False
+        assert await queue.ack(notification_id,worker_id="actual-native-daemon",fencing_token=claimed.fencing_token,**caller_scope) is False
     else:
-        assert await queue.claim_next(worker_id="actual-native-daemon") is None
+        assert await queue.claim_next(worker_id="actual-native-daemon",**caller_scope) is None
     async with sessions() as db:
         intent=await db.get(NativeNotificationOutbox,notification_id)
         assert intent.status=="unknown" and intent.attempt_count==1
-    assert await queue.claim_next(worker_id="another-daemon") is None
+    assert await queue.claim_next(worker_id="another-daemon",**caller_scope) is None
 
 
 @pytest.mark.parametrize("change", ["source", "lineage"])
 async def test_actual_intent_current_binding_denies_claim(accounting_db,real_auth,monkeypatch,change):
     from src.db.models import GuardianSourceBaseline
     sessions,owner,row,notification_id,queue=await _actual_notification_intent(accounting_db,monkeypatch)
+    caller_scope=dict(owner_principal_id=owner["principal_id"],operator_session_id=owner["session_id"])
     # Negative canonical mutation invalidates actual prior verified lineage;
     # it does not insert a success, proof, outbox intent or feedback outcome.
     async with sessions() as db:
@@ -237,16 +249,16 @@ async def test_actual_intent_current_binding_denies_claim(accounting_db,real_aut
             intervention=await db.get(GuardianIntervention,row.intervention_id)
             intervention.original_root_id="foreign-root"
             db.add(intervention)
-    assert await queue.claim_next(worker_id="actual-native-daemon") is None
+    assert await queue.claim_next(worker_id="actual-native-daemon",**caller_scope) is None
     async with sessions() as db:
         intent=await db.get(NativeNotificationOutbox,notification_id)
         assert intent.status=="cancelled" and intent.attempt_count==0
         assert intent.last_error==("source_stale" if change=="source" else "opportunity_notification_lineage_invalid")
 
 
-async def test_sql_ordering_many_future_snoozes_cannot_starve_recovery(isolated_runtime):
+async def _sql_ordering_many_ineligible_intents_cannot_starve_recovery(isolated_runtime,excluded):
     # Deliberately malformed SQL ordering-only fixture, NOT native opportunity
-    # capability proof: future-snoozed intents must never be claimed or charged.
+    # capability proof: future-snoozed/foreign intents must never be claimed or charged.
     from tests.test_work_board_m6_provider_free_journey import _goal
     from src.db.models import GuardianInboxDisposition
     sessions,_=isolated_runtime
@@ -260,7 +272,8 @@ async def test_sql_ordering_many_future_snoozes_cannot_starve_recovery(isolated_
             db.add(GuardianIntervention(id=intervention_id,intervention_type="opportunity",opportunity_id=source_id))
             db.add(GuardianInboxDisposition(id=source_id,source_id=source_id,source_kind="guardian_opportunity",
                 owner_principal_id=OWNER,owner_session_id=SESSION,goal_id=goal.id,goal_revision=1,
-                watch_id="ordering-only-watch",state="snoozed",snoozed_until=current+timedelta(minutes=20),
+                watch_id="ordering-only-watch",state="snoozed" if excluded=="future_snooze" else "pending",
+                snoozed_until=current+timedelta(minutes=20) if excluded=="future_snooze" else None,
                 expires_at=current+timedelta(hours=1)))
             db.add(NativeNotificationOutbox(id=source_id,idempotency_key=source_id,payload_digest="0"*64,
                 intervention_id=intervention_id,intervention_type="opportunity",owner_principal_id=OWNER,
@@ -269,24 +282,34 @@ async def test_sql_ordering_many_future_snoozes_cannot_starve_recovery(isolated_
     queue=NativeNotificationQueue()
     recovery=await queue.enqueue(intervention_id=None,title="Recovery",body="Existing recovery notice",
         intervention_type="recovery",urgency=1,idempotency_key="ordering-only-recovery")
-    assert (await queue.claim_next(worker_id="recovery-daemon")).id==recovery.id
+    assert (await queue.claim_next(worker_id="recovery-daemon",owner_principal_id=OWNER,
+        operator_session_id=SESSION if excluded=="future_snooze" else "foreign-root")).id==recovery.id
     async with sessions() as db:
         assert (await db.execute(select(func.count()).select_from(NativeNotificationOutbox).where(
             NativeNotificationOutbox.intervention_type=="opportunity",NativeNotificationOutbox.status=="queued",
-            NativeNotificationOutbox.attempt_count==0))).scalar()==25
+            NativeNotificationOutbox.attempt_count==0,NativeNotificationOutbox.fencing_token==0))).scalar()==25
+
+
+async def test_sql_ordering_many_future_snoozes_cannot_starve_recovery(isolated_runtime):
+    await _sql_ordering_many_ineligible_intents_cannot_starve_recovery(isolated_runtime,"future_snooze")
+
+
+async def test_sql_ordering_many_foreign_root_intents_cannot_starve_recovery(isolated_runtime):
+    await _sql_ordering_many_ineligible_intents_cannot_starve_recovery(isolated_runtime,"foreign_root")
 
 
 async def test_actual_snoozed_unknown_never_reconciles_to_retry(accounting_db,real_auth,monkeypatch):
     from src.guardian import inbox
     sessions,owner,row,notification_id,queue=await _actual_notification_intent(accounting_db,monkeypatch)
-    claimed=await queue.claim_next(worker_id="actual-native-daemon")
+    caller_scope=dict(owner_principal_id=owner["principal_id"],operator_session_id=owner["session_id"])
+    claimed=await queue.claim_next(worker_id="actual-native-daemon",**caller_scope)
     assert claimed.id==notification_id
     detail=await inbox.get_owned_item(owner_principal_id=owner["principal_id"],owner_session_id=owner["session_id"],item_id=row.id)
     until=now()+timedelta(minutes=20)
     result=await inbox.apply_action(owner_principal_id=owner["principal_id"],owner_session_id=owner["session_id"],
         item_id=row.id,action="snooze",expected_revision=detail["revision"],idempotency_key="unknown-snooze",until=until)
     assert result["state"]=="snoozed"
-    assert await queue.claim_next(worker_id="actual-native-daemon") is None
+    assert await queue.claim_next(worker_id="actual-native-daemon",**caller_scope) is None
     async with sessions() as db:
         intent=await db.get(NativeNotificationOutbox,notification_id)
         assert intent.status=="unknown"
@@ -298,7 +321,7 @@ async def test_actual_snoozed_unknown_never_reconciles_to_retry(accounting_db,re
     monkeypatch.setattr("src.observer.native_notification_queue._utc_now",lambda:after)
     assert await queue.reconcile_unknown(notification_id,retry=True,owner_principal_id=owner["principal_id"],
         operator_session_id=owner["session_id"]) is False
-    assert await queue.claim_next(worker_id="actual-native-daemon") is None
+    assert await queue.claim_next(worker_id="actual-native-daemon",**caller_scope) is None
     async with sessions() as db:
         intent=await db.get(NativeNotificationOutbox,notification_id)
         assert intent.status=="unknown"

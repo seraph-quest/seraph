@@ -302,6 +302,142 @@ async def guard_recovered_queue(db, run):
         db.add(row)
 
 
+async def _persisted_result_binding(db, run, row):
+    """SQL-only proof of the original contacted owner and its verified output."""
+    from sqlalchemy import select
+    from src.db.models import InferenceCostReservation
+    from src.artifacts.registry import artifact_id_for
+    from src.guardian.opportunities import now, utc
+    from src.workflows.job_runtime import _effect_ledger_or_raise, _job_has_unsafe_effects
+    _, (_, _, budget, policy, _) = await _authority(db, row.id, execution=True)
+    authority = _recovered_authority(run)
+    expected = {"principal": SERVICE_PRINCIPAL, "owner_kind": "service", "service_id": SERVICE_ID,
+        "capability_id": CAPABILITY, "permissions": ["model_inference", "workspace_write"],
+        "budget_grant_id": policy.grant_id, "opportunity_id": row.id, "source_digest": row.source_digest,
+        "policy_revision": row.policy_revision, "goal_id": row.goal_id, "goal_revision": row.goal_revision,
+        "session_id": row.original_root_id, "goal_owner_principal_id": row.owner_principal_id,
+        "goal_owner_session_id": row.original_root_id}
+    reservations = list((await db.execute(select(InferenceCostReservation).where(
+        InferenceCostReservation.job_id == row.job_id))).scalars().all())
+    if (row.status != "assessing" or row.assessment_json is not None or row.result_artifact_id is not None
+            or row.intervention_id is not None or run.status != "running"
+            or run.run_identity != row.job_id or run.run_identity != f"opportunity:{row.id}"
+            or run.job_kind != JOB_KIND or run.capability_version != CAPABILITY
+            or run.owner_kind != "service" or run.owner_principal_id != SERVICE_PRINCIPAL
+            or run.service_id != SERVICE_ID or run.session_id != row.original_root_id
+            or run.operator_session_id != row.original_root_id or run.goal_id != row.goal_id
+            or run.goal_revision != row.goal_revision or run.plan_revision != row.watch_revision
+            or run.idempotency_scope != f"opportunity:{row.owner_principal_id}" or run.idempotency_key != row.dedupe_key
+            or run.lease_owner != RUNNER or run.fencing_token < 1
+            or run.lease_expires_at is None or utc(run.lease_expires_at) <= now()
+            or run.deadline_at is None or not now() < utc(run.deadline_at) <= utc(row.assessment_deadline_at)
+            or not 1 <= run.attempt_count <= run.max_attempts <= min(2, budget.max_attempts)
+            or any(authority.get(key) != value for key, value in expected.items()) or len(reservations) != 1):
+        raise OpportunityError("assessment_restart_requires_readback")
+    cost = reservations[0]
+    if (cost.state != "settled" or cost.contact_started_at is None or cost.actual_cost_microusd is None
+            or cost.actual_cost_microusd < 0 or cost.job_fencing_token != run.fencing_token
+            or cost.operation_id != f"remote:opportunity:{row.id}" or cost.owner_id != SERVICE_PRINCIPAL
+            or cost.goal_id != row.goal_id or cost.goal_revision != row.goal_revision):
+        raise OpportunityError("assessment_restart_requires_readback")
+    try:
+        artifacts = json.loads(run.artifact_receipts_json)
+        effects = _effect_ledger_or_raise(run.effect_receipts_json)
+        if not isinstance(artifacts, list) or len(artifacts) != 1 or not isinstance(artifacts[0], dict):
+            raise ValueError("one result artifact required")
+        artifact = artifacts[0]
+        sha = artifact["content_sha256"]
+        reference = f"{PREFIX}result-{row.id}-{sha}.json"
+        if (not isinstance(sha, str) or re.fullmatch(r"[0-9a-f]{64}", sha) is None
+                or artifact.get("artifact_type") != "guardian_opportunity_assessment"
+                or artifact.get("producer") != JOB_KIND or artifact.get("exists") is not True
+                or artifact.get("file_path") != reference
+                or artifact.get("artifact_id") != artifact_id_for(file_path=reference,
+                    artifact_type="guardian_opportunity_assessment", producer=JOB_KIND,
+                    run_id=row.job_id, content_sha256=sha) or type(artifact.get("size_bytes")) is not int
+                or not 0 < artifact["size_bytes"] <= EVIDENCE_LIMIT
+                or len(effects) != 2 or _job_has_unsafe_effects(effects)):
+            raise ValueError("unverified result artifact")
+        remote = [item for item in effects if item.get("effect_type") == "remote_inference_admission"]
+        outputs = [item for item in effects if item.get("effect_type") == "workspace_write"]
+        if len(remote) != 1 or len(outputs) != 1:
+            raise ValueError("exact original effects required")
+        contact, output = remote[0], outputs[0]
+        if (contact.get("status") != "succeeded" or contact.get("fencing_token") != run.fencing_token
+                or contact.get("target_digest") != cost.operation_id
+                or output.get("receipt_kind") != "readback" or output.get("status") != "succeeded"
+                or output.get("fencing_token") != run.fencing_token or output.get("reconciled") is not True
+                or output.get("reconciliation_status") != "resolved" or output.get("target_path") != reference
+                or output.get("target_digest") != sha or output.get("content_sha256") != sha
+                or output.get("readback_id") != f"opportunity_readback:{row.id}:{sha}"
+                or any(output.get("details", {}).get(key) is not True
+                       for key in ("verified", "output_exists", "workspace_contained"))):
+            raise ValueError("original verified readback required")
+    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+        raise OpportunityError("assessment_restart_requires_readback") from exc
+    return artifact, cost
+
+
+async def adopt_persisted_assessment(opportunity_id):
+    """Adopt once using the original live lease; never claim, renew or replay."""
+    from sqlalchemy import select
+    from src.db import engine as db_engine
+    from src.db.models import WorkflowRunState, GuardianIntervention
+    from src.guardian.opportunity_contracts import validate_assessment
+    from src.work_board.input_artifacts import _safe_file_bytes
+    from src.work_board.repository import BoardError
+    from src.workflows.job_runtime import durable_job_repository
+    async with db_engine.get_session() as db:
+        row, _ = await _authority(db, opportunity_id, execution=True)
+        run = (await db.execute(select(WorkflowRunState).where(
+            WorkflowRunState.run_identity == row.job_id))).scalars().first()
+        if run is None:
+            raise OpportunityError("assessment_restart_requires_readback")
+        artifact, cost = await _persisted_result_binding(db, run, row)
+        staged_row, staged_run, staged_cost = (item.model_dump(mode="json") for item in (row, run, cost))
+    # Physical files, cited spans, and vault redaction are staged before the
+    # native writer. Its callback performs only canonical SQL rechecks and CAS.
+    try:
+        token = json.loads(row.source_token_json)
+        evidence = read_snapshot(token["artifact_id"], row.source_digest)
+        payload = _safe_file_bytes(canonical_workspace_root(settings.workspace_dir) / artifact["file_path"],
+            expected_digest=artifact["content_sha256"], expected_size=artifact["size_bytes"])
+        assessment = validate_assessment(payload.decode("utf-8"), evidence)
+        if json_bytes(assessment.model_dump(mode="json")) != payload:
+            raise OpportunityError("assessment_readback_mismatch")
+    except (OSError, ValueError, TypeError, KeyError, BoardError) as exc:
+        raise OpportunityError("assessment_restart_requires_readback") from exc
+    await assert_known_vault_values_absent(assessment.model_dump(mode="json"))
+    for value in (assessment.summary, assessment.reason, assessment.abstain_reason or ""):
+        assert_public_judgment_text(value, output=True)
+
+    async def adopt(db, native):
+        current, _ = await _authority(db, opportunity_id, evidence=evidence, execution=True)
+        current_artifact, current_cost = await _persisted_result_binding(db, native, current)
+        if (current.model_dump(mode="json") != staged_row or native.model_dump(mode="json") != staged_run
+                or current_cost.model_dump(mode="json") != staged_cost or current_artifact != artifact):
+            raise OpportunityError("opportunity_adoption_stale")
+        if assessment.proposed:
+            intervention = GuardianIntervention(id=f"opportunity:{current.id}", session_id=None,
+                intervention_type="opportunity", content_excerpt=assessment.summary,
+                reasoning=assessment.reason, guardian_confidence=assessment.confidence,
+                owner_principal_id=current.owner_principal_id, original_root_id=current.original_root_id,
+                goal_id=current.goal_id, goal_revision=current.goal_revision, opportunity_id=current.id,
+                delivery_status="not_requested", latest_outcome="created", transport="guardian_inbox")
+            db.add(intervention)
+            current.intervention_id = intervention.id
+        current.status = "proposed" if assessment.proposed else "silent"
+        current.assessment_json, current.result_artifact_id = payload.decode(), artifact["artifact_id"]
+        current.reason_code = None if assessment.proposed else "assessment_abstained"
+        current.revision += 1
+        db.add(current)
+
+    return await durable_job_repository.transition_job(row.job_id, "succeeded", owner=RUNNER,
+        fencing_token=run.fencing_token, expected_revision=run.revision, terminal_authority_check=adopt,
+        result={"opportunity_id": row.id, "result_sha256": artifact["content_sha256"], "learning": "no_learning"},
+        result_summary="verified cited opportunity judgment; no learning")
+
+
 async def _contact_limits(db, row, policy):
     """Count durable contacted attempts across policy renewals and Unknowns."""
     from sqlalchemy import select
@@ -477,8 +613,8 @@ async def execute_assessment(opportunity_id):
     """Native lease owns execution; terminal adoption shares its SQL fence."""
     from sqlalchemy import select, update, text
     from src.db import engine as db_engine
-    from src.db.models import GuardianOpportunity, GuardianIntervention, InferenceCostReservation
-    from src.guardian.opportunities import now, assert_opportunity_current
+    from src.db.models import GuardianOpportunity, InferenceCostReservation
+    from src.guardian.opportunities import now
     from src.guardian.opportunity_contracts import validate_assessment
     from src.work_board.input_artifacts import _write_payload, _safe_file_bytes
     from src.workflows.job_runtime import durable_job_repository
@@ -526,37 +662,14 @@ async def execute_assessment(opportunity_id):
             target_path=reference, target_digest=sha, content_sha256=sha, status="succeeded",
             details={"verified": True, "output_exists": True, "workspace_contained": True},
             owner=RUNNER, fencing_token=fence, expected_revision=artifact["revision"])
-        readback = await durable_job_repository.record_readback(row.job_id, target_path=reference,
+        await durable_job_repository.record_readback(row.job_id, target_path=reference,
             effect_id=effect["receipt"]["effect_id"], effect_type="workspace_write", target_digest=sha,
             content_sha256=sha, readback_id=f"opportunity_readback:{row.id}:{sha}",
             verified_at=now().isoformat(), status="succeeded",
             details={"verified": True, "output_exists": True, "workspace_contained": True},
             owner=RUNNER, fencing_token=fence, expected_revision=effect["revision"])
 
-        async def adopt(db, run):
-            current, _ = await _authority(db, row.id, evidence=evidence, execution=True)
-            if current.status != "assessing" or current.job_id != run.run_identity:
-                raise OpportunityError("opportunity_adoption_stale")
-            if assessment.proposed:
-                intervention = GuardianIntervention(id=f"opportunity:{row.id}", session_id=None,
-                    intervention_type="opportunity", content_excerpt=assessment.summary,
-                    reasoning=assessment.reason, guardian_confidence=assessment.confidence,
-                    owner_principal_id=row.owner_principal_id, original_root_id=row.original_root_id,
-                    goal_id=row.goal_id, goal_revision=row.goal_revision, opportunity_id=row.id,
-                    delivery_status="not_requested", latest_outcome="created", transport="guardian_inbox")
-                db.add(intervention)
-                current.intervention_id = intervention.id
-            current.status = "proposed" if assessment.proposed else "silent"
-            current.assessment_json = payload.decode()
-            current.result_artifact_id = artifact["receipt"]["artifact_id"]
-            current.reason_code = None if assessment.proposed else "assessment_abstained"
-            current.revision += 1
-            db.add(current)
-
-        await durable_job_repository.transition_job(row.job_id, "succeeded", owner=RUNNER,
-            fencing_token=fence, expected_revision=readback["revision"], terminal_authority_check=adopt,
-            result={"opportunity_id": row.id, "result_sha256": sha, "learning": "no_learning"},
-            result_summary="verified cited opportunity judgment; no learning")
+        await adopt_persisted_assessment(row.id)
         # Optional delivery cannot roll back verified judgment or retry it.
         try:
             await request_optional_notification(row.id)
@@ -634,17 +747,26 @@ async def run_opportunity_tick():
                             reason_code=reason, revision=GuardianOpportunity.revision + 1))
                         continue
             if row.status == "assessing":
-                # A restarted process cannot prove the former callback ended.
-                # Retain contacted liability/history and never replay it.
+                # Verified current output can use its original live native
+                # fence once. Missing proof retains liability, never a replay.
                 async with db_engine.get_session() as db:
                     reservation = (await db.execute(select(InferenceCostReservation).where(
                         InferenceCostReservation.job_id == row.job_id))).scalars().first()
                     contacted = reservation is not None and reservation.contact_started_at is not None
                 if contacted or utc(row.assessment_deadline_at) <= now():
+                    if contacted:
+                        from src.workflows.job_runtime import DurableJobError
+                        try:
+                            await adopt_persisted_assessment(row.id)
+                        except (OpportunityError, DurableJobError):
+                            pass
+                        else:
+                            continue
                     async with db_engine.get_session() as db:
                         await db.execute(text("BEGIN IMMEDIATE"))
                         await db.execute(update(GuardianOpportunity).where(GuardianOpportunity.id == row.id,
-                            GuardianOpportunity.revision == row.revision).values(status="unknown" if contacted else "blocked",
+                            GuardianOpportunity.revision == row.revision,
+                            GuardianOpportunity.status == "assessing").values(status="unknown" if contacted else "blocked",
                             reason_code="assessment_restart_requires_readback" if contacted else "assessment_deadline_expired",
                             revision=GuardianOpportunity.revision + 1))
                     continue

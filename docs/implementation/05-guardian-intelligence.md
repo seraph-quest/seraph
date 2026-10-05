@@ -1598,6 +1598,12 @@ cost remains visible and is never automatically replayed; proven never-contacted
 recovery reuses the original job and bounds, with at most two attempts and any
 stricter Goal limit.
 
+A restart may adopt an already persisted, physically verified judgment once
+while the original native lease, fence and assessment authority remain current.
+This finalizes the original job without another provider call, claim, attempt or
+lease extension. Expired authority or missing readback leaves blocked or Unknown
+history available for review.
+
 Provider-intercepted native receipts establish the bounded execution path;
 the milestone also requires a managed UI journey. Neither establishes live
 provider usefulness. Secret, email/phone and invented

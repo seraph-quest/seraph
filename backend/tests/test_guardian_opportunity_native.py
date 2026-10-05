@@ -273,6 +273,7 @@ async def test_actual_startup_queue_rechecks_current_authority_and_exact_binding
     from src.db.models import Goal, OperatorSession, GuardianSourceWatch, WorkflowRunState
     from src.guardian.opportunity_contracts import OpportunityError
     sessions, goal, watch, row, native = await _startup_recovered_candidate(isolated_runtime)
+    expected_attempt_count = native["attempt_count"]
     async with sessions() as db:
         run = (await db.execute(select(WorkflowRunState).where(
             WorkflowRunState.run_identity == row.job_id))).scalar_one()
@@ -299,6 +300,7 @@ async def test_actual_startup_queue_rechecks_current_authority_and_exact_binding
             run.deadline_at = datetime.now(timezone.utc)-timedelta(seconds=1)
         elif change == "attempts":
             run.attempt_count = run.max_attempts
+            expected_attempt_count = run.attempt_count
         elif change in {"reserved", "released", "unknown"}:
             db.add(_reservation_negative(row, native, change))
         elif change == "reason":
@@ -318,7 +320,7 @@ async def test_actual_startup_queue_rechecks_current_authority_and_exact_binding
             expected_fencing_token=native["lease"]["fencing_token"])
     latest = await durable_job_repository.get_job(row.job_id)
     assert latest["status"] == "blocked" and latest["revision"] == native["revision"]
-    assert latest["attempt_count"] == native["attempt_count"]
+    assert latest["attempt_count"] == expected_attempt_count
     assert latest["lease"]["fencing_token"] == native["lease"]["fencing_token"]
     async with sessions() as db:
         current = await db.get(GuardianOpportunity, row.id)

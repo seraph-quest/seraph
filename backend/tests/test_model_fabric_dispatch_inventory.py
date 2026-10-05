@@ -304,7 +304,7 @@ def _review(
 _CANONICAL_ADAPTERS = (
     _review(
         "llm_runtime.py",
-        1670,
+        1671,
         "_governed_research_chat_completion",
         "client.stream",
         "canonical_adapter",
@@ -313,7 +313,7 @@ _CANONICAL_ADAPTERS = (
     ),
     _review(
         "llm_runtime.py",
-        1613,
+        1614,
         "_governed_openai_chat_completion",
         "client.post",
         "canonical_adapter",
@@ -322,7 +322,7 @@ _CANONICAL_ADAPTERS = (
     ),
     _review(
         "llm_runtime.py",
-        4754,
+        4756,
         "stream_completion_with_fallback.default_transport",
         "client.stream",
         "canonical_adapter",
@@ -366,12 +366,12 @@ _REVIEWED_EXCEPTIONS = (
         "_request_pinned_https",
         "client.stream",
         "non_model_transport",
-        "Existing pinned HTTPS source retrieval enforces authority checks and transfer bounds before returning a public-source response; it does not submit model inference.",
-        "Keep in the guarded source-read transport; route through model-fabric admission if this leaf becomes a model request.",
+        "Existing generic pinned HTTPS transport serves external integrations with authority checks and transfer bounds; it does not submit model inference.",
+        "Keep in the guarded external transport; route through model-fabric admission if this leaf becomes a model request.",
     ),
     _review(
         "llm_runtime.py",
-        3846,
+        3848,
         "FallbackLiteLLMModel.generate.invoke_primary_transport",
         "BaseLiteLLMModel.generate",
         "transitional_provider_call",
@@ -380,7 +380,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        3925,
+        3927,
         "FallbackLiteLLMModel.generate.invoke_fallback_transport",
         "fallback_model.generate",
         "transitional_provider_call",
@@ -389,7 +389,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4371,
+        4373,
         "completion_with_fallback_sync.invoke_primary_transport",
         "litellm.completion",
         "transitional_provider_call",
@@ -398,7 +398,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4449,
+        4451,
         "completion_with_fallback_sync.invoke_fallback_transport",
         "litellm.completion",
         "transitional_provider_call",
@@ -407,7 +407,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        1239,
+        1268,
         "_execute_canary_transport",
         "client.post",
         "capability_probe",
@@ -416,7 +416,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        1252,
+        1281,
         "_execute_canary_transport",
         "client.stream",
         "capability_probe",
@@ -425,7 +425,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        1267,
+        1296,
         "_execute_canary_transport",
         "client.post",
         "capability_probe",

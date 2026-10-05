@@ -486,6 +486,10 @@ def execute_sync_adapter(
             )
         )
 
+    # The coroutine bridge copies context; a ContextVar set only inside it
+    # cannot survive back into the synchronous broker caller.
+    from .accounting import bind_accounting_profile
+    bind_accounting_profile(admission_request.operation_id, decision.selected.profile.id)
     _run_awaitable_sync(
         prepare_bound_remote_inference(
             admission_request,

@@ -772,7 +772,7 @@ def _embed_texts(
 
     profile = _embedding_profile(model=model, batch_size=len(texts))
     controls = profile.options.get("_seraph_openrouter", {})
-    timeout_seconds = min(REQUEST_TIMEOUT_SECONDS, float(controls.get("timeout_seconds", REQUEST_TIMEOUT_SECONDS)))
+    timeout_seconds = float(controls.get("timeout_seconds", REQUEST_TIMEOUT_SECONDS))
     request_id = f"embedding:{uuid4().hex}"
     try:
         input_value = texts[0] if len(texts) == 1 else texts
@@ -799,6 +799,10 @@ def _embed_texts(
             context=context,
             batch_size=len(texts),
         )
+        if setup is not None and setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+            measured = next((proof.proven_value for proof in proofs if proof.capability == "embedding" and proof_is_fresh(proof)), None)
+            if type(measured) is not int or not 1 <= measured <= 65_536:
+                _raise_configuration("embedding_measured_dimension_required", batch_size=len(texts), model=model)
         vectors = execute_sync_adapter(
             context=context,
             candidates=(candidate,),
@@ -913,6 +917,10 @@ def _embed_texts(
         )
         raise EmbeddingResponseError(reason_code, stage="response", request_id=request_id)
 
+    if setup is not None and setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+        measured = next((proof.proven_value for proof in proofs if proof.capability == "embedding" and proof_is_fresh(proof)), None)
+        if type(measured) is not int or not 1 <= measured <= 65_536 or len(vectors[0]) != measured:
+            raise EmbeddingResponseError("embedding_dimension_proof_mismatch", stage="response", request_id=request_id)
     _remember_metadata(
         model=model,
         dimension=len(vectors[0]),
@@ -937,7 +945,8 @@ def embed_batch(
 
 
 def embedding_metadata() -> EmbeddingMetadata | None:
-    """Return the process-local vector-space identity, if one is loaded."""
+    """Project current measured proof geometry without contacting a provider."""
+    global _metadata, _metadata_profile_hash
     with _metadata_lock:
         metadata, bound_hash = _metadata, _metadata_profile_hash
     setup = read_model_fabric_configuration().openrouter_setup
@@ -946,12 +955,19 @@ def embedding_metadata() -> EmbeddingMetadata | None:
             model = _configured_model(batch_size=0)
             _validate_route_policy(batch_size=0, model=model)
             profile = _embedding_profile(model=model, batch_size=0)
-            if metadata is None or metadata.model != model or bound_hash != profile.contract_hash:
-                return None
             context = SimpleNamespace(requirements=SimpleNamespace(capabilities=("embedding",)))
             proofs = _load_embedding_proofs(profile=profile, candidate=candidate_from_profile(profile), context=context, batch_size=0)
             if {proof.capability for proof in proofs if proof_is_fresh(proof)} != {"embedding", "health", "latency_ms"}:
                 return None
+            dimension = next((proof.proven_value for proof in proofs if proof.capability == "embedding"), None)
+            if type(dimension) is not int or not 1 <= dimension <= 65_536:
+                return None
+            projected = EmbeddingMetadata(EMBEDDING_SCHEMA_VERSION, "openrouter", model, dimension)
+            if metadata is not None and bound_hash == profile.contract_hash and metadata != projected:
+                return None
+            metadata = projected
+            with _metadata_lock:
+                _metadata, _metadata_profile_hash = metadata, profile.contract_hash
         except EmbeddingError:
             return None
     return metadata

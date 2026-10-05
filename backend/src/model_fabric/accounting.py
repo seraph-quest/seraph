@@ -115,9 +115,14 @@ class DurableInferenceBrokerMixin:
             from .configuration import OPENROUTER_SETUP_V2_SCHEMA_VERSION, route_slot_for_task_class
             if setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
                 from .caller_context import canonical_route_spec
-                slot = route_slot_for_task_class(canonical_route_spec(request.runtime_path).task_class)
-                route = (setup.routes or {}).get(slot)
                 profile_id = _profile_bindings.get().get(request.operation_id)
+                if request.runtime_path == "capability_probe":
+                    slot = next((slot for slot in ("text", "vision", "embedding") if profile_id == f"openrouter.{slot}"), None)
+                    if slot is None:
+                        raise InferenceAccountingError("accounting_profile_binding_invalid")
+                else:
+                    slot = route_slot_for_task_class(canonical_route_spec(request.runtime_path).task_class)
+                route = (setup.routes or {}).get(slot)
                 if route is None or not route.enabled or profile_id != f"openrouter.{slot}" or slot != "text" and (setup.purpose_consents or {}).get(slot) != configured.egress_revision:
                     raise InferenceAccountingError("accounting_profile_binding_invalid")
                 bound = route.request_cost_bound_microusd

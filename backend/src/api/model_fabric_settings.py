@@ -10,6 +10,7 @@ from decimal import Decimal
 from dataclasses import replace
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -30,6 +31,7 @@ from src.model_fabric import (
     ProviderProfile,
     candidate_from_profile,
     finalized_openai_compatible_body,
+    finalized_openai_compatible_embeddings_body,
 )
 from src.model_fabric.caller_context import CANONICAL_ROUTE_SPECS
 from src.model_fabric.configuration import (
@@ -54,6 +56,7 @@ from src.model_fabric.configuration import (
     _configuration_payload,
     read_model_fabric_configuration,
     validate_active_model_fabric_configuration,
+    validate_openrouter_setup,
     write_model_fabric_configuration,
 )
 from src.model_fabric.contracts import (
@@ -739,7 +742,18 @@ async def run_model_fabric_canary(body: CapabilityCanaryRequest, request: Reques
     profile = provider_profiles().get(body.profile_id)
     if profile is None:
         raise HTTPException(status_code=404, detail="Model-fabric profile not found")
-    policy = effective_workload_policy("capability_probe")
+    configured = read_model_fabric_configuration()
+    setup = configured.openrouter_setup
+    if setup is not None and setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+        # This existing proof generator is an explicit target exception, never
+        # an ordinary task-class mapping or an unknown-to-text fallback.
+        slot = next((slot for slot in OPENROUTER_ROUTE_SLOTS if profile.id == f"openrouter.{slot}"), None)
+        if slot is None:
+            raise HTTPException(status_code=403, detail="canary_exact_slot_required")
+        runtime_path = {"text": "chat_agent", "vision": "screenshot_image_analysis", "embedding": "memory_embedding"}[slot]
+        policy = effective_workload_policy(runtime_path)
+    else:
+        policy = effective_workload_policy("capability_probe")
     try:
         candidate = candidate_from_profile(profile)
     except ValueError as exc:
@@ -798,7 +812,7 @@ async def _run_model_fabric_canary_locked(body, profile, policy, candidate, prin
         requirements=InferenceRequirements(
             capabilities=(body.capability,),
             context_tokens=128,
-            output_tokens=64,
+            output_tokens=int(fixture.get("output_tokens", 64)),
             max_cost_microusd=policy.max_cost_microusd,
             max_local_resource_ms=int(body.timeout_seconds * 1000),
             max_latency_ms=int(body.timeout_seconds * 1000),
@@ -887,10 +901,17 @@ def _canary_fixture(profile: ProviderProfile, capability: str) -> dict[str, obje
                 "file": file_metadata,
             },
         }
-    payload = _chat_canary_payload(profile.model, capability)
+    if profile.transport_adapter == "openai_compatible_embeddings":
+        payload = finalized_openai_compatible_embeddings_body(model_id=profile.model,
+            inputs="Seraph fixed non-sensitive embedding canary.", options=profile.options)
+        return {"json": payload, "digest_payload": payload, "output_tokens": 1}
+    controls = profile.options.get("_seraph_openrouter", {})
+    payload = _chat_canary_payload(profile.model, capability, options=profile.options,
+        output_tokens=min(64, int(controls.get("output_limit", 64))))
     return {
         "json": payload,
         "digest_payload": payload,
+        "output_tokens": payload["max_tokens"],
     }
 
 
@@ -930,7 +951,8 @@ def _static_profile_route_reasons(
             reasons.append("adapter_capability_mismatch")
     if profile.context_window_tokens is None or profile.context_window_tokens < 128:
         reasons.append("profile_limit_unknown_or_insufficient:context_tokens")
-    if profile.max_output_tokens is None or profile.max_output_tokens < 64:
+    output_tokens = 1 if profile.transport_adapter == "openai_compatible_embeddings" else min(64, int(profile.options.get("_seraph_openrouter", {}).get("output_limit", 64)))
+    if profile.max_output_tokens is None or profile.max_output_tokens < output_tokens:
         reasons.append("profile_limit_unknown_or_insufficient:output_tokens")
     timeout_ms = int(timeout_seconds * 1000)
     if profile.max_latency_ms is None or profile.max_latency_ms > timeout_ms:
@@ -1078,6 +1100,11 @@ async def _openrouter_setup_status(setup: OpenRouterSetup | None, *, configurati
                                 proof_expires_at=datetime.fromtimestamp(min(proof.expires_at for proof in proofs), timezone.utc).isoformat())
                     except Exception:
                         state["error_code"] = "proof_metadata_unavailable"
+            if original_setup.schema_version == OPENROUTER_SETUP_SCHEMA_VERSION:
+                try:
+                    validate_openrouter_setup(replace(setup, routes={slot: route}))
+                except ValueError:
+                    state.update(status="blocked", error_code="legacy_route_capabilities_require_review")
         if route is not None:
             payload["routes"][slot].update(state)
         payload["slot_statuses"][slot] = state
@@ -1235,6 +1262,7 @@ async def _execute_canary_transport(
     if profile.api_key:
         headers["Authorization"] = f"Bearer {profile.api_key}"
     started = time.monotonic()
+    embedding_dimension = None
     async with httpx.AsyncClient(timeout=timeout_seconds, follow_redirects=False) as client:
         if profile.transport_adapter == "vlm_analyze_file":
             response = await client.post(
@@ -1268,16 +1296,21 @@ async def _execute_canary_transport(
                 response = await client.post(endpoint, headers=headers, json=payload)
                 capture_response_usage(response)
                 response.raise_for_status()
-                if not _validate_chat_canary_response(response.json(), capability):
+                if profile.transport_adapter == "openai_compatible_embeddings":
+                    embedding_dimension = _embedding_canary_dimension(response.json())
+                    valid = embedding_dimension is not None
+                else:
+                    valid = _validate_chat_canary_response(response.json(), capability)
+                if not valid:
                     return CapabilityProbeObservation(False, error_code="canary_shape_invalid")
     elapsed_ms = max(int((time.monotonic() - started) * 1000), 0)
-    value = _proven_value(capability, elapsed_ms)
+    value = embedding_dimension if capability == ModelCapability.EMBEDDING.value else _proven_value(capability, elapsed_ms)
     if value is None:
         return CapabilityProbeObservation(False, error_code="proof_value_unknown")
     return CapabilityProbeObservation(True, proven_value=value)
 
 
-def _chat_canary_payload(model: str, capability: str) -> dict[str, object]:
+def _chat_canary_payload(model: str, capability: str, *, options=None, output_tokens=64) -> dict[str, object]:
     content: object = "Reply with CANARY_OK only."
     messages: list[dict[str, object]] = [{"role": "user", "content": content}]
     additional_fields: dict[str, object] = {}
@@ -1295,10 +1328,31 @@ def _chat_canary_payload(model: str, capability: str) -> dict[str, object]:
     return finalized_openai_compatible_body(
         model_id=model,
         messages=messages,
-        max_tokens=64,
+        max_tokens=output_tokens,
+        options=options,
         stream=True if streaming else None,
         additional_fields=additional_fields,
     )
+
+
+def _embedding_canary_dimension(payload: object) -> int | None:
+    """Measure one bounded finite vector without retaining its contents."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list) or len(payload["data"]) != 1:
+        return None
+    row = payload["data"][0]
+    if not isinstance(row, dict) or type(row.get("index")) is not int or row["index"] != 0:
+        return None
+    vector = row.get("embedding")
+    if not isinstance(vector, list) or not 1 <= len(vector) <= 65_536:
+        return None
+    try:
+        if any(type(value) not in {int, float} or not math.isfinite(value) for value in vector):
+            return None
+    except OverflowError:
+        return None
+    if not any(value != 0 for value in vector):
+        return None
+    return len(vector)
 
 
 def _validate_chat_canary_response(payload: object, capability: str) -> bool:

@@ -45,6 +45,7 @@ from src.model_fabric.remote_inference_admission import (
     RemoteInferenceAdmissionRequest as GpuAdmissionRequest,
     current_remote_inference_receipt_binding,
     prepare_bound_remote_inference,
+    bind_accounting_profile,
     remote_inference_admission_broker as gpu_admission_broker,
     stable_remote_inference_operation_id,
 )
@@ -3328,6 +3329,7 @@ def _execute_sync_with_gpu_admission(
                 == "openrouter"
             ),
         )
+        bind_accounting_profile(request.operation_id, profile_id)
         _run_receipt_hook_sync(
             prepare_bound_remote_inference(
                 request,

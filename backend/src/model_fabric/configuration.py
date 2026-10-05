@@ -537,9 +537,9 @@ def migrate_openrouter_setup_v1_to_v2(setup: OpenRouterSetup, *, egress_revision
         routes["embedding"] = route
         consents["embedding"] = egress_revision
     else:
-        routes["text"] = replace(route, capabilities=tuple(value for value in route.capabilities if value != "vision"))
+        routes["text"] = route
         if "vision" in setup.capabilities and setup.cloud_egress_acknowledged and setup.zero_data_retention:
-            routes["vision"] = replace(route, capabilities=tuple(dict.fromkeys(("text", *route.capabilities))))
+            routes["vision"] = route
             consents["vision"] = egress_revision
     return replace(setup, schema_version=OPENROUTER_SETUP_V2_SCHEMA_VERSION,
         model_ids=(), capabilities=(), allowed_upstreams=(), routes=routes,

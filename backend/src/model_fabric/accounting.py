@@ -108,6 +108,15 @@ class DurableInferenceBrokerMixin:
             configured, policy_digest = current_inference_policy()
             setup = configured.openrouter_setup
             bound = setup.request_cost_bound_microusd or setup.spend_ceiling_microusd
+            from .configuration import OPENROUTER_SETUP_V2_SCHEMA_VERSION, route_slot_for_task_class
+            if setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+                from .caller_context import canonical_route_spec
+                slot = route_slot_for_task_class(canonical_route_spec(request.runtime_path).task_class)
+                route = (setup.routes or {}).get(slot)
+                profile_id = _profile_bindings.get().get(request.operation_id)
+                if route is None or not route.enabled or profile_id != f"openrouter.{slot}" or slot != "text" and (setup.purpose_consents or {}).get(slot) != configured.egress_revision:
+                    raise InferenceAccountingError("accounting_profile_binding_invalid")
+                bound = route.request_cost_bound_microusd
             if type(bound) is not int or bound <= 0:
                 raise InferenceAccountingError("accounting_server_bound_required")
             request = replace(request, estimated_cost_microusd=bound)

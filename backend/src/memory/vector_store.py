@@ -180,6 +180,8 @@ def add_memory(
                     "embedding_dimension": metadata.dimension,
                 }
             )
+        if _active_embedding_metadata() != metadata or len(vector) != metadata.dimension:
+            raise EmbeddingUnavailableError("embedding_binding_changed", stage="metadata")
         table.add([row])
 
         logger.info("Added memory %s (category=%s)", memory_id[:8], category)
@@ -249,7 +251,7 @@ def search_with_status(
                     "top_k": top_k,
                 },
             )
-            return [], False
+            return [], True
 
         results = table.search(query_vector).limit(top_k)
 

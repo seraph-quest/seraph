@@ -27,7 +27,7 @@ from src.model_fabric import (
     finalized_openai_compatible_body,
 )
 from src.model_fabric.caller_context import build_canonical_inference_context
-from src.model_fabric.configuration import effective_workload_policy
+from src.model_fabric.configuration import effective_workload_policy, read_model_fabric_configuration, OPENROUTER_SETUP_V2_SCHEMA_VERSION, openrouter_profile_id_for_runtime_path
 from src.model_fabric.proofs import proof_is_fresh
 from src.model_fabric.remote_inference_admission import (
     RemoteInferenceAdmissionError,
@@ -70,6 +70,11 @@ class ScreenshotSemanticAnalysisError(RuntimeError):
     """Raised when the configured semantic screenshot analyzer fails."""
 
 
+def _screenshot_profile_id() -> str:
+    profile_id = openrouter_profile_id_for_runtime_path("screenshot_image_analysis")
+    return SCREENSHOT_VLM_PROFILE_ID if profile_id == "openrouter" else profile_id
+
+
 def screenshot_semantic_analysis_enabled() -> bool:
     """Return true only when remote vision is explicitly configured and allowed.
     """
@@ -80,17 +85,20 @@ def screenshot_semantic_analysis_enabled() -> bool:
         return False
     if not effective_screen_analysis_model() or not settings.openrouter_api_key.strip():
         return False
-    if not bool(getattr(settings, "openrouter_provider_only", True)):
+    configured = read_model_fabric_configuration()
+    setup = configured.openrouter_setup
+    v2 = setup is not None and setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION
+    if not v2 and not bool(getattr(settings, "openrouter_provider_only", True)):
         return False
-    if not str(getattr(settings, "openrouter_allowed_upstreams", "") or "").strip():
+    if not v2 and not str(getattr(settings, "openrouter_allowed_upstreams", "") or "").strip():
         return False
-    if bool(getattr(settings, "openrouter_allow_fallbacks", False)):
+    if not v2 and bool(getattr(settings, "openrouter_allow_fallbacks", False)):
         return False
-    if bool(getattr(settings, "openrouter_require_parameters", True)) is not True:
+    if not v2 and bool(getattr(settings, "openrouter_require_parameters", True)) is not True:
         return False
-    if str(getattr(settings, "openrouter_data_collection", "deny") or "deny") != "deny":
+    if not v2 and str(getattr(settings, "openrouter_data_collection", "deny") or "deny") != "deny":
         return False
-    if not bool(getattr(settings, "openrouter_zero_data_retention", False)):
+    if not v2 and not bool(getattr(settings, "openrouter_zero_data_retention", False)):
         return False
     try:
         policy = effective_workload_policy("screenshot_image_analysis")
@@ -105,7 +113,7 @@ def screenshot_semantic_analysis_enabled() -> bool:
         or set(policy.allowed_provider_kinds) != {"openrouter"}
     ):
         return False
-    profile = provider_profiles().get(SCREENSHOT_VLM_PROFILE_ID)
+    profile = provider_profiles().get(_screenshot_profile_id())
     if profile is None or profile.provider_kind != "openrouter":
         return False
     if (
@@ -125,7 +133,7 @@ def screenshot_semantic_analysis_enabled() -> bool:
     ):
         return False
     provider_options = profile.options.get("provider") if isinstance(profile.options, dict) else None
-    return isinstance(provider_options, dict) and bool(provider_options.get("only"))
+    return isinstance(provider_options, dict) and bool(provider_options.get("only")) and provider_options.get("zdr") is True
 
 
 async def screenshot_semantic_analysis_ready(*, timeout_seconds: float = 2.0) -> bool:
@@ -191,7 +199,7 @@ async def _screenshot_semantic_analysis_backend_ready(*, timeout_seconds: float 
 
 async def _openrouter_profile_proofs_ready(*, timeout_seconds: float = 2.0) -> bool:
     """Check persisted vision/response proofs before admitting background work."""
-    profile = provider_profiles().get(SCREENSHOT_VLM_PROFILE_ID)
+    profile = provider_profiles().get(_screenshot_profile_id())
     if profile is None:
         return False
     candidate = candidate_from_profile(profile)
@@ -430,7 +438,7 @@ async def _analyze_with_openrouter(image_path: Path, artifacts: dict[str, Any]) 
         "height": artifacts.get("height"),
     }
     prompt = screenshot_analysis_prompt(metadata)
-    profile = provider_profiles().get(SCREENSHOT_VLM_PROFILE_ID)
+    profile = provider_profiles().get(_screenshot_profile_id())
     if profile is None:
         raise ScreenshotSemanticAnalysisError("openrouter screenshot profile is not configured")
     if profile.provider_kind != "openrouter" or profile.api_base != "https://openrouter.ai/api/v1":

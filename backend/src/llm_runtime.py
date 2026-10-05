@@ -1142,6 +1142,12 @@ def runtime_profile_candidates(
     profile: str | None = None,
 ) -> list[str]:
     """Return the ordered runtime profiles to try for an implicit runtime path."""
+    from src.model_fabric.caller_context import is_canonical_inference_route
+    from src.model_fabric.configuration import openrouter_profile_id_for_runtime_path
+    if runtime_path and is_canonical_inference_route(runtime_path):
+        canonical_profile = openrouter_profile_id_for_runtime_path(runtime_path)
+        if canonical_profile != "openrouter":
+            return [canonical_profile]
     if profile:
         normalized_profile = _normalize_runtime_profile(profile)
         from src.model_fabric.caller_context import is_canonical_inference_route
@@ -1249,6 +1255,8 @@ def _profile_model_id(profile: str) -> str:
     provider_profile = _provider_profile(profile)
     if provider_profile is not None:
         return provider_profile.routing_model or provider_profile.model
+    if profile in {"openrouter.text", "openrouter.vision", "openrouter.embedding"}:
+        return ""
     return settings.default_model
 
 

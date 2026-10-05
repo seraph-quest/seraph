@@ -163,7 +163,14 @@ def _witness(account: InferenceAccountingOwner) -> dict[str, object]:
 
 
 @contextmanager
-def _continuity_lock(root: Path, *, initialize: bool = False):
+def _continuity_lock(root: Path, *, initialize: bool = False, held_workspace=None):
+    if held_workspace is not None:
+        from src.workspace.accounting_witness import assert_deployment_binding
+        if held_workspace.host_root != root:
+            raise InferenceAccountingError("accounting_continuity_unavailable")
+        assert_deployment_binding(held_workspace)
+        yield held_workspace
+        return
     workspace = ProductionWorkspace(host_root=root)
     directory = workspace.lifecycle_directory
     try:
@@ -402,7 +409,7 @@ class InferenceAccountingRepositoryMixin:
             "witness": _witness(account), "secret_values_included": False})
         write_lifecycle_receipt(workspace, receipt, _accounting_lock_held=True)
 
-    async def configure_inference_accounting(self, ceiling_microusd: int, *, reserve_review_microusd: int | None = None) -> dict[str, object]:
+    async def configure_inference_accounting(self, ceiling_microusd: int, *, reserve_review_microusd: int | None = None, continuity_workspace=None) -> dict[str, object]:
         """Explicit settings save bootstraps only a truly empty deployment."""
         ceiling = integer_amount(ceiling_microusd, positive=True)
         if reserve_review_microusd is not None:
@@ -413,7 +420,7 @@ class InferenceAccountingRepositoryMixin:
         async with self._session() as db:
             await self._accounting_begin(db)
             account, rows = await self._accounting_rows(db)
-            with _continuity_lock(root, initialize=account is None) as workspace:
+            with _continuity_lock(root, initialize=account is None, held_workspace=continuity_workspace) as workspace:
                 if account is None:
                     prior = read_lifecycle_receipt(workspace)
                     if rows or (prior and "inference_accounting" in prior):
@@ -697,13 +704,13 @@ class InferenceAccountingRepositoryMixin:
                 await self._persist_accounting_witness(db, workspace, account, rows)
                 return _operation_payload(row)
 
-    async def inference_accounting_snapshot(self, *, now: datetime | None = None, job_id: str | None = None) -> dict[str, object]:
+    async def inference_accounting_snapshot(self, *, now: datetime | None = None, job_id: str | None = None, continuity_workspace=None) -> dict[str, object]:
         period = period_id(now or datetime.now(timezone.utc))
         try:
             async with self._session() as db:
                 await self._accounting_begin(db)
                 account, rows = await self._accounting_rows(db)
-                with _continuity_lock(Path(settings.workspace_dir).resolve()) as workspace:
+                with _continuity_lock(Path(settings.workspace_dir).resolve(), held_workspace=continuity_workspace) as workspace:
                     self._assert_accounting_continuity(workspace, account, rows)
                     from src.workspace.accounting_witness import period_state, unreviewed_overruns
                     owner_data, operations = account.model_dump(mode="json"), [_operation_payload(row) for row in rows]

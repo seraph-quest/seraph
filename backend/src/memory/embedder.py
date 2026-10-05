@@ -13,6 +13,7 @@ import math
 import threading
 import time
 from typing import Any
+from types import SimpleNamespace
 from uuid import uuid4
 
 import httpx
@@ -20,7 +21,8 @@ import httpx
 from config.settings import settings
 from src.approval.runtime import get_current_trust_principal
 from src.audit.runtime import log_integration_event_sync
-from src.model_fabric.configuration import effective_workload_policy
+from src.model_fabric.configuration import effective_workload_policy, read_model_fabric_configuration, OPENROUTER_SETUP_V2_SCHEMA_VERSION
+from src.model_fabric.proofs import proof_is_fresh
 from src.model_fabric.remote_inference_admission import (
     RemoteInferenceAdmissionError,
 )
@@ -116,6 +118,7 @@ class EmbeddingMetadata:
 
 
 _metadata: EmbeddingMetadata | None = None
+_metadata_profile_hash: str | None = None
 _metadata_lock = threading.Lock()
 _LOAD_EVENT_EMITTED = False
 
@@ -181,6 +184,12 @@ def _raise_configuration(
 
 def _configured_model(*, batch_size: int) -> str:
     """Resolve only an explicitly OpenRouter-qualified model identifier."""
+    setup = read_model_fabric_configuration().openrouter_setup
+    if setup is not None and setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+        route = (setup.routes or {}).get("embedding")
+        if route is None or not route.enabled:
+            _raise_configuration("embedding_route_required", batch_size=batch_size)
+        return route.model_id.removeprefix("openrouter/")
     configured = str(settings.embedding_model or "").strip()
     if not configured:
         _raise_configuration("embedding_model_required", batch_size=batch_size)
@@ -236,6 +245,9 @@ def _validate_route_policy(*, batch_size: int, model: str) -> None:
             batch_size=batch_size,
             model=model,
         )
+    setup = read_model_fabric_configuration().openrouter_setup
+    if setup is not None and setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+        return
     if not bool(getattr(settings, "openrouter_provider_only", True)):
         _raise_configuration(
             "openrouter_provider_only_required",
@@ -281,6 +293,10 @@ def _validate_route_policy(*, batch_size: int, model: str) -> None:
 
 def _embedding_provider_options() -> dict[str, object]:
     """Return the exact provider policy that the embedding body will carry."""
+    setup = read_model_fabric_configuration().openrouter_setup
+    if setup is not None and setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+        profile = _embedding_profile(model=_configured_model(batch_size=0), batch_size=0)
+        return {"provider": dict(profile.options["provider"])}
     upstreams = [
         item.strip()
         for item in str(getattr(settings, "openrouter_allowed_upstreams", "") or "").split(",")
@@ -304,6 +320,12 @@ def _embedding_profile(*, model: str, batch_size: int) -> ProviderProfile:
     """Resolve the exact builtin profile for the configured model."""
     from src.llm_runtime import provider_profiles
 
+    setup = read_model_fabric_configuration().openrouter_setup
+    if setup is not None and setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+        profile = provider_profiles().get("openrouter.embedding")
+        if profile is None or not profile.enabled or profile.model != model or active_provider_exclusion_reason(profile) is not None or profile.transport_adapter != "openai_compatible_embeddings":
+            _raise_configuration("embedding_profile_not_compliant", batch_size=batch_size, model=model)
+        return profile
     profile = provider_profiles().get(EMBEDDING_WORKLOAD_PATH)
     if profile is None:
         _raise_configuration(
@@ -670,7 +692,12 @@ def _parse_vectors(
 
 
 def _remember_metadata(*, model: str, dimension: int, batch_size: int, request_id: str) -> None:
-    global _metadata, _LOAD_EVENT_EMITTED
+    global _metadata, _metadata_profile_hash, _LOAD_EVENT_EMITTED
+    setup = read_model_fabric_configuration().openrouter_setup
+    profile_hash = None
+    if setup is not None and setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+        _validate_route_policy(batch_size=batch_size, model=model)
+        profile_hash = _embedding_profile(model=model, batch_size=batch_size).contract_hash
     candidate = EmbeddingMetadata(
         schema_version=EMBEDDING_SCHEMA_VERSION,
         provider="openrouter",
@@ -678,7 +705,7 @@ def _remember_metadata(*, model: str, dimension: int, batch_size: int, request_i
         dimension=dimension,
     )
     with _metadata_lock:
-        if _metadata is not None and _metadata != candidate:
+        if _metadata is not None and _metadata != candidate and not (profile_hash is not None and _metadata.model != candidate.model and _metadata_profile_hash != profile_hash):
             _log_embedding_event(
                 "failed",
                 details=_safe_details(
@@ -695,6 +722,7 @@ def _remember_metadata(*, model: str, dimension: int, batch_size: int, request_i
                 request_id=request_id,
             )
         _metadata = candidate
+        _metadata_profile_hash = profile_hash
         if not _LOAD_EVENT_EMITTED:
             _log_embedding_event(
                 "loaded",
@@ -732,7 +760,8 @@ def _embed_texts(
             batch_size=len(texts),
             model=model,
         )
-    configured_base = str(settings.llm_api_base or "").strip().rstrip("/")
+    setup = read_model_fabric_configuration().openrouter_setup
+    configured_base = OPENROUTER_API_BASE if setup is not None and setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION else str(settings.llm_api_base or "").strip().rstrip("/")
     if configured_base != OPENROUTER_API_BASE:
         _raise_configuration(
             "openrouter_api_base_required",
@@ -906,12 +935,28 @@ def embed_batch(
 def embedding_metadata() -> EmbeddingMetadata | None:
     """Return the process-local vector-space identity, if one is loaded."""
     with _metadata_lock:
-        return _metadata
+        metadata, bound_hash = _metadata, _metadata_profile_hash
+    setup = read_model_fabric_configuration().openrouter_setup
+    if setup is not None and setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+        try:
+            model = _configured_model(batch_size=0)
+            _validate_route_policy(batch_size=0, model=model)
+            profile = _embedding_profile(model=model, batch_size=0)
+            if metadata is None or metadata.model != model or bound_hash != profile.contract_hash:
+                return None
+            context = SimpleNamespace(requirements=SimpleNamespace(capabilities=("embedding",)))
+            proofs = _load_embedding_proofs(profile=profile, candidate=candidate_from_profile(profile), context=context, batch_size=0)
+            if {proof.capability for proof in proofs if proof_is_fresh(proof)} != {"embedding", "health", "latency_ms"}:
+                return None
+        except EmbeddingError:
+            return None
+    return metadata
 
 
 def _reset_embedder_state() -> None:
     """Reset cached embedding metadata for tests and deterministic evals."""
-    global _metadata, _LOAD_EVENT_EMITTED
+    global _metadata, _metadata_profile_hash, _LOAD_EVENT_EMITTED
     with _metadata_lock:
         _metadata = None
+        _metadata_profile_hash = None
         _LOAD_EVENT_EMITTED = False

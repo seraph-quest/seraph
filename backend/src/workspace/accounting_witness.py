@@ -165,11 +165,22 @@ def _write_configuration_file(path, payload):
         temporary.unlink(missing_ok=True)
 
 
-def _publish_policy_locked(workspace, payload, *, target_path):
+class PolicyRevisionConflict(RuntimeError):
+    pass
+
+
+def _publish_policy_locked(workspace, payload, *, target_path, expected_revision=None):
     from src.workspace.production import write_lifecycle_receipt, _write_private_checkpoint
     _assert_credential_free_configuration(payload)
     receipt = read_lifecycle_receipt(workspace) or {}
     prior = receipt.get("provider_policy")
+    if expected_revision is not None:
+        if type(expected_revision) is not int or expected_revision < 1:
+            raise PolicyRevisionConflict("provider_policy_revision_changed")
+        current = json.loads(target_path.read_text()) if target_path.is_file() else None
+        empty_bootstrap = current is None and isinstance(prior, dict) and prior.get("revision") == 0 and expected_revision == 1
+        if not empty_bootstrap and (not isinstance(current, dict) or current.get("egress_revision", 1) != expected_revision or not policy_continuity(workspace, current)[0]):
+            raise PolicyRevisionConflict("provider_policy_revision_changed")
     revision = payload.get("egress_revision", 1)
     record = {"revision": revision, "configuration_digest": configuration_digest(payload),
         "state": "revoked" if payload.get("egress_revoked") else "active"}
@@ -185,9 +196,9 @@ def _publish_policy_locked(workspace, payload, *, target_path):
     return record
 
 
-def publish_policy_configuration(root, payload):
+def publish_policy_configuration(root, payload, *, expected_revision=None):
     with maintenance_accounting_lock(root) as workspace:
-        return _publish_policy_locked(workspace, payload, target_path=root / "model-fabric-settings.json")
+        return _publish_policy_locked(workspace, payload, target_path=root / "model-fabric-settings.json", expected_revision=expected_revision)
 
 
 def revoke_restored_policy(*, active, target):

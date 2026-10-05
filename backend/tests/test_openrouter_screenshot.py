@@ -78,13 +78,19 @@ def test_screenshot_model_identifier_requires_explicit_openrouter_qualification(
 
 
 @pytest.mark.asyncio
-async def test_openrouter_screenshot_uses_inline_bytes_and_no_local_endpoint(tmp_path, monkeypatch):
+@pytest.mark.parametrize("saved_controls", (False, True))
+async def test_openrouter_screenshot_uses_inline_bytes_and_no_local_endpoint(tmp_path, monkeypatch, saved_controls):
     from src.observer import screenshot_semantic_analysis as module
 
     image = tmp_path / "capture.png"
     image.write_bytes(b"png bytes")
     profile = _profile()
+    if saved_controls:
+        from dataclasses import replace
+        profile = replace(profile, options={**profile.options,
+            "_seraph_openrouter": {"output_limit": 512, "timeout_seconds": 3}})
     calls: list[dict[str, object]] = []
+    contexts = []
 
     class Response:
         status_code = 200
@@ -136,11 +142,10 @@ async def test_openrouter_screenshot_uses_inline_bytes_and_no_local_endpoint(tmp
     monkeypatch.setattr(module, "provider_profiles", lambda: {profile.id: profile})
     monkeypatch.setattr(module, "_run_governed_vlm_adapter", governed)
     monkeypatch.setattr(module.httpx, "AsyncClient", Client)
-    monkeypatch.setattr(
-        module,
-        "build_canonical_inference_context",
-        lambda *_args, **_kwargs: SimpleNamespace(deadline_at=10**12),
-    )
+    def capture_context(*_args, **kwargs):
+        contexts.append(kwargs)
+        return SimpleNamespace(deadline_at=10**12)
+    monkeypatch.setattr(module, "build_canonical_inference_context", capture_context)
     monkeypatch.setattr(module, "bind_final_inference_payload", lambda context, _body: context)
 
     result = await module.analyze_screenshot_image(image, {"created_at": "2026-09-08T00:00:00Z"})
@@ -150,6 +155,10 @@ async def test_openrouter_screenshot_uses_inline_bytes_and_no_local_endpoint(tmp
     body = calls[0]["json"]
     assert isinstance(body, dict)
     assert body["model"] == "anthropic/claude-sonnet-4"
+    assert body["max_tokens"] == (512 if saved_controls else 1400)
+    assert contexts[0]["output_tokens"] == body["max_tokens"]
+    if saved_controls:
+        assert contexts[0]["timeout_seconds"] <= 3
     content = body["messages"][0]["content"]
     assert content[1]["type"] == "image_url"
     assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")

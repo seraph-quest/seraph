@@ -202,7 +202,7 @@ def _effective_runtime_route_status(runtime: dict[str, str], vlm_status: dict[st
         else str(settings.openrouter_api_key or os.getenv("OPENROUTER_API_KEY", "") or "").strip()
     )
     allowed_upstreams = (
-        tuple(setup.allowed_upstreams)
+        (tuple(setup.routes["text"].allowed_upstreams) if setup.routes and setup.routes.get("text") else tuple(setup.allowed_upstreams))
         if setup is not None
         else tuple(
             item.strip()

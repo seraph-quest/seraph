@@ -33,6 +33,7 @@ from .remote_inference_admission import (
     RemoteInferenceAdmissionError,
     RemoteInferenceAdmissionRequest,
     remote_inference_admission_broker,
+    prepare_bound_remote_inference,
 )
 from .selector import preflight_candidate
 
@@ -134,6 +135,7 @@ async def run_capability_probe(
     )
 
     async def admitted_transport() -> CapabilityProbeObservation:
+        await prepare_bound_remote_inference(admission_request, profile_id=candidate.profile.id)
         return await broker.execute(
             admission_request,
             lambda: transport(candidate, trust_request, context.requirements),

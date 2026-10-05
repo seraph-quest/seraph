@@ -71,26 +71,62 @@ export interface ModelFabricRuntimeStatus {
   openrouter_setup?: OpenRouterSetupStatus | null;
 }
 
-export interface OpenRouterSetupStatus {
-  schema_version: string;
-  profile_id: string;
-  api_base: string;
-  provider_kind: string;
-  model_ids: string[];
+export type OpenRouterPurpose = "text" | "vision" | "embedding";
+
+// Values accepted by PUT exclude the response's readiness and proof metadata.
+export interface OpenRouterRouteValue {
+  model_id: string;
+  enabled: boolean;
   capabilities: string[];
+  allowed_upstreams: string[];
   temperature: number;
   max_output_tokens: number;
   timeout_seconds: number;
-  allowed_upstreams: string[];
+  zero_data_retention: boolean;
+  request_cost_bound_microusd: number;
+}
+
+export interface OpenRouterSlotStatus {
+  status: "configuration_required" | "blocked" | "ready";
+  error_code: string | null;
+  proof_expires_at: string | null;
+}
+
+export interface OpenRouterRouteStatus extends OpenRouterRouteValue, OpenRouterSlotStatus {}
+
+export interface OpenRouterSetupValue {
+  schema_version: "seraph.openrouter.setup.v2";
+  routes: Record<OpenRouterPurpose, OpenRouterRouteValue | null>;
+  api_key?: string;
+  egress_class: string;
+  cloud_egress_acknowledged: true;
+  vision_egress_acknowledged?: true;
+  embedding_egress_acknowledged?: true;
+  spend_ceiling_microusd: number;
+  max_queued: number;
+  max_inflight: 1;
+  max_outstanding_per_owner: number;
+  max_retries: number;
+  data_collection: "deny";
+  data_retention_policy: "deny";
+  allow_fallbacks: false;
+  require_parameters: true;
+}
+
+export interface OpenRouterSetupStatus {
+  schema_version: "seraph.openrouter.setup.v2";
+  profile_id: string;
+  api_base: string;
+  provider_kind: string;
+  routes: Record<OpenRouterPurpose, OpenRouterRouteStatus | null>;
+  slot_statuses: Record<OpenRouterPurpose, OpenRouterSlotStatus>;
   allow_fallbacks: boolean;
   require_parameters: boolean;
   data_collection: string;
   data_retention_policy: string;
-  zero_data_retention: boolean;
   egress_class: string;
   cloud_egress_acknowledged: boolean;
   spend_ceiling_microusd: number | null;
-  request_cost_bound_microusd?: number | null;
   max_queued: number;
   max_inflight: number;
   max_outstanding_per_owner: number;
@@ -249,29 +285,57 @@ function stringArray(value: unknown): string[] {
 
 function normalizeOpenRouterSetup(value: unknown): OpenRouterSetupStatus | null {
   const record = recordOf(value);
-  if (!record || typeof record.profile_id !== "string") return null;
+  // Legacy migration and purpose consent belong to the backend. Never infer a
+  // new purpose from cached v1 metadata or a partially returned route.
+  const rawRoutes = recordOf(record?.routes);
+  if (!record || record.schema_version !== "seraph.openrouter.setup.v2" || !rawRoutes) return null;
+  const rawStatuses = recordOf(record.slot_statuses);
+  const routes = {} as OpenRouterSetupStatus["routes"];
+  const slot_statuses = {} as OpenRouterSetupStatus["slot_statuses"];
+  for (const slot of ["text", "vision", "embedding"] as const) {
+    const route = recordOf(rawRoutes[slot]);
+    if (rawRoutes[slot] != null && (!route || typeof route.model_id !== "string"
+      || typeof route.enabled !== "boolean" || !Array.isArray(route.capabilities)
+      || !Array.isArray(route.allowed_upstreams)
+      || !["temperature", "max_output_tokens", "timeout_seconds", "request_cost_bound_microusd"].every(
+        (field) => typeof route[field] === "number" && Number.isFinite(route[field]),
+      ) || typeof route.zero_data_retention !== "boolean")) return null;
+    const rawState = recordOf(rawStatuses?.[slot]) ?? route;
+    const state: OpenRouterSlotStatus = {
+      status: rawState?.status === "ready" || rawState?.status === "configuration_required" ? rawState.status : "blocked",
+      error_code: typeof rawState?.error_code === "string" ? rawState.error_code : rawState ? null : "slot_metadata_unavailable",
+      proof_expires_at: typeof rawState?.proof_expires_at === "string" ? rawState.proof_expires_at : null,
+    };
+    slot_statuses[slot] = state;
+    routes[slot] = route ? {
+      model_id: route.model_id as string,
+      enabled: route.enabled as boolean,
+      capabilities: stringArray(route.capabilities),
+      allowed_upstreams: stringArray(route.allowed_upstreams),
+      temperature: route.temperature as number,
+      max_output_tokens: route.max_output_tokens as number,
+      timeout_seconds: route.timeout_seconds as number,
+      zero_data_retention: route.zero_data_retention as boolean,
+      request_cost_bound_microusd: route.request_cost_bound_microusd as number,
+      ...state,
+    } : null;
+  }
   return {
-    schema_version: typeof record.schema_version === "string" ? record.schema_version : "unknown",
-    profile_id: record.profile_id,
+    schema_version: "seraph.openrouter.setup.v2",
+    profile_id: typeof record.profile_id === "string" ? record.profile_id : "openrouter",
     api_base: typeof record.api_base === "string" ? record.api_base : "",
     provider_kind: typeof record.provider_kind === "string" ? record.provider_kind : "openrouter",
-    model_ids: stringArray(record.model_ids),
-    capabilities: stringArray(record.capabilities),
-    temperature: typeof record.temperature === "number" ? record.temperature : 0.7,
-    max_output_tokens: typeof record.max_output_tokens === "number" ? record.max_output_tokens : 4096,
-    timeout_seconds: typeof record.timeout_seconds === "number" ? record.timeout_seconds : 120,
-    allowed_upstreams: stringArray(record.allowed_upstreams),
+    routes,
+    slot_statuses,
     allow_fallbacks: record.allow_fallbacks === true,
     require_parameters: record.require_parameters !== false,
     data_collection: typeof record.data_collection === "string" ? record.data_collection : "unknown",
     data_retention_policy: typeof record.data_retention_policy === "string" ? record.data_retention_policy : "unknown",
-    zero_data_retention: record.zero_data_retention === true,
     egress_class: typeof record.egress_class === "string" ? record.egress_class : "unknown",
     cloud_egress_acknowledged: record.cloud_egress_acknowledged === true,
     spend_ceiling_microusd: typeof record.spend_ceiling_microusd === "number"
       ? record.spend_ceiling_microusd
       : null,
-    request_cost_bound_microusd: typeof record.request_cost_bound_microusd === "number" ? record.request_cost_bound_microusd : null,
     max_queued: typeof record.max_queued === "number" ? record.max_queued : 64,
     max_inflight: typeof record.max_inflight === "number" ? record.max_inflight : 1,
     max_outstanding_per_owner: typeof record.max_outstanding_per_owner === "number"
@@ -494,7 +558,7 @@ export function loadRetainedModelFabricSettings(): ModelFabricSettingsStatus | n
 export function retainModelFabricSettings(value: ModelFabricSettingsStatus): void {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(MODEL_FABRIC_STORAGE_KEY, JSON.stringify(value));
+    window.localStorage.setItem(MODEL_FABRIC_STORAGE_KEY, JSON.stringify(normalizeModelFabricSettings(value)));
   } catch {
     // Retention is best effort; the live settings endpoint remains authoritative.
   }

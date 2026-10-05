@@ -517,7 +517,9 @@ def test_canonical_caller_context_defaults_to_openrouter_and_disables_legacy_fal
     assert context.fallback_allowed is False
 
 
-def test_canonical_runtime_ignores_persisted_model_override():
+def test_canonical_runtime_ignores_persisted_model_override(monkeypatch):
+    # The invariant is ignoring the override, independent of an operator's env.
+    monkeypatch.setattr(settings, "default_model", "openrouter/anthropic/claude-sonnet-4")
     with patch.object(
         settings,
         "runtime_model_overrides",

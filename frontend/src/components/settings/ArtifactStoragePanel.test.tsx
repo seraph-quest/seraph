@@ -3,10 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ArtifactStoragePanel } from "./ArtifactStoragePanel";
 import { isGreenModelFabricCanary } from "../../lib/modelFabric";
+import { API_URL } from "../../config/constants";
 
-function mockResponse(data: unknown, ok = true) {
+function mockResponse(data: unknown, ok = true, status = ok ? 200 : 503) {
   return {
     ok,
+    status,
     json: async () => data,
   };
 }
@@ -317,9 +319,118 @@ describe("ArtifactStoragePanel", () => {
     expect(await screen.findByText(/local-text\/text · passed · proof abcdef123456/)).toHaveClass("text-green-400");
     const canaryCalls = fetchMock.mock.calls.filter(([input]) => String(input).includes("/canary"));
     expect(canaryCalls).toHaveLength(1);
+    expect(canaryCalls[0][0]).toBe(`${API_URL}/api/settings/model-fabric/canary`);
+    expect(canaryCalls[0][1]).toMatchObject({ method: "POST", credentials: "include" });
     expect(JSON.parse(String(canaryCalls[0][1]?.body))).toEqual({
       profile_id: "local-text", capability: "text", timeout_seconds: 120, proof_ttl_seconds: 3600,
     });
+  });
+
+  it.each([
+    "egress_revision_conflict",
+    { code: "egress_revision_conflict", message: "Review the current policy revision." },
+  ])("preserves a conflicting setup draft without retrying mutation URLs, then explicitly refreshes and saves (%j)", async (detail) => {
+    const artifactStorage = settingsFromScreenAnalysisFixture({
+      enabled: false, provider: "openrouter", model: "", preserve_captures: true,
+      archive_dir: "/tmp/seraph-fixture/artifacts", capture_mode: "on_switch", cadence_seconds: null,
+      daemon_connected: false, artifact_count: 0, last_artifact_at: null,
+    });
+    // Explicit synthetic route; this mounted journey has no provider transport.
+    const textRoute = {
+      model_id: "fixture/text", enabled: true, capabilities: ["text", "structured_output"],
+      allowed_upstreams: ["fixture-upstream"], temperature: 0.7, max_output_tokens: 4096,
+      timeout_seconds: 120, zero_data_retention: false, request_cost_bound_microusd: 500,
+      status: "configuration_required", error_code: "credential_missing", proof_expires_at: null,
+    };
+    const slotStatuses = {
+      text: { status: "configuration_required", error_code: "credential_missing", proof_expires_at: null },
+      vision: { status: "configuration_required", error_code: "route_missing", proof_expires_at: null },
+      embedding: { status: "configuration_required", error_code: "route_missing", proof_expires_at: null },
+    };
+    const setup = {
+      schema_version: "seraph.openrouter.setup.v2", profile_id: "openrouter",
+      api_base: "https://openrouter.ai/api/v1", provider_kind: "openrouter",
+      routes: { text: textRoute, vision: null, embedding: null }, slot_statuses: slotStatuses,
+      allow_fallbacks: false, require_parameters: true, data_collection: "deny", data_retention_policy: "deny",
+      egress_class: "cloud_allowed_full", cloud_egress_acknowledged: true,
+      spend_ceiling_microusd: 10_000, max_queued: 64, max_inflight: 1, max_outstanding_per_owner: 16, max_retries: 2,
+      credential_ref: "vault:openrouter_api_key", credential_fingerprint: null, credential_configured: false,
+      status: "configuration_required", error_code: "credential_missing", provider_calls: "manual_canary_only",
+    };
+    const settingsPayload = {
+      schema_version: "seraph.model-fabric.settings.v1", status: "configuration_required", error_code: null,
+      profiles: [], persisted_profile_ids: [], workload_policies: [],
+      defaults: { egress_class: "cloud_allowed_full", fallback_allowed: false },
+      canary_endpoint: "/api/settings/model-fabric/canary", egress_revision: 7, egress_revoked: false,
+      openrouter_setup: setup,
+    };
+    let currentSettings = settingsPayload;
+    let rejectSave = true;
+    const endpoint = `${API_URL}/api/settings/model-fabric`;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (init?.method === "PUT") {
+        if (url !== endpoint) return Promise.reject(new Error("Unexpected alternate mutation destination"));
+        return Promise.resolve(rejectSave ? mockResponse({ detail }, false, 409) : mockResponse(currentSettings));
+      }
+      if (url.includes("/api/settings/artifact-storage")) return Promise.resolve(mockResponse(artifactStorage));
+      if (url.endsWith("/api/settings/model-fabric")) {
+        // Keep the existing metadata GET fallback: same-origin failure can be
+        // recovered through the configured address, without extending writes.
+        if (url === "/api/settings/model-fabric" && endpoint !== url) return Promise.reject(new Error("metadata proxy unavailable"));
+        if (url === endpoint) return Promise.resolve(mockResponse(currentSettings));
+      }
+      if (url.includes("/api/runtime/status")) return Promise.resolve(mockResponse({ model_fabric: { status: "configuration_required" } }));
+      return Promise.reject(new Error(`unexpected ${url}`));
+    });
+
+    render(<ArtifactStoragePanel />);
+    await waitFor(() => expect(screen.getByLabelText("OpenRouter text model ID")).toHaveValue("fixture/text"));
+    const mutationCalls = () => fetchMock.mock.calls.filter(([, init]) => init?.method === "PUT");
+    const settingsReads = () => fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith("/api/settings/model-fabric") && init?.method !== "PUT");
+    if (endpoint !== "/api/settings/model-fabric") {
+      expect(settingsReads().map(([input]) => String(input))).toEqual(["/api/settings/model-fabric", endpoint]);
+    }
+    expect(mutationCalls()).toHaveLength(0);
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+    fireEvent.change(screen.getByLabelText("OpenRouter text model ID"), { target: { value: "fixture/retained-choice" } });
+    const readsBeforeSave = settingsReads().length;
+    fireEvent.click(screen.getByRole("button", { name: "Save OpenRouter setup" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Request failed: 409");
+    expect(alert).toHaveTextContent("egress_revision_conflict");
+    if (typeof detail !== "string") expect(alert).toHaveTextContent(detail.message);
+    expect(alert).not.toHaveTextContent("Failed to fetch");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Save OpenRouter setup" })).toBeEnabled());
+    expect(mutationCalls()).toHaveLength(1);
+    expect(mutationCalls()[0][0]).toBe(endpoint);
+    expect(mutationCalls()[0][1]).toMatchObject({ method: "PUT", credentials: "include" });
+    expect(JSON.parse(String(mutationCalls()[0][1].body)).expected_policy_revision).toBe(7);
+    expect(screen.getByLabelText("OpenRouter text model ID")).toHaveValue("fixture/retained-choice");
+    expect(settingsReads()).toHaveLength(readsBeforeSave);
+
+    currentSettings = { ...settingsPayload, egress_revision: 9 };
+    fireEvent.click(screen.getByRole("button", { name: "Refresh current OpenRouter settings" }));
+    expect(await screen.findByText("Current settings loaded; edits retained. Review routes and acknowledgments before saving.")).toBeInTheDocument();
+    expect(settingsReads()).toHaveLength(readsBeforeSave + 1);
+    expect(settingsReads()[settingsReads().length - 1][0]).toBe(endpoint);
+    expect(mutationCalls()).toHaveLength(1);
+    expect(screen.getByLabelText("OpenRouter text model ID")).toHaveValue("fixture/retained-choice");
+    expect(screen.getByLabelText("OpenRouter vision model ID")).toBeEnabled();
+
+    rejectSave = false;
+    currentSettings = { ...currentSettings, egress_revision: 11,
+      openrouter_setup: { ...setup, routes: { ...setup.routes, text: { ...textRoute, model_id: "fixture/retained-choice" } } } };
+    fireEvent.click(screen.getByRole("button", { name: "Save OpenRouter setup" }));
+    await waitFor(() => expect(mutationCalls()).toHaveLength(2));
+    const request = JSON.parse(String(mutationCalls()[1][1].body));
+    expect(mutationCalls()[1][0]).toBe(endpoint);
+    expect(request.expected_policy_revision).toBe(9);
+    expect(request.openrouter_setup.routes.text.model_id).toBe("fixture/retained-choice");
+    expect(request.openrouter_setup.routes.vision).toBeNull();
+    expect(request.openrouter_setup.routes.embedding).toBeNull();
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
   });
 
   it("keeps retained model-fabric controls visible but disables canaries while metadata is stale", async () => {

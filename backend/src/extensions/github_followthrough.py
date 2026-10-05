@@ -2341,6 +2341,8 @@ class GitHubFollowthroughService:
             "session_id": owner_session_id,
             "capability_id": CAPABILITY_ID,
             "permissions": ["github_issue_create_or_comment"],
+            "action": request.action,
+            "repository": connection.repository,
             "connection_id": connection.id,
             "connection_revision": int(connection.revision),
             "source_watch_id": watch.id,

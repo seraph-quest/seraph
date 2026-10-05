@@ -77,6 +77,83 @@ def _v2_setup_payload(**overrides):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("async_db", ["file"], indirect=True)
+@pytest.mark.parametrize("malformed", (["vision"], [], "vision", "", 1, 0, True, {"vision": True}, {"vision": "3"}, {"text": 3}))
+async def test_v2_malformed_persisted_purpose_consents_degrade_metadata_without_contact(client, model_fabric_workspace, keyless_openrouter, malformed):
+    import json
+    from dataclasses import replace
+    from src.api import model_fabric_settings as api
+    from src.model_fabric.configuration import _configuration_payload, read_model_fabric_configuration, validate_openrouter_setup
+    body = api.OpenRouterSetupInput.model_validate(_v2_setup_payload())
+    valid = api._openrouter_setup_from_input(body, existing=None)
+    with pytest.raises(ValueError, match="invalid OpenRouter purpose consent"):
+        validate_openrouter_setup(replace(valid, purpose_consents=malformed))
+    payload = _configuration_payload(api._setup_configuration(valid, profiles=(), policies=()))
+    payload["openrouter_setup"]["purpose_consents"] = malformed
+    path = model_fabric_workspace / "model-fabric-settings.json"
+    original = json.dumps(payload).encode()
+    path.write_bytes(original)
+    with patch("httpx.AsyncClient.post", side_effect=AssertionError("provider contact forbidden")) as contact:
+        persisted = read_model_fabric_configuration()
+        assert persisted.status == "degraded" and persisted.error_code == "configuration_unreadable"
+        status = await client.get("/api/settings/model-fabric")
+        assert status.status_code == 200, status.text
+        assert status.json()["configuration_status"] == "degraded"
+        assert status.json()["error_code"] == "configuration_unreadable"
+        assert status.json()["openrouter_setup"] is None
+        runtime = await client.get("/api/runtime/status")
+        assert runtime.status_code == 200, runtime.text
+        assert runtime.json()["model_fabric"]["configuration_status"] == "degraded"
+        assert runtime.json()["model_fabric"]["configuration_error"] == "configuration_unreadable"
+    contact.assert_not_called()
+    assert path.read_bytes() == original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+@pytest.mark.parametrize("field,malformed", (
+    ("schema_version", {}), ("schema_version", []),
+    ("temperature", {}), ("temperature", 10**1000), ("timeout_seconds", None),
+    ("max_output_tokens", []), ("max_queued", "8"), ("max_outstanding_per_owner", {}),
+    ("max_retries", 1.5), ("max_inflight", True), ("cloud_egress_acknowledged", []),
+    ("zero_data_retention", 1), ("credential_ref", []), ("credential_fingerprint", 7),
+    ("routes", []), ("routes.text", "fixture/text"),
+    ("routes.text.capabilities", "text"), ("routes.text.allowed_upstreams", 1),
+    ("routes.text.temperature", 10**1000),
+))
+async def test_v2_malformed_persisted_shared_and_route_shapes_are_unreadable(client, model_fabric_workspace, keyless_openrouter, field, malformed):
+    import json
+    from dataclasses import replace
+    from src.api import model_fabric_settings as api
+    from src.model_fabric.configuration import _configuration_payload, _openrouter_setup_from_payload, read_model_fabric_configuration, validate_openrouter_setup
+    valid = api._openrouter_setup_from_input(api.OpenRouterSetupInput.model_validate(_v2_setup_payload()), existing=None)
+    payload = _configuration_payload(api._setup_configuration(valid, profiles=(), policies=()))
+    cursor = payload["openrouter_setup"]
+    parts = field.split(".")
+    for part in parts[:-1]:
+        cursor = cursor[part]
+    cursor[parts[-1]] = malformed
+    if not field.startswith("routes."):
+        with pytest.raises(ValueError):
+            validate_openrouter_setup(replace(valid, **{field: malformed}))
+    with pytest.raises(ValueError):
+        _openrouter_setup_from_payload(payload["openrouter_setup"])
+    path = model_fabric_workspace / "model-fabric-settings.json"
+    original = json.dumps(payload).encode()
+    path.write_bytes(original)
+    with patch("httpx.AsyncClient.post", side_effect=AssertionError("provider contact forbidden")) as contact:
+        current = read_model_fabric_configuration()
+        assert current.status == "degraded" and current.error_code == "configuration_unreadable"
+        result = await client.get("/api/settings/model-fabric")
+        assert result.status_code == 200, result.text
+        assert result.json()["configuration_status"] == "degraded"
+        assert result.json()["error_code"] == "configuration_unreadable"
+        assert result.json()["openrouter_setup"] is None
+    contact.assert_not_called()
+    assert path.read_bytes() == original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
 async def test_v2_slots_save_readback_restart_and_legacy_write_rejection(client, model_fabric_workspace, keyless_openrouter):
     from src.model_fabric.configuration import read_model_fabric_configuration, effective_workload_policy
     from src.llm_runtime import resolve_runtime_profile

@@ -513,6 +513,8 @@ def _validate_openrouter_route(setup: OpenRouterSetup, slot: str, route: OpenRou
     for field in ("temperature", "timeout_seconds"):
         if type(getattr(route, field)) not in {float, int}:
             raise ValueError("OpenRouter route numbers must be finite")
+    if not 0 <= route.temperature <= 2 or not 1 <= route.timeout_seconds <= _MAX_OPENROUTER_TIMEOUT_SECONDS:
+        raise ValueError("OpenRouter route numbers must be within declared bounds")
     required = {"text": {"text"}, "vision": {"text", "vision"}, "embedding": {"embedding"}}[slot]
     if not required.issubset(route.capabilities) or slot != "embedding" and "embedding" in route.capabilities or slot == "text" and "vision" in route.capabilities:
         raise ValueError("OpenRouter route capabilities do not match its purpose")
@@ -571,15 +573,37 @@ def openrouter_profiles_for_setup(setup: OpenRouterSetup, *, existing: tuple[Pro
 
 def validate_openrouter_setup(setup: OpenRouterSetup) -> None:
     """Validate the complete user-facing OpenRouter setup contract."""
-    if setup.schema_version not in {OPENROUTER_SETUP_SCHEMA_VERSION, OPENROUTER_SETUP_V2_SCHEMA_VERSION}:
+    if not isinstance(setup.schema_version, str) or setup.schema_version not in {OPENROUTER_SETUP_SCHEMA_VERSION, OPENROUTER_SETUP_V2_SCHEMA_VERSION}:
         raise ValueError("unsupported OpenRouter setup schema")
     if setup.profile_id != "openrouter":
         raise ValueError("OpenRouter setup must use the canonical openrouter profile")
     v2 = setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION
     if v2:
+        # Persisted JSON has no Pydantic boundary. Reject malformed shared
+        # shapes before numeric conversion, hashing, or collection operations.
+        for field, lower, upper in (("temperature", 0, 2), ("timeout_seconds", 1, _MAX_OPENROUTER_TIMEOUT_SECONDS)):
+            value = getattr(setup, field)
+            if type(value) not in {int, float} or not lower <= value <= upper:
+                raise ValueError("OpenRouter setup numbers must be within declared bounds")
+        for field, lower, upper in (("max_output_tokens", 1, _MAX_OPENROUTER_OUTPUT_TOKENS),
+            ("max_queued", 1, _MAX_OPENROUTER_QUEUE), ("max_inflight", 1, 1),
+            ("max_outstanding_per_owner", 1, _MAX_OPENROUTER_OWNER_OUTSTANDING),
+            ("max_retries", 0, _MAX_OPENROUTER_RETRIES)):
+            value = getattr(setup, field)
+            if type(value) is not int or not lower <= value <= upper:
+                raise ValueError("OpenRouter setup integers must be within declared bounds")
+        if any(type(getattr(setup, field)) is not bool for field in
+            ("allow_fallbacks", "require_parameters", "zero_data_retention", "cloud_egress_acknowledged")):
+            raise ValueError("OpenRouter setup booleans must be literal")
+        if not isinstance(setup.credential_ref, str) or setup.credential_fingerprint is not None and not isinstance(setup.credential_fingerprint, str):
+            raise ValueError("OpenRouter setup credential metadata must be strings")
         if not isinstance(setup.routes, dict) or set(setup.routes) - set(OPENROUTER_ROUTE_SLOTS):
             raise ValueError("unsupported OpenRouter route slot")
-        if setup.purpose_consents is not None and (set(setup.purpose_consents) - {"vision", "embedding"} or any(type(value) is not int or value < 1 for value in setup.purpose_consents.values())):
+        if setup.purpose_consents is not None and (
+            not isinstance(setup.purpose_consents, dict)
+            or set(setup.purpose_consents) - {"vision", "embedding"}
+            or any(type(value) is not int or value < 1 for value in setup.purpose_consents.values())
+        ):
             raise ValueError("invalid OpenRouter purpose consent")
         for slot, route in setup.routes.items():
             if route is not None:
@@ -647,6 +671,8 @@ def _openrouter_setup_from_payload(payload: object) -> OpenRouterSetup:
         raise ValueError("OpenRouter setup contains unsupported fields")
     values = dict(payload)
     if values.get("schema_version") == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+        if "credential_ref" in values and not isinstance(values["credential_ref"], str):
+            raise ValueError("OpenRouter setup credential reference must be a string")
         raw_routes = values.get("routes")
         if not isinstance(raw_routes, dict):
             raise ValueError("OpenRouter routes must be an object")

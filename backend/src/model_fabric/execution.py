@@ -27,6 +27,7 @@ from .remote_inference_admission import (
     stable_remote_inference_operation_id,
 )
 from .selector import select_route
+from .gpu_admission import GpuPriority
 
 
 _SyncResult = TypeVar("_SyncResult")
@@ -335,6 +336,7 @@ async def run_preflighted_adapter(
     decision: RouteDecision,
     adapter: Callable[[ModelRouteCandidate, bool], Awaitable[object]],
     hooks: RouteReceiptHooks,
+    admission_priority: GpuPriority | None = None,
 ) -> object:
     """Run a preflighted non-streaming adapter (for example VLM analyze-file)."""
     if not decision.allowed or decision.selected is None:
@@ -352,6 +354,7 @@ async def run_preflighted_adapter(
         raise NoCompliantModelRouteError()
     admission_request = GpuAdmissionRequest.from_inference_context(
         context,
+        priority=admission_priority,
         operation_id=stable_remote_inference_operation_id(
             context,
             profile_id=decision.selected.profile.id,

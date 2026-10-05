@@ -944,6 +944,8 @@ class GuardianDecisionPacket(SQLModel, table=True):
     strategy_delta_id: Optional[str] = Field(default=None, index=True)
     observed_checkpoint_json: str = Field(default="{}")
     observed_checkpoint_sha256: str = Field(default="", index=True)
+    opportunity_snapshot_artifact_id: Optional[str] = Field(default=None)
+    opportunity_snapshot_sha256: Optional[str] = Field(default=None)
     redaction_manifest_json: str = Field(default="{}")
     outcome_json: str = Field(default="{}")
     failure_code: Optional[str] = Field(default=None, index=True)
@@ -2385,6 +2387,8 @@ class Goal(SQLModel, table=True):
     owner_principal_id: Optional[str] = Field(default=None, index=True)
     owner_session_id: Optional[str] = Field(default=None, index=True)
     admission_budget_json: Optional[str] = Field(default=None)
+    guardian_policy_json: Optional[str] = Field(default=None)
+    guardian_policy_revision: int = Field(default=0)
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
 
@@ -2490,6 +2494,46 @@ class GuardianIntervention(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_now, index=True)
     updated_at: datetime = Field(default_factory=_now, index=True)
     feedback_at: Optional[datetime] = Field(default=None, index=True)
+    owner_principal_id: Optional[str] = Field(default=None)
+    original_root_id: Optional[str] = Field(default=None)
+    goal_id: Optional[str] = Field(default=None)
+    goal_revision: Optional[int] = Field(default=None)
+    opportunity_id: Optional[str] = Field(default=None)
+    delivery_status: Optional[str] = Field(default=None)
+
+
+class GuardianOpportunity(SQLModel, table=True):
+    """Bounded source-cited judgment; the native job owns execution."""
+
+    __tablename__ = "guardian_opportunities"
+    __table_args__ = (
+        Index("ux_guardian_opportunity_owner_dedupe", "owner_principal_id", "dedupe_key", unique=True),
+        Index("ix_guardian_opportunity_owner_goal_created", "owner_principal_id", "goal_id", "created_at", "id"),
+        Index("ix_guardian_opportunity_status_created", "status", "created_at", "id"),
+    )
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_principal_id: str
+    original_root_id: str
+    goal_id: str
+    goal_revision: int
+    policy_revision: int
+    watch_id: str
+    watch_revision: int
+    source_packet_id: str
+    source_digest: str
+    source_token_json: str
+    dedupe_key: str
+    status: str = "queued"
+    revision: int = 1
+    created_at: datetime = Field(default_factory=_now)
+    expires_at: datetime
+    assessment_deadline_at: datetime
+    job_id: Optional[str] = None
+    proposal_id: Optional[str] = None
+    intervention_id: Optional[str] = None
+    result_artifact_id: Optional[str] = None
+    reason_code: Optional[str] = None
+    assessment_json: Optional[str] = None
 
 
 # ─── Native notification outbox ────────────────────────

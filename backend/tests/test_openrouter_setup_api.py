@@ -18,6 +18,9 @@ from src.vault.repository import vault_repository
 @pytest.fixture
 def model_fabric_workspace(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    monkeypatch.setenv("SERAPH_WORKSPACE_LIFECYCLE_PATH", str(tmp_path.parent / f"{tmp_path.name}-lifecycle"))
+    from src.workspace.production import ProductionWorkspace, prepare_lifecycle_directory
+    prepare_lifecycle_directory(ProductionWorkspace(host_root=tmp_path))
     monkeypatch.setattr(settings, "openrouter_provider_only", True)
     monkeypatch.setattr(settings, "openrouter_allowed_upstreams", "anthropic")
     monkeypatch.setattr(settings, "openrouter_allow_fallbacks", False)

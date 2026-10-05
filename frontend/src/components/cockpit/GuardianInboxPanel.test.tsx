@@ -1,10 +1,21 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { StrictMode } from "react";
+import { StrictMode, useState } from "react";
 import { createRef } from "react";
 
 import { GuardianInboxPanel, type GuardianInboxPanelHandle } from "./GuardianInboxPanel";
+import type { GuardianInboxItem } from "../../types";
+
+function ControlledInspectorInbox() {
+  const [selected, setSelected] = useState<GuardianInboxItem | null>(null);
+  return <>
+    <GuardianInboxPanel pollIntervalMs={0} selectedItemId={selected?.id ?? null}
+      onSelectItem={setSelected} onRefreshSelectedItem={(id, next) => setSelected((current) => current?.id === id ? next : current)} />
+    <output data-testid="controlled-selection">{selected?.title ?? "closed"}</output>
+    <button onClick={() => setSelected(null)}>Close test inspector</button>
+  </>;
+}
 
 function response(payload: unknown, ok = true, status = ok ? 200 : 409) {
   return { ok, status, json: async () => payload };
@@ -97,6 +108,35 @@ describe("GuardianInboxPanel", () => {
     expect(screen.queryByRole("button", { name: "Cancel assessment" })).not.toBeInTheDocument();
     expect(screen.queryByText(/server state is not recognized/)).not.toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["closed", "another row"])("does not overwrite %s selection with an in-flight detail response", async (selection) => {
+    const first = opportunity();
+    const second = opportunity({ id: "opportunity-2", opportunity_id: "opportunity-2", source_id: "opportunity-2", title: "Another opportunity" });
+    let resolveDetail: (value: ReturnType<typeof response>) => void = () => {};
+    fetchMock.mockResolvedValueOnce(response({ items: [first, second] }));
+    fetchMock.mockImplementationOnce(() => new Promise<ReturnType<typeof response>>((resolve) => { resolveDetail = resolve; }));
+    fetchMock.mockResolvedValueOnce(response(second));
+    render(<ControlledInspectorInbox />);
+    const firstRow = await screen.findByTestId(`guardian-inbox-row-${first.id}`);
+    fireEvent.click(within(firstRow).getByRole("button", { name: "View evidence and task" }));
+    expect(screen.getByTestId("controlled-selection")).toHaveTextContent(first.title);
+    if (selection === "closed") fireEvent.click(screen.getByRole("button", { name: "Close test inspector" }));
+    else fireEvent.click(within(screen.getByTestId(`guardian-inbox-row-${second.id}`)).getByRole("button", { name: "View evidence and task" }));
+    await act(async () => resolveDetail(response({ ...first, title: "Old detail must not reselect" })));
+    expect(screen.getByTestId("controlled-selection")).toHaveTextContent(selection === "closed" ? "closed" : second.title);
+  });
+
+  it("clears the controlled selected inspector when a successful replacement list removes its ID", async () => {
+    const row = opportunity();
+    fetchMock.mockResolvedValueOnce(response({ items: [row] }));
+    fetchMock.mockResolvedValueOnce(response(row));
+    fetchMock.mockResolvedValueOnce(response({ items: [] }));
+    render(<ControlledInspectorInbox />);
+    fireEvent.click(await screen.findByRole("button", { name: "View evidence and task" }));
+    expect(screen.getByTestId("controlled-selection")).toHaveTextContent(row.title);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(screen.getByTestId("controlled-selection")).toHaveTextContent("closed"));
   });
 
   it("requires server cancellation availability and waits for quiescence instead of claiming cancelled", async () => {

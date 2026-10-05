@@ -29,6 +29,8 @@ export interface GuardianInboxPanelProps {
   onOpenGoals?: () => void;
   onOpenWork?: () => void;
   onSelectItem?: (item: GuardianInboxItem) => void;
+  selectedItemId?: string | null;
+  onRefreshSelectedItem?: (itemId: string, item: GuardianInboxItem | null) => void;
   onInspectArtifact?: (reference: GuardianInboxEvidenceRef, preview?: GuardianInboxEvidencePreview) => void;
 }
 
@@ -107,6 +109,16 @@ function detailMatchesListItem(listItem: GuardianInboxItem, detail: GuardianInbo
     || listItem.opportunity_id !== detail.opportunity_id
     || listItem.opportunity_revision !== detail.opportunity_revision
     || listItem.opportunity_status !== detail.opportunity_status
+    || listItem.state !== detail.state
+    || listItem.degraded !== detail.degraded
+    || listItem.evidence_status !== detail.evidence_status
+    || listItem.source_status !== detail.source_status
+    || listItem.source_freshness !== detail.source_freshness
+    || listItem.verification_status !== detail.verification_status
+    || listItem.reason_code !== detail.reason_code
+    || listItem.policy_reason !== detail.policy_reason
+    || listItem.recovery_action !== detail.recovery_action
+    || JSON.stringify(listItem.allowed_actions) !== JSON.stringify(detail.allowed_actions)
   ) {
     return false;
   }
@@ -349,6 +361,8 @@ export const GuardianInboxPanel = forwardRef<GuardianInboxPanelHandle, GuardianI
   onOpenGoals,
   onOpenWork,
   onSelectItem,
+  selectedItemId,
+  onRefreshSelectedItem,
   onInspectArtifact,
 }: GuardianInboxPanelProps, ref) {
   const [items, setItems] = useState<GuardianInboxItem[]>([]);
@@ -382,6 +396,8 @@ export const GuardianInboxPanel = forwardRef<GuardianInboxPanelHandle, GuardianI
   const detailConfirmedRef = useRef(new Set<string>());
   const expandedRef = useRef<Record<string, boolean>>({});
   const itemsRef = useRef<GuardianInboxItem[]>([]);
+  const selectionRef = useRef({ selectedItemId, onRefreshSelectedItem });
+  selectionRef.current = { selectedItemId, onRefreshSelectedItem };
   const mountedRef = useRef(true);
   const listControllerRef = useRef<AbortController | null>(null);
   const listGenerationRef = useRef(0);
@@ -445,7 +461,9 @@ export const GuardianInboxPanel = forwardRef<GuardianInboxPanelHandle, GuardianI
         itemsRef.current = updated;
         return updated;
       });
-      onSelectItem?.(mergedDetail);
+      if (selectionRef.current.onRefreshSelectedItem) {
+        selectionRef.current.onRefreshSelectedItem(item.id, mergedDetail);
+      } else onSelectItem?.(mergedDetail);
     } catch (err) {
       if (
         !mountedRef.current
@@ -491,13 +509,15 @@ export const GuardianInboxPanel = forwardRef<GuardianInboxPanelHandle, GuardianI
         const cached = detailCacheRef.current.get(item.id);
         if (!cached) {
           detailConfirmedRef.current.delete(item.id);
-          if (expandedRef.current[item.id]) reloadDetails.push(item);
+          if (expandedRef.current[item.id] && item.evidence_status !== "unavailable") reloadDetails.push(item);
           return item;
         }
         if (!detailMatchesListItem(item, cached)) {
+          detailControllersRef.current.get(item.id)?.abort();
+          detailControllersRef.current.delete(item.id);
           detailCacheRef.current.delete(item.id);
           detailConfirmedRef.current.delete(item.id);
-          if (expandedRef.current[item.id]) reloadDetails.push(item);
+          if (expandedRef.current[item.id] && item.evidence_status !== "unavailable") reloadDetails.push(item);
           return item;
         }
         return mergeCachedDetail(item, cached);
@@ -517,6 +537,10 @@ export const GuardianInboxPanel = forwardRef<GuardianInboxPanelHandle, GuardianI
         });
       }
       setItems(next);
+      const selectedId = selectionRef.current.selectedItemId;
+      if (selectedId) selectionRef.current.onRefreshSelectedItem?.(
+        selectedId, next.find((item) => item.id === selectedId) ?? null,
+      );
       setListConfirmed(true);
       reloadDetails.forEach((item) => void loadDetail(item));
       setNextCursor(page.next_cursor ?? null);

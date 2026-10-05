@@ -7910,6 +7910,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const setSelectedGuardianCandidate = useCallback((item: GuardianInboxItem | null) => {
     setGuardianSelection(item ? { ownerKey: attentionOwnerKey, item } : null);
   }, [attentionOwnerKey]);
+  const refreshSelectedGuardianCandidate = useCallback((itemId: string, item: GuardianInboxItem | null) => {
+    setGuardianSelection((current) => current?.ownerKey === attentionOwnerKey && current.item.id === itemId
+      ? item ? { ownerKey: attentionOwnerKey, item } : null
+      : current);
+  }, [attentionOwnerKey]);
   const [selectedProcedureSourceTask, setSelectedProcedureSourceTask] = useState<WorkBoardTask | null>(null);
   const [daemonPresence, setDaemonPresence] = useState<DaemonPresenceState | null>(null);
   const [desktopNotifications, setDesktopNotifications] = useState<ObserverContinuitySnapshot["notifications"]>([]);
@@ -16493,6 +16498,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               focusItemId={attentionNavigation.inboxFocusId}
               autoFocusAcceptedTask
               onSelectItem={setSelectedGuardianCandidate}
+              selectedItemId={selectedGuardianCandidate?.id ?? null}
+              onRefreshSelectedItem={refreshSelectedGuardianCandidate}
               onOpenTask={(taskId, item) => {
                 attentionNavigation.fromInbox(taskId, item);
                 setFocusTaskId(taskId);
@@ -17065,9 +17072,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               />
               {activeSection !== "inbox" ? (
                 <GuardianInboxPanel
+                  key={attentionOwnerKey ?? "unconfirmed"}
                   active={advancedWorkspaceOpen}
                   pageSize={20}
                   onSelectItem={setSelectedGuardianCandidate}
+                  selectedItemId={selectedGuardianCandidate?.id ?? null}
+                  onRefreshSelectedItem={refreshSelectedGuardianCandidate}
                   onOpenTask={(taskId) => {
                     setFocusTaskId(taskId);
                     selectCockpitSection("work");

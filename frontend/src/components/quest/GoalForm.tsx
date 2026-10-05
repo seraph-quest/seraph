@@ -564,7 +564,7 @@ export function GuardianPolicyForm({ goal }: { goal: GoalInfo }) {
   const [assessmentCap, setAssessmentCap] = useState(goal.guardian_policy?.max_assessments_per_utc_day ?? 1);
   const [planCap, setPlanCap] = useState(goal.guardian_policy?.max_plan_proposals_per_utc_day ?? 0);
   const [notificationCap, setNotificationCap] = useState(goal.guardian_policy?.max_notification_per_utc_day ?? 0);
-  const [autoStage, setAutoStage] = useState(false);
+  const [autoStage, setAutoStage] = useState(goal.guardian_policy?.auto_stage_plan ?? false);
   const [ackStage, setAckStage] = useState(false);
   const [ackNotifications, setAckNotifications] = useState(false);
   const saveRequest = useRef<{ signature: string; key: string; policy: GuardianGoalPolicy } | null>(null);
@@ -581,7 +581,21 @@ export function GuardianPolicyForm({ goal }: { goal: GoalInfo }) {
     return () => { mounted.current = false; controller.abort(); };
   }, [goal.id]);
 
-  useEffect(() => { setCurrentGoal(goal); }, [goal]);
+  useEffect(() => {
+    setCurrentGoal((previous) => {
+      const sameScope = previous.id === goal.id && previous.owner_session_id === goal.owner_session_id
+        && previous.ownership_access === goal.ownership_access;
+      // A parent tree refresh can lag behind an explicit save/metadata receipt.
+      // Scope changes must still replace metadata, including recovered reads.
+      if (sameScope && ((goal.revision ?? 0) < (previous.revision ?? 0)
+        || (goal.revision === previous.revision
+          && (goal.guardian_policy_revision ?? 0) < (previous.guardian_policy_revision ?? 0)))) return previous;
+      return goal;
+    });
+    if (goal.owner_session_id !== currentGoal.owner_session_id || goal.ownership_access !== currentGoal.ownership_access) {
+      setAckStage(false); setAckNotifications(false); saveRequest.current = null;
+    }
+  }, [goal]);
   const eligible = watches.filter((watch) => watch.goal_id === currentGoal.id && watch.goal_revision === currentGoal.revision
     && watch.state === "active" && watch.sources.length > 0 && watch.sources.every((source) => source.kind === "public_https_text"));
   const staleSelection = selected.some((id) => !eligible.some((watch) => watch.id === id));
@@ -617,7 +631,7 @@ export function GuardianPolicyForm({ goal }: { goal: GoalInfo }) {
   };
 
   const save = async () => {
-    if (requiresRefresh || busy) return;
+    if (requiresRefresh || busy || currentGoal.ownership_access === "recovered_read_only") return;
     setError(""); setNotice("");
     const budget = currentGoal.admission_budget;
     const grantId = budget?.grant_id ?? currentGoal.guardian_policy?.grant_id;
@@ -679,6 +693,8 @@ export function GuardianPolicyForm({ goal }: { goal: GoalInfo }) {
     <p className="text-[10px] text-slate-400">Finite, public-watch model judgments. Inbox only by default; no execution or learning follows a score. Policy revision {currentGoal.guardian_policy_revision ?? 0}.</p>
     {policyReviewRequired ? <div role="status">Goal review required. Review/rebind watches, then explicitly save a current policy.</div> : null}
     {currentGoal.guardian_policy ? <div>Confirmed {currentGoal.guardian_policy.confirmed_at} · review due {currentGoal.guardian_policy.review_due_at}</div> : <div>Assessments disabled · no policy confirmed</div>}
+    <div>Current confirmed policy: {currentGoal.guardian_assessment_state ?? "disabled"} · advisory auto-stage {currentGoal.guardian_policy?.auto_stage_plan ? "enabled" : "disabled"}.</div>
+    <p className="text-[10px] text-slate-400">Controls below are your unsaved draft. Metadata refresh retains this draft; only Save assessment policy confirms changes.</p>
     {metadataError ? <div role="status">{metadataError}</div> : null}
     <label className="block"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} /> Enable bounded public opportunity assessments</label>
     <fieldset><legend>Select 1–3 current public source watches</legend>
@@ -699,7 +715,7 @@ export function GuardianPolicyForm({ goal }: { goal: GoalInfo }) {
     <label className="block"><input type="checkbox" checked={ackNotifications} onChange={(event) => setAckNotifications(event.target.checked)} /> I separately acknowledge optional notifications and quiet-hour limits</label>
     <div>Minimum assessment gap: 30 minutes. Root and Goal expiry remain authoritative.</div>
     {error ? <div role="alert">{error}</div> : null}{notice ? <div role="status">{notice}</div> : null}
-    <button type="button" onClick={() => void save()} disabled={busy || requiresRefresh}>Save assessment policy</button>
+    <button type="button" onClick={() => void save()} disabled={busy || requiresRefresh || currentGoal.ownership_access === "recovered_read_only"}>Save assessment policy</button>
     <button type="button" onClick={() => void refreshPolicy()} disabled={busy}>Refresh policy metadata</button>
   </section>;
 }

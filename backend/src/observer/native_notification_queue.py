@@ -1314,6 +1314,19 @@ class NativeNotificationQueue:
                     select(NativeNotificationOutbox)
                     .where(NativeNotificationOutbox.status.in_(ACTIVE_STATUSES))
                 )
+                # Opportunity intents carry private Goal/root lineage. They
+                # require both exact bindings even for otherwise ambient reads.
+                legacy = or_(
+                    NativeNotificationOutbox.intervention_type.is_(None),
+                    NativeNotificationOutbox.intervention_type != "opportunity",
+                )
+                if owner_principal_id and operator_session_id:
+                    stmt = stmt.where(or_(legacy, and_(
+                        NativeNotificationOutbox.owner_principal_id == owner_principal_id,
+                        NativeNotificationOutbox.operator_session_id == operator_session_id,
+                    )))
+                else:
+                    stmt = stmt.where(legacy)
                 if owner_principal_id is not None:
                     stmt = stmt.where(
                         _owner_scope_predicate(

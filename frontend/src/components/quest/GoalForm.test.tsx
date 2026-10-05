@@ -124,6 +124,16 @@ function publicWatch(overrides = {}) {
   return { id: watchId, goal_id: "goal-1", goal_revision: 4, plan_revision: 2, state: "active",
     sources: [{ source_key: "release-notes", kind: "public_https_text", label: "Release notes" }], ...overrides };
 }
+function savedPolicyGoal(): GoalInfo {
+  const goal = policyGoal();
+  return { ...goal, guardian_policy_revision: 2, guardian_assessment_state: "enabled", guardian_policy: {
+    schema_version: "seraph.guardian.policy.v1", assessment_enabled: true, auto_stage_plan: true,
+    confirmed_at: new Date().toISOString(), review_due_at: goal.admission_budget!.period_expires_at!,
+    grant_id: "grant-1", original_root_id: "root-1", goal_revision: 4, source_watch_ids: [watchId],
+    max_assessments_per_utc_day: 2, max_plan_proposals_per_utc_day: 1, max_notification_per_utc_day: 0,
+    minimum_gap_seconds: 1800,
+  } };
+}
 function policyResponse(payload: unknown, status = 200) {
   return { ok: status >= 200 && status < 300, status, json: async () => payload };
 }
@@ -132,6 +142,64 @@ describe("GuardianPolicyForm", () => {
   const fetchMock = vi.fn();
   beforeEach(() => { fetchMock.mockReset(); vi.stubGlobal("fetch", fetchMock); });
   afterEach(() => { vi.unstubAllGlobals(); });
+
+  it("reopens saved canonical policy controls with separate acknowledgments still unchecked", async () => {
+    const goal = savedPolicyGoal();
+    fetchMock.mockResolvedValue(policyResponse([publicWatch()]));
+    const first = render(<GuardianPolicyForm goal={goal} />);
+    await screen.findByLabelText(`Assessment watch ${watchId}`);
+    first.unmount();
+    render(<GuardianPolicyForm goal={{ ...goal }} />);
+    await screen.findByLabelText(`Assessment watch ${watchId}`);
+    expect(screen.getByText(/Policy revision 2/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Enable bounded public opportunity assessments")).toBeChecked();
+    expect(screen.getByLabelText(`Assessment watch ${watchId}`)).toBeChecked();
+    expect(screen.getByLabelText("Enable advisory auto-stage plans")).toBeChecked();
+    expect(screen.getByLabelText("Advisory proposals per UTC day")).toHaveValue(1);
+    expect(screen.getByLabelText("I separately acknowledge advisory staging never accepts or executes a plan")).not.toBeChecked();
+    expect(screen.getByLabelText("I separately acknowledge optional notifications and quiet-hour limits")).not.toBeChecked();
+    expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(true);
+  });
+
+  it("retains a dirty draft on explicit refresh and keeps the current header through older tree props", async () => {
+    const goal = policyGoal();
+    fetchMock.mockResolvedValueOnce(policyResponse([publicWatch()]));
+    const view = render(<GuardianPolicyForm goal={goal} />);
+    await screen.findByLabelText(`Assessment watch ${watchId}`);
+    fireEvent.click(screen.getByLabelText("Enable bounded public opportunity assessments"));
+    fireEvent.change(screen.getByLabelText("Assessments per UTC day"), { target: { value: "4" } });
+    const current = savedPolicyGoal();
+    fetchMock.mockResolvedValueOnce(policyResponse([current]));
+    fetchMock.mockResolvedValueOnce(policyResponse([publicWatch()]));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh policy metadata" }));
+    await screen.findByText(/Current revisions refreshed/);
+    view.rerender(<GuardianPolicyForm goal={{ ...goal }} />);
+    expect(screen.getByText(/Policy revision 2/)).toBeInTheDocument();
+    expect(screen.getByText(/Current confirmed policy: enabled/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Assessments per UTC day")).toHaveValue(4);
+    expect(screen.getByLabelText(`Assessment watch ${watchId}`)).not.toBeChecked();
+    expect(screen.getByLabelText("Enable advisory auto-stage plans")).not.toBeChecked();
+    expect(screen.getByLabelText("I separately acknowledge advisory staging never accepts or executes a plan")).not.toBeChecked();
+    expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(true);
+    fetchMock.mockImplementationOnce(async (_url, init) => {
+      const body = JSON.parse(init.body);
+      return policyResponse({ goal_revision: 4, guardian_policy_revision: 3, guardian_policy: body.policy, assessment_state: "enabled" });
+    });
+    fireEvent.click(screen.getByLabelText(`Assessment watch ${watchId}`));
+    fireEvent.click(screen.getByRole("button", { name: "Save assessment policy" }));
+    await screen.findByText(/Assessment policy saved/);
+    const saves = fetchMock.mock.calls.filter(([, init]) => init?.method === "PUT");
+    expect(saves).toHaveLength(1);
+    expect(JSON.parse(saves[0][1].body)).toMatchObject({ expected_goal_revision: 4, expected_policy_revision: 2,
+      acknowledge_auto_stage_plan: false, acknowledge_notifications: false,
+      policy: { max_assessments_per_utc_day: 4, auto_stage_plan: false } });
+    view.rerender(<GuardianPolicyForm goal={{ ...goal }} />);
+    expect(screen.getByText(/Policy revision 3/)).toBeInTheDocument();
+    view.rerender(<GuardianPolicyForm goal={{ ...goal, ownership_access: "recovered_read_only", proactive_enabled: false,
+      admission_budget: null, guardian_assessment_state: "goal_review_required" }} />);
+    expect(screen.getByText(/Goal review required/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save assessment policy" })).toBeDisabled();
+  });
 
   it("keeps legacy NULL policies off and saves deliberate policy-only consent with exact CAS, UUID and default limits", async () => {
     const goal = policyGoal();

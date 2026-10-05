@@ -681,6 +681,44 @@ describe("CockpitView", () => {
     expect(screen.queryByText("Operator terminal", { selector: ".cockpit-window-title" })).not.toBeInTheDocument();
   });
 
+  it("refreshes the selected Guardian inspector when current authority changes without captured revision changes", async () => {
+    mockCockpitBaselineFetch(fetchMock, {});
+    const baselineFetch = fetchMock.getMockImplementation();
+    let stale = false;
+    const candidate = { id: "selected-opportunity", revision: 3, state: "proposed", source_kind: "guardian_opportunity",
+      source_id: "selected-opportunity", opportunity_id: "selected-opportunity", opportunity_revision: 3,
+      opportunity_status: "proposed", title: "Selected public opportunity", summary: "Verified public change",
+      why_now: "Current source changed", goal_id: "goal-1", goal_revision: 4, watch_id: "watch-1", plan_revision: 2,
+      expires_at: "2030-01-01T00:00:00Z", evidence_status: "verified", source_status: "succeeded",
+      evidence_refs: [{ artifact_id: "selected-evidence", status: "verified" }], allowed_actions: [],
+      assessment: { schema_version: "seraph.opportunity.assessment.v1", relevance: 3, confidence: "medium",
+        summary: "Verified public change", reason: "A cited change", suggested_blueprint: "public-browser-check",
+        abstain_reason: null, citations: [{ source_id: "source-one", start_line: 1, end_line: 1, span_sha256: "a".repeat(64) }] } };
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/guardian/inbox")) {
+        const row = stale ? { ...candidate, evidence_status: "unavailable", reason_code: "goal_review_required",
+          policy_reason: "goal_review_required", evidence_refs: [] } : candidate;
+        return Promise.resolve(mockResponse(url.includes("/selected-opportunity")
+          ? { ...row, evidence_previews: stale ? [] : [{ artifact_id: "selected-evidence", source_id: "source-one",
+            text: "Exact public excerpt", line_count: 1 }] } : { items: [row] }));
+      }
+      return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
+    });
+    useCockpitLayoutStore.setState({ activeSection: "inbox" });
+    render(<CockpitView onSend={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "View evidence and task" }));
+    const inspector = screen.getByTestId("guardian-candidate-inspector");
+    await waitFor(() => expect(within(inspector).getByText(/selected-evidence/)).toBeInTheDocument());
+    stale = true;
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(within(inspector).getByText("unavailable", { exact: true })).toBeInTheDocument());
+    expect(within(inspector).queryByText(/selected-evidence/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Exact public excerpt")).not.toBeInTheDocument();
+    expect(within(inspector).getByText(/Policy boundary: goal_review_required/)).toBeInTheDocument();
+    expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(true);
+  });
+
   it("shows the exact local host approval label in the pending approvals pane", async () => {
     mockCockpitBaselineFetch(fetchMock, {});
     const baselineFetch = fetchMock.getMockImplementation();

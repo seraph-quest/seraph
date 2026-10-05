@@ -64,7 +64,7 @@ class OpportunityHttpBoundary(httpx.AsyncBaseTransport):
 
 
 @pytest.mark.parametrize("scenario", ["completed", "silent", "citation_tampered", "invented_reference",
-    "pii_output", "secret_output", "missing_snapshot", "cancel_contacted", "coalesce_uncontacted", "outstanding_one", "cancel_uncontacted"])
+    "pii_output", "secret_output", "missing_snapshot", "cancel_contacted", "coalesce_uncontacted", "outstanding_one", "cancel_uncontacted", "startup_recovery"])
 async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_auth, monkeypatch, scenario):
     from src.api import auth, goals, model_fabric_settings
     from src.guardian import source_watch, inbox
@@ -174,6 +174,30 @@ async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_aut
         messages, context = assessment_context(row, current_goal, offered)
         assert {p.origin for p in context.provenance} == {ContentOrigin.CANONICAL_MEMORY, ContentOrigin.EXTERNAL_UNTRUSTED}
         assert all(p.instruction_authority is False for p in context.provenance)
+        if scenario == "startup_recovery":
+            from src.guardian.opportunity_runtime import _authority, RUNNER, run_opportunity_tick, _executions
+            from src.db.models import WorkflowRunState
+            queued = await durable_job_repository.get_job(row.job_id)
+            async def claim(db, run):
+                pending, _ = await _authority(db, row.id, execution=True)
+                pending.status, pending.revision = "assessing", pending.revision + 1
+                db.add(pending)
+            claimed = await durable_job_repository.claim_job(row.job_id, owner=RUNNER,
+                expected_revision=queued["revision"], claim_authority_check=claim)
+            async with factory.accounting_sessions() as db:
+                native = (await db.execute(select(WorkflowRunState).where(
+                    WorkflowRunState.run_identity == row.job_id))).scalar_one()
+                native.lease_expires_at = datetime.now(timezone.utc)-timedelta(seconds=1)
+                db.add(native)
+            recovered = next(job for job in await durable_job_repository.recover_stale_jobs()
+                if job["job_id"] == row.job_id)
+            assert recovered["status"] == "blocked" and recovered["effects"] == []
+            assert recovered["lease"]["fencing_token"] > claimed["lease"]["fencing_token"]
+            assert (await run_opportunity_tick())["started"] == 1
+            await asyncio.wait_for(_executions[row.id], timeout=30)
+            retried = await durable_job_repository.get_job(row.job_id)
+            assert retried["attempt_count"] == 2 and retried["deadline_at"] == recovered["deadline_at"]
+            assert retried["lease"]["fencing_token"] > recovered["lease"]["fencing_token"]
         if scenario in {"coalesce_uncontacted", "outstanding_one", "cancel_uncontacted"}:
             from src.guardian.opportunity_runtime import run_opportunity_tick, _executions
             entered, release = asyncio.Event(), asyncio.Event()
@@ -297,14 +321,14 @@ async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_aut
                 job_id="guardian_opportunity_assessment", allow_model_inference=True)
             await wrapper()
             await asyncio.wait_for(_executions[row.id], timeout=50)
-        elif scenario not in {"coalesce_uncontacted", "outstanding_one"}:
+        elif scenario not in {"coalesce_uncontacted", "outstanding_one", "startup_recovery"}:
             await execute_assessment(row.id)
         async with factory.accounting_sessions() as db:
             final = await db.get(GuardianOpportunity, row.id)
             expected = "silent" if scenario == "silent" else "unknown" if scenario == "cancel_contacted" else (
-                "proposed" if scenario in {"completed", "coalesce_uncontacted", "outstanding_one"} else "blocked")
+                "proposed" if scenario in {"completed", "coalesce_uncontacted", "outstanding_one", "startup_recovery"} else "blocked")
             assert final.status == expected, final.reason_code
-            if scenario not in {"completed", "coalesce_uncontacted", "outstanding_one"}:
+            if scenario not in {"completed", "coalesce_uncontacted", "outstanding_one", "startup_recovery"}:
                 assert final.intervention_id is None
                 assert (await db.execute(select(func.count()).select_from(GuardianIntervention))).scalar() == 0
                 assert (await db.execute(select(func.count()).select_from(NativeNotificationOutbox))).scalar() == 0
@@ -341,7 +365,7 @@ async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_aut
         assert calls[-1]["stream"] is False and calls[-1]["max_tokens"] == 1024 and "tools" not in calls[-1]
         (root/"actual-opportunity-readback.json").write_text(json.dumps(dict(native=native,
             inbox=detail, source_contacts=len(source_calls), provider_contacts=len(calls)), default=str))
-        if scenario in {"coalesce_uncontacted", "outstanding_one"}:
+        if scenario in {"coalesce_uncontacted", "outstanding_one", "startup_recovery"}:
             assert sum(len(call["messages"]) == 2 for call in calls) == 1
             assert detail["assessment"]["citations"][0]["span_sha256"] == offered.sources[0].excerpt_sha256
             return

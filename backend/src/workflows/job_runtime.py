@@ -3119,15 +3119,19 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             dependency_guard = (preflight_run.job_kind in {'browser_public_task',
                 'work.evidence-dossier.v1', 'work.local-evidence-report.v1'}
                 and to_status in {'queued', 'running', 'succeeded', 'degraded'})
+            guardian_queue_guard = preflight_run.job_kind == "guardian_opportunity_assess" and to_status == "queued"
             if dependency_guard:
                 staged_dependencies = await stage_run_dependencies(db, preflight_run)
             await db.rollback()
-            if (terminal_authority_check is not None and to_status in {"succeeded", "degraded"}) or dependency_guard or cancellation_authority_check is not None:
+            if (terminal_authority_check is not None and to_status in {"succeeded", "degraded"}) or dependency_guard or cancellation_authority_check is not None or guardian_queue_guard:
                 bind = db.get_bind()
                 dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
                 if dialect_name == "sqlite":
                     await db.execute(text("BEGIN IMMEDIATE"))
             run = await self._fetch(db, job_id)
+            if guardian_queue_guard and run.status == "blocked":
+                from src.guardian.opportunity_runtime import guard_recovered_queue
+                await guard_recovered_queue(db, run)
             if cancellation_authority_check is not None:
                 if to_status != "cancelled":
                     raise DurableJobTransitionError("cancellation authority applies only to cancellation")

@@ -192,6 +192,29 @@ async def _publish_verified_packet(event):
                 (GuardianOpportunity.job_id.is_(None) | GuardianOpportunity.job_id.not_in(contacted_native)))
                 .values(status="silent", reason_code="coalesced",
                     revision=GuardianOpportunity.revision + 1))
+            # Startup may already have cleared the native lease. This exact
+            # zero-reservation classification can replace pending history,
+            # but never serves as proof that an unowned Task has closed.
+            from src.guardian.opportunity_runtime import assert_recovered_uncontacted_binding
+            recovered_rows = (await db.execute(select(GuardianOpportunity, WorkflowRunState).join(
+                WorkflowRunState, GuardianOpportunity.job_id == WorkflowRunState.run_identity).where(
+                GuardianOpportunity.watch_id == watch.id,
+                GuardianOpportunity.status.in_(PENDING),
+                GuardianOpportunity.id != (existing.id if existing else opportunity.id),
+                WorkflowRunState.status == "blocked",
+                WorkflowRunState.failure_reason == "stale_lease_requires_reconciliation").limit(20))).all()
+            for historical, run in recovered_rows:
+                if any(getattr(historical, field) != getattr(opportunity, field) for field in (
+                        "owner_principal_id", "original_root_id", "goal_id", "goal_revision",
+                        "policy_revision", "watch_revision")):
+                    continue
+                try:
+                    await assert_recovered_uncontacted_binding(db, run, historical, retry=False)
+                except OpportunityError:
+                    continue
+                historical.status, historical.reason_code = "silent", "coalesced"
+                historical.revision += 1
+                db.add(historical)
         # A repeated semantic packet must retain its original disposition,
         # while still superseding other uncontacted candidates from this watch.
         if existing:

@@ -161,7 +161,8 @@ async def test_canonical_pending_capacity_blocks_before_native_admission(isolate
         assert (await db.execute(select(func.count()).select_from(InferenceCostReservation))).scalar() == 0
 
 
-async def test_expired_never_contacted_native_lease_recovers_same_job_bounded(isolated_runtime, monkeypatch):
+@pytest.mark.parametrize("recovery_owner", ["targeted", "startup"])
+async def test_expired_never_contacted_native_lease_recovers_same_job_bounded(isolated_runtime, monkeypatch, recovery_owner):
     import asyncio
     import json
     from datetime import datetime, timedelta, timezone
@@ -188,6 +189,15 @@ async def test_expired_never_contacted_native_lease_recovers_same_job_bounded(is
             WorkflowRunState.run_identity == queued["job_id"]))).scalar_one()
         native.lease_expires_at = datetime.now(timezone.utc)-timedelta(seconds=1)
         db.add(native)
+    if recovery_owner == "startup":
+        recovered = await durable_job_repository.recover_stale_jobs()
+        native = next(job for job in recovered if job["job_id"] == queued["job_id"])
+        assert native["status"] == "blocked" and native["failure_reason"] == "stale_lease_requires_reconciliation"
+        assert native["lease"]["owner"] is None and native["lease"]["expires_at"] is None
+        assert native["lease"]["fencing_token"] > claimed["lease"]["fencing_token"]
+        async with sessions() as db:
+            assert (await db.get(GuardianOpportunity, row.id)).status == "assessing"
+            assert (await db.execute(select(func.count()).select_from(InferenceCostReservation))).scalar() == 0
     def forbid_http(*args, **kwargs):
         raise AssertionError("unverified recovery must not reach HTTP")
     monkeypatch.setattr(httpx, "AsyncClient", forbid_http)
@@ -202,6 +212,196 @@ async def test_expired_never_contacted_native_lease_recovers_same_job_bounded(is
     assert (await opportunity_runtime.run_opportunity_tick())["started"] == 0
     async with sessions() as db:
         assert (await db.execute(select(func.count()).select_from(InferenceCostReservation))).scalar() == 0
+
+
+async def _startup_recovered_candidate(isolated_runtime):
+    """Actual publication, admission, claim and global restart reconciliation."""
+    import json
+    from datetime import datetime, timedelta, timezone
+    from src.db.models import Goal, WorkflowRunState
+    sessions, goal, watch, _, row, _ = await publish_source(isolated_runtime)
+    async with sessions() as db:
+        current = await db.get(Goal, goal.id)
+        budget = json.loads(current.admission_budget_json)
+        budget["max_attempts"] = 2
+        current.admission_budget_json = json.dumps(budget)
+        db.add(current)
+    queued = await admit_assessment(row.id)
+    async def claim(db, run):
+        current, _ = await _authority(db, row.id, execution=True)
+        current.status, current.revision = "assessing", current.revision + 1
+        db.add(current)
+    claimed = await durable_job_repository.claim_job(queued["job_id"], owner=RUNNER,
+        expected_revision=queued["revision"], claim_authority_check=claim)
+    async with sessions() as db:
+        native = (await db.execute(select(WorkflowRunState).where(
+            WorkflowRunState.run_identity == queued["job_id"]))).scalar_one()
+        native.lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        db.add(native)
+    recovered = next(item for item in await durable_job_repository.recover_stale_jobs()
+        if item["job_id"] == queued["job_id"])
+    assert recovered["status"] == "blocked"
+    assert recovered["failure_reason"] == "stale_lease_requires_reconciliation"
+    assert recovered["lease"]["owner"] is None
+    assert recovered["lease"]["fencing_token"] > claimed["lease"]["fencing_token"]
+    async with sessions() as db:
+        row = await db.get(GuardianOpportunity, row.id)
+        assert row.status == "assessing"
+        assert (await db.execute(select(func.count()).select_from(InferenceCostReservation))).scalar() == 0
+    return sessions, goal, watch, row, recovered
+
+
+def _reservation_negative(row, native, state):
+    """Accounting-row corruption negative, never an execution/success receipt."""
+    from datetime import datetime, timedelta, timezone
+    return InferenceCostReservation(operation_id="negative:"+row.id, deployment_id="negative",
+        job_id=row.job_id, owner_id=row.owner_principal_id, goal_id=row.goal_id,
+        goal_revision=row.goal_revision, payload_digest="0"*64, policy_digest="0"*64,
+        runtime_path="strategist_agent", profile_id="negative", period_id="negative",
+        settings_revision=1, ceiling_microusd=1, bound_microusd=1, sequence=1,
+        priority=2, deadline_at=datetime.now(timezone.utc)+timedelta(minutes=1),
+        state=state, job_fencing_token=native["lease"]["fencing_token"])
+
+
+@pytest.mark.parametrize("change", ["root", "goal", "policy", "source", "grant", "deadline", "attempts",
+    "reserved", "released", "unknown", "reason", "malformed", "shape", "principal", "owner_kind",
+    "service_id", "capability_id", "permissions", "budget_grant_id"])
+async def test_actual_startup_queue_rechecks_current_authority_and_exact_binding(isolated_runtime, monkeypatch, change):
+    import httpx
+    import json
+    from datetime import datetime, timedelta, timezone
+    from src.db.models import Goal, OperatorSession, GuardianSourceWatch, WorkflowRunState
+    from src.guardian.opportunity_contracts import OpportunityError
+    sessions, goal, watch, row, native = await _startup_recovered_candidate(isolated_runtime)
+    async with sessions() as db:
+        run = (await db.execute(select(WorkflowRunState).where(
+            WorkflowRunState.run_identity == row.job_id))).scalar_one()
+        if change == "root":
+            root = await db.get(OperatorSession, row.original_root_id)
+            root.revoked_at = datetime.now(timezone.utc)
+            db.add(root)
+        elif change in {"goal", "policy", "grant"}:
+            current = await db.get(Goal, goal.id)
+            if change == "goal":
+                current.revision += 1
+            elif change == "policy":
+                current.guardian_policy_revision += 1
+            else:
+                policy = json.loads(current.guardian_policy_json)
+                policy["grant_id"] = "different-review"
+                current.guardian_policy_json = json.dumps(policy)
+            db.add(current)
+        elif change == "source":
+            current = await db.get(GuardianSourceWatch, watch["id"])
+            current.plan_revision += 1
+            db.add(current)
+        elif change == "deadline":
+            run.deadline_at = datetime.now(timezone.utc)-timedelta(seconds=1)
+        elif change == "attempts":
+            run.attempt_count = run.max_attempts
+        elif change in {"reserved", "released", "unknown"}:
+            db.add(_reservation_negative(row, native, change))
+        elif change == "reason":
+            run.failure_reason = "operator_review_required"
+        elif change in {"malformed", "shape"}:
+            run.declared_authority_json = "{" if change == "malformed" else "[]"
+        else:
+            authority = json.loads(run.declared_authority_json)
+            authority[change] = [] if change == "permissions" else "different-binding"
+            run.declared_authority_json = json.dumps(authority)
+        db.add(run)
+    def forbid_http(*args, **kwargs):
+        raise AssertionError("invalid restart must remain before HTTP")
+    monkeypatch.setattr(httpx, "AsyncClient", forbid_http)
+    with pytest.raises(OpportunityError):
+        await durable_job_repository.queue_job(row.job_id, expected_revision=native["revision"],
+            expected_fencing_token=native["lease"]["fencing_token"])
+    latest = await durable_job_repository.get_job(row.job_id)
+    assert latest["status"] == "blocked" and latest["revision"] == native["revision"]
+    assert latest["attempt_count"] == native["attempt_count"]
+    assert latest["lease"]["fencing_token"] == native["lease"]["fencing_token"]
+    async with sessions() as db:
+        current = await db.get(GuardianOpportunity, row.id)
+        assert current.status == "assessing" and current.revision == row.revision
+        assert not any(item.contact_started_at for item in (await db.execute(select(InferenceCostReservation))).scalars())
+
+
+@pytest.mark.parametrize("stale", ["revision", "fence"])
+async def test_startup_queue_failed_native_cas_rolls_back_opportunity_transition(isolated_runtime, stale):
+    sessions, _, _, row, native = await _startup_recovered_candidate(isolated_runtime)
+    with pytest.raises(DurableJobLeaseError):
+        await durable_job_repository.queue_job(row.job_id,
+            expected_revision=native["revision"]-(stale == "revision"),
+            expected_fencing_token=native["lease"]["fencing_token"]-(stale == "fence"))
+    latest = await durable_job_repository.get_job(row.job_id)
+    assert latest["status"] == "blocked" and latest["revision"] == native["revision"]
+    async with sessions() as db:
+        current = await db.get(GuardianOpportunity, row.id)
+        assert current.status == "assessing" and current.revision == row.revision
+        assert (await db.execute(select(func.count()).select_from(InferenceCostReservation))).scalar() == 0
+
+
+@pytest.mark.parametrize("change", ["exact", "reason", "reserved", "unknown", "malformed"])
+async def test_verified_publication_handles_recovered_blocked_history_without_guessing_closure(isolated_runtime, monkeypatch, change):
+    import httpx
+    from datetime import datetime, timedelta, timezone
+    from src.db.models import WorkflowRunState
+    from src.guardian import opportunity_runtime
+    from src.guardian.source_watch import SourceWatchService
+    from tests.test_work_board_m6_provider_free_journey import SESSION
+    sessions, _, watch, row, native = await _startup_recovered_candidate(isolated_runtime)
+    if change != "exact":
+        async with sessions() as db:
+            run = (await db.execute(select(WorkflowRunState).where(
+                WorkflowRunState.run_identity == row.job_id))).scalar_one()
+            if change == "reason":
+                run.failure_reason = "operator_review_required"
+            elif change == "malformed":
+                run.declared_authority_json = "[]"
+            else:
+                db.add(_reservation_negative(row, native, change))
+            db.add(run)
+    async def fetch(source):
+        return "Stable public line\nA third distinct relevant public release\n", {"content_type": "text/plain"}
+    result = await SourceWatchService(fetcher=fetch).run_watch(watch["id"], occurrence_id="recovered-newest",
+        expected_plan_revision=1, expected_owner_session_id=SESSION)
+    assert result["status"] == "succeeded", result
+    async with sessions() as db:
+        old = await db.get(GuardianOpportunity, row.id)
+        latest = (await db.execute(select(GuardianOpportunity).where(GuardianOpportunity.id != row.id))).scalar_one()
+        if change != "exact":
+            assert old.status == "assessing" and old.revision == row.revision
+            assert latest.status == "blocked" and latest.reason_code == "opportunity_capacity_exhausted"
+            assert latest.job_id is None
+        else:
+            assert old.status == "silent" and old.reason_code == "coalesced"
+            assert latest.status == "queued" and latest.job_id is None
+    assert (await durable_job_repository.get_job(row.job_id))["status"] == "blocked"
+    if change != "exact":
+        return
+    assert await opportunity_runtime.quiesce_opportunity(old, coalesced=True) is False
+    def forbid_http(*args, **kwargs):
+        raise AssertionError("unowned recovered execution has no Task closure proof")
+    monkeypatch.setattr(httpx, "AsyncClient", forbid_http)
+    for _ in range(2):
+        assert (await opportunity_runtime.run_opportunity_tick())["started"] == 0
+        async with sessions() as db:
+            current = await db.get(GuardianOpportunity, latest.id)
+            assert current.status == "queued" and current.reason_code == "coalesced_execution_waiting"
+            assert current.revision == latest.revision+1
+    async with sessions() as db:
+        current = await db.get(GuardianOpportunity, latest.id)
+        current.assessment_deadline_at = datetime.now(timezone.utc)-timedelta(seconds=1)
+        db.add(current)
+    assert (await opportunity_runtime.run_opportunity_tick())["started"] == 0
+    async with sessions() as db:
+        current = await db.get(GuardianOpportunity, latest.id)
+        assert current.status == "blocked" and current.reason_code == "assessment_deadline_expired"
+        assert current.revision == latest.revision+2
+        assert (await db.execute(select(func.count()).select_from(InferenceCostReservation))).scalar() == 0
+    residual = await durable_job_repository.get_job(row.job_id)
+    assert residual["status"] == "blocked" and residual["attempt_count"] == native["attempt_count"]
+    assert residual["lease"]["fencing_token"] == native["lease"]["fencing_token"]
 
 
 async def test_fixed_native_kind_requires_all_current_authority_callbacks(isolated_runtime, monkeypatch):

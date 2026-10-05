@@ -36,6 +36,7 @@ from uuid import uuid4
 from sqlalchemy import and_, delete, func, or_, select, text, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db import engine as db_engine
 from src.db.models import (
@@ -89,6 +90,46 @@ class NativeNotificationBudgetDenied(ValueError):
 
 class NativeNotificationLeaseError(ValueError):
     """Raised for malformed or stale daemon lease state."""
+
+
+async def _opportunity_claim_reason(db: AsyncSession, row: NativeNotificationOutbox, now: datetime) -> str | None:
+    """Recheck only the existing opportunity intent's canonical SQL binding."""
+    from src.db.models import GuardianIntervention, GuardianOpportunity, GuardianInboxDisposition
+    from src.guardian.opportunities import assert_opportunity_current
+    from src.guardian.opportunity_contracts import OpportunityError
+
+    intervention = await db.get(GuardianIntervention, row.intervention_id) if row.intervention_id else None
+    opportunity = await db.get(GuardianOpportunity, intervention.opportunity_id) if intervention else None
+    disposition = await db.get(GuardianInboxDisposition, opportunity.id) if opportunity else None
+    binding = (row.owner_principal_id, row.operator_session_id, row.goal_id, row.goal_revision)
+    if (opportunity is None or disposition is None or intervention.intervention_type != "opportunity"
+            or opportunity.intervention_id != intervention.id
+            or (opportunity.owner_principal_id, opportunity.original_root_id, opportunity.goal_id,
+                opportunity.goal_revision) != binding
+            or (intervention.owner_principal_id, intervention.original_root_id, intervention.goal_id,
+                intervention.goal_revision) != binding
+            or (disposition.owner_principal_id, disposition.owner_session_id, disposition.goal_id,
+                disposition.goal_revision) != binding
+            or disposition.source_kind != "guardian_opportunity" or disposition.source_id != opportunity.id
+            or disposition.source_digest != opportunity.source_digest
+            or disposition.watch_id != opportunity.watch_id or disposition.plan_revision != opportunity.watch_revision):
+        return "opportunity_notification_lineage_invalid"
+    try:
+        _, _, _, policy, _ = await assert_opportunity_current(db, opportunity)
+    except OpportunityError as exc:
+        return exc.code
+    except (ValueError, TypeError, KeyError):
+        return "opportunity_notification_lineage_invalid"
+    if policy.max_notification_per_utc_day == 0:
+        return "opportunity_notifications_disabled"
+    if opportunity.status != "proposed" or (_aware(disposition.expires_at) or now) <= now:
+        return "opportunity_notification_suppressed"
+    if disposition.state == "snoozed":
+        until = _aware(disposition.snoozed_until)
+        if until is None:
+            return "opportunity_notification_lineage_invalid"
+        return "opportunity_notification_snoozed" if until > now else None
+    return None if disposition.state == "pending" else "opportunity_notification_suppressed"
 
 
 @dataclass
@@ -811,6 +852,27 @@ class NativeNotificationQueue:
                 await delete_source_rows(db)
                 return _row_to_notification(row)
 
+    async def _suppress_opportunity_handoff(self, db: AsyncSession, row: NativeNotificationOutbox, now: datetime, *, worker: str, fencing_token: int) -> bool:
+        """An already claimed opportunity loses authority as Unknown, never undisplayed."""
+        if (row.intervention_type != "opportunity" or row.status not in CLAIMED_STATUSES
+                or row.lease_owner != worker or row.fencing_token != fencing_token
+                or (_aware(row.lease_expires_at) or now) <= now):
+            return False
+        reason = await _opportunity_claim_reason(db, row, now)
+        if reason is None:
+            return False
+        changed = await db.execute(update(NativeNotificationOutbox).execution_options(synchronize_session=False).where(
+            NativeNotificationOutbox.id == row.id, NativeNotificationOutbox.status == row.status,
+            NativeNotificationOutbox.fencing_token == row.fencing_token,
+            NativeNotificationOutbox.attempt_count == row.attempt_count,
+            NativeNotificationOutbox.lease_owner == row.lease_owner).values(
+                status="unknown", last_error=reason, degraded_state=reason,
+                lease_owner=None, lease_expires_at=None, updated_at=now))
+        if changed.rowcount == 1:
+            await db.refresh(row)
+            await self._finish_attempt(db, row, status="unknown", now=now, error_code=reason)
+        return True
+
     async def _finish_attempt(
         self,
         db,
@@ -939,6 +1001,7 @@ class NativeNotificationQueue:
             reason = _goal_binding_reason(row, goal)
             if reason is None:
                 continue
+            terminal = "unknown" if row.intervention_type == "opportunity" and row.status in CLAIMED_STATUSES else "cancelled"
             transition = await db.execute(
                 update(NativeNotificationOutbox)
                 .execution_options(synchronize_session=False)
@@ -948,8 +1011,8 @@ class NativeNotificationQueue:
                     NativeNotificationOutbox.fencing_token == row.fencing_token,
                 )
                 .values(
-                    status="cancelled",
-                    cancelled_at=now,
+                    status=terminal,
+                    cancelled_at=now if terminal == "cancelled" else None,
                     last_error=reason,
                     degraded_state=reason,
                     lease_owner=None,
@@ -960,7 +1023,7 @@ class NativeNotificationQueue:
             if transition.rowcount != 1:
                 continue
             await db.refresh(row)
-            await self._finish_attempt(db, row, status="cancelled", now=now, error_code=reason)
+            await self._finish_attempt(db, row, status=terminal, now=now, error_code=reason)
 
         # A notification bound to an operator/session is an authorized intent,
         # not an ambient broadcast. Re-check both bindings on every queue
@@ -1018,6 +1081,7 @@ class NativeNotificationQueue:
                     reason = "operator_session_expired"
             if reason is None:
                 continue
+            terminal = "unknown" if row.intervention_type == "opportunity" and row.status in CLAIMED_STATUSES else "cancelled"
             transition = await db.execute(
                 update(NativeNotificationOutbox)
                 .execution_options(synchronize_session=False)
@@ -1027,8 +1091,8 @@ class NativeNotificationQueue:
                     NativeNotificationOutbox.fencing_token == row.fencing_token,
                 )
                 .values(
-                    status="cancelled",
-                    cancelled_at=now,
+                    status=terminal,
+                    cancelled_at=now if terminal == "cancelled" else None,
                     last_error=reason,
                     degraded_state=reason,
                     lease_owner=None,
@@ -1039,7 +1103,7 @@ class NativeNotificationQueue:
             if transition.rowcount != 1:
                 continue
             await db.refresh(row)
-            await self._finish_attempt(db, row, status="cancelled", now=now, error_code=reason)
+            await self._finish_attempt(db, row, status=terminal, now=now, error_code=reason)
 
         await db.execute(
             update(NativeNotificationOutbox)
@@ -1090,14 +1154,39 @@ class NativeNotificationQueue:
 
         async with self._lock:
             async with self._session() as db:
+                if db.in_transaction():
+                    await db.commit()
+                if db.get_bind().dialect.name == "sqlite":
+                    await db.execute(text("BEGIN IMMEDIATE"))
                 now = _utc_now()
                 await self._reconcile_expired(db, now)
                 # Returning an unexpired claim to the same worker preserves
                 # the old poll/ack behaviour and avoids duplicate display.
+                # Keep legacy ordinary queues usable before Guardian tables
+                # exist. Only opportunity intents require the fixed SQL join.
+                has_opportunity = (await db.execute(select(NativeNotificationOutbox.id).where(
+                    NativeNotificationOutbox.intervention_type == "opportunity",
+                    NativeNotificationOutbox.status.in_(ACTIVE_STATUSES)).limit(1))).first() is not None
+                eligible = True
+                if has_opportunity:
+                    from src.db.models import GuardianInboxDisposition, GuardianIntervention
+                    future_snooze = select(GuardianInboxDisposition.id).join(GuardianIntervention,
+                        GuardianInboxDisposition.source_id == GuardianIntervention.opportunity_id).where(
+                        GuardianIntervention.id == NativeNotificationOutbox.intervention_id,
+                        GuardianInboxDisposition.source_kind == "guardian_opportunity",
+                        GuardianInboxDisposition.owner_principal_id == NativeNotificationOutbox.owner_principal_id,
+                        GuardianInboxDisposition.owner_session_id == NativeNotificationOutbox.operator_session_id,
+                        GuardianInboxDisposition.goal_id == NativeNotificationOutbox.goal_id,
+                        GuardianInboxDisposition.goal_revision == NativeNotificationOutbox.goal_revision,
+                        GuardianInboxDisposition.state == "snoozed",
+                        GuardianInboxDisposition.snoozed_until > now).exists()
+                    eligible = ~and_(NativeNotificationOutbox.intervention_type == "opportunity",
+                        NativeNotificationOutbox.status == "queued", future_snooze)
                 result = await db.execute(
                     select(NativeNotificationOutbox)
                     .where(
                         NativeNotificationOutbox.status.in_(ACTIVE_STATUSES),
+                        eligible,
                         NativeNotificationOutbox.deadline_at > now,
                         (
                             (NativeNotificationOutbox.status == "queued")
@@ -1109,9 +1198,29 @@ class NativeNotificationQueue:
                         NativeNotificationOutbox.created_at.asc(),
                         NativeNotificationOutbox.id.asc(),
                     )
-                    .limit(1)
+                    .limit(20)
                 )
-                row = result.scalar_one_or_none()
+                row = None
+                for candidate in result.scalars().all():
+                    if candidate.intervention_type == "opportunity":
+                        reason = await _opportunity_claim_reason(db, candidate, now)
+                        if reason:
+                            terminal = "unknown" if candidate.status in CLAIMED_STATUSES else "cancelled"
+                            changed = await db.execute(update(NativeNotificationOutbox)
+                                .execution_options(synchronize_session=False).where(
+                                    NativeNotificationOutbox.id == candidate.id,
+                                    NativeNotificationOutbox.status == candidate.status,
+                                    NativeNotificationOutbox.fencing_token == candidate.fencing_token,
+                                    NativeNotificationOutbox.attempt_count == candidate.attempt_count).values(
+                                        status=terminal, last_error=reason, degraded_state=reason,
+                                        cancelled_at=now if terminal == "cancelled" else None,
+                                        lease_owner=None, lease_expires_at=None, updated_at=now))
+                            if changed.rowcount == 1:
+                                await db.refresh(candidate)
+                                await self._finish_attempt(db, candidate, status=terminal, now=now, error_code=reason)
+                            continue
+                    row = candidate
+                    break
                 if row is None:
                     return None
                 if row.status in CLAIMED_STATUSES:
@@ -1241,6 +1350,10 @@ class NativeNotificationQueue:
 
         async with self._lock:
             async with self._session() as db:
+                if db.in_transaction():
+                    await db.commit()
+                if db.get_bind().dialect.name == "sqlite":
+                    await db.execute(text("BEGIN IMMEDIATE"))
                 now = _utc_now()
                 await self._reconcile_expired(db, now)
                 result = await db.execute(
@@ -1250,6 +1363,8 @@ class NativeNotificationQueue:
                 )
                 row = result.scalar_one_or_none()
                 if row is None or row.status in TERMINAL_STATUSES:
+                    return False
+                if await self._suppress_opportunity_handoff(db, row, now, worker=worker, fencing_token=fencing_token):
                     return False
                 if row.status in CLAIMED_STATUSES:
                     if row.status != "display_attempted":
@@ -1382,6 +1497,10 @@ class NativeNotificationQueue:
             return False
         async with self._lock:
             async with self._session() as db:
+                if db.in_transaction():
+                    await db.commit()
+                if db.get_bind().dialect.name == "sqlite":
+                    await db.execute(text("BEGIN IMMEDIATE"))
                 now = _utc_now()
                 await self._reconcile_expired(db, now)
                 row_result = await db.execute(
@@ -1391,6 +1510,8 @@ class NativeNotificationQueue:
                 )
                 row = row_result.scalar_one_or_none()
                 if row is None or row.attempt_count < 1:
+                    return False
+                if await self._suppress_opportunity_handoff(db, row, now, worker=worker, fencing_token=fencing_token):
                     return False
                 attempt_result = await db.execute(
                     select(NativeNotificationDeliveryAttempt).where(
@@ -1516,6 +1637,10 @@ class NativeNotificationQueue:
                 )
                 row = row_result.scalar_one_or_none()
                 if row is None or row.status != "unknown":
+                    return False
+                if row.intervention_type == "opportunity":
+                    # Opportunity delivery ambiguity is terminal: explicit
+                    # recovery must not replay an optional notification.
                     return False
                 if row.goal_id is not None and (
                     not owner_principal_id

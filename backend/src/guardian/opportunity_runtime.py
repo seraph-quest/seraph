@@ -236,6 +236,72 @@ async def assert_coalesced_predecessor_closed(db, row):
         raise OpportunityError("coalesced_execution_waiting" if pending[1] else "coalesced_binding_missing")
 
 
+def _recovered_authority(run):
+    try:
+        authority = json.loads(run.declared_authority_json or "{}")
+    except (ValueError, TypeError) as exc:
+        raise OpportunityError("assessment_restart_requires_readback") from exc
+    if not isinstance(authority, dict):
+        raise OpportunityError("assessment_restart_requires_readback")
+    return authority
+
+
+async def assert_recovered_uncontacted_binding(db, run, row, *, retry=True):
+    """Pure SQL proof of the existing native owner's exact restart outcome."""
+    from sqlalchemy import select
+    from src.db.models import InferenceCostReservation
+    from src.guardian.opportunities import now, utc
+    from src.workflows.job_runtime import _effect_ledger_or_raise, DurableJobTransitionError
+    authority = _recovered_authority(run)
+    from src.db.models import Goal
+    from src.guardian.opportunities import policy_for
+    goal = await db.get(Goal, row.goal_id)
+    policy = policy_for(goal) if goal is not None else None
+    expected = {"principal": SERVICE_PRINCIPAL, "owner_kind": "service", "service_id": SERVICE_ID,
+        "capability_id": CAPABILITY, "permissions": ["model_inference", "workspace_write"],
+        "budget_grant_id": policy.grant_id if policy is not None else None,
+        "opportunity_id": row.id, "source_digest": row.source_digest,
+        "policy_revision": row.policy_revision, "goal_id": row.goal_id,
+        "goal_revision": row.goal_revision, "session_id": row.original_root_id,
+        "goal_owner_principal_id": row.owner_principal_id,
+        "goal_owner_session_id": row.original_root_id}
+    try:
+        effects = _effect_ledger_or_raise(run.effect_receipts_json)
+    except DurableJobTransitionError as exc:
+        raise OpportunityError("assessment_restart_requires_readback") from exc
+    reservation = (await db.execute(select(InferenceCostReservation).where(
+        InferenceCostReservation.job_id == run.run_identity))).scalars().first()
+    if (run.status != "blocked" or run.failure_reason != "stale_lease_requires_reconciliation"
+            or run.run_identity != row.job_id or run.run_identity != f"opportunity:{row.id}"
+            or run.job_kind != JOB_KIND or run.capability_version != CAPABILITY
+            or run.owner_kind != "service" or run.owner_principal_id != SERVICE_PRINCIPAL
+            or run.service_id != SERVICE_ID or run.operator_session_id != row.original_root_id
+            or run.goal_id != row.goal_id or run.goal_revision != row.goal_revision
+            or run.plan_revision != row.watch_revision or run.lease_owner is not None
+            or run.lease_expires_at is not None or run.fencing_token < 2
+            or not 1 <= run.attempt_count <= min(2, run.max_attempts)
+            or retry and run.attempt_count >= min(2, run.max_attempts)
+            or effects or reservation is not None or policy is None
+            or any(authority.get(key) != value for key, value in expected.items())
+            or run.deadline_at is None or utc(run.deadline_at) > utc(row.assessment_deadline_at)
+            or retry and utc(run.deadline_at) <= now()):
+        raise OpportunityError("assessment_restart_requires_readback")
+
+
+async def guard_recovered_queue(db, run):
+    """Fixed native blocked→queued guard; shares its writer and rollback."""
+    authority = _recovered_authority(run)
+    row, (_, _, budget, policy, _) = await _authority(db, authority.get("opportunity_id"), execution=True)
+    await assert_recovered_uncontacted_binding(db, run, row)
+    await assert_coalesced_predecessor_closed(db, row)
+    await _contact_limits(db, row, policy)
+    if run.max_attempts > min(2, budget.max_attempts):
+        raise OpportunityError("assessment_restart_requires_readback")
+    if row.status == "assessing":
+        row.status, row.reason_code, row.revision = "queued", None, row.revision + 1
+        db.add(row)
+
+
 async def _contact_limits(db, row, policy):
     """Count durable contacted attempts across policy renewals and Unknowns."""
     from sqlalchemy import select
@@ -584,32 +650,39 @@ async def run_opportunity_tick():
                     continue
                 from src.workflows.job_runtime import durable_job_repository
                 native = await durable_job_repository.get_job(row.job_id) if row.job_id else None
-                if (native is None or native["status"] != "running"
-                        or native["lease"]["expires_at"] is None
-                        or utc(datetime.fromisoformat(native["lease"]["expires_at"])) > now()
+                if (native is None or native["status"] not in {"running", "blocked"}
                         or native["attempt_count"] >= native["max_attempts"]
                         or native["effects"]):
                     continue
                 # Existing targeted native recovery clears only this expired
                 # lease. Zero-contact/zero-effect proof permits a bounded
                 # second attempt, under its original immutable deadline.
-                recovered = await durable_job_repository.recover_stale_job(row.job_id)
+                if native["status"] == "running":
+                    if (native["lease"]["expires_at"] is None
+                            or utc(datetime.fromisoformat(native["lease"]["expires_at"])) > now()):
+                        continue
+                    recovered = await durable_job_repository.recover_stale_job(row.job_id)
+                else:
+                    recovered = native  # Startup already advanced its fence.
                 if recovered["status"] != "blocked" or recovered["effects"]:
                     continue
+                # Physical proof is staged outside the native queue writer.
+                try:
+                    evidence = read_snapshot(json.loads(row.source_token_json)["artifact_id"], row.source_digest)
+                except OpportunityError:
+                    continue
                 async with db_engine.get_session() as db:
-                    current, _ = await _authority(db, row.id, execution=True)
+                    current, _ = await _authority(db, row.id, evidence=evidence, execution=True)
                     reservation = (await db.execute(select(InferenceCostReservation).where(
                         InferenceCostReservation.job_id == row.job_id))).scalars().first()
                     if reservation is not None:
                         continue  # No invented settlement/quiescence proof.
-                await durable_job_repository.queue_job(row.job_id, expected_revision=recovered["revision"],
-                    reason="verified_never_contacted_opportunity_recovery")
-                async with db_engine.get_session() as db:
-                    await db.execute(text("BEGIN IMMEDIATE"))
-                    current, _ = await _authority(db, row.id, execution=True)
-                    current.status, current.reason_code = "queued", None
-                    current.revision += 1
-                    db.add(current)
+                try:
+                    await durable_job_repository.queue_job(row.job_id, expected_revision=recovered["revision"],
+                        expected_fencing_token=recovered["lease"]["fencing_token"],
+                        reason="verified_never_contacted_opportunity_recovery")
+                except OpportunityError:
+                    continue
             if len(_executions) >= 16:
                 return {"started": started}
 

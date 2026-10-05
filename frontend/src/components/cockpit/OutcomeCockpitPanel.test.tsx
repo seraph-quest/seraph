@@ -170,6 +170,18 @@ describe("OutcomeCockpitPanel", () => {
     expect(onInspectWork).toHaveBeenCalledOnce();
   });
 
+  it("uses the exact local host approval label and boundary disclosure", () => {
+    const onApprove = vi.fn();
+    renderFixture(
+      { approval: { localHostExecutionRequired: true, permissions: ["local_host_execution", "workspace_write"] } },
+      { onApprove },
+    );
+
+    expect(screen.getByRole("button", { name: "Approve local tests on this host" })).toBeInTheDocument();
+    expect(within(screen.getByTestId("outcome-approval-card")).getByText(/filesystem, network, and host resource access/i)).toBeInTheDocument();
+    expect(within(screen.getByTestId("outcome-approval-card")).getByText(/local_host_execution · workspace_write/)).toBeInTheDocument();
+  });
+
   it("keeps stale authority visible while locking effect controls", () => {
     const onApprove = vi.fn();
     const onContinue = vi.fn();

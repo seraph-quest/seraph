@@ -24,7 +24,7 @@ def _llm_response(content: str) -> MagicMock:
 
 
 @pytest.fixture(autouse=True)
-def allow_openrouter_screen_llm_for_existing_report_tests():
+def allow_openrouter_screen_llm_for_existing_report_tests(monkeypatch):
     """Keep report mechanics tests independent from live OpenRouter credentials.
 
     The OpenRouter policy and proof contract has dedicated tests.  These tests
@@ -32,6 +32,10 @@ def allow_openrouter_screen_llm_for_existing_report_tests():
     already-admitted canonical route and still honor the feature-off setting.
     """
     from src.scheduler.screen_llm_policy import ScreenDerivedLlmDecision
+
+    # The operator may disable reports in .env.dev. These mechanics tests opt
+    # into their intercepted route; feature-off tests still override this.
+    monkeypatch.setattr(settings, "end_of_day_report_llm_enabled", True)
 
     async def admitted_decision(runtime_path: str) -> ScreenDerivedLlmDecision:
         if not settings.end_of_day_report_llm_enabled:

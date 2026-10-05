@@ -79,6 +79,7 @@ from src.execution.repo_sandbox import (
     RepoSandboxLimits,
     RepoSandboxJob,
     RootlessDockerRepoSandbox,
+    build_repo_repair_executor,
     limits_digest,
 )
 from src.goals.contracts import GoalCandidateAction, GoalCandidateDecision, GoalOutcomeReceipt
@@ -5036,6 +5037,27 @@ _REPO_CHANGE_JOB_TTL_SECONDS = 10 * 60
 _REPO_CHANGE_INFLIGHT_TASKS: dict[str, asyncio.Task[Any]] = {}
 
 
+def _build_repo_repair_executor_compat() -> Any:
+    """Select repair executor while preserving direct legacy settings objects."""
+
+    from src.execution.repo_sandbox import (
+        _effective_repo_sandbox_settings,
+        build_repo_repair_executor,
+    )
+
+    config = _effective_repo_sandbox_settings()
+    selected = str(getattr(config, "executor_kind", "local") or "local")
+    fields_set = getattr(config, "model_fields_set", set())
+    if (
+        selected == "local"
+        and "executor_kind" not in fields_set
+        and str(getattr(config, "docker_socket", "") or "").strip()
+        and str(getattr(config, "worker_image_digest", "") or "").strip()
+    ):
+        return RootlessDockerRepoSandbox(config=config)
+    return build_repo_repair_executor(config=config)
+
+
 async def authenticate_repo_change_operator(
     owner_session_id: str,
     *,
@@ -5439,21 +5461,54 @@ async def _repo_change_settle_cancelled_sandbox(
     }
 
 
-def _repo_change_dispatch_checkpoint(job: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Return the latest durable Docker dispatch fence payload."""
+def _repo_change_dispatch_checkpoint_envelope(
+    job: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, int | None, bool]:
+    """Return the dispatch payload and its server-owned checkpoint fence.
+
+    ``record_checkpoint`` safely redacts token-shaped fields inside a payload,
+    while the checkpoint receipt's top-level ``fencing_token`` is the durable
+    CAS envelope written by the server.  Cancellation/recovery must use that
+    envelope for the original worker fence; the public payload is only a
+    structural projection.
+    """
 
     checkpoints = job.get("checkpoints") if isinstance(job, dict) else None
     if not isinstance(checkpoints, list):
-        return None
+        return None, None, True
     for item in reversed(checkpoints):
         payload = item.get("payload") if isinstance(item, dict) else None
-        if isinstance(payload, dict) and payload.get("phase") == "docker_dispatch_reserved":
-            return payload
-    return None
+        if isinstance(payload, dict) and payload.get("phase") in {
+            "docker_dispatch_reserved",
+            "executor_dispatch_reserved",
+        }:
+            envelope_fence: int | None = None
+            envelope_valid = True
+            if isinstance(item, dict) and "fencing_token" in item:
+                raw_fence = item.get("fencing_token")
+                if type(raw_fence) is int and raw_fence > 0:
+                    envelope_fence = raw_fence
+                else:
+                    envelope_valid = False
+            return dict(payload), envelope_fence, envelope_valid
+    return None, None, True
+
+
+def _repo_change_dispatch_checkpoint(job: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return the latest durable executor dispatch fence payload."""
+
+    payload, envelope_fence, envelope_valid = _repo_change_dispatch_checkpoint_envelope(job)
+    if payload is None:
+        return None
+    if envelope_valid and envelope_fence is not None:
+        payload_fence = payload.get("fencing_token")
+        if payload_fence in (None, "[redacted]"):
+            payload["fencing_token"] = envelope_fence
+    return payload
 
 
 def _repo_change_dispatch_reserved(job: dict[str, Any] | None) -> bool:
-    """Return whether the durable row crossed the Docker dispatch fence."""
+    """Return whether the durable row crossed the executor dispatch fence."""
 
     return _repo_change_dispatch_checkpoint(job) is not None
 
@@ -5464,26 +5519,107 @@ def _repo_change_dispatch_contract(
 ) -> tuple[bool, str, dict[str, Any] | None]:
     """Validate the persisted dispatch fence before adopting external work."""
 
-    payload = _repo_change_dispatch_checkpoint(job)
+    payload, envelope_fence, envelope_valid = _repo_change_dispatch_checkpoint_envelope(job)
     if payload is None:
         return False, "recovery_dispatch_fence_missing", None
+    if not envelope_valid:
+        return False, "recovery_dispatch_contract_mismatch", payload
+    payload_fence = payload.get("fencing_token")
+    if envelope_fence is not None:
+        if payload_fence not in (None, "[redacted]") and (
+            type(payload_fence) is not int or payload_fence != envelope_fence
+        ):
+            return False, "recovery_dispatch_contract_mismatch", payload
+        payload["fencing_token"] = envelope_fence
+    elif payload_fence is not None and (
+        type(payload_fence) is not int or payload_fence <= 0
+    ):
+        return False, "recovery_dispatch_contract_mismatch", payload
     job = job if isinstance(job, dict) else {}
     authority = authority if isinstance(authority, dict) else {}
     token = RootlessDockerRepoSandbox._server_token(str(job.get("job_id") or ""))
+    executor_kind = str(authority.get("executor_kind") or "docker_rootless")
+    # Checkpoints written before the selectable-executor extension have no
+    # discriminator.  They are historical repo-change/rootless work and must
+    # remain replayable without inventing a new local authority field.
+    payload_executor_kind = str(payload.get("executor_kind") or "docker_rootless")
+    if payload_executor_kind != executor_kind:
+        return False, "recovery_dispatch_contract_mismatch", payload
     expected = {
         "job_id": str(job.get("job_id") or ""),
         "attempt": int(job.get("attempt_count") or 0),
         "authority_digest": str(job.get("authority_digest") or ""),
         "base_digest": str(authority.get("base_digest") or ""),
-        "patch_sha256": str(authority.get("patch_sha256") or ""),
-        "image_digest": str(authority.get("image_digest") or ""),
-        "limits_digest": str(authority.get("limits_digest") or ""),
-        "container_name": f"{token}-worker",
-        "input_volume": f"{token}-input",
     }
+    if "attempt_id" in payload:
+        declared_authority = (
+            job.get("declared_authority")
+            if isinstance(job.get("declared_authority"), Mapping)
+            else {}
+        )
+        expected_attempt_id = str(
+            authority.get("attempt_id")
+            or authority.get("work_board_attempt_id")
+            or declared_authority.get("attempt_id")
+            or ""
+        )
+        if not expected_attempt_id or payload.get("attempt_id") != expected_attempt_id:
+            return False, "recovery_dispatch_contract_mismatch", payload
+        try:
+            if int(payload.get("fencing_token") or 0) <= 0:
+                return False, "recovery_dispatch_contract_mismatch", payload
+        except (TypeError, ValueError, OverflowError):
+            return False, "recovery_dispatch_contract_mismatch", payload
+    if "executor_kind" in payload:
+        expected["executor_kind"] = executor_kind
+    if executor_kind == "local":
+        expected["process_group_identity"] = f"{token}-local"
+    else:
+        expected.update({
+            "patch_sha256": str(authority.get("patch_sha256") or ""),
+            "image_digest": str(authority.get("image_digest") or ""),
+            "limits_digest": str(authority.get("limits_digest") or ""),
+            "container_name": f"{token}-worker",
+            "input_volume": f"{token}-input",
+        })
     if any(payload.get(key) != value for key, value in expected.items()):
         return False, "recovery_dispatch_contract_mismatch", payload
     return True, "", payload
+
+
+def _repo_change_execution_authority(
+    job: Mapping[str, Any],
+    dispatch_payload: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return worker authority with the original dispatch attempt/fence.
+
+    The durable row's current lease can be a newly reclaimed cancellation or
+    recovery lease. Worker cleanup must use the accepted execution binding
+    recorded at dispatch, while owner/session and current-lease checks happen
+    independently before this helper is called.
+    """
+
+    authority = dict(
+        job.get("declared_authority")
+        if isinstance(job.get("declared_authority"), Mapping)
+        else {}
+    )
+    payload = (
+        dispatch_payload
+        if isinstance(dispatch_payload, Mapping)
+        else _repo_change_dispatch_checkpoint(dict(job))
+    )
+    if isinstance(payload, Mapping):
+        attempt_id = str(payload.get("attempt_id") or "").strip()
+        if attempt_id:
+            authority["attempt_id"] = attempt_id
+        try:
+            accepted_fence = int(payload.get("fencing_token") or 0)
+        except (TypeError, ValueError, OverflowError):
+            accepted_fence = 0
+        if accepted_fence > 0:
+            authority["fencing_token"] = accepted_fence
+    return authority
 
 
 def _repo_change_error_code(exc: BaseException) -> str:
@@ -6240,19 +6376,49 @@ def _repo_change_dispatch_payload(
 
     job_id = str(current["job_id"])
     dispatch_token = RootlessDockerRepoSandbox._server_token(job_id)
-    return {
-        "phase": "docker_dispatch_reserved",
+    executor_kind = str(authority.get("executor_kind") or "docker_rootless")
+    dispatch_phase = "executor_dispatch_reserved" if executor_kind == "local" else "docker_dispatch_reserved"
+    payload = {
+        "phase": dispatch_phase,
         "job_id": job_id,
         "attempt": int(claimed.get("attempt_count") or 0),
         "authority_digest": str(current.get("authority_digest") or ""),
         "base_digest": str(authority.get("base_digest") or ""),
-        "patch_sha256": str(authority.get("patch_sha256") or ""),
-        "image_digest": str(authority.get("image_digest") or ""),
-        "limits_digest": str(authority.get("limits_digest") or ""),
-        "container_name": f"{dispatch_token}-worker",
-        "input_volume": f"{dispatch_token}-input",
         "retry": retry,
+        "executor_kind": executor_kind,
     }
+    # Cancellation and restart reconciliation must target the exact accepted
+    # worker attempt. A later cancellation lease is an ownership check only;
+    # it cannot authorize a different child fence.
+    accepted_attempt_id = str(
+        authority.get("attempt_id")
+        or authority.get("work_board_attempt_id")
+        or (
+            claimed.get("declared_authority")
+            if isinstance(claimed.get("declared_authority"), Mapping)
+            else {}
+        ).get("attempt_id")
+        or ""
+    ).strip()
+    if accepted_attempt_id:
+        payload["attempt_id"] = accepted_attempt_id
+    try:
+        accepted_fence = int((claimed.get("lease") or {}).get("fencing_token") or 0)
+    except (TypeError, ValueError, OverflowError):
+        accepted_fence = 0
+    if accepted_fence > 0:
+        payload["fencing_token"] = accepted_fence
+    if executor_kind == "local":
+        payload["process_group_identity"] = f"{dispatch_token}-local"
+    else:
+        payload.update({
+            "patch_sha256": str(authority.get("patch_sha256") or ""),
+            "image_digest": str(authority.get("image_digest") or ""),
+            "limits_digest": str(authority.get("limits_digest") or ""),
+            "container_name": f"{dispatch_token}-worker",
+            "input_volume": f"{dispatch_token}-input",
+        })
+    return payload
 
 
 async def _execute_repo_change_claimed_inner(
@@ -6263,6 +6429,7 @@ async def _execute_repo_change_claimed_inner(
     approval_id: str | None = None,
     retry: bool = False,
     proof_kind: str = "GuardianPacket",
+    execution_deadline_at: str | None = None,
 ) -> dict[str, Any]:
     """Run one already-approved, fenced repository job exactly once.
 
@@ -6393,12 +6560,17 @@ async def _execute_repo_change_claimed_inner(
             # wins first changes the row to terminal and makes this write
             # fail; a cancellation that arrives after this write must retain
             # an unknown-effect recovery state.
+            dispatch_details = {
+                "retry": retry,
+                "executor_kind": dispatch_payload.get("executor_kind"),
+            }
+            for key in ("container_name", "input_volume", "process_group_identity"):
+                if key in dispatch_payload:
+                    dispatch_details[key] = dispatch_payload[key]
             return await record_repo_phase(
-                "docker_dispatch_reserved",
+                str(dispatch_payload.get("phase") or "docker_dispatch_reserved"),
                 checkpoint_payload=dispatch_payload,
-                container_name=dispatch_payload["container_name"],
-                input_volume=dispatch_payload["input_volume"],
-                retry=retry,
+                **dispatch_details,
             )
 
         def dispatch_guard() -> None:
@@ -6409,9 +6581,14 @@ async def _execute_repo_change_claimed_inner(
                 future.cancel()
                 raise RepoSandboxError("repo_change_dispatch_fence_lost", phase="worker_started") from exc
 
+        execution_sandbox = (
+            _build_repo_repair_executor_compat()
+            if proof_kind == "RepoRepairProposal"
+            else RootlessDockerRepoSandbox()
+        )
         sandbox_task = _repo_change_track_sandbox_call(
             str(current["job_id"]),
-            RootlessDockerRepoSandbox().execute_job,
+            execution_sandbox.execute_job,
             RepoSandboxJob(
                 job_id=str(current["job_id"]), repository_root=str(authority.get("repository_ref") or ""),
                 patch_bytes=patch, allowed_paths=tuple(authority.get("allowed_paths") or ()),
@@ -6419,6 +6596,37 @@ async def _execute_repo_change_claimed_inner(
                 base_digest=str(authority.get("base_digest") or ""), deadline_seconds=int(authority.get("deadline_seconds", 180)),
                 worker_image_digest=str(authority.get("image_digest") or ""),
                 limits_digest=str(authority.get("limits_digest") or ""),
+                execution_deadline_at=(
+                    str(execution_deadline_at or authority.get("execution_deadline_at") or "").strip() or None
+                ),
+                attempt_id=str(
+                    authority.get("attempt_id")
+                    or authority.get("work_board_attempt_id")
+                    or (claimed.get("declared_authority") or {}).get("attempt_id")
+                    or ""
+                ),
+                fencing_token=claimed_fencing_token,
+                expected_posture_digest=str(authority.get("executor_posture_digest") or ""),
+                expected_worker_source_sha256=str(
+                    (authority.get("executor_posture") or {}).get("worker_source_sha256")
+                    if isinstance(authority.get("executor_posture"), Mapping)
+                    else ""
+                ),
+                expected_interpreter_sha256=str(
+                    (authority.get("executor_posture") or {}).get("interpreter_sha256")
+                    if isinstance(authority.get("executor_posture"), Mapping)
+                    else ""
+                ),
+                expected_pytest_executable_sha256=str(
+                    (authority.get("executor_posture") or {}).get("pytest_executable_sha256")
+                    if isinstance(authority.get("executor_posture"), Mapping)
+                    else ""
+                ),
+                expected_pytest_package_sha256=str(
+                    (authority.get("executor_posture") or {}).get("pytest_package_sha256")
+                    if isinstance(authority.get("executor_posture"), Mapping)
+                    else ""
+                ),
             ),
             before_dispatch=dispatch_guard,
         )
@@ -6673,6 +6881,7 @@ async def _execute_repo_change_claimed(
     approval_id: str | None = None,
     retry: bool = False,
     proof_kind: str = "GuardianPacket",
+    execution_deadline_at: str | None = None,
 ) -> dict[str, Any]:
     """Keep cancellation operator-visible across the whole claimed boundary."""
 
@@ -6684,6 +6893,7 @@ async def _execute_repo_change_claimed(
             approval_id=approval_id,
             retry=retry,
             proof_kind=proof_kind,
+            execution_deadline_at=execution_deadline_at,
         )
     except asyncio.CancelledError:
         lease = claimed.get("lease") if isinstance(claimed.get("lease"), Mapping) else {}
@@ -6810,6 +7020,7 @@ async def _resolve_repo_repair_proposal(
         raise HTTPException(status_code=409, detail={"code": "approval_owner_mismatch"})
     from src.workflows.repo_repair import (
         RepoRepairService,
+        _executor_preflight,
         _proposal_authority_payload,
         _sandbox_authority_payload,
     )
@@ -6831,21 +7042,49 @@ async def _resolve_repo_repair_proposal(
     # server-owned handoff rather than making the runner infer a new authority
     # field from a caller projection.
     authority["base_digest"] = resolved.base_snapshot_digest
-    sandbox = RootlessDockerRepoSandbox()
+    reviewed_kind = str(
+        _proposal_authority_payload(resolved).get("executor_kind") or "docker_rootless"
+    )
+    if reviewed_kind not in {"local", "docker_rootless", "docker_rootful"}:
+        raise HTTPException(status_code=409, detail={"code": "repair_executor_authority_changed", "recovery_action": "create_fresh_repair", "operator_visible": True})
+    try:
+        sandbox = build_repo_repair_executor() if reviewed_kind != "docker_rootless" else RootlessDockerRepoSandbox()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "repair_executor_unavailable", "recovery_action": "restore_executor_prerequisite", "operator_visible": True},
+        ) from exc
+    authority_projection = _proposal_authority_payload(resolved)
     reviewed_sandbox = {
-        key: str(authority.get(key) or "")
-        for key in (
-            "sandbox_profile",
-            "sandbox_image_digest",
-            "sandbox_limits_digest",
-            "sandbox_socket_digest",
-        )
+        key: authority_projection.get(key)
+        for key in authority_projection
+        if key.startswith("sandbox_") or key in {
+            "executor_kind",
+            "executor_profile",
+            "executor_posture_digest",
+            "required_permissions",
+            "local_host_execution_required",
+        }
     }
-    current_sandbox = _sandbox_authority_payload(sandbox)
+    try:
+        current_preflight = await asyncio.to_thread(_executor_preflight, sandbox)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "repair_executor_preflight_blocked", "recovery_action": "restore_executor_prerequisite", "operator_visible": True},
+        ) from exc
+    if not bool(getattr(current_preflight, "ok", False)):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "repair_executor_preflight_blocked", "recovery_action": "restore_executor_prerequisite", "operator_visible": True},
+        )
+    current_sandbox = _sandbox_authority_payload(sandbox, current_preflight)
     durable_authority = current.get("declared_authority") if isinstance(current.get("declared_authority"), Mapping) else {}
-    if (
-        not all(reviewed_sandbox.values())
-        or reviewed_sandbox != current_sandbox
+    # Old repair jobs/proposals have no selectable-executor metadata.  They
+    # remain bound to the historical rootless adapter and are not rejected
+    # merely because the additive M4 posture fields are absent.
+    if reviewed_sandbox and (
+        any(current_sandbox.get(key) != value for key, value in reviewed_sandbox.items())
         or any(durable_authority.get(key) != reviewed_sandbox[key] for key in reviewed_sandbox)
     ):
         raise HTTPException(
@@ -6873,15 +7112,28 @@ async def _resolve_repo_repair_proposal(
     if remaining_seconds < 30:
         raise HTTPException(status_code=409, detail={"code": "repair_deadline_expired"})
     remaining_seconds = min(int(sandbox.limits.max_wall_seconds), remaining_seconds)
-    authority.update(
-        {
-            "profile": reviewed_sandbox["sandbox_profile"],
-            "image_digest": sandbox.validate_image_digest(reviewed_sandbox["sandbox_image_digest"]),
-            "limits_digest": reviewed_sandbox["sandbox_limits_digest"],
-            "deadline_seconds": remaining_seconds,
-            "approval_id": exact_approval_id,
-        }
-    )
+    authority.update({
+        "executor_kind": reviewed_kind,
+        "executor_profile": reviewed_sandbox.get("executor_profile"),
+        "executor_posture_digest": reviewed_sandbox.get("executor_posture_digest"),
+        "required_permissions": list(reviewed_sandbox.get("required_permissions") or []),
+        "local_host_execution_required": bool(reviewed_sandbox.get("local_host_execution_required")),
+        "profile": reviewed_sandbox.get("sandbox_profile"),
+        "limits_digest": reviewed_sandbox.get("sandbox_limits_digest"),
+        "deadline_seconds": remaining_seconds,
+        "deadline_at": deadline.astimezone(timezone.utc).isoformat(),
+        "approval_id": exact_approval_id,
+    })
+    if reviewed_kind == "local":
+        authority["image_digest"] = ""
+    else:
+        try:
+            authority["image_digest"] = sandbox.validate_image_digest(str(reviewed_sandbox.get("sandbox_image_digest") or ""))
+        except RepoSandboxError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "repair_executor_authority_changed", "recovery_action": "create_fresh_repair", "operator_visible": True},
+            ) from exc
     return resolved, authority, approval
 
 
@@ -6892,6 +7144,7 @@ async def _resume_verified_repo_execution(
     claimed: Mapping[str, Any],
     approval_id: str | None = None,
     authority: Mapping[str, Any] | None = None,
+    execution_deadline_at: str | None = None,
 ) -> dict[str, Any]:
     """Execute one explicitly discriminated repository proof.
 
@@ -6909,6 +7162,7 @@ async def _resume_verified_repo_execution(
             claimed=dict(claimed),
             approval_id=approval_id,
             proof_kind=proof_kind,
+            execution_deadline_at=execution_deadline_at,
         )
     if proof_kind != "RepoRepairProposal":
         raise DurableJobError("repository_execution_proof_kind_invalid")
@@ -6917,12 +7171,15 @@ async def _resume_verified_repo_execution(
         claimed=claimed,
         approval_id=approval_id,
     )
+    if execution_deadline_at:
+        resolved_authority["execution_deadline_at"] = str(execution_deadline_at)
     result = await _execute_repo_change_claimed(
         current=dict(current),
         authority=resolved_authority,
         claimed=dict(claimed),
         approval_id=str(getattr(resolved_approval, "id", "") or proposal.approval_id or approval_id or ""),
         proof_kind=proof_kind,
+        execution_deadline_at=execution_deadline_at,
     )
     if str(result.get("status") or "") in {"succeeded", "failed"}:
         async with get_session() as db:
@@ -7486,6 +7743,12 @@ async def _safe_repo_repair_projection(
         # details JSON or any private source/model payload.
         approval = await approval_repository.get(approval_id)
         if approval is not None:
+            try:
+                approval_details = json.loads(getattr(approval, "details_json", None) or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                approval_details = {}
+            if not isinstance(approval_details, Mapping):
+                approval_details = {}
             approval_projection = {
                 "approval_id": approval_id,
                 "status": str(getattr(approval, "status", "") or "unknown"),
@@ -7493,6 +7756,18 @@ async def _safe_repo_repair_projection(
                 "action": str(getattr(approval, "action", "") or ""),
                 "expires_at": _utc_datetime(getattr(approval, "expires_at", None)).isoformat()
                 if getattr(approval, "expires_at", None) is not None else None,
+                "executor_kind": str(approval_details.get("executor_kind") or authority.get("executor_kind") or "docker_rootless"),
+                "executor_profile": str(approval_details.get("executor_profile") or authority.get("executor_profile") or ""),
+                "executor_posture_digest": str(approval_details.get("executor_posture_digest") or authority.get("executor_posture_digest") or ""),
+                "required_permissions": [
+                    str(item)
+                    for item in (approval_details.get("required_permissions") or authority.get("required_permissions") or [])
+                ],
+                "local_host_execution_required": bool(
+                    approval_details.get("local_host_execution_required")
+                    if "local_host_execution_required" in approval_details
+                    else authority.get("local_host_execution_required", False)
+                ),
             }
     status = str(job.get("status") or "blocked")
     reason = str(job.get("failure_reason") or "")
@@ -7535,7 +7810,11 @@ async def _safe_repo_repair_projection(
     elif status in {"unknown_external_effect", "cost_liability"}:
         recovery_action = "reconcile_external_effect"
     elif status == "blocked":
-        recovery_action = "restore_rootless_prerequisite"
+        recovery_action = (
+            "restore_local_workspace"
+            if str(authority.get("executor_kind") or "docker_rootless") == "local"
+            else "restore_executor_prerequisite"
+        )
     else:
         recovery_action = "dispatcher_will_resume_same_root"
     return {
@@ -7554,6 +7833,12 @@ async def _safe_repo_repair_projection(
         "run_fingerprint": job.get("run_fingerprint"),
         "capability_id": "engineering.repo-repair.v1",
         "capability_version": job.get("capability_version"),
+        "executor_kind": authority.get("executor_kind") or "docker_rootless",
+        "executor_profile": authority.get("executor_profile"),
+        "executor_posture": authority.get("executor_posture") if isinstance(authority.get("executor_posture"), Mapping) else None,
+        "executor_posture_digest": authority.get("executor_posture_digest"),
+        "required_permissions": list(authority.get("required_permissions") or []),
+        "local_host_execution_required": bool(authority.get("local_host_execution_required")),
         "limits": authority.get("limits") if isinstance(authority.get("limits"), Mapping) else {},
         "preflight": preflight,
         "source_packet": (
@@ -8185,7 +8470,6 @@ async def cancel_repo_change_for_authenticated_operator(
                     "job": uncertain,
                     "operator_action": "reconcile_or_cancel",
                 }
-            token = RootlessDockerRepoSandbox._server_token(job_id)
             try:
                 reserved = await _repo_change_reserve_cancel_cleanup(job, reason=reason)
             except (DurableJobError, DurableJobTransitionError, ValueError) as exc:
@@ -8207,12 +8491,23 @@ async def cancel_repo_change_for_authenticated_operator(
                     status_code=409,
                     detail={"code": "repo_change_cancel_race", "reason": str(exc), "operator_visible": True},
                 ) from exc
+            authority = _repo_change_execution_authority(job, dispatch_payload)
+            executor_kind = str(authority.get("executor_kind") or "docker_rootless")
             try:
-                cleanup = RootlessDockerRepoSandbox().cancel(
-                    container_name=str(dispatch_payload["container_name"]),
-                    additional_container_names=(f"{token}-loader",),
-                    input_volume=str(dispatch_payload["input_volume"]),
-                )
+                if executor_kind == "local":
+                    cleanup = await asyncio.to_thread(
+                        _build_repo_repair_executor_compat().cancel,
+                        job_id=job_id,
+                        authority=authority,
+                    )
+                else:
+                    token = RootlessDockerRepoSandbox._server_token(job_id)
+                    cleanup = await asyncio.to_thread(
+                        RootlessDockerRepoSandbox().cancel,
+                        container_name=str(dispatch_payload["container_name"]),
+                        additional_container_names=(f"{token}-loader",),
+                        input_volume=str(dispatch_payload["input_volume"]),
+                    )
             except (OSError, RepoSandboxError, ValueError) as exc:
                 cleanup = {"status": "unknown_external_effect", "reason": "cleanup_unproven", "error": type(exc).__name__}
             return await _repo_change_settle_reserved_cancel(reserved, cleanup=cleanup, reason=reason)
@@ -8359,14 +8654,24 @@ async def cancel_repo_change_for_authenticated_operator(
                 status_code=409,
                 detail={"code": "repo_change_cancel_race", "reason": str(exc), "operator_visible": True},
             ) from exc
-        worker_name = str((dispatch_payload or {}).get("container_name") or f"{token}-worker")
-        input_volume = str((dispatch_payload or {}).get("input_volume") or f"{token}-input")
+        execution_authority = _repo_change_execution_authority(latest, dispatch_payload)
+        execution_kind = str(execution_authority.get("executor_kind") or "docker_rootless")
         try:
-            cleanup = RootlessDockerRepoSandbox().cancel(
-                container_name=worker_name,
-                additional_container_names=(f"{token}-loader",),
-                input_volume=input_volume,
-            )
+            if execution_kind == "local":
+                cleanup = await asyncio.to_thread(
+                    _build_repo_repair_executor_compat().cancel,
+                    job_id=job_id,
+                    authority=execution_authority,
+                )
+            else:
+                worker_name = str((dispatch_payload or {}).get("container_name") or f"{token}-worker")
+                input_volume = str((dispatch_payload or {}).get("input_volume") or f"{token}-input")
+                cleanup = await asyncio.to_thread(
+                    RootlessDockerRepoSandbox().cancel,
+                    container_name=worker_name,
+                    additional_container_names=(f"{token}-loader",),
+                    input_volume=input_volume,
+                )
         except (OSError, RepoSandboxError, ValueError) as exc:
             latest_after_error = await durable_job_repository.get_job(job_id) or latest
             if str(latest_after_error.get("status") or "") in {

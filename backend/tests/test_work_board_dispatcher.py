@@ -39,6 +39,7 @@ from src.work_board.dispatcher import (
     GOAL_SNAPSHOT_CAPABILITY,
     WorkBoardDispatcher,
     _preflight_recovery_action,
+    _repair_approval_resume_recovery_ready,
     _stable_reason_code,
     registered_executor_id,
 )
@@ -49,6 +50,109 @@ from src.workflows.job_runtime import DurableJobError, DurableJobRepository
 
 
 OWNER = WorkBoardOwner(principal_id="operator:dispatcher", session_id="dispatcher-session")
+
+
+def _repair_approval_recovery_projection() -> dict[str, Any]:
+    job_id = "repair-recovery-job"
+    owner_id = "operator:repair"
+    operation_id = "remote-operation-1"
+    expiry = (datetime.now(timezone.utc) + timedelta(minutes=4)).timestamp()
+    return {
+        "job_id": job_id,
+        "run_identity": job_id,
+        "status": "queued",
+        "owner": {"kind": "user", "principal_id": owner_id, "service_id": None},
+        "session_id": "session:repair",
+        "operator_session_id": "session:repair",
+        "goal_id": "goal:repair",
+        "goal_revision": 2,
+        "plan_revision": 1,
+        "authority_digest": "authority-repair",
+        "budget_digest": "budget-repair",
+        "capability_version": "1",
+        "declared_authority": {
+            "capability_id": "engineering.repo-repair.v1",
+            "approval_id": "approval-repair",
+        },
+        "effects": [
+            {
+                "effect_id": f"remote_inference:{operation_id}",
+                "receipt_kind": "effect",
+                "effect_type": "remote_inference_admission",
+                "target_digest": operation_id,
+                "status": "succeeded",
+                "details": {
+                    "admission_status": "settled",
+                    "receipt": {
+                        "status": "settled",
+                        "operation_id": operation_id,
+                        "job_id": job_id,
+                        "owner_id": owner_id,
+                    },
+                },
+            },
+            {
+                "kind": "approval_resume",
+                "status": "approved",
+                "approval_request_status": "consumed",
+                "approval_id": "approval-repair",
+                "operator_principal_id": owner_id,
+                "operator_session_id": "session:repair",
+                "owner_kind": "user",
+                "owner_principal_id": owner_id,
+                "service_id": None,
+                "authority_digest": "authority-repair",
+                "goal_id": "goal:repair",
+                "goal_revision": 2,
+                "plan_revision": 1,
+                "capability_version": "1",
+                "budget_digest": "budget-repair",
+                "expires_at": expiry,
+            },
+        ],
+    }
+
+
+def test_repair_approval_recovery_accepts_settled_admission_and_consumed_resume():
+    assert _repair_approval_resume_recovery_ready(_repair_approval_recovery_projection()) is True
+
+
+def test_repair_approval_recovery_rejects_unknown_effect_kind():
+    projection = _repair_approval_recovery_projection()
+    projection["effects"].append(
+        {
+            "effect_type": "unregistered_effect",
+            "receipt_kind": "effect",
+            "status": "succeeded",
+        }
+    )
+    assert _repair_approval_resume_recovery_ready(projection) is False
+
+
+def test_repair_approval_recovery_rejects_duplicate_resume_receipt():
+    projection = _repair_approval_recovery_projection()
+    projection["effects"].append(dict(projection["effects"][1]))
+    assert _repair_approval_resume_recovery_ready(projection) is False
+
+
+def test_repair_approval_recovery_rejects_foreign_admission_and_authority_mismatch():
+    projection = _repair_approval_recovery_projection()
+    remote = projection["effects"][0]
+    remote["details"]["receipt"]["job_id"] = "foreign-job"
+    assert _repair_approval_resume_recovery_ready(projection) is False
+
+    projection = _repair_approval_recovery_projection()
+    projection["effects"][1]["authority_digest"] = "foreign-authority"
+    assert _repair_approval_resume_recovery_ready(projection) is False
+
+
+def test_repair_approval_recovery_rejects_unresolved_admission():
+    projection = _repair_approval_recovery_projection()
+    remote = projection["effects"][0]
+    remote["status"] = "intent"
+    remote["details"]["admission_status"] = "intent"
+    remote["details"]["receipt"]["status"] = "intent"
+    assert _repair_approval_resume_recovery_ready(projection) is False
 
 
 @pytest.mark.parametrize(

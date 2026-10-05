@@ -467,14 +467,35 @@ mutation is allowed. Artifact reads expose only safe identity, digest, expiry,
 and lifecycle metadata. The server then inspects a private snapshot, pauses
 for explicit code-egress consent, and asks the governed `strategist_agent`
 route for one strict patch proposal. The operator reviews the exact proposal
-and approval target before an isolated test/readback path can run.
+and approval target before the selected executor's staged test/readback path
+can run.
 
 The repair path binds the source packet, model request and response, patch,
 approval, owner/session, Goal, attempt, and durable job by digest. It exposes
 blocked, stale, revoked, and unknown recovery states and records
-`memory_status=no_learning`. Tests run against the bounded snapshot and do
-not claim to modify the original checkout. Source text, prompts, model
+`memory_status=no_learning`. Tests run against the bounded staged snapshot and
+do not claim to modify the original checkout. Source text, prompts, model
 responses, and credentials stay out of generic operator projections.
+
+The selected repair executor is server-owned settings, visible in Settings →
+Repository sandbox and in the Work inspector. A fresh settings document selects
+the disabled **Trusted local staged runner** by default. Local execution uses a
+private staged directory and fixed test argv as the host user; it has no OS
+isolation guarantee, does not claim CPU, memory, PID, network, or filesystem
+confinement, and requires a separate exact `local_host_execution` approval for
+each job. The approval surface says **Approve local tests on this host** and
+shows the host-user filesystem, network, and resource boundary. Settings
+selection is never execution permission.
+
+The optional **Docker rootless** profile requires a strict Linux rootless
+daemon, pinned image, and independently verified fixed limits. The optional
+**Docker rootful** profile uses an existing configured daemon and must
+independently verify its non-root worker, network, read-only, capability, image,
+and resource posture. Missing or drifted evidence blocks the selected profile;
+Seraph does not silently switch between local, rootless, and rootful execution.
+The legacy
+`engineering.repo-change.v1` path remains strict rootless-only and is shown as a
+separate preflight.
 
 On a first managed local start, a newly created workspace is private (`0700`),
 settings descendants repaired on the current-owner write path are private,
@@ -482,14 +503,32 @@ and the persisted selector file is `0600`. A pre-existing broad workspace or
 foreign-owned, symlinked, or otherwise untrusted settings path remains
 blocked. Use a private workspace beneath trusted ancestors and retry; Seraph
 does not automatically chmod an existing workspace root or shared ancestor.
-Saving selectors never starts Docker or changes host resource limits.
+Saving selectors never starts Docker or changes host resource limits. A legacy
+settings document without an executor selector remains rootless-only until the
+operator explicitly selects another backend.
 
-This is **Partial** and branch-local. Intercepted model transport and sandbox
-mechanics prove request, authority, recovery, and readback contracts only. If
-rootless CPU, memory, pids, or the pinned image cannot be verified, the path
-blocks before model contact. No live provider/account canary, paid inference,
-kernel resource-enforcement receipt, or original-repository write is claimed;
-the capability is not Shipped `develop` truth.
+This is **Partial** and branch-local. Intercepted model transport and executor
+mechanics prove request, authority, recovery, and readback contracts only. A
+local technical preflight can make preparation ready, but execution remains
+blocked until the exact per-job host approval is recorded. If Docker CPU,
+memory, pids, network, image, or daemon posture cannot be verified, the
+selected Docker path blocks without falling back. No live provider/account
+canary, paid inference, kernel resource-enforcement receipt, or
+original-repository write is claimed. Repair execution uses one durable
+`repo-repair-execution` slot across Goals and recovery, releases the
+`remote-inference` claim before approval or test dispatch, and sets one
+absolute execution deadline for staging, process startup/wait, output drain,
+cleanup, readback, and publication; it does not reset that deadline per phase.
+Cancellation or unproven cleanup/readback/publication remains blocked or
+unknown and is reconciled against the same job/attempt rather than replayed as
+a fresh proposal or execution. The current branch has one native API local
+vertical receipt with intercepted OpenRouter transport, real staged
+subprocess/filesystem readback, unchanged source, verified cleanup, and
+`no_learning`; the companion two-Goal and API-cancel vertical receipts remain
+pending final validation. Provider/account usefulness, live OpenRouter
+quality, and Docker resource enforcement remain **external-unverified**. The
+capability is not Shipped `develop` truth until cumulative epic validation and
+the reviewed branch land.
 
 ### Bounded public browser tasks
 

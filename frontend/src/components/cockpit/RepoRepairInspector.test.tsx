@@ -150,6 +150,97 @@ describe("RepoRepairInspector", () => {
     expect(screen.getByText(/No verified readback receipt/)).toBeInTheDocument();
   });
 
+  it("shows the local host posture and exact approval boundary", async () => {
+    const onOpenApprovals = vi.fn();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response(projection({
+      status: "awaiting_approval",
+      source_packet: null,
+      executor_kind: "local",
+      executor_profile: "local:repo-python-pytest-v1",
+      executor_posture: {
+        kind: "local",
+        profile: "repo-python-pytest-v1",
+        isolation_claim: "none",
+        network_isolation: "not_verified",
+        resource_enforcement: "admission_and_wall_timeout_only",
+        host_access: "explicit_job_approval_required",
+        image_digest: null,
+        limits_digest: "a".repeat(64),
+      },
+      executor_posture_digest: "9cc8184ce2062898d42e10984571c18ccc2d5892db5269a4c10aec27d00ba522",
+      required_permissions: ["local_host_execution"],
+      local_host_execution_required: true,
+      preparation_ready: true,
+      execution_ready: false,
+      egress: { consent_id: "consent-1", revision: 1, runtime_path: "strategist_agent", effective_profile_id: "openrouter/repair", effective_upstream: "openrouter", maximum_input_bytes: 65536, maximum_output_tokens: 4096, expires_at: "2030-01-01T00:00:00Z", state: "active" },
+      proposal: { proposal_id: "proposal-1", status: "awaiting_approval", revision: 2, base_snapshot_digest: "a".repeat(64), source_digest: "b".repeat(64), model_profile_id: "openrouter/repair", patch_sha256: "c".repeat(64), approval_id: "approval-1", expires_at: "2030-01-01T00:00:00Z", safe_metadata: {} },
+      approval: { approval_id: "approval-1", status: "pending", tool_name: "engineering.repo-repair.v1", action: "repo_repair.resolve", expires_at: "2030-01-01T00:00:00Z" },
+      recovery_action: "review_repo_repair_proposal",
+    }))));
+
+    render(<RepoRepairInspector {...inspectorProps} jobId="job-1" onOpenApprovals={onOpenApprovals} />);
+    expect(await screen.findByText(/no isolation guarantee/i)).toBeInTheDocument();
+    expect(screen.getByText(/awaiting exact host approval/i)).toBeInTheDocument();
+    const approveButton = screen.getByRole("button", { name: "Approve local tests on this host" });
+    expect(approveButton).toBeInTheDocument();
+    fireEvent.click(approveButton);
+    expect(onOpenApprovals).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["local profile", {
+      executor_kind: "local",
+      executor_profile: undefined,
+    }],
+    ["local posture", {
+      executor_kind: "local",
+      executor_posture: undefined,
+    }],
+    ["local digest", {
+      executor_kind: "local",
+      executor_posture_digest: null,
+    }],
+    ["local readiness", {
+      executor_kind: "local",
+      preparation_ready: undefined,
+    }],
+    ["rootless posture", {
+      executor_kind: "docker_rootless",
+      executor_profile: "docker_rootless:repo-python-pytest-v1",
+      executor_posture: undefined,
+      executor_posture_digest: "b".repeat(64),
+      required_permissions: [],
+      local_host_execution_required: false,
+      preparation_ready: true,
+      execution_ready: true,
+    }],
+    ["rootful readiness", {
+      executor_kind: "docker_rootful",
+      executor_profile: "docker_rootful:repo-python-pytest-v1",
+      executor_posture: {
+        kind: "docker_rootful",
+        profile: "repo-python-pytest-v1",
+        isolation_claim: "rootful_container",
+        network_isolation: "none",
+        resource_enforcement: "verified_fixed_limits",
+        image_digest: null,
+        limits_digest: "a".repeat(64),
+        local_host_execution_required: false,
+      },
+      executor_posture_digest: "b".repeat(64),
+      required_permissions: [],
+      local_host_execution_required: false,
+      preparation_ready: undefined,
+      execution_ready: true,
+    }],
+  ])("keeps incomplete explicit %s metadata from becoming an execution receipt", async (_label, metadata) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response(projection(metadata))));
+    render(<RepoRepairInspector {...inspectorProps} jobId="job-1" />);
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/repair status response/i);
+    expect(alert).not.toHaveTextContent(/No isolation guarantee/i);
+  });
+
   it("surfaces a deadline when a private preview fetch ignores abort", async () => {
     vi.useFakeTimers();
     const fetchMock = vi.mocked(fetch);

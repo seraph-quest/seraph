@@ -20,6 +20,7 @@ from src.api.workflows import (
     _repo_change_candidate_plan_matches,
     _repo_change_dispatch_payload,
     _repo_change_dispatch_contract,
+    _repo_change_execution_authority,
     _repo_change_local_finalize_pending,
     _repo_change_patch_read_blocked,
     _repo_change_reconcile_verified_local_result,
@@ -202,6 +203,81 @@ def test_dispatch_payload_uses_the_post_claim_attempt_count():
         },
     )
     assert valid and reason == ""
+
+
+def test_cancel_authority_keeps_original_dispatch_attempt_and_fence():
+    job = {
+        "job_id": "repo-change-" + "2" * 32,
+        "declared_authority": {
+            "executor_kind": "local",
+            "attempt_id": "attempt-original",
+            "authority_digest": "a" * 64,
+        },
+        "lease": {"owner": "service:recovery", "fencing_token": 99},
+        "checkpoints": [
+            {
+                "payload": {
+                    "phase": "executor_dispatch_reserved",
+                    "attempt_id": "attempt-original",
+                    "fencing_token": 7,
+                }
+            }
+        ],
+    }
+    authority = _repo_change_execution_authority(job)
+    assert authority["attempt_id"] == "attempt-original"
+    assert authority["fencing_token"] == 7
+    assert authority["fencing_token"] != job["lease"]["fencing_token"]
+
+
+def test_dispatch_contract_recovers_redacted_payload_fence_from_server_envelope():
+    job_id = "repo-change-" + "3" * 32
+    token = RootlessDockerRepoSandbox._server_token(job_id)
+    checkpoint = {
+        "checkpoint_id": "executor_dispatch_reserved",
+        # This top-level receipt field is the server-owned CAS envelope.
+        "fencing_token": 7,
+        "payload": {
+            "phase": "executor_dispatch_reserved",
+            "job_id": job_id,
+            "attempt": 1,
+            "attempt_id": "attempt-original",
+            "fencing_token": "[redacted]",
+            "authority_digest": "a" * 64,
+            "base_digest": "b" * 64,
+            "executor_kind": "local",
+            "process_group_identity": f"{token}-local",
+        },
+    }
+    job = {
+        "job_id": job_id,
+        "attempt_count": 1,
+        "authority_digest": "a" * 64,
+        "declared_authority": {
+            "executor_kind": "local",
+            "attempt_id": "attempt-original",
+        },
+        "checkpoints": [checkpoint],
+    }
+    authority = {
+        "executor_kind": "local",
+        "attempt_id": "attempt-original",
+        "base_digest": "b" * 64,
+    }
+
+    valid, reason, payload = _repo_change_dispatch_contract(job, authority)
+    assert valid and reason == ""
+    assert payload is not None and payload["fencing_token"] == 7
+    assert _repo_change_execution_authority(job, payload)["fencing_token"] == 7
+
+    forged_payload = {**checkpoint["payload"], "fencing_token": 99}
+    forged_job = {
+        **job,
+        "checkpoints": [{**checkpoint, "payload": forged_payload}],
+    }
+    forged_valid, forged_reason, _ = _repo_change_dispatch_contract(forged_job, authority)
+    assert not forged_valid
+    assert forged_reason == "recovery_dispatch_contract_mismatch"
 
 
 @pytest.mark.parametrize("existing_status", ["succeeded", "running"])

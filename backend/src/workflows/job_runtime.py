@@ -30,6 +30,17 @@ from src.db.session_refs import ensure_sessions_exist
 
 DURABLE_JOB_RECORD_SCHEMA_VERSION = 2
 
+# A repair execution reservation is a safety boundary rather than ordinary
+# checkpoint history.  It must survive bounded history churn until the exact
+# same job/attempt/fence publishes cleanup and readback proof.  Keep the
+# latest receipt for each of these ids when trimming any checkpoint history.
+_REPO_REPAIR_RESERVATION_CHECKPOINT_IDS = frozenset(
+    {
+        "repo-repair-execution-reservation",
+        "repo-repair-execution-release",
+    }
+)
+
 
 def get_session():
     """Resolve the shared session factory through the durable-state module.
@@ -314,6 +325,49 @@ def _json_load(raw: str | None, fallback: Any) -> Any:
         return fallback
 
 
+def _bounded_checkpoint_receipts(
+    history: Iterable[Any],
+    *,
+    limit: int = 50,
+) -> list[Any]:
+    """Trim checkpoint history while retaining an unresolved repair hold.
+
+    Checkpoint receipts are intentionally bounded because they are persisted
+    in one JSON column.  A repair reservation is also the cross-process
+    execution lock, so evicting its held receipt would let a successor pass
+    the durable admission query after a worker crash.  Preserve the latest
+    reservation and release receipts within the same bound and use the
+    remaining slots for ordinary history.  Malformed special receipts are
+    retained too; the repair parser then fails closed instead of treating
+    corruption as an absent reservation.
+    """
+
+    try:
+        bounded_limit = max(1, int(limit))
+    except (TypeError, ValueError, OverflowError):
+        bounded_limit = 50
+    items = list(history) if isinstance(history, Iterable) else []
+    latest_special: dict[str, tuple[int, Any]] = {}
+    for index, item in enumerate(items):
+        if not isinstance(item, Mapping):
+            continue
+        checkpoint_id = _text(item.get("checkpoint_id"))
+        if checkpoint_id in _REPO_REPAIR_RESERVATION_CHECKPOINT_IDS:
+            latest_special[checkpoint_id] = (index, item)
+    special_indexes = {index for index, _item in latest_special.values()}
+    ordinary = [
+        (index, item)
+        for index, item in enumerate(items)
+        if index not in special_indexes
+    ]
+    retained_special = list(latest_special.values())
+    ordinary_slots = max(0, bounded_limit - len(retained_special))
+    selected = ordinary[-ordinary_slots:] if ordinary_slots else []
+    selected.extend(retained_special)
+    selected.sort(key=lambda pair: pair[0])
+    return [item for _index, item in selected]
+
+
 def _cleanup_reservation_pending(run: WorkflowRunState) -> bool:
     """Return whether an exact private cleanup is between intent and receipt."""
 
@@ -574,6 +628,12 @@ def _safe_structure(value: Any, *, max_depth: int = 3) -> Any:
                     "routineparentboardfencingtoken",
                     "watchparentfencingtoken",
                     "watchparentboardfencingtoken",
+                    # The repair lane stores its exact durable reservation
+                    # identity under the short ``fence`` field.  It is a
+                    # monotonic CAS counter, so retaining its non-negative
+                    # integer form is safe and required for same-job
+                    # recovery/settlement.
+                    "fence",
                 }
                 and type(item) is int
                 and item >= 0
@@ -4081,6 +4141,11 @@ class DurableJobRepository:
                 # checkpoint policy may retain a bounded, JSON-safe payload
                 # for recovery.  The legacy/default path remains digest-only.
                 receipt["payload"] = _safe_structure(checkpoint_payload)
+            # Repair reservation history is part of the physical execution
+            # fence.  Do not let the generic checkpoint writer treat malformed
+            # JSON as an empty legacy history and evict that fence.
+            if self._repo_repair_claimed(run):
+                self._repo_repair_reservation_state(run)
             existing = _json_load(run.checkpoint_receipts_json, [])
             existing = [item for item in existing if isinstance(item, dict) and item.get("checkpoint_id") != checkpoint_id]
             existing.append(receipt)
@@ -4099,7 +4164,7 @@ class DurableJobRepository:
                 .execution_options(synchronize_session=False)
                 .where(*checkpoint_conditions)
                 .values(
-                    checkpoint_receipts_json=_canonical(existing[-50:]),
+                    checkpoint_receipts_json=_canonical(_bounded_checkpoint_receipts(existing)),
                     updated_at=now,
                     heartbeat_at=now,
                     revision=WorkflowRunState.revision + 1,
@@ -4110,6 +4175,405 @@ class DurableJobRepository:
             refreshed = await self._fetch(db, job_id)
             db.expunge(refreshed)
             return _serialize(refreshed, receipt={"kind": "checkpoint", "status": "recorded", **receipt})
+
+    @staticmethod
+    def _repo_repair_reservation_state(run: WorkflowRunState) -> dict[str, Any] | None:
+        """Read the latest exact repair reservation marker from checkpoints."""
+
+        raw = getattr(run, "checkpoint_receipts_json", None)
+        if raw is None or not str(raw).strip():
+            checkpoints = []
+        else:
+            try:
+                checkpoints = json.loads(raw)
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise DurableJobTransitionError(
+                    "repository repair reservation history is malformed"
+                ) from exc
+        if not isinstance(checkpoints, list):
+            raise DurableJobTransitionError("repository repair reservation history is malformed")
+        for item in reversed(checkpoints):
+            if not isinstance(item, Mapping):
+                continue
+            checkpoint_id = _text(item.get("checkpoint_id"))
+            if checkpoint_id not in {
+                "repo-repair-execution-reservation",
+                "repo-repair-execution-release",
+            }:
+                continue
+            payload = item.get("payload")
+            if not isinstance(payload, Mapping) or _text(payload.get("kind")) != "repo_repair_execution_reservation":
+                raise DurableJobTransitionError("repository repair reservation marker is malformed")
+            status = _text(payload.get("status"))
+            if status not in {"held", "released"}:
+                raise DurableJobTransitionError("repository repair reservation status is malformed")
+            try:
+                fence = int(payload.get("fence"))
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise DurableJobTransitionError("repository repair reservation fence is malformed") from exc
+            if (
+                not _text(payload.get("job_id"))
+                or not _text(payload.get("attempt_id"))
+                or fence <= 0
+                or not _text(payload.get("authority_digest"))
+            ):
+                raise DurableJobTransitionError("repository repair reservation identity is malformed")
+            if status == "released" and (
+                payload.get("cleanup_proven") is not True
+                or payload.get("readback_verified") is not True
+                or _text(payload.get("outcome_status")) not in {"succeeded", "degraded", "failed", "cancelled"}
+            ):
+                raise DurableJobTransitionError("repository repair release proof is malformed")
+            return dict(payload)
+        return None
+
+    @staticmethod
+    def _repo_repair_claimed(run: WorkflowRunState) -> bool:
+        raw = getattr(run, "resource_claims_json", None)
+        if raw is None or not str(raw).strip():
+            return False
+        try:
+            claims = json.loads(raw)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise DurableJobTransitionError("repository repair resource claims are malformed") from exc
+        if not isinstance(claims, list):
+            raise DurableJobTransitionError("repository repair resource claims are malformed")
+        return isinstance(claims, list) and "repo-repair-execution" in {
+            _text(value) for value in claims
+        }
+
+    @staticmethod
+    def _repo_repair_reservation_matches(
+        payload: Mapping[str, Any] | None,
+        *,
+        job_id: str,
+        attempt_id: str,
+        fence: int,
+        authority_digest: str,
+    ) -> bool:
+        if not isinstance(payload, Mapping):
+            return False
+        try:
+            observed_fence = int(payload.get("fence"))
+        except (TypeError, ValueError, OverflowError):
+            return False
+        return (
+            _text(payload.get("job_id")) == job_id
+            and _text(payload.get("attempt_id")) == attempt_id
+            and observed_fence == fence
+            and _text(payload.get("authority_digest")) == authority_digest
+        )
+
+    async def reserve_repo_repair_execution(
+        self,
+        job_id: str,
+        *,
+        owner: str,
+        fencing_token: int,
+        attempt_id: str,
+        authority_digest: str,
+        execution_deadline_at: str | None = None,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        """Atomically reserve the one physical repair execution slot.
+
+        The flock is acquired by the dispatcher before this method.  SQLite's
+        immediate transaction makes the durable reservation the final race
+        authority across dispatcher processes and preserves it after process
+        death.  A reservation is idempotent only for the exact same job,
+        attempt, fence, and authority digest.
+        """
+
+        job_id = _text(job_id)
+        owner = _text(owner)
+        attempt_id = _text(attempt_id)
+        authority_digest = _text(authority_digest)
+        try:
+            fencing_token = int(fencing_token)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise DurableJobLeaseError("repository repair reservation fence is malformed") from exc
+        if not job_id or not owner or not attempt_id or not authority_digest or fencing_token <= 0:
+            raise DurableJobLeaseError("repository repair reservation identity is incomplete")
+        async with self._session() as db:
+            bind = db.get_bind()
+            dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
+            if dialect_name == "sqlite":
+                await db.execute(text("BEGIN IMMEDIATE"))
+            run = await self._fetch(db, job_id)
+            if run.status != "running":
+                raise DurableJobAdmissionDenied(
+                    "repo_repair_execution_job_not_running",
+                    goal_id=_text(getattr(run, "goal_id", None)) or None,
+                )
+            if not self._repo_repair_claimed(run):
+                raise DurableJobTransitionError("repository repair execution claim is missing")
+            await _assert_canonical_goal_fence(
+                db,
+                goal_id=getattr(run, "goal_id", None),
+                goal_revision=getattr(run, "goal_revision", None),
+                owner_kind=_text(getattr(run, "owner_kind", None)),
+                owner_principal_id=getattr(run, "owner_principal_id", None),
+                session_id=getattr(run, "session_id", None),
+                authority=getattr(run, "declared_authority_json", None),
+            )
+            self._assert_lease(run, owner=owner, fencing_token=fencing_token)
+            current_revision = _revision(run)
+            if expected_revision is not None and int(expected_revision) != current_revision:
+                raise DurableJobLeaseError("durable job revision is stale")
+            current = self._repo_repair_reservation_state(run)
+            if current is not None and _text(current.get("status")) == "held":
+                if self._repo_repair_reservation_matches(
+                    current,
+                    job_id=job_id,
+                    attempt_id=attempt_id,
+                    fence=fencing_token,
+                    authority_digest=authority_digest,
+                ):
+                    db.expunge(run)
+                    return _serialize(
+                        run,
+                        receipt={
+                            "kind": "repo_repair_execution_reservation",
+                            "status": "deduped",
+                            "job_id": job_id,
+                            "attempt_id": attempt_id,
+                            "fence": fencing_token,
+                            "authority_digest": authority_digest,
+                            "execution_deadline_at": current.get("execution_deadline_at"),
+                            "operator_visible": True,
+                        },
+                    )
+                raise DurableJobAdmissionDenied(
+                    "repo_repair_execution_busy",
+                    goal_id=_text(getattr(run, "goal_id", None)) or None,
+                )
+            if current is not None and _text(current.get("status")) == "released":
+                if self._repo_repair_reservation_matches(
+                    current,
+                    job_id=job_id,
+                    attempt_id=attempt_id,
+                    fence=fencing_token,
+                    authority_digest=authority_digest,
+                ):
+                    raise DurableJobTransitionError("repository repair execution reservation already settled")
+                raise DurableJobAdmissionDenied(
+                    "repo_repair_execution_busy",
+                    goal_id=_text(getattr(run, "goal_id", None)) or None,
+                )
+
+            rows = (
+                await db.execute(
+                    select(WorkflowRunState).where(
+                        WorkflowRunState.record_schema_version >= DURABLE_JOB_RECORD_SCHEMA_VERSION,
+                        WorkflowRunState.run_identity != job_id,
+                        WorkflowRunState.job_kind == "engineering.repo-repair.v1",
+                        # Keep the BEGIN IMMEDIATE section bounded to the
+                        # repair resource.  The Python pass below still
+                        # validates the canonical JSON claim exactly.
+                        WorkflowRunState.resource_claims_json.contains("repo-repair-execution"),
+                        WorkflowRunState.checkpoint_receipts_json.contains(
+                            "repo_repair_execution_reservation"
+                        ),
+                    )
+                )
+            ).scalars().all()
+            for other in rows:
+                if not self._repo_repair_claimed(other):
+                    continue
+                other_reservation = self._repo_repair_reservation_state(other)
+                if isinstance(other_reservation, Mapping) and _text(other_reservation.get("status")) == "held":
+                    raise DurableJobAdmissionDenied(
+                        "repo_repair_execution_busy",
+                        goal_id=_text(getattr(run, "goal_id", None)) or None,
+                    )
+
+            payload = {
+                "kind": "repo_repair_execution_reservation",
+                "status": "held",
+                "job_id": job_id,
+                "attempt_id": attempt_id,
+                "fence": fencing_token,
+                "authority_digest": authority_digest,
+                "execution_deadline_at": execution_deadline_at,
+                "operator_visible": True,
+                "recorded_at": _utc_now().isoformat(),
+            }
+            existing = _json_load(run.checkpoint_receipts_json, [])
+            existing = [
+                item
+                for item in existing
+                if isinstance(item, Mapping)
+                and _text(item.get("checkpoint_id")) != "repo-repair-execution-reservation"
+            ]
+            receipt = {
+                "checkpoint_id": "repo-repair-execution-reservation",
+                "state_digest": _digest(payload),
+                "state_keys": sorted(payload),
+                "safe": True,
+                "recorded_at": _utc_now().isoformat(),
+                "fence": fencing_token,
+                "payload": _safe_structure(payload),
+            }
+            existing.append(receipt)
+            now = _utc_now()
+            updated = await db.execute(
+                update(WorkflowRunState)
+                .execution_options(synchronize_session=False)
+                .where(
+                    WorkflowRunState.run_identity == job_id,
+                    WorkflowRunState.status == "running",
+                    WorkflowRunState.revision == current_revision,
+                    WorkflowRunState.fencing_token == fencing_token,
+                    WorkflowRunState.lease_owner == owner,
+                    WorkflowRunState.lease_expires_at > now,
+                )
+                .values(
+                    checkpoint_receipts_json=_canonical(_bounded_checkpoint_receipts(existing)),
+                    updated_at=now,
+                    heartbeat_at=now,
+                    revision=WorkflowRunState.revision + 1,
+                )
+            )
+            if not _rowcount_is_one(updated):
+                raise DurableJobLeaseError("repository repair reservation fence is stale")
+            refreshed = await self._fetch(db, job_id)
+            db.expunge(refreshed)
+            return _serialize(
+                refreshed,
+                receipt={
+                    "kind": "repo_repair_execution_reservation",
+                    "status": "held",
+                    "job_id": job_id,
+                    "attempt_id": attempt_id,
+                    "fence": fencing_token,
+                    "authority_digest": authority_digest,
+                    "execution_deadline_at": execution_deadline_at,
+                    "operator_visible": True,
+                },
+            )
+
+    async def settle_repo_repair_execution(
+        self,
+        job_id: str,
+        *,
+        attempt_id: str,
+        fencing_token: int,
+        authority_digest: str,
+        cleanup_proven: bool,
+        readback_verified: bool,
+        outcome_status: str,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        """Publish reservation release only after exact cleanup/readback proof."""
+
+        if not cleanup_proven or not readback_verified:
+            raise DurableJobTransitionError("repository repair cleanup/readback is not proven")
+        if outcome_status not in {"succeeded", "degraded", "failed", "cancelled"}:
+            raise DurableJobTransitionError("repository repair outcome is not terminal")
+        try:
+            fencing_token = int(fencing_token)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise DurableJobLeaseError("repository repair release fence is malformed") from exc
+        job_id = _text(job_id)
+        attempt_id = _text(attempt_id)
+        authority_digest = _text(authority_digest)
+        async with self._session() as db:
+            bind = db.get_bind()
+            if getattr(getattr(bind, "dialect", None), "name", "") == "sqlite":
+                await db.execute(text("BEGIN IMMEDIATE"))
+            run = await self._fetch(db, job_id)
+            if run.status not in {"succeeded", "degraded", "failed", "cancelled"}:
+                raise DurableJobTransitionError("repository repair job is not terminally published")
+            current_revision = _revision(run)
+            if expected_revision is not None and int(expected_revision) != current_revision:
+                raise DurableJobLeaseError("durable job revision is stale")
+            current = self._repo_repair_reservation_state(run)
+            if current is None:
+                raise DurableJobTransitionError("repository repair reservation is missing")
+            if not self._repo_repair_reservation_matches(
+                current,
+                job_id=job_id,
+                attempt_id=attempt_id,
+                fence=fencing_token,
+                authority_digest=authority_digest,
+            ):
+                raise DurableJobLeaseError("repository repair reservation identity changed")
+            if _text(current.get("status")) == "released":
+                db.expunge(run)
+                return _serialize(
+                    run,
+                    receipt={
+                        "kind": "repo_repair_execution_release",
+                        "status": "deduped",
+                        "job_id": job_id,
+                        "attempt_id": attempt_id,
+                        "fence": fencing_token,
+                        "operator_visible": True,
+                    },
+                )
+            payload = {
+                "kind": "repo_repair_execution_reservation",
+                "status": "released",
+                "job_id": job_id,
+                "attempt_id": attempt_id,
+                "fence": fencing_token,
+                "authority_digest": authority_digest,
+                "execution_deadline_at": current.get("execution_deadline_at"),
+                "outcome_status": outcome_status,
+                "cleanup_proven": True,
+                "readback_verified": True,
+                "operator_visible": True,
+                "recorded_at": _utc_now().isoformat(),
+            }
+            existing = _json_load(run.checkpoint_receipts_json, [])
+            existing = [
+                item
+                for item in existing
+                if isinstance(item, Mapping)
+                and _text(item.get("checkpoint_id")) != "repo-repair-execution-release"
+            ]
+            existing.append(
+                {
+                    "checkpoint_id": "repo-repair-execution-release",
+                    "state_digest": _digest(payload),
+                    "state_keys": sorted(payload),
+                    "safe": True,
+                    "recorded_at": _utc_now().isoformat(),
+                    "fence": fencing_token,
+                    "payload": _safe_structure(payload),
+                }
+            )
+            now = _utc_now()
+            updated = await db.execute(
+                update(WorkflowRunState)
+                .execution_options(synchronize_session=False)
+                .where(
+                    WorkflowRunState.run_identity == job_id,
+                    WorkflowRunState.revision == current_revision,
+                    WorkflowRunState.fencing_token == fencing_token,
+                    WorkflowRunState.status.in_(("succeeded", "degraded", "failed", "cancelled")),
+                )
+                .values(
+                    checkpoint_receipts_json=_canonical(_bounded_checkpoint_receipts(existing)),
+                    updated_at=now,
+                    revision=WorkflowRunState.revision + 1,
+                )
+            )
+            if not _rowcount_is_one(updated):
+                raise DurableJobLeaseError("repository repair release fence is stale")
+            refreshed = await self._fetch(db, job_id)
+            db.expunge(refreshed)
+            return _serialize(
+                refreshed,
+                receipt={
+                    "kind": "repo_repair_execution_release",
+                    "status": "released",
+                    "job_id": job_id,
+                    "attempt_id": attempt_id,
+                    "fence": fencing_token,
+                    "operator_visible": True,
+                },
+            )
 
     async def adopt_routine_publication_child(
         self,
@@ -4441,7 +4905,7 @@ class DurableJobRepository:
                 }
                 updated = [item for item in history if item.get("checkpoint_id") != checkpoint_id]
                 updated.append(receipt)
-                return _canonical(updated[-50:])
+                return _canonical(_bounded_checkpoint_receipts(updated))
 
             child_checkpoints_json = append_checkpoint(
                 child.checkpoint_receipts_json,
@@ -4592,6 +5056,11 @@ class DurableJobRepository:
                 "recovery_owner_kind": owner_kind,
                 "recovery_owner_principal_id": owner_principal_id,
             }
+            # The same fail-closed rule applies to owner-bound recovery
+            # checkpoints.  Non-repair rows retain their legacy tolerant
+            # history handling below.
+            if self._repo_repair_claimed(run):
+                self._repo_repair_reservation_state(run)
             existing = _json_load(run.checkpoint_receipts_json, [])
             existing = [
                 item
@@ -4613,7 +5082,7 @@ class DurableJobRepository:
                 .execution_options(synchronize_session=False)
                 .where(*conditions)
                 .values(
-                    checkpoint_receipts_json=_canonical(existing[-50:]),
+                    checkpoint_receipts_json=_canonical(_bounded_checkpoint_receipts(existing)),
                     updated_at=now,
                     heartbeat_at=now,
                     revision=WorkflowRunState.revision + 1,

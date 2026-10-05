@@ -30,6 +30,12 @@ const ROLE_LABELS: Record<string, string> = {
   clarification: "Clarify",
 };
 
+const MAX_PERMISSION_BYTES = 128;
+
+function boundedPermissions(value: string[] | undefined): string[] {
+  return value?.filter((item) => typeof item === "string" && item.trim().length > 0 && item.length <= MAX_PERMISSION_BYTES && !item.includes("\u0000")) ?? [];
+}
+
 export function MessageBubble({ message }: MessageBubbleProps) {
   const [approvalStatus, setApprovalStatus] = useState(message.approvalStatus ?? "pending");
   const [submitting, setSubmitting] = useState(false);
@@ -38,6 +44,9 @@ export function MessageBubble({ message }: MessageBubbleProps) {
   const isStep = message.role === "step";
   const isApproval = message.role === "approval";
   const isClarification = message.role === "clarification";
+  const localHostExecution = message.localHostExecutionRequired === true
+    || message.requiredPermissions?.includes("local_host_execution") === true;
+  const permissionScope = boundedPermissions(message.requiredPermissions);
 
   const handleApproval = async (decision: "approve" | "deny") => {
     if (!message.approvalId || submitting || approvalStatus !== "pending") return;
@@ -107,7 +116,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
                 disabled={submitting}
                 className="text-[10px] px-2 py-1 border border-green-400 text-green-300 rounded-sm hover:bg-green-400/10 disabled:opacity-50"
               >
-                Approve
+                {localHostExecution ? "Approve local tests on this host" : "Approve"}
               </button>
               <button
                 onClick={() => handleApproval("deny")}
@@ -124,6 +133,16 @@ export function MessageBubble({ message }: MessageBubbleProps) {
               {approvalStatus === "denied" && "Denied."}
             </div>
           )}
+        </div>
+      )}
+      {isApproval && permissionScope.length > 0 && (
+        <div className="mt-2 text-[10px] text-retro-text/70" aria-label="Approval permission scope">
+          Permission scope: {permissionScope.join(" · ")}
+        </div>
+      )}
+      {isApproval && localHostExecution && (
+        <div className="mt-2 text-[10px] text-yellow-200" role="note">
+          Host permission: local tests run as the Seraph user with filesystem, network, and host resource access. No isolation guarantee is provided.
         </div>
       )}
     </div>

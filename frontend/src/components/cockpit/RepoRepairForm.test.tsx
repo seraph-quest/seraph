@@ -104,7 +104,7 @@ describe("RepoRepairForm", () => {
       goal_id: "goal-1",
       goal_revision: 3,
       idempotency_key: expect.stringMatching(/^repo-repair-input:/),
-    });
+  });
     expect(artifactBody.input).toEqual({
       repository_path: "repos/seraph",
       problem_statement: "Describe the bounded repository failure and the smallest safe repair.",
@@ -251,5 +251,45 @@ describe("RepoRepairForm", () => {
     view.rerender(<RepoRepairForm goals={[goal]} ownerPrincipalId="operator:one" ownerSessionId="operator-session-2" onCreated={vi.fn()} onClose={vi.fn()} />);
     await waitFor(() => expect(screen.getByLabelText("Repair problem statement")).toHaveValue("Describe the bounded repository failure and the smallest safe repair."));
     expect(screen.getByRole("alert")).toHaveTextContent("authenticated owner session changed");
+    });
+
+  it("shows the server-owned executor receipt without accepting executor authority in the task form", async () => {
+    const metadata = {
+      executor_kind: "local",
+      executor_profile: "local:repo-python-pytest-v1",
+      executor_posture: {
+        kind: "local",
+        profile: "repo-python-pytest-v1",
+        isolation_claim: "none",
+        network_isolation: "not_verified",
+        resource_enforcement: "admission_and_wall_timeout_only",
+        host_access: "explicit_job_approval_required",
+        image_digest: null,
+        limits_digest: "a".repeat(64),
+      },
+      executor_posture_digest: "9cc8184ce2062898d42e10984571c18ccc2d5892db5269a4c10aec27d00ba522",
+      local_host_approval_required: true,
+      preparation_ready: true,
+      execution_ready: false,
+      preflight: { ok: true, status: "ready", reason: "local_staging_available" },
+    };
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/settings/repo-sandbox")) return Promise.resolve(response(metadata));
+      if (url.endsWith("/input-artifacts")) return Promise.resolve(response(artifact));
+      if (url.endsWith("/tasks")) return Promise.resolve(response({ task: task(), idempotent_replay: false }));
+      return Promise.resolve(response({}));
+    });
+
+    const onCreated = vi.fn();
+    render(<RepoRepairForm goals={[goal]} ownerPrincipalId="operator:one" ownerSessionId="operator-session-1" onCreated={onCreated} onClose={vi.fn()} />);
+    expect(await screen.findByText("local:repo-python-pytest-v1")).toBeInTheDocument();
+    expect(screen.getByText(/this form has no authority to grant it/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/execution backend/i)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Create repository repair task" }));
+    await waitFor(() => expect(onCreated).toHaveBeenCalled());
+    const posts = postCalls(fetchMock);
+    expect(posts).toHaveLength(2);
+    expect(String(posts[1]?.[1]?.body)).not.toContain("executor_kind");
   });
 });

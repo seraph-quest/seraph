@@ -3,7 +3,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
 import type {
+  RepoRepairExecutorKind,
   WorkBoardRepoRepairProjection,
+  WorkBoardRepoRepairExecutorPosture,
   WorkBoardRepoRepairSourcePreview,
 } from "../../types";
 
@@ -60,6 +62,202 @@ const SOURCE_PREVIEW_MAX_OUTPUT_TOKENS = 4096;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+const REPO_REPAIR_EXECUTOR_KINDS: RepoRepairExecutorKind[] = ["local", "docker_rootless", "docker_rootful"];
+const REPO_SANDBOX_PROFILE = "repo-python-pytest-v1";
+const LOCAL_HOST_ACCESS = "explicit_job_approval_required";
+
+const POSTURE_VALUES: Record<RepoRepairExecutorKind, {
+  isolation: string[];
+  network: string[];
+  resources: string[];
+}> = {
+  local: {
+    isolation: ["none"],
+    network: ["not_verified"],
+    resources: ["admission_and_wall_timeout_only"],
+  },
+  docker_rootless: {
+    isolation: ["rootless_container", "unverified"],
+    network: ["none", "unverified"],
+    resources: ["verified_fixed_limits", "unverified"],
+  },
+  docker_rootful: {
+    isolation: ["rootful_container", "unverified"],
+    network: ["none", "unverified"],
+    resources: ["verified_fixed_limits", "unverified"],
+  },
+};
+
+function boundedMetadataString(value: unknown, fallback: string, maxBytes = 512): string {
+  return typeof value === "string" && value.length <= maxBytes && !value.includes("\u0000") ? value : fallback;
+}
+
+function isSafeDigest(value: unknown): value is string | null | undefined {
+  return value === undefined || value === null || (typeof value === "string" && /^[0-9a-f]{64}$/.test(value));
+}
+
+const MAX_PERMISSION_BYTES = 128;
+
+function isBoundedPermission(value: unknown): value is string {
+  return typeof value === "string"
+    && value.trim().length > 0
+    && value.length <= MAX_PERMISSION_BYTES
+    && !value.includes("\u0000");
+}
+
+function normalizeExecutorMetadata(payload: Record<string, unknown>): Pick<
+  WorkBoardRepoRepairProjection,
+  "executor_kind" | "executor_profile" | "executor_posture" | "executor_posture_digest" | "required_permissions" | "local_host_execution_required" | "preparation_ready" | "execution_ready"
+> {
+  const explicitExecutorKind = payload.executor_kind !== undefined;
+  const kind = payload.executor_kind === undefined ? "docker_rootless" : payload.executor_kind;
+  if (!REPO_REPAIR_EXECUTOR_KINDS.includes(kind as RepoRepairExecutorKind)) {
+    throw new Error("The repair status response has an unsupported executor.");
+  }
+  const executorKind = kind as RepoRepairExecutorKind;
+  const rawPosture = payload.executor_posture;
+  if (rawPosture !== undefined && !isRecord(rawPosture)) {
+    throw new Error("The repair status response has malformed executor posture metadata.");
+  }
+  if (explicitExecutorKind && rawPosture === undefined) {
+    throw new Error("The repair status response is missing executor posture metadata.");
+  }
+  const posture = (rawPosture ?? {
+    kind: executorKind,
+    profile: REPO_SANDBOX_PROFILE,
+    isolation_claim: "unverified",
+    network_isolation: "unverified",
+    resource_enforcement: "unverified",
+    image_digest: null,
+    limits_digest: null,
+    local_host_execution_required: false,
+  }) as Record<string, unknown>;
+  if (explicitExecutorKind && ["kind", "profile", "isolation_claim", "network_isolation", "resource_enforcement", "limits_digest"].some((key) => !Object.prototype.hasOwnProperty.call(posture, key))) {
+    throw new Error("The repair status response has incomplete executor posture metadata.");
+  }
+  if (posture.kind !== undefined && posture.kind !== executorKind) {
+    throw new Error("The repair status response has mismatched executor posture metadata.");
+  }
+  if (posture.profile !== undefined && posture.profile !== REPO_SANDBOX_PROFILE) {
+    throw new Error("The repair status response has an unsupported executor profile.");
+  }
+  const imageDigest = posture.image_digest;
+  if (imageDigest !== undefined && imageDigest !== null && (typeof imageDigest !== "string" || imageDigest.length > 512 || imageDigest.includes("\u0000"))) {
+    throw new Error("The repair status response has malformed executor posture metadata.");
+  }
+  if (executorKind === "local" && imageDigest !== undefined && imageDigest !== null) {
+    throw new Error("The local executor cannot carry an image digest.");
+  }
+  const rawIsolation = posture.isolation_claim;
+  const rawNetwork = posture.network_isolation;
+  const rawResources = posture.resource_enforcement;
+  for (const item of [rawIsolation, rawNetwork, rawResources]) {
+    if (item !== undefined && (typeof item !== "string" || item.length > 128 || item.includes("\u0000"))) {
+      throw new Error("The repair status response has malformed executor posture metadata.");
+    }
+  }
+  if (rawIsolation !== undefined && !POSTURE_VALUES[executorKind].isolation.includes(rawIsolation as string)) {
+    throw new Error("The repair status response has contradictory isolation metadata.");
+  }
+  if (rawNetwork !== undefined && !POSTURE_VALUES[executorKind].network.includes(rawNetwork as string)) {
+    throw new Error("The repair status response has contradictory network metadata.");
+  }
+  if (rawResources !== undefined && !POSTURE_VALUES[executorKind].resources.includes(rawResources as string)) {
+    throw new Error("The repair status response has contradictory resource metadata.");
+  }
+  if (!isSafeDigest(posture.limits_digest)) {
+    throw new Error("The repair status response has malformed limits metadata.");
+  }
+  const hostAccess = posture.host_access;
+  if (hostAccess !== undefined && (!isBoundedPermission(hostAccess) || (executorKind !== "local" || hostAccess !== LOCAL_HOST_ACCESS))) {
+    throw new Error("The repair status response has contradictory host access metadata.");
+  }
+  const localHost = payload.local_host_execution_required ?? posture.local_host_execution_required;
+  const effectiveLocalHost = localHost === undefined && hostAccess === LOCAL_HOST_ACCESS ? true : localHost;
+  if (effectiveLocalHost !== undefined && typeof effectiveLocalHost !== "boolean") {
+    throw new Error("The repair status response has malformed host permission metadata.");
+  }
+  if (executorKind === "local" && effectiveLocalHost === false) {
+    throw new Error("The local executor cannot disable its host permission boundary.");
+  }
+  if (executorKind !== "local" && effectiveLocalHost === true) {
+    throw new Error("A Docker executor cannot claim local host permission.");
+  }
+  if (hostAccess === LOCAL_HOST_ACCESS && effectiveLocalHost !== true) {
+    throw new Error("The repair status response has contradictory host permission metadata.");
+  }
+  const permissions = payload.required_permissions;
+  if (permissions !== undefined && (!Array.isArray(permissions) || permissions.some((item) => !isBoundedPermission(item)))) {
+    throw new Error("The repair status response has malformed permission metadata.");
+  }
+  const postureValue: WorkBoardRepoRepairExecutorPosture = {
+    kind: executorKind,
+    profile: boundedMetadataString(posture.profile, REPO_SANDBOX_PROFILE),
+    isolation_claim: boundedMetadataString(posture.isolation_claim, executorKind === "local" ? "none" : "unverified"),
+    network_isolation: boundedMetadataString(posture.network_isolation, executorKind === "local" ? "not_verified" : "unverified"),
+    resource_enforcement: boundedMetadataString(posture.resource_enforcement, executorKind === "local" ? "admission_and_wall_timeout_only" : "unverified"),
+    image_digest: typeof imageDigest === "string" ? imageDigest : null,
+    limits_digest: typeof posture.limits_digest === "string" ? posture.limits_digest : null,
+    ...(hostAccess === undefined ? {} : { host_access: hostAccess }),
+    local_host_execution_required: effectiveLocalHost ?? executorKind === "local",
+  };
+  const optionalDigest = payload.executor_posture_digest;
+  if (explicitExecutorKind
+    ? (typeof optionalDigest !== "string" || !/^[0-9a-f]{64}$/.test(optionalDigest))
+    : !isSafeDigest(optionalDigest)) {
+    throw new Error("The repair status response has malformed posture digest metadata.");
+  }
+  const expectedExecutorProfile = `${executorKind}:${REPO_SANDBOX_PROFILE}`;
+  if (explicitExecutorKind && payload.executor_profile !== expectedExecutorProfile) {
+    throw new Error("The repair status response has an unsupported executor profile.");
+  }
+  if (!explicitExecutorKind && payload.executor_profile !== undefined && payload.executor_profile !== expectedExecutorProfile) {
+    throw new Error("The repair status response has an unsupported executor profile.");
+  }
+  const readiness = (name: "preparation_ready" | "execution_ready") => {
+    const value = payload[name];
+    if (value !== undefined && typeof value !== "boolean") throw new Error("The repair status response has malformed readiness metadata.");
+    return value as boolean | undefined;
+  };
+  const preparationReady = readiness("preparation_ready");
+  const executionReady = readiness("execution_ready");
+  if (explicitExecutorKind) {
+    if (typeof payload.local_host_execution_required !== "boolean"
+      || typeof preparationReady !== "boolean"
+      || typeof executionReady !== "boolean"
+      || !Array.isArray(permissions)
+      || !isRecord(payload.preflight)
+      || typeof payload.preflight.status !== "string") {
+      throw new Error("The repair status response is missing complete executor readiness metadata.");
+    }
+    if (typeof effectiveLocalHost !== "boolean"
+      || (payload.local_host_execution_required !== undefined && payload.local_host_execution_required !== effectiveLocalHost)
+      || postureValue.local_host_execution_required !== effectiveLocalHost) {
+      throw new Error("The repair status response has contradictory host permission metadata.");
+    }
+    if (executorKind === "local" && !permissions.includes("local_host_execution")) {
+      throw new Error("The local repair status is missing its required host permission.");
+    }
+    if (executorKind === "local" && executionReady === true) {
+      throw new Error("The local repair status cannot claim execution readiness without per-job approval.");
+    }
+  }
+  return {
+    executor_kind: executorKind,
+    executor_profile: typeof payload.executor_profile === "string"
+      ? payload.executor_profile
+      : expectedExecutorProfile,
+    executor_posture: postureValue,
+    executor_posture_digest: typeof optionalDigest === "string" ? optionalDigest : null,
+    required_permissions: Array.isArray(permissions) ? permissions as string[] : [],
+    local_host_execution_required: explicitExecutorKind
+      ? payload.local_host_execution_required as boolean
+      : typeof localHost === "boolean" ? localHost : executorKind === "local",
+    preparation_ready: preparationReady,
+    execution_ready: executionReady,
+  };
 }
 
 function utf8ByteLength(value: string): number {
@@ -296,7 +494,8 @@ export function RepoRepairInspector({
       throw new Error("The repair status response changed operator ownership.");
     }
     ownerBindingRef.current = binding;
-    return next as WorkBoardRepoRepairProjection;
+    const executorMetadata = normalizeExecutorMetadata(next as Record<string, unknown>);
+    return { ...(next as WorkBoardRepoRepairProjection), ...executorMetadata };
   }
 
   async function readProjection(generation: number): Promise<WorkBoardRepoRepairProjection> {
@@ -627,6 +826,21 @@ export function RepoRepairInspector({
   const proposal = projectionForRender.proposal;
   const approval = projectionForRender.approval;
   const status = projectionForRender.status;
+  const executorKind = projectionForRender.executor_kind ?? projectionForRender.executor_posture?.kind ?? "docker_rootless";
+  const executorProfile = projectionForRender.executor_profile ?? `${executorKind}:repo-python-pytest-v1`;
+  const posture = projectionForRender.executor_posture ?? {
+    kind: executorKind,
+    profile: "repo-python-pytest-v1",
+    isolation_claim: executorKind === "local" ? "none" : "unverified",
+    network_isolation: executorKind === "local" ? "not_verified" : "unverified",
+    resource_enforcement: executorKind === "local" ? "admission_and_wall_timeout_only" : "unverified",
+    image_digest: null,
+    limits_digest: null,
+    local_host_execution_required: executorKind === "local",
+  };
+  const localHostExecution = executorKind === "local" || projectionForRender.local_host_execution_required === true;
+  const preparationReady = projectionForRender.preparation_ready ?? projectionForRender.preflight?.status === "verified";
+  const executionReady = projectionForRender.execution_ready ?? (Boolean(preparationReady) && !localHostExecution);
   const canConsent = Boolean(packet && sourcePreviewForRender && !projectionForRender.egress);
   const canResume = Boolean(
     proposal
@@ -647,7 +861,11 @@ export function RepoRepairInspector({
       </div>
       <div className="mt-2 grid gap-1 text-[11px]">
         <div>Root <span className="font-mono break-all">{projectionForRender.job_id}</span> · authority <span className="font-mono">{safeDigest(projectionForRender.authority_digest)}</span></div>
+        <div>Executor: <span className="font-mono">{executorProfile}</span> · posture <span className="font-mono">{safeDigest(projectionForRender.executor_posture_digest)}</span></div>
         <div>Preflight: {projectionForRender.preflight?.status === "verified" ? "verified" : `blocked or unknown${projectionForRender.preflight && typeof projectionForRender.preflight.reason === "string" ? ` · ${projectionForRender.preflight.reason}` : ""}`}</div>
+        <div>Preparation: {preparationReady ? "ready" : "blocked"} · execution: {executionReady ? "ready" : localHostExecution && preparationReady ? "awaiting exact host approval" : "blocked"}</div>
+        <div>Posture: isolation {posture.isolation_claim ?? "unknown"} · network {posture.network_isolation ?? "unknown"} · resources {posture.resource_enforcement ?? "unknown"}</div>
+        {localHostExecution && <div className="text-amber-200">Trusted host execution: no isolation guarantee. This job may access the host filesystem and network as the Seraph user after the exact approval.</div>}
         <div>Memory: {projectionForRender.memory_status} · provider contact: {projectionForRender.execution.provider_contacted ? "recorded" : "not recorded"}</div>
       </div>
 
@@ -688,8 +906,9 @@ export function RepoRepairInspector({
           <div className="flex items-center justify-between gap-2"><div className="font-semibold">Reviewed repair proposal</div><span>{statusLabel(proposal.status)} · revision {proposal.revision}</span></div>
           <div className="mt-1">Patch digest <span className="font-mono">{safeDigest(proposal.patch_sha256)}</span> · model profile {proposal.model_profile_id}</div>
           {approval && <div className="mt-1">Exact approval <span className="font-mono break-all">{approval.approval_id}</span> · {statusLabel(approval.status)}{approval.expires_at ? ` · expires ${new Date(approval.expires_at).toLocaleString()}` : ""}</div>}
+          {localHostExecution && <div className="mt-1 text-amber-200">Host permission required: local filesystem and network access, host-user resource consumption, and bounded process execution are visible in the exact approval.</div>}
           <div className="mt-2 flex flex-wrap gap-2">
-            {approval?.status === "pending" && onOpenApprovals && <button type="button" className="cockpit-feedback-button" onClick={onOpenApprovals}>Review exact approval</button>}
+            {approval?.status === "pending" && onOpenApprovals && <button type="button" className="cockpit-feedback-button" onClick={onOpenApprovals}>{localHostExecution ? "Approve local tests on this host" : "Review exact approval"}</button>}
             {approval?.status === "approved" && canResume && <button type="button" className="cockpit-feedback-button" onClick={() => void resumeApprovedProposal()} disabled={busy}>Resume approved repair</button>}
             {approval?.status === "denied" && <span className="text-amber-200">Approval denied. Prepare a fresh review after checking the current source and goal.</span>}
           </div>

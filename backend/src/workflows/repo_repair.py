@@ -49,6 +49,8 @@ from src.goals.repository import deserialize_admission_budget
 from src.execution.repo_sandbox import (
     RepoSandboxError,
     RootlessDockerRepoSandbox,
+    build_repo_repair_executor,
+    executor_posture_digest,
     _patch_paths_from_diff,
     _worker_test_args,
     limits_digest,
@@ -463,7 +465,50 @@ def _mapping_value(value: Any, key: str, default: Any = None) -> Any:
     return getattr(value, key, default)
 
 
-def _sandbox_authority_payload(sandbox: RootlessDockerRepoSandbox) -> dict[str, str]:
+_REPO_REPAIR_EXECUTOR_KINDS = frozenset({"local", "docker_rootless", "docker_rootful"})
+
+
+def _executor_kind(sandbox: Any) -> str:
+    # An explicitly injected historical RootlessDockerRepoSandbox is a test
+    # and compatibility seam.  Its config may be the new local-default model,
+    # but the class itself still means the legacy rootless executor.
+    if type(sandbox) is RootlessDockerRepoSandbox:
+        kind = "docker_rootless"
+    else:
+        kind = str(
+            getattr(sandbox, "kind", None)
+            or getattr(getattr(sandbox, "config", None), "executor_kind", None)
+            or "docker_rootless"
+        )
+    if kind not in _REPO_REPAIR_EXECUTOR_KINDS:
+        raise RepoRepairError("executor_kind_invalid", "The repository executor selector is invalid", status_code=409)
+    return kind
+
+
+def _executor_profile(sandbox: Any) -> str:
+    profile = str(getattr(getattr(sandbox, "config", None), "profile", "repo-python-pytest-v1") or "")
+    if profile != "repo-python-pytest-v1":
+        raise RepoRepairError("executor_profile_invalid", "The repository executor profile is invalid", status_code=409)
+    return profile
+
+
+def _executor_preflight(sandbox: Any) -> Any:
+    """Call either the additive executor seam or the legacy rootless seam."""
+
+    try:
+        return sandbox.preflight()
+    except TypeError:
+        # A future executor may require the authority mapping.  Callers that
+        # need that stronger binding should use ``preflight(authority)``; the
+        # current repair preparation has no public caller-controlled authority
+        # and the legacy class intentionally accepts no argument.
+        return sandbox.preflight({})
+
+
+def _sandbox_authority_payload(
+    sandbox: Any,
+    preflight: Any | None = None,
+) -> dict[str, Any]:
     """Return the fixed sandbox selectors bound to a reviewed proposal.
 
     The socket itself is an operator-owned local route and is therefore kept
@@ -473,15 +518,62 @@ def _sandbox_authority_payload(sandbox: RootlessDockerRepoSandbox) -> dict[str, 
     consumed by the trusted runner.
     """
 
+    kind = _executor_kind(sandbox)
+    profile = _executor_profile(sandbox)
+    config = getattr(sandbox, "config", None)
+    image_digest = str(getattr(config, "worker_image_digest", "") or "")
+    socket_digest = _digest_bytes(str(getattr(config, "docker_socket", "") or "").encode("utf-8"))
+    limits = getattr(sandbox, "limits", None)
+    if limits is None:
+        raise RepoRepairError("executor_limits_unavailable", "The repository executor limits are unavailable", status_code=409)
+    limits_hash = limits_digest(limits)
+    receipt: Mapping[str, Any] = {}
+    if preflight is not None:
+        try:
+            candidate = preflight.as_receipt() if hasattr(preflight, "as_receipt") else preflight
+        except Exception:
+            candidate = {}
+        if isinstance(candidate, Mapping):
+            receipt = candidate
+    posture = receipt.get("posture") if isinstance(receipt.get("posture"), Mapping) else None
+    if posture is None:
+        if kind == "local":
+            posture = {
+                "kind": "local",
+                "profile": profile,
+                "isolation_claim": "none",
+                "network_isolation": "not_verified",
+                "resource_enforcement": "admission_and_wall_timeout_only",
+                "host_access": "explicit_job_approval_required",
+                "limits_digest": limits_hash,
+            }
+        else:
+            posture = {
+                "kind": kind,
+                "profile": profile,
+                "rootless": kind == "docker_rootless",
+                "limits_digest": limits_hash,
+                "image_digest": image_digest,
+                "network": "none",
+                "resource_controllers": "verified",
+            }
+    posture = dict(posture)
+    posture_hash = str(receipt.get("posture_digest") or "") or executor_posture_digest(posture)
     return {
-        "sandbox_profile": str(sandbox.config.profile),
-        "sandbox_image_digest": str(sandbox.config.worker_image_digest),
-        "sandbox_limits_digest": limits_digest(sandbox.limits),
-        "sandbox_socket_digest": _digest_bytes(str(sandbox.config.docker_socket).encode("utf-8")),
+        "sandbox_profile": profile,
+        "sandbox_image_digest": image_digest,
+        "sandbox_limits_digest": limits_hash,
+        "sandbox_socket_digest": socket_digest,
+        "executor_kind": kind,
+        "executor_profile": f"{kind}:{profile}",
+        "executor_posture": posture,
+        "executor_posture_digest": posture_hash,
+        "required_permissions": ["local_host_execution"] if kind == "local" else [],
+        "local_host_execution_required": kind == "local",
     }
 
 
-def _proposal_sandbox_authority(row: RepoRepairProposalRow) -> dict[str, str]:
+def _proposal_sandbox_authority(row: RepoRepairProposalRow) -> dict[str, Any]:
     """Read the reviewed sandbox selectors from the bounded metadata JSON."""
 
     try:
@@ -491,7 +583,7 @@ def _proposal_sandbox_authority(row: RepoRepairProposalRow) -> dict[str, str]:
     sandbox = metadata.get("sandbox") if isinstance(metadata, Mapping) else None
     if not isinstance(sandbox, Mapping):
         return {}
-    return {
+    result: dict[str, Any] = {
         key: str(sandbox.get(key) or "")
         for key in (
             "sandbox_profile",
@@ -500,6 +592,22 @@ def _proposal_sandbox_authority(row: RepoRepairProposalRow) -> dict[str, str]:
             "sandbox_socket_digest",
         )
     }
+    # These fields were added for M4.  Preserve the old four-key authority
+    # projection for legacy rows so their stored digest remains replayable.
+    for key in (
+        "executor_kind",
+        "executor_profile",
+        "executor_posture_digest",
+    ):
+        if key in sandbox:
+            result[key] = str(sandbox.get(key) or "")
+    if "executor_posture" in sandbox and isinstance(sandbox.get("executor_posture"), Mapping):
+        result["executor_posture"] = dict(sandbox["executor_posture"])
+    if "required_permissions" in sandbox and isinstance(sandbox.get("required_permissions"), list):
+        result["required_permissions"] = [str(item) for item in sandbox["required_permissions"]]
+    if "local_host_execution_required" in sandbox:
+        result["local_host_execution_required"] = bool(sandbox.get("local_host_execution_required"))
+    return result
 
 
 def _proposal_authority_payload(row: RepoRepairProposalRow) -> dict[str, Any]:
@@ -571,14 +679,17 @@ class RepoRepairService:
     def __init__(
         self,
         *,
-        sandbox: RootlessDockerRepoSandbox | None = None,
+        sandbox: Any | None = None,
         model_factory: Callable[..., Any] | None = None,
         secret_scanner: Callable[[str], Awaitable[str]] | None = None,
         session_factory: Callable[[], Any] | None = None,
         workspace_dir: str | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
-        self.sandbox = sandbox or RootlessDockerRepoSandbox()
+        # The factory is the only production selector.  Tests and the legacy
+        # engineering.repo-change path may still inject the strict rootless
+        # adapter explicitly; an injected adapter is never re-selected here.
+        self.sandbox = sandbox or build_repo_repair_executor()
         self.model_factory = model_factory or (lambda **kwargs: FallbackLiteLLMModel(**kwargs))
         self.secret_scanner = secret_scanner or (lambda value: redact_secrets_in_text(value, fail_closed=True))
         self.session_factory = session_factory or get_session
@@ -2168,6 +2279,56 @@ class RepoRepairService:
                     "The source packet publication identity changed",
                     status_code=409,
                 )
+            source_checkpoint_id = f"repo-repair-source:{run_id}"
+
+            async def _ensure_verified_source_checkpoint() -> None:
+                """Record or validate the committed packet's durable receipt."""
+
+                existing_checkpoint = await self._latest_checkpoint_payload(
+                    job_id=run_id,
+                    checkpoint_id=source_checkpoint_id,
+                )
+                if existing_checkpoint is not None:
+                    if (
+                        existing_checkpoint.get("kind") != "repo_repair_source_packet"
+                        or str(existing_checkpoint.get("workflow_run_id")) != run_id
+                        or str(existing_checkpoint.get("packet_id")) != packet_id
+                        or str(existing_checkpoint.get("artifact_ref")) != packet_artifact_ref
+                        or str(existing_checkpoint.get("artifact_sha256")) != packet_artifact_digest
+                        or str(existing_checkpoint.get("input_digest")) != digest
+                        or str(existing_checkpoint.get("source_manifest_digest")) != source_manifest_digest
+                    ):
+                        raise RepoRepairError(
+                            "repair_source_recovery_required",
+                            "The verified source packet checkpoint is bound to different publication",
+                            status_code=409,
+                        )
+                    return
+                await self._record_checkpoint(
+                    job_id=run_id,
+                    checkpoint_id=source_checkpoint_id,
+                    state={
+                        "kind": "repo_repair_source_packet",
+                        "status": "row_flushed",
+                        "packet_id": packet_id,
+                        "artifact_sha256": packet_artifact_digest,
+                    },
+                    payload={
+                        "kind": "repo_repair_source_packet",
+                        "workflow_run_id": run_id,
+                        "attempt_id": attempt_id,
+                        "lease_owner": packet_lease_owner,
+                        "lease_fence": packet_fence,
+                        "packet_id": packet_id,
+                        "artifact_ref": packet_artifact_ref,
+                        "artifact_sha256": packet_artifact_digest,
+                        "input_digest": digest,
+                        "source_manifest_digest": source_manifest_digest,
+                        "learning": "no_learning",
+                    },
+                    owner=packet_lease_owner,
+                    fencing_token=packet_fence,
+                )
         async with self._db(db) as session:
             existing = (
                 await session.execute(
@@ -2185,6 +2346,7 @@ class RepoRepairService:
                     or existing.source_manifest_digest != source_manifest_digest
                 ):
                     raise RepoRepairError("source_packet_binding_conflict", "The repair source packet binding changed", status_code=409)
+                await _ensure_verified_source_checkpoint()
                 return self._packet_result(existing)
             row = RepoRepairSourcePacketRow(
                 id=packet_id,
@@ -2219,31 +2381,17 @@ class RepoRepairService:
                     "The source packet row publication outcome is unknown; reconcile the exact private artifact",
                     status_code=503,
                 ) from exc
-            await self._record_checkpoint(
-                job_id=run_id,
-                checkpoint_id=f"repo-repair-source:{run_id}",
-                state={
-                    "kind": "repo_repair_source_packet",
-                    "status": "row_flushed",
-                    "packet_id": packet_id,
-                    "artifact_sha256": artifact_sha256,
-                },
-                payload={
-                    "kind": "repo_repair_source_packet",
-                    "workflow_run_id": run_id,
-                    "attempt_id": attempt_id,
-                    "lease_owner": packet_lease_owner,
-                    "lease_fence": packet_fence,
-                    "packet_id": packet_id,
-                    "artifact_ref": artifact_ref,
-                    "artifact_sha256": artifact_sha256,
-                    "input_digest": digest,
-                    "source_manifest_digest": source_manifest_digest,
-                    "learning": "no_learning",
-                },
-                owner=packet_lease_owner,
-                fencing_token=packet_fence,
-            )
+            # The durable checkpoint repository deliberately uses its own
+            # session.  Commit the verified source-packet row before opening
+            # that writer so SQLite does not hold this transaction's write
+            # lock across two independent sessions.  The immutable packet
+            # identity, private artifact, and publication-pending checkpoint
+            # were established before this boundary; if checkpoint recording
+            # fails after the commit, the exact row/artifact pair is
+            # recoverable by the existing idempotent lookup rather than being
+            # rolled back into an unbound private file.
+            await session.commit()
+            await _ensure_verified_source_checkpoint()
             return self._packet_result(row)
 
     @staticmethod
@@ -2509,6 +2657,74 @@ class RepoRepairService:
         ]
         prompt_digest = canonical_digest(messages)
         operation_key = f"repo-repair-proposal:{principal_job_id}"
+
+        async def _ensure_proposal_checkpoint(
+            *,
+            proposal_id: str,
+            response_digest: str,
+            patch_artifact_ref: str,
+            patch_sha256: str,
+            authority_digest: str,
+            request_digest: str,
+        ) -> None:
+            """Record or validate the committed proposal's patch receipt."""
+
+            checkpoint_id = f"repo-repair-patch:{principal_job_id}"
+            existing_checkpoint = await self._latest_checkpoint_payload(
+                job_id=principal_job_id,
+                checkpoint_id=checkpoint_id,
+            )
+            if existing_checkpoint is not None:
+                if (
+                    existing_checkpoint.get("kind") != "repo_repair_patch"
+                    or str(existing_checkpoint.get("workflow_run_id")) != principal_job_id
+                    or str(existing_checkpoint.get("response_digest")) != response_digest
+                    or str(existing_checkpoint.get("patch_artifact_ref")) != patch_artifact_ref
+                    or str(existing_checkpoint.get("patch_sha256")) != patch_sha256
+                    or str(existing_checkpoint.get("authority_digest")) != authority_digest
+                    or str(existing_checkpoint.get("request_digest")) != request_digest
+                ):
+                    raise RepoRepairError(
+                        "repair_patch_recovery_required",
+                        "The repair patch checkpoint is bound to different proposal evidence",
+                        status_code=409,
+                    )
+                if str(existing_checkpoint.get("proposal_id")) == proposal_id:
+                    return
+                # A prior proposal row may have been durably removed after
+                # this exact immutable patch receipt was written.  The
+                # operation key and all evidence digests still bind the
+                # replacement row; rewrite only the metadata receipt to the
+                # current row identity rather than contacting the model.
+            await self._record_checkpoint(
+                job_id=principal_job_id,
+                checkpoint_id=checkpoint_id,
+                state={
+                    "kind": "repo_repair_patch",
+                    "status": "row_flushed",
+                    "proposal_id": proposal_id,
+                    "patch_sha256": patch_sha256,
+                    "authority_digest": authority_digest,
+                },
+                payload={
+                    "kind": "repo_repair_patch",
+                    "workflow_run_id": principal_job_id,
+                    "attempt_id": packet.work_board_attempt_id,
+                    "lease_owner": lease_owner,
+                    "lease_fence": int(fencing_token),
+                    "proposal_id": proposal_id,
+                    "source_packet_id": packet.packet_id,
+                    "response_digest": response_digest,
+                    "patch_artifact_ref": patch_artifact_ref,
+                    "patch_sha256": patch_sha256,
+                    "authority_digest": authority_digest,
+                    "request_digest": request_digest,
+                    "learning": "no_learning",
+                },
+                owner=lease_owner,
+                fencing_token=int(fencing_token),
+            )
+
         # Reconcile a completed proposal before contacting the model.  The
         # durable job/broker owns remote-intent recovery; this local guard
         # prevents a repeated service call from creating a second proposal or
@@ -2532,6 +2748,14 @@ class RepoRepairService:
                 ):
                     raise RepoRepairError("proposal_idempotency_conflict", "The repair proposal key is bound to different model evidence", status_code=409)
                 if existing.status in {"awaiting_approval", "approved", "consumed"}:
+                    await _ensure_proposal_checkpoint(
+                        proposal_id=str(existing.proposal_id),
+                        response_digest=str(existing.model_output_digest),
+                        patch_artifact_ref=f"workspace-json:{existing.patch_artifact_id}",
+                        patch_sha256=str(existing.patch_sha256),
+                        authority_digest=str(existing.authority_digest),
+                        request_digest=str(existing.request_digest),
+                    )
                     return existing
                 raise RepoRepairError("proposal_not_replayable", "The repair proposal requires explicit reconciliation before another model call", status_code=409)
         recovered_response = await self._load_response_checkpoint(
@@ -2560,7 +2784,7 @@ class RepoRepairService:
         # responsibility.  Its receipt is tied to the same durable lease
         # before model construction or any provider contact is possible.
         try:
-            preflight = self.sandbox.preflight()
+            preflight = await asyncio.to_thread(_executor_preflight, self.sandbox)
             preflight_receipt = (
                 preflight.as_receipt()
                 if hasattr(preflight, "as_receipt")
@@ -2601,7 +2825,7 @@ class RepoRepairService:
                 f"The repository repair sandbox is blocked: {reason}",
                 status_code=409,
             )
-        sandbox_authority = _sandbox_authority_payload(self.sandbox)
+        sandbox_authority = _sandbox_authority_payload(self.sandbox, preflight)
         try:
             model_kwargs: dict[str, Any] = build_model_kwargs(
                 temperature=0.2,
@@ -2853,7 +3077,14 @@ class RepoRepairService:
             raise RepoRepairError("model_patch_invalid", "The model proposal is not a supported patch/test contract", status_code=409) from exc
         if not changed_paths.issubset(server_allowed) or tuple(normalized_tests) != tuple(_worker_test_args(tuple(intent.test_args), tuple(intent.allowed_paths))):
             raise RepoRepairError("model_patch_authority_changed", "The model changed the reviewed paths or tests", status_code=409)
-        patch_bytes = output.patch_unified_diff.encode("utf-8")
+        # Pydantic's bounded response model strips surrounding whitespace from
+        # strings.  A unified diff still needs its terminal newline for the
+        # native worker's strict ``git apply --check`` parser, so normalize the
+        # server-owned artifact before hashing and publishing it.
+        patch_text = output.patch_unified_diff
+        if not patch_text.endswith("\n"):
+            patch_text += "\n"
+        patch_bytes = patch_text.encode("utf-8")
         if b"GIT binary patch" in patch_bytes or b"Binary files" in patch_bytes or b"\x00" in patch_bytes:
             raise RepoRepairError("model_patch_binary_rejected", "The model proposal contains an unsupported binary patch", status_code=409)
         patch_digest = _digest_bytes(patch_bytes)
@@ -3038,33 +3269,20 @@ class RepoRepairService:
                     "The repair patch proposal row publication outcome is unknown; reconcile the exact private artifact",
                     status_code=503,
                 ) from exc
-            await self._record_checkpoint(
-                job_id=principal_job_id,
-                checkpoint_id=f"repo-repair-patch:{principal_job_id}",
-                state={
-                    "kind": "repo_repair_patch",
-                    "status": "row_flushed",
-                    "proposal_id": proposal.proposal_id,
-                    "patch_sha256": patch_digest,
-                    "authority_digest": authority_digest,
-                },
-                payload={
-                    "kind": "repo_repair_patch",
-                    "workflow_run_id": principal_job_id,
-                    "attempt_id": packet.work_board_attempt_id,
-                    "lease_owner": lease_owner,
-                    "lease_fence": int(fencing_token),
-                    "proposal_id": proposal.proposal_id,
-                    "source_packet_id": packet.packet_id,
-                    "response_digest": response_digest,
-                    "patch_artifact_ref": patch_ref,
-                    "patch_sha256": patch_digest,
-                    "authority_digest": authority_digest,
-                    "request_digest": request_digest,
-                    "learning": "no_learning",
-                },
-                owner=lease_owner,
-                fencing_token=int(fencing_token),
+            # As with source packets, the checkpoint repository uses another
+            # writer session.  Commit the immutable proposal row first so a
+            # pooled SQLite database cannot hold its write lock across that
+            # separate checkpoint transaction.  The response/patch intents
+            # and exact private artifacts make a post-commit checkpoint
+            # failure recoverable without another model request.
+            await session.commit()
+            await _ensure_proposal_checkpoint(
+                proposal_id=str(proposal.proposal_id),
+                response_digest=response_digest,
+                patch_artifact_ref=patch_ref,
+                patch_sha256=patch_digest,
+                authority_digest=authority_digest,
+                request_digest=request_digest,
             )
             return proposal
 
@@ -3209,12 +3427,64 @@ class RepoRepairService:
                     "The effective route no longer matches the proposal authority",
                     status_code=409,
                 )
+            # Re-select the server-owned executor from the immutable proposal
+            # metadata.  A legacy proposal has no selector and is deliberately
+            # replayed only on the historical rootless executor; it must never
+            # be rebound to the new local default after a restart.
+            try:
+                reviewed_sandbox = _proposal_sandbox_authority(row)
+                proposal_kind = str(reviewed_sandbox.get("executor_kind") or "docker_rootless")
+                try:
+                    injected_kind = _executor_kind(self.sandbox)
+                except RepoRepairError:
+                    injected_kind = ""
+                proposal_sandbox = None
+                if injected_kind == proposal_kind:
+                    proposal_sandbox = self.sandbox
+                if proposal_sandbox is None:
+                    proposal_sandbox = (
+                        build_repo_repair_executor()
+                        if "executor_kind" in reviewed_sandbox
+                        else RootlessDockerRepoSandbox()
+                    )
+            except Exception as exc:
+                raise RepoRepairError(
+                    "repo_sandbox_preflight_blocked",
+                    "The reviewed repository executor is unavailable",
+                    status_code=409,
+                ) from exc
+            try:
+                current_preflight = await asyncio.to_thread(_executor_preflight, proposal_sandbox)
+            except Exception as exc:
+                raise RepoRepairError(
+                    "repo_sandbox_preflight_blocked",
+                    "The reviewed repository executor preflight failed closed",
+                    status_code=409,
+                ) from exc
+            if not bool(getattr(current_preflight, "ok", False)):
+                raise RepoRepairError(
+                    "repo_sandbox_preflight_blocked",
+                    "The reviewed repository executor is not ready",
+                    status_code=409,
+                )
+            current_sandbox = _sandbox_authority_payload(proposal_sandbox, current_preflight)
+            # A pre-M4 proposal may contain no sandbox metadata at all.  It is
+            # intentionally replayed on the historical rootless executor; the
+            # absence of new posture fields is not itself a posture drift.
+            if reviewed_sandbox and any(
+                current_sandbox.get(key) != value for key, value in reviewed_sandbox.items()
+            ):
+                raise RepoRepairError(
+                    "repair_sandbox_authority_changed",
+                    "The reviewed repository executor posture changed",
+                    status_code=409,
+                )
             if current_repository_digest is None:
                 try:
-                    repository = self.sandbox.validate_snapshot_root(row.repository_ref)
+                    repository = proposal_sandbox.validate_snapshot_root(row.repository_ref)
                     workspace = self._workspace()
                     with tempfile.TemporaryDirectory(prefix="repo-repair-resolve-", dir=workspace / "tmp") as temp_dir:
-                        current_repository_digest = self.sandbox.snapshot_repository(repository, Path(temp_dir) / "snapshot").digest
+                        current_repository_digest = proposal_sandbox.snapshot_repository(repository, Path(temp_dir) / "snapshot").digest
                 except (RepoSandboxError, OSError) as exc:
                     raise RepoRepairError("repository_snapshot_unavailable", "The current repository snapshot is unavailable", status_code=409) from exc
             if _safe_digest(current_repository_digest, field="repository") != row.base_snapshot_digest:
@@ -3308,6 +3578,18 @@ class RepoRepairService:
                 or _utc(approval_row.expires_at) > _utc(row.expires_at)
             ):
                 raise RepoRepairError("approval_not_current", "The exact repair approval is not current", status_code=409)
+            if proposal_kind == "local":
+                try:
+                    approval_details = json.loads(approval_row.details_json or "{}")
+                except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                    raise RepoRepairError("approval_binding_corrupt", "The local host approval metadata is unreadable", status_code=409) from exc
+                permissions = approval_details.get("required_permissions") if isinstance(approval_details, Mapping) else None
+                if permissions != ["local_host_execution"] or str(approval_details.get("executor_kind") or "") != "local":
+                    raise RepoRepairError(
+                        "local_host_approval_required",
+                        "This repair requires the exact local_host_execution approval",
+                        status_code=409,
+                    )
             # Approval identity is issued against the proposal revision that
             # was shown to the operator.  Approving the proposal advances its
             # mutable lifecycle revision, so recomputing from the post-approval

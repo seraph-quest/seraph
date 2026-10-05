@@ -11,6 +11,7 @@ from src.guardian.opportunity_contracts import (
     GuardianPolicy, OpportunityEvidence, OpportunityError, digest, json_bytes, validate_assessment,
 )
 from src.guardian.opportunity_runtime import build_evidence, read_snapshot, stage_snapshot
+from tests.test_work_board_m6_provider_free_journey import isolated_runtime
 
 
 def policy(**changes):
@@ -116,3 +117,17 @@ def test_evidence_never_persists_raw_baseline_or_changed_text():
     assert set(offered.sources[0].model_dump()) == {
         "source_key", "identity_digest", "target", "new_hash", "excerpt", "excerpt_sha256"}
     assert OpportunityEvidence.model_validate_json(offered.model_dump_json()) == offered
+
+
+async def test_known_multiline_or_unreadable_vault_values_fail_closed(isolated_runtime, monkeypatch):
+    from src.guardian.opportunity_runtime import assert_known_vault_values_absent
+    from src.vault.repository import vault_repository
+    from cryptography.fernet import Fernet
+    secret = "bounded-private\nmultiline-value"
+    await vault_repository.store("956-multiline-privacy", secret)
+    await assert_known_vault_values_absent({"public": "permitted literal evidence"})
+    with pytest.raises(OpportunityError, match="assessment_sensitive_text"):
+        await assert_known_vault_values_absent({"nested": [{"value": secret}]})
+    monkeypatch.setattr(settings, "vault_encryption_key", Fernet.generate_key().decode())
+    with pytest.raises(OpportunityError, match="assessment_sensitive_text"):
+        await assert_known_vault_values_absent({"public": "unreadable Vault is not verified redaction"})

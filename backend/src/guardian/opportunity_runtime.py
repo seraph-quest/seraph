@@ -21,6 +21,33 @@ RUNNER = "scheduler:guardian-opportunity"
 _executions: dict[str, asyncio.Task] = {}
 
 
+async def assert_known_vault_values_absent(payload):
+    """Check bounded literal fields with the existing strict read-only owner.
+
+    JSON escaping must not hide a multiline known value. This runs outside
+    every SQLite writer and rejects unavailable redaction rather than changing
+    the immutable offered bytes or the model judgment.
+    """
+    from src.db import engine as db_engine
+    from src.vault.redaction import redact_secrets_in_text_readonly
+    pending, literals = [payload], []
+    while pending:
+        value = pending.pop()
+        if isinstance(value, str):
+            literals.append(value)
+        elif isinstance(value, dict):
+            pending.extend(value.keys())
+            pending.extend(value.values())
+        elif isinstance(value, (list, tuple)):
+            pending.extend(value)
+    checked = json_bytes(payload).decode() + "\n" + "\n".join(literals)
+    if len(checked.encode("utf-8")) > 32 * 1024:
+        raise OpportunityError("assessment_sensitive_text")
+    async with db_engine.get_session() as db:
+        if await redact_secrets_in_text_readonly(db, checked, fail_closed=True) != checked:
+            raise OpportunityError("assessment_sensitive_text")
+
+
 def assert_public_judgment_text(value, *, output=False):
     """Conservative bounded M2 privacy gate, never a general PII classifier."""
     from src.guardian.source_watch import redact_export_text
@@ -169,7 +196,21 @@ async def admit_assessment(opportunity_id):
         await db.execute(update(GuardianOpportunity).where(GuardianOpportunity.id == row.id,
             GuardianOpportunity.revision == current.revision).values(job_id=job_id))
     if admitted["status"] == "accepted":
-        admitted = await durable_job_repository.queue_job(job_id, expected_revision=admitted["revision"])
+        from src.workflows.job_runtime import DurableJobLeaseError
+        try:
+            admitted = await durable_job_repository.queue_job(job_id, expected_revision=admitted["revision"])
+        except DurableJobLeaseError:
+            # Concurrent publication/tick callers can share the accepted row.
+            # Reuse only the exact job another caller has already queued or
+            # claimed; a lost CAS never grants a retry or new authority.
+            latest = await durable_job_repository.get_job(job_id)
+            if latest is None or latest["status"] not in {"queued", "running"}:
+                raise
+            async with db_engine.get_session() as db:
+                current, _ = await _authority(db, opportunity_id, evidence=evidence, execution=True)
+                if current.job_id != job_id:
+                    raise OpportunityError("opportunity_job_binding_changed")
+            admitted = latest
     return admitted
 
 
@@ -258,10 +299,7 @@ async def _completion(row, goal, evidence, *, fence):
     from src.model_fabric.remote_inference_admission import bind_remote_inference_receipt
     from src.workflows.job_runtime import durable_job_repository
     messages, context = assessment_context(row, goal, evidence)
-    from src.vault import redaction as vault_redaction
-    literal_input = messages[1]["content"]
-    if await vault_redaction.redact_secrets_in_text(literal_input, fail_closed=True) != literal_input:
-        raise OpportunityError("assessment_sensitive_text")
+    await assert_known_vault_values_absent(json.loads(messages[1]["content"]))
     profile_id = llm_runtime.resolve_runtime_profile(runtime_path="strategist_agent", profile=None)
     profile = llm_runtime._provider_profile(profile_id)
     if profile is None:
@@ -376,10 +414,7 @@ async def execute_assessment(opportunity_id):
     try:
         raw = await _completion(row, goal, evidence, fence=fence)
         assessment = validate_assessment(raw, evidence)
-        from src.vault import redaction as vault_redaction
-        judgment = json_bytes(assessment.model_dump(mode="json")).decode()
-        if await vault_redaction.redact_secrets_in_text(judgment, fail_closed=True) != judgment:
-            raise OpportunityError("assessment_sensitive_text")
+        await assert_known_vault_values_absent(assessment.model_dump(mode="json"))
         for value in (assessment.summary, assessment.reason, assessment.abstain_reason or ""):
             assert_public_judgment_text(value, output=True)
         # Recheck physical evidence and current authority before writing any

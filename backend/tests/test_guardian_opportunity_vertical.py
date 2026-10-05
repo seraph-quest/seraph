@@ -158,7 +158,14 @@ async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_aut
             row = (await db.execute(select(GuardianOpportunity))).scalar_one()
             current_goal = await db.get(Goal, goal["id"])
         offered = read_snapshot(json.loads(row.source_token_json)["artifact_id"], row.source_digest)
-        await admit_assessment(row.id)
+        from src.guardian.opportunity_contracts import VerifiedSourcePacket
+        from src.guardian.opportunities import publish_verified_packet
+        repeated = await asyncio.gather(*(publish_verified_packet(VerifiedSourcePacket(
+            packet_id=row.source_packet_id, watch_revision=row.watch_revision,
+            goal_revision=row.goal_revision)) for _ in range(2)))
+        assert repeated == [row.id, row.id]
+        admissions = await asyncio.gather(admit_assessment(row.id), admit_assessment(row.id))
+        assert admissions[0]["job_id"] == admissions[1]["job_id"]
         async with factory.accounting_sessions() as db:
             row = await db.get(GuardianOpportunity, row.id)
         messages, context = assessment_context(row, current_goal, offered)

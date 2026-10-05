@@ -63,6 +63,41 @@ async def test_dismissed_semantics_never_requeue_and_supersede_other_pending_pac
     assert (await durable_job_repository.get_job(queued["job_id"]))["status"] == "cancelled"
 
 
+@pytest.mark.parametrize("capacity,count", [("goal", 1), ("owner", 2), ("host", 16)])
+async def test_canonical_pending_capacity_blocks_before_native_admission(isolated_runtime, capacity, count):
+    from uuid import uuid4
+    from src.guardian.source_watch import SourceWatchService
+    from tests.test_work_board_m6_provider_free_journey import OWNER, SESSION
+    sessions, goal, watch, _, original, _ = await publish_source(isolated_runtime)
+    async with sessions() as db:
+        historical = await db.get(GuardianOpportunity, original.id)
+        historical.status = "silent"
+        db.add(historical)
+        # Pending-row capacity fixture only: no successful job, accounting
+        # reservation or intervention is seeded. Execution remains separately
+        # subject to Root/Goal/watch/source admission and its native fence.
+        for ordinal in range(count):
+            occupied = GuardianOpportunity.model_validate(original.model_dump())
+            occupied.id, occupied.dedupe_key = str(uuid4()), "occupied:"+str(ordinal)
+            occupied.watch_id = str(uuid4())
+            occupied.goal_id = goal.id if capacity == "goal" else str(uuid4())
+            occupied.owner_principal_id = OWNER if capacity != "host" else "operator:capacity:"+str(ordinal)
+            db.add(occupied)
+    async def fetch(source):
+        return "Stable public line\nA distinct new bounded material release\n", {"content_type": "text/plain"}
+    result = await SourceWatchService(fetcher=fetch).run_watch(watch["id"], occurrence_id="capacity-material",
+        expected_plan_revision=1, expected_owner_session_id=SESSION)
+    assert result["status"] == "succeeded", result
+    async with sessions() as db:
+        denied = (await db.execute(select(GuardianOpportunity).where(
+            GuardianOpportunity.reason_code == "opportunity_capacity_exhausted"))).scalar_one()
+        assert denied.status == "blocked" and denied.job_id is None
+        pending = list((await db.execute(select(GuardianOpportunity).where(
+            GuardianOpportunity.status.in_(("queued", "assessing"))))).scalars())
+        assert len(pending) == count
+        assert (await db.execute(select(func.count()).select_from(InferenceCostReservation))).scalar() == 0
+
+
 async def test_expired_never_contacted_native_lease_recovers_same_job_bounded(isolated_runtime, monkeypatch):
     import asyncio
     import json

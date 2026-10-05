@@ -1074,7 +1074,8 @@ async def _openrouter_setup_status(setup: OpenRouterSetup | None, *, configurati
                                 break
                             proofs.append(proof)
                         else:
-                            state.update(status="ready", error_code=None, proof_expires_at=min(proof.expires_at for proof in proofs))
+                            state.update(status="ready", error_code=None,
+                                proof_expires_at=datetime.fromtimestamp(min(proof.expires_at for proof in proofs), timezone.utc).isoformat())
                     except Exception:
                         state["error_code"] = "proof_metadata_unavailable"
         if route is not None:

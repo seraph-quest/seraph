@@ -165,6 +165,289 @@ async def test_v2_uncertain_final_publication_preserves_active_target_key(client
     assert await vault_repository.get("openrouter_api_key") == "sk-active-fixture"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+@pytest.mark.parametrize("mutation", (
+    "legacy_model", "legacy_capabilities", "unknown_slot", "string_enabled",
+    "boolean_bound", "missing_upstream", "mixed_embedding", "vision_without_text",
+    "wrong_endpoint", "unsafe_key",
+))
+async def test_v2_closed_input_rejects_before_secret_or_policy_mutation(client, model_fabric_workspace, keyless_openrouter, mutation):
+    body = _v2_setup_payload(api_key="sk-rejected-fixture")
+    if mutation == "legacy_model":
+        body["model"] = "fixture/ignored"
+    elif mutation == "legacy_capabilities":
+        body["capabilities"] = ["text"]
+    elif mutation == "unknown_slot":
+        body["routes"]["audio"] = None
+    elif mutation == "string_enabled":
+        body["routes"]["text"]["enabled"] = "true"
+    elif mutation == "boolean_bound":
+        body["routes"]["text"]["request_cost_bound_microusd"] = True
+    elif mutation == "missing_upstream":
+        body["routes"]["text"]["allowed_upstreams"] = []
+    elif mutation == "mixed_embedding":
+        body["routes"]["embedding"]["capabilities"] = ["embedding", "text"]
+    elif mutation == "vision_without_text":
+        body["routes"]["vision"]["capabilities"] = ["vision"]
+    elif mutation == "wrong_endpoint":
+        body["api_base"] = "https://provider.invalid/v1"
+    elif mutation == "unsafe_key":
+        body["api_key"] = "sk-unsafe\nfixture"
+    response = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1, "openrouter_setup": body})
+    assert response.status_code == 422, response.text
+    assert await vault_repository.get("openrouter_api_key") is None
+    assert not (model_fabric_workspace / "model-fabric-settings.json").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_v2_all_null_slots_save_without_inventing_selection(client, model_fabric_workspace, keyless_openrouter):
+    from src.model_fabric.configuration import effective_workload_policy, read_model_fabric_configuration
+    from src.security.trust_contract import EgressClass
+    body = _v2_setup_payload(routes={"text": None, "vision": None, "embedding": None})
+    response = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1, "openrouter_setup": body})
+    assert response.status_code == 200, response.text
+    assert read_model_fabric_configuration().profiles == ()
+    assert all(route is None for route in response.json()["openrouter_setup"]["routes"].values())
+    assert all(state["status"] == "configuration_required" for state in response.json()["openrouter_setup"]["slot_statuses"].values())
+    assert effective_workload_policy("chat_agent").egress_class is EgressClass.LOCAL_ONLY
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+@pytest.mark.parametrize("capabilities, expected_slots", (
+    (["text", "structured_output"], {"text"}),
+    (["text", "vision", "structured_output"], {"text", "vision"}),
+    (["embedding"], {"embedding"}),
+))
+async def test_v1_projection_is_pure_and_explicit_v2_save_preserves_existing_consent(client, model_fabric_workspace, keyless_openrouter, capabilities, expected_slots):
+    from dataclasses import asdict
+    from src.model_fabric.configuration import migrate_openrouter_setup_v1_to_v2, read_model_fabric_configuration
+    saved = await client.put("/api/settings/model-fabric", json={"openrouter_setup": _setup_payload(capabilities=capabilities, zero_data_retention=True, api_key="sk-migration-fixture")})
+    assert saved.status_code == 200, saved.text
+    original = read_model_fabric_configuration()
+    before = (model_fabric_workspace / "model-fabric-settings.json").read_bytes()
+    with patch("httpx.AsyncClient.post", side_effect=AssertionError("migration provider contact forbidden")):
+        projected = (await client.get("/api/settings/model-fabric")).json()["openrouter_setup"]
+    assert projected["schema_version"] == "seraph.openrouter.setup.v2"
+    assert {slot for slot, route in projected["routes"].items() if route is not None} == expected_slots
+    assert (model_fabric_workspace / "model-fabric-settings.json").read_bytes() == before
+    assert read_model_fabric_configuration().openrouter_setup.schema_version == "seraph.openrouter.setup.v1"
+    migration = migrate_openrouter_setup_v1_to_v2(original.openrouter_setup, egress_revision=original.egress_revision)
+    assert migration.purpose_consents == {slot: original.egress_revision for slot in expected_slots - {"text"}}
+    body = _v2_setup_payload(routes={slot: asdict(route) if route is not None else None for slot, route in migration.routes.items()},
+        vision_egress_acknowledged=False, embedding_egress_acknowledged=False)
+    # Keep original values exactly; migration cannot silently raise cost/limits.
+    body["spend_ceiling_microusd"] = original.openrouter_setup.spend_ceiling_microusd
+    body["max_retries"] = original.openrouter_setup.max_retries
+    response = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": original.egress_revision, "openrouter_setup": body})
+    assert response.status_code == 200, response.text
+    current = read_model_fabric_configuration()
+    assert current.v1_rollback_snapshot["openrouter_setup"]["schema_version"] == "seraph.openrouter.setup.v1"
+    assert "sk-migration-fixture" not in (model_fabric_workspace / "model-fabric-settings.json").read_text()
+    assert await vault_repository.get("openrouter_api_key") == "sk-migration-fixture"
+    assert current.openrouter_setup.purpose_consents == {slot: current.egress_revision for slot in expected_slots - {"text"}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_v2_saved_routes_own_runtime_and_screen_status_without_legacy_fallback(client, model_fabric_workspace, keyless_openrouter, monkeypatch):
+    from src.observer.screen_analysis_settings import read_screen_analysis_settings, write_screen_analysis_settings
+    monkeypatch.setattr(settings, "screen_analysis_provider", "legacy")
+    monkeypatch.setattr(settings, "screen_analysis_model", "openrouter/fixture/obsolete")
+    write_screen_analysis_settings({"enabled": True, "provider": "legacy", "model": "openrouter/fixture/obsolete"})
+    saved = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1, "openrouter_setup": _v2_setup_payload()})
+    assert saved.status_code == 200
+    runtime = (await client.get("/api/runtime/status")).json()
+    assert runtime["effective_runtime"]["model"] == "fixture/text"
+    assert "openrouter_upstream_allowlist_missing" not in runtime["effective_runtime"]["inference_readiness"]["reasons"]
+    screen = read_screen_analysis_settings()
+    assert screen["enabled"] is True
+    assert screen["model"] == "openrouter/fixture/vision"
+    assert screen["provider"] == "openrouter"
+    body = _v2_setup_payload()
+    body["routes"]["vision"] = None
+    assert (await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 3, "openrouter_setup": body})).status_code == 200
+    screen = read_screen_analysis_settings()
+    assert screen["enabled"] is True
+    assert screen["model"] == "" and screen["provider"] == ""
+    assert (await client.get("/api/runtime/status")).json()["effective_runtime"]["model"] == "fixture/text"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_v2_interrupted_active_witness_requires_revoked_reconciliation(client, model_fabric_workspace, keyless_openrouter, monkeypatch):
+    from src.workspace import accounting_witness, maintenance_fence
+    from src.workspace.production import ProductionWorkspace
+    from src.model_fabric.configuration import read_model_fabric_configuration
+    writer = accounting_witness._write_configuration_file
+    def fail_active_file(path, payload):
+        if not payload["egress_revoked"]:
+            raise OSError("injected witness-to-file crash")
+        return writer(path, payload)
+    monkeypatch.setattr(accounting_witness, "_write_configuration_file", fail_active_file)
+    response = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1, "openrouter_setup": _v2_setup_payload(api_key="sk-gap-fixture")})
+    assert response.status_code == 503
+    status = (await client.get("/api/settings/model-fabric")).json()
+    assert status["egress_revoked"] is True
+    assert status["error_code"] == "provider_policy_continuity_unavailable"
+    # Contradictory active witness cannot justify guessing a key compensation.
+    assert await vault_repository.get("openrouter_api_key") == "sk-gap-fixture"
+    monkeypatch.setattr(accounting_witness, "_write_configuration_file", writer)
+    with maintenance_fence(ProductionWorkspace(host_root=model_fabric_workspace)):
+        recovery = accounting_witness.reconcile_policy_checkpoint(model_fabric_workspace)
+    assert recovery["status"] == "reconciled_revoked"
+    assert recovery["revision"] == 4
+    settings.openrouter_api_key = ""
+    restarted = await client.get("/api/settings/model-fabric")
+    assert restarted.json()["egress_revoked"] is True
+    assert read_model_fabric_configuration().egress_revision == 4
+    assert all(state["status"] != "ready" for state in restarted.json()["openrouter_setup"]["slot_statuses"].values())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_v2_cross_process_writer_cannot_activate_during_key_mutation_or_restore_old_policy(client, model_fabric_workspace, keyless_openrouter, monkeypatch):
+    import asyncio
+    import json
+    import sys
+    from src.api import model_fabric_settings as api
+    from src.model_fabric.configuration import read_model_fabric_configuration
+    store = api._store_setup_credential
+    observations = []
+    # This subprocess runs the actual retained flock and exact-CAS publication
+    # seam against the same file, with no database/provider or credential access.
+    script = """
+import json, sys
+from dataclasses import replace
+from config.settings import settings
+from src.model_fabric.configuration import read_model_fabric_configuration, write_model_fabric_configuration
+settings.workspace_dir = sys.argv[1]
+current = read_model_fabric_configuration()
+try:
+    write_model_fabric_configuration(replace(current, egress_revoked=False, egress_revision=3), expected_revision=2)
+except Exception as error:
+    print(json.dumps({"error": type(error).__name__, "reason": str(error), "revision": current.egress_revision, "revoked": current.egress_revoked}))
+else:
+    print(json.dumps({"unexpected_success": True}))
+"""
+    async def contender():
+        process = await asyncio.create_subprocess_exec(sys.executable, "-c", script, str(model_fabric_workspace),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        output, error = await asyncio.wait_for(process.communicate(), 10)
+        assert process.returncode == 0, error.decode()
+        return json.loads(output)
+    async def checked_store(*args, **kwargs):
+        assert read_model_fabric_configuration().egress_revoked
+        result = await store(*args, **kwargs)
+        observations.append(await contender())
+        assert read_model_fabric_configuration().egress_revision == 2
+        assert read_model_fabric_configuration().egress_revoked
+        return result
+    monkeypatch.setattr(api, "_store_setup_credential", checked_store)
+    response = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1, "openrouter_setup": _v2_setup_payload(api_key="sk-cross-process-fixture")})
+    assert response.status_code == 200, response.text
+    assert observations[0]["error"] == "ProductionWorkspaceReconciliationError"
+    assert "busy" in observations[0]["reason"]
+    assert observations[0]["revision"] == 2 and observations[0]["revoked"] is True
+    after = await contender()
+    assert after["error"] == "PolicyRevisionConflict"
+    assert read_model_fabric_configuration().egress_revision == 3
+    assert read_model_fabric_configuration().egress_revoked is False
+    assert await vault_repository.get("openrouter_api_key") == "sk-cross-process-fixture"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_v2_vision_edit_preserves_exact_text_proof_but_denies_old_queued_epoch(client, model_fabric_workspace, keyless_openrouter):
+    import asyncio
+    import time
+    from dataclasses import replace
+    from src.model_fabric import candidate_from_profile
+    from src.model_fabric.accounting import bind_accounting_profile
+    from src.model_fabric.configuration import read_model_fabric_configuration
+    from src.model_fabric.proofs import build_model_route_proof, proof_is_fresh
+    from src.model_fabric.repository import model_fabric_repository
+    from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
+    from src.workflows.job_runtime import durable_job_repository
+    from tests.test_inference_accounting import request
+    from tests.test_model_fabric_proofs_receipts import _receipt
+
+    first_save = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1, "openrouter_setup": _v2_setup_payload(api_key="sk-proof-fixture")})
+    assert first_save.status_code == 200
+    before = next(profile for profile in read_model_fabric_configuration().profiles if profile.id == "openrouter.text")
+    candidate = candidate_from_profile(before)
+    # Synthetic proof fixture checks exact hash/storage semantics only. It does
+    # not substitute for the milestone's intercepted manual canary journey.
+    now = time.time()
+    receipt = _receipt(receipt_id="fixture-text-probe", workload="capability_probe")
+    receipt = replace(receipt, actual_profile_id=before.id, actual_model=before.model,
+        actual_adapter=before.transport_adapter,
+        attempts=tuple(replace(attempt, profile_id=before.id, model=before.model,
+            endpoint=candidate.endpoint, adapter=before.transport_adapter) for attempt in receipt.attempts))
+    assert (await model_fabric_repository.persist_route_receipt(receipt)).persisted
+    proof = build_model_route_proof(profile=before, endpoint_class=candidate.endpoint_class,
+        adapter=before.transport_adapter, capability="text", canary_version="fixture-v1",
+        outcome="passed", checked_at=now, expires_at=now + 600,
+        probe_receipt_id=receipt.receipt_id, probe_receipt_hash=receipt.receipt_hash)
+    assert (await model_fabric_repository.persist_capability_proof(proof)).persisted
+    for capability, value in (("health", "healthy"), ("latency_ms", 1)):
+        additional = build_model_route_proof(profile=before, endpoint_class=candidate.endpoint_class,
+            adapter=before.transport_adapter, capability=capability, canary_version="fixture-v1",
+            outcome="passed", checked_at=now, expires_at=now + 600,
+            probe_receipt_id=receipt.receipt_id, probe_receipt_hash=receipt.receipt_hash, proven_value=value)
+        assert (await model_fabric_repository.persist_capability_proof(additional)).persisted
+    from datetime import datetime, timezone
+    ready = (await client.get("/api/settings/model-fabric")).json()["openrouter_setup"]["slot_statuses"]["text"]
+    assert ready["status"] == "ready"
+    assert ready["proof_expires_at"] == datetime.fromtimestamp(now + 600, timezone.utc).isoformat()
+    broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
+    started, release = asyncio.Event(), asyncio.Event()
+    callbacks = []
+    async def active():
+        callbacks.append("active")
+        started.set()
+        await release.wait()
+        return {"usage": {"cost": "0.000001"}}
+    async def forbidden():
+        callbacks.append("stale-queued")
+        return {"usage": {"cost": "0.000001"}}
+    bind_accounting_profile("active-text", before.id)
+    bind_accounting_profile("queued-text", before.id)
+    active_task = asyncio.create_task(broker.execute(replace(request("active-text"), owner_budget_microusd=25_000), active))
+    queued_task = None
+    try:
+        await asyncio.wait_for(started.wait(), 5)
+        queued_task = asyncio.create_task(broker.execute(replace(request("queued-text"), owner_budget_microusd=25_000), forbidden))
+        for _ in range(100):
+            operations = (await durable_job_repository.inference_accounting_snapshot()).get("operations", [])
+            if len(operations) == 2:
+                break
+            await asyncio.sleep(0.01)
+        assert len(operations) == 2
+        changed = _v2_setup_payload()
+        changed["routes"]["vision"]["model_id"] = "fixture/new-vision"
+        second_save = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 3, "openrouter_setup": changed})
+        assert second_save.status_code == 200, second_save.text
+        after = next(profile for profile in read_model_fabric_configuration().profiles if profile.id == before.id)
+        assert after.contract_hash == before.contract_hash
+        found = await model_fabric_repository.latest_capability_proof(profile_schema_version=after.schema_version,
+            profile_contract_hash=after.contract_hash, profile_id=after.id, model=after.model,
+            endpoint=candidate.endpoint, endpoint_class=candidate.endpoint_class,
+            adapter=after.transport_adapter, capability="text")
+        assert found is not None and found.proof_hash == proof.proof_hash and proof_is_fresh(found)
+    finally:
+        release.set()
+        tasks = [task for task in (active_task, queued_task) if task is not None]
+        outcomes = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 5)
+    assert all(isinstance(outcome, Exception) for outcome in outcomes)
+    assert callbacks == ["active"]
+    snapshot = await durable_job_repository.inference_accounting_snapshot()
+    assert snapshot["committed_microusd"] == 1
+    assert snapshot["unknown_microusd"] == 0
+
+
 @pytest.fixture
 def keyless_openrouter(monkeypatch):
     monkeypatch.setattr(settings, "openrouter_api_key", "")

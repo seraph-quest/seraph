@@ -11,6 +11,7 @@ import pyarrow as pa
 from config.settings import settings
 from src.audit.runtime import log_integration_event_sync
 from src.memory.embedder import EmbeddingMetadata, EmbeddingUnavailableError, embed, embedding_metadata
+from src.model_fabric.configuration import OPENROUTER_SETUP_V2_SCHEMA_VERSION, read_model_fabric_configuration
 from src.workspace import WorkspaceStateClass, canonical_workspace_registry, canonical_workspace_root
 
 logger = logging.getLogger(__name__)
@@ -236,9 +237,24 @@ def search_with_status(
             )
             return [], False
 
-        query_vector = embed(query)
-        metadata = _active_embedding_metadata()
-        table = _get_or_create_table(metadata=metadata)
+        setup = read_model_fabric_configuration().openrouter_setup
+        v2 = setup is not None and setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION
+        if v2:
+            metadata = _active_embedding_metadata()
+            db = _get_db()
+            table_name = _table_name(metadata)
+            if table_name not in db.table_names():
+                raise EmbeddingUnavailableError("embedding_target_index_required", stage="metadata")
+            table = db.open_table(table_name)
+            if table.schema.field("vector").type.list_size != metadata.dimension or table.count_rows() == 0:
+                raise EmbeddingUnavailableError("embedding_target_index_unusable", stage="metadata")
+            query_vector = embed(query)
+            if _active_embedding_metadata() != metadata or len(query_vector) != metadata.dimension:
+                raise EmbeddingUnavailableError("embedding_binding_changed", stage="metadata")
+        else:
+            query_vector = embed(query)
+            metadata = _active_embedding_metadata()
+            table = _get_or_create_table(metadata=metadata)
 
         if table.count_rows() == 0:
             _log_vector_store_event(

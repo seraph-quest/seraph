@@ -105,6 +105,10 @@ class DurableInferenceBrokerMixin:
         try:
             if not isinstance(request.owner_id, str) or not request.owner_id.startswith(("operator:", "service:")) or len(request.owner_id) > 256:
                 raise InferenceAccountingError("accounting_job_authority_invalid")
+            from .configuration import read_model_fabric_configuration
+            persisted = read_model_fabric_configuration()
+            if persisted.status == "degraded":
+                raise InferenceAccountingError(persisted.error_code or "provider_policy_continuity_unavailable")
             configured, policy_digest = current_inference_policy()
             setup = configured.openrouter_setup
             bound = setup.request_cost_bound_microusd or setup.spend_ceiling_microusd

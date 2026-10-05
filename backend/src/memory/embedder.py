@@ -474,6 +474,7 @@ def _request_embeddings(
     model: str,
     texts: list[str],
     request_id: str,
+    timeout_seconds: float = REQUEST_TIMEOUT_SECONDS,
 ) -> object:
     """Dispatch one bounded, idempotent embedding request to OpenRouter."""
     payload = finalized_openai_compatible_embeddings_body(
@@ -491,7 +492,7 @@ def _request_embeddings(
     last_status: int | None = None
     with httpx.Client(
         follow_redirects=False,
-        timeout=httpx.Timeout(REQUEST_TIMEOUT_SECONDS),
+        timeout=httpx.Timeout(timeout_seconds),
     ) as client:
         for retry_count in range(MAX_RETRIES + 1):
             try:
@@ -770,6 +771,8 @@ def _embed_texts(
         )
 
     profile = _embedding_profile(model=model, batch_size=len(texts))
+    controls = profile.options.get("_seraph_openrouter", {})
+    timeout_seconds = min(REQUEST_TIMEOUT_SECONDS, float(controls.get("timeout_seconds", REQUEST_TIMEOUT_SECONDS)))
     request_id = f"embedding:{uuid4().hex}"
     try:
         input_value = texts[0] if len(texts) == 1 else texts
@@ -777,7 +780,7 @@ def _embed_texts(
             EMBEDDING_WORKLOAD_PATH,
             payload={"model": model, "input": input_value},
             output_tokens=1,
-            timeout_seconds=REQUEST_TIMEOUT_SECONDS,
+            timeout_seconds=timeout_seconds,
             principal=effective_principal,
             session_id=effective_principal.session_id,
             job_id=effective_principal.job_id,
@@ -806,6 +809,7 @@ def _embed_texts(
                     model=selected.profile.model,
                     texts=texts,
                     request_id=request_id,
+                    timeout_seconds=timeout_seconds,
                 ),
                 expected_count=len(texts),
                 model=selected.profile.model,

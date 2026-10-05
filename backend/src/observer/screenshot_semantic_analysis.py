@@ -466,18 +466,25 @@ async def _analyze_with_openrouter(image_path: Path, artifacts: dict[str, Any]) 
             ],
         }
     ]
+    controls = profile.options.get("_seraph_openrouter", {})
+    output_tokens = min(1400, int(controls.get("output_limit", 1400)))
+    timeout_seconds = min(
+        max(int(settings.agent_chat_timeout), 1),
+        REMOTE_SCREENSHOT_TIMEOUT_SECONDS,
+        float(controls.get("timeout_seconds", REMOTE_SCREENSHOT_TIMEOUT_SECONDS)),
+    )
     transport_body = finalized_openai_compatible_body(
         model_id=profile.model,
         messages=messages,
         options=profile.options,
         temperature=0.0,
-        max_tokens=1400,
+        max_tokens=output_tokens,
     )
     context = build_canonical_inference_context(
         "screenshot_image_analysis",
         payload=transport_body,
-        output_tokens=1400,
-        timeout_seconds=min(max(int(settings.agent_chat_timeout), 1), REMOTE_SCREENSHOT_TIMEOUT_SECONDS),
+        output_tokens=output_tokens,
+        timeout_seconds=timeout_seconds,
     )
     context = bind_final_inference_payload(context, transport_body)
 

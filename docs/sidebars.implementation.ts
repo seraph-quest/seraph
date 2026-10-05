@@ -9,6 +9,7 @@ const sidebars: SidebarsConfig = {
         'project-constitution',
         'current-app-guide',
         'STATUS',
+        'guardian-capability-roadmap',
         {
           type: 'category',
           label: 'Architecture Decisions',
@@ -19,6 +20,8 @@ const sidebars: SidebarsConfig = {
             'decisions/canonical-memory-boundary',
             'decisions/gpu-core-mac-edge-topology',
             'decisions/epic-integration-branch-workflow',
+            'decisions/evidence-bound-guardian-opportunities',
+            'decisions/purpose-specific-openrouter-routes',
           ],
         },
         'docs-contract',

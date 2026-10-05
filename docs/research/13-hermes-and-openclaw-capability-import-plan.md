@@ -4,6 +4,12 @@ title: 13. Hermes And OpenClaw Capability Import Plan
 
 # 13. Hermes And OpenClaw Capability Import Plan
 
+Historical import proposal. Its execution waves are superseded for current
+planning by the [guardian capability roadmap](/guardian-capability-roadmap).
+Use the October [Hermes overview](./seraph-vs-hermes-overview.md) and
+[detailed comparison](./seraph-vs-hermes-detailed.md) for refreshed evidence;
+this document does not direct new implementation.
+
 ## Goal
 
 Define exactly which Hermes and OpenClaw capability surfaces Seraph should import next, which should stay out, and how each surface should land in Seraph's extension platform.

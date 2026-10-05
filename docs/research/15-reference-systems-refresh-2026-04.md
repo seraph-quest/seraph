@@ -4,6 +4,13 @@ title: 15. Reference Systems Refresh 2026-04
 
 # 15. Reference Systems Refresh 2026-04
 
+Historical April snapshot. October refreshes are the
+[Hermes comparison](./seraph-vs-hermes-detailed.md) and
+[IronClaw comparison](./seraph-vs-ironclaw-detailed.md), with a shared
+[actual Seraph baseline](./seraph-capability-baseline-2026-10-05.md).
+The [new roadmap](/guardian-capability-roadmap) owns the
+resulting capability sequence; old gap claims below require revalidation.
+
 ## Purpose
 
 Refresh the benchmark picture against Hermes, OpenClaw, and IronClaw using current primary-source materials, then identify what changed enough to justify roadmap corrections.

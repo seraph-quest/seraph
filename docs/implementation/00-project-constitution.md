@@ -7,7 +7,9 @@ title: Seraph Project Constitution
 
 **Document class:** canonical product and architecture contract
 
-**Target program:** [Epic #736](https://github.com/seraph-quest/seraph/issues/736)
+**Capability sequence:** [Guardian capability roadmap](./23-guardian-capability-roadmap.md)
+
+**Completed foundation:** [Epic #736](https://github.com/seraph-quest/seraph/issues/736)
 
 **Shipped-state owner:** [Development Status](./STATUS.md)
 
@@ -94,6 +96,14 @@ The following architecture decisions are normative:
 20. [ADR-020: Reviewed authored capability packages](./decisions/020-reviewed-authored-capability-packages.md)
 21. [ADR-021: Exact Forgejo issue title transaction](./decisions/021-exact-forgejo-issue-title.md)
 
+The next additive target decisions are [ADR-023: Evidence-bound guardian
+opportunities](./decisions/023-evidence-bound-guardian-opportunities.md) and
+[ADR-024: Purpose-specific OpenRouter routes](./decisions/024-purpose-specific-openrouter-routes.md).
+They take effect after the independently reviewed #954 documentation PR merges;
+their capability milestones remain Planned. The optional NEAR target is blocked
+on a separate reviewed ADR-006 exception and concrete trust prerequisites; this
+roadmap does not authorize a direct-provider route.
+
 Changing a locked decision requires a superseding ADR, a tracked issue, an
 independent Critic/Contrarian review, and updates to every affected active doc.
 
@@ -153,10 +163,12 @@ Open branches describe intended post-merge truth and must be identified as such.
 - Remote inference uses one shared bounded admission contract with owner,
   priority, deadline, cancellation, budget, idempotency, and reconciliation
   receipts. The initial in-flight limit is one; this is an API admission bound,
-  not a claim about upstream hardware concurrency. The migration branch has
-  process-local admission and operator receipts; durable queue persistence and
-  provider cost reservation/reconciliation remain tracked follow-up work in
-  #743/#744.
+  not a claim about upstream hardware concurrency. The integrated runtime has
+  durable jobs, provider cost reservations and witnessed reconciliation;
+  contacted unknown costs remain liabilities. See the dated
+  [source/test baseline](/research/seraph-capability-baseline-2026-10-05)
+  for the develop/main boundary and unresolved focused-test failures. The old
+  process-local migration description is historical, not the current target.
 - Canonical goals, memory, jobs, artifacts, approvals, and audit records remain
   in Seraph-owned storage. Advisory memory providers may augment recall but do
   not become authoritative.

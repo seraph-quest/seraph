@@ -23,6 +23,16 @@ analysis. Nothing here establishes that a capability is accepted or shipped.
 
 ## Research Areas
 
+Current dated capability comparison (5 October 2026):
+
+- [Seraph baseline and test limits](./seraph-capability-baseline-2026-10-05.md)
+- Hermes: [overview](./seraph-vs-hermes-overview.md) and [detailed matrix](./seraph-vs-hermes-detailed.md)
+- IronClaw: [overview](./seraph-vs-ironclaw-overview.md) and [detailed matrix](./seraph-vs-ironclaw-detailed.md)
+- [NEAR inference and TEE boundaries](./near-ai-trust-boundary-2026-10-05.md)
+- [Resulting capability roadmap](/guardian-capability-roadmap)
+
+Earlier thematic research:
+
 - [Guardian thesis](./01-guardian-thesis.md)
 - [Human model and memory](./02-human-model-and-memory.md)
 - [Runtime and reliability](./03-runtime-and-reliability.md)

@@ -45,6 +45,7 @@ from src.model_fabric.remote_inference_admission import (
     RemoteInferenceAdmissionRequest as GpuAdmissionRequest,
     current_remote_inference_receipt_binding,
     prepare_bound_remote_inference,
+    bind_accounting_profile,
     remote_inference_admission_broker as gpu_admission_broker,
     stable_remote_inference_operation_id,
 )
@@ -1142,6 +1143,12 @@ def runtime_profile_candidates(
     profile: str | None = None,
 ) -> list[str]:
     """Return the ordered runtime profiles to try for an implicit runtime path."""
+    from src.model_fabric.caller_context import is_canonical_inference_route
+    from src.model_fabric.configuration import openrouter_profile_id_for_runtime_path
+    if runtime_path and is_canonical_inference_route(runtime_path):
+        canonical_profile = openrouter_profile_id_for_runtime_path(runtime_path)
+        if canonical_profile != "openrouter":
+            return [canonical_profile]
     if profile:
         normalized_profile = _normalize_runtime_profile(profile)
         from src.model_fabric.caller_context import is_canonical_inference_route
@@ -1249,6 +1256,8 @@ def _profile_model_id(profile: str) -> str:
     provider_profile = _provider_profile(profile)
     if provider_profile is not None:
         return provider_profile.routing_model or provider_profile.model
+    if profile in {"openrouter.text", "openrouter.vision", "openrouter.embedding"}:
+        return ""
     return settings.default_model
 
 
@@ -3320,6 +3329,7 @@ def _execute_sync_with_gpu_admission(
                 == "openrouter"
             ),
         )
+        bind_accounting_profile(request.operation_id, profile_id)
         _run_receipt_hook_sync(
             prepare_bound_remote_inference(
                 request,

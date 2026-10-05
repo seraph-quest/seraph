@@ -93,6 +93,28 @@ def test_embedding_model_or_dimension_change_selects_a_distinct_table():
     assert vector_store._schema_for_embedding(second).field("vector").type.list_size == 3
 
 
+@pytest.mark.parametrize("target_state", ("missing", "empty", "wrong_dimension"))
+def test_v2_unusable_target_index_degrades_before_query_contact_or_creation(tmp_path, monkeypatch, target_state):
+    from types import SimpleNamespace
+    import lancedb
+    from src.model_fabric.configuration import OPENROUTER_SETUP_V2_SCHEMA_VERSION
+    old = EmbeddingMetadata("seraph.memory.embedding.v1", "openrouter", "fixture/old", 2)
+    target = EmbeddingMetadata("seraph.memory.embedding.v1", "openrouter", "fixture/target", 3)
+    db = lancedb.connect(str(tmp_path / "lance"))
+    db.create_table(vector_store._table_name(old), schema=vector_store._schema_for_embedding(old))
+    if target_state != "missing":
+        schema = vector_store._schema_for_embedding(target if target_state == "empty" else old)
+        db.create_table(vector_store._table_name(target), schema=schema)
+    before = set(db.table_names())
+    monkeypatch.setattr(vector_store, "read_model_fabric_configuration", lambda: SimpleNamespace(openrouter_setup=SimpleNamespace(schema_version=OPENROUTER_SETUP_V2_SCHEMA_VERSION)))
+    monkeypatch.setattr(vector_store, "embedding_metadata", lambda: target)
+    monkeypatch.setattr(vector_store, "_get_db", lambda: db)
+    with patch.object(vector_store, "embed", side_effect=AssertionError("query provider contact forbidden")) as contact:
+        assert vector_store.search_with_status("current target required") == ([], True)
+    contact.assert_not_called()
+    assert set(db.table_names()) == before
+
+
 def test_active_vector_store_requires_embedding_namespace(monkeypatch):
     monkeypatch.setattr(vector_store.settings, "openrouter_provider_only", True)
     monkeypatch.setattr(vector_store, "embedding_metadata", lambda: None)

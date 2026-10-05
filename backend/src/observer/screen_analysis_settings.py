@@ -16,6 +16,14 @@ OPENROUTER_SCREEN_MODEL_PREFIX = "openrouter/"
 SCREENSHOT_FOLDER_ENV = "SERAPH_SCREENSHOT_FOLDER"
 
 
+def _saved_vision_route():
+    from src.model_fabric.configuration import read_model_fabric_configuration, OPENROUTER_SETUP_V2_SCHEMA_VERSION
+    setup = read_model_fabric_configuration().openrouter_setup
+    if setup is not None and setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+        return True, (setup.routes or {}).get("vision")
+    return False, None
+
+
 def normalize_openrouter_model_identifier(value: object) -> str:
     """Return an explicitly OpenRouter-qualified model id or an empty value.
 
@@ -85,6 +93,11 @@ def read_screen_analysis_settings() -> dict[str, object]:
     payload["enabled"] = bool(payload.get("enabled"))
     payload["preserve_captures"] = bool(payload.get("preserve_captures"))
     payload["model"] = normalize_openrouter_model_identifier(payload.get("model"))
+    v2, route = _saved_vision_route()
+    if v2:
+        # The capture toggle stays independently owned; route identity is canonical.
+        payload["provider"] = "openrouter" if route is not None and route.enabled else ""
+        payload["model"] = route.model_id if route is not None and route.enabled else ""
     payload["archive_dir"] = str(Path(str(payload.get("archive_dir") or "")).expanduser().resolve())
 
     screenshot_folder = str(payload.get("screenshot_folder") or "").strip()
@@ -131,6 +144,9 @@ def effective_screen_analysis_enabled() -> bool:
 
 def effective_screen_analysis_model() -> str:
     """Return the model label Seraph should send/report for screenshot semantic analysis."""
+    v2, route = _saved_vision_route()
+    if v2:
+        return route.model_id if route is not None and route.enabled else ""
     configured = normalize_openrouter_model_identifier(settings.screen_analysis_model)
     if configured:
         return configured

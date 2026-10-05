@@ -31,6 +31,69 @@ async def test_new_packet_coalesces_existing_uncontacted_native_queue(isolated_r
     assert (await durable_job_repository.get_job(queued["job_id"]))["status"] == "cancelled"
 
 
+@pytest.mark.parametrize("missing_binding", [False, True])
+async def test_unowned_claim_keeps_latest_candidate_waiting_without_replay(isolated_runtime, monkeypatch, missing_binding):
+    import httpx
+    from datetime import datetime, timedelta, timezone
+    from sqlalchemy import delete
+    from src.db.models import WorkflowRunState
+    from src.guardian import opportunity_runtime
+    from src.guardian.opportunity_contracts import OpportunityError
+    from src.guardian.source_watch import SourceWatchService
+    from tests.test_work_board_m6_provider_free_journey import SESSION
+    sessions, _, watch, _, old, _ = await publish_source(isolated_runtime)
+    queued = await admit_assessment(old.id)
+    async def claim(db, run):
+        current, _ = await _authority(db, old.id, execution=True)
+        current.status, current.revision = "assessing", current.revision + 1
+        db.add(current)
+    claimed = await durable_job_repository.claim_job(queued["job_id"], owner=RUNNER,
+        expected_revision=queued["revision"], claim_authority_check=claim)
+    assert old.id not in opportunity_runtime._executions
+    async def fetch(source):
+        return "Stable public line\nA newer relevant public release with material detail\n", {"content_type": "text/plain"}
+    newer = await SourceWatchService(fetcher=fetch).run_watch(watch["id"], occurrence_id="unowned-newest",
+        expected_plan_revision=1, expected_owner_session_id=SESSION)
+    assert newer["status"] == "succeeded", newer
+    async with sessions() as db:
+        old = await db.get(GuardianOpportunity, old.id)
+        latest = (await db.execute(select(GuardianOpportunity).where(GuardianOpportunity.status == "queued"))).scalar_one()
+        assert old.status == "silent" and old.reason_code == "coalesced"
+    native = await durable_job_repository.get_job(queued["job_id"])
+    assert native["status"] == "running" and native["attempt_count"] == claimed["attempt_count"]
+    assert await opportunity_runtime.quiesce_opportunity(old, coalesced=True) is False
+    if missing_binding:
+        # Canonical corruption negative only: a linked missing native row
+        # cannot serve as a proof that its former transfer closed.
+        async with sessions() as db:
+            await db.execute(delete(WorkflowRunState).where(WorkflowRunState.run_identity == old.job_id))
+        assert await opportunity_runtime.quiesce_opportunity(old, coalesced=True) is False
+    def forbid_http(*args, **kwargs):
+        raise AssertionError("unproved old closure must never reach HTTP")
+    monkeypatch.setattr(httpx, "AsyncClient", forbid_http)
+    reason = "coalesced_binding_missing" if missing_binding else "coalesced_execution_waiting"
+    with pytest.raises(OpportunityError, match=reason):
+        await admit_assessment(latest.id)
+    for _ in range(2):
+        assert (await opportunity_runtime.run_opportunity_tick())["started"] == 0
+        async with sessions() as db:
+            current = await db.get(GuardianOpportunity, latest.id)
+            assert current.status == "queued" and current.reason_code == reason and current.job_id is None
+            assert current.revision == latest.revision + 1
+            assert (await db.execute(select(func.count()).select_from(InferenceCostReservation))).scalar() == 0
+    async with sessions() as db:
+        current = await db.get(GuardianOpportunity, latest.id)
+        current.assessment_deadline_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        db.add(current)
+    assert (await opportunity_runtime.run_opportunity_tick())["started"] == 0
+    async with sessions() as db:
+        current = await db.get(GuardianOpportunity, latest.id)
+        assert current.status == "blocked" and current.reason_code == "assessment_deadline_expired"
+        assert current.revision == latest.revision + 2 and current.job_id is None
+    if not missing_binding:
+        assert (await durable_job_repository.get_job(old.job_id))["status"] == "running"
+
+
 async def test_dismissed_semantics_never_requeue_and_supersede_other_pending_packets(isolated_runtime):
     from src.guardian.source_watch import SourceWatchService
     from tests.test_work_board_m6_provider_free_journey import SESSION

@@ -34,6 +34,7 @@ async def assert_known_vault_values_absent(payload):
     while pending:
         value = pending.pop()
         if isinstance(value, str):
+            assert_public_judgment_text(value)
             literals.append(value)
         elif isinstance(value, dict):
             pending.extend(value.keys())
@@ -159,6 +160,7 @@ async def admit_assessment(opportunity_id):
     from src.workflows.job_runtime import DurableJobIdentity, DurableJobSpec, durable_job_repository
     async with db_engine.get_session() as db:
         row, (goal, root, budget, policy, expiry) = await _authority(db, opportunity_id, execution=True)
+        await assert_coalesced_predecessor_closed(db, row)
         token = json.loads(row.source_token_json)
     evidence = read_snapshot(token["artifact_id"], row.source_digest)
     job_id = f"opportunity:{row.id}"
@@ -174,7 +176,8 @@ async def admit_assessment(opportunity_id):
         authority["budget_microusd"] = cost_bound
 
     async def check(db, spec):
-        await _authority(db, opportunity_id, evidence=evidence, execution=True)
+        current, _ = await _authority(db, opportunity_id, evidence=evidence, execution=True)
+        await assert_coalesced_predecessor_closed(db, current)
 
     admitted = await durable_job_repository.admit_job(DurableJobSpec(
         identity=DurableJobIdentity(job_id=job_id, owner_kind="service", owner_principal_id=SERVICE_PRINCIPAL,
@@ -212,6 +215,25 @@ async def admit_assessment(opportunity_id):
                     raise OpportunityError("opportunity_job_binding_changed")
             admitted = latest
     return admitted
+
+
+async def assert_coalesced_predecessor_closed(db, row):
+    """An unowned prior execution retains its native outstanding slot."""
+    from sqlalchemy import select, or_
+    from src.db.models import GuardianOpportunity, WorkflowRunState
+    from src.workflows.job_runtime import DURABLE_JOB_TERMINAL_STATUSES
+    pending = (await db.execute(select(GuardianOpportunity.id, WorkflowRunState.run_identity)
+        .select_from(GuardianOpportunity).outerjoin(
+        WorkflowRunState, GuardianOpportunity.job_id == WorkflowRunState.run_identity).where(
+        GuardianOpportunity.goal_id == row.goal_id,
+        GuardianOpportunity.owner_principal_id == row.owner_principal_id,
+        GuardianOpportunity.original_root_id == row.original_root_id,
+        GuardianOpportunity.status == "silent", GuardianOpportunity.reason_code == "coalesced",
+        GuardianOpportunity.job_id.is_not(None),
+        or_(WorkflowRunState.run_identity.is_(None),
+            WorkflowRunState.status.not_in(tuple(DURABLE_JOB_TERMINAL_STATUSES)))).limit(1))).first()
+    if pending:
+        raise OpportunityError("coalesced_execution_waiting" if pending[1] else "coalesced_binding_missing")
 
 
 async def _contact_limits(db, row, policy):
@@ -258,6 +280,7 @@ def assessment_context(row, goal, evidence):
         "success_criterion": json.loads(goal.success_criterion_json or "null")}
     assert_public_judgment_text(json_bytes(goal_fields).decode())
     public_fields = evidence.model_dump(mode="json")
+    assert_public_judgment_text(json_bytes(public_fields).decode())
     instruction = ("Return one JSON object of schema seraph.opportunity.assessment.v1 with fields "
         "schema_version (seraph.opportunity.assessment.v1),relevance (integer 0..4),confidence (low|medium|high),summary (<=240 chars),"
         "reason (<=1000 chars),citations (1..4 objects: source_id,start_line,end_line,span_sha256),"
@@ -526,6 +549,24 @@ async def run_opportunity_tick():
             cursor = (row.created_at, row.id)
             if row.id in _executions:
                 continue
+            if row.status == "queued":
+                # Unknown closure of an obsolete execution is not a new
+                # authority grant or a permanent capacity failure. Retain the
+                # current candidate visibly until closure or its deadline.
+                async with db_engine.get_session() as db:
+                    try:
+                        await assert_coalesced_predecessor_closed(db, row)
+                    except OpportunityError as exc:
+                        await db.execute(text("BEGIN IMMEDIATE"))
+                        expired = utc(row.assessment_deadline_at) <= now()
+                        reason = "assessment_deadline_expired" if expired else exc.code
+                        await db.execute(update(GuardianOpportunity).where(
+                            GuardianOpportunity.id == row.id, GuardianOpportunity.revision == row.revision,
+                            GuardianOpportunity.status == "queued",
+                            or_(GuardianOpportunity.reason_code.is_(None), GuardianOpportunity.reason_code != reason)).values(
+                            status="blocked" if expired else "queued",
+                            reason_code=reason, revision=GuardianOpportunity.revision + 1))
+                        continue
             if row.status == "assessing":
                 # A restarted process cannot prove the former callback ended.
                 # Retain contacted liability/history and never replay it.
@@ -579,6 +620,14 @@ async def run_opportunity_tick():
                     pass
                 except Exception as exc:
                     reason = exc.code if isinstance(exc, OpportunityError) else "assessment_admission_failed"
+                    if reason in {"coalesced_execution_waiting", "coalesced_binding_missing"}:
+                        async with db_engine.get_session() as db:
+                            await db.execute(text("BEGIN IMMEDIATE"))
+                            await db.execute(update(GuardianOpportunity).where(GuardianOpportunity.id == identifier,
+                                GuardianOpportunity.status == "queued",
+                                or_(GuardianOpportunity.reason_code.is_(None), GuardianOpportunity.reason_code != reason))
+                                .values(reason_code=reason, revision=GuardianOpportunity.revision + 1))
+                        return
                     async with db_engine.get_session() as db:
                         await db.execute(text("BEGIN IMMEDIATE"))
                         await db.execute(update(GuardianOpportunity).where(GuardianOpportunity.id == identifier,
@@ -597,18 +646,28 @@ async def run_opportunity_tick():
     return {"started": started, "examined": examined}
 
 
-async def quiesce_opportunity(row):
+async def quiesce_opportunity(row, *, coalesced=False):
     """Execution owner cancels actual async transfer before confirming closure."""
-    from src.workflows.job_runtime import durable_job_repository
+    from src.workflows.job_runtime import durable_job_repository, DurableJobLeaseError
     from src.guardian.opportunities import now
     task = _executions.get(row.id)
     native = await durable_job_repository.get_job(row.job_id) if row.job_id else None
+    if coalesced and (native is None or native["status"] not in {"queued", "running", "blocked"}):
+        return native is not None and native["status"] == "cancelled"
+    if coalesced and native["status"] == "blocked" and task is None:
+        return False
     if native and native["status"] == "running":
-        checkpoint = await durable_job_repository.record_checkpoint(row.job_id,
-            checkpoint_id="cancel_requested", state={"phase": "cancel_requested", "opportunity_id": row.id},
-            checkpoint_payload={"opportunity_id": row.id, "requested_at": now().isoformat()},
-            safe=True, owner=native["lease"]["owner"], fencing_token=native["lease"]["fencing_token"],
-            expected_revision=native["revision"])
+        try:
+            await durable_job_repository.record_checkpoint(row.job_id,
+                checkpoint_id="cancel_requested", state={"phase": "cancel_requested", "opportunity_id": row.id},
+                checkpoint_payload={"opportunity_id": row.id, "requested_at": now().isoformat()},
+                safe=True, owner=native["lease"]["owner"], fencing_token=native["lease"]["fencing_token"],
+                expected_revision=native["revision"])
+        except DurableJobLeaseError:
+            if not coalesced:
+                raise
+            # The actual callback may naturally finish after publication.
+            # Its exact job is read again after owned Task closure below.
         if task is None:
             return False
     if task is not None:
@@ -616,21 +675,48 @@ async def quiesce_opportunity(row):
         await asyncio.gather(task, return_exceptions=True)
     if native:
         native = await durable_job_repository.get_job(row.job_id)
+        if coalesced and (native is None or native["status"] == "cancelled"):
+            return native is not None
         if native["status"] in {"unknown_external_effect", "cost_liability"}:
             return task is not None and task.done()  # Actual closure, liability survives.
 
         async def cancellation_check(db, run):
-            from src.db.models import GuardianOpportunity
+            from sqlalchemy import select
+            from src.db.models import GuardianOpportunity, InferenceCostReservation
             current = await db.get(GuardianOpportunity, row.id)
             if (current is None or current.job_id != run.run_identity
                     or current.owner_principal_id != row.owner_principal_id
                     or current.original_root_id != row.original_root_id
-                    or current.reason_code not in {"cancel_requested", "assessment_cancel_requested"}
+                    or ((current.status != "silent" or current.reason_code != "coalesced") if coalesced
+                        else current.reason_code not in {"cancel_requested", "assessment_cancel_requested"})
                     or _executions.get(row.id) is not None):
                 raise OpportunityError("assessment_cancel_not_quiescent")
+            if coalesced:
+                contacted = (await db.execute(select(InferenceCostReservation).where(
+                    InferenceCostReservation.job_id == run.run_identity,
+                    InferenceCostReservation.contact_started_at.is_not(None)))).scalars().first()
+                if (run.job_kind != JOB_KIND or run.capability_version != CAPABILITY
+                        or run.operator_session_id != row.original_root_id
+                        or run.owner_principal_id != SERVICE_PRINCIPAL
+                        or run.goal_id != row.goal_id or run.status not in {"queued", "running", "blocked"} or contacted):
+                    raise OpportunityError("opportunity_coalescing_stale")
 
-        await durable_job_repository.transition_job(row.job_id, "cancelled",
-            owner=native["lease"]["owner"], fencing_token=native["lease"]["fencing_token"],
-            expected_revision=native["revision"], cancellation_authority_check=cancellation_check,
-            reason="operator_cancelled_opportunity")
+        for attempt in range(2 if coalesced else 1):
+            lease = ({"owner": native["lease"]["owner"], "fencing_token": native["lease"]["fencing_token"]}
+                if native["status"] == "running" else {})
+            try:
+                await durable_job_repository.transition_job(row.job_id, "cancelled", **lease,
+                    expected_revision=native["revision"], cancellation_authority_check=cancellation_check,
+                    reason="coalesced_uncontacted_opportunity" if coalesced else "operator_cancelled_opportunity")
+                break
+            except DurableJobLeaseError:
+                if not coalesced or attempt:
+                    raise
+                native = await durable_job_repository.get_job(row.job_id)
+                if native is None:
+                    return False
+                if native["status"] == "cancelled":
+                    return True
+                if native["status"] not in {"queued", "running", "blocked"}:
+                    return False
     return True

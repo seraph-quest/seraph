@@ -185,6 +185,7 @@ describe("GuardianPolicyForm", () => {
     fetchMock.mockResolvedValueOnce(policyResponse([publicWatch()]));
     render(<GuardianPolicyForm goal={policyGoal()} />);
     await screen.findByLabelText(`Assessment watch ${watchId}`);
+    expect(screen.getByText("Plan staging is not available yet. Saving this permission does not create a plan.")).toBeInTheDocument();
     fireEvent.click(screen.getByLabelText("Enable bounded public opportunity assessments"));
     fireEvent.click(screen.getByLabelText(`Assessment watch ${watchId}`));
     fireEvent.click(screen.getByLabelText("Enable advisory auto-stage plans"));

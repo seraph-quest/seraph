@@ -100,30 +100,20 @@ async def publish_verified_packet(event):
     identifier = await _publish_verified_packet(event)
     if identifier is None:
         return None
-    # Publication marks obsolete uncontacted rows before their claim guard
-    # can execute. Close their existing queued jobs outside the writer.
-    from src.db.models import InferenceCostReservation
-    from src.workflows.job_runtime import durable_job_repository
+    # Publication and the contact marker share SQLite's writer lock. Close
+    # obsolete queued or claimed transfers outside that writer.
+    from src.guardian.opportunity_runtime import quiesce_opportunity
     async with db_engine.get_session() as db:
         latest = await db.get(GuardianOpportunity, identifier)
-        rows = list((await db.execute(select(GuardianOpportunity).where(
+        rows = list((await db.execute(select(GuardianOpportunity).outerjoin(WorkflowRunState,
+            GuardianOpportunity.job_id == WorkflowRunState.run_identity).where(
             GuardianOpportunity.watch_id == latest.watch_id,
             GuardianOpportunity.status == "silent", GuardianOpportunity.reason_code == "coalesced",
-            GuardianOpportunity.job_id.is_not(None)).limit(20))).scalars().all())
+            GuardianOpportunity.job_id.is_not(None),
+            (WorkflowRunState.run_identity.is_(None) | WorkflowRunState.status.in_(("queued", "running", "blocked"))))
+            .order_by(GuardianOpportunity.created_at, GuardianOpportunity.id).limit(20))).scalars().all())
     for row in rows:
-        native = await durable_job_repository.get_job(row.job_id)
-        if native and native["status"] == "queued":
-            async def cancel_guard(db, run, opportunity_id=row.id):
-                current = await db.get(GuardianOpportunity, opportunity_id)
-                contacts = (await db.execute(select(InferenceCostReservation).where(
-                    InferenceCostReservation.job_id == run.run_identity,
-                    InferenceCostReservation.contact_started_at.is_not(None)))).scalars().first()
-                if (current is None or current.status != "silent" or current.reason_code != "coalesced"
-                        or current.job_id != run.run_identity or run.status != "queued" or contacts):
-                    raise OpportunityError("opportunity_coalescing_stale")
-            await durable_job_repository.transition_job(row.job_id, "cancelled",
-                expected_revision=native["revision"], cancellation_authority_check=cancel_guard,
-                reason="coalesced_uncontacted_opportunity")
+        await quiesce_opportunity(row, coalesced=True)
     return identifier
 
 
@@ -188,16 +178,17 @@ async def _publish_verified_packet(event):
             status="blocked" if snapshot_error else "queued", reason_code=snapshot_error)
         if not snapshot_error:
             await assert_source_current(db, opportunity, evidence=evidence)
-            # Latest pending packet from the same watch coalesces only before
-            # any execution owner has claimed it. Contacted history survives.
+            # A claim does not imply contact. Replace pending work until its
+            # durable contact marker exists; contacted history survives.
             from src.db.models import InferenceCostReservation
-            queued_native = select(WorkflowRunState.run_identity).where(WorkflowRunState.status == "queued")
+            uncontacted_native = select(WorkflowRunState.run_identity).where(
+                WorkflowRunState.status.in_(("queued", "running")))
             contacted_native = select(InferenceCostReservation.job_id).where(
                 InferenceCostReservation.contact_started_at.is_not(None))
             await db.execute(update(GuardianOpportunity).where(
-                GuardianOpportunity.watch_id == watch.id, GuardianOpportunity.status == "queued",
+                GuardianOpportunity.watch_id == watch.id, GuardianOpportunity.status.in_(("queued", "assessing")),
                 GuardianOpportunity.id != (existing.id if existing else opportunity.id),
-                (GuardianOpportunity.job_id.is_(None) | GuardianOpportunity.job_id.in_(queued_native)),
+                (GuardianOpportunity.job_id.is_(None) | GuardianOpportunity.job_id.in_(uncontacted_native)),
                 (GuardianOpportunity.job_id.is_(None) | GuardianOpportunity.job_id.not_in(contacted_native)))
                 .values(status="silent", reason_code="coalesced",
                     revision=GuardianOpportunity.revision + 1))

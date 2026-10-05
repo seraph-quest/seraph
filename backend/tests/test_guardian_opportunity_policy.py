@@ -16,14 +16,14 @@ from src.guardian.opportunities import policy_projection, assert_opportunity_cur
 from src.guardian.source_watch import SourceWatchService
 
 
-async def setup_policy(isolated_runtime):
+async def setup_policy(isolated_runtime, *, source_key="public", target="https://example.com/public"):
     sessions, _ = isolated_runtime
     goal = _goal(str(uuid4()), "Explicit reviewed public goal")
     async with sessions() as db:
         db.add(goal)
     watch = await SourceWatchService().create_watch(owner_principal_id=OWNER, owner_session_id=SESSION,
         goal_id=goal.id, expected_goal_revision=1,
-        sources=[dict(source_key="public", kind="public_https_text", target="https://example.com/public",
+        sources=[dict(source_key=source_key, kind="public_https_text", target=target,
             label="public", priority=1)], criteria={}, schedule={"cron": "0 * * * *", "timezone": "UTC"},
         write_mode="standing_reviewed", reviewed_grant_id=GRANT)
     current = datetime.now(timezone.utc)
@@ -147,6 +147,40 @@ async def test_known_vault_secret_never_enters_new_snapshot_or_provider_input(is
         assert packet.opportunity_snapshot_artifact_id is None
         assert opportunity.status == "blocked" and opportunity.reason_code == "source_excerpt_unavailable"
         assert opportunity.job_id is None
+        assert (await db.execute(select(func.count()).select_from(WorkflowRunState).where(
+            WorkflowRunState.job_kind == "guardian_opportunity_assess"))).scalar() == 0
+    assert not list((isolated_runtime[1]/"artifacts/work-board/opportunities").glob("*.json"))
+
+
+@pytest.mark.parametrize("field,value", [
+    ("source_key", "reviewer.person@example.com"),
+    ("target", "https://example.com/releases/reviewer.person@example.com"),
+    ("target", "https://example.com/releases?ref=reviewer.person@example.com"),
+    ("source_key", "correcthorse956batterystaple"),
+])
+async def test_literal_source_metadata_excluded_before_snapshot_and_assessment(isolated_runtime, field, value):
+    sessions, goal, watch, request, body = await setup_policy(isolated_runtime, **{field: value})
+    await put_guardian_policy(goal.id, body, request)
+    if "correcthorse" in value:
+        from src.vault.repository import vault_repository
+        await vault_repository.store("956-private-metadata", value, owner_principal_id=OWNER)
+    versions = iter(("Prior public release\n", "A different relevant new public release\n"))
+    seen = []
+    async def fetch(source):
+        seen.append((source.source_key, source.target))
+        return next(versions), {"content_type": "text/plain"}
+    service = SourceWatchService(fetcher=fetch)
+    for occurrence, expected in (("metadata-baseline", "baseline_initialized"), ("metadata-material", "succeeded")):
+        result = await service.run_watch(watch["id"], occurrence_id=occurrence,
+            expected_plan_revision=1, expected_owner_session_id=SESSION)
+        assert result["status"] == expected, result
+    assert len(seen) == 2 and all((key if field == "source_key" else url) == value for key, url in seen)
+    async with sessions() as db:
+        row = (await db.execute(select(GuardianOpportunity))).scalar_one()
+        packet = await db.get(GuardianDecisionPacket, row.source_packet_id)
+        assert packet.opportunity_snapshot_artifact_id is None
+        assert row.status == "blocked" and row.reason_code == "source_excerpt_unavailable"
+        assert row.job_id is None
         assert (await db.execute(select(func.count()).select_from(WorkflowRunState).where(
             WorkflowRunState.job_kind == "guardian_opportunity_assess"))).scalar() == 0
     assert not list((isolated_runtime[1]/"artifacts/work-board/opportunities").glob("*.json"))

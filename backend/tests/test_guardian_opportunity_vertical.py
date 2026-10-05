@@ -29,6 +29,8 @@ class OpportunityHttpBoundary(httpx.AsyncBaseTransport):
         body = json.loads(request.content)
         self.calls.append(body)
         if len(body["messages"]) == 1:
+            if self.controls.get("hold_canary"):
+                await self.controls["hold_canary"]()
             content = '{"ok":true}' if "response_format" in body else "CANARY_OK"
         else:
             if self.controls.get("after_contact"):
@@ -62,7 +64,7 @@ class OpportunityHttpBoundary(httpx.AsyncBaseTransport):
 
 
 @pytest.mark.parametrize("scenario", ["completed", "silent", "citation_tampered", "invented_reference",
-    "pii_output", "secret_output", "missing_snapshot", "cancel_contacted"])
+    "pii_output", "secret_output", "missing_snapshot", "cancel_contacted", "coalesce_uncontacted", "outstanding_one", "cancel_uncontacted"])
 async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_auth, monkeypatch, scenario):
     from src.api import auth, goals, model_fabric_settings
     from src.guardian import source_watch, inbox
@@ -94,7 +96,8 @@ async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_aut
         return original_client(**kwargs)
     monkeypatch.setattr(httpx, "AsyncClient", clients)
     versions = iter(("Stable public line\nPrevious public release\n",
-        "Stable public line\nA relevant new public release\n"))
+        "Stable public line\nA relevant new public release\n",
+        "Stable public line\nA newer relevant public release with material detail\n"))
     async def public_http(request):
         assert request.method == "GET" and request.url == "https://example.com/public"
         source_calls.append(str(request.url))
@@ -129,7 +132,7 @@ async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_aut
         current = datetime.now(timezone.utc)
         created = await client.post("/api/goals", json=dict(title="Review cited public release changes",
             proactive_enabled=True, admission_budget=dict(reviewed_grant=True, grant_id="opportunity-review",
-                max_outstanding_jobs=2, max_attempts=2, max_runtime_seconds=300,
+                max_outstanding_jobs=1 if scenario == "outstanding_one" else 2, max_attempts=2, max_runtime_seconds=300,
                 period_started_at=current.isoformat(), period_expires_at=(current+timedelta(hours=1)).isoformat())))
         assert created.status_code == 200, created.text
         goal = created.json()
@@ -171,6 +174,89 @@ async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_aut
         messages, context = assessment_context(row, current_goal, offered)
         assert {p.origin for p in context.provenance} == {ContentOrigin.CANONICAL_MEMORY, ContentOrigin.EXTERNAL_UNTRUSTED}
         assert all(p.instruction_authority is False for p in context.provenance)
+        if scenario in {"coalesce_uncontacted", "outstanding_one", "cancel_uncontacted"}:
+            from src.guardian.opportunity_runtime import run_opportunity_tick, _executions
+            entered, release = asyncio.Event(), asyncio.Event()
+            async def hold_canary():
+                entered.set()
+                await release.wait()
+            controls["hold_canary"] = hold_canary
+            canary = asyncio.create_task(client.post("/api/settings/model-fabric/canary", json=dict(
+                profile_id="openrouter", capability="health", timeout_seconds=30)))
+            await asyncio.wait_for(entered.wait(), timeout=20)
+            assert (await run_opportunity_tick())["started"] == 1
+            active = _executions[row.id]
+            async def wait_for_native_queue():
+                while True:
+                    state = await remote_inference_admission.remote_inference_admission_broker.status()
+                    if any(item["job_id"] == row.job_id for item in state["queued"]):
+                        return
+                    await asyncio.sleep(0.02)
+            await asyncio.wait_for(wait_for_native_queue(), timeout=20)
+            async with factory.accounting_sessions() as db:
+                assert (await db.get(GuardianOpportunity, row.id)).status == "assessing"
+                old_cost = (await db.execute(select(InferenceCostReservation).where(
+                    InferenceCostReservation.job_id == row.job_id))).scalar_one()
+                assert old_cost.contact_started_at is None
+            assert (await durable_job_repository.get_job(row.job_id))["status"] == "running"
+            if scenario == "cancel_uncontacted":
+                async with factory.accounting_sessions() as db:
+                    pending = await db.get(GuardianOpportunity, row.id)
+                request = dict(expected_opportunity_revision=pending.revision, idempotency_key=str(uuid4()))
+                cancelled = await client.post(f"/api/guardian/opportunities/{row.id}/cancel", json=request)
+                assert cancelled.status_code == 200, cancelled.text
+                assert cancelled.json()["quiescent"] is True and cancelled.json()["status"] == "cancelled"
+                replay = await client.post(f"/api/guardian/opportunities/{row.id}/cancel", json=request)
+                assert replay.status_code == 200 and replay.json() == cancelled.json()
+                assert active.done() and row.id not in _executions
+                assert (await durable_job_repository.get_job(row.job_id))["status"] == "cancelled"
+                controls.pop("hold_canary")
+                release.set()
+                proof = await asyncio.wait_for(canary, timeout=20)
+                assert proof.status_code == 200 and proof.json()["outcome"] == "passed", proof.text
+                assert (await run_opportunity_tick())["started"] == 0
+                async with factory.accounting_sessions() as db:
+                    cost = (await db.execute(select(InferenceCostReservation).where(
+                        InferenceCostReservation.job_id == row.job_id))).scalar_one()
+                    assert cost.contact_started_at is None and cost.state == "released"
+                    assert (await db.execute(select(func.count()).select_from(GuardianIntervention))).scalar() == 0
+                    assert (await db.execute(select(func.count()).select_from(NativeNotificationOutbox))).scalar() == 0
+                assert len(source_calls) == 2 and len(calls) == 5
+                assert all(len(call["messages"]) == 1 for call in calls)
+                (root/"actual-opportunity-uncontacted-cancel-readback.json").write_text(json.dumps(dict(
+                    cancellation=cancelled.json(), cost_state=cost.state, provider_contacts=len(calls),
+                    assessment_contacts=0, source_contacts=len(source_calls)), default=str))
+                return
+            newer = await service.run_watch(watch["id"], occurrence_id="actual-opportunity-newest",
+                expected_plan_revision=1, expected_owner_session_id=owner["session_id"])
+            if scenario == "outstanding_one":
+                # The existing source-watch owner projects the native denial
+                # class; the finite cap must still stop before any source GET.
+                assert newer["status"] == "blocked" and newer["reason_code"] == "DurableJobAdmissionDenied", newer
+                assert await durable_job_repository.get_job(newer["job_id"]) is None
+                assert len(source_calls) == 2 and not active.done()
+            else:
+                assert newer["status"] == "succeeded", newer
+                assert active.done() and row.id not in _executions
+                assert (await durable_job_repository.get_job(row.job_id))["status"] == "cancelled"
+                async with factory.accounting_sessions() as db:
+                    old = await db.get(GuardianOpportunity, row.id)
+                    assert old.status == "silent" and old.reason_code == "coalesced"
+                    old_cost = (await db.execute(select(InferenceCostReservation).where(
+                        InferenceCostReservation.job_id == row.job_id))).scalar_one()
+                    assert old_cost.contact_started_at is None and old_cost.state == "released"
+                    row = (await db.execute(select(GuardianOpportunity).where(
+                        GuardianOpportunity.status == "queued"))).scalar_one()
+                    offered = read_snapshot(json.loads(row.source_token_json)["artifact_id"], row.source_digest)
+            controls.pop("hold_canary")
+            release.set()
+            proof = await asyncio.wait_for(canary, timeout=20)
+            assert proof.status_code == 200 and proof.json()["outcome"] == "passed", proof.text
+            if scenario == "outstanding_one":
+                await asyncio.wait_for(active, timeout=30)
+            else:
+                assert (await run_opportunity_tick())["started"] == 1
+                await asyncio.wait_for(_executions[row.id], timeout=30)
         if scenario == "missing_snapshot":
             async def remove_immutable_evidence():
                 (root/json.loads(row.source_token_json)["artifact_id"]).unlink()
@@ -190,6 +276,14 @@ async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_aut
             active = _executions[row.id]
             async with factory.accounting_sessions() as db:
                 pending = await db.get(GuardianOpportunity, row.id)
+            newer = await service.run_watch(watch["id"], occurrence_id="actual-contacted-newer",
+                expected_plan_revision=1, expected_owner_session_id=owner["session_id"])
+            assert newer["status"] == "succeeded", newer
+            async with factory.accounting_sessions() as db:
+                old = await db.get(GuardianOpportunity, row.id)
+                latest = (await db.execute(select(GuardianOpportunity).where(GuardianOpportunity.id != row.id))).scalar_one()
+                assert old.status == "assessing" and old.revision == pending.revision
+                assert latest.status == "blocked" and latest.reason_code == "opportunity_capacity_exhausted"
             response = await client.post(f"/api/guardian/opportunities/{row.id}/cancel", json=dict(
                 expected_opportunity_revision=pending.revision, idempotency_key=str(uuid4())))
             assert response.status_code == 200, response.text
@@ -203,14 +297,14 @@ async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_aut
                 job_id="guardian_opportunity_assessment", allow_model_inference=True)
             await wrapper()
             await asyncio.wait_for(_executions[row.id], timeout=50)
-        else:
+        elif scenario not in {"coalesce_uncontacted", "outstanding_one"}:
             await execute_assessment(row.id)
         async with factory.accounting_sessions() as db:
             final = await db.get(GuardianOpportunity, row.id)
             expected = "silent" if scenario == "silent" else "unknown" if scenario == "cancel_contacted" else (
-                "proposed" if scenario == "completed" else "blocked")
+                "proposed" if scenario in {"completed", "coalesce_uncontacted", "outstanding_one"} else "blocked")
             assert final.status == expected, final.reason_code
-            if scenario != "completed":
+            if scenario not in {"completed", "coalesce_uncontacted", "outstanding_one"}:
                 assert final.intervention_id is None
                 assert (await db.execute(select(func.count()).select_from(GuardianIntervention))).scalar() == 0
                 assert (await db.execute(select(func.count()).select_from(NativeNotificationOutbox))).scalar() == 0
@@ -224,7 +318,7 @@ async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_aut
                 if scenario == "cancel_contacted":
                     assert detail["quiescent"] is True and detail["cancel_requested"] is True
                     assert detail["cancel_allowed"] is False
-                assert len(source_calls) == 2 and len(calls) == 5
+                assert len(source_calls) == (3 if scenario == "cancel_contacted" else 2) and len(calls) == 5
                 (root/f"actual-opportunity-{scenario}-readback.json").write_text(json.dumps(dict(
                     detail=detail, state=cost.state, contacts=len(calls)), default=str))
                 return
@@ -242,10 +336,15 @@ async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_aut
             owner_session_id=owner["session_id"], item_id=row.id)
         assert detail["source_kind"] == "guardian_opportunity" and detail["verification_status"] == "passed"
         assert detail["assessment"]["citations"][0]["span_sha256"] == offered.sources[0].excerpt_sha256
-        assert len(source_calls) == 2 and len(calls) == 5
+        assert len(source_calls) == (3 if scenario == "coalesce_uncontacted" else 2)
+        assert len(calls) == (6 if scenario in {"coalesce_uncontacted", "outstanding_one"} else 5)
         assert calls[-1]["stream"] is False and calls[-1]["max_tokens"] == 1024 and "tools" not in calls[-1]
         (root/"actual-opportunity-readback.json").write_text(json.dumps(dict(native=native,
             inbox=detail, source_contacts=len(source_calls), provider_contacts=len(calls)), default=str))
+        if scenario in {"coalesce_uncontacted", "outstanding_one"}:
+            assert sum(len(call["messages"]) == 2 for call in calls) == 1
+            assert detail["assessment"]["citations"][0]["span_sha256"] == offered.sources[0].excerpt_sha256
+            return
         from src.guardian import feedback
         monkeypatch.setattr(feedback, "get_session", factory.accounting_sessions)
         async def forbid_memory_refresh(**kwargs):

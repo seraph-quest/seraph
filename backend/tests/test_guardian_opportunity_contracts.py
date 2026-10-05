@@ -119,6 +119,23 @@ def test_evidence_never_persists_raw_baseline_or_changed_text():
     assert OpportunityEvidence.model_validate_json(offered.model_dump_json()) == offered
 
 
+@pytest.mark.parametrize("field,value", [
+    ("source_key", "reviewer.person@example.com"),
+    ("target", "https://example.com/releases/reviewer.person@example.com?ref=public"),
+    ("target", "https://example.com/releases?ref=reviewer.person@example.com"),
+])
+def test_provider_context_refuses_unsafe_literal_metadata_without_rewriting(field, value):
+    from src.guardian.opportunity_runtime import assessment_context
+    offered = evidence()
+    offered.sources[0] = offered.sources[0].model_copy(update={field: value})
+    goal = SimpleNamespace(id="goal", revision=1, title="Review public changes", description="",
+        success_criterion_json="null")
+    row = SimpleNamespace()
+    with pytest.raises(OpportunityError, match="assessment_sensitive_text"):
+        assessment_context(row, goal, offered)
+    assert getattr(offered.sources[0], field) == value
+
+
 async def test_known_multiline_or_unreadable_vault_values_fail_closed(isolated_runtime, monkeypatch):
     from src.guardian.opportunity_runtime import assert_known_vault_values_absent
     from src.vault.repository import vault_repository

@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 
-from sqlmodel import select
+from sqlmodel import and_, or_, select
 
 from src.db.engine import get_session
 from src.db.models import GuardianIntervention
@@ -789,9 +789,22 @@ class GuardianFeedbackRepository:
         limit: int = 5,
         session_id: str | None = None,
         active_project: str | None = None,
+        owner_principal_id: str | None = None,
+        original_root_id: str | None = None,
     ) -> list[GuardianIntervention]:
         async with get_session() as db:
             query = select(GuardianIntervention)
+            # Opportunity judgments contain Goal-derived private text and have
+            # no chat session. Generic legacy consumers cannot treat them as
+            # ambient; scope this population before LIMIT to preserve own rows.
+            legacy = GuardianIntervention.intervention_type != "opportunity"
+            if owner_principal_id and original_root_id:
+                query = query.where(or_(legacy, and_(
+                    GuardianIntervention.owner_principal_id == owner_principal_id,
+                    GuardianIntervention.original_root_id == original_root_id,
+                )))
+            else:
+                query = query.where(legacy)
             if session_id:
                 query = query.where(GuardianIntervention.session_id == session_id)
             normalized_active_project = _normalized_active_project(active_project)

@@ -427,7 +427,7 @@ async def _publish_independent_ready_goal(isolated_runtime):
     return row
 
 
-@pytest.mark.parametrize("invalid", ["goal", "source", "snapshot"])
+@pytest.mark.parametrize("invalid", ["goal", "source", "snapshot", "token_json", "token_shape", "token_artifact"])
 async def test_invalid_recovered_goal_does_not_starve_independent_ready_goal(isolated_runtime, monkeypatch, invalid):
     import asyncio
     import json
@@ -440,6 +440,11 @@ async def test_invalid_recovered_goal_does_not_starve_independent_ready_goal(iso
         reference = json.loads(old.source_token_json)["artifact_id"]
         assert reference.startswith(opportunity_runtime.PREFIX)
         (isolated_runtime[1]/reference).unlink()
+    elif invalid.startswith("token_"):
+        async with sessions() as db:
+            current = await db.get(GuardianOpportunity, old.id)
+            current.source_token_json = {"token_json":"{", "token_shape":"[]", "token_artifact":"{}"}[invalid]
+            db.add(current)
     else:
         async with sessions() as db:
             if invalid == "goal":
@@ -459,7 +464,8 @@ async def test_invalid_recovered_goal_does_not_starve_independent_ready_goal(iso
         stopped = await db.get(GuardianOpportunity, old.id)
         assert stopped.status == "blocked" and stopped.revision == old.revision+1
         assert stopped.reason_code == {"goal":"goal_review_required", "source":"source_stale",
-            "snapshot":"source_excerpt_unavailable"}[invalid]
+            "snapshot":"source_excerpt_unavailable", "token_json":"source_excerpt_unavailable",
+            "token_shape":"source_excerpt_unavailable", "token_artifact":"source_excerpt_unavailable"}[invalid]
         handled = await db.get(GuardianOpportunity, ready.id)
         assert handled.job_id == f"opportunity:{ready.id}"
         assert (await db.execute(select(func.count()).select_from(InferenceCostReservation))).scalar() == 0

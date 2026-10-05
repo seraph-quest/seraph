@@ -2441,7 +2441,21 @@ async def build_observer_continuity_snapshot(
         )
     ]
     queued_insights = await insight_queue.peek_all()
-    recent_interventions = await guardian_feedback_repository.list_recent(limit=8)
+    recent_interventions = await guardian_feedback_repository.list_recent(
+        limit=8,
+        owner_principal_id=owner_principal_id,
+        original_root_id=operator_session_id,
+    )
+    recent_interventions = [
+        item
+        for item in recent_interventions
+        if getattr(item, "intervention_type", None) != "opportunity"
+        or (
+            bool(owner_principal_id and operator_session_id)
+            and getattr(item, "owner_principal_id", None) == owner_principal_id
+            and getattr(item, "original_root_id", None) == operator_session_id
+        )
+    ]
     session_titles = {
         str(session["id"]): str(session.get("title") or "Untitled session")
         for session in await session_manager.list_sessions(

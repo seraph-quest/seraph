@@ -648,7 +648,7 @@ async def run_opportunity_tick():
                             reason_code="assessment_restart_requires_readback" if contacted else "assessment_deadline_expired",
                             revision=GuardianOpportunity.revision + 1))
                     continue
-                from src.workflows.job_runtime import durable_job_repository
+                from src.workflows.job_runtime import durable_job_repository, DurableJobLeaseError
                 native = await durable_job_repository.get_job(row.job_id) if row.job_id else None
                 if (native is None or native["status"] not in {"running", "blocked"}
                         or native["attempt_count"] >= native["max_attempts"]
@@ -668,20 +668,33 @@ async def run_opportunity_tick():
                     continue
                 # Physical proof is staged outside the native queue writer.
                 try:
-                    evidence = read_snapshot(json.loads(row.source_token_json)["artifact_id"], row.source_digest)
-                except OpportunityError:
-                    continue
-                async with db_engine.get_session() as db:
-                    current, _ = await _authority(db, row.id, evidence=evidence, execution=True)
-                    reservation = (await db.execute(select(InferenceCostReservation).where(
-                        InferenceCostReservation.job_id == row.job_id))).scalars().first()
-                    if reservation is not None:
-                        continue  # No invented settlement/quiescence proof.
-                try:
+                    try:
+                        snapshot_reference = json.loads(row.source_token_json)["artifact_id"]
+                    except (json.JSONDecodeError, TypeError, KeyError) as exc:
+                        raise OpportunityError("source_excerpt_unavailable") from exc
+                    evidence = read_snapshot(snapshot_reference, row.source_digest)
+                    async with db_engine.get_session() as db:
+                        current, _ = await _authority(db, row.id, evidence=evidence, execution=True)
+                        reservation = (await db.execute(select(InferenceCostReservation).where(
+                            InferenceCostReservation.job_id == row.job_id))).scalars().first()
+                        if reservation is not None:
+                            continue  # No invented settlement/quiescence proof.
                     await durable_job_repository.queue_job(row.job_id, expected_revision=recovered["revision"],
                         expected_fencing_token=recovered["lease"]["fencing_token"],
                         reason="verified_never_contacted_opportunity_recovery")
-                except OpportunityError:
+                except DurableJobLeaseError:
+                    # The native CAS winner owns recovery; a later tick reads
+                    # its committed state without blocking or replaying it.
+                    continue
+                except OpportunityError as exc:
+                    async with db_engine.get_session() as db:
+                        await db.execute(text("BEGIN IMMEDIATE"))
+                        await db.execute(update(GuardianOpportunity).where(
+                            GuardianOpportunity.id == row.id, GuardianOpportunity.job_id == row.job_id,
+                            GuardianOpportunity.status == "assessing",
+                            GuardianOpportunity.revision == row.revision).values(
+                            status="blocked", reason_code=exc.code,
+                            revision=GuardianOpportunity.revision + 1))
                     continue
             if len(_executions) >= 16:
                 return {"started": started}

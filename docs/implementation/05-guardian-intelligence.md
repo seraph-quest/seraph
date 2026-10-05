@@ -1583,6 +1583,11 @@ task for operator review. Snooze and dismissal persist existing dispositions.
 Judgment, delivery and feedback do not enter legacy learning weights or refresh
 canonical memory; downstream execution and learning require separate reviews.
 
+Opportunity judgments retain their exact operator and original Root lineage.
+Continuity shows them only for that authenticated binding; generic activity and
+summary queries omit them when the binding is absent. A missing chat session is
+not permission to expose Goal-derived text as ambient history.
+
 Delivery is Inbox-only by default. Separately acknowledged notification opt-in
 uses the existing quiet-hours policy and durable outbox, capped at two owner
 intents per UTC day, one per Goal and a thirty-minute owner gap. Unknown delivery

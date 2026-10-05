@@ -406,6 +406,104 @@ async def test_verified_publication_handles_recovered_blocked_history_without_gu
     assert residual["lease"]["fencing_token"] == native["lease"]["fencing_token"]
 
 
+async def _publish_independent_ready_goal(isolated_runtime):
+    from tests.test_guardian_opportunity_policy import setup_policy
+    from src.api.goals import put_guardian_policy
+    from src.guardian.source_watch import SourceWatchService
+    from tests.test_work_board_m6_provider_free_journey import SESSION
+    sessions, goal, watch, request, body = await setup_policy(isolated_runtime)
+    await put_guardian_policy(goal.id, body, request)
+    versions = iter(("Older independent release\n", "A relevant independent public release\n"))
+    async def fetch(source):
+        return next(versions), {"content_type": "text/plain"}
+    service = SourceWatchService(fetcher=fetch)
+    for occurrence in ("independent-baseline", "independent-material"):
+        result = await service.run_watch(watch["id"], occurrence_id=occurrence,
+            expected_plan_revision=1, expected_owner_session_id=SESSION)
+        assert result["status"] in {"baseline_initialized", "succeeded"}, result
+    async with sessions() as db:
+        row = (await db.execute(select(GuardianOpportunity).where(GuardianOpportunity.goal_id == goal.id))).scalar_one()
+        assert row.status == "queued" and row.job_id is None
+    return row
+
+
+@pytest.mark.parametrize("invalid", ["goal", "source", "snapshot"])
+async def test_invalid_recovered_goal_does_not_starve_independent_ready_goal(isolated_runtime, monkeypatch, invalid):
+    import asyncio
+    import json
+    import httpx
+    from src.db.models import Goal, GuardianSourceWatch
+    from src.guardian import opportunity_runtime
+    sessions, goal, watch, old, native = await _startup_recovered_candidate(isolated_runtime)
+    ready = await _publish_independent_ready_goal(isolated_runtime)
+    if invalid == "snapshot":
+        reference = json.loads(old.source_token_json)["artifact_id"]
+        assert reference.startswith(opportunity_runtime.PREFIX)
+        (isolated_runtime[1]/reference).unlink()
+    else:
+        async with sessions() as db:
+            if invalid == "goal":
+                current = await db.get(Goal, goal.id)
+                current.revision += 1
+            else:
+                current = await db.get(GuardianSourceWatch, watch["id"])
+                current.plan_revision += 1
+            db.add(current)
+    def forbid_http(*args, **kwargs):
+        raise AssertionError("provider-free scheduler proof must not reach HTTP")
+    monkeypatch.setattr(httpx, "AsyncClient", forbid_http)
+    tick = await opportunity_runtime.run_opportunity_tick()
+    assert tick == {"started": 1, "examined": 2}
+    await asyncio.wait_for(opportunity_runtime._executions[ready.id], timeout=20)
+    async with sessions() as db:
+        stopped = await db.get(GuardianOpportunity, old.id)
+        assert stopped.status == "blocked" and stopped.revision == old.revision+1
+        assert stopped.reason_code == {"goal":"goal_review_required", "source":"source_stale",
+            "snapshot":"source_excerpt_unavailable"}[invalid]
+        handled = await db.get(GuardianOpportunity, ready.id)
+        assert handled.job_id == f"opportunity:{ready.id}"
+        assert (await db.execute(select(func.count()).select_from(InferenceCostReservation))).scalar() == 0
+    original = await durable_job_repository.get_job(old.job_id)
+    assert original["status"] == "blocked" and original["revision"] == native["revision"]
+    assert original["attempt_count"] == native["attempt_count"]
+    assert original["deadline_at"] == native["deadline_at"]
+    # The independent Goal reaches its actual native claim. This deliberately
+    # provider-free fixture lacks model readiness, so no useful judgment or
+    # successful native/Inbox outcome is seeded or claimed here.
+    assert (await durable_job_repository.get_job(handled.job_id))["attempt_count"] == 1
+
+
+async def test_recovery_queue_cas_loss_preserves_actual_winner_for_next_tick(isolated_runtime, monkeypatch):
+    import asyncio
+    import httpx
+    from src.guardian import opportunity_runtime
+    sessions, _, _, row, native = await _startup_recovered_candidate(isolated_runtime)
+    queue = durable_job_repository.queue_job
+    lost = False
+    async def actual_winner_then_stale_caller(job_id, **kwargs):
+        nonlocal lost
+        if job_id == row.job_id and not lost:
+            lost = True
+            assert (await queue(job_id, **kwargs))["status"] == "queued"
+            # A second real call carries the old recovered revision/fence.
+            # The canonical native owner itself rejects this caller's CAS.
+        return await queue(job_id, **kwargs)
+    monkeypatch.setattr(durable_job_repository, "queue_job", actual_winner_then_stale_caller)
+    def forbid_http(*args, **kwargs):
+        raise AssertionError("provider-free CAS proof must not reach HTTP")
+    monkeypatch.setattr(httpx, "AsyncClient", forbid_http)
+    assert (await opportunity_runtime.run_opportunity_tick())["started"] == 0
+    async with sessions() as db:
+        current = await db.get(GuardianOpportunity, row.id)
+        assert current.status == "queued" and current.reason_code is None
+    winner = await durable_job_repository.get_job(row.job_id)
+    assert winner["status"] == "queued" and winner["attempt_count"] == native["attempt_count"]
+    assert winner["deadline_at"] == native["deadline_at"]
+    assert (await opportunity_runtime.run_opportunity_tick())["started"] == 1
+    await asyncio.wait_for(opportunity_runtime._executions[row.id], timeout=20)
+    assert (await durable_job_repository.get_job(row.job_id))["attempt_count"] == 2
+
+
 async def test_fixed_native_kind_requires_all_current_authority_callbacks(isolated_runtime, monkeypatch):
     sessions, goal, watch, request, row, packet = await publish_source(isolated_runtime)
     original_admit = durable_job_repository.admit_job

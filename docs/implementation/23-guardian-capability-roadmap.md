@@ -191,6 +191,11 @@ stop conditions. Changed baseline/contracts require evidence back to the lead,
 not an implementation agent's redesign. Exact cumulative pushed-head independent
 review is mandatory; a relevant subsequent push invalidates prior review.
 
+For future validation, use an existing absolute writable temporary directory:
+`TMPDIR=/tmp` on Linux or `TMPDIR=/private/tmp` on macOS, checking the directory
+before running commands. Historical macOS receipts retain their original path.
+Temporary validation files do not authorize source worktrees under `/tmp`.
+
 Planning critique accepted corrections to proposal dispatch, goal/watch revision
 binding, no-push feedback ownership, deterministic excerpt selection, operation vs
 review expiry, prospective learning populations, unchanged slot proof reuse and

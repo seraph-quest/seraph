@@ -5,7 +5,7 @@ title: "ADR-023: Evidence-bound guardian opportunities and follow-through"
 
 # ADR-023: Evidence-bound guardian opportunities and follow-through
 
-**Status:** Target proposed for independent review under [#954](https://github.com/seraph-quest/seraph/issues/954). No implementation or Shipped claim.
+**Status:** Target decision under [#954](https://github.com/seraph-quest/seraph/issues/954), effective only when independently reviewed [PR #960](https://github.com/seraph-quest/seraph/pull/960) merges to `develop`. All new capabilities remain Planned; no implementation or Shipped claim.
 
 **Decision class:** Additive guardian contract over the existing four layers.
 
@@ -236,11 +236,14 @@ invented separate Ready review. Staging never accepts or dispatches a plan;
 the explicit acceptance is the queue authorization. It grants no private egress
 or broader effect authority.
 
-`GuardianOpportunity` links result lineage for display only. Success means exact
-native producer readback plus dependent report artifact verified by the existing
-owners. Task completion without artifact proof remains incomplete. Show same
-Inbox→Work card→literal report→explicit no_learning journey and preserve failed,
-blocked, cancelled and Unknown status without promoting model assertions.
+`GuardianOpportunity` links result lineage for display only. For
+`public-browser-check`, success requires the exact native browser result artifact
+and readback verified by the existing owner. For `public-evidence-report`, success
+requires exact native producer readback plus the dependent report artifact
+verified by the existing owners. Task completion without the selected blueprint's
+artifact proof remains incomplete. Show Inbox→Work card→literal browser result
+or report→explicit no_learning and preserve failed, blocked, cancelled and Unknown
+status without promoting model assertions.
 
 ## M4: Review usefulness and reduce unwanted interventions
 

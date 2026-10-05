@@ -5,7 +5,7 @@ title: "ADR-024: Purpose-specific OpenRouter routes"
 
 # ADR-024: Purpose-specific OpenRouter routes
 
-**Status:** Target proposed for independent review under [#954](https://github.com/seraph-quest/seraph/issues/954); not effective until the documentation PR is reviewed and merged to `develop`.
+**Status:** Target decision under [#954](https://github.com/seraph-quest/seraph/issues/954), effective only when independently reviewed [PR #960](https://github.com/seraph-quest/seraph/pull/960) merges to `develop`. All new capabilities remain Planned; no implementation or Shipped claim.
 
 **Decision class:** Additive model-fabric setup contract. ADR-006 remains the active provider boundary.
 

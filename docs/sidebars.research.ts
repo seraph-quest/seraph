@@ -3,6 +3,12 @@ import type {SidebarsConfig} from '@docusaurus/plugin-content-docs';
 const sidebars: SidebarsConfig = {
   researchSidebar: [
     'synthesis',
+    'seraph-capability-baseline-2026-10-05',
+    'seraph-vs-hermes-overview',
+    'seraph-vs-hermes-detailed',
+    'seraph-vs-ironclaw-overview',
+    'seraph-vs-ironclaw-detailed',
+    'near-ai-trust-boundary-2026-10-05',
     'guardian-thesis',
     'human-model-and-memory',
     'runtime-and-reliability',

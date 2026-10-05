@@ -4,6 +4,12 @@ title: 18. Agent Competition Truth Table
 
 # 18. Agent Competition Truth Table
 
+This May comparison is historical. For current October evidence use the
+[Hermes matrix](./seraph-vs-hermes-detailed.md),
+[IronClaw matrix](./seraph-vs-ironclaw-detailed.md) and
+[capability roadmap](/guardian-capability-roadmap).
+Its old milestone references do not define the current execution queue.
+
 ## Purpose
 
 This is the broad M0 competition truth table for Seraph's capability-first world-class strategy.

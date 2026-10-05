@@ -131,11 +131,15 @@ with exit 2, and a child-reported non-pass result, including `failed`, is
 visibly `degraded` with exit 2; hard configuration or static failures remain
 `failed` with exit 4. Source presence cannot satisfy behavior.
 
-Branch-local #753 adds authenticated local canonical-memory export, deterministic
+Integrated #753 provides authenticated local canonical-memory export, deterministic
 rebuild, tombstone-aware additive restore, and operator-visible recovery status;
 the owning guide records its bounded SQLite proof and remaining StrategyDelta,
-multi-process, production-restore, and semantic-quality limits. It is not
-Shipped `develop` truth until the reviewed milestone change lands.
+multi-process, production-restore, and semantic-quality limits. This bounded
+implementation is present on `develop`; the broader recovery/quality claim
+remains **Partial**. The [5 October baseline](/research/seraph-capability-baseline-2026-10-05)
+separates released main, integrated programs and current test failures. The
+[capability roadmap](./23-guardian-capability-roadmap.md) is Planned work and
+does not upgrade any runtime or comparative evidence claim.
 
 The bounded #920 profile adds neutral paired Telegram task notices, explicit bounded
 status review, exact pending-approval denial and original-attempt cancellation.

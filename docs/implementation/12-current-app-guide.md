@@ -211,6 +211,12 @@ With no key, status is explicitly
 backend hydrates a vault-backed credential before resolving the first route;
 if the vault is unavailable or empty, the route remains blocked.
 
+Independent review identified malformed saved v2 controls or purpose consent
+that could interrupt settings and status reads. Strict validation now reports
+`degraded` / `configuration_unreadable`. Reading this configuration preserves
+its saved bytes, performs no automatic repair or activation, and makes no
+provider request.
+
 Saving and reading setup metadata never call OpenRouter. The existing manual
 canary targets an exact enabled purpose profile and returns capability proof,
 including measured embedding dimension, without retaining the generated vector.

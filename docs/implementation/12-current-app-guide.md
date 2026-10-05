@@ -181,33 +181,47 @@ is missing.
 
 Open the Settings panel's **OpenRouter setup** section to save the fixed
 `https://openrouter.ai/api/v1` route without editing an environment file. Enter
-one qualified `provider/model` ID (multiple model selection is rejected until a
-governed selector exists), select the capabilities, choose the explicit
-upstream allow-list, and set temperature, output-token, timeout, cloud-egress
-acknowledgement, explicit deny data-retention policy, a positive finite spend
-ceiling, and the bounded queue controls. These persisted controls are applied
-to the active profile, caller cost/budget context, and remote admission lane
-on every profile resolution; mutable legacy environment controls cannot
-override them. Fallbacks are always
-disabled; vision and embedding capabilities require zero-data-retention
-acknowledgement.
+one qualified `provider/model` ID and explicit upstream allow-list for each
+enabled purpose: text, vision, and embedding. Each purpose has its own
+capabilities, temperature, output cap, timeout, and request-cost bound; an
+absent or disabled purpose has no invented selection or fallback. Text covers
+chat, reasoning, reports, and memory synthesis. Screenshot understanding uses
+vision; vector operations use embedding. The three profiles share one key,
+finite deployment ceiling, lifecycle witness, and serial admission lane.
+Persisted controls govern caller bounds on every resolution; legacy environment
+controls cannot override a saved v2 slot. Vision and embedding require separate
+explicit purpose consent and zero data retention. Fallbacks remain disabled.
 
 The API-key field is write-only. A supplied key is stored through Seraph's
 encrypted vault and the response exposes only `credential_configured` and a
 short fingerprint plus the non-secret credential reference. Leaving the field
 blank preserves the existing server-side reference and fingerprint. Credential
-and configuration writes compensate a vault update if the configuration write
-fails. The browser does not retain
+and configuration updates first publish the complete target as revoked, then
+install the key and review the existing accounting ceiling/reserve, then
+activate the same target only against the exact intermediate revision. A
+concurrent save returns HTTP409. Refresh current settings, review retained
+edits and acknowledgments, and save explicitly; the browser never retries a
+mutation against another backend. An interrupted save remains revoked or
+continuity-degraded until explicit reconciliation and re-save. If final
+publication is uncertain, credential compensation first reads the actual
+configuration and witness; an exact active target keeps its new key. The browser does not retain
 the field, and saved configuration and status payloads contain no key value.
 With no key, status is explicitly
 `configuration_required` and the route is not silently usable. On restart the
 backend hydrates a vault-backed credential before resolving the first route;
 if the vault is unavailable or empty, the route remains blocked.
 
-Saving and reading setup metadata never call OpenRouter. Capability proof is
-available only through the explicit manual canary control, which is intentionally
-omitted from keyless local tests. A real key and any canary remain operator-supplied
-follow-up configuration.
+Saving and reading setup metadata never call OpenRouter. The existing manual
+canary targets an exact enabled purpose profile and returns capability proof,
+including measured embedding dimension, without retaining the generated vector.
+Status shows each purpose's model, readiness reason, and proof expiry. A
+vision-only edit retains an unchanged text profile's proof; queued requests
+still recheck the current global policy epoch before contact. Legacy v1 reads
+preserve their exact capabilities and existing consent without rewriting files
+or manufacturing proofs. A projection incompatible with a v2 slot is visibly
+blocked until explicit reviewed save; stored v2 rejects legacy writes with
+HTTP409. Local tests intercept provider transport; real availability, quality,
+costs, and embedding usefulness remain externally unverified.
 
 ### Local cockpit interaction boundaries
 
@@ -1335,13 +1349,20 @@ retrieval through guarded provider integrations.
 
 On this branch, remote embedding is a separately admitted OpenRouter
 capability. Memory vector writes and vector search require an explicit
-`embedding_model=openrouter/...` configuration plus a persisted exact-profile
-cost record and fresh embedding health/latency proofs. If any of those inputs
+enabled v2 embedding slot (or the existing explicit legacy
+`embedding_model=openrouter/...` configuration), exact-profile cost accounting,
+and fresh embedding/health/latency proofs with measured dimension. If any input
 is absent or stale, the vector path remains blocked and the caller must use the
 clearly labelled lexical/degraded path; it must not recreate the historical
 local 384-dimensional index or silently fall back to another provider. Existing
 un-namespaced local vectors are retained as migration evidence and require a
-tracked rebuild from canonical memory before they can be used again.
+tracked rebuild from canonical memory before they can be used again. The saved
+slot selects the existing schema/provider/model/dimension namespace. Search
+checks that namespace's measured geometry and usable index before making a
+query embedding; a missing index returns lexical/degraded results without a
+provider call, empty-table creation, or old-namespace fallback. Restart restores
+geometry from current exact proofs. New indexing remains explicit; canonical
+source and deletion/tombstone checks still apply across selection changes.
 
 Those proofs are runtime prerequisites for enabling remote vector operations,
 not merge prerequisites. Keyless tests and health checks cover the blocked and

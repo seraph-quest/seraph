@@ -80,6 +80,19 @@ remain usable without a local model server, CUDA, downloaded weights, or the VLM
 wrapper. Missing key, consent, approved upstream, model-fabric bounds/proofs,
 or budget is reported as blocked or configuration-required.
 
+Purpose-specific OpenRouter setup remains **Partial** for operational
+acceptance. Existing settings provides independent text, vision, and embedding
+slots with per-purpose status/proof expiry, shared write-only credential,
+deployment ceiling, and sole serial broker. Save uses witnessed revocation,
+accounting review, and exact-revision activation; stale UI edits require
+explicit refresh/review/re-save. Legacy reads preserve exact authority and
+block incompatible slot projections until explicit save. Vector consumers use
+current measured-proof namespaces and lexical degradation when the selected
+index is unavailable. Provider-intercepted local receipts verify native chat,
+screenshot, and vector execution with one active transport and retained charge
+readback; actual provider availability, model quality, costs, and embedding
+usefulness remain externally unverified. See the [setup guide](./12-current-app-guide.md#configure-the-openrouter-route-epic-736775).
+
 Deployment inference accounting remains **Partial**. The canonical durable job
 repository owns finite reservations, immutable UTC-month attribution, account
 usage settlement, and unknown liabilities that carry across rollover and

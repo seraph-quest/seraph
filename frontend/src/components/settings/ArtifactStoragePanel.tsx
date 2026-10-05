@@ -335,21 +335,35 @@ async function fetchJsonWithTimeout(path: string, timeoutMs = 3_000, init?: Requ
   throw lastError ?? new Error("Request failed.");
 }
 
-async function postModelFabricCanary(path: string, body: Record<string, unknown>): Promise<unknown> {
+async function mutateJsonWithTimeout(path: string, timeoutMs: number, init: RequestInit): Promise<unknown> {
   const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), 35_000);
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await apiFetch(`${API_URL}${path}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-    if (!response.ok) throw new Error(`Canary request failed: ${response.status}`);
+    // Mutations belong to the configured backend. A conflict or uncertain
+    // transport result must never retry a different workspace/backend.
+    const response = await apiFetch(`${API_URL}${path}`, { ...init, signal: controller.signal });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null);
+      const detail: unknown = payload?.detail;
+      const description = typeof detail === "string" ? detail
+        : detail && typeof detail === "object" ? [
+          "code" in detail && typeof detail.code === "string" ? detail.code : null,
+          "message" in detail && typeof detail.message === "string" ? detail.message : null,
+        ].filter(Boolean).join(" · ") : "";
+      throw new Error(`Request failed: ${response.status}${description ? " · " + description : ""}`);
+    }
     return await response.json();
   } finally {
     window.clearTimeout(timeout);
   }
+}
+
+async function postModelFabricCanary(path: string, body: Record<string, unknown>): Promise<unknown> {
+  return mutateJsonWithTimeout(path, 35_000, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
 }
 
 function settingsFromScreenAnalysis(screen: ScreenAnalysisSettings): ArtifactStorageSettings {
@@ -713,7 +727,7 @@ export function ArtifactStoragePanel() {
   }
 
   async function saveOpenRouterSetup(payload: Record<string, unknown>): Promise<ModelFabricSettingsStatus> {
-    const response = await fetchJsonWithTimeout("/api/settings/model-fabric", 20_000, {
+    const response = await mutateJsonWithTimeout("/api/settings/model-fabric", 20_000, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),

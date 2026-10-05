@@ -727,8 +727,15 @@ class InferenceAccountingRepositoryMixin:
                     committed = sum(row.actual_cost_microusd or 0 for row in rows if row.state == "settled" and row.period_id >= period)
                     reserved = sum(row.bound_microusd for row in rows if row.state == "reserved")
                     unknown = sum(row.bound_microusd for row in rows if row.state in {"contact_started", "unknown"})
+                    current_review = next((entry for entry in reversed(json.loads(account.settings_history_json))
+                        if entry.get("kind") == "request_reserve_review"
+                        and entry.get("revision") == account.settings_revision), None)
                     return {**period_status, "status": "blocked" if reason else "ready", "reason_code": reason,
                         "accounting_continuity_verified": True, "revision": account.revision,
+                        "ledger_digest": account.ledger_digest,
+                        "request_reserve_review": {"settings_revision": current_review["revision"],
+                            "accounting_revision": current_review["accounting_revision"],
+                            "bound_microusd": current_review["bound_microusd"]} if current_review else None,
                         "period_review": {"endpoint": "/api/settings/model-fabric/accounting/period", "method": "POST",
                             "period_id": period, "expected_revision": account.revision,
                             "authority_scope": "deployment_accounting"} if period_status["reason_code"] else None,

@@ -637,10 +637,20 @@ async def _put_openrouter_v2(body, setup_input, persisted):
                     if stored != setup:
                         raise RuntimeError("credential target changed")
                 review = max((route.request_cost_bound_microusd for route in (setup.routes or {}).values() if route is not None and route.enabled), default=None)
-                await durable_job_repository.configure_inference_accounting(setup.spend_ceiling_microusd,
+                configured_accounting = await durable_job_repository.configure_inference_accounting(setup.spend_ceiling_microusd,
                     reserve_review_microusd=review, continuity_workspace=workspace)
                 accounting = await durable_job_repository.inference_accounting_snapshot(continuity_workspace=workspace)
-                if accounting.get("status") != "ready" or accounting.get("ceiling_microusd") != setup.spend_ceiling_microusd or accounting.get("overrun_max_cost_microusd", 0):
+                persisted_review = accounting.get("request_reserve_review")
+                exact_review = review is None or (
+                    isinstance(persisted_review, dict)
+                    and persisted_review.get("settings_revision") == accounting.get("settings_revision")
+                    and persisted_review.get("bound_microusd") == review
+                    and type(persisted_review.get("accounting_revision")) is int
+                    and persisted_review["accounting_revision"] == configured_accounting.get("revision", 0) - 1
+                )
+                exact_witness = all(accounting.get(field) == configured_accounting.get(field)
+                    for field in ("deployment_id", "revision", "ledger_digest"))
+                if accounting.get("status") != "ready" or accounting.get("ceiling_microusd") != setup.spend_ceiling_microusd or accounting.get("overrun_max_cost_microusd", 0) or not exact_review or not exact_witness:
                     raise InferenceAccountingError("accounting_settings_revision_unavailable")
                 write_model_fabric_configuration(target, expected_revision=revision + 1, publication_workspace=workspace)
             except Exception:

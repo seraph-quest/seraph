@@ -31,6 +31,38 @@ async def test_new_packet_coalesces_existing_uncontacted_native_queue(isolated_r
     assert (await durable_job_repository.get_job(queued["job_id"]))["status"] == "cancelled"
 
 
+async def test_dismissed_semantics_never_requeue_and_supersede_other_pending_packets(isolated_runtime):
+    from src.guardian.source_watch import SourceWatchService
+    from tests.test_work_board_m6_provider_free_journey import SESSION
+    sessions, _, watch, _, original, _ = await publish_source(isolated_runtime)
+    # This is a disposition/dedupe fixture, not a fabricated native success.
+    async with sessions() as db:
+        dismissed = await db.get(GuardianOpportunity, original.id)
+        dismissed.status = "dismissed"
+        db.add(dismissed)
+    versions = iter(("Stable public line\nA different relevant public release with detail\n",
+                     "Stable public line\nA relevant new public release\n"))
+    async def fetch(source):
+        return next(versions), {"content_type": "text/plain"}
+    service = SourceWatchService(fetcher=fetch)
+    for occurrence in ("different-material", "same-dismissed-material"):
+        result = await service.run_watch(watch["id"], occurrence_id=occurrence,
+            expected_plan_revision=1, expected_owner_session_id=SESSION)
+        assert result["status"] == "succeeded", result
+        if occurrence == "different-material":
+            async with sessions() as db:
+                pending = (await db.execute(select(GuardianOpportunity).where(
+                    GuardianOpportunity.status == "queued"))).scalar_one()
+            queued = await admit_assessment(pending.id)
+    async with sessions() as db:
+        rows = list((await db.execute(select(GuardianOpportunity))).scalars())
+        assert len(rows) == 2  # New packet UUID does not alter semantic identity.
+        assert (await db.get(GuardianOpportunity, original.id)).status == "dismissed"
+        assert (await db.get(GuardianOpportunity, pending.id)).reason_code == "coalesced"
+        assert not any(row.status in {"queued", "assessing"} for row in rows)
+    assert (await durable_job_repository.get_job(queued["job_id"]))["status"] == "cancelled"
+
+
 async def test_expired_never_contacted_native_lease_recovers_same_job_bounded(isolated_runtime, monkeypatch):
     import asyncio
     import json

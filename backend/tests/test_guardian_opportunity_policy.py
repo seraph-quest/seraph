@@ -125,6 +125,33 @@ async def test_new_material_publication_stages_immutable_snapshot_and_unique_row
         assert (await db.execute(select(func.count()).select_from(GuardianOpportunity))).scalar() == 1
 
 
+async def test_known_vault_secret_never_enters_new_snapshot_or_provider_input(isolated_runtime):
+    from src.vault.repository import vault_repository
+    sessions, goal, watch, request, body = await setup_policy(isolated_runtime)
+    await put_guardian_policy(goal.id, body, request)
+    await vault_repository.store("956-private-snapshot", "correcthorse956batterystaple", owner_principal_id=OWNER)
+    versions = iter(("Prior stable public release\n",
+        "Changed public release contains correcthorse956batterystaple\n"))
+    async def fetch(source):
+        return next(versions), {"content_type": "text/plain"}
+    service = SourceWatchService(fetcher=fetch)
+    baseline = await service.run_watch(watch["id"], occurrence_id="secret-baseline",
+        expected_plan_revision=1, expected_owner_session_id=SESSION)
+    assert baseline["status"] == "baseline_initialized", baseline
+    material = await service.run_watch(watch["id"], occurrence_id="secret-material",
+        expected_plan_revision=1, expected_owner_session_id=SESSION)
+    assert material["status"] == "succeeded", material
+    async with sessions() as db:
+        opportunity = (await db.execute(select(GuardianOpportunity))).scalar_one()
+        packet = await db.get(GuardianDecisionPacket, opportunity.source_packet_id)
+        assert packet.opportunity_snapshot_artifact_id is None
+        assert opportunity.status == "blocked" and opportunity.reason_code == "source_excerpt_unavailable"
+        assert opportunity.job_id is None
+        assert (await db.execute(select(func.count()).select_from(WorkflowRunState).where(
+            WorkflowRunState.job_kind == "guardian_opportunity_assess"))).scalar() == 0
+    assert not list((isolated_runtime[1]/"artifacts/work-board/opportunities").glob("*.json"))
+
+
 @pytest.mark.parametrize("change", ["source_permission", "source_generation", "goal", "policy", "root"])
 async def test_queued_publication_current_authority_fails_closed(isolated_runtime, change):
     import json

@@ -49,3 +49,7 @@ async def test_opportunity_outbox_default_opt_in_idempotency_unknown_cap(isolate
         await queue.enqueue(**dict(fields, idempotency_key="no-unknown-retry"))
     async with sessions() as db:
         assert (await db.execute(select(func.count()).select_from(NativeNotificationOutbox))).scalar() == 1
+        from src.guardian.opportunities import project_item
+        current = await db.get(GuardianOpportunity, row.id)
+        projection = await project_item(db, current)
+        assert projection["delivery_status"] == "unknown"

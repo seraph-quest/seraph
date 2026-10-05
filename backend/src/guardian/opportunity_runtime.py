@@ -376,6 +376,10 @@ async def execute_assessment(opportunity_id):
     try:
         raw = await _completion(row, goal, evidence, fence=fence)
         assessment = validate_assessment(raw, evidence)
+        from src.vault import redaction as vault_redaction
+        judgment = json_bytes(assessment.model_dump(mode="json")).decode()
+        if await vault_redaction.redact_secrets_in_text(judgment, fail_closed=True) != judgment:
+            raise OpportunityError("assessment_sensitive_text")
         for value in (assessment.summary, assessment.reason, assessment.abstain_reason or ""):
             assert_public_judgment_text(value, output=True)
         # Recheck physical evidence and current authority before writing any

@@ -2912,6 +2912,10 @@ class SourceWatchService:
                 if "workspace_write" not in authority.get("permissions", []):
                     raise SourceWatchError("workspace_write_authority_required")
                 evidence = build_evidence(packet=packet, observations=scan.material)
+                from src.vault import redaction as vault_redaction
+                offered = _dump(evidence.model_dump(mode="json"))
+                if await vault_redaction.redact_secrets_in_text(offered, fail_closed=True) != offered:
+                    raise SourceWatchError("source_excerpt_unavailable")
                 packet.opportunity_snapshot_artifact_id, packet.opportunity_snapshot_sha256 = stage_snapshot(evidence)
             except Exception:
                 # Missing/stale staging authority blocks only the optional

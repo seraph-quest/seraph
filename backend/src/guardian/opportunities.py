@@ -172,8 +172,6 @@ async def _publish_verified_packet(event):
         existing = (await db.execute(select(GuardianOpportunity).where(
             GuardianOpportunity.owner_principal_id == goal.owner_principal_id,
             GuardianOpportunity.dedupe_key == key))).scalars().first()
-        if existing:
-            return existing.id
         token = {"artifact_id": reference, "checkpoint_sha256": packet.observed_checkpoint_sha256,
                  "source_set_digest": watch.source_set_digest, "criteria_digest": watch.criteria_digest,
                  "read_authority_digest": digest(json_bytes(json.loads(watch.read_authority_json))),
@@ -198,10 +196,16 @@ async def _publish_verified_packet(event):
                 InferenceCostReservation.contact_started_at.is_not(None))
             await db.execute(update(GuardianOpportunity).where(
                 GuardianOpportunity.watch_id == watch.id, GuardianOpportunity.status == "queued",
+                GuardianOpportunity.id != (existing.id if existing else opportunity.id),
                 (GuardianOpportunity.job_id.is_(None) | GuardianOpportunity.job_id.in_(queued_native)),
                 (GuardianOpportunity.job_id.is_(None) | GuardianOpportunity.job_id.not_in(contacted_native)))
                 .values(status="silent", reason_code="coalesced",
                     revision=GuardianOpportunity.revision + 1))
+        # A repeated semantic packet must retain its original disposition,
+        # while still superseding other uncontacted candidates from this watch.
+        if existing:
+            return existing.id
+        if not snapshot_error:
             pending = list((await db.execute(select(GuardianOpportunity).where(
                 GuardianOpportunity.status.in_(PENDING)))).scalars().all())
             if (any(row.goal_id == goal.id for row in pending)
@@ -403,7 +407,13 @@ async def project_item(db, row, disposition=None, *, detail=False):
         try:
             await current_goal_authority(db, goal_id=row.goal_id, owner=row.owner_principal_id,
                 root_id=row.original_root_id, goal_revision=live_goal.revision, require_budget=False)
-            cancel_allowed = row.status in {"queued", "assessing", "blocked", "unknown"} and row.reason_code != "cancel_requested"
+            native = (await db.execute(select(WorkflowRunState).where(
+                WorkflowRunState.run_identity == row.job_id))).scalars().first() if row.job_id else None
+            from src.workflows.job_runtime import DURABLE_JOB_TRANSITIONS
+            native_cancellable = row.job_id is None or (native is not None
+                and "cancelled" in DURABLE_JOB_TRANSITIONS.get(native.status, frozenset()))
+            cancel_allowed = (native_cancellable and row.status in {"queued", "assessing", "blocked", "unknown"}
+                and row.reason_code not in {"cancel_requested", "assessment_cancel_requested", "operator_cancelled"})
         except OpportunityError:
             pass
     item = {"id": disposition.id if disposition else row.id,

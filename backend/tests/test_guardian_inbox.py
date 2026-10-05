@@ -641,44 +641,46 @@ async def test_concurrent_different_keys_have_one_cas_winner(async_db, tmp_path,
                 await db.rollback()
                 raise
 
-    monkeypatch.setattr(source_watch_module.db_engine, "get_session", file_session)
-    _, _, packet = await _seed_packet(
-        async_db,
-        tmp_path,
-        monkeypatch,
-        packet_id="packet-concurrent",
-        db_session=file_session,
-    )
-    row = await ensure_inbox_disposition(packet_id=packet.id)
-    assert row is not None
+    # Restore before async_db tears down its overlapping session patch.
+    with monkeypatch.context() as scoped:
+        scoped.setattr(source_watch_module.db_engine, "get_session", file_session)
+        _, _, packet = await _seed_packet(
+            async_db,
+            tmp_path,
+            scoped,
+            packet_id="packet-concurrent",
+            db_session=file_session,
+        )
+        row = await ensure_inbox_disposition(packet_id=packet.id)
+        assert row is not None
 
-    async def accept(key: str):
-        try:
-            return await apply_action(
-                owner_principal_id=OWNER,
-                owner_session_id=SESSION,
-                item_id=row.id,
-                action="accept_followup",
-                expected_revision=1,
-                idempotency_key=key,
-            )
-        except Exception as exc:  # the loser is checked below as a typed CAS failure
-            return exc
+        async def accept(key: str):
+            try:
+                return await apply_action(
+                    owner_principal_id=OWNER,
+                    owner_session_id=SESSION,
+                    item_id=row.id,
+                    action="accept_followup",
+                    expected_revision=1,
+                    idempotency_key=key,
+                )
+            except Exception as exc:  # the loser is checked below as a typed CAS failure
+                return exc
 
-    results = await asyncio.gather(accept("concurrent-a"), accept("concurrent-b"))
-    successes = [result for result in results if isinstance(result, dict)]
-    failures = [result for result in results if isinstance(result, Exception)]
-    assert len(successes) == 1
-    assert len(failures) == 1
-    assert isinstance(failures[0], InboxError)
-    assert failures[0].code in {"stale_revision", "inbox_item_unavailable", "readback_blocked"}
-    async with file_session() as db:
-        tasks = list((await db.execute(select(WorkBoardTask))).scalars())
-        actions = list((await db.execute(select(GuardianInboxAction))).scalars())
-        disposition = await db.get(GuardianInboxDisposition, row.id)
-    assert len(tasks) == 1
-    assert len(actions) == 1
-    assert disposition is not None and disposition.state == "accepted"
+        results = await asyncio.gather(accept("concurrent-a"), accept("concurrent-b"))
+        successes = [result for result in results if isinstance(result, dict)]
+        failures = [result for result in results if isinstance(result, Exception)]
+        assert len(successes) == 1
+        assert len(failures) == 1
+        assert isinstance(failures[0], InboxError)
+        assert failures[0].code in {"stale_revision", "inbox_item_unavailable", "readback_blocked"}
+        async with file_session() as db:
+            tasks = list((await db.execute(select(WorkBoardTask))).scalars())
+            actions = list((await db.execute(select(GuardianInboxAction))).scalars())
+            disposition = await db.get(GuardianInboxDisposition, row.id)
+        assert len(tasks) == 1
+        assert len(actions) == 1
+        assert disposition is not None and disposition.state == "accepted"
     await engine.dispose()
 
 

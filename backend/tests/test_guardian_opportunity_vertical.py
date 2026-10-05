@@ -51,6 +51,8 @@ class OpportunityHttpBoundary(httpx.AsyncBaseTransport):
                 model["reason"] = "Execute https://invented.example/action now."
             elif scenario == "pii_output":
                 model["summary"] = "Contact private.person@example.com now."
+            elif scenario == "secret_output":
+                model["summary"] = "Secret value is correcthorse956batterystaple."
             content = json.dumps(model)
         payload = dict(id="intercepted-opportunity-"+str(len(self.calls)),
             choices=[dict(message=dict(role="assistant", content=content))],
@@ -60,7 +62,7 @@ class OpportunityHttpBoundary(httpx.AsyncBaseTransport):
 
 
 @pytest.mark.parametrize("scenario", ["completed", "silent", "citation_tampered", "invented_reference",
-    "pii_output", "missing_snapshot", "cancel_contacted"])
+    "pii_output", "secret_output", "missing_snapshot", "cancel_contacted"])
 async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_auth, monkeypatch, scenario):
     from src.api import auth, goals, model_fabric_settings
     from src.guardian import source_watch, inbox
@@ -80,6 +82,11 @@ async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_aut
     await durable_job_repository.configure_inference_accounting(1000)
     calls, source_calls = [], []
     controls = {"scenario": scenario}
+    if scenario == "completed":
+        # The reviewed snooze must fit a real finite Root. The shared research
+        # fixture's five-minute Root deliberately cannot grant a 20min snooze.
+        from config.settings import settings
+        monkeypatch.setattr(settings, "operator_auth_idle_seconds", 3600)
     original_client = httpx.AsyncClient
     def clients(**kwargs):
         if kwargs.get("transport") is None:
@@ -110,6 +117,10 @@ async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_aut
         login = await client.post("/api/auth/login", json={"password": "research-vertical-private-secret"})
         assert login.status_code == 200, login.text
         owner = login.json()
+        if scenario == "secret_output":
+            from src.vault.repository import vault_repository
+            await vault_repository.store("956-private-boundary", "correcthorse956batterystaple",
+                owner_principal_id=owner["principal_id"])
         for capability in ("text", "structured_output", "latency_ms", "health"):
             proof = await client.post("/api/settings/model-fabric/canary", json=dict(
                 profile_id="openrouter", capability=capability, timeout_seconds=30))
@@ -205,6 +216,7 @@ async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_aut
                 assert detail["allowed_actions"] == []
                 if scenario == "cancel_contacted":
                     assert detail["quiescent"] is True and detail["cancel_requested"] is True
+                    assert detail["cancel_allowed"] is False
                 assert len(source_calls) == 2 and len(calls) == 5
                 (root/f"actual-opportunity-{scenario}-readback.json").write_text(json.dumps(dict(
                     detail=detail, state=cost.state, contacts=len(calls)), default=str))
@@ -227,3 +239,23 @@ async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_aut
         assert calls[-1]["stream"] is False and calls[-1]["max_tokens"] == 1024 and "tools" not in calls[-1]
         (root/"actual-opportunity-readback.json").write_text(json.dumps(dict(native=native,
             inbox=detail, source_contacts=len(source_calls), provider_contacts=len(calls)), default=str))
+        from src.guardian import feedback
+        monkeypatch.setattr(feedback, "get_session", factory.accounting_sessions)
+        async def forbid_memory_refresh(**kwargs):
+            raise AssertionError("opportunity feedback cannot refresh canonical memory")
+        monkeypatch.setattr(feedback.guardian_feedback_repository, "_refresh_learning_memories", forbid_memory_refresh)
+        await feedback.guardian_feedback_repository.record_feedback(final.intervention_id,
+            feedback_type="helpful", owner_principal_id=owner["principal_id"], original_root_id=owner["session_id"])
+        learning = await feedback.guardian_feedback_repository.get_learning_signal(intervention_type="opportunity")
+        assert learning.helpful_count == 0 and learning.not_helpful_count == 0
+        snooze_request = dict(owner_principal_id=owner["principal_id"], owner_session_id=owner["session_id"],
+            item_id=detail["id"], action="snooze", expected_revision=detail["revision"],
+            idempotency_key="actual-opportunity-snooze", until=datetime.now(timezone.utc)+timedelta(minutes=20))
+        snoozed = await inbox.apply_action(**snooze_request)
+        assert snoozed["state"] == "snoozed"
+        assert await inbox.apply_action(**snooze_request) == snoozed
+        detail = await inbox.get_owned_item(owner_principal_id=owner["principal_id"],
+            owner_session_id=owner["session_id"], item_id=row.id)
+        assert detail["allowed_actions"] == [] and detail["snoozed_until"] is not None
+        assert len(detail["action_history"]) == 1
+        assert len(calls) == 5 and len(source_calls) == 2

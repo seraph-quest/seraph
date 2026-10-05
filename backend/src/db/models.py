@@ -719,6 +719,143 @@ class NativeNotificationDeliveryAttempt(SQLModel, table=True):
     finished_at: Optional[datetime] = Field(default=None, index=True)
 
 
+# ─── Telegram transport state ──────────────────────────
+
+class TelegramConnectorState(SQLModel, table=True):
+    """The one server-owned Telegram pairing and polling cursor.
+
+    Telegram is an interface edge.  This row stores only pairing, consent,
+    cursor, and bounded health metadata; the bot credential is kept in the
+    scoped vault adapter and never copied here.
+    """
+
+    __tablename__ = "telegram_connector_state"
+
+    id: str = Field(default="singleton", primary_key=True)
+    owner_principal_id: Optional[str] = Field(default=None, index=True)
+    operator_id: Optional[int] = Field(default=None, index=True)
+    chat_id: Optional[int] = Field(default=None, index=True)
+    pairing_id: Optional[str] = Field(default=None, index=True)
+    pairing_state: str = Field(default="unconfigured", index=True)
+    pairing_authority_reference: Optional[str] = Field(default=None)
+    pairing_expires_at: Optional[datetime] = Field(default=None, index=True)
+    session_id: Optional[str] = Field(default=None, index=True)
+    cursor: int = Field(default=0, index=True)
+    last_update_id: Optional[int] = Field(default=None, index=True)
+    last_update_at: Optional[datetime] = Field(default=None, index=True)
+    degraded_state: Optional[str] = Field(default=None, index=True)
+    last_error: Optional[str] = Field(default=None, index=True)
+    polling_enabled: bool = Field(default=False, index=True)
+    credential_key: str = Field(default="connector.telegram.bot_token")
+    telegram_consent_reference: Optional[str] = Field(default=None)
+    telegram_consent_state: str = Field(default="missing", index=True)
+    telegram_consent_granted_at: Optional[datetime] = Field(default=None)
+    telegram_consent_expires_at: Optional[datetime] = Field(default=None, index=True)
+    model_consent_reference: Optional[str] = Field(default=None)
+    model_consent_state: str = Field(default="missing", index=True)
+    model_consent_granted_at: Optional[datetime] = Field(default=None)
+    model_consent_expires_at: Optional[datetime] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+
+
+class TelegramUpdateRecord(SQLModel, table=True):
+    """Redacted durable receipt for one accepted or blocked Telegram update."""
+
+    __tablename__ = "telegram_update_records"
+    __table_args__ = (
+        Index("ux_telegram_update_records_update_id", "update_id", unique=True),
+        Index("ux_telegram_update_records_idempotency", "idempotency_key", unique=True),
+    )
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    update_id: int = Field(index=True)
+    message_id: int = Field(index=True)
+    idempotency_key: str = Field(index=True)
+    request_digest: str = Field(index=True)
+    owner_principal_id: Optional[str] = Field(default=None, index=True)
+    operator_id: int = Field(index=True)
+    chat_id: int = Field(index=True)
+    session_id: Optional[str] = Field(default=None, index=True)
+    status: str = Field(default="blocked", index=True)
+    reason_code: str = Field(default="unknown", index=True)
+    model_status: str = Field(default="not_requested", index=True)
+    model_attempt_count: int = Field(default=0, index=True)
+    attachment_id: Optional[str] = Field(default=None, index=True)
+    attachment_path: Optional[str] = Field(default=None)
+    attachment_digest: Optional[str] = Field(default=None, index=True)
+    attachment_receipt_digest: Optional[str] = Field(default=None, index=True)
+    ingress_receipt_json: Optional[str] = Field(default=None)
+    audio_receipt_json: Optional[str] = Field(default=None)
+    transcript_confirmed: bool = Field(default=False, index=True)
+    last_error: Optional[str] = Field(default=None, index=True)
+    received_at: datetime = Field(default_factory=_now, index=True)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+
+
+class TelegramDeliveryOutbox(SQLModel, table=True):
+    """Durable text delivery intent with explicit ambiguity and retry state."""
+
+    __tablename__ = "telegram_delivery_outbox"
+    __table_args__ = (
+        Index("ix_telegram_delivery_pending_order", "status", "next_attempt_at", "created_at"),
+        Index("ix_telegram_delivery_lease", "status", "lease_expires_at"),
+    )
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    idempotency_key: str = Field(unique=True, index=True)
+    payload_digest: str = Field(index=True)
+    owner_principal_id: str = Field(index=True)
+    operator_id: int = Field(index=True)
+    chat_id: int = Field(index=True)
+    session_id: Optional[str] = Field(default=None, index=True)
+    conversation_id: Optional[str] = Field(default=None, index=True)
+    thread_id: Optional[str] = Field(default=None, index=True)
+    correlation_id: Optional[str] = Field(default=None, index=True)
+    causation_id: Optional[str] = Field(default=None, index=True)
+    message_kind: str = Field(default="text", index=True)
+    body: str = Field(default="")
+    status: str = Field(default="queued", index=True)
+    attempt_count: int = Field(default=0, index=True)
+    max_attempts: int = Field(default=3, index=True)
+    next_attempt_at: datetime = Field(default_factory=_now, index=True)
+    deadline_at: datetime = Field(index=True)
+    lease_owner: Optional[str] = Field(default=None, index=True)
+    lease_expires_at: Optional[datetime] = Field(default=None, index=True)
+    fencing_token: int = Field(default=0, index=True)
+    telegram_message_id: Optional[int] = Field(default=None, index=True)
+    last_error: Optional[str] = Field(default=None, index=True)
+    degraded_state: Optional[str] = Field(default=None, index=True)
+    approval_id: Optional[str] = Field(default=None, index=True)
+    approval_action: Optional[str] = Field(default=None, index=True)
+    approval_request_digest: Optional[str] = Field(default=None, index=True)
+    approval_expires_at: Optional[datetime] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+    delivered_at: Optional[datetime] = Field(default=None, index=True)
+    cancelled_at: Optional[datetime] = Field(default=None, index=True)
+
+
+class TelegramDeliveryAttempt(SQLModel, table=True):
+    """One fenced Telegram send attempt; timeout remains externally ambiguous."""
+
+    __tablename__ = "telegram_delivery_attempts"
+    __table_args__ = (
+        Index("ux_telegram_delivery_attempt_order", "delivery_id", "attempt_index", unique=True),
+    )
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    delivery_id: str = Field(foreign_key="telegram_delivery_outbox.id", index=True)
+    attempt_index: int = Field(index=True)
+    lease_owner: str = Field(index=True)
+    fencing_token: int = Field(index=True)
+    status: str = Field(default="claimed", index=True)
+    error_code: Optional[str] = Field(default=None, index=True)
+    started_at: datetime = Field(default_factory=_now, index=True)
+    finished_at: Optional[datetime] = Field(default=None, index=True)
+
+
 # ─── ScreenObservation ─────────────────────────────────
 
 class ScreenObservation(SQLModel, table=True):

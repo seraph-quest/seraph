@@ -6,6 +6,8 @@ import {
   fetchGuardianInbox,
   fetchGuardianInboxItem,
   GuardianInboxApiError,
+  cancelGuardianOpportunity,
+  createGuardianUuid,
 } from "../../lib/guardianInbox";
 import type {
   GuardianInboxAction,
@@ -102,6 +104,9 @@ function detailMatchesListItem(listItem: GuardianInboxItem, detail: GuardianInbo
     || listItem.watch_id !== detail.watch_id
     || listItem.plan_revision !== detail.plan_revision
     || listItem.source_id !== detail.source_id
+    || listItem.opportunity_id !== detail.opportunity_id
+    || listItem.opportunity_revision !== detail.opportunity_revision
+    || listItem.opportunity_status !== detail.opportunity_status
   ) {
     return false;
   }
@@ -133,6 +138,12 @@ function mergeCachedDetail(listItem: GuardianInboxItem, detail: GuardianInboxIte
     recovery_action: listItem.recovery_action ?? detail.recovery_action,
     action_history: detail.action_history ?? listItem.action_history,
     action_history_truncated: detail.action_history_truncated ?? listItem.action_history_truncated,
+    assessment: detail.assessment ?? listItem.assessment,
+    reason_code: listItem.reason_code ?? detail.reason_code,
+    cancel_allowed: listItem.cancel_allowed === true && detail.cancel_allowed === true,
+    cancel_requested: listItem.cancel_requested === true || detail.cancel_requested === true,
+    quiescent: listItem.quiescent === true || detail.quiescent === true,
+    allowed_actions: listItem.allowed_actions.filter((action) => detail.allowed_actions.includes(action)),
   };
 }
 
@@ -150,6 +161,10 @@ function snoozeReason(item: GuardianInboxItem): string {
 }
 
 function stateLabel(item: GuardianInboxItem): string {
+  if (item.source_kind === "guardian_opportunity" && item.opportunity_status) {
+    if (item.cancel_requested && !item.quiescent) return `${item.opportunity_status} · cancellation requested; waiting for native quiescence`;
+    if (item.state === "pending") return item.opportunity_status;
+  }
   return item.state === "snoozed"
     ? `Snoozed until ${formatTime(item.snoozed_until)} · ${snoozeReason(item)}`
     : item.state;
@@ -362,6 +377,7 @@ export const GuardianInboxPanel = forwardRef<GuardianInboxPanelHandle, GuardianI
   const [listConfirmed, setListConfirmed] = useState(false);
   const gestureKeys = useRef(new Map<string, string>());
   const gestureRequests = useRef(new Map<string, GuardianInboxActionRequest>());
+  const cancellationRequests = useRef(new Map<string, { revision: number; key: string }>());
   const detailCacheRef = useRef(new Map<string, GuardianInboxItem>());
   const detailConfirmedRef = useRef(new Set<string>());
   const expandedRef = useRef<Record<string, boolean>>({});
@@ -855,6 +871,41 @@ export const GuardianInboxPanel = forwardRef<GuardianInboxPanelHandle, GuardianI
     },
   }), [runAction]);
 
+  const cancelOpportunity = async (item: GuardianInboxItem) => {
+    if (!item.cancel_allowed || !item.opportunity_id || !item.opportunity_revision || actionBusy) return;
+    const id = item.opportunity_id;
+    const request = cancellationRequests.current.get(id) ?? { revision: item.opportunity_revision, key: createGuardianUuid() };
+    cancellationRequests.current.set(id, request);
+    setActionBusy(`${item.id}:cancel`); setActionError((current) => ({ ...current, [item.id]: "" }));
+    try {
+      const result = await cancelGuardianOpportunity(id, request.revision, request.key);
+      if (!mountedRef.current) return;
+      cancellationRequests.current.delete(id);
+      setItems((current) => {
+        const next = current.map((row) => row.id === item.id ? { ...row, opportunity_revision: result.revision,
+          opportunity_status: result.status, state: result.status, cancel_requested: result.cancel_requested,
+          quiescent: result.quiescent, cancel_allowed: false, allowed_actions: [], reason_code: result.reason_code } : row);
+        itemsRef.current = next;
+        return next;
+      });
+      setReceipts((current) => ({ ...current, [item.id]: result.quiescent
+        ? result.status === "cancelled" ? "Cancellation confirmed · native work is quiescent." : "Native work is quiescent; Unknown outcome and cost liability remain retained."
+        : "Cancellation requested · waiting for native quiescence. Refresh to read back; no replay or authority renewal." }));
+      detailCacheRef.current.delete(item.id); detailConfirmedRef.current.delete(item.id);
+    } catch (error) {
+      if (!mountedRef.current) return;
+      const stale = error instanceof GuardianInboxApiError && error.status === 409;
+      setActionError((current) => ({ ...current, [item.id]: stale
+        ? "Opportunity changed. Refresh and review before cancelling again; no automatic resubmission."
+        : "Cancellation outcome Unknown. Refresh to inspect native quiescence and retained cost liability." }));
+      if (stale) cancellationRequests.current.delete(id);
+      setItems((current) => {
+        const next = current.map((row) => row.id === item.id ? { ...row, cancel_allowed: false } : row);
+        itemsRef.current = next; return next;
+      });
+    } finally { if (mountedRef.current) setActionBusy(null); }
+  };
+
   return (
     <section className="cockpit-outcome-card" data-testid="guardian-inbox-panel" aria-busy={loading ? "true" : "false"}>
       <div className="cockpit-outcome-card-header">
@@ -938,6 +989,15 @@ export const GuardianInboxPanel = forwardRef<GuardianInboxPanelHandle, GuardianI
               <div className="cockpit-outcome-primary">{item.title} · {stateLabel(item)}</div>
               <div className="cockpit-outcome-copy">{item.summary}</div>
               <div className="cockpit-outcome-copy">Why now: {item.why_now}</div>
+              {item.source_kind === "guardian_opportunity" ? <div className="cockpit-outcome-note">
+                <div>Model judgment · relevance {item.assessment?.relevance ?? "unknown"}/4 · confidence {item.assessment?.confidence ?? "unknown"}. Scores are not calibrated probabilities.</div>
+                <div>Assessment {item.opportunity_status ?? "unknown"} · reason {item.reason_code ?? "none"} · delivery {item.delivery_status ?? "unknown"} · no learning</div>
+                {item.opportunity_status === "unknown" ? <div>Outcome Unknown; retained inference liability. No automatic replay.</div> : null}
+                {item.opportunity_status === "silent" ? <div>Silent assessment history; no proposed action.</div> : null}
+                {item.reason_code === "goal_review_required" ? <div>Goal review required. Review current Goal and watches before future assessment.</div> : null}
+                {item.assessment?.abstain_reason ? <div>Abstention: {item.assessment.abstain_reason}</div> : null}
+                {item.assessment ? <div>Advisory blueprint: {item.assessment.suggested_blueprint}. Source and model text do not authorize execution.</div> : null}
+              </div> : null}
               <div className="cockpit-outcome-note">
                 goal {item.goal_id} rev {item.goal_revision} · watch {item.watch_id} plan {item.plan_revision} · expires {formatTime(item.expires_at)}
               </div>
@@ -948,6 +1008,9 @@ export const GuardianInboxPanel = forwardRef<GuardianInboxPanelHandle, GuardianI
               {item.recovery_action ? <div className="cockpit-outcome-note">recovery · {item.recovery_action}</div> : null}
               {item.degraded ? <div className="cockpit-outcome-note">degraded · server state is not recognized; actions are unavailable</div> : null}
               <div className="source-watch-actions">
+                {item.cancel_allowed && item.opportunity_id && item.opportunity_revision ? <button type="button" disabled={actionDisabled} onClick={() => void cancelOpportunity(item)}>
+                  {actionBusy === `${item.id}:cancel` ? "Requesting cancellation…" : "Cancel assessment"}
+                </button> : null}
                 {supported.has("accept_followup") ? (
                   <button type="button" onClick={() => void runAction(item, "accept_followup")} disabled={actionDisabled}>
                     {actionBusy === `${item.id}:accept_followup` ? "Accepting…" : "Accept follow-up"}
@@ -1006,6 +1069,20 @@ export const GuardianInboxPanel = forwardRef<GuardianInboxPanelHandle, GuardianI
               {expanded[item.id] ? (
                 <div className="cockpit-outcome-note">
                   {refreshingDetail ? <div role="status">Refreshing verified evidence details…</div> : null}
+                  {item.source_kind === "guardian_opportunity" && item.assessment ? <div aria-label="Exact assessment citations">
+                    <div>Literal model judgment: {item.assessment.reason}</div>
+                    {item.assessment.citations.map((citation, index) => {
+                      const preview = item.evidence_previews?.find((entry) => entry.source_id === citation.source_id);
+                      const lines = preview?.text?.split("\n");
+                      const exact = lines && citation.end_line <= lines.length ? lines.slice(citation.start_line - 1, citation.end_line).join("\n") : null;
+                      return <div key={`${citation.source_id}:${index}`}>
+                        <div>Source {citation.source_id} · normalized redacted lines {citation.start_line}–{citation.end_line} · span SHA256 {citation.span_sha256}</div>
+                        {exact && !refreshingDetail && detailConfirmedRef.current.has(item.id) && item.evidence_status === "verified"
+                          ? <pre className="whitespace-pre-wrap">{exact}</pre> : <div>Exact cited excerpt unavailable; refresh authorized evidence.</div>}
+                      </div>;
+                    })}
+                    <div>Citations establish provenance; they do not establish semantic truth or grant authority.</div>
+                  </div> : null}
                   <div>evidence refs:</div>
                   {item.evidence_refs.length > 0 ? item.evidence_refs.map((ref, index) => {
                     const href = safeHref(ref.artifact_url);

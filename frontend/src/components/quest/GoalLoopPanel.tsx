@@ -12,6 +12,9 @@ import type {
   GoalStrategyDelta,
 } from "../../types";
 import { GoalLoopReceiptDetails } from "./GoalLoopReceiptDetails";
+import { GuardianPolicyForm } from "./GoalForm";
+import { fetchGuardianOpportunities } from "../../lib/guardianInbox";
+import type { GuardianInboxItem } from "../../types";
 
 type GoalLoopViewState =
   | "loading"
@@ -177,6 +180,29 @@ export function GoalLoopPanel({ goal, onEdit }: Props) {
   const [priority, setPriority] = useState("");
   const [reason, setReason] = useState("");
   const correctionId = useRef<string | null>(null);
+  const [opportunities, setOpportunities] = useState<GuardianInboxItem[]>([]);
+  const [historyCursor, setHistoryCursor] = useState<string | null>(null);
+  const [historyError, setHistoryError] = useState("");
+  const [historyBusy, setHistoryBusy] = useState(false);
+  const [historyLoaded, setHistoryLoaded] = useState(false);
+  const historyRequest = useRef(0);
+
+  useEffect(() => { historyRequest.current += 1; setOpportunities([]); setHistoryCursor(null); setHistoryError(""); setHistoryBusy(false); setHistoryLoaded(false); }, [goal?.id]);
+  useEffect(() => () => { historyRequest.current += 1; }, []);
+  const loadHistory = async (cursor?: string | null) => {
+    if (!goal || historyBusy) return;
+    const request = ++historyRequest.current;
+    setHistoryBusy(true); setHistoryError("");
+    try {
+      const page = await fetchGuardianOpportunities(goal.id, cursor);
+      if (request !== historyRequest.current) return;
+      setOpportunities((previous) => cursor ? [...previous, ...page.items.filter((item) => !previous.some((old) => old.id === item.id))] : page.items);
+      setHistoryCursor(page.next_cursor ?? null);
+      setHistoryLoaded(true);
+    } catch (error) {
+      if (request === historyRequest.current) setHistoryError(error instanceof Error ? error.message : "History unavailable. Last-known results retained.");
+    } finally { if (request === historyRequest.current) setHistoryBusy(false); }
+  };
 
   useEffect(() => {
     setActionFailure(null);
@@ -372,6 +398,20 @@ export function GoalLoopPanel({ goal, onEdit }: Props) {
 
       {goal && (
         <>
+          <GuardianPolicyForm key={goal.id} goal={goal} />
+          <section aria-label="Opportunity assessment history" className="mt-2">
+            <button type="button" disabled={historyBusy} onClick={() => void loadHistory()}>Review assessment history</button>
+            {historyError ? <div role="status">{historyError} Last-known assessment history retained.</div> : null}
+            {historyLoaded && opportunities.length === 0 ? <div>No opportunity assessment history for this Goal.</div> : null}
+            {opportunities.map((item) => <article key={item.id} className="mt-1">
+              <div>{item.opportunity_status ?? "unknown"} · {item.summary}</div>
+              <div>{item.reason_code ?? "No failure reason"} · Goal revision {item.goal_revision}</div>
+              {item.reason_code === "goal_review_required" ? <div>Review the current Goal and source watches before enabling future assessments.</div> : null}
+              {item.opportunity_status === "unknown" ? <div>Outcome Unknown; retained inference liability. No automatic replay.</div> : null}
+              <div>{item.assessment ? "Model judgment; inspect exact citations in the existing Inbox." : "No proposed intervention."} No learning recorded.</div>
+            </article>)}
+            {historyCursor ? <button type="button" disabled={historyBusy} onClick={() => void loadHistory(historyCursor)}>More assessment history</button> : null}
+          </section>
           <div className="flex flex-wrap gap-x-2 gap-y-1 mt-2 text-[9px] text-retro-text/60">
             <span>revision {goal.revision ?? activePayload?.goal.revision ?? "unknown"}</span>
             <span>status {goal.status}</span>

@@ -173,6 +173,9 @@ def isolated_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         async def get(self, entity, identity, *args, **kwargs):
             return self._session.get(entity, identity, *args, **kwargs)
 
+        async def run_sync(self, function, *args, **kwargs):
+            return function(self._session, *args, **kwargs)
+
         async def flush(self, *args, **kwargs):
             return self._session.flush(*args, **kwargs)
 

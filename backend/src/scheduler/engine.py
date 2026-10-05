@@ -114,6 +114,7 @@ def init_scheduler() -> AsyncIOScheduler | None:
     from src.scheduler.jobs.calendar_scan import run_calendar_scan
     from src.scheduler.jobs.strategist_tick import run_strategist_tick
     from src.work_board.dispatcher import run_work_board_dispatch
+    from src.guardian.opportunity_runtime import run_opportunity_tick
     from src.scheduler.jobs.daily_briefing import run_daily_briefing
     from src.scheduler.jobs.evening_review import run_evening_review
     from src.scheduler.jobs.activity_digest import run_activity_digest
@@ -155,6 +156,13 @@ def init_scheduler() -> AsyncIOScheduler | None:
             "trigger": IntervalTrigger(seconds=5),
             "id": "work_board_dispatch",
             "name": "Operator work-board dispatch",
+            "misfire_grace_time": 5,
+        },
+        {
+            "func": _async_job_wrapper(run_opportunity_tick, loop, job_id="guardian_opportunity_assessment", allow_model_inference=True),
+            "trigger": IntervalTrigger(seconds=5),
+            "id": "guardian_opportunity_assessment",
+            "name": "Bounded guardian opportunity assessment",
             "misfire_grace_time": 5,
         },
         {

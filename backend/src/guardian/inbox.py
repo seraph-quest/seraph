@@ -26,6 +26,7 @@ from src.db.models import (
     GuardianDecisionPacket,
     GuardianInboxAction,
     GuardianInboxDisposition,
+    GuardianOpportunity,
     GuardianSourceWatch,
     GovernedScheduleBinding,
     MailMessageBinding,
@@ -1413,6 +1414,21 @@ async def list_owned_items(
                     now=now,
                 )
             )
+        opportunity_query = select(GuardianInboxDisposition, GuardianOpportunity).join(
+            GuardianOpportunity, GuardianOpportunity.id == GuardianInboxDisposition.source_id).where(
+            GuardianInboxDisposition.source_kind == "guardian_opportunity",
+            GuardianInboxDisposition.owner_principal_id == owner_principal_id,
+            GuardianInboxDisposition.owner_session_id == owner_session_id,
+            GuardianOpportunity.owner_principal_id == owner_principal_id,
+            GuardianOpportunity.original_root_id == owner_session_id)
+        if cursor_value:
+            opportunity_query = opportunity_query.where(or_(GuardianInboxDisposition.created_at > cursor_value[0],
+                and_(GuardianInboxDisposition.created_at == cursor_value[0], GuardianInboxDisposition.id > cursor_value[1])))
+        opportunity_rows = list((await db.execute(opportunity_query.order_by(
+            GuardianInboxDisposition.created_at, GuardianInboxDisposition.id).limit(limit + 1))).all())
+        from src.guardian.opportunities import project_item
+        for disposition, opportunity in opportunity_rows[:limit]:
+            items.append(await project_item(db, opportunity, disposition))
         items.sort(
             key=lambda item: (
                 _utc(datetime.fromisoformat(str(item.get("created_at"))))
@@ -1421,7 +1437,7 @@ async def list_owned_items(
                 str(item.get("id") or ""),
             )
         )
-        has_more = len(rows) > limit or len(mail_rows) > limit
+        has_more = len(items) > limit or len(rows) > limit or len(mail_rows) > limit or len(opportunity_rows) > limit
         page_items = items[:limit]
         next_cursor = None
         if has_more and page_items:
@@ -1436,6 +1452,16 @@ async def get_owned_item(
     *, owner_principal_id: str, owner_session_id: str, item_id: str, detail: bool = True
 ) -> dict[str, Any]:
     async with db_engine.get_session() as db:
+        opportunity_row = (await db.execute(select(GuardianInboxDisposition, GuardianOpportunity).join(
+            GuardianOpportunity, GuardianOpportunity.id == GuardianInboxDisposition.source_id).where(
+            GuardianInboxDisposition.id == item_id, GuardianInboxDisposition.source_kind == "guardian_opportunity",
+            GuardianInboxDisposition.owner_principal_id == owner_principal_id,
+            GuardianInboxDisposition.owner_session_id == owner_session_id,
+            GuardianOpportunity.owner_principal_id == owner_principal_id,
+            GuardianOpportunity.original_root_id == owner_session_id))).first()
+        if opportunity_row:
+            from src.guardian.opportunities import project_item
+            return await project_item(db, opportunity_row[1], opportunity_row[0], detail=detail)
         mail_row = await _load_mail_projection_row(
             db,
             item_id=item_id,
@@ -2052,6 +2078,11 @@ async def apply_action(
             until=until,
             reason=reason,
         )
+    if source_kind == "guardian_opportunity":
+        from src.guardian.opportunities import apply_inbox_action
+        return await apply_inbox_action(owner=owner_principal_id, root_id=owner_session_id,
+            item_id=item_id, action=action, expected_revision=expected_revision,
+            idempotency_key=idempotency_key, until=until, reason=reason)
     payload_digest = _digest(
         _json(
             {

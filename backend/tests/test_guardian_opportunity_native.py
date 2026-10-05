@@ -1,0 +1,50 @@
+"""Actual native guard registration and source-bound inputs, no model call."""
+from dataclasses import replace
+
+import pytest
+from sqlalchemy import select, func
+
+from tests.test_work_board_m6_provider_free_journey import isolated_runtime
+from tests.test_guardian_opportunity_policy import publish_source
+from src.db.models import GuardianOpportunity, InferenceCostReservation
+from src.guardian.opportunity_runtime import admit_assessment, _authority, RUNNER
+from src.workflows.job_runtime import (
+    durable_job_repository, DurableJobAdmissionDenied, DurableJobLeaseError, DurableJobTransitionError,
+)
+
+
+async def test_fixed_native_kind_requires_all_current_authority_callbacks(isolated_runtime, monkeypatch):
+    sessions, goal, watch, request, row, packet = await publish_source(isolated_runtime)
+    original_admit = durable_job_repository.admit_job
+    captured = []
+    async def capture(spec, **kwargs):
+        captured.append(spec)
+        return await original_admit(spec, **kwargs)
+    monkeypatch.setattr(durable_job_repository, "admit_job", capture)
+    queued = await admit_assessment(row.id)
+    assert queued["status"] == "queued"
+    assert queued["capability_version"] == "guardian.opportunity-assess.v1"
+    spec = captured[0]
+    fresh_identity = replace(spec.identity, job_id=spec.identity.job_id + ":missing", idempotency_key="missing-callback")
+    with pytest.raises(DurableJobAdmissionDenied, match="fixed_native_admission_required"):
+        await original_admit(replace(spec, identity=fresh_identity))
+    assert await durable_job_repository.get_job(fresh_identity.job_id) is None
+    with pytest.raises(DurableJobLeaseError, match="fixed native authority"):
+        await durable_job_repository.claim_job(queued["job_id"], owner=RUNNER, expected_revision=queued["revision"])
+    assert (await durable_job_repository.get_job(queued["job_id"]))["status"] == "queued"
+
+    async def actual_guard(db, run):
+        current, _ = await _authority(db, row.id, execution=True)
+        assert current.job_id == run.run_identity
+        current.status = "assessing"
+        current.revision += 1
+        db.add(current)
+    claimed = await durable_job_repository.claim_job(queued["job_id"], owner=RUNNER,
+        expected_revision=queued["revision"], claim_authority_check=actual_guard)
+    with pytest.raises(DurableJobTransitionError, match="fixed native authority"):
+        await durable_job_repository.transition_job(queued["job_id"], "succeeded", owner=RUNNER,
+            fencing_token=claimed["lease"]["fencing_token"], expected_revision=claimed["revision"])
+    assert (await durable_job_repository.get_job(queued["job_id"]))["status"] == "running"
+    async with sessions() as db:
+        assert (await db.execute(select(func.count()).select_from(InferenceCostReservation))).scalar() == 0
+        assert (await db.get(GuardianOpportunity, row.id)).assessment_json is None

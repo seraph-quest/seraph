@@ -664,7 +664,7 @@ class NativeNotificationQueue:
                 # advisory count. SQLite's immediate transaction serializes
                 # distinct idempotency keys across queue instances/processes;
                 # the normal outer session commit persists the reservation.
-                if budget_limit is not None:
+                if budget_limit is not None or intervention_type == "opportunity":
                     if db.in_transaction():
                         await db.commit()
                     bind = db.get_bind()
@@ -748,6 +748,12 @@ class NativeNotificationQueue:
                             budget_period_key=str(budget_period_key),
                             budget_limit=budget_limit,
                         )
+
+                if intervention_type == "opportunity":
+                    from src.guardian.opportunities import guard_notification_intent
+                    await guard_notification_intent(db, intervention_id=intervention_id,
+                        owner=owner_principal_id, root_id=operator_session_id,
+                        goal_id=goal_id, goal_revision=goal_revision)
 
                 # SQLite's conflict-aware insert is the cross-process CAS.
                 # It avoids a SELECT-then-INSERT uniqueness exception and

@@ -2990,15 +2990,20 @@ async def enqueue_test_native_notification(request: Request):
     "/observer/interventions/{intervention_id}/feedback",
     response_model=InterventionFeedbackResponse,
 )
-async def post_intervention_feedback(intervention_id: str, body: InterventionFeedbackRequest):
+async def post_intervention_feedback(intervention_id: str, body: InterventionFeedbackRequest, request: Request):
     """Record explicit user feedback for a proactive intervention."""
     from src.guardian.feedback import guardian_feedback_repository
 
-    updated = await guardian_feedback_repository.record_feedback(
-        intervention_id,
-        feedback_type=body.feedback_type,
-        feedback_note=body.note,
-    )
+    from src.guardian.opportunity_contracts import OpportunityError
+    operator = getattr(request.state, "operator", None)
+    try:
+        updated = await guardian_feedback_repository.record_feedback(
+            intervention_id, feedback_type=body.feedback_type, feedback_note=body.note,
+            owner_principal_id=getattr(getattr(operator, "principal", None), "principal_id", None),
+            original_root_id=getattr(operator, "session_id", None),
+        )
+    except OpportunityError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
     await log_integration_event(
         integration_type="observer_feedback",
         name="intervention",

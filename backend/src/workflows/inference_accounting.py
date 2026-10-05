@@ -561,6 +561,14 @@ class InferenceAccountingRepositoryMixin:
                 now = datetime.now(timezone.utc).replace(tzinfo=None)
                 if run.status != "running" or row.job_fencing_token != fencing_token or _utc(row.deadline_at) <= _utc(now):
                     raise InferenceAccountingError("accounting_contact_fence_invalid")
+                opportunity_denial = None
+                if run.job_kind == "guardian_opportunity_assess":
+                    from src.guardian.opportunity_runtime import guard_provider_contact
+                    from src.guardian.opportunity_contracts import OpportunityError
+                    try:
+                        await guard_provider_contact(db, run)
+                    except OpportunityError as exc:
+                        opportunity_denial = exc.code
                 # Reservations can predate another call's actual settlement.
                 # Recheck the canonical ledger under this SAME writer and
                 # witness lock before recording contact, including prefunding.
@@ -577,7 +585,7 @@ class InferenceAccountingRepositoryMixin:
                 def held(item):
                     return item.bound_microusd if item.state in {"reserved", "contact_started", "unknown"} else (
                         (item.actual_cost_microusd or 0) if item.state == "settled" and item.period_id >= period else 0)
-                denial = ("provider_contact_denied" if _provider_contact_denied(row)
+                denial = (opportunity_denial or ("provider_contact_denied" if _provider_contact_denied(row)
                     else "provider_policy_revision_changed" if current_digest != policy_digest
                     else "accounting_settings_revision_unavailable" if (
                         account.ceiling_microusd != configured.openrouter_setup.spend_ceiling_microusd
@@ -586,7 +594,7 @@ class InferenceAccountingRepositoryMixin:
                     or ("provider_charge_exceeded_reservation" if unreviewed_overruns(owner_data, operations) else None)
                     or ("deployment_cost_budget_exhausted" if sum(held(item) for item in rows) > account.ceiling_microusd else None)
                     or ("owner_cost_budget_exhausted" if row.owner_ceiling_microusd is not None
-                        and sum(held(item) for item in rows if item.owner_id == row.owner_id) > row.owner_ceiling_microusd else None))
+                        and sum(held(item) for item in rows if item.owner_id == row.owner_id) > row.owner_ceiling_microusd else None)))
                 if not _provider_contact_denied(row):
                     history = json.loads(row.evidence_json)
                     if denial:

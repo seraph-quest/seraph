@@ -4,7 +4,8 @@ from __future__ import annotations
 import os
 import asyncio
 import json
-from datetime import timedelta
+import re
+from datetime import datetime, timedelta
 
 from config.settings import settings
 from src.guardian.opportunity_contracts import EvidenceSource, OpportunityEvidence, OpportunityError, digest, json_bytes
@@ -18,6 +19,18 @@ SERVICE_ID = "guardian-opportunity"
 SERVICE_PRINCIPAL = "service:guardian-opportunity"
 RUNNER = "scheduler:guardian-opportunity"
 _executions: dict[str, asyncio.Task] = {}
+
+
+def assert_public_judgment_text(value, *, output=False):
+    """Conservative bounded M2 privacy gate, never a general PII classifier."""
+    from src.guardian.source_watch import redact_export_text
+    text = str(value or "")
+    if (redact_export_text(text)[0] != text
+            or re.search(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", text, re.I)
+            or re.search(r"(?<!\w)(?:\+\d{1,3}[ -]?)?(?:\(?\d{3}\)?[ -])\d{3}[ -]\d{4}(?!\w)", text)):
+        raise OpportunityError("assessment_sensitive_text")
+    if output and re.search(r"https?://|file://|(?:^|\s)(?:/|\.\./|~/)|[A-Z]:\\", text, re.I):
+        raise OpportunityError("assessment_invented_reference")
 
 
 def build_evidence(*, packet, observations):
@@ -38,6 +51,7 @@ def build_evidence(*, packet, observations):
         excerpt = "\n".join(lines)
         if not excerpt.strip():
             continue
+        assert_public_judgment_text(excerpt)
         from src.guardian.source_watch import _safe_public_source_target
         if _safe_public_source_target(item.source.target) != item.source.target:
             raise OpportunityError("source_excerpt_unavailable")
@@ -142,7 +156,7 @@ async def admit_assessment(opportunity_id):
         operator_session_id=row.original_root_id, goal_id=row.goal_id, goal_revision=row.goal_revision,
         plan_revision=row.watch_revision, priority=30, declared_authority=authority,
         deadline_at=min(utc(row.assessment_deadline_at), now() + timedelta(seconds=300)),
-        max_attempts=2, max_outstanding_jobs=budget.max_outstanding_jobs, service_id=SERVICE_ID,
+        max_attempts=min(2, budget.max_attempts), max_outstanding_jobs=budget.max_outstanding_jobs, service_id=SERVICE_ID,
         run_fingerprint=digest(json_bytes([row.id, row.dedupe_key, authority])),
         budget_microusd=cost_bound), admission_authority_check=check)
     # Linking remains pure SQL. Admission deduplication handles a crash between
@@ -201,9 +215,10 @@ def assessment_context(row, goal, evidence):
     goal_fields = {"goal_id": goal.id, "goal_revision": goal.revision,
         "title": goal.title, "description": goal.description,
         "success_criterion": json.loads(goal.success_criterion_json or "null")}
+    assert_public_judgment_text(json_bytes(goal_fields).decode())
     public_fields = evidence.model_dump(mode="json")
     instruction = ("Return one JSON object of schema seraph.opportunity.assessment.v1 with fields "
-        "schema_version,relevance (integer 0..4),confidence (low|medium|high),summary (<=240 chars),"
+        "schema_version (seraph.opportunity.assessment.v1),relevance (integer 0..4),confidence (low|medium|high),summary (<=240 chars),"
         "reason (<=1000 chars),citations (1..4 objects: source_id,start_line,end_line,span_sha256),"
         "suggested_blueprint (public-evidence-report|public-browser-check|none),abstain_reason (null or <=240 chars). "
         "Cite exact source_key IDs and 1-based inclusive excerpt lines; span_sha256 is SHA256 of exact LF-joined "
@@ -243,6 +258,10 @@ async def _completion(row, goal, evidence, *, fence):
     from src.model_fabric.remote_inference_admission import bind_remote_inference_receipt
     from src.workflows.job_runtime import durable_job_repository
     messages, context = assessment_context(row, goal, evidence)
+    from src.vault import redaction as vault_redaction
+    literal_input = messages[1]["content"]
+    if await vault_redaction.redact_secrets_in_text(literal_input, fail_closed=True) != literal_input:
+        raise OpportunityError("assessment_sensitive_text")
     profile_id = llm_runtime.resolve_runtime_profile(runtime_path="strategist_agent", profile=None)
     profile = llm_runtime._provider_profile(profile_id)
     if profile is None:
@@ -274,7 +293,8 @@ async def _completion(row, goal, evidence, *, fence):
                 or current_job["lease"]["owner"] != RUNNER
                 or current_job["lease"]["fencing_token"] != fence):
             raise OpportunityError("assessment_execution_fence_stale")
-        result, _ = await llm_runtime._governed_research_chat_completion(decision, context, body, api_key)
+        result, _ = await llm_runtime._governed_research_chat_completion(
+            decision=decision, context=context, body=body, api_key=api_key)
         return result.choices[0].message.content
 
     with bind_remote_inference_receipt(repository=durable_job_repository, job_id=row.job_id,
@@ -302,6 +322,7 @@ async def request_optional_notification(opportunity_id):
         _, _, _, policy, _ = await assert_opportunity_current(db, row)
         if policy.max_notification_per_utc_day == 0:
             return
+    read_snapshot(json.loads(row.source_token_json)["artifact_id"], row.source_digest)
     ctx = context_manager.get_context()
     decision = decide_intervention(message_type="proactive", intervention_type="opportunity",
         content="A cited Guardian opportunity is ready for your review.", urgency=2,
@@ -355,10 +376,8 @@ async def execute_assessment(opportunity_id):
     try:
         raw = await _completion(row, goal, evidence, fence=fence)
         assessment = validate_assessment(raw, evidence)
-        from src.guardian.source_watch import redact_export_text
-        if any(redact_export_text(value)[0] != value for value in (assessment.summary, assessment.reason,
-                assessment.abstain_reason or "")):
-            raise OpportunityError("assessment_sensitive_output")
+        for value in (assessment.summary, assessment.reason, assessment.abstain_reason or ""):
+            assert_public_judgment_text(value, output=True)
         # Recheck physical evidence and current authority before writing any
         # output. The native writer receives only verified immutable digests.
         read_snapshot(json.loads(row.source_token_json)["artifact_id"], row.source_digest)
@@ -426,8 +445,13 @@ async def execute_assessment(opportunity_id):
             unknown = contacted and reservation.state != "settled"
         reason = exc.code if isinstance(exc, OpportunityError) else (
             "assessment_cancel_requested" if isinstance(exc, asyncio.CancelledError) else "assessment_failed")
+        import logging
+        logging.getLogger(__name__).warning("Opportunity assessment stopped (%s)", type(exc).__name__)
         async with db_engine.get_session() as db:
             await db.execute(text("BEGIN IMMEDIATE"))
+            current = await db.get(GuardianOpportunity, row.id)
+            if current is not None and current.reason_code == "cancel_requested":
+                reason = "assessment_cancel_requested"
             await db.execute(update(GuardianOpportunity).where(GuardianOpportunity.id == row.id,
                 GuardianOpportunity.status == "assessing").values(status="unknown" if unknown else "blocked",
                 reason_code=reason, revision=GuardianOpportunity.revision + 1))
@@ -447,17 +471,19 @@ async def run_opportunity_tick():
     from src.guardian.opportunities import now, utc
     cursor = None
     started = 0
-    while started < 16:
+    examined = 0
+    while started < 16 and examined < 20:
         async with db_engine.get_session() as db:
             query = select(GuardianOpportunity).where(GuardianOpportunity.status.in_(("queued", "assessing")))
             if cursor:
                 query = query.where(or_(GuardianOpportunity.created_at > cursor[0], and_(
                     GuardianOpportunity.created_at == cursor[0], GuardianOpportunity.id > cursor[1])))
             rows = list((await db.execute(query.order_by(GuardianOpportunity.created_at, GuardianOpportunity.id)
-                .limit(20))).scalars().all())
+                .limit(20 - examined))).scalars().all())
         if not rows:
             break
         for row in rows:
+            examined += 1
             cursor = (row.created_at, row.id)
             if row.id in _executions:
                 continue
@@ -475,7 +501,35 @@ async def run_opportunity_tick():
                             GuardianOpportunity.revision == row.revision).values(status="unknown" if contacted else "blocked",
                             reason_code="assessment_restart_requires_readback" if contacted else "assessment_deadline_expired",
                             revision=GuardianOpportunity.revision + 1))
-                continue
+                    continue
+                from src.workflows.job_runtime import durable_job_repository
+                native = await durable_job_repository.get_job(row.job_id) if row.job_id else None
+                if (native is None or native["status"] != "running"
+                        or native["lease"]["expires_at"] is None
+                        or utc(datetime.fromisoformat(native["lease"]["expires_at"])) > now()
+                        or native["attempt_count"] >= native["max_attempts"]
+                        or native["effects"]):
+                    continue
+                # Existing targeted native recovery clears only this expired
+                # lease. Zero-contact/zero-effect proof permits a bounded
+                # second attempt, under its original immutable deadline.
+                recovered = await durable_job_repository.recover_stale_job(row.job_id)
+                if recovered["status"] != "blocked" or recovered["effects"]:
+                    continue
+                async with db_engine.get_session() as db:
+                    current, _ = await _authority(db, row.id, execution=True)
+                    reservation = (await db.execute(select(InferenceCostReservation).where(
+                        InferenceCostReservation.job_id == row.job_id))).scalars().first()
+                    if reservation is not None:
+                        continue  # No invented settlement/quiescence proof.
+                await durable_job_repository.queue_job(row.job_id, expected_revision=recovered["revision"],
+                    reason="verified_never_contacted_opportunity_recovery")
+                async with db_engine.get_session() as db:
+                    await db.execute(text("BEGIN IMMEDIATE"))
+                    current, _ = await _authority(db, row.id, execution=True)
+                    current.status, current.reason_code = "queued", None
+                    current.revision += 1
+                    db.add(current)
             if len(_executions) >= 16:
                 return {"started": started}
 
@@ -501,7 +555,7 @@ async def run_opportunity_tick():
                 break
         if len(rows) < 20:
             break
-    return {"started": started}
+    return {"started": started, "examined": examined}
 
 
 async def quiesce_opportunity(row):
@@ -524,7 +578,7 @@ async def quiesce_opportunity(row):
     if native:
         native = await durable_job_repository.get_job(row.job_id)
         if native["status"] in {"unknown_external_effect", "cost_liability"}:
-            return True  # Quiescent transfer; historical liability survives.
+            return task is not None and task.done()  # Actual closure, liability survives.
 
         async def cancellation_check(db, run):
             from src.db.models import GuardianOpportunity

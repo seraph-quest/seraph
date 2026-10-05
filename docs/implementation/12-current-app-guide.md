@@ -1178,6 +1178,15 @@ Board; it does not execute that task or grant additional permissions. Snooze and
 dismiss persist without learning. Zero notification allowance keeps the inbox
 usable without sending a message.
 
+The Goal loop also offers a separately reviewed public opportunity assessment
+policy over selected current public HTTPS watches. It stays disabled until the
+operator confirms its finite limits. New verified material packets may produce
+a literal cited judgment in the same Inbox; weak judgments remain silent history
+and invalid or stale evidence remains blocked. Goal edits require explicit watch
+and policy review. Accept creates a Triage review task, and cancel reports actual
+quiescence while retaining Unknown inference liability. These judgments do not
+execute a capability or update memory. Notifications remain a separate opt-in.
+
 See [Guardian Intelligence](./05-guardian-intelligence.md#reviewed-goals-and-the-source-change-inbox)
 for ownership, readback, idempotency, and bounded recovery contracts. Local
 source execution and live external/provider usefulness have separate evidence

@@ -97,6 +97,37 @@ async def assert_opportunity_current(db, opportunity, *, evidence=None):
 
 
 async def publish_verified_packet(event):
+    identifier = await _publish_verified_packet(event)
+    if identifier is None:
+        return None
+    # Publication marks obsolete uncontacted rows before their claim guard
+    # can execute. Close their existing queued jobs outside the writer.
+    from src.db.models import InferenceCostReservation
+    from src.workflows.job_runtime import durable_job_repository
+    async with db_engine.get_session() as db:
+        latest = await db.get(GuardianOpportunity, identifier)
+        rows = list((await db.execute(select(GuardianOpportunity).where(
+            GuardianOpportunity.watch_id == latest.watch_id,
+            GuardianOpportunity.status == "silent", GuardianOpportunity.reason_code == "coalesced",
+            GuardianOpportunity.job_id.is_not(None)).limit(20))).scalars().all())
+    for row in rows:
+        native = await durable_job_repository.get_job(row.job_id)
+        if native and native["status"] == "queued":
+            async def cancel_guard(db, run, opportunity_id=row.id):
+                current = await db.get(GuardianOpportunity, opportunity_id)
+                contacts = (await db.execute(select(InferenceCostReservation).where(
+                    InferenceCostReservation.job_id == run.run_identity,
+                    InferenceCostReservation.contact_started_at.is_not(None)))).scalars().first()
+                if (current is None or current.status != "silent" or current.reason_code != "coalesced"
+                        or current.job_id != run.run_identity or run.status != "queued" or contacts):
+                    raise OpportunityError("opportunity_coalescing_stale")
+            await durable_job_repository.transition_job(row.job_id, "cancelled",
+                expected_revision=native["revision"], cancellation_authority_check=cancel_guard,
+                reason="coalesced_uncontacted_opportunity")
+    return identifier
+
+
+async def _publish_verified_packet(event):
     """Only the successful live publication seam calls this typed event handler.
 
     Physical snapshot readback precedes the writer; its exact SQL binding is
@@ -133,7 +164,9 @@ async def publish_verified_packet(event):
             watch_id=watch.id)
         if packet.plan_revision != event.watch_revision or watch.plan_revision != event.watch_revision:
             raise OpportunityError("source_stale")
-        semantic = sha or packet.observed_checkpoint_sha256
+        # Snapshot bytes include publication identity; semantic dedupe uses
+        # the actual immutable offered sources independently of packet UUID.
+        semantic = digest(json_bytes([item.model_dump() for item in evidence.sources])) if evidence else packet.observed_checkpoint_sha256
         key = digest(json_bytes([goal.owner_principal_id, goal.id, goal.revision,
             watch.id, watch.plan_revision, semantic, policy.schema_version]))
         existing = (await db.execute(select(GuardianOpportunity).where(
@@ -151,16 +184,23 @@ async def publish_verified_packet(event):
             original_root_id=goal.owner_session_id, goal_id=goal.id, goal_revision=goal.revision,
             policy_revision=goal.guardian_policy_revision, watch_id=watch.id,
             watch_revision=watch.plan_revision, source_packet_id=packet.id,
-            source_digest=semantic, source_token_json=json_bytes(token).decode(), dedupe_key=key,
-            expires_at=expiry, assessment_deadline_at=min(admitted_at + timedelta(seconds=120), expiry),
+            source_digest=sha or packet.observed_checkpoint_sha256, source_token_json=json_bytes(token).decode(), dedupe_key=key,
+            expires_at=expiry, assessment_deadline_at=min(
+                admitted_at + timedelta(seconds=min(120, budget.max_runtime_seconds)), expiry),
             status="blocked" if snapshot_error else "queued", reason_code=snapshot_error)
         if not snapshot_error:
             await assert_source_current(db, opportunity, evidence=evidence)
             # Latest pending packet from the same watch coalesces only before
             # any execution owner has claimed it. Contacted history survives.
+            from src.db.models import InferenceCostReservation
+            queued_native = select(WorkflowRunState.run_identity).where(WorkflowRunState.status == "queued")
+            contacted_native = select(InferenceCostReservation.job_id).where(
+                InferenceCostReservation.contact_started_at.is_not(None))
             await db.execute(update(GuardianOpportunity).where(
                 GuardianOpportunity.watch_id == watch.id, GuardianOpportunity.status == "queued",
-                GuardianOpportunity.job_id.is_(None)).values(status="silent", reason_code="coalesced",
+                (GuardianOpportunity.job_id.is_(None) | GuardianOpportunity.job_id.in_(queued_native)),
+                (GuardianOpportunity.job_id.is_(None) | GuardianOpportunity.job_id.not_in(contacted_native)))
+                .values(status="silent", reason_code="coalesced",
                     revision=GuardianOpportunity.revision + 1))
             pending = list((await db.execute(select(GuardianOpportunity).where(
                 GuardianOpportunity.status.in_(PENDING)))).scalars().all())
@@ -331,6 +371,13 @@ async def project_item(db, row, disposition=None, *, detail=False):
     """Literal history plus current availability; judgment never becomes authority."""
     from src.guardian.opportunity_contracts import OpportunityAssessment
     reason = row.reason_code
+    from src.db.models import NativeNotificationOutbox
+    delivery = (await db.execute(select(NativeNotificationOutbox).where(
+        NativeNotificationOutbox.intervention_id == row.intervention_id,
+        NativeNotificationOutbox.intervention_type == "opportunity",
+        NativeNotificationOutbox.owner_principal_id == row.owner_principal_id,
+        NativeNotificationOutbox.operator_session_id == row.original_root_id)
+        .order_by(NativeNotificationOutbox.created_at.desc()).limit(1))).scalars().first() if row.intervention_id else None
     current = True
     try:
         await assert_opportunity_current(db, row)
@@ -377,16 +424,26 @@ async def project_item(db, row, disposition=None, *, detail=False):
         "evidence": {"dossier_artifact_id": None, "dossier_sha256": None, "task_artifact_id": None, "task_sha256": None},
         "evidence_refs": [], "evidence_status": "verified" if assessment and current else "unavailable",
         "verification_status": "passed" if assessment else "not_proposed", "memory_status": "no_learning",
-        "delivery_status": "not_requested", "policy_reason": reason, "allowed_actions": allowed,
+        "delivery_status": delivery.status if delivery else "not_requested", "policy_reason": reason, "allowed_actions": allowed,
         "cancel_allowed": cancel_allowed,
         "cancel_requested": row.reason_code in {"cancel_requested", "assessment_cancel_requested", "operator_cancelled"},
         "quiescent": row.status == "cancelled"}
+    if row.status == "unknown" and item["cancel_requested"]:
+        receipts = list((await db.execute(select(AuditEvent).where(AuditEvent.actor == row.owner_principal_id,
+            AuditEvent.event_type == "guardian_opportunity_cancel_requested",
+            AuditEvent.created_at >= row.created_at).order_by(AuditEvent.created_at.desc()).limit(20))).scalars().all())
+        item["quiescent"] = any(json.loads(receipt.details_json).get("result", {}).get("opportunity_id") == row.id
+            and json.loads(receipt.details_json).get("result", {}).get("quiescent") is True for receipt in receipts)
     if not current:
         item["recovery_action"] = "review_goal_and_watch"
     if detail:
+        from src.guardian.inbox import _load_action_history
+        history, truncated = await _load_action_history(db, owner_principal_id=row.owner_principal_id,
+            owner_session_id=row.original_root_id, item_id=row.id)
         item.update(evidence_previews=[], action_history=[], action_history_truncated=False, job=None,
             links={"source_watch": f"/api/capabilities/source-watches/{row.watch_id}", "packet": None,
                    "board_task": f"/api/work-board/tasks/{disposition.task_id}" if disposition and disposition.task_id else None})
+        item.update(action_history=history, action_history_truncated=truncated)
         if current:
             from src.guardian.opportunity_runtime import read_snapshot
             token = json.loads(row.source_token_json)
@@ -420,7 +477,7 @@ async def list_history(*, owner, root_id, goal_id=None, limit=20, cursor=None):
                 GuardianOpportunity.created_at == position[0], GuardianOpportunity.id > position[1])))
         rows = list((await db.execute(query.order_by(GuardianOpportunity.created_at, GuardianOpportunity.id)
             .limit(limit + 1))).scalars().all())
-        items = [await project_item(db, row) for row in rows[:limit]]
+        items = [await project_item(db, row, await db.get(GuardianInboxDisposition, row.id)) for row in rows[:limit]]
     return {"items": items, "next_cursor": _encode_cursor(rows[limit-1].created_at, rows[limit-1].id)
         if len(rows) > limit else None}
 
@@ -532,8 +589,9 @@ async def cancel_opportunity(*, operator, opportunity_id, request):
         row = await db.get(GuardianOpportunity, opportunity_id)
         if row is None or row.owner_principal_id != owner or row.original_root_id != root_id:
             raise OpportunityError("opportunity_not_found", 404)
+        current_goal = await db.get(Goal, row.goal_id)
         await current_goal_authority(db, goal_id=row.goal_id, owner=owner, root_id=root_id,
-            goal_revision=(await db.get(Goal, row.goal_id)).revision, require_budget=False)
+            goal_revision=current_goal.revision if current_goal else row.goal_revision, require_budget=False)
         if row.revision != request.expected_opportunity_revision:
             raise OpportunityError("opportunity_revision_stale")
         if row.status not in {"queued", "assessing", "unknown", "blocked"}:

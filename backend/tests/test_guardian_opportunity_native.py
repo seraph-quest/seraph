@@ -13,6 +13,67 @@ from src.workflows.job_runtime import (
 )
 
 
+async def test_new_packet_coalesces_existing_uncontacted_native_queue(isolated_runtime):
+    from src.guardian.source_watch import SourceWatchService
+    from tests.test_work_board_m6_provider_free_journey import SESSION
+    sessions, _, watch, _, old, _ = await publish_source(isolated_runtime)
+    queued = await admit_assessment(old.id)
+    async def fetch(source):
+        return "Stable public line\nA newer relevant public release with material detail\n", {"content_type": "text/plain"}
+    newer = await SourceWatchService(fetcher=fetch).run_watch(watch["id"], occurrence_id="newer-material",
+        expected_plan_revision=1, expected_owner_session_id=SESSION)
+    assert newer["status"] == "succeeded", newer
+    async with sessions() as db:
+        rows = list((await db.execute(select(GuardianOpportunity).order_by(GuardianOpportunity.created_at))).scalars())
+        assert len(rows) == 2
+        assert rows[0].status == "silent" and rows[0].reason_code == "coalesced"
+        assert rows[1].status == "queued"
+    assert (await durable_job_repository.get_job(queued["job_id"]))["status"] == "cancelled"
+
+
+async def test_expired_never_contacted_native_lease_recovers_same_job_bounded(isolated_runtime, monkeypatch):
+    import asyncio
+    import json
+    from datetime import datetime, timedelta, timezone
+    from src.db.models import Goal, WorkflowRunState
+    from src.guardian import opportunity_runtime
+    import httpx
+    sessions, goal, _, _, row, _ = await publish_source(isolated_runtime)
+    async with sessions() as db:
+        current_goal = await db.get(Goal, goal.id)
+        budget = json.loads(current_goal.admission_budget_json)
+        budget["max_attempts"] = 2
+        current_goal.admission_budget_json = json.dumps(budget)
+        db.add(current_goal)
+    queued = await admit_assessment(row.id)
+    async def claim(db, run):
+        current, _ = await _authority(db, row.id, execution=True)
+        current.status = "assessing"
+        current.revision += 1
+        db.add(current)
+    claimed = await durable_job_repository.claim_job(queued["job_id"], owner=RUNNER,
+        expected_revision=queued["revision"], claim_authority_check=claim)
+    async with sessions() as db:
+        native = (await db.execute(select(WorkflowRunState).where(
+            WorkflowRunState.run_identity == queued["job_id"]))).scalar_one()
+        native.lease_expires_at = datetime.now(timezone.utc)-timedelta(seconds=1)
+        db.add(native)
+    def forbid_http(*args, **kwargs):
+        raise AssertionError("unverified recovery must not reach HTTP")
+    monkeypatch.setattr(httpx, "AsyncClient", forbid_http)
+    tick = await opportunity_runtime.run_opportunity_tick()
+    assert tick["started"] == 1
+    task = opportunity_runtime._executions[row.id]
+    await asyncio.wait_for(task, timeout=20)
+    recovered = await durable_job_repository.get_job(queued["job_id"])
+    assert recovered["job_id"] == claimed["job_id"]
+    assert recovered["attempt_count"] == 2
+    assert recovered["lease"]["fencing_token"] > claimed["lease"]["fencing_token"]
+    assert (await opportunity_runtime.run_opportunity_tick())["started"] == 0
+    async with sessions() as db:
+        assert (await db.execute(select(func.count()).select_from(InferenceCostReservation))).scalar() == 0
+
+
 async def test_fixed_native_kind_requires_all_current_authority_callbacks(isolated_runtime, monkeypatch):
     sessions, goal, watch, request, row, packet = await publish_source(isolated_runtime)
     original_admit = durable_job_repository.admit_job

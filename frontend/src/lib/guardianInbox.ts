@@ -15,6 +15,8 @@ import type {
   GuardianPolicyWatch,
   GuardianOpportunityAssessment,
   GuardianOpportunityStatus,
+  OpportunityPlanOffer, OpportunityPlanReference, OpportunityPlanPreview, OpportunityPlanRequest, OpportunityPlanResponse,
+  PipelineRecoveryReason,
 } from "../types";
 
 export class GuardianInboxApiError extends Error {
@@ -222,7 +224,14 @@ export function normalizeGuardianInboxItem(value: unknown): GuardianInboxItem | 
   const evidence = normalizeEvidence(value.evidence_refs);
   const source = isRecord(value.source) ? value.source : null;
   const links = isRecord(value.links) ? value.links : null;
+  const offer = normalizeOpportunityPlanOffer(value.plan_offer);
+  const preview = normalizeOpportunityPlanPreview(value.plan_preview);
+  const planInvalid = (value.plan_offer != null && (!offer || !planPositive(value.opportunity_revision) || !planPositive(value.goal_revision)))
+    || (value.plan_preview != null && (!preview || preview.opportunity_id !== value.opportunity_id || preview.goal_id !== value.goal_id
+      || preview.goal_revision !== value.goal_revision));
   return {
+    plan_offer: offer,
+    plan_preview: preview,
     opportunity_id: typeof value.opportunity_id === "string" ? value.opportunity_id : null,
     opportunity_revision: nullableInteger(value.opportunity_revision),
     opportunity_status: normalizeOpportunityStatus(value.opportunity_status),
@@ -235,7 +244,7 @@ export function normalizeGuardianInboxItem(value: unknown): GuardianInboxItem | 
     id,
     revision: Math.max(1, integerValue(value.revision, 1)),
     state: (knownState ? rawState : "pending") as GuardianInboxItem["state"],
-    degraded: !knownState,
+    degraded: !knownState || planInvalid,
     source_kind: stringValue(value.source_kind, "source_packet"),
     source_id: stringValue(value.source_id),
     title: stringValue(value.title, "Watched source changed").slice(0, 240),
@@ -251,7 +260,7 @@ export function normalizeGuardianInboxItem(value: unknown): GuardianInboxItem | 
     evidence_refs: evidence,
     evidence_previews: normalizeEvidencePreviews(value.evidence_previews),
     job: normalizeJob(value.job),
-    allowed_actions: knownState && !(value.source_kind === "guardian_opportunity" && (!normalizeOpportunityAssessment(value.assessment)
+    allowed_actions: knownState && !planInvalid && !(value.source_kind === "guardian_opportunity" && (!normalizeOpportunityAssessment(value.assessment)
       || value.opportunity_status !== "proposed")) ? normalizeActions(value.allowed_actions) : [],
     evidence_status: typeof value.evidence_status === "string" ? value.evidence_status : null,
     source_status: typeof value.source_status === "string"
@@ -301,6 +310,122 @@ function normalizeOpportunityAssessment(value: unknown): GuardianOpportunityAsse
       && (citation.end_line as number) <= 200 && typeof citation.span_sha256 === "string"
       && /^[0-9a-f]{64}$/.test(citation.span_sha256))) return null;
   return value as unknown as GuardianOpportunityAssessment;
+}
+
+const planId = (v: unknown): v is string => typeof v === "string" && /^[a-zA-Z0-9:_-]{1,128}$/.test(v);
+const planPositive = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v > 0;
+const planTime = (v: unknown): v is string => typeof v === "string" && /Z$/.test(v) && Number.isFinite(Date.parse(v));
+const planSha = (v: unknown): v is string => typeof v === "string" && /^[a-f0-9]{64}$/.test(v);
+const closedPlanKeys = (value: Record<string, unknown>, keys: string): boolean => Object.keys(value).every((key) => keys.split(",").includes(key));
+export const PIPELINE_RECOVERY_REASONS: PipelineRecoveryReason[] = [
+  "input_artifact_cleanup_required", "input_artifact_write_failed", "pipeline_recovery_required", "pipeline_materialization_conflict",
+  "pipeline_output_unverified", "pipeline_output_too_large", "pipeline_handoff_changed", "pipeline_input_changed", "pipeline_root_changed",
+  "pipeline_goal_changed", "pipeline_source_changed", "pipeline_source_permission", "pipeline_review_required", "pipeline_expired",
+  "pipeline_attempts_exhausted", "pipeline_task_changed", "pipeline_producer_changed", "pipeline_plan_changed", "source_stale", "goal_review_required", "opportunity_expired",
+];
+export function validPipelineRecoveryReason(value: unknown): boolean {
+  return value == null || PIPELINE_RECOVERY_REASONS.includes(value as PipelineRecoveryReason);
+}
+export function normalizeOpportunityPlanReference(value: unknown): OpportunityPlanReference | null {
+  if (!isRecord(value) || !closedPlanKeys(value, "proposal_id,kind,proposal_revision,parent_task_id,parent_revision,proposal_digest,expires_at,status,blueprint_id,provider_contact_state,generation_retry_allowed,recovery_reason") || !planId(value.proposal_id) || !planId(value.parent_task_id)
+    || !planPositive(value.proposal_revision) || !planPositive(value.parent_revision) || !planTime(value.expires_at)
+    || !["opportunity_plan", "public-evidence-pipeline.v1"].includes(String(value.kind))
+    || !["pending_inference", "proposed", "accepted", "blocked", "rejected", "expired"].includes(String(value.status))
+    || (value.proposal_digest !== null && !planSha(value.proposal_digest))
+    || (value.blueprint_id !== null && !["public-browser-check", "public-evidence-report"].includes(String(value.blueprint_id)))
+    || (value.provider_contact_state !== undefined && !["not_started", "started", "succeeded", "unknown"].includes(String(value.provider_contact_state)))
+    || (value.generation_retry_allowed !== undefined && typeof value.generation_retry_allowed !== "boolean")
+    || !validPipelineRecoveryReason(value.recovery_reason)
+    || (value.recovery_reason != null && value.blueprint_id !== "public-evidence-report")
+    || (value.kind === "public-evidence-pipeline.v1" && value.blueprint_id !== "public-evidence-report")
+    || (value.blueprint_id === "public-evidence-report" && value.kind !== "public-evidence-pipeline.v1")
+    || (["proposed", "accepted"].includes(String(value.status)) && (!planSha(value.proposal_digest) || value.blueprint_id === null))
+    || (value.generation_retry_allowed === true && value.provider_contact_state !== "not_started")) return null;
+  return value as unknown as OpportunityPlanReference;
+}
+export function normalizeOpportunityPlanOffer(value: unknown): OpportunityPlanOffer | null {
+  if (!isRecord(value) || !closedPlanKeys(value, "available_blueprint_ids,unavailable_reason,can_generate,generation_block_reason,proposal_ref") || !Array.isArray(value.available_blueprint_ids) || value.available_blueprint_ids.length > 2
+    || new Set(value.available_blueprint_ids).size !== value.available_blueprint_ids.length
+    || !value.available_blueprint_ids.every((id) => ["public-browser-check", "public-evidence-report"].includes(String(id)))
+    || typeof value.can_generate !== "boolean" || !(value.unavailable_reason === null || typeof value.unavailable_reason === "string")
+    || !(value.generation_block_reason === null || typeof value.generation_block_reason === "string")
+    || (value.proposal_ref !== null && !normalizeOpportunityPlanReference(value.proposal_ref))
+    || (value.can_generate && (!value.available_blueprint_ids.length || value.proposal_ref !== null || value.generation_block_reason !== null))) return null;
+  return value as unknown as OpportunityPlanOffer;
+}
+export function normalizeOpportunityPlanPreview(value: unknown): OpportunityPlanPreview | null {
+  if (!isRecord(value) || !closedPlanKeys(value, "opportunity_id,opportunity_revision,blueprint_id,goal_id,goal_revision,source_id,source_digest,watch_id,watch_revision,steps,review_expires_at,deadline_at,no_learning,recovery_reason")
+    || new TextEncoder().encode(JSON.stringify(value)).length > 16384 || !planId(value.opportunity_id) || !planPositive(value.opportunity_revision)
+    || !planId(value.goal_id) || !planPositive(value.goal_revision) || !planId(value.watch_id) || !planPositive(value.watch_revision)
+    || !planId(value.source_id) || !planSha(value.source_digest) || !planTime(value.review_expires_at)
+    || !(value.deadline_at === null || planTime(value.deadline_at)) || value.no_learning !== true
+    || !["public-browser-check", "public-evidence-report"].includes(String(value.blueprint_id))
+    || !validPipelineRecoveryReason(value.recovery_reason) || !Array.isArray(value.steps)
+    || value.steps.length !== (value.blueprint_id === "public-browser-check" ? 1 : 3)) return null;
+  const slots = ["public_source", "evidence_dossier", "local_report"];
+  const capabilities = ["browser.public-task.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1"];
+  const schemas = ["browser_public_task_result", "evidence_dossier.v1", "text/plain"];
+  for (const [i, step] of value.steps.entries()) {
+    if (!isRecord(step) || !closedPlanKeys(step, "slot,capability_id,input,input_materialization,output_schema,permissions,native_approvals,runtime_seconds,output_bytes") || step.slot !== slots[i] || step.capability_id !== capabilities[i] || step.output_schema !== schemas[i]
+      || !Array.isArray(step.permissions) || step.permissions.length > 32 || !step.permissions.every((p) => typeof p === "string" && p.length <= 256)
+      || !Array.isArray(step.native_approvals) || step.native_approvals.length > 32 || !step.native_approvals.every((p) => typeof p === "string" && p.length <= 1024)
+      || !planPositive(step.runtime_seconds) || step.runtime_seconds > (i === 0 ? 180 : 30)
+      || !planPositive(step.output_bytes) || step.output_bytes > 65536) return null;
+    if (i > 0) { if (step.input !== null || step.input_materialization !== "after_verified_producer") return null; continue; }
+    const input = step.input;
+    if (!isRecord(input) || !closedPlanKeys(input, "schema_version,start_url,allowed_hosts,approved_url_prefixes,actions,final_expected_checks") || input.schema_version !== 1 || step.input_materialization !== "bound" || typeof input.start_url !== "string" || input.start_url.length > 2048) return null;
+    let url: URL;
+    try { url = new URL(input.start_url); } catch { return null; }
+    if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash
+      || JSON.stringify(input.allowed_hosts) !== JSON.stringify([url.hostname]) || JSON.stringify(input.approved_url_prefixes) !== JSON.stringify([input.start_url])) return null;
+    const checks = [{ kind: "url_host", value: url.hostname }, { kind: "url_path_prefix", value: url.pathname }];
+    if (JSON.stringify(input.final_expected_checks) !== JSON.stringify(checks) || !Array.isArray(input.actions) || input.actions.length !== 2
+      || !isRecord(input.actions[0]) || !closedPlanKeys(input.actions[0], "kind,url,expected_checks") || input.actions[0].kind !== "navigate" || input.actions[0].url !== input.start_url
+      || JSON.stringify(input.actions[0].expected_checks) !== JSON.stringify(checks)
+      || !isRecord(input.actions[1]) || !closedPlanKeys(input.actions[1], "kind,selector,max_chars,expected_checks") || input.actions[1].kind !== "extract" || input.actions[1].selector !== "body" || input.actions[1].max_chars !== 8192
+      || JSON.stringify(input.actions[1].expected_checks) !== JSON.stringify(checks)) return null;
+  }
+  return value as unknown as OpportunityPlanPreview;
+}
+export function planReferenceMatchesPreview(ref: OpportunityPlanReference, preview: OpportunityPlanPreview): boolean {
+  return ref.blueprint_id === preview.blueprint_id && ref.expires_at === preview.review_expires_at
+    && (ref.kind === "public-evidence-pipeline.v1") === (preview.blueprint_id === "public-evidence-report");
+}
+export function opportunityPlanStorageKey(principal: string, root: string, id: string): string {
+  return `seraph.opportunity-plan.v1:${encodeURIComponent(principal)}:${encodeURIComponent(root)}:${encodeURIComponent(id)}`;
+}
+export function readOpportunityPlanRequest(key: string): OpportunityPlanRequest | null {
+  const raw = window.sessionStorage.getItem(key);
+  if (raw === null) return null;
+  if (new TextEncoder().encode(raw).length > 1024) throw new Error("Retained plan request exceeds its bound.");
+  const value: unknown = JSON.parse(raw);
+  if (!isRecord(value) || Object.keys(value).sort().join() !== "expected_goal_revision,expected_opportunity_revision,idempotency_key"
+    || !planPositive(value.expected_goal_revision) || !planPositive(value.expected_opportunity_revision)
+    || typeof value.idempotency_key !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value.idempotency_key)) throw new Error("Retained plan request is corrupt. Generation is blocked.");
+  return value as unknown as OpportunityPlanRequest;
+}
+export function retainOpportunityPlanRequest(key: string, request: OpportunityPlanRequest): void {
+  const raw = JSON.stringify(request);
+  window.sessionStorage.setItem(key, raw);
+  if (window.sessionStorage.getItem(key) !== raw || JSON.stringify(readOpportunityPlanRequest(key)) !== raw) throw new Error("Exact plan request retention is unavailable. No request was sent.");
+}
+export function retainOpportunityBrowserAcceptance(key: string, path: string, body: { expected_proposal_revision: number; expected_parent_revision: number }): void {
+  const raw = JSON.stringify({ path, body });
+  const existing = window.sessionStorage.getItem(key);
+  if (existing !== null && existing !== raw) throw new Error("Retained acceptance differs from this preview. Refresh and inspect; no new request was sent.");
+  window.sessionStorage.setItem(key, raw);
+  if (window.sessionStorage.getItem(key) !== raw) throw new Error("Exact acceptance retention is unavailable. No request was sent.");
+}
+export async function generateGuardianOpportunityPlan(id: string, request: OpportunityPlanRequest, signal?: AbortSignal): Promise<OpportunityPlanResponse> {
+  const response = await apiFetch(`${API_URL}/api/guardian/opportunities/${encodeURIComponent(id)}/plan`, {
+    method: "POST", signal, headers: { "Content-Type": "application/json" }, body: JSON.stringify(request),
+  });
+  const payload = await responsePayload(response);
+  if (!response.ok) throw payloadError(response, payload, "Plan generation outcome is uncertain. Refresh before any exact retry");
+  if (!isRecord(payload) || payload.opportunity_id !== id || !planPositive(payload.opportunity_revision)
+    || payload.opportunity_revision < request.expected_opportunity_revision || (payload.proposal_ref !== null && !normalizeOpportunityPlanReference(payload.proposal_ref))
+    || !(payload.reason_code === null || typeof payload.reason_code === "string")) throw new GuardianInboxApiError(502, "Plan generation readback is incomplete. Refresh; no automatic retry.");
+  return payload as unknown as OpportunityPlanResponse;
 }
 
 export function createGuardianUuid(): string {

@@ -118,6 +118,20 @@ class OpportunityCancel(Closed):
     idempotency_key: UUID
 
 
+class OpportunityPlanRequest(Closed):
+    expected_opportunity_revision: PositiveInt
+    expected_goal_revision: PositiveInt
+    idempotency_key: UUID
+
+
+class OpportunityPlanResult(Closed):
+    schema_version: Literal["seraph.opportunity.plan.v1"]
+    blueprint_id: Literal["public-browser-check", "public-evidence-report"]
+    title: str = Field(min_length=1, max_length=160)
+    reason: str = Field(min_length=1, max_length=1000)
+    citations: list[Citation] = Field(min_length=1, max_length=4)
+
+
 def json_bytes(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
 

@@ -1,7 +1,11 @@
 import { API_URL } from "../config/constants";
 import { apiFetch } from "./api";
+import { normalizeOpportunityPlanPreview, validPipelineRecoveryReason } from "./guardianInbox";
+import type { OpportunityPlanPreview, PipelineRecoveryReason } from "../types";
 
 export interface ArtifactPipeline {
+  opportunity_id?: string | null; opportunity_revision?: number | null;
+  plan_preview?: OpportunityPlanPreview | null; recovery_reason?: PipelineRecoveryReason | null;
   operation_id: string; revision: number; parent_revision: number; digest: string;
   status: "proposed" | "accepted"; plan_version: number; deadline_at: string | null;
   steps: { slot: string; capability_id: string; task_id: string; task_revision: number; status: string; block_reason: string | null }[];
@@ -60,6 +64,12 @@ export function writePipelineStorage(key: string, task: string, value: PipelineS
 }
 
 export function validatePipeline(value: unknown): ArtifactPipeline {
+  if (record(value) && (!validPipelineRecoveryReason(value.recovery_reason)
+    || (value.plan_preview != null && !normalizeOpportunityPlanPreview(value.plan_preview))
+    || (value.opportunity_id == null && value.opportunity_revision != null)
+    || (value.opportunity_id != null && (!safeId(value.opportunity_id) || !positive(value.opportunity_revision)
+      || (value.plan_preview != null && ((value.plan_preview as OpportunityPlanPreview).opportunity_id !== value.opportunity_id
+      || (value.plan_preview as OpportunityPlanPreview).opportunity_revision !== value.opportunity_revision)))))) throw new Error("Opportunity pipeline linkage is incomplete.");
   if (!record(value) || typeof value.operation_id !== "string" || !identifier.test(value.operation_id)
     || !positive(value.revision) || !positive(value.parent_revision) || !positive(value.plan_version)
     || typeof value.digest !== "string" || !/^[a-f0-9]{64}$/.test(value.digest)

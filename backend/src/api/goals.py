@@ -43,7 +43,7 @@ from src.guardian.goal_conditioned_loop import (
     propose_goal_candidate_set,
 )
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
-from src.guardian.opportunity_contracts import GuardianPolicySave, OpportunityCancel
+from src.guardian.opportunity_contracts import GuardianPolicySave, OpportunityCancel, OpportunityPlanRequest
 from src.guardian.opportunities import OpportunityError, policy_projection, save_policy
 
 logger = logging.getLogger(__name__)
@@ -476,6 +476,16 @@ async def cancel_guardian_opportunity(opportunity_id: str, body: OpportunityCanc
     operator = _require_authenticated_operator(request)
     try:
         return await cancel_opportunity(operator=operator, opportunity_id=opportunity_id, request=body)
+    except OpportunityError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
+
+
+@router.post("/guardian/opportunities/{opportunity_id}/plan")
+async def generate_guardian_opportunity_plan(opportunity_id: str, body: OpportunityPlanRequest, request: Request):
+    from src.guardian.opportunity_plans import generate_plan
+    operator = _require_authenticated_operator(request)
+    try:
+        return await generate_plan(operator=operator, opportunity_id=opportunity_id, request=body)
     except OpportunityError as exc:
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
 

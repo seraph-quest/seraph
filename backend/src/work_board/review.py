@@ -9,6 +9,7 @@ and never trust reviewer, run, or evidence identities supplied by a browser.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
 import hashlib
 import json
 import re
@@ -65,6 +66,91 @@ _LEGACY_HANDOFF_RECONCILIATION_REASON = (
 _LEGACY_HANDOFF_MISSING_REASON = (
     "Every completed parent must have a verified handoff before dispatch"
 )
+
+
+@dataclass(frozen=True)
+class PipelineProducerWitness:
+    owner_principal_id: str
+    original_root_id: str
+    task_id: str
+    task_token: str
+    attempt_id: str
+    attempt_token: str
+    run_identity: str
+    run_token: str
+    input_artifact_id: str
+    input_artifact_token: str
+    proof_bytes: bytes
+    output_bytes: bytes
+    output_reference: str
+    content_sha256: str
+
+
+async def stage_pipeline_producer_readback(db, owner, producer) -> PipelineProducerWitness:
+    from src.work_board.pipelines import row_token
+    from src.work_board.pipeline_cpu import read_output
+    from src.work_board.pipeline_contracts import canonical_bytes, MAX_QUOTED_BYTES, REPORT
+    attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == producer.task_id)
+        .order_by(WorkBoardAttempt.created_at.desc(), WorkBoardAttempt.attempt_id.desc()).limit(1))
+    proof = await _verified_workflow_readback(db, producer, attempt) if attempt else None
+    if (producer.status != WorkBoardStatus.done or producer.owner_principal_id != owner.principal_id
+        or producer.owner_session_id != owner.session_id or proof is None):
+        raise BoardError("pipeline_output_unverified", "The real producer readback is required", status_code=409)
+    run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == attempt.workflow_run_id))
+    artifacts = _decode_list(run.artifact_receipts_json)
+    matching = [item for item in artifacts if isinstance(item, dict) and item.get("exists") is True
+        and item.get("content_sha256") == proof["content_sha256"]]
+    if len(matching) != 1:
+        raise BoardError("pipeline_output_unverified", "The producer artifact is ambiguous", status_code=409)
+    reference = matching[0]["file_path"]
+    raw = read_output(reference, proof["content_sha256"])
+    if producer.capability_id != REPORT and len(raw) > MAX_QUOTED_BYTES:
+        raise BoardError("pipeline_output_too_large", "The producer exceeds the input allowance", status_code=409)
+    from src.db.models import WorkBoardInputArtifact
+    input_artifact = await db.get(WorkBoardInputArtifact, producer.input_artifact_id)
+    if input_artifact is None:
+        raise BoardError("pipeline_input_changed", "The producer input binding is unavailable", status_code=409)
+    return PipelineProducerWitness(owner.principal_id, owner.session_id, producer.task_id, row_token(producer),
+        attempt.attempt_id, row_token(attempt), run.run_identity, row_token(run), input_artifact.artifact_id,
+        row_token(input_artifact), canonical_bytes(proof),
+        raw, reference, proof["content_sha256"])
+
+
+async def recheck_pipeline_producer_readback(db, owner, *, witness: PipelineProducerWitness):
+    from src.work_board.pipelines import row_token
+    if not isinstance(witness, PipelineProducerWitness) or (witness.owner_principal_id, witness.original_root_id) != (owner.principal_id, owner.session_id):
+        raise BoardError("pipeline_producer_changed", "Staged producer proof is required", status_code=409)
+    producer = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == witness.task_id).execution_options(populate_existing=True))
+    attempt = await db.get(WorkBoardAttempt, witness.attempt_id, populate_existing=True)
+    run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == witness.run_identity).execution_options(populate_existing=True))
+    from src.db.models import WorkBoardInputArtifact
+    input_artifact = await db.get(WorkBoardInputArtifact, witness.input_artifact_id, populate_existing=True)
+    latest = await db.scalar(select(WorkBoardAttempt.attempt_id).where(WorkBoardAttempt.task_id == witness.task_id)
+        .order_by(WorkBoardAttempt.created_at.desc(), WorkBoardAttempt.attempt_id.desc()).limit(1))
+    if (producer is None or attempt is None or run is None or latest != witness.attempt_id
+        or row_token(producer) != witness.task_token or row_token(attempt) != witness.attempt_token
+        or row_token(run) != witness.run_token or run.status != "succeeded"
+        or producer.status != WorkBoardStatus.done or attempt.ended_at is None
+        or input_artifact is None or row_token(input_artifact) != witness.input_artifact_token
+        or hashlib.sha256(witness.output_bytes).hexdigest() != witness.content_sha256):
+        raise BoardError("pipeline_producer_changed", "The staged producer binding changed", status_code=409)
+    return {"file_path": witness.output_reference, "content_sha256": witness.content_sha256,
+        "attempt_id": witness.attempt_id, "quoted_source_data": witness.output_bytes.decode("utf-8")}
+
+
+async def _materialize_pipeline_handoff_locked(db, owner, parent, child, link, *, witness: PipelineProducerWitness):
+    await recheck_pipeline_producer_readback(db, owner, witness=witness)
+    existing = await db.scalar(select(WorkBoardHandoff).where(WorkBoardHandoff.link_id == link.link_id,
+        WorkBoardHandoff.source_attempt_id == witness.attempt_id,
+        WorkBoardHandoff.source_task_revision == parent.task_revision))
+    if existing is None:
+        attempt = await db.get(WorkBoardAttempt, witness.attempt_id)
+        existing = await _persist_one_handoff(db, owner, parent, child, attempt,
+            proof=json.loads(witness.proof_bytes), link=link)
+    elif link.current_handoff_id != existing.handoff_id:
+        link.current_handoff_id = existing.handoff_id
+        await db.flush()
+    return existing
 _HANDOFF_RECONCILIATION_REASONS = (
     _HANDOFF_RECONCILIATION_REASON,
     _LEGACY_HANDOFF_RECONCILIATION_REASON,

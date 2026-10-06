@@ -869,6 +869,24 @@ class BoardAttemptProjection:
     event: WorkBoardEvent
 
 
+@dataclass(frozen=True)
+class SafeTaskText:
+    owner_principal_id: str
+    original_root_id: str
+    request_digest: str
+    title: str
+    body: str
+
+
+async def stage_safe_task_text(db, owner, request) -> SafeTaskText:
+    lane = _registered_executor_lane(request.capability_id)
+    if lane and request.status is WorkBoardStatus.todo:
+        request = request.model_copy(update={"executor_id": lane})
+    return SafeTaskText(owner.principal_id, owner.session_id, _payload_digest(request),
+        await WorkBoardRepository._safe_text(request.title, db=db),
+        await WorkBoardRepository._safe_text(request.body, db=db))
+
+
 class WorkBoardRepository:
     """Single kernel for all M1 task, dependency, comment, and event writes."""
 
@@ -1122,6 +1140,19 @@ class WorkBoardRepository:
         origin_session_id: str | None = None,
         publication_authority_check: Callable[[AsyncSession], Awaitable[None]] | None = None,
     ) -> BoardMutation:
+        return await self._create_task(db, owner, request, origin_session_id=origin_session_id,
+            publication_authority_check=publication_authority_check)
+
+    async def _create_task_locked(self, db, owner, request, *, staged_text: SafeTaskText,
+                                  staged_input=None) -> BoardMutation:
+        if not isinstance(staged_text, SafeTaskText):
+            raise BoardError("pipeline_task_changed", "Staged task text is required", status_code=409)
+        return await self._create_task(db, owner, request, staged_text=staged_text,
+                                      staged_input=staged_input)
+
+    async def _create_task(self, db, owner, request, *, origin_session_id=None,
+                           publication_authority_check=None, staged_text=None,
+                           staged_input=None) -> BoardMutation:
         self._validate_task_fields(request)
         # Triage rows may remain unbound until Specify/Decompose acceptance,
         # but an executable Todo row must use the lane derived from the live
@@ -1162,7 +1193,12 @@ class WorkBoardRepository:
                 artifact_id=request.input_artifact_id, goal_id=request.goal_id,
                 goal_revision=request.goal_revision, capability_id=request.capability_id)
             document_stage = (_metadata_digest(artifact.row), artifact.row.revision)
-        if request.input_artifact_id or publication_authority_check is not None:
+        if staged_text is not None:
+            if (staged_text.owner_principal_id != owner.principal_id
+                or staged_text.original_root_id != owner.session_id
+                or staged_text.request_digest != _payload_digest(request)):
+                raise BoardError("pipeline_task_changed", "The staged task binding changed", status_code=409)
+        elif request.input_artifact_id or publication_authority_check is not None:
             # Reserve the writer before reading the owner/goal/artifact graph.
             # Those reads establish the authority that is bound by the task
             # insert; moving the fence after redaction would allow a stale
@@ -1250,16 +1286,14 @@ class WorkBoardRepository:
             artifact = ResolvedInputArtifact(row=fresh, input=artifact.input, payload=artifact.payload)
         if request.input_artifact_id:
             if artifact is None:
-                from src.work_board.input_artifacts import resolve_input_artifact_for_task
-
-                artifact = await resolve_input_artifact_for_task(
-                    db,
-                    owner,
-                    artifact_id=request.input_artifact_id,
-                    goal_id=request.goal_id,
-                    goal_revision=request.goal_revision,
-                    capability_id=request.capability_id or "",
-                )
+                if staged_text is not None:
+                    from src.work_board.input_artifacts import recheck_staged_input
+                    artifact = await recheck_staged_input(db, owner, request, witness=staged_input)
+                else:
+                    from src.work_board.input_artifacts import resolve_input_artifact_for_task
+                    artifact = await resolve_input_artifact_for_task(db, owner,
+                        artifact_id=request.input_artifact_id, goal_id=request.goal_id,
+                        goal_revision=request.goal_revision, capability_id=request.capability_id or "")
             typed_input_ref = artifact.row.typed_input_ref
             typed_input_digest = artifact.row.payload_sha256
         else:
@@ -1274,8 +1308,8 @@ class WorkBoardRepository:
                     status_code=403,
                 )
             reviewer_id = owner.principal_id
-        safe_title = await self._safe_text(request.title, db=db)
-        safe_body = await self._safe_text(request.body, db=db)
+        safe_title = staged_text.title if staged_text else await self._safe_text(request.title, db=db)
+        safe_body = staged_text.body if staged_text else await self._safe_text(request.body, db=db)
 
         task = WorkBoardTask(
             owner_principal_id=owner.principal_id,
@@ -2310,6 +2344,13 @@ class WorkBoardRepository:
             frontier.extend(str(value) for value in result.scalars().all())
         return False
 
+    async def _add_link_locked(self, db, owner, request, *, staged_context):
+        from src.work_board.pipelines import PipelineAcceptContext
+        if not isinstance(staged_context, PipelineAcceptContext):
+            raise BoardError("pipeline_plan_changed", "Staged link proof is required", status_code=409)
+        return await self.add_link(db, owner, request, acquire_lock=False,
+                                   staged_producer=staged_context.producer_witness)
+
     async def add_link(
         self,
         db: AsyncSession,
@@ -2317,6 +2358,7 @@ class WorkBoardRepository:
         request: WorkBoardLinkCreate,
         *,
         acquire_lock: bool = True,
+        staged_producer=None,
     ) -> tuple[WorkBoardLink, WorkBoardEvent]:
         if request.parent_task_id == request.child_task_id:
             raise BoardError("dependency_cycle", "A task cannot depend on itself")
@@ -2380,15 +2422,13 @@ class WorkBoardRepository:
             # The edge and its immutable proof must commit together.  A
             # completed parent with no verified readback aborts this whole
             # transaction, leaving no dependency edge to bypass provenance.
-            from src.work_board.review import materialize_handoff_for_link
-
-            handoff = await materialize_handoff_for_link(
-                db,
-                owner,
-                parent,
-                child,
-                link,
-            )
+            if staged_producer is not None:
+                from src.work_board.review import _materialize_pipeline_handoff_locked
+                handoff = await _materialize_pipeline_handoff_locked(db, owner, parent, child,
+                    link, witness=staged_producer)
+            else:
+                from src.work_board.review import materialize_handoff_for_link
+                handoff = await materialize_handoff_for_link(db, owner, parent, child, link)
         else:
             handoff = None
         event = await self._event(

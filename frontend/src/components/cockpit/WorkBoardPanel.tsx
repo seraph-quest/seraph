@@ -5,7 +5,7 @@ import { createPortal } from "react-dom";
 import { API_URL, WS_URL } from "../../config/constants";
 import { resolveWebSocketUrl } from "../../hooks/useWebSocket";
 import { apiFetch } from "../../lib/api";
-import { fetchGuardianInboxItem } from "../../lib/guardianInbox";
+import { fetchGuardianInboxItem, normalizeOpportunityPlanReference, normalizeOpportunityPlanPreview, planReferenceMatchesPreview, retainOpportunityBrowserAcceptance } from "../../lib/guardianInbox";
 import { BrowserTaskForm } from "./BrowserTaskForm";
 import type { BrowserTaskSubmissionReceipt, PendingBrowserSubmission } from "./BrowserTaskForm";
 import { CalendarPrepForm } from "./CalendarPrepForm";
@@ -2617,7 +2617,7 @@ function WorkBoardPanel({
     return key;
   };
 
-  const requestProposal = async (kind: WorkBoardProposal["kind"], forceNew = false) => {
+  const requestProposal = async (kind: "specify" | "decompose", forceNew = false) => {
     if (!selectedTask || !["triage", "todo"].includes(selectedTask.status)) return;
     const taskId = selectedTask.task_id;
     // Invalidate an in-flight hydration GET before issuing the operator's
@@ -2670,6 +2670,7 @@ function WorkBoardPanel({
 
   const decideProposal = async (decision: "accept" | "reject") => {
     if (!proposal) return;
+    if (proposal.kind === "public-evidence-pipeline.v1" || (proposal.kind === "opportunity_plan" && !linkedPlanReady)) return;
     const taskId = selectedTaskIdRef.current;
     const selectionVersion = proposalSelectionVersionRef.current;
     const proposalId = proposal.proposal_id;
@@ -2685,6 +2686,9 @@ function WorkBoardPanel({
       }
       : { expected_proposal_revision: proposal.proposal_revision };
     try {
+      if (decision === "accept" && proposal.kind === "opportunity_plan") retainOpportunityBrowserAcceptance(
+        `seraph.opportunity-plan-accept.v1:${ownerPrincipalId}:${ownerSessionId}:${proposal.proposal_id}`, path,
+        { expected_proposal_revision: proposal.proposal_revision, expected_parent_revision: proposal.parent_revision });
       const retainedBody = decision === "accept" && selectedTask && proposal.kind === "specify"
         ? retainSpecificationAcceptance(specificationScope(selectedTask, proposal, ownerSessionId), body as import('./SpecificationEvidenceReview').SpecificationAcceptance)
         : body;
@@ -2895,6 +2899,19 @@ function WorkBoardPanel({
     && proposal.proposed_tasks.length > 0
     && proposal.proposed_tasks.every((task) => hasServerAuthorityPreview(task.authority)),
   );
+  const linkedPlan = Boolean(proposal?.opportunity_id || selectedDetail?.proposal_ref || proposal?.kind === "opportunity_plan" || proposal?.kind === "public-evidence-pipeline.v1");
+  const linkedReference = normalizeOpportunityPlanReference(proposal?.proposal_ref ?? selectedDetail?.proposal_ref);
+  const linkedPreview = normalizeOpportunityPlanPreview(proposal?.plan_preview ?? selectedDetail?.plan_preview);
+  const linkedPlanReady = Boolean(linkedReference && linkedPreview && selectedTask && currentOwnerSession
+    && linkedReference.proposal_id === proposal?.proposal_id && linkedReference.parent_task_id === selectedTask.task_id
+    && linkedReference.parent_revision === selectedTask.task_revision && linkedReference.proposal_revision === proposal?.proposal_revision
+    && linkedReference.status === proposal?.status && linkedReference.proposal_digest === proposal?.proposal_digest
+    && linkedReference.kind === proposal?.kind && linkedPreview.goal_id === selectedTask.goal_id
+    && linkedPreview.goal_revision === selectedTask.goal_revision && linkedPreview.opportunity_id === proposal?.opportunity_id
+    && linkedPreview.opportunity_revision === proposal?.opportunity_revision && planReferenceMatchesPreview(linkedReference, linkedPreview)
+    && Date.parse(linkedReference.expires_at) > Date.now());
+  const linkedInspectionReady = Boolean(linkedReference?.status === "accepted" && selectedTask && currentOwnerSession
+    && linkedReference.parent_task_id === selectedTask.task_id && selectedTask.pipeline_operation_id === linkedReference.proposal_id);
   const routineVersion = routinePreview?.version_plan.version
     ?? routine?.current_version
     ?? routine?.versions[0]?.version
@@ -3612,7 +3629,7 @@ function WorkBoardPanel({
                 {proposal && (
                   <section className="mt-3 rounded border border-white/10 bg-black/20 p-3" aria-label="Triage proposal preview">
                     <div className="flex items-center justify-between gap-2">
-                      <div className="font-semibold">{proposal.kind === "specify" ? "Specify" : "Decompose"} proposal preview</div>
+                      <div className="font-semibold">{linkedPlan ? "Read-only opportunity plan" : proposal.kind === "specify" ? "Specify" : "Decompose"} proposal preview</div>
                       <span className="text-[10px] uppercase opacity-70">{proposalStatusLabel(proposal)} · revision {proposal.proposal_revision}</span>
                     </div>
                     {proposal.blocked_reason && <div className="mt-2 rounded border border-amber-500/40 p-2" role="status">
@@ -3623,6 +3640,7 @@ function WorkBoardPanel({
                           : "Resolve the prerequisite, then retry the unchanged request only when its durable receipt proves that provider contact never started; a changed binding requires a new request key."}
                     </div>}
                     {proposal.recovery_action === "retry_same_binding_after_prerequisite"
+                      && (proposal.kind === "specify" || proposal.kind === "decompose")
                       && selectedTask
                       && ["triage", "todo"].includes(selectedTask.status)
                       && currentOwnerSession
@@ -3631,12 +3649,18 @@ function WorkBoardPanel({
                           type="button"
                           className="cockpit-feedback-button mt-2"
                           disabled={proposalBusy}
-                          onClick={() => void requestProposal(proposal.kind, true)}
+                          onClick={() => void requestProposal(proposal.kind as "specify" | "decompose", true)}
                         >Retry with new request key</button>
                       )}
                     <div className="mt-2">Estimated cost: {proposal.estimated_cost ?? "Not provided"}</div>
                     <div className="mt-1 break-all">Proposal capability: {proposal.capability_id ?? "Governed proposal route"}{proposal.capability_version ? ` · version ${proposal.capability_version}` : ""}</div>
                     <div className="mt-1">Parent revision: {proposal.parent_revision} · expires {safeDateTime(proposal.expires_at)}</div>
+                    {linkedPlan && <div>
+                      <p>Non-executable Triage staging. Acceptance authorizes the existing queue under native approval gates; no_learning.</p>
+                      {linkedPreview ? <pre className="whitespace-pre-wrap break-all" aria-label="Exact read-only opportunity plan">{JSON.stringify(linkedPreview, null, 2)}</pre>
+                        : <p role="status">Exact plan preview is unavailable. Actions remain blocked.</p>}
+                      {!linkedPlanReady ? <p role="status">Plan bindings are incomplete or stale. Refresh current Goal, source and parent before accepting.</p> : null}
+                    </div>}
                     <div className="mt-2 grid gap-2">
                       {proposal.proposed_tasks.map((proposedTask, index) => (
                         <article key={proposedTask.task_id ?? `${proposal.proposal_id}:task:${index}`} className="rounded border border-white/10 p-2">
@@ -3652,7 +3676,7 @@ function WorkBoardPanel({
                       {proposal.proposed_tasks.length === 0 && <div className="cockpit-empty">No executable task proposal was returned.</div>}
                     </div>
                     {proposal.proposed_links.length > 0 && <div className="mt-2">Proposed dependencies: {proposal.proposed_links.map((link) => `${link.parent_task_id} → ${link.child_task_id}`).join(" · ")}</div>}
-                    {proposal.status === "proposed" && !proposalAuthorityComplete && (
+                    {proposal.status === "proposed" && !linkedPlan && !proposalAuthorityComplete && (
                       <div className="mt-2 text-amber-200" role="status">A complete server-derived authority preview is missing. Request a fresh proposal before accepting this one.</div>
                     )}
                     {proposal.status === "proposed" && (
@@ -3661,8 +3685,8 @@ function WorkBoardPanel({
                         key={specificationScope(selectedTask, proposal, ownerSessionId)} task={selectedTask}
                         proposal={proposal} ownerSessionId={ownerSessionId} onReplacement={updateProposalEvidence} />}
                       <div className="mt-3 flex flex-wrap gap-2">
-                        <button type="button" className="cockpit-feedback-button" disabled={proposalBusy || !proposalAuthorityComplete} onClick={() => void decideProposal("accept")}>Accept proposal</button>
-                        <button type="button" className="cockpit-feedback-button" disabled={proposalBusy} onClick={() => void decideProposal("reject")}>Reject proposal</button>
+                        {proposal.kind !== "public-evidence-pipeline.v1" ? <button type="button" className="cockpit-feedback-button" disabled={proposalBusy || (linkedPlan ? !linkedPlanReady : !proposalAuthorityComplete)} onClick={() => void decideProposal("accept")}>{linkedPlan ? "Accept and queue this read-only plan" : "Accept proposal"}</button> : null}
+                        {!linkedPlan ? <button type="button" className="cockpit-feedback-button" disabled={proposalBusy} onClick={() => void decideProposal("reject")}>Reject proposal</button> : null}
                       </div>
                       </>
                     )}
@@ -4123,7 +4147,10 @@ function WorkBoardPanel({
                 task={selectedTask} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
                 onChanged={async () => { await refreshSnapshot(); }} />}
 
-              {ownerPrincipalId && ownerSessionId && <ArtifactPipelineReview key={`${ownerPrincipalId}:${ownerSessionId}:${selectedTask.task_id}`} task={selectedTask}
+              {ownerPrincipalId && ownerSessionId && (!linkedPlan || linkedReference?.kind === "public-evidence-pipeline.v1") && <ArtifactPipelineReview key={`${ownerPrincipalId}:${ownerSessionId}:${selectedTask.task_id}`} task={selectedTask}
+                opportunityPlan={Boolean(linkedPlan)}
+                proposal_ref={(linkedPlanReady || linkedInspectionReady) && linkedReference?.blueprint_id === "public-evidence-report" ? linkedReference : null}
+                plan_preview={(linkedPlanReady || linkedInspectionReady) && linkedReference?.blueprint_id === "public-evidence-report" ? linkedPreview : null}
                 ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
                 metadataConfirmed={Boolean(selectedDetail && !detailLoading && !stale && !detailError)}
                 onRefresh={refreshSelectedTask} onOpenTask={openTask} />}

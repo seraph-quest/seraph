@@ -569,6 +569,13 @@ class InferenceAccountingRepositoryMixin:
                 if run.status != "running" or row.job_fencing_token != fencing_token or _utc(row.deadline_at) <= _utc(now):
                     raise InferenceAccountingError("accounting_contact_fence_invalid")
                 opportunity_denial = None
+                if run.job_kind == "work_board_proposal":
+                    from src.guardian.opportunity_plans import guard_linked_plan_provider_contact
+                    from src.guardian.opportunity_contracts import OpportunityError
+                    try:
+                        await guard_linked_plan_provider_contact(db, run)
+                    except OpportunityError as exc:
+                        opportunity_denial = exc.code
                 if run.job_kind == "guardian_opportunity_assess":
                     from src.guardian.opportunity_runtime import guard_provider_contact
                     from src.guardian.opportunity_contracts import OpportunityError

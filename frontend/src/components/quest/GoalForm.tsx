@@ -708,8 +708,8 @@ export function GuardianPolicyForm({ goal }: { goal: GoalInfo }) {
     <label className="block">Review due (UTC)<input aria-label="Assessment review due UTC" type="datetime-local" value={reviewDue.slice(0, 16)} onChange={(event) => setReviewDue(`${event.target.value}:00Z`)} /></label>
     <label className="block">Assessments per UTC day<input aria-label="Assessments per UTC day" type="number" min={1} max={4} value={assessmentCap} onChange={(event) => setAssessmentCap(Number(event.target.value))} /></label>
     <label className="block">Advisory proposals per UTC day<input aria-label="Advisory proposals per UTC day" type="number" min={0} max={2} value={planCap} onChange={(event) => setPlanCap(Number(event.target.value))} /></label>
-    <label className="block"><input type="checkbox" checked={autoStage} onChange={(event) => setAutoStage(event.target.checked)} /> Enable advisory auto-stage plans</label>
-    <p className="text-[10px] text-slate-400">Plan staging is not available yet. Saving this permission does not create a plan.</p>
+    <label className="block"><input type="checkbox" checked={autoStage} onChange={(event) => setAutoStage(event.target.checked)} /> Enable silent non-executable Triage plan staging</label>
+    <p className="text-[10px] text-slate-400">Separately consented staging may silently create a non-executable Triage plan. Saving this permission never accepts or executes a plan.</p>
     <label className="block"><input type="checkbox" checked={ackStage} onChange={(event) => setAckStage(event.target.checked)} /> I separately acknowledge advisory staging never accepts or executes a plan</label>
     <label className="block">Optional notifications per UTC day<input aria-label="Opportunity notifications per UTC day" type="number" min={0} max={2} value={notificationCap} onChange={(event) => setNotificationCap(Number(event.target.value))} /></label>
     <label className="block"><input type="checkbox" checked={ackNotifications} onChange={(event) => setAckNotifications(event.target.checked)} /> I separately acknowledge optional notifications and quiet-hour limits</label>

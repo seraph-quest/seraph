@@ -1706,6 +1706,7 @@ class WorkBoardProposal(SQLModel, table=True):
 
     __tablename__ = "work_board_proposals"
     __table_args__ = (
+        Index("ux_work_board_proposals_opportunity", "opportunity_id", unique=True),
         Index(
             "ux_work_board_proposals_idempotency",
             "owner_principal_id",
@@ -1719,6 +1720,8 @@ class WorkBoardProposal(SQLModel, table=True):
     )
 
     proposal_id: str = Field(default_factory=_uuid, primary_key=True)
+    opportunity_id: Optional[str] = Field(default=None)
+    opportunity_revision: Optional[int] = Field(default=None)
     owner_principal_id: str = Field(index=True)
     owner_session_id: str = Field(index=True)
     parent_task_id: str = Field(index=True)

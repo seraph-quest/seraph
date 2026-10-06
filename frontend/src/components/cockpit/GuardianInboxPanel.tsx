@@ -8,6 +8,7 @@ import {
   GuardianInboxApiError,
   cancelGuardianOpportunity,
   createGuardianUuid,
+  generateGuardianOpportunityPlan, opportunityPlanStorageKey, readOpportunityPlanRequest, retainOpportunityPlanRequest,
 } from "../../lib/guardianInbox";
 import type {
   GuardianInboxAction,
@@ -16,9 +17,12 @@ import type {
   GuardianInboxEvidencePreview,
   GuardianInboxItem,
   GuardianInboxPage,
+  OpportunityPlanRequest,
 } from "../../types";
 
 export interface GuardianInboxPanelProps {
+  currentOwnerPrincipalId?: string | null;
+  currentRootId?: string | null;
   autoLoad?: boolean;
   active?: boolean;
   pageSize?: number;
@@ -351,6 +355,8 @@ function clearPersistedGesture(itemId: string, action: GuardianInboxAction): voi
 }
 
 export const GuardianInboxPanel = forwardRef<GuardianInboxPanelHandle, GuardianInboxPanelProps>(function GuardianInboxPanel({
+  currentOwnerPrincipalId = null,
+  currentRootId = null,
   autoLoad = true,
   active = true,
   pageSize = 50,
@@ -366,6 +372,30 @@ export const GuardianInboxPanel = forwardRef<GuardianInboxPanelHandle, GuardianI
   onInspectArtifact,
 }: GuardianInboxPanelProps, ref) {
   const [items, setItems] = useState<GuardianInboxItem[]>([]);
+  const planOwner = currentOwnerPrincipalId && currentRootId ? `${currentOwnerPrincipalId}:${currentRootId}` : null;
+  const [confirmedPlanOwner, setConfirmedPlanOwner] = useState<string | null>(null);
+  const planScope = useRef(planOwner);
+  const planController = useRef<AbortController | null>(null);
+  if (planScope.current !== planOwner) { planController.current?.abort(); planScope.current = planOwner; }
+  const planLock = useRef(false);
+  const [planBusy, setPlanBusy] = useState<string | null>(null);
+  const [planError, setPlanError] = useState<string | null>(null);
+  const [planRequests, setPlanRequests] = useState<Record<string, OpportunityPlanRequest | null>>({});
+  const [planStorageErrors, setPlanStorageErrors] = useState<Record<string, boolean>>({});
+  useEffect(() => {
+    setPlanBusy(null); planLock.current = false; setPlanError(null); setConfirmedPlanOwner(null);
+  }, [currentOwnerPrincipalId, currentRootId]);
+  useEffect(() => {
+    const requests: Record<string, OpportunityPlanRequest | null> = {};
+    const errors: Record<string, boolean> = {};
+    if (currentOwnerPrincipalId && currentRootId) for (const item of items) {
+      if (!item.opportunity_id) continue;
+      try { requests[item.id] = readOpportunityPlanRequest(opportunityPlanStorageKey(currentOwnerPrincipalId, currentRootId, item.opportunity_id)); }
+      catch { errors[item.id] = true; }
+    }
+    setPlanRequests(requests); setPlanStorageErrors(errors);
+  }, [currentOwnerPrincipalId, currentRootId, items]);
+  useEffect(() => () => { planController.current?.abort(); }, []);
   useEffect(() => {
     if (!focusItemId) return;
     const row = [...document.querySelectorAll<HTMLElement>("[data-testid^=\"guardian-inbox-row-\"]")].find((entry) => entry.dataset.testid === `guardian-inbox-row-${focusItemId}`);
@@ -542,6 +572,7 @@ export const GuardianInboxPanel = forwardRef<GuardianInboxPanelHandle, GuardianI
         selectedId, next.find((item) => item.id === selectedId) ?? null,
       );
       setListConfirmed(true);
+      setConfirmedPlanOwner(planOwner);
       reloadDetails.forEach((item) => void loadDetail(item));
       setNextCursor(page.next_cursor ?? null);
       setLastConfirmedAt(page.last_confirmed_at ?? new Date().toISOString());
@@ -570,7 +601,7 @@ export const GuardianInboxPanel = forwardRef<GuardianInboxPanelHandle, GuardianI
       }
     }
     return false;
-  }, [loadDetail, pageSize]);
+  }, [loadDetail, pageSize, planOwner]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -895,6 +926,32 @@ export const GuardianInboxPanel = forwardRef<GuardianInboxPanelHandle, GuardianI
     },
   }), [runAction]);
 
+  const generatePlan = async (item: GuardianInboxItem, retry = false) => {
+    if (!currentOwnerPrincipalId || !currentRootId || !planOwner || confirmedPlanOwner !== planOwner || planLock.current || item.degraded || !item.opportunity_id
+      || !item.opportunity_revision || !item.plan_offer || planStorageErrors[item.id]) return;
+    const retained = planRequests[item.id];
+    const reference = item.plan_offer.proposal_ref;
+    const retryAllowed = retained && retained.expected_goal_revision === item.goal_revision
+      && reference?.generation_retry_allowed === true && reference.provider_contact_state === "not_started";
+    if (retry ? !retryAllowed : retained || !item.plan_offer.can_generate) return;
+    const request = retained ?? { expected_opportunity_revision: item.opportunity_revision,
+      expected_goal_revision: item.goal_revision, idempotency_key: createGuardianUuid() };
+    const scope = planOwner;
+    const controller = new AbortController(); planController.current = controller;
+    planLock.current = true; setPlanBusy(item.id); setPlanError(null);
+    try {
+      retainOpportunityPlanRequest(opportunityPlanStorageKey(currentOwnerPrincipalId, currentRootId, item.opportunity_id), request);
+      setPlanRequests((current) => ({ ...current, [item.id]: request }));
+      await generateGuardianOpportunityPlan(item.opportunity_id, request, controller.signal);
+      if (controller.signal.aborted || planScope.current !== scope) return;
+      await load(undefined, false, false);
+    } catch (error) {
+      if (!controller.signal.aborted && planScope.current === scope) setPlanError(error instanceof Error ? error.message : "Plan outcome uncertain. Refresh; no automatic retry.");
+    } finally {
+      if (planScope.current === scope) { planLock.current = false; setPlanBusy(null); }
+    }
+  };
+
   const cancelOpportunity = async (item: GuardianInboxItem) => {
     if (!item.cancel_allowed || !item.opportunity_id || !item.opportunity_revision || actionBusy) return;
     const id = item.opportunity_id;
@@ -1031,6 +1088,23 @@ export const GuardianInboxPanel = forwardRef<GuardianInboxPanelHandle, GuardianI
               <div className="cockpit-outcome-note">authority / budget boundary · {item.policy_reason ?? (item.source_kind === "guardian_opportunity" ? "No current boundary reason" : "unavailable in this inbox projection")}</div>
               {item.recovery_action ? <div className="cockpit-outcome-note">recovery · {item.recovery_action}</div> : null}
               {item.degraded ? <div className="cockpit-outcome-note">degraded · server state is not recognized; actions are unavailable</div> : null}
+              {item.plan_offer ? <div className="cockpit-outcome-note">
+                <div>Available read-only blueprints: {item.plan_offer.available_blueprint_ids.join(", ") || "none"}</div>
+                {item.plan_offer.unavailable_reason ? <div>Unmet need: {item.plan_offer.unavailable_reason}</div> : null}
+                {item.plan_offer.generation_block_reason ? <div>Plan generation blocked: {item.plan_offer.generation_block_reason}</div> : null}
+                {planStorageErrors[item.id] ? <div role="alert">Exact plan request storage is corrupt or unavailable. Generation is blocked.</div> : null}
+                {item.plan_offer.proposal_ref ? <div>
+                  <div>Plan {item.plan_offer.proposal_ref.status} · non-executable staging until explicit acceptance · no_learning</div>
+                  <button type="button" onClick={() => onOpenTask?.(item.plan_offer!.proposal_ref!.parent_task_id, item)}>Review staged read-only plan in Work</button>
+                </div> : null}
+                {planRequests[item.id] ? <button type="button" disabled={!planOwner || confirmedPlanOwner !== planOwner || Boolean(planBusy) || item.degraded || planStorageErrors[item.id]
+                  || planRequests[item.id]?.expected_goal_revision !== item.goal_revision
+                  || item.plan_offer.proposal_ref?.generation_retry_allowed !== true || item.plan_offer.proposal_ref?.provider_contact_state !== "not_started"}
+                  onClick={() => void generatePlan(item, true)}>Retry exact never-contacted plan request</button>
+                  : <button type="button" disabled={!planOwner || confirmedPlanOwner !== planOwner || Boolean(planBusy) || item.degraded || planStorageErrors[item.id] || !item.plan_offer.can_generate}
+                    onClick={() => void generatePlan(item)}>Generate plan</button>}
+                {planError ? <div role="alert">{planError}</div> : null}
+              </div> : null}
               <div className="source-watch-actions">
                 {item.cancel_allowed && item.opportunity_id && item.opportunity_revision ? <button type="button" disabled={actionDisabled} onClick={() => void cancelOpportunity(item)}>
                   {actionBusy === `${item.id}:cancel` ? "Requesting cancellation…" : "Cancel assessment"}

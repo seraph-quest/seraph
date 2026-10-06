@@ -44,7 +44,7 @@ SESSION = "procedure-schedule-session"
 GOAL = "procedure-schedule-goal"
 JOB = "procedure-schedule-job"
 BINDING = "procedure-schedule-binding"
-SLOT = datetime(2026, 10, 1, 9, 0, tzinfo=timezone.utc)
+SLOT = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
 
 
 @pytest.fixture(autouse=True)

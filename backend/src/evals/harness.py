@@ -4820,7 +4820,8 @@ async def _eval_embedding_runtime_audit() -> dict[str, Any]:
         max_cost_microusd=500,
     )
 
-    def _fake_request(*, model: str, texts: list[str], request_id: str) -> dict[str, Any]:
+    def _fake_request(*, model: str, texts: list[str], request_id: str, timeout_seconds: float) -> dict[str, Any]:
+        assert timeout_seconds > 0
         if texts == ["fail"]:
             embedder_module._log_embedding_event(
                 "failed",
@@ -10654,12 +10655,20 @@ async def _eval_native_presence_notification_behavior() -> dict[str, Any]:
 
 @_isolated_eval_database
 async def _eval_native_desktop_shell_behavior() -> dict[str, Any]:
+    from src.auth.service import authenticate_token, create_session
+
     await native_notification_queue.clear()
     mgr = ContextManager()
     mgr.update_screen_context("VS Code — shell.py", "Editing native presence shell state.")
     mgr.update_capture_mode("balanced")
     mock_log_event = AsyncMock()
     operator_request = _authenticated_operator_request("/api/observer/daemon-status")
+    with patch.object(settings, "operator_auth_secret", "desktop-shell-fixture-secret"):
+        token, _ = await create_session()
+        operator = await authenticate_token(token, touch=False)
+    operator_request.state.operator = operator
+    daemon_request = _authenticated_daemon_request("eval-daemon")
+    daemon_request.state.operator = operator
 
     with (
         patch("src.api.observer.context_manager", mgr),
@@ -10669,7 +10678,7 @@ async def _eval_native_desktop_shell_behavior() -> dict[str, Any]:
         queued = await enqueue_test_native_notification(operator_request)
         queued_status = await daemon_status(operator_request)
         polled = await get_next_native_notification(
-            _authenticated_daemon_request("eval-daemon"),
+            daemon_request,
             worker_id="eval-daemon",
         )
         await mark_native_notification_display_attempted(
@@ -10678,7 +10687,7 @@ async def _eval_native_desktop_shell_behavior() -> dict[str, Any]:
                 worker_id="eval-daemon",
                 fencing_token=polled["notification"].get("fencing_token"),
             ),
-            request=_authenticated_daemon_request("eval-daemon"),
+            request=daemon_request,
         )
         acked = await ack_native_notification(
             queued["id"],
@@ -10686,7 +10695,7 @@ async def _eval_native_desktop_shell_behavior() -> dict[str, Any]:
                 worker_id="eval-daemon",
                 fencing_token=polled["notification"].get("fencing_token"),
             ),
-            request=_authenticated_daemon_request("eval-daemon"),
+            request=daemon_request,
         )
         acked_status = await daemon_status(operator_request)
 
@@ -11105,12 +11114,20 @@ async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
 
 @_isolated_eval_database
 async def _eval_desktop_notification_action_replay_behavior() -> dict[str, Any]:
+    from src.auth.service import authenticate_token, create_session
+
     await native_notification_queue.clear()
     mgr = ContextManager()
     mgr.update_screen_context("Desktop shell", "Replaying notification actions across browser and daemon surfaces.")
     mgr.update_capture_mode("balanced")
     mock_log_event = AsyncMock()
     operator_request = _authenticated_operator_request("/api/observer/notifications")
+    with patch.object(settings, "operator_auth_secret", "desktop-replay-fixture-secret"):
+        token, _ = await create_session()
+        operator = await authenticate_token(token, touch=False)
+    operator_request.state.operator = operator
+    daemon_request = _authenticated_daemon_request("eval-daemon")
+    daemon_request.state.operator = operator
 
     with (
         patch("src.api.observer.context_manager", mgr),
@@ -11121,7 +11138,7 @@ async def _eval_desktop_notification_action_replay_behavior() -> dict[str, Any]:
         dismissed = await dismiss_native_notification(first["id"], operator_request)
         second = await enqueue_test_native_notification(operator_request)
         polled = await get_next_native_notification(
-            _authenticated_daemon_request("eval-daemon"),
+            daemon_request,
             worker_id="eval-daemon",
         )
         await mark_native_notification_display_attempted(
@@ -11130,7 +11147,7 @@ async def _eval_desktop_notification_action_replay_behavior() -> dict[str, Any]:
                 worker_id="eval-daemon",
                 fencing_token=polled["notification"].get("fencing_token"),
             ),
-            request=_authenticated_daemon_request("eval-daemon"),
+            request=daemon_request,
         )
         acked = await ack_native_notification(
             second["id"],
@@ -11138,7 +11155,7 @@ async def _eval_desktop_notification_action_replay_behavior() -> dict[str, Any]:
                 worker_id="eval-daemon",
                 fencing_token=polled["notification"].get("fencing_token"),
             ),
-            request=_authenticated_daemon_request("eval-daemon"),
+            request=daemon_request,
         )
         final_status = await daemon_status(operator_request)
 

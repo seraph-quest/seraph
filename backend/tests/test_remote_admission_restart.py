@@ -9,6 +9,7 @@ import time
 from types import SimpleNamespace
 
 import pytest
+from tests.test_inference_accounting import accounting_db, setup_configuration
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from sqlmodel import SQLModel
@@ -208,7 +209,9 @@ def _remote_effect(job: dict[str, object]) -> dict[str, object]:
 
 
 @pytest.mark.asyncio
-async def test_sync_injected_transport_round_trip_is_durably_fenced(async_db):
+async def test_sync_injected_transport_round_trip_is_durably_fenced(accounting_db):
+    setup_configuration()
+    await durable_job_repository.configure_inference_accounting(1000)
     now = time.time()
     profile = _profile(now=now)
     context = _context(job_id="job-744-sync", request_id="request-744-sync", profile=profile)
@@ -218,7 +221,7 @@ async def test_sync_injected_transport_round_trip_is_durably_fenced(async_db):
 
     def transport(candidate, stream):
         calls.append({"model": candidate.profile.model, "stream": stream})
-        return {"choices": [{"message": {"content": "fixture-response"}}]}
+        return {"choices": [{"message": {"content": "fixture-response"}}], "usage": {"cost": "0.000002"}}
 
     with bind_remote_inference_receipt(
         repository=durable_job_repository,
@@ -287,7 +290,9 @@ async def test_llm_runtime_sync_caller_uses_the_same_durable_fence(async_db, mon
 
 
 @pytest.mark.asyncio
-async def test_streaming_injected_transport_round_trip_uses_same_durable_fence(async_db):
+async def test_streaming_injected_transport_round_trip_uses_same_durable_fence(accounting_db):
+    setup_configuration()
+    await durable_job_repository.configure_inference_accounting(1000)
     now = time.time()
     profile = _profile(now=now)
     context = _context(job_id="job-744-stream", request_id="request-744-stream", profile=profile)
@@ -296,6 +301,8 @@ async def test_streaming_injected_transport_round_trip_uses_same_durable_fence(a
     calls: list[dict[str, object]] = []
 
     async def transport(candidate, body, follow_redirects):
+        from src.model_fabric.accounting import capture_inference_usage
+
         calls.append(
             {
                 "model": candidate.profile.model,
@@ -305,6 +312,7 @@ async def test_streaming_injected_transport_round_trip_uses_same_durable_fence(a
         )
         yield "fixture-"
         yield "stream"
+        capture_inference_usage({"usage": {"cost": "0.000002"}})
 
     class Hooks:
         async def attempt_started(self, **_kwargs):
@@ -386,7 +394,9 @@ async def test_provider_error_persists_uncertain_blocked_receipt_without_fallbac
 
 
 @pytest.mark.asyncio
-async def test_restart_identity_fence_rejects_duplicate_dispatch(async_db):
+async def test_restart_identity_fence_rejects_duplicate_dispatch(accounting_db):
+    setup_configuration()
+    await durable_job_repository.configure_inference_accounting(1000)
     now = time.time()
     profile = _profile(now=now)
     context = _context(job_id="job-744-restart", request_id="request-744-restart", profile=profile)
@@ -397,7 +407,7 @@ async def test_restart_identity_fence_rejects_duplicate_dispatch(async_db):
     def transport(_candidate, _stream):
         nonlocal calls
         calls += 1
-        return {"choices": [{"message": {"content": "once"}}]}
+        return {"choices": [{"message": {"content": "once"}}], "usage": {"cost": "0.000002"}}
 
     fence = claimed["lease"]["fencing_token"]
     with bind_remote_inference_receipt(

@@ -109,7 +109,7 @@ export interface GoalAdmissionBudget {
   timezone: string;
 }
 
-export type GuardianInboxState = "pending" | "snoozed" | "accepted" | "dismissed" | "expired";
+export type GuardianInboxState = "pending" | "snoozed" | "accepted" | "dismissed" | "expired" | GuardianOpportunityStatus;
 
 export type GuardianInboxAction = "accept_followup" | "snooze" | "dismiss";
 
@@ -142,6 +142,8 @@ export interface GuardianInboxReadback {
 
 /** Bounded, redacted, owner-checked detail preview for a verified artifact. */
 export interface GuardianInboxEvidencePreview {
+  source_id?: string | null;
+  line_count?: number | null;
   artifact_id?: string | null;
   artifact_type?: string | null;
   file_path?: string | null;
@@ -193,6 +195,15 @@ export interface GuardianInboxMailOrigin {
 
 /** Operator-safe projection of a durable, owner-scoped guardian intervention. */
 export interface GuardianInboxItem {
+  opportunity_id?: string | null;
+  opportunity_revision?: number | null;
+  opportunity_status?: GuardianOpportunityStatus | null;
+  assessment?: GuardianOpportunityAssessment | null;
+  reason_code?: string | null;
+  delivery_status?: string | null;
+  cancel_requested?: boolean;
+  cancel_allowed?: boolean;
+  quiescent?: boolean;
   id: string;
   revision: number;
   state: GuardianInboxState;
@@ -318,6 +329,10 @@ export interface CanonicalMemoryPage {
 }
 
 export interface GoalInfo {
+  owner_session_id?: string | null;
+  guardian_policy_revision?: number;
+  guardian_policy?: GuardianGoalPolicy | null;
+  guardian_assessment_state?: "disabled" | "enabled" | "goal_review_required";
   ownership_access?: "recovered_read_only";
   execution_block_reason?: string;
   id: string;
@@ -339,6 +354,44 @@ export interface GoalInfo {
   success_criterion?: GoalSuccessCriterion | null;
   proactive_enabled?: boolean;
   admission_budget?: GoalAdmissionBudget | null;
+}
+
+export type GuardianOpportunityStatus = "queued" | "assessing" | "proposed" | "silent" | "blocked" | "unknown" | "planned" | "dismissed" | "expired" | "cancelled";
+
+export interface GuardianOpportunityAssessment {
+  schema_version: "seraph.opportunity.assessment.v1";
+  relevance: number;
+  confidence: "low" | "medium" | "high";
+  summary: string;
+  reason: string;
+  citations: Array<{ source_id: string; start_line: number; end_line: number; span_sha256: string }>;
+  suggested_blueprint: "public-evidence-report" | "public-browser-check" | "none";
+  abstain_reason: string | null;
+}
+
+export interface GuardianGoalPolicy {
+  schema_version: "seraph.guardian.policy.v1";
+  assessment_enabled: boolean;
+  auto_stage_plan: boolean;
+  confirmed_at: string;
+  review_due_at: string;
+  grant_id: string;
+  original_root_id: string;
+  goal_revision: number;
+  source_watch_ids: string[];
+  max_assessments_per_utc_day: number;
+  max_plan_proposals_per_utc_day: number;
+  max_notification_per_utc_day: number;
+  minimum_gap_seconds: number;
+}
+
+export interface GuardianPolicyWatch {
+  id: string;
+  goal_id: string;
+  goal_revision: number;
+  plan_revision: number;
+  state: string;
+  sources: Array<{ source_key: string; kind: string; label?: string }>;
 }
 
 export type WorkBoardStatus =

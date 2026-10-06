@@ -19,6 +19,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from cryptography.fernet import Fernet
 from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session as SyncSession
@@ -28,8 +29,10 @@ from sqlmodel import SQLModel
 from config.settings import settings
 from src.db import engine as db_engine
 from src.auth.service import AuthenticatedOperator
+from src.auth import service as auth_service_module
 from src.db.models import (
     Goal,
+    OperatorSession,
     GuardianDecisionPacket,
     GitHubFollowthroughConnection,
     WorkBoardAttempt,
@@ -79,7 +82,7 @@ from src.extensions.capability_pack import CapabilityPackLifecycle, CapabilityPa
 from src.workflows.routines import _routine_pack_id
 
 
-OWNER = "operator:m6-integration"
+OWNER = "operator:root:m6-integration"
 SESSION = "session:m6-integration"
 GRANT = "grant:m6-provider-free"
 
@@ -115,6 +118,8 @@ def isolated_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     database = tmp_path / "workspace.sqlite"
+    monkeypatch.setattr(settings, "vault_encryption_key", Fernet.generate_key().decode())
+    monkeypatch.setattr("src.vault.crypto._fernet", None)
     sync_engine = create_engine(
         f"sqlite:///{database}",
         connect_args={"check_same_thread": False},
@@ -164,6 +169,12 @@ def isolated_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
 
         async def scalar(self, statement, *args, **kwargs):
             return self._session.scalar(statement, *args, **kwargs)
+
+        async def get(self, entity, identity, *args, **kwargs):
+            return self._session.get(entity, identity, *args, **kwargs)
+
+        async def run_sync(self, function, *args, **kwargs):
+            return function(self._session, *args, **kwargs)
 
         async def flush(self, *args, **kwargs):
             return self._session.flush(*args, **kwargs)
@@ -219,7 +230,19 @@ def isolated_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setattr(approval_repository_module, "get_session", get_session)
     monkeypatch.setattr(audit_repository_module, "get_session", get_session)
     monkeypatch.setattr(vault_repository_module, "get_session", get_session)
+    monkeypatch.setattr(auth_service_module, "get_session", get_session)
     monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+    # Standing public watches retain the actual original Root identity and a
+    # finite reviewed grant. A data-only Goal/session fixture cannot authorize
+    # reads through the current SourceWatchService authority contract.
+    now = datetime.now(timezone.utc)
+    with SyncSession(sync_engine) as db:
+        db.add(OperatorSession(
+            id=SESSION, principal_id=OWNER, token_hash=_sha("m6-provider-free-root"),
+            idle_expires_at=now + timedelta(hours=1),
+            absolute_expires_at=now + timedelta(hours=2),
+        ))
+        db.commit()
     yield get_session, workspace
     sync_engine.dispose()
 
@@ -232,6 +255,8 @@ def _goal(goal_id: str, title: str) -> Goal:
         max_attempts=1,
         max_runtime_seconds=300,
         notifications_per_day=0,
+        period_started_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+        period_expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
         timezone="UTC",
     )
     return Goal(
@@ -350,7 +375,7 @@ async def test_second_goal_source_watch_executes_with_durable_readback(
         expected_owner_session_id=SESSION,
     )
 
-    assert first_baseline["status"] == "baseline_initialized"
+    assert first_baseline["status"] == "baseline_initialized", first_baseline
     assert second_baseline["status"] == "baseline_initialized"
     assert first_change["status"] == "succeeded"
     assert second_change["status"] == "succeeded"
@@ -509,14 +534,6 @@ async def test_reviewed_routine_second_goal_runs_through_board_dispatch_and_read
             "repository": "example/repo",
         }
 
-    async def fake_vault_exists(key):
-        assert key == "m6/intercepted-github-token"
-        return True
-
-    async def fake_vault_get(key):
-        assert key == "m6/intercepted-github-token"
-        return "intercepted-test-token"
-
     async def fake_authenticate(_session_id, *, touch=False):
         assert touch is False
         return SimpleNamespace(
@@ -568,12 +585,19 @@ async def test_reviewed_routine_second_goal_runs_through_board_dispatch_and_read
 
     monkeypatch.setattr(GitHubFollowthroughService, "__init__", intercepted_service_init)
     monkeypatch.setattr(github_followthrough_module, "authenticate_session", fake_authenticate)
-    monkeypatch.setattr(vault_repository_module.vault_repository, "exists", fake_vault_exists)
-    monkeypatch.setattr(vault_repository_module.vault_repository, "get", fake_vault_get)
     monkeypatch.setattr(dispatcher_module, "authenticate_session", fake_authenticate)
+    # Preserve the real owner Vault and finite consent binding, not a key-is-
+    # consent shortcut. Only the external GitHub HTTP boundary is intercepted.
+    await vault_repository_module.vault_repository.store(
+        "m6/intercepted-github-token", "intercepted-test-token", owner_principal_id=OWNER,
+    )
+    snapshot = await vault_repository_module.vault_repository.snapshot(
+        "m6/intercepted-github-token", owner_principal_id=OWNER,
+    )
+    from src.extensions.github_consent import GitHubConsentRequest, issuance
+    canonical_operator = await auth_service_module.authenticate_session(SESSION, touch=False)
     async with get_session() as db:
-        db.add(
-            GitHubFollowthroughConnection(
+        connection = GitHubFollowthroughConnection(
                 id="intercepted-github-connection",
                 owner_principal_id=OWNER,
                 repository="example/repo",
@@ -581,7 +605,13 @@ async def test_reviewed_routine_second_goal_runs_through_board_dispatch_and_read
                 revision=1,
                 mode="active",
             )
-        )
+        for field, value in issuance(
+            connection, canonical_operator,
+            GitHubConsentRequest(acknowledged=True, duration_seconds=3600, actions=["github_issue_write"]),
+            snapshot.binding_digest, 1,
+        ).items():
+            setattr(connection, field, value)
+        db.add(connection)
     monkeypatch.setattr(GitHubFollowthroughService, "get_connection", fake_get_connection)
 
     # Initialize the source baseline, then build both source and action cards
@@ -593,7 +623,7 @@ async def test_reviewed_routine_second_goal_runs_through_board_dispatch_and_read
         expected_plan_revision=int(first_watch["plan_revision"]),
         expected_owner_session_id=SESSION,
     )
-    assert first_baseline["status"] == "baseline_initialized"
+    assert first_baseline["status"] == "baseline_initialized", first_baseline
     board_owner = WorkBoardOwner(principal_id=OWNER, session_id=SESSION)
     board_repository = WorkBoardRepository()
     source_input_ref, source_input_digest = _write_typed_input(
@@ -959,11 +989,11 @@ async def test_reviewed_routine_second_goal_runs_through_board_dispatch_and_read
     assert final_task.block_reason == "awaiting_publication_preview"
     assert fetch_counts["second"] == 2
 
-    # Exercise authenticated recovery when the exact owner session has lost
-    # its external-mutation grant. No effect is admitted; the same open board
-    # attempt stays Blocked and exposes prerequisite recovery. A later
-    # authenticated request for that same immutable owner session rechecks its
-    # current grant, then prepares the exact publication approval.
+    # Exercise real credential unavailability under current finite consent.
+    # Generic request grants no longer govern GitHub consent. Temporarily
+    # loading the wrong local key makes canonical Vault decryption fail; no
+    # ciphertext, consent, revision or admitted authority is changed. Restoring
+    # that exact prerequisite permits recovery of the same uncontacted attempt.
     monkeypatch.setattr(work_board_api, "get_session", get_session)
     monkeypatch.setattr(work_board_api, "dispatcher", dispatcher)
 
@@ -989,6 +1019,9 @@ async def test_reviewed_routine_second_goal_runs_through_board_dispatch_and_read
 
     async with get_session() as db:
         recovery_detail = await board_repository.get_detail(db, board_owner, task_id)
+    original_vault_key = settings.vault_encryption_key
+    monkeypatch.setattr(settings, "vault_encryption_key", Fernet.generate_key().decode())
+    monkeypatch.setattr("src.vault.crypto._fernet", None)
     missing_grant_request = publication_request(())
     with pytest.raises(HTTPException) as missing_grant:
         await work_board_api.prepare_work_board_routine_publication(
@@ -1010,6 +1043,17 @@ async def test_reviewed_routine_second_goal_runs_through_board_dispatch_and_read
     assert blocked_detail["attempts"][0].ended_at is None
     assert blocked_detail["attempts"][0].lease_owner is None
 
+    monkeypatch.setattr(settings, "vault_encryption_key", original_vault_key)
+    monkeypatch.setattr("src.vault.crypto._fernet", None)
+    restored_snapshot = await vault_repository_module.vault_repository.snapshot(
+        "m6/intercepted-github-token", owner_principal_id=OWNER,
+    )
+    assert restored_snapshot.binding_digest == snapshot.binding_digest
+    async with get_session() as db:
+        restored_connection = await db.get(GitHubFollowthroughConnection, "intercepted-github-connection")
+        assert restored_connection.revision == 1
+        assert restored_connection.consent_connection_revision == 1
+        assert restored_connection.consent_revoked_at is None
     publication_response = await work_board_api.prepare_work_board_routine_publication(
         request=publication_request((AuthorityGrant.EXTERNAL_MUTATION.value,)),
         task_id=task_id,
@@ -1072,6 +1116,24 @@ async def test_reviewed_routine_second_goal_runs_through_board_dispatch_and_read
         parent_job,
         expected_revision=recover_task.task_revision,
     )
+    # Check the same canonical immutable consent binding used by recovery.
+    from src.extensions.github_consent import require_followthrough_consent
+    current_m3 = await durable_job_repository.get_job(m3_job_id)
+    current_authority = current_m3["declared_authority"]
+    assert current_authority["action"] == "create_issue"
+    assert current_authority["repository"] == "example/repo"
+    from src.extensions.github_followthrough import GitHubFollowthroughError
+    contacts_before_recovery = len(github_requests)
+    for action, repository in ((None, "example/repo"), ("create_comment", "example/repo"),
+                               ("create_issue", "different/repository")):
+        with pytest.raises(GitHubFollowthroughError):
+            await require_followthrough_consent(principal=OWNER, root=SESSION,
+                action=action, repository=repository,
+                revision=current_authority["connection_revision"], binding=current_authority["github_consent"])
+        assert len(github_requests) == contacts_before_recovery
+    await require_followthrough_consent(principal=OWNER, root=SESSION,
+        action=current_authority.get("action"), repository=current_authority.get("repository"),
+        revision=current_authority.get("connection_revision"), binding=current_authority.get("github_consent"))
     try:
         recovered = await routines.recover(
             routine_id,
@@ -1082,7 +1144,7 @@ async def test_reviewed_routine_second_goal_runs_through_board_dispatch_and_read
         )
     finally:
         await dispatcher.reconcile_linked_attempts()
-    assert recovered["status"] == "succeeded"
+    assert recovered["status"] == "succeeded", json.dumps(recovered, sort_keys=True, default=str)
     assert recovered["child"]["remote_id"] == 481
     assert github_requests[:initial_publication_requests] == ["POST", "GET"]
     assert github_requests[initial_publication_requests:] == ["POST", "GET"]

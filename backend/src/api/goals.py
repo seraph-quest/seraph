@@ -43,6 +43,8 @@ from src.guardian.goal_conditioned_loop import (
     propose_goal_candidate_set,
 )
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
+from src.guardian.opportunity_contracts import GuardianPolicySave, OpportunityCancel
+from src.guardian.opportunities import OpportunityError, policy_projection, save_policy
 
 logger = logging.getLogger(__name__)
 
@@ -394,6 +396,7 @@ async def _record_proactive_permission(
 def _goal_payload(goal) -> dict:
     criterion = deserialize_success_criterion(goal)
     return {
+        **policy_projection(goal),
         "id": goal.id,
         "parent_id": goal.parent_id,
         "title": goal.title,
@@ -413,6 +416,17 @@ def _goal_payload(goal) -> dict:
             if deserialize_admission_budget(goal) else None
         ),
     }
+
+
+@router.put("/goals/{goal_id}/guardian-policy")
+async def put_guardian_policy(goal_id: str, body: GuardianPolicySave, request: Request):
+    operator = _require_authenticated_operator(request)
+    try:
+        return await save_policy(operator=operator, goal_id=goal_id, request=body)
+    except OpportunityError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=503, detail={"code": "guardian_store_unavailable"}) from exc
 
 
 @router.get("/goals")
@@ -440,8 +454,30 @@ async def list_goals(
         if goal.id in recovered:
             payload.update(RECOVERED_FIELDS)
             payload.update(proactive_enabled=False, admission_budget=None)
+            payload["guardian_assessment_state"] = "goal_review_required"
         result.append(payload)
     return result
+
+
+@router.get("/guardian/opportunities")
+async def get_guardian_opportunities(request: Request, goal_id: str | None = None, limit: int = 20, cursor: str | None = None):
+    from src.guardian.opportunities import list_history
+    operator = _require_authenticated_operator(request)
+    try:
+        return await list_history(owner=operator.principal.principal_id, root_id=operator.session_id,
+            goal_id=goal_id, limit=limit, cursor=cursor)
+    except OpportunityError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
+
+
+@router.post("/guardian/opportunities/{opportunity_id}/cancel")
+async def cancel_guardian_opportunity(opportunity_id: str, body: OpportunityCancel, request: Request):
+    from src.guardian.opportunities import cancel_opportunity
+    operator = _require_authenticated_operator(request)
+    try:
+        return await cancel_opportunity(operator=operator, opportunity_id=opportunity_id, request=body)
+    except OpportunityError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
 
 
 @router.get("/goals/tree")

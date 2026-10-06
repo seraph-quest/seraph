@@ -1549,6 +1549,76 @@ is not inferred to mean no learning, and this projection creates no memory write
 Notification budget zero keeps candidates visible in the inbox while preserving
 the existing outbox's delivery policy and quiet hours.
 
+### Reviewed public opportunity assessments
+
+A Goal may separately opt into a finite Guardian assessment policy. The Goal
+loop selects one to three current public HTTPS watches, a review expiry,
+one to four assessments per UTC day and a minimum thirty-minute gap. The server
+binds the policy to the current Goal revision, finite reviewed grant and original
+Root. Saving it admits no work. A Goal edit or expired permission requires
+explicit watch review and policy confirmation; neither renews automatically.
+Existing Goals have no policy and assessments remain disabled.
+
+Only a new verified material public packet publishes an opportunity. Its
+immutable private evidence contains at most two already-redacted public excerpts,
+two hundred whole LF lines per source and four KiB of aggregate text. Exact
+packet/checkpoint/source bindings and excerpt hashes survive restart; old packets
+without this snapshot are not fetched again or reconstructed for assessment.
+Private workspace sources cannot enter this model input.
+
+The existing native job owner admits one bounded strategist request through the
+governed OpenRouter route at reports/research priority. Canonical Goal fields and
+untrusted public evidence retain separate provenance and no instruction
+authority. Execution has no tools, streaming, fallback or corrective call. The
+closed output requires exact excerpt-line SHA256 citations. Current Root, Goal,
+policy, source permission, artifact and native lease fences gate contact and
+adoption. One pending assessment per Goal, two per owner and sixteen per host
+bound admission; each recovery tick examines at most twenty indexed rows.
+
+A valid relevant judgment creates one lineage-bound opportunity intervention
+and literal cited Inbox card. Weak judgments remain visible silent history;
+invalid citations, unavailable proof or changed authority remain blocked history.
+Neither has a feedback intervention. Accepting a current card creates a Triage
+task for operator review. Snooze and dismissal persist existing dispositions.
+Judgment, delivery and feedback do not enter legacy learning weights or refresh
+canonical memory; downstream execution and learning require separate reviews.
+
+Opportunity judgments and optional notification metadata retain their exact
+operator and original Root lineage.
+Continuity shows them only for that authenticated binding; generic activity and
+summary queries omit them when the binding is absent. A missing chat session is
+not permission to expose Goal-derived text as ambient history.
+
+Delivery is Inbox-only by default. Separately acknowledged notification opt-in
+uses the existing quiet-hours policy and durable outbox, capped at two owner
+intents per UTC day, one per Goal and a thirty-minute owner gap. Unknown delivery
+consumes its slot and is not retried. Cancellation uses revision CAS and confirms
+actual native transfer quiescence before reporting closure. Contacted Unknown
+cost remains visible and is never automatically replayed; proven never-contacted
+recovery reuses the original job and bounds, with at most two attempts and any
+stricter Goal limit.
+
+A restart may adopt an already persisted, physically verified judgment once
+while the original native lease, fence and assessment authority remain current.
+This finalizes the original job without another provider call, claim, attempt or
+lease extension. Expired authority or missing readback leaves blocked or Unknown
+history available for review.
+Corrupt source-proof metadata remains unavailable without preventing other ready
+Goals from being examined.
+
+Recovery views preserve the recorded assessment outcome separately from current
+authority and evidence failures. A current abstention is a judgment, not a policy
+restriction. Independent review findings required finite source-proof bounds,
+exact original-Root notification checks, once-only persisted-result adoption and
+this history/current-state separation; those corrections were accepted.
+
+Provider-intercepted native receipts establish the bounded execution path;
+the milestone also requires a managed UI journey. Neither establishes live
+provider usefulness. Secret, email/phone and invented
+reference checks are conservative filters, not complete PII detection or semantic
+truth verification. Public excerpts can contain misleading material; citations
+prove byte attribution. The broader proactive learning loop remains **Partial**.
+
 This is a bounded local source-change loop, with an explicit `no_learning`
 result. It does not establish general autonomous operation or live provider
 quality. On an open feature branch this section describes the intended

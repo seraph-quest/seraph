@@ -36,6 +36,8 @@ from uuid import uuid4
 from sqlalchemy import and_, delete, func, or_, select, text, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from src.db import engine as db_engine
 from src.db.models import (
@@ -89,6 +91,46 @@ class NativeNotificationBudgetDenied(ValueError):
 
 class NativeNotificationLeaseError(ValueError):
     """Raised for malformed or stale daemon lease state."""
+
+
+async def _opportunity_claim_reason(db: AsyncSession, row: NativeNotificationOutbox, now: datetime) -> str | None:
+    """Recheck only the existing opportunity intent's canonical SQL binding."""
+    from src.db.models import GuardianIntervention, GuardianOpportunity, GuardianInboxDisposition
+    from src.guardian.opportunities import assert_opportunity_current
+    from src.guardian.opportunity_contracts import OpportunityError
+
+    intervention = await db.get(GuardianIntervention, row.intervention_id) if row.intervention_id else None
+    opportunity = await db.get(GuardianOpportunity, intervention.opportunity_id) if intervention else None
+    disposition = await db.get(GuardianInboxDisposition, opportunity.id) if opportunity else None
+    binding = (row.owner_principal_id, row.operator_session_id, row.goal_id, row.goal_revision)
+    if (opportunity is None or disposition is None or intervention.intervention_type != "opportunity"
+            or opportunity.intervention_id != intervention.id
+            or (opportunity.owner_principal_id, opportunity.original_root_id, opportunity.goal_id,
+                opportunity.goal_revision) != binding
+            or (intervention.owner_principal_id, intervention.original_root_id, intervention.goal_id,
+                intervention.goal_revision) != binding
+            or (disposition.owner_principal_id, disposition.owner_session_id, disposition.goal_id,
+                disposition.goal_revision) != binding
+            or disposition.source_kind != "guardian_opportunity" or disposition.source_id != opportunity.id
+            or disposition.source_digest != opportunity.source_digest
+            or disposition.watch_id != opportunity.watch_id or disposition.plan_revision != opportunity.watch_revision):
+        return "opportunity_notification_lineage_invalid"
+    try:
+        _, _, _, policy, _ = await assert_opportunity_current(db, opportunity)
+    except OpportunityError as exc:
+        return exc.code
+    except (ValueError, TypeError, KeyError):
+        return "opportunity_notification_lineage_invalid"
+    if policy.max_notification_per_utc_day == 0:
+        return "opportunity_notifications_disabled"
+    if opportunity.status != "proposed" or (_aware(disposition.expires_at) or now) <= now:
+        return "opportunity_notification_suppressed"
+    if disposition.state == "snoozed":
+        until = _aware(disposition.snoozed_until)
+        if until is None:
+            return "opportunity_notification_lineage_invalid"
+        return "opportunity_notification_snoozed" if until > now else None
+    return None if disposition.state == "pending" else "opportunity_notification_suppressed"
 
 
 @dataclass
@@ -364,6 +406,29 @@ def _owner_scope_predicate(
         operator_match,
     )
     return or_(ambient, owned)
+
+
+def _opportunity_caller_scope_predicate(
+    *,
+    owner_principal_id: str | None,
+    operator_session_id: str | None,
+) -> ColumnElement[bool]:
+    """Keep opportunity delivery under its exact caller owner and original Root.
+
+    Ordinary notifications retain their existing internal/ambient semantics.
+    Missing either caller binding cannot authorize an opportunity, even when
+    a daemon presents the current lease owner's worker id and fencing token.
+    """
+    legacy = or_(
+        NativeNotificationOutbox.intervention_type.is_(None),
+        NativeNotificationOutbox.intervention_type != "opportunity",
+    )
+    if not owner_principal_id or not operator_session_id:
+        return legacy
+    return or_(legacy, and_(
+        NativeNotificationOutbox.owner_principal_id == owner_principal_id,
+        NativeNotificationOutbox.operator_session_id == operator_session_id,
+    ))
 
 
 async def _ensure_outbox_tables(db) -> None:
@@ -664,7 +729,7 @@ class NativeNotificationQueue:
                 # advisory count. SQLite's immediate transaction serializes
                 # distinct idempotency keys across queue instances/processes;
                 # the normal outer session commit persists the reservation.
-                if budget_limit is not None:
+                if budget_limit is not None or intervention_type == "opportunity":
                     if db.in_transaction():
                         await db.commit()
                     bind = db.get_bind()
@@ -749,6 +814,12 @@ class NativeNotificationQueue:
                             budget_limit=budget_limit,
                         )
 
+                if intervention_type == "opportunity":
+                    from src.guardian.opportunities import guard_notification_intent
+                    await guard_notification_intent(db, intervention_id=intervention_id,
+                        owner=owner_principal_id, root_id=operator_session_id,
+                        goal_id=goal_id, goal_revision=goal_revision)
+
                 # SQLite's conflict-aware insert is the cross-process CAS.
                 # It avoids a SELECT-then-INSERT uniqueness exception and
                 # lets a losing writer read the committed canonical row.
@@ -805,6 +876,27 @@ class NativeNotificationQueue:
                 await delete_source_rows(db)
                 return _row_to_notification(row)
 
+    async def _suppress_opportunity_handoff(self, db: AsyncSession, row: NativeNotificationOutbox, now: datetime, *, worker: str, fencing_token: int) -> bool:
+        """An already claimed opportunity loses authority as Unknown, never undisplayed."""
+        if (row.intervention_type != "opportunity" or row.status not in CLAIMED_STATUSES
+                or row.lease_owner != worker or row.fencing_token != fencing_token
+                or (_aware(row.lease_expires_at) or now) <= now):
+            return False
+        reason = await _opportunity_claim_reason(db, row, now)
+        if reason is None:
+            return False
+        changed = await db.execute(update(NativeNotificationOutbox).execution_options(synchronize_session=False).where(
+            NativeNotificationOutbox.id == row.id, NativeNotificationOutbox.status == row.status,
+            NativeNotificationOutbox.fencing_token == row.fencing_token,
+            NativeNotificationOutbox.attempt_count == row.attempt_count,
+            NativeNotificationOutbox.lease_owner == row.lease_owner).values(
+                status="unknown", last_error=reason, degraded_state=reason,
+                lease_owner=None, lease_expires_at=None, updated_at=now))
+        if changed.rowcount == 1:
+            await db.refresh(row)
+            await self._finish_attempt(db, row, status="unknown", now=now, error_code=reason)
+        return True
+
     async def _finish_attempt(
         self,
         db,
@@ -829,10 +921,15 @@ class NativeNotificationQueue:
         attempt.error_code = _safe_reason(error_code) if error_code else None
         attempt.finished_at = now
 
-    async def _reconcile_expired(self, db, now: datetime) -> None:
+    async def _reconcile_expired(
+        self, db, now: datetime, *, opportunity_scope: ColumnElement[bool] | None = None,
+    ) -> None:
         """Recover leases and expire queued work before every read/transition."""
+        # Daemon interactions cannot clean up another Root's opportunity.
+        # Separate trusted maintenance callers retain global reconciliation.
+        scope = opportunity_scope if opportunity_scope is not None else True
         result = await db.execute(
-            select(NativeNotificationOutbox).where(NativeNotificationOutbox.status.in_(CLAIMED_STATUSES))
+            select(NativeNotificationOutbox).where(scope, NativeNotificationOutbox.status.in_(CLAIMED_STATUSES))
         )
         for row in result.scalars().all():
             lease_expires_at = _aware(row.lease_expires_at)
@@ -840,6 +937,7 @@ class NativeNotificationQueue:
                 continue
             reason = "claimed_lease_missing" if lease_expires_at is None else "lease_expired_reconciliation_required"
             predicates = [
+                scope,
                 NativeNotificationOutbox.id == row.id,
                 NativeNotificationOutbox.status.in_(CLAIMED_STATUSES),
                 NativeNotificationOutbox.fencing_token == row.fencing_token,
@@ -873,6 +971,7 @@ class NativeNotificationQueue:
         # make that intent terminal before claim/read can expose it.
         attachment_result = await db.execute(
             select(NativeNotificationOutbox).where(
+                scope,
                 NativeNotificationOutbox.status.in_(ACTIVE_STATUSES),
             )
         )
@@ -889,6 +988,7 @@ class NativeNotificationQueue:
                     update(NativeNotificationOutbox)
                     .execution_options(synchronize_session=False)
                     .where(
+                        scope,
                         NativeNotificationOutbox.id == row.id,
                         NativeNotificationOutbox.status.in_(ACTIVE_STATUSES),
                         NativeNotificationOutbox.fencing_token == row.fencing_token,
@@ -914,6 +1014,7 @@ class NativeNotificationQueue:
         # goal or malformed legacy row can never fall back to ambient delivery.
         goal_result = await db.execute(
             select(NativeNotificationOutbox).where(
+                scope,
                 NativeNotificationOutbox.status.in_(ACTIVE_STATUSES),
                 NativeNotificationOutbox.goal_id.is_not(None),
             )
@@ -933,17 +1034,19 @@ class NativeNotificationQueue:
             reason = _goal_binding_reason(row, goal)
             if reason is None:
                 continue
+            terminal = "unknown" if row.intervention_type == "opportunity" and row.status in CLAIMED_STATUSES else "cancelled"
             transition = await db.execute(
                 update(NativeNotificationOutbox)
                 .execution_options(synchronize_session=False)
                 .where(
+                    scope,
                     NativeNotificationOutbox.id == row.id,
                     NativeNotificationOutbox.status.in_(ACTIVE_STATUSES),
                     NativeNotificationOutbox.fencing_token == row.fencing_token,
                 )
                 .values(
-                    status="cancelled",
-                    cancelled_at=now,
+                    status=terminal,
+                    cancelled_at=now if terminal == "cancelled" else None,
                     last_error=reason,
                     degraded_state=reason,
                     lease_owner=None,
@@ -954,7 +1057,7 @@ class NativeNotificationQueue:
             if transition.rowcount != 1:
                 continue
             await db.refresh(row)
-            await self._finish_attempt(db, row, status="cancelled", now=now, error_code=reason)
+            await self._finish_attempt(db, row, status=terminal, now=now, error_code=reason)
 
         # A notification bound to an operator/session is an authorized intent,
         # not an ambient broadcast. Re-check both bindings on every queue
@@ -962,6 +1065,7 @@ class NativeNotificationQueue:
         # dispatch after the owner was revoked or the conversation changed.
         bound_result = await db.execute(
             select(NativeNotificationOutbox).where(
+                scope,
                 NativeNotificationOutbox.status.in_(ACTIVE_STATUSES),
                 or_(
                     NativeNotificationOutbox.session_id.is_not(None),
@@ -1012,17 +1116,19 @@ class NativeNotificationQueue:
                     reason = "operator_session_expired"
             if reason is None:
                 continue
+            terminal = "unknown" if row.intervention_type == "opportunity" and row.status in CLAIMED_STATUSES else "cancelled"
             transition = await db.execute(
                 update(NativeNotificationOutbox)
                 .execution_options(synchronize_session=False)
                 .where(
+                    scope,
                     NativeNotificationOutbox.id == row.id,
                     NativeNotificationOutbox.status.in_(ACTIVE_STATUSES),
                     NativeNotificationOutbox.fencing_token == row.fencing_token,
                 )
                 .values(
-                    status="cancelled",
-                    cancelled_at=now,
+                    status=terminal,
+                    cancelled_at=now if terminal == "cancelled" else None,
                     last_error=reason,
                     degraded_state=reason,
                     lease_owner=None,
@@ -1033,12 +1139,13 @@ class NativeNotificationQueue:
             if transition.rowcount != 1:
                 continue
             await db.refresh(row)
-            await self._finish_attempt(db, row, status="cancelled", now=now, error_code=reason)
+            await self._finish_attempt(db, row, status=terminal, now=now, error_code=reason)
 
         await db.execute(
             update(NativeNotificationOutbox)
             .execution_options(synchronize_session=False)
             .where(
+                scope,
                 NativeNotificationOutbox.status == "queued",
                 NativeNotificationOutbox.deadline_at <= now,
             )
@@ -1054,6 +1161,7 @@ class NativeNotificationQueue:
             update(NativeNotificationOutbox)
             .execution_options(synchronize_session=False)
             .where(
+                scope,
                 NativeNotificationOutbox.status == "queued",
                 (
                     (NativeNotificationOutbox.deadline_at.is_(None))
@@ -1075,23 +1183,55 @@ class NativeNotificationQueue:
         *,
         worker_id: str = "native-daemon",
         lease_seconds: int | None = None,
+        owner_principal_id: str | None = None,
+        operator_session_id: str | None = None,
     ) -> NativeNotification | None:
         """Atomically claim the oldest pending notification for one worker."""
         worker = _valid_worker(worker_id)
+        scope = _opportunity_caller_scope_predicate(
+            owner_principal_id=owner_principal_id, operator_session_id=operator_session_id,
+        )
         lease_duration = self.lease_seconds if lease_seconds is None else lease_seconds
         if lease_duration < 1 or lease_duration > 300:
             raise ValueError("lease_seconds must be between 1 and 300")
 
         async with self._lock:
             async with self._session() as db:
+                if db.in_transaction():
+                    await db.commit()
+                if db.get_bind().dialect.name == "sqlite":
+                    await db.execute(text("BEGIN IMMEDIATE"))
                 now = _utc_now()
-                await self._reconcile_expired(db, now)
+                await self._reconcile_expired(db, now, opportunity_scope=scope)
                 # Returning an unexpired claim to the same worker preserves
                 # the old poll/ack behaviour and avoids duplicate display.
+                # Keep legacy ordinary queues usable before Guardian tables
+                # exist. Only opportunity intents require the fixed SQL join.
+                has_opportunity = (await db.execute(select(NativeNotificationOutbox.id).where(
+                    scope,
+                    NativeNotificationOutbox.intervention_type == "opportunity",
+                    NativeNotificationOutbox.status.in_(ACTIVE_STATUSES)).limit(1))).first() is not None
+                eligible = True
+                if has_opportunity:
+                    from src.db.models import GuardianInboxDisposition, GuardianIntervention
+                    future_snooze = select(GuardianInboxDisposition.id).join(GuardianIntervention,
+                        GuardianInboxDisposition.source_id == GuardianIntervention.opportunity_id).where(
+                        GuardianIntervention.id == NativeNotificationOutbox.intervention_id,
+                        GuardianInboxDisposition.source_kind == "guardian_opportunity",
+                        GuardianInboxDisposition.owner_principal_id == NativeNotificationOutbox.owner_principal_id,
+                        GuardianInboxDisposition.owner_session_id == NativeNotificationOutbox.operator_session_id,
+                        GuardianInboxDisposition.goal_id == NativeNotificationOutbox.goal_id,
+                        GuardianInboxDisposition.goal_revision == NativeNotificationOutbox.goal_revision,
+                        GuardianInboxDisposition.state == "snoozed",
+                        GuardianInboxDisposition.snoozed_until > now).exists()
+                    eligible = ~and_(NativeNotificationOutbox.intervention_type == "opportunity",
+                        NativeNotificationOutbox.status == "queued", future_snooze)
                 result = await db.execute(
                     select(NativeNotificationOutbox)
                     .where(
+                        scope,
                         NativeNotificationOutbox.status.in_(ACTIVE_STATUSES),
+                        eligible,
                         NativeNotificationOutbox.deadline_at > now,
                         (
                             (NativeNotificationOutbox.status == "queued")
@@ -1103,9 +1243,30 @@ class NativeNotificationQueue:
                         NativeNotificationOutbox.created_at.asc(),
                         NativeNotificationOutbox.id.asc(),
                     )
-                    .limit(1)
+                    .limit(20)
                 )
-                row = result.scalar_one_or_none()
+                row = None
+                for candidate in result.scalars().all():
+                    if candidate.intervention_type == "opportunity":
+                        reason = await _opportunity_claim_reason(db, candidate, now)
+                        if reason:
+                            terminal = "unknown" if candidate.status in CLAIMED_STATUSES else "cancelled"
+                            changed = await db.execute(update(NativeNotificationOutbox)
+                                .execution_options(synchronize_session=False).where(
+                                    scope,
+                                    NativeNotificationOutbox.id == candidate.id,
+                                    NativeNotificationOutbox.status == candidate.status,
+                                    NativeNotificationOutbox.fencing_token == candidate.fencing_token,
+                                    NativeNotificationOutbox.attempt_count == candidate.attempt_count).values(
+                                        status=terminal, last_error=reason, degraded_state=reason,
+                                        cancelled_at=now if terminal == "cancelled" else None,
+                                        lease_owner=None, lease_expires_at=None, updated_at=now))
+                            if changed.rowcount == 1:
+                                await db.refresh(candidate)
+                                await self._finish_attempt(db, candidate, status=terminal, now=now, error_code=reason)
+                            continue
+                    row = candidate
+                    break
                 if row is None:
                     return None
                 if row.status in CLAIMED_STATUSES:
@@ -1122,6 +1283,7 @@ class NativeNotificationQueue:
                     update(NativeNotificationOutbox)
                     .execution_options(synchronize_session=False)
                     .where(
+                        scope,
                         NativeNotificationOutbox.id == row.id,
                         NativeNotificationOutbox.status == "queued",
                         NativeNotificationOutbox.deadline_at > now,
@@ -1168,10 +1330,14 @@ class NativeNotificationQueue:
         notification_id = _validate_identifier(notification_id, field="notification_id")
         if not notification_id:
             return None
+        scope = _opportunity_caller_scope_predicate(
+            owner_principal_id=owner_principal_id, operator_session_id=operator_session_id,
+        )
         async with self._lock:
             async with self._session() as db:
-                await self._reconcile_expired(db, _utc_now())
+                await self._reconcile_expired(db, _utc_now(), opportunity_scope=scope)
                 stmt = select(NativeNotificationOutbox).where(
+                    scope,
                     NativeNotificationOutbox.id == notification_id
                 )
                 if owner_principal_id is not None:
@@ -1199,6 +1365,19 @@ class NativeNotificationQueue:
                     select(NativeNotificationOutbox)
                     .where(NativeNotificationOutbox.status.in_(ACTIVE_STATUSES))
                 )
+                # Opportunity intents carry private Goal/root lineage. They
+                # require both exact bindings even for otherwise ambient reads.
+                legacy = or_(
+                    NativeNotificationOutbox.intervention_type.is_(None),
+                    NativeNotificationOutbox.intervention_type != "opportunity",
+                )
+                if owner_principal_id and operator_session_id:
+                    stmt = stmt.where(or_(legacy, and_(
+                        NativeNotificationOutbox.owner_principal_id == owner_principal_id,
+                        NativeNotificationOutbox.operator_session_id == operator_session_id,
+                    )))
+                else:
+                    stmt = stmt.where(legacy)
                 if owner_principal_id is not None:
                     stmt = stmt.where(
                         _owner_scope_predicate(
@@ -1220,6 +1399,8 @@ class NativeNotificationQueue:
         *,
         worker_id: str | None = None,
         fencing_token: int | None = None,
+        owner_principal_id: str | None = None,
+        operator_session_id: str | None = None,
     ) -> bool:
         """Record a successful daemon acknowledgement under the current fence."""
         notification_id = _validate_identifier(notification_id, field="notification_id")
@@ -1232,18 +1413,28 @@ class NativeNotificationQueue:
         # from the daemon that owns the current lease and fence.
         if worker is None or fencing_token is None:
             return False
+        scope = _opportunity_caller_scope_predicate(
+            owner_principal_id=owner_principal_id, operator_session_id=operator_session_id,
+        )
 
         async with self._lock:
             async with self._session() as db:
+                if db.in_transaction():
+                    await db.commit()
+                if db.get_bind().dialect.name == "sqlite":
+                    await db.execute(text("BEGIN IMMEDIATE"))
                 now = _utc_now()
-                await self._reconcile_expired(db, now)
+                await self._reconcile_expired(db, now, opportunity_scope=scope)
                 result = await db.execute(
                     select(NativeNotificationOutbox).where(
+                        scope,
                         NativeNotificationOutbox.id == notification_id
                     )
                 )
                 row = result.scalar_one_or_none()
                 if row is None or row.status in TERMINAL_STATUSES:
+                    return False
+                if await self._suppress_opportunity_handoff(db, row, now, worker=worker, fencing_token=fencing_token):
                     return False
                 if row.status in CLAIMED_STATUSES:
                     if row.status != "display_attempted":
@@ -1258,6 +1449,7 @@ class NativeNotificationQueue:
                     if row.lease_owner != worker:
                         return False
                     predicates = [
+                        scope,
                         NativeNotificationOutbox.id == notification_id,
                         NativeNotificationOutbox.status.in_(CLAIMED_STATUSES),
                         NativeNotificationOutbox.fencing_token == fencing_token,
@@ -1292,6 +1484,8 @@ class NativeNotificationQueue:
         reason: str = "display_failed",
         worker_id: str | None = None,
         fencing_token: int | None = None,
+        owner_principal_id: str | None = None,
+        operator_session_id: str | None = None,
     ) -> bool:
         """Record an ambiguous daemon failure for explicit reconciliation.
 
@@ -1306,13 +1500,21 @@ class NativeNotificationQueue:
             raise NativeNotificationLeaseError("fencing_token must be a positive integer")
         if worker is None or fencing_token is None:
             return False
+        scope = _opportunity_caller_scope_predicate(
+            owner_principal_id=owner_principal_id, operator_session_id=operator_session_id,
+        )
 
         async with self._lock:
             async with self._session() as db:
+                if db.in_transaction():
+                    await db.commit()
+                if db.get_bind().dialect.name == "sqlite":
+                    await db.execute(text("BEGIN IMMEDIATE"))
                 now = _utc_now()
-                await self._reconcile_expired(db, now)
+                await self._reconcile_expired(db, now, opportunity_scope=scope)
                 result = await db.execute(
                     select(NativeNotificationOutbox).where(
+                        scope,
                         NativeNotificationOutbox.id == notification_id
                     )
                 )
@@ -1330,6 +1532,7 @@ class NativeNotificationQueue:
 
                 safe_reason = _safe_reason(reason)
                 predicates = [
+                    scope,
                     NativeNotificationOutbox.id == notification_id,
                     NativeNotificationOutbox.status.in_(CLAIMED_STATUSES),
                     NativeNotificationOutbox.fencing_token == fencing_token,
@@ -1368,23 +1571,35 @@ class NativeNotificationQueue:
         *,
         worker_id: str,
         fencing_token: int,
+        owner_principal_id: str | None = None,
+        operator_session_id: str | None = None,
     ) -> bool:
         """Fence the handoff immediately before invoking the OS display call."""
         notification_id = _validate_identifier(notification_id, field="notification_id")
         worker = _valid_worker(worker_id)
         if not notification_id or not isinstance(fencing_token, int) or fencing_token < 1:
             return False
+        scope = _opportunity_caller_scope_predicate(
+            owner_principal_id=owner_principal_id, operator_session_id=operator_session_id,
+        )
         async with self._lock:
             async with self._session() as db:
+                if db.in_transaction():
+                    await db.commit()
+                if db.get_bind().dialect.name == "sqlite":
+                    await db.execute(text("BEGIN IMMEDIATE"))
                 now = _utc_now()
-                await self._reconcile_expired(db, now)
+                await self._reconcile_expired(db, now, opportunity_scope=scope)
                 row_result = await db.execute(
                     select(NativeNotificationOutbox).where(
+                        scope,
                         NativeNotificationOutbox.id == notification_id
                     )
                 )
                 row = row_result.scalar_one_or_none()
                 if row is None or row.attempt_count < 1:
+                    return False
+                if await self._suppress_opportunity_handoff(db, row, now, worker=worker, fencing_token=fencing_token):
                     return False
                 attempt_result = await db.execute(
                     select(NativeNotificationDeliveryAttempt).where(
@@ -1401,6 +1616,7 @@ class NativeNotificationQueue:
                     update(NativeNotificationOutbox)
                     .execution_options(synchronize_session=False)
                     .where(
+                        scope,
                         NativeNotificationOutbox.id == notification_id,
                         NativeNotificationOutbox.status == "claimed",
                         NativeNotificationOutbox.lease_owner == worker,
@@ -1510,6 +1726,10 @@ class NativeNotificationQueue:
                 )
                 row = row_result.scalar_one_or_none()
                 if row is None or row.status != "unknown":
+                    return False
+                if row.intervention_type == "opportunity":
+                    # Opportunity delivery ambiguity is terminal: explicit
+                    # recovery must not replay an optional notification.
                     return False
                 if row.goal_id is not None and (
                     not owner_principal_id
@@ -1912,7 +2132,10 @@ class NativeNotificationQueue:
         async with self._lock:
             async with self._session() as db:
                 now = _utc_now()
-                await self._reconcile_expired(db, now)
+                scope = _opportunity_caller_scope_predicate(
+                    owner_principal_id=owner_principal_id, operator_session_id=operator_session_id,
+                ) if owner_principal_id is not None else None
+                await self._reconcile_expired(db, now, opportunity_scope=scope)
                 stmt = select(NativeNotificationOutbox).where(
                     NativeNotificationOutbox.status.in_(ACTIVE_STATUSES)
                 )

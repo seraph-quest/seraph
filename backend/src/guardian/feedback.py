@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 
-from sqlmodel import select
+from sqlmodel import and_, or_, select
 
 from src.db.engine import get_session
 from src.db.models import GuardianIntervention
@@ -205,6 +205,8 @@ def _intervention_reliability(item: GuardianIntervention) -> float:
 
 
 def _positive_feedback_weight(item: GuardianIntervention) -> float:
+    if item.intervention_type == "opportunity":
+        return 0.0
     if item.feedback_type == "helpful":
         return 1.0
     if item.feedback_type == "acknowledged":
@@ -213,6 +215,8 @@ def _positive_feedback_weight(item: GuardianIntervention) -> float:
 
 
 def _positive_delivery_outcome_weight(item: GuardianIntervention) -> float:
+    if item.intervention_type == "opportunity":
+        return 0.0
     positive_feedback = _positive_feedback_weight(item)
     if positive_feedback > 0.0:
         return positive_feedback
@@ -224,6 +228,8 @@ def _positive_delivery_outcome_weight(item: GuardianIntervention) -> float:
 
 
 def _negative_outcome_weight(item: GuardianIntervention) -> float:
+    if item.intervention_type == "opportunity":
+        return 0.0
     if item.feedback_type == "not_helpful" or item.latest_outcome == "failed":
         return 1.0
     return 0.0
@@ -574,6 +580,8 @@ class GuardianFeedbackRepository:
         source_session_id: str | None,
         active_project: str | None,
     ) -> None:
+        if intervention_type == "opportunity":
+            return
         from src.memory.procedural import sync_learning_signal_memories
         from src.memory.snapshots import (
             invalidate_bounded_guardian_snapshot_cache,
@@ -734,6 +742,8 @@ class GuardianFeedbackRepository:
         feedback_type: str,
         feedback_note: str | None = None,
         latest_outcome: str = "feedback_received",
+        owner_principal_id: str | None = None,
+        original_root_id: str | None = None,
     ) -> GuardianIntervention | None:
         refreshed: GuardianIntervention | None = None
         async with get_session() as db:
@@ -741,6 +751,17 @@ class GuardianFeedbackRepository:
                 select(GuardianIntervention).where(GuardianIntervention.id == intervention_id)
             )
             intervention = result.scalar_one_or_none()
+            from src.db.models import GuardianOpportunity
+            from src.guardian.opportunity_contracts import OpportunityError
+            opportunity_id = (intervention.opportunity_id if intervention and intervention.intervention_type == "opportunity"
+                              else intervention_id.removeprefix("opportunity:"))
+            opportunity = await db.get(GuardianOpportunity, opportunity_id)
+            if opportunity is not None:
+                if (opportunity.owner_principal_id != owner_principal_id
+                        or opportunity.original_root_id != original_root_id):
+                    raise OpportunityError("opportunity_owner_mismatch", 403)
+                if opportunity.status != "proposed" or intervention is None:
+                    raise OpportunityError("opportunity_not_proposed")
             if intervention is None:
                 return None
             intervention.feedback_type = feedback_type
@@ -753,6 +774,8 @@ class GuardianFeedbackRepository:
             await db.refresh(intervention)
             refreshed = intervention
 
+        if refreshed.intervention_type == "opportunity":
+            return refreshed
         await self._refresh_learning_memories(
             intervention_type=refreshed.intervention_type,
             source_session_id=refreshed.session_id,
@@ -766,9 +789,22 @@ class GuardianFeedbackRepository:
         limit: int = 5,
         session_id: str | None = None,
         active_project: str | None = None,
+        owner_principal_id: str | None = None,
+        original_root_id: str | None = None,
     ) -> list[GuardianIntervention]:
         async with get_session() as db:
             query = select(GuardianIntervention)
+            # Opportunity judgments contain Goal-derived private text and have
+            # no chat session. Generic legacy consumers cannot treat them as
+            # ambient; scope this population before LIMIT to preserve own rows.
+            legacy = GuardianIntervention.intervention_type != "opportunity"
+            if owner_principal_id and original_root_id:
+                query = query.where(or_(legacy, and_(
+                    GuardianIntervention.owner_principal_id == owner_principal_id,
+                    GuardianIntervention.original_root_id == original_root_id,
+                )))
+            else:
+                query = query.where(legacy)
             if session_id:
                 query = query.where(GuardianIntervention.session_id == session_id)
             normalized_active_project = _normalized_active_project(active_project)
@@ -921,7 +957,8 @@ class GuardianFeedbackRepository:
     ) -> GuardianLearningSignal:
         async with get_session() as db:
             stmt = select(GuardianIntervention).where(
-                GuardianIntervention.intervention_type == intervention_type
+                GuardianIntervention.intervention_type == intervention_type,
+                GuardianIntervention.intervention_type != "opportunity",
             )
             if session_id is not None:
                 stmt = stmt.where(GuardianIntervention.session_id == session_id)

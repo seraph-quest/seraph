@@ -2723,6 +2723,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             await recheck_run_dependencies(db, run, admission_dependencies)
             if identity.job_kind == "forgejo_issue_title_v1" and admission_authority_check is None:
                 raise DurableJobAdmissionDenied("forgejo_fixed_native_admission_required")
+            if identity.job_kind == "guardian_opportunity_assess" and admission_authority_check is None:
+                raise DurableJobAdmissionDenied("guardian_opportunity_fixed_native_admission_required")
             if admission_authority_check is not None:
                 # Server-only capability guard shares the canonical Goal and
                 # new-row insert transaction. Exact immutable replay above
@@ -3117,15 +3119,19 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             dependency_guard = (preflight_run.job_kind in {'browser_public_task',
                 'work.evidence-dossier.v1', 'work.local-evidence-report.v1'}
                 and to_status in {'queued', 'running', 'succeeded', 'degraded'})
+            guardian_queue_guard = preflight_run.job_kind == "guardian_opportunity_assess" and to_status == "queued"
             if dependency_guard:
                 staged_dependencies = await stage_run_dependencies(db, preflight_run)
             await db.rollback()
-            if (terminal_authority_check is not None and to_status in {"succeeded", "degraded"}) or dependency_guard or cancellation_authority_check is not None:
+            if (terminal_authority_check is not None and to_status in {"succeeded", "degraded"}) or dependency_guard or cancellation_authority_check is not None or guardian_queue_guard:
                 bind = db.get_bind()
                 dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
                 if dialect_name == "sqlite":
                     await db.execute(text("BEGIN IMMEDIATE"))
             run = await self._fetch(db, job_id)
+            if guardian_queue_guard and run.status == "blocked":
+                from src.guardian.opportunity_runtime import guard_recovered_queue
+                await guard_recovered_queue(db, run)
             if cancellation_authority_check is not None:
                 if to_status != "cancelled":
                     raise DurableJobTransitionError("cancellation authority applies only to cancellation")
@@ -3347,6 +3353,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if to_status in {"succeeded", "degraded"}:
                 if run.job_kind == "forgejo_issue_title_v1" and terminal_authority_check is None:
                     raise DurableJobTransitionError("Forgejo terminalization requires its fixed native authority callback")
+                if run.job_kind == "guardian_opportunity_assess" and terminal_authority_check is None:
+                    raise DurableJobTransitionError("Opportunity terminalization requires its fixed native authority callback")
                 if _deadline_expired(run):
                     raise DurableJobTransitionError("job deadline has expired")
                 effect_ledger = effect_ledger or _effect_ledger_or_raise(run.effect_receipts_json)
@@ -3882,6 +3890,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             preflight_run = await self._fetch(db, job_id)
             if preflight_run.job_kind == "forgejo_issue_title_v1" and claim_authority_check is None:
                 raise DurableJobLeaseError("Forgejo claims require the fixed native authority callback")
+            if preflight_run.job_kind == "guardian_opportunity_assess" and claim_authority_check is None:
+                raise DurableJobLeaseError("Opportunity claims require the fixed native authority callback")
             if str(preflight_run.status) in DURABLE_JOB_TERMINAL_STATUSES:
                 await _assert_canonical_goal_fence(db, goal_id=preflight_run.goal_id,
                     goal_revision=preflight_run.goal_revision, owner_kind=preflight_run.owner_kind,
@@ -3899,7 +3909,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if dependency_guard:
                 await recheck_run_dependencies(db, run, staged_dependencies)
             if claim_authority_check is not None:
-                if run.job_kind not in {"readonly_research_child", "document_invoice_compare_v1", "local_authored_json", "forgejo_issue_title_v1"}:
+                if run.job_kind not in {"readonly_research_child", "document_invoice_compare_v1", "local_authored_json", "forgejo_issue_title_v1", "guardian_opportunity_assess"}:
                     raise DurableJobLeaseError("phase-bound claims require a fixed native capability")
                 await claim_authority_check(db, run)
             await _assert_canonical_goal_fence(

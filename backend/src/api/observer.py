@@ -198,7 +198,7 @@ class DaemonStatusResponse(BaseModel):
 _DAEMON_ID_HEADER = "X-Seraph-Daemon-Id"
 
 
-def _require_authenticated_daemon(request: Request, worker_id: str) -> None:
+def _require_authenticated_daemon(request: Request, worker_id: str) -> tuple[str, str]:
     """Bind a daemon receipt to the authenticated request and worker id.
 
     The lease owner in the JSON/query payload is not an authentication
@@ -213,6 +213,7 @@ def _require_authenticated_daemon(request: Request, worker_id: str) -> None:
         raise HTTPException(status_code=401, detail="daemon identity header is required")
     if presented != worker_id:
         raise HTTPException(status_code=401, detail="daemon identity does not match worker_id")
+    return _require_authenticated_operator_binding(request)
 
 
 def _require_authenticated_operator_binding(request: Request) -> tuple[str, str]:
@@ -2441,7 +2442,21 @@ async def build_observer_continuity_snapshot(
         )
     ]
     queued_insights = await insight_queue.peek_all()
-    recent_interventions = await guardian_feedback_repository.list_recent(limit=8)
+    recent_interventions = await guardian_feedback_repository.list_recent(
+        limit=8,
+        owner_principal_id=owner_principal_id,
+        original_root_id=operator_session_id,
+    )
+    recent_interventions = [
+        item
+        for item in recent_interventions
+        if getattr(item, "intervention_type", None) != "opportunity"
+        or (
+            bool(owner_principal_id and operator_session_id)
+            and getattr(item, "owner_principal_id", None) == owner_principal_id
+            and getattr(item, "original_root_id", None) == operator_session_id
+        )
+    ]
     session_titles = {
         str(session["id"]): str(session.get("title") or "Untitled session")
         for session in await session_manager.list_sessions(
@@ -2701,8 +2716,12 @@ async def get_next_native_notification(
     """Return one claim for the uniquely identified authenticated daemon."""
     if worker_id is None:
         raise HTTPException(status_code=401, detail="worker_id is required for daemon polling")
-    _require_authenticated_daemon(request, worker_id)
-    notification = await native_notification_queue.claim_next(worker_id=worker_id)
+    owner_principal_id, operator_session_id = _require_authenticated_daemon(request, worker_id)
+    notification = await native_notification_queue.claim_next(
+        worker_id=worker_id,
+        owner_principal_id=owner_principal_id,
+        operator_session_id=operator_session_id,
+    )
     if notification is None:
         await log_integration_event(
             integration_type="observer_daemon",
@@ -2712,7 +2731,10 @@ async def get_next_native_notification(
         )
         return {"notification": None}
 
-    pending_count = await native_notification_queue.count()
+    pending_count = await native_notification_queue.count(
+        owner_principal_id=owner_principal_id,
+        operator_session_id=operator_session_id,
+    )
     await log_integration_event(
         integration_type="observer_daemon",
         name="notifications",
@@ -2738,12 +2760,18 @@ async def ack_native_notification(
     """Acknowledge a native notification after the daemon displays it."""
     from src.guardian.feedback import guardian_feedback_repository
 
-    _require_authenticated_daemon(request, body.worker_id)
-    notification = await native_notification_queue.get(notification_id)
+    owner_principal_id, operator_session_id = _require_authenticated_daemon(request, body.worker_id)
+    notification = await native_notification_queue.get(
+        notification_id,
+        owner_principal_id=owner_principal_id,
+        operator_session_id=operator_session_id,
+    )
     acked = await native_notification_queue.ack(
         notification_id,
         worker_id=body.worker_id,
         fencing_token=body.fencing_token,
+        owner_principal_id=owner_principal_id,
+        operator_session_id=operator_session_id,
     )
     intervention_id = notification.intervention_id if notification is not None else None
     if acked and intervention_id:
@@ -2783,12 +2811,14 @@ async def fail_native_notification(
     request: Request,
 ):
     """Record an ambiguous native-display failure for operator recovery."""
-    _require_authenticated_daemon(request, body.worker_id)
+    owner_principal_id, operator_session_id = _require_authenticated_daemon(request, body.worker_id)
     failed = await native_notification_queue.fail(
         notification_id,
         reason=body.reason,
         worker_id=body.worker_id,
         fencing_token=body.fencing_token,
+        owner_principal_id=owner_principal_id,
+        operator_session_id=operator_session_id,
     )
     await log_integration_event(
         integration_type="observer_daemon",
@@ -2809,11 +2839,13 @@ async def mark_native_notification_display_attempted(
     request: Request,
 ):
     """Record the fenced handoff immediately before an OS display attempt."""
-    _require_authenticated_daemon(request, body.worker_id)
+    owner_principal_id, operator_session_id = _require_authenticated_daemon(request, body.worker_id)
     marked = await native_notification_queue.mark_display_attempted(
         notification_id,
         worker_id=body.worker_id,
         fencing_token=body.fencing_token,
+        owner_principal_id=owner_principal_id,
+        operator_session_id=operator_session_id,
     )
     await log_integration_event(
         integration_type="observer_daemon",
@@ -2990,15 +3022,20 @@ async def enqueue_test_native_notification(request: Request):
     "/observer/interventions/{intervention_id}/feedback",
     response_model=InterventionFeedbackResponse,
 )
-async def post_intervention_feedback(intervention_id: str, body: InterventionFeedbackRequest):
+async def post_intervention_feedback(intervention_id: str, body: InterventionFeedbackRequest, request: Request):
     """Record explicit user feedback for a proactive intervention."""
     from src.guardian.feedback import guardian_feedback_repository
 
-    updated = await guardian_feedback_repository.record_feedback(
-        intervention_id,
-        feedback_type=body.feedback_type,
-        feedback_note=body.note,
-    )
+    from src.guardian.opportunity_contracts import OpportunityError
+    operator = getattr(request.state, "operator", None)
+    try:
+        updated = await guardian_feedback_repository.record_feedback(
+            intervention_id, feedback_type=body.feedback_type, feedback_note=body.note,
+            owner_principal_id=getattr(getattr(operator, "principal", None), "principal_id", None),
+            original_root_id=getattr(operator, "session_id", None),
+        )
+    except OpportunityError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
     await log_integration_event(
         integration_type="observer_feedback",
         name="intervention",

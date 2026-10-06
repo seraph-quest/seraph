@@ -1,6 +1,6 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { GoalLoopPanel } from "./GoalLoopPanel";
 import { GoalLoopReceiptDetails } from "./GoalLoopReceiptDetails";
@@ -133,8 +133,77 @@ function setupStore(overrides: Partial<ReturnType<typeof useQuestStore.getState>
 }
 
 describe("GoalLoopPanel", () => {
+  afterEach(() => { vi.unstubAllGlobals(); });
   beforeEach(() => {
     setupStore();
+  });
+
+  it("loads a bounded Goal-scoped history only on explicit inspection and retains it through partial failures", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true, status: 200, json: async () => [] });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<GoalLoopPanel goal={goal} />);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(fetchMock.mock.calls[0][0]).toContain("/api/capabilities/source-watches");
+    fetchMock.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ items: [{
+      id: "unknown-1", revision: 2, state: "unknown", source_kind: "guardian_opportunity", source_id: "unknown-1",
+      opportunity_id: "unknown-1", opportunity_revision: 2, opportunity_status: "unknown", assessment: null,
+      title: "Assessment history", summary: "Assessment contact uncertain", why_now: "outcome_unknown",
+      goal_id: "g1", goal_revision: 4, watch_id: "watch-1", plan_revision: 1, expires_at: "2026-10-07T12:00:00Z",
+      evidence_refs: [], allowed_actions: [], reason_code: "outcome_unknown",
+    }], next_cursor: "opaque-next" }) });
+    fireEvent.click(screen.getByRole("button", { name: "Review assessment history" }));
+    await screen.findByText("unknown · Assessment contact uncertain");
+    expect(fetchMock.mock.calls[1][0]).toContain("/api/guardian/opportunities?goal_id=g1&limit=20");
+    expect(screen.getByText(/Outcome Unknown; retained inference liability/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "More assessment history" })).toBeEnabled();
+    fetchMock.mockRejectedValueOnce(new Error("History temporarily unavailable"));
+    fireEvent.click(screen.getByRole("button", { name: "More assessment history" }));
+    await screen.findByText(/Last-known assessment history retained/);
+    expect(screen.getByText("unknown · Assessment contact uncertain")).toBeInTheDocument();
+    expect(fetchMock.mock.calls[2][0]).toContain("cursor=opaque-next");
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+  });
+
+  it.each([
+    { status: "blocked", reason: "source_excerpt_unavailable", policy: "source_stale" },
+    { status: "proposed", reason: "goal_review_required", policy: "goal_review_required" },
+    { status: "proposed", reason: "source_stale", policy: "source_stale" },
+    { status: "silent", reason: "assessment_abstained", policy: null },
+  ])("retains $status history reason $reason and the live $policy policy without proposing actions", async ({ status, reason, policy }) => {
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true, status: 200, json: async () => [] });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<GoalLoopPanel goal={goal} />);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    // With no stored reason, the API projects the current policy reason for proposed rows.
+    fetchMock.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ items: [{
+      id: "recovered-1", revision: 2, state: status, source_kind: "guardian_opportunity", source_id: "recovered-1",
+      opportunity_id: "recovered-1", opportunity_revision: 2, opportunity_status: status, assessment: null,
+      title: "Assessment history", summary: "Recovered assessment", why_now: reason,
+      goal_id: "g1", goal_revision: 4, watch_id: "watch-1", plan_revision: 1,
+      expires_at: "2026-10-07T12:00:00Z", evidence_refs: [], evidence_status: "unavailable",
+      allowed_actions: [], reason_code: reason, policy_reason: policy,
+    }] }) });
+    fireEvent.click(screen.getByRole("button", { name: "Review assessment history" }));
+    const summary = await screen.findByText(`${status} · Recovered assessment`);
+    const history = summary.closest("article")!;
+    expect(within(history).getByText(`${reason} · Goal revision 4`)).toBeInTheDocument();
+    if (policy && policy !== reason) expect(within(history).getByText(`Current policy: ${policy}`)).toBeInTheDocument();
+    else expect(within(history).queryByText(/^Current policy:/)).not.toBeInTheDocument();
+    expect(within(history).getByText("No proposed intervention. No learning recorded.")).toBeInTheDocument();
+    expect(within(history).queryByRole("button")).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls[1][0]).toContain("/api/guardian/opportunities?goal_id=g1&limit=20");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows the invalidated Goal policy while other loop metadata is degraded", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => [] });
+    vi.stubGlobal("fetch", fetchMock);
+    setupStore({ goalLoopError: { status: 503, code: "metadata_unavailable", message: "Loop metadata unavailable", payload: null } });
+    render(<GoalLoopPanel goal={{ ...goal, guardian_assessment_state: "goal_review_required", guardian_policy_revision: 2 }} />);
+    expect(screen.getByText(/Goal review required. Review\/rebind watches/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Enable bounded public opportunity assessments")).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Refresh policy metadata" })).toBeEnabled();
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
   });
 
   it("shows the four outcome axes and uses only the bounded snapshot endpoint", async () => {

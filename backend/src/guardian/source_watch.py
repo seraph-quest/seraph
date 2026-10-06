@@ -399,7 +399,7 @@ def _source_watch_approval_scope(
     keep a decision scoped to one bounded local outcome.
     """
 
-    return {
+    scope = {
         "action": "write_source_watch_dossier_and_task",
         "target": {
             "source_watch_id": _text(watch.id),
@@ -411,6 +411,12 @@ def _source_watch_approval_scope(
         },
         "effects": ["write_dossier_artifact", "create_goal_task"],
     }
+    if packet.opportunity_snapshot_artifact_id:
+        scope["opportunity_snapshot"] = {
+            "artifact_id": packet.opportunity_snapshot_artifact_id,
+            "sha256": packet.opportunity_snapshot_sha256,
+        }
+    return scope
 
 
 def _readback_receipt_identity(job_id: str, target_path: str, digest: str) -> tuple[str, str]:
@@ -2890,6 +2896,29 @@ class SourceWatchService:
             observed_checkpoint_sha256=checkpoint_sha256,
             redaction_manifest_json=_dump(redaction),
         )
+        # The operator's finite M2 policy authorizes private evidence staging.
+        # Optional assessment never reconstructs older packets or changes the
+        # watch's local-write approval; its immutable identity joins that scope.
+        if getattr(goal, "guardian_policy_json", None):
+            try:
+                from src.guardian.opportunities import current_policy_authority
+                from src.guardian.opportunity_runtime import build_evidence, stage_snapshot
+                async with db_engine.get_session() as db:
+                    await current_policy_authority(db, goal_id=goal.id, owner=watch.owner_principal_id,
+                        root_id=watch.owner_session_id, goal_revision=watch.goal_revision, watch_id=watch.id)
+                    await self._assert_read_authority(watch, db=db)
+                current = await durable_job_repository.get_job(job_id)
+                authority = current.get("declared_authority", {}) if current else {}
+                if "workspace_write" not in authority.get("permissions", []):
+                    raise SourceWatchError("workspace_write_authority_required")
+                evidence = build_evidence(packet=packet, observations=scan.material)
+                from src.guardian.opportunity_runtime import assert_known_vault_values_absent
+                await assert_known_vault_values_absent(evidence.model_dump(mode="json"))
+                packet.opportunity_snapshot_artifact_id, packet.opportunity_snapshot_sha256 = stage_snapshot(evidence)
+            except Exception:
+                # Missing/stale staging authority blocks only the optional
+                # assessment, preserving the existing watch journey.
+                logger.info("guardian opportunity snapshot unavailable for packet %s", packet.id)
         async with db_engine.get_session() as db:
             existing = (
                 await db.execute(
@@ -4658,6 +4687,15 @@ class SourceWatchService:
             },
             result_summary="verified source-watch dossier and local task readback",
         )
+        try:
+            from src.guardian.opportunities import publish_verified_packet
+            from src.guardian.opportunity_contracts import VerifiedSourcePacket
+
+            await publish_verified_packet(VerifiedSourcePacket(packet_id=packet.id,
+                watch_revision=packet.plan_revision, goal_revision=packet.goal_revision))
+        except Exception:
+            # Assessment is optional and cannot undo verified source effects.
+            logger.exception("guardian opportunity publication admission failed")
         try:
             from src.guardian.inbox import ensure_inbox_disposition
 

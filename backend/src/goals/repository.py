@@ -579,10 +579,13 @@ class GoalRepository:
             all_goals = result.scalars().all()
 
         # Build tree structure
+        # Keep the tree consumed by the Goal UI consistent with list metadata.
+        from src.guardian.opportunities import policy_projection
         goal_map = {}
         for g in all_goals:
             criterion = deserialize_success_criterion(g)
             goal_map[g.id] = {
+                **policy_projection(g),
                 "id": g.id,
                 "parent_id": g.parent_id,
                 "title": g.title,
@@ -608,6 +611,7 @@ class GoalRepository:
                 goal_map[g.id].update(RECOVERED_FIELDS)
                 goal_map[g.id]["proactive_enabled"] = False
                 goal_map[g.id]["admission_budget"] = None
+                goal_map[g.id]["guardian_assessment_state"] = "goal_review_required"
 
         roots = []
         for g in all_goals:

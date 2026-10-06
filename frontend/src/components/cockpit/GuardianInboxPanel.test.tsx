@@ -1,10 +1,21 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { StrictMode } from "react";
+import { StrictMode, useState } from "react";
 import { createRef } from "react";
 
 import { GuardianInboxPanel, type GuardianInboxPanelHandle } from "./GuardianInboxPanel";
+import type { GuardianInboxItem } from "../../types";
+
+function ControlledInspectorInbox() {
+  const [selected, setSelected] = useState<GuardianInboxItem | null>(null);
+  return <>
+    <GuardianInboxPanel pollIntervalMs={0} selectedItemId={selected?.id ?? null}
+      onSelectItem={setSelected} onRefreshSelectedItem={(id, next) => setSelected((current) => current?.id === id ? next : current)} />
+    <output data-testid="controlled-selection">{selected?.title ?? "closed"}</output>
+    <button onClick={() => setSelected(null)}>Close test inspector</button>
+  </>;
+}
 
 function response(payload: unknown, ok = true, status = ok ? 200 : 409) {
   return { ok, status, json: async () => payload };
@@ -35,6 +46,18 @@ const item = {
   allowed_actions: ["accept_followup", "snooze", "dismiss"],
 };
 
+const assessment = { schema_version: "seraph.opportunity.assessment.v1", relevance: 3, confidence: "medium",
+  summary: "<script>open https://model.invalid/path</script>", reason: "The selected release removes an endpoint.",
+  citations: [{ source_id: "release-notes", start_line: 2, end_line: 2, span_sha256: "a".repeat(64) }],
+  suggested_blueprint: "public-evidence-report", abstain_reason: null };
+function opportunity(overrides = {}) {
+  return { ...item, id: "opportunity-1", source_kind: "guardian_opportunity", source_id: "opportunity-1",
+    title: "Public evidence opportunity", summary: assessment.summary, opportunity_id: "opportunity-1",
+    opportunity_revision: 3, opportunity_status: "proposed", assessment,
+    reason_code: null, delivery_status: "not_requested", cancel_allowed: false,
+    cancel_requested: false, quiescent: false, ...overrides };
+}
+
 describe("GuardianInboxPanel", () => {
   const fetchMock = vi.fn();
 
@@ -48,6 +71,172 @@ describe("GuardianInboxPanel", () => {
     window.sessionStorage.clear();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+  });
+
+  it("renders cited assessment prose literally and shows only exact normalized evidence spans", async () => {
+    const row = opportunity({ allowed_actions: [] });
+    fetchMock.mockResolvedValueOnce(response({ items: [row] }));
+    fetchMock.mockResolvedValueOnce(response({ ...row, evidence_previews: [{ artifact_id: "artifact-dossier", sha256: "abc123",
+      source_id: "release-notes", text: "Uncited heading\nThe endpoint was removed.\nUncited footer", line_count: 3 }] }));
+    render(<GuardianInboxPanel pollIntervalMs={0} />);
+    expect(await screen.findByText(assessment.summary)).toBeInTheDocument();
+    expect(screen.getByText(/Model judgment · relevance 3\/4 · confidence medium/)).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /model.invalid/ })).not.toBeInTheDocument();
+    expect(document.querySelector("script")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Accept follow-up" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "View evidence and task" }));
+    expect(await screen.findByText("The endpoint was removed.")).toBeInTheDocument();
+    expect(screen.queryByText("Uncited heading")).not.toBeInTheDocument();
+    expect(screen.getByText(/normalized redacted lines 2–2/)).toHaveTextContent("a".repeat(64));
+  });
+
+  it("shows silent, blocked, stale, Unknown and cancelled history without inventing actions", async () => {
+    fetchMock.mockResolvedValueOnce(response({ items: [
+      opportunity({ id: "silent", opportunity_id: "silent", state: "silent", opportunity_status: "silent", allowed_actions: [], reason_code: "low_relevance" }),
+      opportunity({ id: "blocked", opportunity_id: "blocked", state: "blocked", opportunity_status: "blocked", assessment: null, allowed_actions: [], reason_code: "source_excerpt_unavailable" }),
+      opportunity({ id: "stale", opportunity_id: "stale", allowed_actions: [], reason_code: "goal_review_required" }),
+      opportunity({ id: "unknown", opportunity_id: "unknown", state: "unknown", opportunity_status: "unknown", assessment: null, allowed_actions: [], reason_code: "outcome_unknown" }),
+      opportunity({ id: "cancelled", opportunity_id: "cancelled", state: "cancelled", opportunity_status: "cancelled", assessment: null, allowed_actions: [], quiescent: true }),
+    ] }));
+    render(<GuardianInboxPanel pollIntervalMs={0} />);
+    await screen.findByTestId("guardian-inbox-row-silent");
+    expect(screen.getByText("Silent assessment history; no proposed action.")).toBeInTheDocument();
+    expect(screen.getByText(/Goal review required/)).toBeInTheDocument();
+    expect(screen.getByText(/Outcome Unknown; retained inference liability/)).toBeInTheDocument();
+    expect(screen.getByTestId("guardian-inbox-row-cancelled")).toHaveAttribute("data-state", "cancelled");
+    expect(screen.queryByRole("button", { name: "Accept follow-up" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Cancel assessment" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/server state is not recognized/)).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { status: "blocked", reason: "source_excerpt_unavailable", policy: "source_stale" },
+    { status: "proposed", reason: "goal_review_required", policy: "goal_review_required" },
+    { status: "proposed", reason: "source_stale", policy: "source_stale" },
+  ])("shows $status recovery reason $reason alongside live policy $policy without restoring evidence or actions", async ({ status, reason, policy }) => {
+    // Proposed rows with no stored reason receive the live reason in the API projection.
+    const row = opportunity({ state: status, opportunity_status: status,
+      assessment: status === "blocked" ? null : assessment,
+      reason_code: reason, policy_reason: policy, source_freshness: "stale",
+      evidence_status: "unavailable", evidence_refs: [], allowed_actions: [], recovery_action: "review_goal_and_watch" });
+    fetchMock.mockResolvedValueOnce(response({ items: [row] }));
+    render(<GuardianInboxPanel pollIntervalMs={0} />);
+    const article = await screen.findByTestId("guardian-inbox-row-opportunity-1");
+    expect(within(article).getByText(`Assessment ${status} · reason ${reason} · delivery not_requested · no learning`)).toBeInTheDocument();
+    expect(within(article).getByText(`authority / budget boundary · ${policy}`)).toBeInTheDocument();
+    expect(within(article).getByText(/evidence unavailable/)).toBeInTheDocument();
+    expect(within(article).getByText("recovery · review_goal_and_watch")).toBeInTheDocument();
+    expect(within(article).queryByRole("button", { name: "Accept follow-up" })).not.toBeInTheDocument();
+    expect(within(article).queryByRole("button", { name: "Cancel assessment" })).not.toBeInTheDocument();
+    expect(within(article).queryByRole("button", { name: "Dismiss" })).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toContain("/api/guardian/inbox");
+  });
+
+  it("preserves a silent assessment reason without reporting it as a current authority boundary", async () => {
+    const row = opportunity({ state: "silent", opportunity_status: "silent", reason_code: "assessment_abstained",
+      policy_reason: null, why_now: "assessment_abstained", allowed_actions: [] });
+    fetchMock.mockResolvedValueOnce(response({ items: [row] }));
+    render(<GuardianInboxPanel pollIntervalMs={0} />);
+    const article = await screen.findByTestId("guardian-inbox-row-opportunity-1");
+    expect(within(article).getByText("Assessment silent · reason assessment_abstained · delivery not_requested · no learning")).toBeInTheDocument();
+    expect(within(article).getByText("authority / budget boundary · No current boundary reason")).toBeInTheDocument();
+    expect(within(article).getByText("Silent assessment history; no proposed action.")).toBeInTheDocument();
+    expect(within(article).queryByRole("button", { name: "Accept follow-up" })).not.toBeInTheDocument();
+    expect(within(article).queryByRole("button", { name: "Cancel assessment" })).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["closed", "another row"])("does not overwrite %s selection with an in-flight detail response", async (selection) => {
+    const first = opportunity();
+    const second = opportunity({ id: "opportunity-2", opportunity_id: "opportunity-2", source_id: "opportunity-2", title: "Another opportunity" });
+    let resolveDetail: (value: ReturnType<typeof response>) => void = () => {};
+    fetchMock.mockResolvedValueOnce(response({ items: [first, second] }));
+    fetchMock.mockImplementationOnce(() => new Promise<ReturnType<typeof response>>((resolve) => { resolveDetail = resolve; }));
+    fetchMock.mockResolvedValueOnce(response(second));
+    render(<ControlledInspectorInbox />);
+    const firstRow = await screen.findByTestId(`guardian-inbox-row-${first.id}`);
+    fireEvent.click(within(firstRow).getByRole("button", { name: "View evidence and task" }));
+    expect(screen.getByTestId("controlled-selection")).toHaveTextContent(first.title);
+    if (selection === "closed") fireEvent.click(screen.getByRole("button", { name: "Close test inspector" }));
+    else fireEvent.click(within(screen.getByTestId(`guardian-inbox-row-${second.id}`)).getByRole("button", { name: "View evidence and task" }));
+    await act(async () => resolveDetail(response({ ...first, title: "Old detail must not reselect" })));
+    expect(screen.getByTestId("controlled-selection")).toHaveTextContent(selection === "closed" ? "closed" : second.title);
+  });
+
+  it("clears the controlled selected inspector when a successful replacement list removes its ID", async () => {
+    const row = opportunity();
+    fetchMock.mockResolvedValueOnce(response({ items: [row] }));
+    fetchMock.mockResolvedValueOnce(response(row));
+    fetchMock.mockResolvedValueOnce(response({ items: [] }));
+    render(<ControlledInspectorInbox />);
+    fireEvent.click(await screen.findByRole("button", { name: "View evidence and task" }));
+    expect(screen.getByTestId("controlled-selection")).toHaveTextContent(row.title);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(screen.getByTestId("controlled-selection")).toHaveTextContent("closed"));
+  });
+
+  it("requires server cancellation availability and waits for quiescence instead of claiming cancelled", async () => {
+    const row = opportunity({ state: "assessing", opportunity_status: "assessing", assessment: null, allowed_actions: [], cancel_allowed: true });
+    fetchMock.mockResolvedValueOnce(response({ items: [row] }));
+    fetchMock.mockResolvedValueOnce(response({ opportunity_id: row.opportunity_id, revision: 4, status: "assessing",
+      reason_code: "cancel_requested", cancel_requested: true, quiescent: false }));
+    render(<GuardianInboxPanel pollIntervalMs={0} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel assessment" }));
+    await screen.findByText(/Cancellation requested · waiting for native quiescence/);
+    expect(screen.getByTestId("guardian-inbox-row-opportunity-1")).toHaveAttribute("data-state", "assessing");
+    expect(screen.queryByRole("button", { name: "Cancel assessment" })).not.toBeInTheDocument();
+    const [url, init] = fetchMock.mock.calls[1];
+    expect(url).toContain("/api/guardian/opportunities/opportunity-1/cancel");
+    expect(JSON.parse(init.body)).toEqual({ expected_opportunity_revision: 3,
+      idempotency_key: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/) });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    fetchMock.mockResolvedValueOnce(response({ items: [{ ...row, state: "cancelled", opportunity_status: "cancelled", opportunity_revision: 5,
+      cancel_allowed: false, cancel_requested: true, quiescent: true }] }));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(screen.getByTestId("guardian-inbox-row-opportunity-1")).toHaveAttribute("data-state", "cancelled"));
+  });
+
+  it("retains contacted Unknown liability even after native quiescence is confirmed", async () => {
+    fetchMock.mockResolvedValueOnce(response({ items: [opportunity({ state: "unknown", opportunity_status: "unknown", assessment: null,
+      allowed_actions: [], cancel_allowed: true })] }));
+    fetchMock.mockResolvedValueOnce(response({ opportunity_id: "opportunity-1", revision: 4, status: "unknown",
+      reason_code: "outcome_unknown", cancel_requested: true, quiescent: true }));
+    render(<GuardianInboxPanel pollIntervalMs={0} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel assessment" }));
+    await screen.findByText(/Native work is quiescent; Unknown outcome and cost liability remain retained/);
+    expect(screen.getByTestId("guardian-inbox-row-opportunity-1")).toHaveAttribute("data-state", "unknown");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not automatically retry a stale cancellation or accept malformed model citations", async () => {
+    fetchMock.mockResolvedValueOnce(response({ items: [opportunity({ cancel_allowed: true,
+      assessment: { ...assessment, citations: [{ ...assessment.citations[0], end_line: 201 }] } })] }));
+    fetchMock.mockResolvedValueOnce(response({ detail: { code: "opportunity_revision_stale" } }, false, 409));
+    render(<GuardianInboxPanel pollIntervalMs={0} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel assessment" }));
+    await screen.findByText(/Opportunity changed. Refresh and review/);
+    expect(screen.queryByRole("button", { name: "Accept follow-up" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Cancel assessment" })).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not let cached cited detail restore actions that the refreshed current projection removed", async () => {
+    const row = opportunity();
+    fetchMock.mockResolvedValueOnce(response({ items: [row] }));
+    fetchMock.mockResolvedValueOnce(response({ ...row, evidence_previews: [{ artifact_id: "artifact-dossier", sha256: "abc123",
+      source_id: "release-notes", text: "Header\nAuthorized evidence", line_count: 2 }] }));
+    render(<GuardianInboxPanel pollIntervalMs={0} />);
+    fireEvent.click(await screen.findByRole("button", { name: "View evidence and task" }));
+    await screen.findByText("Authorized evidence");
+    expect(screen.getByRole("button", { name: "Accept follow-up" })).toBeInTheDocument();
+    fetchMock.mockResolvedValueOnce(response({ items: [{ ...row, allowed_actions: [], reason_code: "source_stale", evidence_status: "unavailable" }] }));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Accept follow-up" })).not.toBeInTheDocument());
+    expect(screen.queryByText("Authorized evidence")).not.toBeInTheDocument();
+    expect(screen.getByText(/Exact cited excerpt unavailable/)).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it("loads a safe item without mutating or invoking a provider on mount", async () => {

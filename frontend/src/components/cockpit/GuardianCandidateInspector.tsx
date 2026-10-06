@@ -100,7 +100,7 @@ export function GuardianCandidateInspector({
         <div><dt>evidence</dt><dd>{item.evidence_status ?? item.verification_status ?? "unknown"}</dd></div>
         <div><dt>expires</dt><dd>{formatTime(item.expires_at)}</dd></div>
       </dl>
-      <p className="cockpit-section-notice">Policy boundary: {item.policy_reason ?? "unavailable in this inbox projection"} · authority / budget boundary</p>
+      <p className="cockpit-section-notice">Policy boundary: {item.policy_reason ?? (item.source_kind === "guardian_opportunity" ? "No current boundary reason" : "unavailable in this inbox projection")} · authority / budget boundary</p>
       {item.recovery_action ? <p className="cockpit-section-notice">Recovery: {item.recovery_action}</p> : null}
       <section aria-label="Verified evidence">
         <h3>Verified evidence</h3>

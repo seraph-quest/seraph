@@ -168,6 +168,7 @@ describe("GoalLoopPanel", () => {
     { status: "blocked", reason: "source_excerpt_unavailable", policy: "source_stale" },
     { status: "proposed", reason: "goal_review_required", policy: "goal_review_required" },
     { status: "proposed", reason: "source_stale", policy: "source_stale" },
+    { status: "silent", reason: "assessment_abstained", policy: null },
   ])("retains $status history reason $reason and the live $policy policy without proposing actions", async ({ status, reason, policy }) => {
     const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true, status: 200, json: async () => [] });
     vi.stubGlobal("fetch", fetchMock);
@@ -186,7 +187,7 @@ describe("GoalLoopPanel", () => {
     const summary = await screen.findByText(`${status} · Recovered assessment`);
     const history = summary.closest("article")!;
     expect(within(history).getByText(`${reason} · Goal revision 4`)).toBeInTheDocument();
-    if (policy !== reason) expect(within(history).getByText(`Current policy: ${policy}`)).toBeInTheDocument();
+    if (policy && policy !== reason) expect(within(history).getByText(`Current policy: ${policy}`)).toBeInTheDocument();
     else expect(within(history).queryByText(/^Current policy:/)).not.toBeInTheDocument();
     expect(within(history).getByText("No proposed intervention. No learning recorded.")).toBeInTheDocument();
     expect(within(history).queryByRole("button")).not.toBeInTheDocument();

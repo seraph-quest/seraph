@@ -134,6 +134,20 @@ describe("GuardianInboxPanel", () => {
     expect(fetchMock.mock.calls[0][0]).toContain("/api/guardian/inbox");
   });
 
+  it("preserves a silent assessment reason without reporting it as a current authority boundary", async () => {
+    const row = opportunity({ state: "silent", opportunity_status: "silent", reason_code: "assessment_abstained",
+      policy_reason: null, why_now: "assessment_abstained", allowed_actions: [] });
+    fetchMock.mockResolvedValueOnce(response({ items: [row] }));
+    render(<GuardianInboxPanel pollIntervalMs={0} />);
+    const article = await screen.findByTestId("guardian-inbox-row-opportunity-1");
+    expect(within(article).getByText("Assessment silent · reason assessment_abstained · delivery not_requested · no learning")).toBeInTheDocument();
+    expect(within(article).getByText("authority / budget boundary · No current boundary reason")).toBeInTheDocument();
+    expect(within(article).getByText("Silent assessment history; no proposed action.")).toBeInTheDocument();
+    expect(within(article).queryByRole("button", { name: "Accept follow-up" })).not.toBeInTheDocument();
+    expect(within(article).queryByRole("button", { name: "Cancel assessment" })).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it.each(["closed", "another row"])("does not overwrite %s selection with an in-flight detail response", async (selection) => {
     const first = opportunity();
     const second = opportunity({ id: "opportunity-2", opportunity_id: "opportunity-2", source_id: "opportunity-2", title: "Another opportunity" });

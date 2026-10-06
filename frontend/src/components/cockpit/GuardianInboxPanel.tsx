@@ -1028,7 +1028,7 @@ export const GuardianInboxPanel = forwardRef<GuardianInboxPanelHandle, GuardianI
               <div className="cockpit-outcome-note">
                 source {item.source_status ?? "unknown"} · freshness {item.source_freshness ?? "unknown"} · evidence {item.evidence_status ?? item.verification_status ?? "unknown"} · memory {item.memory_status ?? "unknown"}
               </div>
-              <div className="cockpit-outcome-note">authority / budget boundary · {item.policy_reason ?? "unavailable in this inbox projection"}</div>
+              <div className="cockpit-outcome-note">authority / budget boundary · {item.policy_reason ?? (item.source_kind === "guardian_opportunity" ? "No current boundary reason" : "unavailable in this inbox projection")}</div>
               {item.recovery_action ? <div className="cockpit-outcome-note">recovery · {item.recovery_action}</div> : null}
               {item.degraded ? <div className="cockpit-outcome-note">degraded · server state is not recognized; actions are unavailable</div> : null}
               <div className="source-watch-actions">

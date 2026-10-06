@@ -159,6 +159,11 @@ async def test_silent_history_preserves_judgment_reason_on_detail_readback_failu
     async with sessions() as db:
         row = (await db.execute(select(GuardianOpportunity))).scalar_one()
         assert row.status == "silent" and row.reason_code == "assessment_abstained"
+    history = await opportunities.list_history(owner=row.owner_principal_id, root_id=row.original_root_id)
+    current_detail = await inbox.get_owned_item(owner_principal_id=row.owner_principal_id,
+        owner_session_id=row.original_root_id, item_id=row.id)
+    for item in (history["items"][0], current_detail):
+        assert item["reason_code"] == "assessment_abstained" and item["policy_reason"] is None
     authority_checked = []
     original_current = opportunities.assert_opportunity_current
     async def check_current(*args, **kwargs):

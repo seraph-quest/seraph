@@ -414,7 +414,7 @@ async def project_item(db, row, disposition=None, *, detail=False):
     """Literal history plus current availability; judgment never becomes authority."""
     from src.guardian.opportunity_contracts import OpportunityAssessment
     reason = row.reason_code
-    policy_reason = reason
+    policy_reason = None
     from src.db.models import NativeNotificationOutbox
     delivery = (await db.execute(select(NativeNotificationOutbox).where(
         NativeNotificationOutbox.intervention_id == row.intervention_id,

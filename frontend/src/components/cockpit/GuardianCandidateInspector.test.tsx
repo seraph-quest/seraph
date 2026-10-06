@@ -57,6 +57,17 @@ describe("GuardianCandidateInspector", () => {
     expect(screen.queryByRole("link", { name: /evil/i })).not.toBeInTheDocument();
   });
 
+  it("keeps a silent assessment reason separate from an absent current authority boundary", () => {
+    render(<GuardianCandidateInspector item={{ ...candidate, source_kind: "guardian_opportunity", state: "silent",
+      opportunity_id: "opportunity-1", opportunity_status: "silent", reason_code: "assessment_abstained",
+      why_now: "The selected source does not warrant an intervention.", policy_reason: null, allowed_actions: [] }} actionsEnabled onAction={vi.fn()} />);
+    expect(screen.getByText("Why now: The selected source does not warrant an intervention.")).toBeInTheDocument();
+    expect(screen.queryByText(/Policy boundary:.*assessment_abstained/)).not.toBeInTheDocument();
+    expect(screen.getByText("Policy boundary: No current boundary reason · authority / budget boundary")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Accept follow-up" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Snooze" })).not.toBeInTheDocument();
+  });
+
   it("does not invent actions for a terminal or unknown candidate", () => {
     render(<GuardianCandidateInspector item={{ ...candidate, state: "expired", allowed_actions: [], degraded: true }} />);
     expect(screen.queryByRole("button", { name: "Accept follow-up" })).not.toBeInTheDocument();

@@ -1663,6 +1663,59 @@ result. It does not establish general autonomous operation or live provider
 quality. On an open feature branch this section describes the intended
 post-merge behavior; the PR carries current validation and review receipts.
 
+### Reviewed opportunity feedback and reversible preferences
+
+The Inbox records explicit **Helpful** or **Not helpful** judgments separately
+from delivery, acknowledgment, plan acceptance and task success. Helpful requires
+a completed matching plan with current verified native output; Not helpful may
+judge an unwanted opportunity without executing a plan. Unjudged work supplies
+no vote. Corrections append to the original intervention history with exact UUID
+replay and revision checks; history is bounded to 100 events and 32 KiB. Legacy
+feedback and manual procedure recommendations retain their separate populations.
+
+`Recommend opportunity preference` publishes one provider-free private CPU task:
+30 seconds, one attempt, JSON output at most 64 KiB. It considers the complete
+eligible feedback population for the exact owner, original Root and Goal
+revision whose current eligible feedback-tip timestamps fall within the latest
+30 days, with at most 100 opportunities. All append-only history of each included
+opportunity counts toward the 100-event cap, with no second age window.
+Unjudged work and out-of-window tips supply no vote.
+Empty or insufficient evidence returns `no_learning`. Two distinct verified
+Helpful outcomes and no current Not helpful judgment for a blueprint may propose
+`prefer_blueprint`; two Not helpful judgments for the exact watch and no Helpful
+may propose `suppress_watch`. Conflicting or incomplete evidence cannot authorize
+an active preference. Task success itself never adopts memory.
+
+The existing memory review shows the literal preview and exact population. A
+separate initially unchecked acknowledgment authorizes only this opportunity
+preference. Adoption requires the original five-minute review window. At adoption and each
+later use, the current Root, source, outcome and full population are rechecked.
+An adopted effect can remain valid beyond that preview window. Historical
+rollback requires the current original Root and does not renew the preview. An exact
+recommendation UUID retains its original task, attempt and preview; authenticated
+GET inspection cannot publish another CPU task or renew authority.
+
+An adopted preference only orders currently eligible blueprint offers for
+**display**, or suppresses optional candidates from the matching watch before
+assessment admission. Source-watch reads continue. It changes no blueprint
+selection, model advice, cadence, urgency, budget, capability permission or
+execution authority, and cannot suppress security, recovery or retained history.
+A new unjudged opportunity supplies no vote and does not invalidate the existing
+population. Changed eligible feedback, aging, changed Goal/source/outcome or
+deleted evidence does invalidate it. Rollback restores ordinary suggestions and
+retains signed terminal history; it never restores grants.
+
+Private preference memory is excluded from ordinary model retrieval and task
+model evidence; canonical inspection, export and deletion retain their existing
+ownership. Complete cutoff/currentness checks, malformed-history rejection and
+typed authority/error mapping were accepted independent review corrections.
+These mechanisms do not establish measured usefulness, generalized learning or
+live provider quality. Named external transports in local proof do not establish
+live public-source or provider usefulness, which remains **external-unverified**.
+On an open feature branch this is intended post-merge behavior; the aggregate PR
+owns exact current runtime and review receipts. The broader capability remains
+**Partial**.
+
 ## Non-Goals
 
 - marketing “guardian intelligence” before the learning loop is real

@@ -1223,6 +1223,20 @@ its cost liability and cannot resend. `Request durable cancellation` waits for
 verified transport/context cleanup; a normal same-workspace restart preserves
 the original proposal, Root and costs without renewing permission.
 
+Explicit opportunity feedback is now separate from delivery and plan success.
+Use **Helpful** only for a completed matching verified plan, or **Not helpful**
+for an unwanted opportunity. **Recommend opportunity preference** runs one
+provider-free private CPU attempt; zero or insufficient eligible votes returns
+`no_learning`. Two verified Helpful outcomes may recommend display ordering;
+two Not helpful judgments on one watch may recommend optional suppression.
+Review the literal memory preview and separately check its acknowledgment before
+adoption. Rollback restores ordinary suggestions without renewing permissions.
+Source-watch reads, security/recovery notices and historical feedback remain
+available. Preference memory cannot enter ordinary model retrieval. Current
+Root, Goal, source, native outcome and complete feedback population are rechecked
+at adoption and use; unjudged new work does not become a vote. These reversible
+local mechanics do not establish measured usefulness or live provider quality.
+
 New packets replace claimed work only while it has no
 provider contact marker, and the existing execution owner must prove closure.
 An unowned older execution leaves the latest candidate visibly waiting until

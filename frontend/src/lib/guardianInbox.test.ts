@@ -8,11 +8,12 @@ describe("fixed opportunity plan wire", () => {
     parent_revision: 1, proposal_digest: null, expires_at: "2030-01-01T00:00:00Z", status: "pending_inference", blueprint_id: null };
   it("retains required pending IDs and nullable digest/blueprint without inventing metadata", () => {
     expect(normalizeOpportunityPlanReference(pending)).toEqual(pending);
+    expect(normalizeOpportunityPlanReference({ ...pending, expires_at: "2030-01-01T00:00:00+00:00" })).toEqual({ ...pending, expires_at: "2030-01-01T00:00:00+00:00" });
     expect(normalizeOpportunityPlanReference({ ...pending, status: "proposed" })).toBeNull();
   });
   it.each([{ status: "ready" }, { kind: "arbitrary_executor" }, { proposal_revision: 0 }, { proposal_digest: "" },
     { blueprint_id: "invented" }, { generation_retry_allowed: true }, { provider_contact_state: "unknown", generation_retry_allowed: true },
-    { recovery_reason: "raw_exception:secret" }, { parent_task_id: null }])("rejects malformed plan reference %j", (override) => {
+    { recovery_reason: "raw_exception:secret" }, { parent_task_id: null }, { root_id: "forged-authority" }])("rejects malformed plan reference %j", (override) => {
     expect(normalizeOpportunityPlanReference({ ...pending, ...override })).toBeNull();
   });
   it("keeps eligible blueprints visible when the contacted daily cap blocks generation", () => {
@@ -21,6 +22,15 @@ describe("fixed opportunity plan wire", () => {
     expect(normalizeOpportunityPlanOffer(offer)).toEqual(offer);
     expect(normalizeOpportunityPlanOffer({ ...offer, available_blueprint_ids: ["arbitrary"] })).toBeNull();
     expect(normalizeOpportunityPlanOffer({ ...offer, can_generate: true })).toBeNull();
+  });
+  it("marks a malformed or unknown plan offer degraded and removes all actions", () => {
+    const normalized = normalizeGuardianInboxItem({ id: "opportunity-1", revision: 3, state: "proposed", source_kind: "guardian_opportunity",
+      opportunity_id: "opportunity-1", opportunity_revision: 3, goal_id: "goal-1", goal_revision: 4,
+      plan_offer: { available_blueprint_ids: ["public-browser-check"], unavailable_reason: null, can_generate: false, generation_block_reason: "pending",
+        proposal_ref: { ...pending, kind: "arbitrary_executor" } }, allowed_actions: ["accept_followup"] });
+    expect(normalized?.degraded).toBe(true);
+    expect(normalized?.allowed_actions).toEqual([]);
+    expect(normalized?.plan_offer).toBeNull();
   });
   it("requires exact request retention and rejects corrupted replay authority", () => {
     window.sessionStorage.clear();
@@ -46,6 +56,7 @@ describe("fixed opportunity plan wire", () => {
       { slot: "local_report", capability_id: "work.local-evidence-report.v1", output_schema: "text/plain", input_materialization: "after_verified_producer", input: null,
         permissions: [], native_approvals: [], runtime_seconds: 30, output_bytes: 65536 }] };
     expect(normalizeOpportunityPlanPreview(preview)).toEqual(preview);
+    expect(normalizeOpportunityPlanPreview({ ...preview, source_id: "release.notes/v1", review_expires_at: "2030-01-01T00:00:00+00:00" })).toEqual({ ...preview, source_id: "release.notes/v1", review_expires_at: "2030-01-01T00:00:00+00:00" });
     expect(normalizeOpportunityPlanPreview({ ...preview, steps: [preview.steps[0], { ...preview.steps[1], input: { fabricated: true } }, preview.steps[2]] })).toBeNull();
     expect(normalizeOpportunityPlanPreview({ ...preview, no_learning: false })).toBeNull();
   });

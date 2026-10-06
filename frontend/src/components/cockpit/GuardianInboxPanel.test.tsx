@@ -117,8 +117,8 @@ describe("GuardianInboxPanel", () => {
   });
 
   it.each(["started", "succeeded", "unknown"])("reload with %s contact only inspects and never resends the retained generation", async (contact) => {
-    const row = opportunity({ plan_offer: { available_blueprint_ids: ["public-browser-check"], unavailable_reason: null,
-      can_generate: true, generation_block_reason: null, proposal_ref: null } });
+    const row = { ...opportunity(), plan_offer: { available_blueprint_ids: ["public-browser-check"], unavailable_reason: null,
+      can_generate: true, generation_block_reason: null, proposal_ref: null } };
     fetchMock.mockResolvedValueOnce(response({ items: [row] }));
     fetchMock.mockRejectedValueOnce(new Error("Lost response"));
     const mounted = render(<GuardianInboxPanel pollIntervalMs={0} currentOwnerPrincipalId="operator:one" currentRootId="root-1" />);

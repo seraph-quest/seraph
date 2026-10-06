@@ -916,7 +916,7 @@ export interface WorkBoardProposal {
   parent_task_id: string;
   parent_revision: number;
   idempotency_key?: string;
-  proposal_digest: string;
+  proposal_digest: string | null;
   expires_at: string;
   proposed_tasks: WorkBoardProposalTask[];
   proposed_links: WorkBoardProposalLink[];

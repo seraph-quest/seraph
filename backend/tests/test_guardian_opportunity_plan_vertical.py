@@ -167,13 +167,21 @@ async def test_authenticated_opportunity_generate_triage_accept_real_browser_cpu
         response = await client.post(f'/api/guardian/opportunities/{opportunity.id}/plan',json=request)
         assert response.status_code == 200, response.text
         reference = response.json()['proposal_ref']
-        assert reference['status'] == 'proposed' and reference['blueprint_id'] == blueprint, response.text
+        if not reference or reference['status'] != 'proposed':
+            async with factory.accounting_sessions() as db:
+                rows = list((await db.scalars(select(WorkBoardProposal))).all())
+            diagnostic = dict(response=response.json(),proposals=[dict(id=row.proposal_id,status=row.status,
+                output=row.proposal_json,job_id=row.admission_job_id,contact_state=row.provider_contact_state) for row in rows],
+                native=[await durable_job_repository.get_job(row.admission_job_id) for row in rows if row.admission_job_id])
+            (root/'plan-generation-diagnostic.json').write_text(json.dumps(diagnostic,indent=2,default=str))
+            pytest.fail(json.dumps(diagnostic,default=str))
+        assert reference['blueprint_id'] == blueprint, response.text
         assert len(calls) == before+1 and browser_calls == []
         staged_cost = await durable_job_repository.inference_accounting_snapshot()
         proposal_id, task_id = reference['proposal_id'], reference['parent_task_id']
         async with factory.accounting_sessions() as db:
             proposal = await db.get(WorkBoardProposal,proposal_id)
-            task = await db.get(WorkBoardTask,task_id)
+            task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id==task_id))
             assert task.status == WorkBoardStatus.triage
             generation_id = proposal.admission_job_id
         generation = await durable_job_repository.get_job(generation_id)
@@ -198,7 +206,7 @@ async def test_authenticated_opportunity_generate_triage_accept_real_browser_cpu
                 expected_digest=reference['proposal_digest']))
         assert response.status_code == 200, response.text
         async with factory.accounting_sessions() as db:
-            task = await db.get(WorkBoardTask,task_id)
+            task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id==task_id))
             assert task.status == WorkBoardStatus.todo
         passes = []
         for _ in range(8):

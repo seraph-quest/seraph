@@ -2008,6 +2008,10 @@ async def create_proposal(
     from src.memory.evidence_proposal import stage_context, recheck_context, stored_snapshot
     async with get_session() as preflight_db:
         evidence_task = await repository._owned_task(preflight_db, owner, task_id)
+        from src.guardian.opportunity_plans import _linked_proposal
+        linked = await _linked_proposal(preflight_db, evidence_task)
+        if linked is not None and linked.opportunity_id:
+            raise BoardError("opportunity_fixed_plan_required", "Review the bound opportunity plan; alternate planners cannot replace its lineage", status_code=409)
         staged_evidence, evidence_snapshot = await stage_context(preflight_db, owner,
             evidence_task, 'proposal-evidence-stage', operator=operator)
     async with get_session() as db:

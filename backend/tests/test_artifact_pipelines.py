@@ -26,6 +26,12 @@ from src.work_board.repository import BoardError, WorkBoardRepository
 from src.workflows.job_runtime import DurableJobRepository
 
 
+def _cleanup_process_exit(witness):
+    from src.work_board.input_artifacts import cleanup_retired_input
+    result = cleanup_retired_input(witness)
+    os._exit(73 if result.outcome == "absent" else 74)
+
+
 def consumer(raw, *, schema="browser_public_task_result", task="producer", attempt="producer-attempt"):
     return EvidenceConsumerInput(schema_version=1, operation_ref="operation", plan_version=1,
         producer_task_ref=task, producer_attempt_ref=attempt, handoff_ref="handoff",
@@ -196,6 +202,10 @@ async def test_real_chromium_native_browser_to_cpu_dossier_to_plain_report(async
     from src.browser.pinned_transport import PinnedBrowserTransport
     from src.security.site_policy import SiteAccessDecision
     from tests.test_browser_task_lifecycle import _html_responses
+    # This historical fixture owns fixture.example, independently of the
+    # managed operator environment's finite public-source allowlist.
+    monkeypatch.setattr(settings, "browser_site_allowlist", "fixture.example")
+    monkeypatch.setattr(settings, "browser_site_blocklist", "")
     owner, repository, operation = await setup_operation(async_db, monkeypatch, tmp_path)
     jobs = DurableJobRepository()
     dispatcher = WorkBoardDispatcher(repository=repository, jobs=jobs, session_provider=async_db)
@@ -298,13 +308,44 @@ async def test_real_chromium_native_browser_to_cpu_dossier_to_plain_report(async
                         artifact = await prepare_input_artifact(db, owner, WorkBoardInputArtifactCreate(schema_version=1,
                             capability_id="browser.public-task.v1", goal_id="goal-914", goal_revision=1,
                             input=_input(), idempotency_key="914-real-replacement-input"))
+                        old_cpu_input_id = (await repository.get_task(db, owner, old_consumer_id)).input_artifact_id
                         staged = await pipelines.stage_revision(db, owner, old_operation_id, PipelineRevisionRequest(
                             expected_revision=operation["revision"], source_input_artifact_id=artifact.artifact_id,
                             idempotency_key="914-real-replacement-review"))
                         link = await db.scalar(select(WorkBoardLink).where(WorkBoardLink.child_task_id == old_consumer_id))
                         assert link.current_handoff_id is None
-                        operation = await pipelines.accept(db, owner, old_operation_id, PipelineAcceptRequest(
-                            expected_revision=staged["revision"], expected_parent_revision=staged["parent_revision"], expected_digest=staged["digest"]))
+                        exact_accept = PipelineAcceptRequest(expected_revision=staged["revision"],
+                            expected_parent_revision=staged["parent_revision"], expected_digest=staged["digest"])
+                        # The retirement intent commits before physical cleanup.
+                        # A real process then unlinks+fsyncs and exits without
+                        # acknowledgment; exact accepted-digest replay must prove
+                        # only that original leaf's absence and compact its intent.
+                        import multiprocessing
+                        import src.work_board.input_artifacts as artifacts_module
+                        def crash_after_unlink(witness):
+                            process = multiprocessing.get_context("spawn").Process(target=_cleanup_process_exit, args=(witness,))
+                            process.start(); process.join(20)
+                            if process.is_alive():
+                                process.terminate(); process.join(5)
+                            assert process.exitcode == 73
+                            raise OSError("injected process exit after unlink before acknowledgment")
+                        with monkeypatch.context() as interrupted_cleanup:
+                            interrupted_cleanup.setattr(artifacts_module, "cleanup_retired_input", crash_after_unlink)
+                            with pytest.raises(OSError):
+                                await pipelines.accept(db, owner, old_operation_id, exact_accept)
+                        await db.rollback()
+                        recovered_projection = await pipelines.read(db, owner, old_operation_id)
+                        assert recovered_projection["status"] == "accepted"
+                        assert recovered_projection["recovery_reason"] == "input_artifact_cleanup_required"
+                        retired_before_replay = await db.get(WorkBoardInputArtifact, old_cpu_input_id)
+                        assert retired_before_replay.state == "revoked"
+                        assert not (tmp_path / retired_before_replay.typed_input_ref.removeprefix("workspace-json:")).exists()
+                        operation = await pipelines.accept(db, owner, old_operation_id, exact_accept)
+                        assert operation["recovery_reason"] is None
+                        replay_revision = operation["revision"]
+                        replay_again = await pipelines.accept(db, owner, old_operation_id,
+                            exact_accept.model_copy(update={"expected_revision": 1, "expected_parent_revision": 1}))
+                        assert replay_again["revision"] == replay_revision
                         assert operation["plan_version"] == 2 and operation["deadline_at"] == original_deadline
                         assert operation["steps"][1]["task_id"] == old_consumer_id
                         assert link.parent_task_id == operation["steps"][0]["task_id"] != old_producer_id

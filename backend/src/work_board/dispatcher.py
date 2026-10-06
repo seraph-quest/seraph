@@ -4053,6 +4053,13 @@ class WorkBoardDispatcher:
         an API input or a public retry request.
         """
 
+        from src.guardian.opportunity_plans import stage_accepted_plan_task
+        try:
+            async with self.session_provider() as db:
+                await stage_accepted_plan_task(db, task, attempt=_claimed_attempt)
+        except Exception as exc:
+            code = getattr(exc, "code", "pipeline_source_changed")
+            return code, "The current linked plan authority must be reviewed"
         if task.pipeline_operation_id or task.capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
             from src.work_board.pipelines import runtime_guard
             try:
@@ -4975,10 +4982,19 @@ class WorkBoardDispatcher:
                 if task.pipeline_operation_id:
                     from src.work_board.pipelines import task_guard
                     try:
-                        await task_guard(db, task, attempt=attempt)
+                        from src.guardian.opportunity_plans import stage_accepted_plan_task
+                        source_witness = await stage_accepted_plan_task(db, task, attempt=attempt)
+                        await task_guard(db, task, attempt=attempt, source_witness=source_witness)
                     except BoardError:
                         # This session contains only fence/authority reads and
                         # the guard freeze; normal exit commits that freeze.
+                        return False
+
+                elif task.capability_id == "browser.public-task.v1":
+                    from src.guardian.opportunity_plans import stage_accepted_plan_task
+                    try:
+                        await stage_accepted_plan_task(db, task, attempt=attempt)
+                    except Exception:
                         return False
 
                 # Procedure-v2 Browser leaves are native children of the

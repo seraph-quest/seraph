@@ -314,7 +314,7 @@ function normalizeOpportunityAssessment(value: unknown): GuardianOpportunityAsse
 
 const planId = (v: unknown): v is string => typeof v === "string" && /^[a-zA-Z0-9:_-]{1,128}$/.test(v);
 const planPositive = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v > 0;
-const planTime = (v: unknown): v is string => typeof v === "string" && /Z$/.test(v) && Number.isFinite(Date.parse(v));
+const planTime = (v: unknown): v is string => typeof v === "string" && /(?:Z|\+00:00)$/.test(v) && Number.isFinite(Date.parse(v));
 const planSha = (v: unknown): v is string => typeof v === "string" && /^[a-f0-9]{64}$/.test(v);
 const closedPlanKeys = (value: Record<string, unknown>, keys: string): boolean => Object.keys(value).every((key) => keys.split(",").includes(key));
 export const PIPELINE_RECOVERY_REASONS: PipelineRecoveryReason[] = [
@@ -340,7 +340,8 @@ export function normalizeOpportunityPlanReference(value: unknown): OpportunityPl
     || (value.kind === "public-evidence-pipeline.v1" && value.blueprint_id !== "public-evidence-report")
     || (value.blueprint_id === "public-evidence-report" && value.kind !== "public-evidence-pipeline.v1")
     || (["proposed", "accepted"].includes(String(value.status)) && (!planSha(value.proposal_digest) || value.blueprint_id === null))
-    || (value.generation_retry_allowed === true && value.provider_contact_state !== "not_started")) return null;
+    || (value.generation_retry_allowed === true && (value.provider_contact_state !== "not_started"
+      || !["pending_inference", "blocked"].includes(String(value.status)) || value.proposal_digest !== null || value.blueprint_id !== null))) return null;
   return value as unknown as OpportunityPlanReference;
 }
 export function normalizeOpportunityPlanOffer(value: unknown): OpportunityPlanOffer | null {
@@ -357,10 +358,10 @@ export function normalizeOpportunityPlanPreview(value: unknown): OpportunityPlan
   if (!isRecord(value) || !closedPlanKeys(value, "opportunity_id,opportunity_revision,blueprint_id,goal_id,goal_revision,source_id,source_digest,watch_id,watch_revision,steps,review_expires_at,deadline_at,no_learning,recovery_reason")
     || new TextEncoder().encode(JSON.stringify(value)).length > 16384 || !planId(value.opportunity_id) || !planPositive(value.opportunity_revision)
     || !planId(value.goal_id) || !planPositive(value.goal_revision) || !planId(value.watch_id) || !planPositive(value.watch_revision)
-    || !planId(value.source_id) || !planSha(value.source_digest) || !planTime(value.review_expires_at)
+    || typeof value.source_id !== "string" || !value.source_id.length || value.source_id.length > 128 || !planSha(value.source_digest) || !planTime(value.review_expires_at)
     || !(value.deadline_at === null || planTime(value.deadline_at)) || value.no_learning !== true
     || !["public-browser-check", "public-evidence-report"].includes(String(value.blueprint_id))
-    || !validPipelineRecoveryReason(value.recovery_reason) || !Array.isArray(value.steps)
+    || !validPipelineRecoveryReason(value.recovery_reason) || (value.recovery_reason != null && value.blueprint_id !== "public-evidence-report") || !Array.isArray(value.steps)
     || value.steps.length !== (value.blueprint_id === "public-browser-check" ? 1 : 3)) return null;
   const slots = ["public_source", "evidence_dossier", "local_report"];
   const capabilities = ["browser.public-task.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1"];

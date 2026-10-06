@@ -22,6 +22,7 @@ export function ArtifactPipelineReview({ task, ownerPrincipalId, ownerSessionId,
   const [report, setReport] = useState<string | null>(null);
   const generation = useRef(0);
   const activeRequest = useRef<AbortController | null>(null);
+  const linkedSubmissionLock = useRef(false);
   const eligible = metadataConfirmed && task.owner_principal_id === ownerPrincipalId && task.owner_session_id === ownerSessionId && task.ownership_access !== "recovered_read_only";
   const linkedRef = normalizeOpportunityPlanReference(proposal_ref);
   const linkedPreview = normalizeOpportunityPlanPreview(plan_preview);
@@ -36,8 +37,9 @@ export function ArtifactPipelineReview({ task, ownerPrincipalId, ownerSessionId,
     if (!id || !eligible) return;
     const current = generation.current;
     setBusy(true); setError(null);
+    const controller = new AbortController(); activeRequest.current = controller;
     try {
-      const value = await pipelineRequest(`/api/work-board/pipelines/${id}`);
+      const value = await pipelineRequest(`/api/work-board/pipelines/${id}`, undefined, controller.signal);
       if (current === generation.current) setOperation(value);
     } catch (caught) { if (current === generation.current) setError(caught instanceof Error ? caught.message : "Pipeline readback unavailable."); }
     finally { if (current === generation.current) setBusy(false); }
@@ -45,6 +47,7 @@ export function ArtifactPipelineReview({ task, ownerPrincipalId, ownerSessionId,
   useEffect(() => {
     const current = ++generation.current;
     activeRequest.current?.abort();
+    linkedSubmissionLock.current = false;
     setOperation(null); setReport(null); setError(null); setStorageReady(false); setBusy(false);
     if (!eligible || !relevant || (linked && !matched)) return;
     try {
@@ -67,7 +70,8 @@ export function ArtifactPipelineReview({ task, ownerPrincipalId, ownerSessionId,
   }, [key, task.task_id, task.pipeline_operation_id, eligible, relevant, linked, matched, proposal_ref?.proposal_id, proposal_ref?.proposal_revision, proposal_ref?.proposal_digest]);
 
   const submit = async (pending: PipelinePending, retry = false) => {
-    if (!eligible || !storageReady || busy || (retained.pending && !retry) || (linked && (!matched || !pending.path.endsWith('/accept')))) return;
+    if (!eligible || !storageReady || busy || (retained.pending && !retry) || (linked && (linkedSubmissionLock.current || !matched || !pending.path.endsWith('/accept')))) return;
+    if (linked) linkedSubmissionLock.current = true;
     const current = generation.current;
     setBusy(true); setError(null); setReport(null);
     const controller = new AbortController(); activeRequest.current = controller;
@@ -83,7 +87,7 @@ export function ArtifactPipelineReview({ task, ownerPrincipalId, ownerSessionId,
       await onRefresh();
     } catch (caught) {
       if (current === generation.current && !controller.signal.aborted) setError(caught instanceof Error ? caught.message : "Outcome uncertain; retry the exact retained request.");
-    } finally { if (current === generation.current) setBusy(false); }
+    } finally { if (current === generation.current) { setBusy(false); linkedSubmissionLock.current = false; } }
   };
   const mutate = (action: string, body: Record<string, unknown>) => operation && void submit({ path: `/api/work-board/pipelines/${operation.operation_id}/${action}`, body });
   const linkedAcceptReady = Boolean(matched && linkedRef?.status === 'proposed' && linkedRef.proposal_digest
@@ -96,7 +100,7 @@ export function ArtifactPipelineReview({ task, ownerPrincipalId, ownerSessionId,
     <div className="font-semibold">Public evidence pipeline</div>
     <p className="text-xs">Public browser → evidence dossier → local plain-text report. Quoted source data; deterministic CPU; no_learning. One 300-second operation, 2 attempts per leaf, 6 total, 180 seconds browser, 30 seconds CPU, 64 KiB outputs and 40 KiB quoted inputs, bounded by the current Goal.</p>
     {error && <p role="alert" className="mt-2 text-xs">{error}</p>}
-    {retained.pending && <div className="mt-2"><p className="text-xs">A mutation has an uncertain outcome. Its exact request is retained for this operator session.</p><button disabled={busy || !eligible || !storageReady} onClick={() => void submit(retained.pending!, true)}>Retry exact pipeline request</button></div>}
+    {retained.pending && <div className="mt-2"><p className="text-xs">A mutation has an uncertain outcome. Its exact request is retained for this operator session.</p><button disabled={busy || !eligible || !storageReady || (linked && (!matched || !retained.pending.path.endsWith("/accept")))} onClick={() => void submit(retained.pending!, true)}>Retry exact pipeline request</button></div>}
     {!linked && !operation && !task.pipeline_operation_id && <button disabled={disabled || !task.input_artifact_id || !["todo", "triage"].includes(task.status)} onClick={() => void submit({ path: `/api/work-board/tasks/${task.task_id}/pipeline-preview`, body: { expected_revision: task.task_revision, source_input_artifact_id: task.input_artifact_id, idempotency_key: crypto.randomUUID() } })}>Preview evidence pipeline</button>}
     {linked && !matched ? <p role="status">Exact opportunity plan bindings are unavailable; acceptance is blocked.</p> : null}
     {linkedPreview ? <pre className="whitespace-pre-wrap break-all" aria-label="Exact report plan preview">{JSON.stringify(linkedPreview, null, 2)}</pre> : null}
@@ -114,7 +118,7 @@ export function ArtifactPipelineReview({ task, ownerPrincipalId, ownerSessionId,
         {!linked && operation.status === "accepted" && !operation.pending_revision && <button disabled={disabled} onClick={() => mutate("advance", { expected_revision: operation.revision })}>Materialize verified next input</button>}
         {!linked && operation.pending_revision && <button disabled={disabled} onClick={() => mutate("quiesce", { expected_revision: operation.revision })}>Cancel and verify unfinished work</button>}
         {!linked && operation.status === "accepted" && <button disabled={disabled || operation.steps[0]?.status !== "done" || operation.steps.slice(1).some((step) => ["done", "review"].includes(step.status))} onClick={() => mutate("reuse-preview", { expected_revision: operation.revision, expected_parent_revision: operation.steps[0].task_revision, idempotency_key: crypto.randomUUID() })}>Review fresh operation using verified source</button>}
-        {operation.steps[2]?.status === "done" && <button disabled={busy || !eligible} onClick={() => { const current = generation.current; setBusy(true); void pipelineReport(operation.operation_id).then((text) => { if (current === generation.current) setReport(text); }).catch(() => { if (current === generation.current) setError("Verified report unavailable."); }).finally(() => { if (current === generation.current) setBusy(false); }); }}>Read verified local report</button>}
+        {operation.steps[2]?.status === "done" && <button disabled={busy || !eligible} onClick={() => { const current = generation.current; const controller = new AbortController(); activeRequest.current = controller; setBusy(true); void pipelineReport(operation.operation_id, controller.signal).then((text) => { if (current === generation.current) setReport(text); }).catch(() => { if (current === generation.current) setError("Verified report unavailable."); }).finally(() => { if (current === generation.current) setBusy(false); }); }}>Read verified local report</button>}
       </div>
       {!linked && operation.status === "accepted" && !operation.pending_revision && <div className="mt-2"><label>Replacement input artifact <input value={replacement} onChange={(event) => setReplacement(event.target.value)} /></label><button disabled={disabled || !/^[a-zA-Z0-9:-]{1,128}$/.test(replacement) || operation.steps.slice(1).some((step) => ["done", "review"].includes(step.status))} onClick={() => mutate("revision", { expected_revision: operation.revision, source_input_artifact_id: replacement, idempotency_key: crypto.randomUUID() })}>Freeze and review replacement source</button></div>}
       {!linked && <p className="mt-2 text-xs">Open each ready input task and use its existing Ready action to queue execution. Refresh this operation, then materialize the independently verified next input. Revisions preserve the original deadline and attempt counters.</p>}

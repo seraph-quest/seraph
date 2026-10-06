@@ -33,7 +33,7 @@ RECOVERY_REASONS = frozenset({"input_artifact_cleanup_required", "input_artifact
 
 
 def safe_recovery_reason(code):
-    return code if code in RECOVERY_REASONS else "pipeline_recovery_required"
+    return code if isinstance(code, str) and code in RECOVERY_REASONS else "pipeline_recovery_required"
 
 
 def recovery_reason(value):
@@ -74,6 +74,8 @@ async def stage_accept(db, owner, operation_id, request, *, source_witness):
     if getattr(row, "opportunity_id", None) and source_witness is None:
         raise BoardError("pipeline_source_changed", "Linked plan source proof is required", status_code=409)
     pending = value.get("pending_revision")
+    if getattr(row, "opportunity_id", None) and pending:
+        raise BoardError("pipeline_review_required", "Opportunity plans retain their exact fixed source", status_code=409)
     texts, input_witness, retirement = [], None, []
     producer = None
     tasks = [await WorkBoardRepository().get_task(db, owner, step["task_ref"]) for step in value["steps"]]
@@ -149,7 +151,8 @@ def validate_retired_cleanup(intent):
     slots, artifacts = set(), set()
     for entry in entries:
         if not isinstance(entry, dict) or set(entry) != fields: invalid()
-        if entry["slot"] not in SLOTS[1:] or entry["slot"] in slots or entry["artifact_ref"] in artifacts: invalid()
+        if (not isinstance(entry["slot"], str) or not isinstance(entry["artifact_ref"], str)
+            or entry["slot"] not in SLOTS[1:] or entry["slot"] in slots or entry["artifact_ref"] in artifacts): invalid()
         slots.add(entry["slot"]); artifacts.add(entry["artifact_ref"])
         for key in ("task_ref", "artifact_ref"):
             if not isinstance(entry[key], str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,256}", entry[key]): invalid()
@@ -162,8 +165,8 @@ def validate_retired_cleanup(intent):
         ref = entry["typed_input_ref"]
         if (not isinstance(ref, str) or len(ref) > 512 or not ref.startswith(f"workspace-json:{INPUT_ARTIFACT_ROOT}/")
             or any(part in {"", ".", ".."} for part in ref.split(":", 1)[1].split("/"))): invalid()
-        if entry["state"] not in {"pending", "cleanup_required", "verified"}: invalid()
-        if entry["reason_code"] is not None and entry["reason_code"] not in reasons: invalid()
+        if not isinstance(entry["state"], str) or entry["state"] not in {"pending", "cleanup_required", "verified"}: invalid()
+        if entry["reason_code"] is not None and (not isinstance(entry["reason_code"], str) or entry["reason_code"] not in reasons): invalid()
         if entry["state"] != "cleanup_required" and entry["reason_code"] is not None: invalid()
 
 
@@ -427,6 +430,8 @@ async def _accept_locked(db, owner, operation_id, request, *, staged_context: Pi
         opportunity = await db.get(GuardianOpportunity, row.opportunity_id, populate_existing=True)
         await recheck_plan_source(db, opportunity, source_witness=context.source_witness)
     if value.get("pending_revision"):
+        if getattr(row, "opportunity_id", None):
+            raise BoardError("pipeline_review_required", "Opportunity plans retain their exact fixed source", status_code=409)
         return await accept_revision(db, owner, row, value, request, staged_context=context)
     if row.status == "accepted" and value.get("accepted_digest") == request.expected_digest:
         return await read(db, owner, operation_id, workspace_identity=context.workspace_identity)
@@ -494,8 +499,13 @@ async def _accept_locked(db, owner, operation_id, request, *, staged_context: Pi
 
 
 async def reuse_preview(db: Any, owner: WorkBoardOwner, operation_id: str, request: Any) -> dict[str, Any]:
+    original = await db.get(WorkBoardProposal, operation_id)
+    if original is not None and original.owner_principal_id == owner.principal_id and original.owner_session_id == owner.session_id and original.opportunity_id is not None:
+        raise BoardError("pipeline_review_required", "Opportunity plans cannot substitute or reuse their fixed source", status_code=409)
     await _begin_sqlite_immediate(db)
     old, prior = await owned(db, owner, operation_id, revision=request.expected_revision)
+    if old.opportunity_id is not None:
+        raise BoardError("pipeline_review_required", "Opportunity plans cannot substitute or reuse their fixed source", status_code=409)
     producer = await WorkBoardRepository().get_task(db, owner, prior["steps"][0]["task_ref"])
     if producer.task_revision != request.expected_parent_revision:
         raise BoardError("stale_revision", "The original producer changed before output reuse", status_code=409)
@@ -534,15 +544,48 @@ async def reuse_preview(db: Any, owner: WorkBoardOwner, operation_id: str, reque
 
 
 async def stage_revision(db: Any, owner: WorkBoardOwner, operation_id: str, request: Any) -> dict[str, Any]:
-    from src.work_board.input_artifacts import read_input_artifact_metadata, resolve_input_artifact_for_copy
+    from src.work_board.input_artifacts import read_input_artifact_metadata, resolve_input_artifact_for_copy, _metadata_digest
+    staged_row, staged_value = await owned(db, owner, operation_id)
+    if staged_row.opportunity_id is not None:
+        raise BoardError("pipeline_review_required", "Opportunity plans cannot substitute their fixed source", status_code=409)
+    if staged_value.get("retired_input_cleanup"):
+        raise BoardError("input_artifact_cleanup_required", "Resolve the exact retired input cleanup first", status_code=503)
+    staged_revision, staged_digest = staged_row.revision, staged_row.proposal_digest
+    workspace = canonical_bytes(staged_value["live_root"])
+    if staged_row.status != "accepted" or utc(datetime.fromisoformat(staged_value["deadline_at"])) <= now():
+        raise BoardError("pipeline_expired", "A revision cannot renew the original operation deadline", status_code=409)
+    if staged_value.get("pending_revision"):
+        pending = staged_value["pending_revision"]
+        if pending.get("idempotency_key") == request.idempotency_key and pending.get("source_input_artifact_id") == request.source_input_artifact_id and pending.get("request_revision") == request.expected_revision:
+            return await read(db, owner, operation_id, workspace_identity=workspace)
+        raise BoardError("pipeline_revision_pending", "The exact pending revision must be resolved first", status_code=409)
+    if staged_row.revision != request.expected_revision:
+        raise BoardError("pipeline_revision_conflict", "The operation changed before source freeze", status_code=409)
+    staged_tasks = [await WorkBoardRepository().get_task(db, owner, step["task_ref"]) for step in staged_value["steps"]]
+    if any(task.status in {WorkBoardStatus.done, WorkBoardStatus.review} for task in staged_tasks[1:]):
+        raise BoardError("pipeline_completed_consumer", "A completed consumer requires a distinct finite operation", status_code=409)
+    staged_artifact = await read_input_artifact_metadata(db, owner, artifact_id=request.source_input_artifact_id)
+    resolved = await resolve_input_artifact_for_copy(db, owner, typed_input_ref=staged_artifact.typed_input_ref,
+        typed_input_digest=staged_artifact.typed_input_digest, capability_id=CAPABILITIES[0],
+        goal_id=staged_artifact.goal_id, goal_revision=staged_artifact.goal_revision)
+    artifact_token = _metadata_digest(resolved.row)
     await _begin_sqlite_immediate(db)
-    row, value = await owned(db, owner, operation_id)
+    row, value = await owned(db, owner, operation_id, workspace_identity=workspace)
+    if row.opportunity_id is not None:
+        raise BoardError("pipeline_review_required", "Opportunity plans cannot substitute their fixed source", status_code=409)
+    if row.revision != staged_revision or row.proposal_digest != staged_digest:
+        raise BoardError("pipeline_revision_conflict", "The staged revision changed", status_code=409)
+    if value.get("retired_input_cleanup"):
+        raise BoardError("input_artifact_cleanup_required", "Resolve the exact retired input cleanup first", status_code=503)
+    current_artifact = await db.get(WorkBoardInputArtifact, request.source_input_artifact_id, populate_existing=True)
+    if current_artifact is None or _metadata_digest(current_artifact) != artifact_token:
+        raise BoardError("pipeline_input_changed", "The replacement private input changed", status_code=409)
     if row.status != "accepted" or utc(datetime.fromisoformat(value["deadline_at"])) <= now():
         raise BoardError("pipeline_expired", "A revision cannot renew the original operation deadline", status_code=409)
     if value.get("pending_revision"):
         pending = value["pending_revision"]
         if pending.get("idempotency_key") == request.idempotency_key and pending.get("source_input_artifact_id") == request.source_input_artifact_id and pending.get("request_revision") == request.expected_revision:
-            return await read(db, owner, operation_id)
+            return await read(db, owner, operation_id, workspace_identity=workspace)
         raise BoardError("pipeline_revision_pending", "The exact pending revision must be resolved first", status_code=409)
     if row.revision != request.expected_revision:
         raise BoardError("pipeline_revision_conflict", "The operation changed before source freeze", status_code=409)
@@ -556,8 +599,6 @@ async def stage_revision(db: Any, owner: WorkBoardOwner, operation_id: str, requ
     artifact = await read_input_artifact_metadata(db, owner, artifact_id=request.source_input_artifact_id)
     if artifact.capability_id != CAPABILITIES[0] or artifact.goal_id != goal.id or artifact.goal_revision != goal.revision or artifact.bound_task_id:
         raise BoardError("pipeline_source_invalid", "Select a fresh current-Goal public-browser input", status_code=409)
-    resolved = await resolve_input_artifact_for_copy(db, owner, typed_input_ref=artifact.typed_input_ref,
-        typed_input_digest=artifact.typed_input_digest, capability_id=CAPABILITIES[0], goal_id=goal.id, goal_revision=goal.revision)
     snapshots = []
     for task in tasks:
         if task.status not in {WorkBoardStatus.done, WorkBoardStatus.review, WorkBoardStatus.running} and task.block_kind not in {"unknown_effect", "cost_liability", "reconcile_admission_binding"}:
@@ -581,7 +622,7 @@ async def stage_revision(db: Any, owner: WorkBoardOwner, operation_id: str, requ
             "approved_url_prefixes": resolved.input["approved_url_prefixes"], "permissions": value["source_scope"]["permissions"]},
         "frozen_tasks": snapshots, "proposed_plan_version": value["plan_version"] + 1}
     await store(db, row, value)
-    return await read(db, owner, operation_id)
+    return await read(db, owner, operation_id, workspace_identity=workspace)
 
 
 async def quiesce_revision(owner: WorkBoardOwner, operation_id: str, expected_revision: int, *, dispatcher: Any, session_provider: Any) -> dict[str, Any]:
@@ -1052,7 +1093,8 @@ async def advance(db: Any, owner: WorkBoardOwner, operation_id: str, expected_re
             raise BoardError("pipeline_materialization_conflict", "The exact consumer reservation changed", status_code=409)
         next_revision = expected_task_revision + 1
         input_request = WorkBoardTaskCreate(title=consumer.title, input_artifact_id=artifact.artifact_id,
-            capability_id=consumer.capability_id, goal_id=consumer.goal_id, goal_revision=consumer.goal_revision)
+            capability_id=consumer.capability_id, goal_id=consumer.goal_id, goal_revision=consumer.goal_revision,
+            status=WorkBoardStatus.todo, idempotency_key=key)
         resolved = await recheck_staged_input(db, owner, input_request, witness=input_witness)
         await bind_input_artifact(db, owner, artifact=resolved, task_id=consumer.task_id,
             task_revision=next_revision)

@@ -2834,6 +2834,8 @@ async def accept_work_board_proposal(
         return await triage_service.accept_proposal(_owner(operator), proposal_id, body, operator=operator)
     except BoardError as exc:
         _raise_board_error(exc)
+    except OpportunityError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
     except SQLAlchemyError as exc:
         raise HTTPException(
             status_code=503,

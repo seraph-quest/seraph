@@ -1012,6 +1012,15 @@ function WorkBoardPanel({
   const allGoals = useMemo(() => flattenGoals(goals), [goals]);
   const selectedDetail = selectedTaskId && detail?.task.task_id === selectedTaskId ? detail : null;
   const selectedTask = selectedDetail?.task ?? tasks.find((task) => task.task_id === selectedTaskId) ?? null;
+  useEffect(() => {
+    const reference = normalizeOpportunityPlanReference(selectedDetail?.proposal_ref);
+    const preview = normalizeOpportunityPlanPreview(selectedDetail?.plan_preview);
+    if (!reference || reference.parent_task_id !== selectedDetail?.task.task_id) return;
+    setProposal((current) => current && current.proposal_id === reference.proposal_id
+      && reference.proposal_revision >= current.proposal_revision ? { ...current, ...reference,
+        proposal_ref: reference, plan_preview: preview, opportunity_id: preview?.opportunity_id ?? current.opportunity_id,
+        opportunity_revision: preview?.opportunity_revision ?? current.opportunity_revision } : current);
+  }, [selectedDetail, proposal?.proposal_id, proposal?.proposal_revision]);
   const selectedInboxScope = selectedTask?.idempotency_scope ?? null;
   const selectedInboxScopeMatch = selectedInboxScope?.match(GUARDIAN_INBOX_SCOPE) ?? null;
   const selectedInboxOriginKey = selectedTask && selectedInboxScopeMatch
@@ -2900,7 +2909,8 @@ function WorkBoardPanel({
     && proposal.proposed_tasks.every((task) => hasServerAuthorityPreview(task.authority)),
   );
   const linkedPlan = Boolean(proposal?.opportunity_id || selectedDetail?.proposal_ref || proposal?.kind === "opportunity_plan" || proposal?.kind === "public-evidence-pipeline.v1");
-  const linkedReference = normalizeOpportunityPlanReference(proposal?.proposal_ref ?? selectedDetail?.proposal_ref);
+  const linkedReference = normalizeOpportunityPlanReference(selectedTask?.pipeline_operation_id
+    ? selectedDetail?.proposal_ref ?? proposal?.proposal_ref : proposal?.proposal_ref ?? selectedDetail?.proposal_ref);
   const linkedPreview = normalizeOpportunityPlanPreview(proposal?.plan_preview ?? selectedDetail?.plan_preview);
   const linkedPlanReady = Boolean(linkedReference && linkedPreview && selectedTask && currentOwnerSession
     && linkedReference.proposal_id === proposal?.proposal_id && linkedReference.parent_task_id === selectedTask.task_id
@@ -3543,10 +3553,10 @@ function WorkBoardPanel({
                   {selectedTask.status === "triage" && (
                     <button type="button" className="cockpit-feedback-button" disabled={!canPromote || busyAction} onClick={() => void performAction("promote")} title={!canPromote ? "Complete the typed specification and acknowledge the current server limit first." : undefined}>Promote to Todo</button>
                   )}
-                  {["triage", "todo"].includes(selectedTask.status) && currentOwnerSession && (
+                  {["triage", "todo"].includes(selectedTask.status) && currentOwnerSession && !linkedPlan && (
                     <button type="button" className="cockpit-feedback-button" disabled={busyAction || proposalBusy} onClick={() => void requestProposal("specify")}>Specify for review</button>
                   )}
-                  {selectedTask.status === "todo" && currentOwnerSession && (
+                  {selectedTask.status === "todo" && currentOwnerSession && !linkedPlan && (
                     <button type="button" className="cockpit-feedback-button" disabled={busyAction || proposalBusy} onClick={() => void requestProposal("decompose")}>Decompose for review</button>
                   )}
                   {selectedTask.status === "running" && currentOwnerSession && (
@@ -3673,7 +3683,7 @@ function WorkBoardPanel({
                           {proposedTask.cost_estimate && <div>Task cost estimate: {proposedTask.cost_estimate}</div>}
                         </article>
                       ))}
-                      {proposal.proposed_tasks.length === 0 && <div className="cockpit-empty">No executable task proposal was returned.</div>}
+                      {!linkedPlan && proposal.proposed_tasks.length === 0 && <div className="cockpit-empty">No executable task proposal was returned.</div>}
                     </div>
                     {proposal.proposed_links.length > 0 && <div className="mt-2">Proposed dependencies: {proposal.proposed_links.map((link) => `${link.parent_task_id} → ${link.child_task_id}`).join(" · ")}</div>}
                     {proposal.status === "proposed" && !linkedPlan && !proposalAuthorityComplete && (

@@ -213,6 +213,12 @@ async def recheck_accepted_plan_task(db, task, *, attempt=None, source_witness=N
     if task.capability_id not in {"browser.public-task.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
         raise OpportunityError("proposal_stale")
     await recheck_plan_source(db, row, source_witness=source_witness)
+    if task.capability_id == "browser.public-task.v1":
+        binding = json.loads(proposal.proposal_json).get("browser_input_binding")
+        if not binding or binding != {"task_id": task.task_id, "capability_id": task.capability_id,
+                "executor_id": task.executor_id, "input_artifact_id": task.input_artifact_id,
+                "typed_input_ref": task.typed_input_ref, "typed_input_digest": task.typed_input_digest}:
+            raise OpportunityError("proposal_binding_conflict")
 
 
 def proposal_ref(row):
@@ -264,10 +270,25 @@ async def contacted_plan_count(db, owner, goal_id, *, exclude_job=None):
 
 async def assert_linked_plan_native(db, run):
     from src.work_board import triage
+    from src.workflows.job_runtime import _serialize
     row = await db.scalar(select(WorkBoardProposal).where(WorkBoardProposal.admission_job_id == run.run_identity))
-    if (row is None or not row.opportunity_id or row.kind not in {"opportunity_plan", "public-evidence-pipeline.v1"}
+    opportunity = await db.get(GuardianOpportunity, row.opportunity_id) if row and row.opportunity_id else None
+    parent = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == row.parent_task_id)) if row else None
+    projection = _serialize(run)
+    if (row is None or opportunity is None or parent is None
+            or not row.opportunity_id or row.kind not in {"opportunity_plan", "public-evidence-pipeline.v1"}
             or run.job_kind != "work_board_proposal" or run.owner_principal_id != row.owner_principal_id
             or run.session_id != row.owner_session_id or run.goal_revision != row.goal_revision
+            or (run.goal_id, run.goal_revision) != (opportunity.goal_id, opportunity.goal_revision)
+            or (parent.goal_id, parent.goal_revision, parent.owner_principal_id, parent.owner_session_id) !=
+               (opportunity.goal_id, opportunity.goal_revision, row.owner_principal_id, row.owner_session_id)
+            or (opportunity.owner_principal_id, opportunity.original_root_id) != (row.owner_principal_id, row.owner_session_id)
+            or run.capability_version != row.capability_version
+            or projection["operator_session_id"] != row.owner_session_id
+            or projection["authority_digest"] != triage._proposal_digest(triage._proposal_job_authority(row))
+            or projection["declared_authority"] != triage._proposal_job_authority(row)
+            or projection["idempotency"]["scope"] != "work-board-proposal"
+            or projection["idempotency"]["key"] != row.proposal_id
             or run.input_digest != triage._proposal_admission_input_digest(row)
             or run.run_fingerprint != row.request_digest):
         raise OpportunityError("proposal_binding_conflict")
@@ -346,7 +367,7 @@ async def generate_plan(*, operator, opportunity_id, request):
         goal, _, _, _, expiry = await assert_opportunity_current(db, opportunity)
         expires_at = min(now() + timedelta(minutes=5), utc(opportunity.expires_at), expiry)
         card_request = WorkBoardTaskCreate(title="Review public opportunity plan", body="Advisory plan; explicit acceptance required; no_learning",
-            goal_id=goal.id, goal_revision=goal.revision, status=WorkBoardStatus.triage,
+            goal_id=goal.id, goal_revision=goal.revision, capability_id="browser.public-task.v1", status=WorkBoardStatus.triage,
             priority=50, idempotency_scope="opportunity-plan", idempotency_key=str(request.idempotency_key))
         safe = await stage_safe_task_text(db, owner, card_request)
         route, version = triage._route_binding()
@@ -428,8 +449,7 @@ async def generate_plan(*, operator, opportunity_id, request):
             result = await triage._claim_proposal_contact(db, proposal_id, now())
             if result.rowcount != 1:
                 raise OpportunityError("proposal_stale")
-        raw = await triage._invoke_governed_proposal(messages=messages, principal=principal, context=context,
-            job_id=job_binding[0], lease_owner=job_binding[1], fencing_token=job_binding[2], timeout_seconds=remaining)
+        raw = await _invoke_plan_completion(owner, proposal_id, messages, context, job_binding)
         model = validate_plan_result(raw, offered_evidence, binding["offered_blueprints"])
         await assert_known_vault_values_absent(model.model_dump(mode="json"))
         for value in (model.title, model.reason):
@@ -449,6 +469,54 @@ async def generate_plan(*, operator, opportunity_id, request):
         proposal = await db.get(WorkBoardProposal, proposal_id)
         return {"opportunity_id": current.id, "opportunity_revision": current.revision,
             "proposal_ref": proposal_ref(proposal), "reason_code": json.loads(proposal.proposal_json).get("blocked_reason")}
+
+
+async def _invoke_plan_completion(owner, proposal_id, messages, context, binding):
+    """Existing governed broker; fresh source proof in its actual callback context."""
+    from src import llm_runtime
+    from src.model_fabric.contracts import bind_final_inference_payload, finalized_openai_compatible_body
+    from src.model_fabric.execution import run_preflighted_adapter
+    from src.model_fabric.hooks import PersistedRouteReceiptHooks
+    from src.model_fabric.gpu_admission import GpuPriority
+    from src.model_fabric.remote_inference_admission import bind_remote_inference_receipt
+    from src.workflows.job_runtime import durable_job_repository
+    profile_id = llm_runtime.resolve_runtime_profile(runtime_path="strategist_agent", profile=None)
+    profile = llm_runtime._provider_profile(profile_id)
+    if profile is None:
+        raise OpportunityError("profile_unavailable")
+    api_key = "" if profile.keyless else profile.api_key
+    target = {"profile": profile_id, "model_id": llm_runtime._resolved_primary_model_id(runtime_path="strategist_agent", profile=profile_id),
+        "api_base": llm_runtime._profile_api_base(profile_id), "api_key": api_key,
+        "source": "primary", "options": llm_runtime._profile_options(profile_id)}
+    body = finalized_openai_compatible_body(model_id=target["model_id"], messages=messages, options=target["options"],
+        temperature=0, max_tokens=1024, stream=False, additional_fields={"response_format": {"type": "json_object"}})
+    if any(key in body for key in ("tools", "tool_choice", "functions", "function_call")):
+        raise OpportunityError("plan_tools_forbidden")
+    context = bind_final_inference_payload(context, body)
+    decision, proofs = await llm_runtime._governed_preflight_target_async(target, context)
+    if decision is None:
+        raise OpportunityError("route_unavailable")
+    hooks = PersistedRouteReceiptHooks(capability_proof_hashes=proofs)
+    async def adapter(candidate, retry):
+        # Queue waiting cannot reuse stale physical proof or another task's context.
+        async with db_engine.get_session() as db:
+            proposal = await db.get(WorkBoardProposal, proposal_id)
+            opportunity = await _owned_opportunity(db, owner, proposal.opportunity_id)
+            fresh = await stage_plan_source(db, opportunity)
+        token = _contact_source.set(fresh)
+        try:
+            result, _ = await llm_runtime._governed_research_chat_completion(
+                decision=decision, context=context, body=body, api_key=api_key)
+            return result.choices[0].message.content
+        finally:
+            _contact_source.reset(token)
+    with bind_remote_inference_receipt(repository=durable_job_repository, job_id=binding[0], owner=binding[1], fencing_token=binding[2]):
+        result = await run_preflighted_adapter(context=context, decision=decision, adapter=adapter,
+            hooks=hooks, admission_priority=GpuPriority.REPORTS_RESEARCH_MEMORY)
+    receipt = await hooks.persistence_result(context.request_id)
+    if receipt is None or not receipt.persisted:
+        raise OpportunityError("route_receipt_persistence_failed")
+    return result
 
 
 async def _persist_plan_output(owner, proposal_id, model, source):
@@ -561,7 +629,7 @@ async def _finalize_plan(owner, proposal_id, *, operator):
             input=fixed_browser_input(source.target), idempotency_key=f"opportunity-plan:{proposal_id}"))
         request = WorkBoardTaskCreate(title=model.title, body=model.reason, capability_id="browser.public-task.v1",
             goal_id=opportunity.goal_id, goal_revision=opportunity.goal_revision, input_artifact_id=artifact.artifact_id,
-            status=WorkBoardStatus.triage, priority=50)
+            status=WorkBoardStatus.todo, priority=50, idempotency_scope="opportunity-plan", idempotency_key=proposal.idempotency_key)
         staged_input = await stage_input_artifact(db, owner, artifact_id=artifact.artifact_id,
             capability_id=request.capability_id, goal_id=request.goal_id, goal_revision=request.goal_revision)
         safe = await stage_safe_task_text(db, owner, request)
@@ -575,7 +643,7 @@ async def _finalize_plan(owner, proposal_id, *, operator):
         await _assert_generated_native_sql(db, proposal, opportunity)
         if proposal.status != "pending_inference" or proposal.proposal_json != original_json or utc(proposal.expires_at) <= now():
             raise OpportunityError("proposal_stale")
-        card = await db.get(WorkBoardTask, proposal.parent_task_id)
+        card = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == proposal.parent_task_id))
         if card.status != WorkBoardStatus.triage or card.task_revision != proposal.parent_revision or card.input_artifact_id:
             raise OpportunityError("proposal_stale")
         resolved = await recheck_staged_input(db, owner, request, witness=staged_input)
@@ -584,6 +652,9 @@ async def _finalize_plan(owner, proposal_id, *, operator):
         card.title, card.body, card.capability_id, card.executor_id = safe.title, safe.body, "browser.public-task.v1", registered_executor_id("browser.public-task.v1")
         card.input_artifact_id, card.typed_input_ref, card.typed_input_digest = artifact.artifact_id, resolved.row.typed_input_ref, resolved.row.payload_sha256
         db.add(card)
+        value["browser_input_binding"] = {"task_id": card.task_id, "capability_id": card.capability_id,
+            "executor_id": card.executor_id, "input_artifact_id": card.input_artifact_id,
+            "typed_input_ref": card.typed_input_ref, "typed_input_digest": card.typed_input_digest}
         value["generation_output_digest"] = original_digest
         value["generation_result_json"] = original_json
         if model.blueprint_id == "public-evidence-report":
@@ -641,22 +712,37 @@ async def accept_browser_plan(*, owner, proposal_id, request, operator):
         opportunity = await _owned_opportunity(db, owner, proposal.opportunity_id)
         await recheck_plan_source(db, opportunity, source_witness=source)
         await _assert_generated_native_sql(db, proposal, opportunity)
+        value = json.loads(proposal.proposal_json)
+        accepted_request = request.model_dump(mode="json")
+        if proposal.status == "accepted":
+            if opportunity.status != "planned" or value.get("accepted_plan_request") != accepted_request:
+                raise OpportunityError("proposal_stale")
+            return _accepted_browser_result(proposal)
+        if request.execution_replacement is not None:
+            raise OpportunityError("proposal_binding_conflict")
         if (proposal.status != "proposed" or proposal.kind != "opportunity_plan"
                 or proposal.revision != request.expected_proposal_revision or proposal.parent_revision != request.expected_parent_revision
                 or utc(proposal.expires_at) <= now() or opportunity.status != "proposed"):
             raise OpportunityError("proposal_stale")
         await _queue_original_parent(db, owner, proposal, request.expected_parent_revision)
         proposal.status, proposal.revision = "accepted", proposal.revision+1
+        value["accepted_plan_request"] = accepted_request
+        value["accepted_plan_request_digest"] = digest(json_bytes(accepted_request))
+        proposal.proposal_json = json_bytes(value).decode()
         db.add(proposal)
         await _mark_planned(db, opportunity, proposal)
-        return {"proposal_id": proposal_id, "proposal_revision": proposal.revision,
-            "status": "accepted", "parent_task_id": proposal.parent_task_id, "accepted_task_ids": [proposal.parent_task_id],
-            "proposal_ref": proposal_ref(proposal)}
+        return _accepted_browser_result(proposal)
+
+
+def _accepted_browser_result(proposal):
+    return {"proposal_id": proposal.proposal_id, "proposal_revision": proposal.revision,
+        "status": "accepted", "parent_task_id": proposal.parent_task_id, "accepted_task_ids": [proposal.parent_task_id],
+        "proposal_ref": proposal_ref(proposal)}
 
 
 async def _queue_original_parent(db, owner, proposal, revision):
     from src.work_board.repository import WorkBoardRepository
-    task = await db.get(WorkBoardTask, proposal.parent_task_id)
+    task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == proposal.parent_task_id))
     changed = await db.execute(update(WorkBoardTask).where(WorkBoardTask.task_id == task.task_id,
         WorkBoardTask.owner_principal_id == owner.principal_id, WorkBoardTask.owner_session_id == owner.session_id,
         WorkBoardTask.status == WorkBoardStatus.triage, WorkBoardTask.task_revision == revision)
@@ -694,12 +780,27 @@ async def accept_report_plan(*, operator, owner, operation_id, request):
         opportunity = await _owned_opportunity(db, owner, proposal.opportunity_id)
         await recheck_plan_source(db, opportunity, source_witness=source)
         await _assert_generated_native_sql(db, proposal, opportunity)
-        if opportunity.status != "proposed":
+        value = json.loads(proposal.proposal_json)
+        accepted_request = request.model_dump(mode="json")
+        replay = proposal.status == "accepted"
+        if replay:
+            if opportunity.status != "planned" or value.get("accepted_plan_request") != accepted_request:
+                raise OpportunityError("proposal_stale")
+        elif opportunity.status != "proposed":
             raise OpportunityError("proposal_stale")
         await pipelines._accept_locked(db, owner, operation_id, request, staged_context=context)
-        await _queue_original_parent(db, owner, proposal, request.expected_parent_revision)
-        await _mark_planned(db, opportunity, proposal)
-        return await pipelines.read(db, owner, operation_id, workspace_identity=context.workspace_identity)
+        if not replay:
+            await _queue_original_parent(db, owner, proposal, request.expected_parent_revision)
+            await _mark_planned(db, opportunity, proposal)
+            value = json.loads(proposal.proposal_json)
+            value["accepted_plan_request"] = accepted_request
+            value["accepted_plan_request_digest"] = digest(json_bytes(accepted_request))
+            proposal.proposal_json = pipelines.canonical_bytes(value).decode()
+            proposal.proposal_digest = pipelines.digest(value)
+            db.add(proposal)
+    async with db_engine.get_session() as db:
+        await pipelines.resume_retired_cleanup(db, owner, operation_id)
+        return await pipelines.read(db, owner, operation_id)
 
 
 async def get_plan_projection(db, proposal):
@@ -735,3 +836,34 @@ async def auto_stage_plan(opportunity_id):
             idempotency_key=uuid.uuid5(uuid.NAMESPACE_URL, f"seraph:auto-plan:{opportunity_id}:{revision}")))
     except (OpportunityError, ValueError):
         return  # Existing opportunity remains successful; plan owner shows its bounded blocker.
+
+
+async def stage_browser_plan_terminal(task_id, attempt_id):
+    """Browser native terminal closure uses staged immutable source + row tokens."""
+    from src.db.models import WorkBoardAttempt
+    async with db_engine.get_session() as db:
+        task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id))
+        if task is None:
+            linked = await db.scalar(select(WorkBoardProposal).where(WorkBoardProposal.parent_task_id == task_id,
+                WorkBoardProposal.opportunity_id.is_not(None)))
+            if linked is None:
+                return None
+            raise OpportunityError("proposal_stale")
+        attempt = await db.get(WorkBoardAttempt, attempt_id)
+        if task is None:
+            raise OpportunityError("proposal_stale")
+        source = await stage_accepted_plan_task(db, task, attempt=attempt)
+        if source is None:
+            return None
+        if attempt is None or attempt.task_id != task_id or attempt.ended_at is not None:
+            raise OpportunityError("proposal_stale")
+        task_tokens, attempt_tokens = json_bytes(task.model_dump(mode="json")), json_bytes(attempt.model_dump(mode="json"))
+    async def recheck(db, run):
+        current_task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id).execution_options(populate_existing=True))
+        current_attempt = await db.get(WorkBoardAttempt, attempt_id, populate_existing=True)
+        if (current_task is None or current_attempt is None
+                or json_bytes(current_task.model_dump(mode="json")) != task_tokens
+                or json_bytes(current_attempt.model_dump(mode="json")) != attempt_tokens):
+            raise OpportunityError("proposal_stale")
+        await recheck_accepted_plan_task(db, current_task, attempt=current_attempt, source_witness=source)
+    return recheck

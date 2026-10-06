@@ -1629,6 +1629,8 @@ class BrowserTaskRunner:
             )
             self._assert_execution_budget(state)
             self._assert_receipt_budget(state)
+            from src.guardian.opportunity_plans import stage_browser_plan_terminal
+            opportunity_terminal_check = await stage_browser_plan_terminal(task_id, attempt_id)
             transition = await self._await_with_deadline(
                 state,
                 self.jobs.transition_job(
@@ -1637,6 +1639,7 @@ class BrowserTaskRunner:
                     owner=state.lease_owner,
                     fencing_token=state.fencing_token,
                     expected_revision=state.revision,
+                    terminal_authority_check=opportunity_terminal_check,
                     result_summary="public browser extraction verified by artifact readback",
                     result={
                         "cleanup_status": cleanup_status,

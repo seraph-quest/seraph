@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { pipelineStorageKey, readPipelineStorage, writePipelineStorage, validatePipeline } from "./artifactPipeline";
+import { PIPELINE_RECOVERY_REASONS } from "./guardianInbox";
 
 const key = pipelineStorageKey("operator:one", "session-one", "task-one");
 const pending = { path: "/api/work-board/tasks/task-one/pipeline-preview", body: {
@@ -30,5 +31,13 @@ describe("exact retained pipeline mutation", () => {
     expect(() => validatePipeline({ operation_id: "operation", revision: 1, parent_revision: 1, plan_version: 1,
       digest: "a".repeat(64), status: "proposed", no_learning: true, source_scope: { start_url: "https://example.com/", allowed_hosts: ["example.com"], approved_url_prefixes: ["https://example.com/"] },
       steps: [{ capability_id: "work.arbitrary-code.v1", task_id: "task-one", task_revision: 1, status: "todo" }] })).toThrow();
+  });
+  it("accepts only the closed read-only recovery codes without requiring opportunity preview on generic GET", () => {
+    const operation = { operation_id: "operation", revision: 1, parent_revision: 1, plan_version: 1,
+      digest: "a".repeat(64), status: "proposed", no_learning: true, source_scope: { start_url: "https://example.com/", allowed_hosts: ["example.com"], approved_url_prefixes: ["https://example.com/"] },
+      steps: [{ slot: "public_source", capability_id: "browser.public-task.v1", task_id: "task-one", task_revision: 1, status: "triage" }] };
+    for (const recovery_reason of PIPELINE_RECOVERY_REASONS) expect(validatePipeline({ ...operation, recovery_reason }).recovery_reason).toBe(recovery_reason);
+    expect(() => validatePipeline({ ...operation, recovery_reason: "private_path:/vault/secret" })).toThrow(/linkage/);
+    expect(() => validatePipeline({ ...operation, opportunity_id: "opportunity-1", opportunity_revision: -1 })).toThrow(/linkage/);
   });
 });

@@ -1147,6 +1147,8 @@ class WorkBoardRepository:
                                   staged_input=None) -> BoardMutation:
         if not isinstance(staged_text, SafeTaskText):
             raise BoardError("pipeline_task_changed", "Staged task text is required", status_code=409)
+        if request.capability_id not in {"browser.public-task.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+            raise BoardError("pipeline_plan_changed", "The staged helper is limited to fixed plan leaves", status_code=409)
         return await self._create_task(db, owner, request, staged_text=staged_text,
                                       staged_input=staged_input)
 

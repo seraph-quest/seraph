@@ -719,6 +719,33 @@ describe("CockpitView", () => {
     expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(true);
   });
 
+  it.each([
+    { mount: "inbox", authenticated: true }, { mount: "advanced", authenticated: true },
+    { mount: "inbox", authenticated: false }, { mount: "advanced", authenticated: false },
+  ])("binds plan generation in the $mount Inbox to current authenticated owner=$authenticated", async ({ mount, authenticated }) => {
+    mockCockpitBaselineFetch(fetchMock, {});
+    const baselineFetch = fetchMock.getMockImplementation();
+    const row = { id: "plan-opportunity", revision: 3, state: "proposed", source_kind: "guardian_opportunity", source_id: "plan-opportunity",
+      opportunity_id: "plan-opportunity", opportunity_revision: 3, opportunity_status: "proposed", title: "Plan current evidence", summary: "Current cited evidence",
+      why_now: "A current source changed", goal_id: "goal-1", goal_revision: 4, watch_id: "watch-1", plan_revision: 2,
+      expires_at: "2030-01-01T00:00:00Z", evidence_status: "verified", evidence_refs: [], allowed_actions: [],
+      plan_offer: { available_blueprint_ids: ["public-browser-check"], unavailable_reason: null, can_generate: true, generation_block_reason: null, proposal_ref: null } };
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/auth/session")) return Promise.resolve(mockResponse(authenticated
+        ? { authenticated: true, principal_id: "operator:plan", session_id: "root-plan", absolute_expires_at: "2099-01-01T00:00:00Z" }
+        : { authenticated: false }));
+      if (url.includes("/api/guardian/inbox")) return Promise.resolve(mockResponse({ items: [row] }));
+      return baselineFetch?.(input, init) ?? Promise.resolve(mockResponse({}));
+    });
+    if (mount === "inbox") { useCockpitLayoutStore.setState({ activeSection: "inbox" }); render(<CockpitView onSend={() => {}} />); }
+    else renderLegacyCockpit(<CockpitView onSend={() => {}} />);
+    const button = await screen.findByRole("button", { name: "Generate plan" });
+    if (authenticated) await waitFor(() => expect(button).toBeEnabled());
+    else expect(button).toBeDisabled();
+    expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(true);
+  });
+
   it("shows the exact local host approval label in the pending approvals pane", async () => {
     mockCockpitBaselineFetch(fetchMock, {});
     const baselineFetch = fetchMock.getMockImplementation();

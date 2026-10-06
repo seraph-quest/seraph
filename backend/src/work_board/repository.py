@@ -1144,18 +1144,21 @@ class WorkBoardRepository:
             publication_authority_check=publication_authority_check)
 
     async def _create_task_locked(self, db, owner, request, *, staged_text: SafeTaskText,
-                                  staged_input=None) -> BoardMutation:
+                                  staged_input=None, publication_witness=None) -> BoardMutation:
         if not isinstance(staged_text, SafeTaskText):
             raise BoardError("pipeline_task_changed", "Staged task text is required", status_code=409)
-        if request.capability_id not in {"browser.public-task.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+        if request.capability_id not in {"browser.public-task.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1", "memory.opportunity-preference.v1"}:
             raise BoardError("pipeline_plan_changed", "The staged helper is limited to fixed plan leaves", status_code=409)
         return await self._create_task(db, owner, request, staged_text=staged_text,
-                                      staged_input=staged_input)
+                                      staged_input=staged_input, publication_witness=publication_witness)
 
     async def _create_task(self, db, owner, request, *, origin_session_id=None,
                            publication_authority_check=None, staged_text=None,
-                           staged_input=None) -> BoardMutation:
+                           staged_input=None, publication_witness=None) -> BoardMutation:
         self._validate_task_fields(request)
+        if request.capability_id == "memory.opportunity-preference.v1":
+            from src.work_board.opportunity_preference_native import recheck_publication
+            await recheck_publication(db, owner, request, witness=publication_witness)
         # Triage rows may remain unbound until Specify/Decompose acceptance,
         # but an executable Todo row must use the lane derived from the live
         # capability registry.  Normalize a missing lane and reject a forged
@@ -1676,6 +1679,8 @@ class WorkBoardRepository:
                 elif field == "typed_input_digest":
                     _validate_digest(value, field=field)
                 safe_changes[field] = value
+        if task.capability_id == "memory.opportunity-preference.v1" or safe_changes.get("capability_id") == "memory.opportunity-preference.v1":
+            raise BoardError("opportunity_recommendation_system_only", "The original recommendation binding is immutable", status_code=409)
         post_capability = safe_changes.get("capability_id", task.capability_id)
         expected_executor = _registered_executor_lane(post_capability)
         explicit_executor = "executor_id" in safe_changes
@@ -1778,6 +1783,8 @@ class WorkBoardRepository:
         return BoardMutation(task, event)
 
     async def require_generic_recovery_allowed(self, db: AsyncSession, task: WorkBoardTask) -> None:
+        if task.capability_id == "memory.opportunity-preference.v1":
+            raise BoardError("opportunity_recommendation_original_attempt_required", "Inspect or cancel the original recommendation", status_code=409)
         if task.capability_id in {"work.research-dossier.v1", "work.json-format.v1", "work.document-compare.v1"} or is_authored(task.capability_id):
             linked = await db.scalar(select(WorkBoardAttempt.attempt_id).where(
                 WorkBoardAttempt.task_id == task.task_id, WorkBoardAttempt.workflow_run_id.is_not(None)).limit(1))
@@ -1803,6 +1810,8 @@ class WorkBoardRepository:
         values: dict[str, Any] = {}
         if request.action.value in {"retry", "unblock"}:
             await self.require_generic_recovery_allowed(db, task)
+        if task.capability_id == "memory.opportunity-preference.v1" and request.action.value not in {"cancel"}:
+            raise BoardError("opportunity_recommendation_system_only", "The original recommendation is server-owned", status_code=409)
         if request.action.value == "promote":
             await self.validate_task_goal(db, owner, task)
             if task.status is WorkBoardStatus.triage:
@@ -2183,7 +2192,7 @@ class WorkBoardRepository:
             )
             or 0
         )
-        max_attempts = 2
+        max_attempts = 1 if task.capability_id == "memory.opportunity-preference.v1" else 2
         if task.capability_id == _BROWSER_CAPABILITY_ID:
             max_attempts, _max_outstanding_jobs = effective_browser_limits(live_goal)
         if attempt_count >= max_attempts:
@@ -2576,8 +2585,16 @@ class WorkBoardRepository:
         """
 
         observed_at = now or _now()
+        preference_stage = None
+        preference_task = await self._find_task(db,task_id)
+        if preference_task is not None and preference_task.capability_id == "memory.opportunity-preference.v1":
+            from src.work_board.opportunity_preference_native import stage_task_authority
+            preference_stage = await stage_task_authority(db,preference_task)
         await _begin_sqlite_immediate(db)
         task = await self._find_task(db, task_id)
+        if preference_stage is not None:
+            from src.work_board.opportunity_preference_native import recheck_task_authority
+            await recheck_task_authority(db,witness=preference_stage,execution=True)
         if task is None:
             raise BoardNotFound(task_id)
         if task.status is not WorkBoardStatus.todo:
@@ -2834,8 +2851,16 @@ class WorkBoardRepository:
                 staged_dependencies = await stage_dependencies(db, preflight_task)
             except (BoardError, OSError, KeyError, TypeError) as exc:
                 dependency_error = exc
+        preference_stage = None
+        preference_task = await self._find_task(db,task_id)
+        if preference_task is not None and preference_task.capability_id == "memory.opportunity-preference.v1":
+            from src.work_board.opportunity_preference_native import stage_task_authority
+            preference_stage = await stage_task_authority(db,preference_task)
         await _begin_sqlite_immediate(db)
         task = await self._find_task(db, task_id)
+        if preference_stage is not None:
+            from src.work_board.opportunity_preference_native import recheck_task_authority
+            await recheck_task_authority(db,witness=preference_stage,execution=True)
         if task is None:
             raise BoardNotFound(task_id)
         await db.refresh(task)
@@ -3021,7 +3046,8 @@ class WorkBoardRepository:
             )
             or 0
         )
-        attempt_limit = browser_max_attempts if task.capability_id == _BROWSER_CAPABILITY_ID else 2
+        attempt_limit = (1 if task.capability_id == "memory.opportunity-preference.v1" else
+            browser_max_attempts if task.capability_id == _BROWSER_CAPABILITY_ID else 2)
         if attempt_count >= attempt_limit:
             safe_reason = await self._safe_text("The board attempt limit has been exhausted")
             await self._cas_task_update(
@@ -3538,6 +3564,11 @@ class WorkBoardRepository:
     async def project_attempt(self,db,task_id,attempt_id,**kwargs):
         status=kwargs.get("status")
         task=await self._find_task(db,task_id)
+        if task is not None and task.capability_id == "memory.opportunity-preference.v1" and status in {WorkBoardStatus.review,WorkBoardStatus.done}:
+            from src.work_board.opportunity_preference_native import stage_output_source
+            attempt = await db.get(WorkBoardAttempt,attempt_id,populate_existing=True)
+            staged = await stage_output_source(db,task,attempt,require_done=False)
+            return await self._project_attempt(db,task_id,attempt_id,_preference_stage=staged,**kwargs)
         if task is not None and task.capability_id=="work.document-compare.v1" and status in {WorkBoardStatus.review,WorkBoardStatus.done}:
             from src.work_board.document_compare_native import stage,read_output
             from src.work_board.dispatcher import _parse_typed_input
@@ -3580,6 +3611,7 @@ class WorkBoardRepository:
         now: datetime | None = None,
         _tool_stage=None,
         _document_stage=None,
+        _preference_stage=None,
     ) -> BoardAttemptProjection:
         """Project a reconciled attempt without overriding runtime authority."""
 
@@ -3638,6 +3670,9 @@ class WorkBoardRepository:
             except AuthFailure:
                 pass
         await _begin_sqlite_immediate(db)
+        if status in {WorkBoardStatus.review,WorkBoardStatus.done} and _preference_stage is not None:
+            from src.work_board.opportunity_preference_native import recheck_projection_source
+            await recheck_projection_source(db,witness=_preference_stage)
         if safe_projection_reason is not None and (staged_vault_binding is None or await vault_binding(db)!=staged_vault_binding):
             safe_projection_reason = "execution_blocked_redaction_state_changed"
         task = await self._find_task(db, task_id)
@@ -4231,7 +4266,7 @@ class WorkBoardRepository:
             )
             or 0
         )
-        attempt_limit = 2
+        attempt_limit = 1 if task.capability_id == "memory.opportunity-preference.v1" else 2
         if task.capability_id == _BROWSER_CAPABILITY_ID:
             live_goal = await db.scalar(
                 select(Goal).where(

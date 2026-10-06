@@ -366,7 +366,13 @@ async def _ensure_legacy_columns(conn) -> None:
     await _add_missing_columns("guardian_interventions", {
         "owner_principal_id": "VARCHAR", "original_root_id": "VARCHAR", "goal_id": "VARCHAR",
         "goal_revision": "INTEGER", "opportunity_id": "VARCHAR", "delivery_status": "VARCHAR",
+        "outcome_binding_json": "VARCHAR", "feedback_revision": "INTEGER NOT NULL DEFAULT 0",
+        "feedback_history_json": "VARCHAR",
     })
+    if await _table_columns("guardian_interventions"):
+        await conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_guardian_interventions_opportunity_feedback "
+            "ON guardian_interventions (intervention_type, owner_principal_id, original_root_id, goal_id, "
+            "goal_revision, feedback_at, id)")
     if await _table_columns("guardian_opportunities"):
         await conn.exec_driver_sql("CREATE UNIQUE INDEX IF NOT EXISTS ux_guardian_opportunity_owner_dedupe "
                                    "ON guardian_opportunities (owner_principal_id, dedupe_key)")

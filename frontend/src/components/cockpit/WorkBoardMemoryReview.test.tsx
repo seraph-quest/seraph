@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { WorkBoardAttempt, WorkBoardTask } from "../../types";
+import type { OpportunityPreferenceProposal, WorkBoardAttempt, WorkBoardTask } from "../../types";
 import { WorkBoardMemoryReview, type TaskMemoryProposal } from "./WorkBoardMemoryReview";
 
 function response(payload: unknown, ok = true, status = ok ? 200 : 500) {
@@ -538,5 +538,96 @@ describe("WorkBoardMemoryReview", () => {
     expect(screen.getByText(/available only to this task’s authenticated owner session/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Review learning" })).not.toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([{ rollback: false, invalid: "" }, { rollback: true, invalid: "" }, { rollback: false, invalid: "bundle" },
+    { rollback: false, invalid: "population" }, { rollback: false, invalid: "owner" }, { rollback: false, invalid: "scope" },
+    { rollback: false, invalid: "expiry" }, { rollback: false, invalid: "authority" }, { rollback: true, invalid: "stale" },
+    { rollback: true, invalid: "signature" }, { rollback: true, invalid: "owner" }, { rollback: false, invalid: "late_owner" }])("requires a separate literal opportunity acknowledgment and exact bundle for rollback=$rollback invalid=$invalid", async ({ rollback, invalid }) => {
+    const review: OpportunityPreferenceProposal = {
+      schema_version: "opportunity_recommendation.v1", proposal_id: "opportunity-memory-1", status: rollback ? "accepted" : "proposed",
+      canonical_status: rollback ? "accepted" : "proposed", rollback_available: rollback,
+      owner_principal_id: "operator:one", owner_session_id: "operator-session-1", source_task_id: "task-1", source_task_revision: 6,
+      source_attempt_id: "attempt-1", source_attempt_fence: 2, workflow_run_id: "run-1", goal_id: "goal-1", goal_revision: 4,
+      preview_text: "Prefer the reviewed public evidence report offer only.", preview_text_digest: "b".repeat(64),
+      accepted_memory_id: rollback ? "memory-1" : null, revision: 2, reason_code: "current", expires_at: "2030-01-01T00:00:00+00:00",
+      scope: { schema_version: "guardian_opportunity_preference.v1", owner_principal_id: "operator:one", owner_session_id: "operator-session-1",
+        goal_id: "goal-1", goal_revision: 4, action: "prefer_blueprint", blueprint_id: "public-evidence-report", watch_id: null, watch_revision: null,
+        source_context_digest: "c".repeat(64), generation_cutoff_at: "2026-10-06T10:00:00Z", window_days: 30, population_count: 2,
+        feedback_event_count: 3, population_members: ["a", "b"].map((suffix) => ({ opportunity_id: `opportunity-${suffix}`, intervention_id: `intervention-${suffix}`,
+          feedback_revision: 1, feedback_event_id: `${suffix.repeat(8)}-${suffix.repeat(4)}-4${suffix.repeat(3)}-8${suffix.repeat(3)}-${suffix.repeat(12)}`,
+          feedback_at: "2026-10-06T10:00:00Z", feedback_binding_digest: suffix.repeat(64) })), population_digest: "d".repeat(64), bundle_digest: "e".repeat(64) },
+      bundle_digest: "e".repeat(64), evidence_population: "current_explicit_opportunity_feedback_only", quality_evidence: "unmeasured",
+      memory_status: rollback ? "accepted" : "no_learning", included_count: 2, feedback_event_count: 3,
+      quality_disclosure: "Opportunity feedback; usefulness improvement is unmeasured.",
+      registered_capabilities: [], allowed_decision_effects: [],
+    };
+    if (invalid === "bundle") review.bundle_digest = "a".repeat(64);
+    if (invalid === "population") review.scope.population_members[1] = review.scope.population_members[0];
+    if (invalid === "owner") { review.owner_session_id = "foreign-root"; review.scope.owner_session_id = "foreign-root"; }
+    if (invalid === "scope") review.scope = { ...review.scope, execution_permission: true } as typeof review.scope;
+    if (invalid === "expiry") review.expires_at = "2020-01-01T00:00:00Z";
+    if (invalid === "authority") review.allowed_decision_effects = ["dispatch"] as unknown as [];
+    if (invalid === "stale" || invalid === "signature") { review.status = "blocked"; review.memory_status = "no_learning"; review.reason_code = "feedback_outcome_stale"; }
+    if (invalid === "signature") { review.rollback_available = false; review.reason_code = "accepted_memory_binding_unverifiable"; }
+    let resolveCanonical: ((value: ReturnType<typeof response>) => void) | undefined;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/opportunity-memory-1/actions")) {
+        review.status = rollback ? "rolled_back" : "accepted"; review.revision += 1;
+        review.memory_status = rollback ? "no_learning" : "accepted"; review.accepted_memory_id = "memory-1";
+        review.canonical_status = review.status; review.rollback_available = !rollback;
+        return Promise.resolve(response(review));
+      }
+      if (url.endsWith("/opportunity-preferences/opportunity-memory-1")) return invalid === "late_owner"
+        ? new Promise<ReturnType<typeof response>>((resolve) => { resolveCanonical = resolve; })
+        : Promise.resolve(response({ ...review, evidence_digest: "f".repeat(64) }));
+      if (url.includes("/task-proposals?")) return Promise.resolve(response({ proposals: [{ schema_version: review.schema_version, proposal_id: review.proposal_id }] }));
+      if (url.includes("/task-decisions?")) return Promise.resolve(response({ receipts: [] }));
+      throw new Error(`Unexpected request ${url} ${init?.method ?? "GET"}`);
+    });
+    const view = render(<WorkBoardMemoryReview task={task({ capability_id: "memory.opportunity-preference.v1" })} ownerPrincipalId="operator:one" ownerSessionId="operator-session-1" />);
+    if (invalid === "late_owner") {
+      await waitFor(() => expect(resolveCanonical).toBeDefined());
+      view.rerender(<WorkBoardMemoryReview task={task({ capability_id: "memory.opportunity-preference.v1" })} ownerPrincipalId="operator:one" ownerSessionId="foreign-root" />);
+      resolveCanonical!(response(review));
+      await screen.findByText(/available only to this task’s authenticated owner session/);
+      expect(screen.queryByLabelText("Exact opportunity preference preview")).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Adopt this opportunity preference" })).not.toBeInTheDocument();
+      expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(true);
+      return;
+    }
+    if (invalid && invalid !== "stale") {
+      if (invalid === "expiry" || invalid === "signature") await screen.findByText("No current adoption actions. Refresh current source, Goal and population before a new review.");
+      else await screen.findByRole("alert");
+      expect(screen.queryByRole("button", { name: "Adopt this opportunity preference" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Edit and accept" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Accept proposal" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Undo opportunity preference" })).not.toBeInTheDocument();
+      expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(true);
+      return;
+    }
+    expect(await screen.findByLabelText("Exact opportunity preference preview")).toHaveTextContent(review.preview_text);
+    if (invalid === "stale") { expect(screen.getByText(/Status blocked/)).toBeInTheDocument(); expect(screen.queryByRole("button", { name: "Adopt this opportunity preference" })).not.toBeInTheDocument(); }
+    expect(screen.queryByRole("button", { name: "Review learning" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Edit and accept" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Edit before acceptance")).not.toBeInTheDocument();
+    expect(screen.queryByText("Future comparable decision")).not.toBeInTheDocument();
+    const action = screen.getByRole("button", { name: rollback ? "Undo opportunity preference" : "Adopt this opportunity preference" });
+    expect(action).toBeDisabled();
+    expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(true);
+    fireEvent.click(screen.getByRole("checkbox", { name: /I acknowledge this changes only reviewed opportunity/ }));
+    if (rollback) {
+      expect(action).toBeDisabled();
+      fireEvent.change(screen.getByLabelText("Opportunity preference reason"), { target: { value: "Restore ordinary offers" } });
+    }
+    fireEvent.click(action);
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1));
+    const posted = fetchMock.mock.calls.find(([, init]) => init?.method === "POST")!;
+    expect(String(posted[0])).toContain("/api/memory/opportunity-preferences/opportunity-memory-1/actions");
+    expect(JSON.parse(posted[1].body)).toEqual({ action: rollback ? "rollback" : "accept", expected_revision: 2,
+      expected_preview_text_digest: "b".repeat(64), expected_bundle_digest: "e".repeat(64), acknowledged_opportunity_preference_only: true,
+      mutation_uuid: expect.stringMatching(/^[a-f0-9-]{36}$/), reason: rollback ? "Restore ordinary offers" : "" });
+    await screen.findByText(new RegExp(`Status ${rollback ? "rolled_back" : "accepted"} · revision 3`));
   });
 });

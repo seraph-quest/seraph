@@ -195,6 +195,7 @@ export interface GuardianInboxMailOrigin {
 
 /** Operator-safe projection of a durable, owner-scoped guardian intervention. */
 export interface GuardianInboxItem {
+  feedback_summary?: OpportunityFeedbackSummary | null;
   plan_offer?: OpportunityPlanOffer | null;
   plan_preview?: OpportunityPlanPreview | null;
   opportunity_id?: string | null;
@@ -240,6 +241,97 @@ export interface GuardianInboxItem {
   mail?: GuardianInboxMailOrigin | null;
   action_history?: GuardianInboxActionHistoryEntry[];
   action_history_truncated?: boolean;
+}
+
+export interface OpportunityFeedbackSummary {
+  intervention_id: string | null;
+  feedback_revision: number;
+  feedback_type: "helpful" | "not_helpful" | null;
+  feedback_at: string | null;
+  feedback_event_id: string | null;
+  feedback_history_digest: string | null;
+  event_count: number;
+  memory_status: "no_learning";
+  reason_code: string | null;
+}
+export interface OpportunityFeedbackRequest {
+  expected_feedback_revision: number;
+  feedback_type: "helpful" | "not_helpful";
+  reason: string;
+  idempotency_key: string;
+}
+export interface OpportunityRecommendationRequest {
+  expected_opportunity_revision: number;
+  expected_feedback_revision: number;
+  idempotency_key: string;
+}
+export interface OpportunityRecommendationReceipt {
+  opportunity_id: string;
+  opportunity_revision: number;
+  feedback_revision: number;
+  task_id: string;
+  task_revision: number;
+  attempt_id: string | null;
+  job_id: string | null;
+  status: "queued" | "running" | "proposed" | "no_learning" | "blocked" | "cancel_requested" | "cancelled" | "unknown";
+  proposal_id: string | null;
+  bundle_digest: string | null;
+  reason_code: string;
+  population_digest: string;
+  idempotent_replay: boolean;
+  memory_status: "no_learning";
+}
+export interface OpportunityPreferenceScope {
+  schema_version: "guardian_opportunity_preference.v1";
+  owner_principal_id: string;
+  owner_session_id: string;
+  goal_id: string;
+  goal_revision: number;
+  action: "prefer_blueprint" | "suppress_watch";
+  blueprint_id: BlueprintId | null;
+  watch_id: string | null;
+  watch_revision: number | null;
+  source_context_digest: string;
+  generation_cutoff_at: string;
+  window_days: 30;
+  population_count: number;
+  feedback_event_count: number;
+  population_members: { opportunity_id: string; intervention_id: string; feedback_revision: number; feedback_event_id: string;
+    feedback_at: string; feedback_binding_digest: string }[];
+  population_digest: string;
+  bundle_digest: string;
+}
+export interface OpportunityPreferenceProposal {
+  schema_version: "opportunity_recommendation.v1";
+  proposal_id: string;
+  status: string;
+  canonical_status: string;
+  rollback_available: boolean;
+  owner_principal_id: string;
+  owner_session_id: string;
+  source_task_id: string;
+  source_task_revision: number;
+  source_attempt_id: string;
+  source_attempt_fence: number;
+  workflow_run_id: string;
+  goal_id: string;
+  goal_revision: number;
+  preview_text: string;
+  preview_text_digest: string;
+  accepted_memory_id: string | null;
+  revision: number;
+  reason_code: string;
+  expires_at: string | null;
+  scope: OpportunityPreferenceScope;
+  bundle_digest: string;
+  evidence_population: "current_explicit_opportunity_feedback_only";
+  quality_evidence: "unmeasured";
+  memory_status: string;
+  included_count: number;
+  feedback_event_count: number;
+  quality_disclosure: string;
+  registered_capabilities: [];
+  allowed_decision_effects: [];
 }
 
 export interface GuardianInboxPage {

@@ -73,6 +73,74 @@ describe("GuardianInboxPanel", () => {
     vi.restoreAllMocks();
   });
 
+  it("records an explicit revision-zero feedback vote, then appends a correction with the current CAS", async () => {
+    const summary = { intervention_id: "intervention-1", feedback_revision: 0, feedback_type: null as string | null, feedback_at: null as string | null,
+      feedback_event_id: null as string | null, feedback_history_digest: null as string | null, event_count: 0, memory_status: "no_learning", reason_code: null };
+    const row = opportunity({ feedback_summary: summary, allowed_actions: [], delivery_status: "acknowledged" });
+    fetchMock.mockImplementation((url, init) => {
+      if (String(url).endsWith("/feedback")) {
+        const body = JSON.parse(init.body);
+        summary.feedback_revision += 1; summary.event_count += 1; summary.feedback_type = body.feedback_type;
+        summary.feedback_at = "2026-10-06T10:00:00+00:00"; summary.feedback_event_id = "11111111-1111-4111-8111-111111111111";
+        summary.feedback_history_digest = "a".repeat(64);
+        return Promise.resolve(response({ opportunity_id: "opportunity-1", ...summary, feedback_event_digest: "b".repeat(64),
+          outcome_binding_digest: "c".repeat(64), idempotent_replay: false }));
+      }
+      const current = { ...row, feedback_summary: { ...summary } };
+      return Promise.resolve(response(String(url).endsWith("/inbox/opportunity-1") ? current : { items: [current] }));
+    });
+    render(<GuardianInboxPanel currentOwnerPrincipalId="operator:one" currentRootId="root-1" pollIntervalMs={0} />);
+    const helpful = await screen.findByRole("button", { name: "Record Helpful" });
+    fireEvent.click(screen.getByRole("button", { name: "View evidence and task" }));
+    await screen.findByRole("button", { name: "Hide evidence" });
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(0);
+    expect(screen.getByText(/No explicit vote/)).toBeInTheDocument();
+    fireEvent.click(helpful);
+    await screen.findByText(/Current feedback: helpful · revision 1/);
+    fireEvent.click(screen.getByRole("button", { name: "Record Not helpful" }));
+    await screen.findByText(/Current feedback: not_helpful · revision 2/);
+    const posts = fetchMock.mock.calls.filter(([, init]) => init?.method === "POST");
+    expect(posts).toHaveLength(2);
+    expect(JSON.parse(posts[0][1].body)).toEqual({ expected_feedback_revision: 0, feedback_type: "helpful", reason: "", idempotency_key: expect.stringMatching(/^[a-f0-9-]{36}$/) });
+    expect(JSON.parse(posts[1][1].body)).toEqual({ expected_feedback_revision: 1, feedback_type: "not_helpful", reason: "", idempotency_key: expect.stringMatching(/^[a-f0-9-]{36}$/) });
+    expect(JSON.parse(posts[0][1].body).idempotency_key).not.toBe(JSON.parse(posts[1][1].body).idempotency_key);
+  });
+
+  it("keeps a revision-zero CPU request through response loss and reload, inspecting only the original UUID", async () => {
+    const row = opportunity({ feedback_summary: { intervention_id: "intervention-1", feedback_revision: 0, feedback_type: null,
+      feedback_at: null, feedback_event_id: null, feedback_history_digest: null, event_count: 0, memory_status: "no_learning", reason_code: null }, allowed_actions: [] });
+    let phase = "queued";
+    fetchMock.mockImplementation((url, init) => {
+      if (String(url).includes("/recommendation")) {
+        if (init?.method === "POST") return Promise.reject(new TypeError("lost response"));
+        return Promise.resolve(response({ opportunity_id: "opportunity-1", opportunity_revision: 3, feedback_revision: 0,
+          task_id: "cpu-task-1", task_revision: 1, attempt_id: phase === "queued" ? null : "cpu-attempt-1", job_id: phase === "queued" ? null : "cpu-job-1",
+          status: phase, proposal_id: null, bundle_digest: phase === "queued" ? null : "b".repeat(64), population_digest: "a".repeat(64),
+          reason_code: phase === "queued" ? "queued" : "insufficient_evidence", idempotent_replay: true, memory_status: "no_learning" }));
+      }
+      return Promise.resolve(response({ items: [row] }));
+    });
+    const view = render(<GuardianInboxPanel currentOwnerPrincipalId="operator:one" currentRootId="root-1" pollIntervalMs={0} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Request opportunity recommendation" }));
+    await screen.findByText("lost response");
+    const first = fetchMock.mock.calls.find(([, init]) => init?.method === "POST")!;
+    const body = JSON.parse(first[1].body);
+    expect(body).toEqual({ expected_opportunity_revision: 3, expected_feedback_revision: 0, idempotency_key: expect.stringMatching(/^[a-f0-9-]{36}$/) });
+    view.unmount();
+    render(<GuardianInboxPanel currentOwnerPrincipalId="operator:one" currentRootId="root-1" pollIntervalMs={0} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Refresh existing recommendation" }));
+    await screen.findByText(/CPU recommendation queued/);
+    expect(screen.queryByText(/insufficient evidence/)).not.toBeInTheDocument();
+    phase = "no_learning";
+    fireEvent.click(screen.getByRole("button", { name: "Refresh existing recommendation" }));
+    await screen.findByText("Actual CPU result: insufficient evidence. No signed memory proposal.");
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+    const inspections = fetchMock.mock.calls.filter(([url]) => String(url).includes("/recommendation?"));
+    expect(inspections).toHaveLength(2);
+    expect(inspections.every(([url]) => String(url).endsWith(`idempotency_key=${body.idempotency_key}`))).toBe(true);
+    expect(screen.queryByRole("button", { name: /Adopt/ })).not.toBeInTheDocument();
+  });
+
   it("renders cited assessment prose literally and shows only exact normalized evidence spans", async () => {
     const row = opportunity({ allowed_actions: [] });
     fetchMock.mockResolvedValueOnce(response({ items: [row] }));

@@ -438,6 +438,12 @@ def _m5_selection_scope(value: Any) -> dict[str, Any] | None:
     malformed canonical projection fails closed.
     """
 
+    if isinstance(value, dict) and value.get("schema_version") == "guardian_opportunity_preference.v1":
+        from src.guardian.opportunity_preferences import OpportunityPreferenceScope
+        try:
+            return OpportunityPreferenceScope.model_validate(value).model_dump(mode="json")
+        except (TypeError, ValueError):
+            return None
     if isinstance(value, dict) and value.get("schema_version") == "procedure_preference.v1":
         # This fixed schema authenticates an exact reviewed version and its
         # COMPLETE outcome set. Extra JSON fields never silently become a
@@ -1051,24 +1057,24 @@ def _m5_receipt_integrity_payload(value: Any) -> dict[str, Any]:
     return payload
 
 
-def _m5_receipt_integrity_mac(value: Any) -> str:
+def _m5_receipt_integrity_mac(value: Any, *, _signing_key: bytes | None = None) -> str:
     return _mac(
         {
             "version": "work-board-m5-receipt-integrity.v1",
             "receipt": _m5_receipt_integrity_payload(value),
         },
-        key=_effect_mac_key(),
+        key=_effect_mac_key() if _signing_key is None else _signing_key,
     )
 
 
-def _m5_receipt_integrity_matches(value: Any) -> bool:
+def _m5_receipt_integrity_matches(value: Any, *, _signing_key: bytes | None = None) -> bool:
     """Verify the complete receipt record with the configured server key."""
 
     supplied = _m5_receipt_field(value, "receipt_integrity_mac")
     if not isinstance(supplied, str) or not _M5_RECOVERY_DIGEST.fullmatch(supplied):
         return False
     try:
-        expected = _m5_receipt_integrity_mac(value)
+        expected = _m5_receipt_integrity_mac(value, _signing_key=_signing_key)
     except (CapabilityJournalError, TypeError, ValueError):
         return False
     return hmac.compare_digest(supplied, expected)
@@ -1390,6 +1396,14 @@ def _m5_proposal_archive_payload(proposal: MemoryProposal) -> dict[str, Any]:
         reject_unknown_keys=False,
     )
     scope = json.loads(scope_json) if scope_json else None
+    if proposal.schema_version == "opportunity_recommendation.v1":
+        try:
+            candidate_scope = json.loads(proposal.memory_scope_json or "null")
+        except (TypeError, ValueError):
+            candidate_scope = None
+        scope = _m5_selection_scope(candidate_scope)
+        if scope is None or scope.get("schema_version") != "guardian_opportunity_preference.v1":
+            scope = None
 
     return {
         "proposal_id": proposal.proposal_id,
@@ -1541,8 +1555,11 @@ def _m5_normalize_proposal_record(
     )
     if recovered_from_proposal_id == proposal_id:
         raise ValueError(f"memory restore M5 proposal {proposal_id} cannot recover from itself")
-    if record.get("schema_version") != "memory_proposal.v1":
+    opportunity_schema = record.get("schema_version") == "opportunity_recommendation.v1"
+    if record.get("schema_version") != "memory_proposal.v1" and not opportunity_schema:
         raise ValueError(f"memory restore M5 proposal {proposal_id} has an invalid schema version")
+    if not opportunity_schema and isinstance(record.get("memory_scope"), dict) and record["memory_scope"].get("schema_version") == "guardian_opportunity_preference.v1":
+        raise ValueError("specialized opportunity scope cannot be restored as generic M5")
     _m5_normalize_owner(record.get("owner_principal_id"), field_name="proposal owner principal", expected=owner_principal_id)
     _m5_normalize_owner(record.get("owner_session_id"), field_name="proposal owner session", expected=owner_session_id)
     source_task_id = _m5_recovery_id(record.get("source_task_id"), field_name="source_task_id", required=True)
@@ -1640,6 +1657,14 @@ def _m5_normalize_proposal_record(
             decision_effect is MemoryProposalDecisionEffect.require_operator_confirmation
         ),
     )
+    if opportunity_schema:
+        scope = _m5_selection_scope(record.get("memory_scope"))
+        if (scope is None or scope.get("schema_version") != "guardian_opportunity_preference.v1"
+            or scope["owner_principal_id"] != owner_principal_id or scope["owner_session_id"] != owner_session_id
+            or capability_id != "memory.opportunity-preference.v1" or record.get("corrects_memory_id")
+            or record.get("recovered_from_proposal_id")):
+            raise ValueError("memory restore opportunity proposal has invalid schema/scope pairing")
+        scope_json, scope_valid = json.dumps(scope, sort_keys=True, separators=(",", ":")), True
     if scope_valid:
         scope = json.loads(scope_json or "{}")
         if (
@@ -1667,7 +1692,7 @@ def _m5_normalize_proposal_record(
     return {
         "proposal_id": proposal_id,
         "recovered_from_proposal_id": recovered_from_proposal_id,
-        "schema_version": "memory_proposal.v1",
+        "schema_version": "opportunity_recommendation.v1" if opportunity_schema else "memory_proposal.v1",
         "owner_principal_id": owner_principal_id,
         "owner_session_id": owner_session_id,
         "source_task_id": source_task_id,
@@ -3679,6 +3704,11 @@ class MemoryRepository:
                         MemoryProposal.source_context_digest == source_context_digest,
                         MemoryProposal.status == MemoryProposalStatus.accepted,
                         MemoryProposal.schema_version != "procedure_recommendation.v1",
+                        MemoryProposal.schema_version != "opportunity_recommendation.v1",
+                        or_(case((func.json_valid(MemoryProposal.memory_scope_json) == 1,
+                                func.json_extract(MemoryProposal.memory_scope_json, "$.schema_version")), else_=None).is_(None),
+                            case((func.json_valid(MemoryProposal.memory_scope_json) == 1,
+                                func.json_extract(MemoryProposal.memory_scope_json, "$.schema_version")), else_=None) != "guardian_opportunity_preference.v1"),
                     )
                     .order_by(MemoryProposal.proposal_id.asc())
                     .limit(max(1, min(int(limit), 3)))

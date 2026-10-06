@@ -490,7 +490,18 @@ async def _validate_request(
     request: WorkBoardInputArtifactCreate,
     *,
     allow_scheduler: bool = False,
+    publication_population=None,
 ) -> tuple[dict[str, Any], str, str]:
+    if request.capability_id == "memory.opportunity-preference.v1":
+        from src.guardian.opportunity_preferences import PopulationWitness, recheck_population
+        if (not isinstance(publication_population, PopulationWitness)
+            or publication_population.owner_principal_id != owner.principal_id
+            or publication_population.original_root_id != owner.session_id
+            or request.goal_id != publication_population.goal_id
+            or request.goal_revision != publication_population.goal_revision
+            or request.input != publication_population.cpu_input().model_dump(mode="json")):
+            raise BoardError("opportunity_recommendation_system_only", "Use the authenticated recommendation request", status_code=409)
+        await recheck_population(db, witness=publication_population)
     try:
         inputs = validate_capability_input(
             request.capability_id,
@@ -792,6 +803,7 @@ async def prepare_input_artifact(
     now: datetime | None = None,
     allow_scheduler: bool = False,
     retention_deadline: datetime | None = None,
+    publication_population=None,
 ) -> InputArtifactMetadata:
     """Reserve, write, reread, and verify one deterministic input artifact.
 
@@ -808,6 +820,7 @@ async def prepare_input_artifact(
         owner,
         request,
         allow_scheduler=allow_scheduler,
+        publication_population=publication_population,
     )
     if retention_deadline is not None:
         schedule_invocation = inputs.get("invocation_uuid") if isinstance(inputs, Mapping) else None

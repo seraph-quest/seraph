@@ -2472,6 +2472,8 @@ class QueuedInsight(SQLModel, table=True):
 
 class GuardianIntervention(SQLModel, table=True):
     __tablename__ = "guardian_interventions"
+    __table_args__ = (Index("ix_guardian_interventions_opportunity_feedback", "intervention_type",
+        "owner_principal_id", "original_root_id", "goal_id", "goal_revision", "feedback_at", "id"),)
 
     id: str = Field(default_factory=_uuid, primary_key=True)
     session_id: Optional[str] = Field(default=None, foreign_key="sessions.id", index=True)
@@ -2503,6 +2505,9 @@ class GuardianIntervention(SQLModel, table=True):
     goal_revision: Optional[int] = Field(default=None)
     opportunity_id: Optional[str] = Field(default=None)
     delivery_status: Optional[str] = Field(default=None)
+    outcome_binding_json: Optional[str] = Field(default=None)
+    feedback_revision: int = Field(default=0)
+    feedback_history_json: Optional[str] = Field(default=None)
 
 
 class GuardianOpportunity(SQLModel, table=True):

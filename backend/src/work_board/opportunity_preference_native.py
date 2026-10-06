@@ -362,7 +362,7 @@ async def request_opportunity_recommendation(*, operator, opportunity_id, reques
             raise BoardError("opportunity_not_proposed", "The opportunity is unavailable", status_code=404)
         population = await stage_population(db,owner,anchor=anchor,request=request,cutoff_at=cutoff,operator=operator)
         cpu_input = population.cpu_input()
-        artifact = await prepare_input_artifact(db,owner,WorkBoardInputArtifactCreate(capability_id=CAPABILITY,
+        artifact = await prepare_input_artifact(db,owner,WorkBoardInputArtifactCreate(schema_version=1,capability_id=CAPABILITY,
             goal_id=population.goal_id,goal_revision=population.goal_revision,input=cpu_input.model_dump(mode="json"),
             idempotency_key=f"opportunity-recommendation:{opportunity_id}:{request.idempotency_key}"),publication_population=population)
     async with db_engine.get_session() as db:

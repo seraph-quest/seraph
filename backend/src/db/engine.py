@@ -368,6 +368,8 @@ async def _ensure_legacy_columns(conn) -> None:
         "goal_revision": "INTEGER", "opportunity_id": "VARCHAR", "delivery_status": "VARCHAR",
         "outcome_binding_json": "VARCHAR", "feedback_revision": "INTEGER NOT NULL DEFAULT 0",
         "feedback_history_json": "VARCHAR",
+        # Older intervention tables predate this existing nullable projection.
+        "feedback_at": "DATETIME",
     })
     if await _table_columns("guardian_interventions"):
         await conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_guardian_interventions_opportunity_feedback "

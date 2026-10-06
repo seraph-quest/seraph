@@ -169,17 +169,20 @@ def test_empty_feedback_reason_and_revision_zero_recommendation_are_valid():
     assert OpportunityRecommendationRequest(expected_opportunity_revision=1,expected_feedback_revision=0,idempotency_key=uuid4()).expected_feedback_revision==0
 
 
-async def test_populated_previous_schema_migration_repeat_is_additive(tmp_path):
+@pytest.mark.parametrize('has_feedback_at',[True,False])
+async def test_populated_previous_schema_migration_repeat_is_additive(tmp_path,has_feedback_at):
     from src.db.engine import _ensure_legacy_columns
     engine=create_async_engine(f'sqlite+aiosqlite:///{tmp_path}/previous.db')
     try:
         async with engine.begin() as db:
-            await db.exec_driver_sql('CREATE TABLE guardian_interventions (id VARCHAR PRIMARY KEY, intervention_type VARCHAR, owner_principal_id VARCHAR, original_root_id VARCHAR, goal_id VARCHAR, goal_revision INTEGER, feedback_at DATETIME)')
+            columns='id VARCHAR PRIMARY KEY, intervention_type VARCHAR, owner_principal_id VARCHAR, original_root_id VARCHAR, goal_id VARCHAR, goal_revision INTEGER'
+            if has_feedback_at: columns+=', feedback_at DATETIME'
+            await db.exec_driver_sql('CREATE TABLE guardian_interventions ('+columns+')')
             await db.exec_driver_sql("INSERT INTO guardian_interventions (id,intervention_type) VALUES ('legacy','advisory')")
             await _ensure_legacy_columns(db)
             await _ensure_legacy_columns(db)
-            row=(await db.exec_driver_sql("SELECT id,intervention_type,feedback_revision,feedback_history_json,outcome_binding_json,opportunity_id FROM guardian_interventions")).one()
-            assert tuple(row)==('legacy','advisory',0,None,None,None)
+            row=(await db.exec_driver_sql("SELECT id,intervention_type,feedback_revision,feedback_history_json,outcome_binding_json,opportunity_id,feedback_at FROM guardian_interventions")).one()
+            assert tuple(row)==('legacy','advisory',0,None,None,None,None)
             assert [r[2] for r in (await db.exec_driver_sql('PRAGMA index_info(ix_guardian_interventions_opportunity_feedback)')).all()]==[
                 'intervention_type','owner_principal_id','original_root_id','goal_id','goal_revision','feedback_at','id']
     finally:
@@ -387,3 +390,25 @@ async def test_feedback_report_uses_canonical_slot_refs_and_checks_actual_tasks(
             with pytest.raises(OpportunityError,match='feedback_outcome_stale'):
                 await feedback._feedback_lineage(db,owner,opportunity,proposal,
                     source=SimpleNamespace(workspace_identity=b'workspace'))
+
+
+@pytest.mark.parametrize('malformed_id',[[],{},1,True,None])
+async def test_persisted_nonstring_event_uuid_is_bounded_and_never_mutates_feedback(async_db,monkeypatch,malformed_id):
+    operator=await setup_feedback(async_db,monkeypatch)
+    await feedback.record_opportunity_feedback(operator=operator,opportunity_id='opportunity',request=request())
+    async with async_db() as db:
+        row=await db.get(GuardianIntervention,'intervention')
+        events=json.loads(row.feedback_history_json);events[0]['event_id']=malformed_id
+        row.feedback_history_json=json.dumps(events)
+        await db.commit()
+        corrupted_history=row.feedback_history_json
+        with pytest.raises(OpportunityError,match='learning_population_incomplete'):
+            feedback.parse_opportunity_feedback_history(row)
+    with pytest.raises(OpportunityError,match='learning_population_incomplete'):
+        await feedback.record_opportunity_feedback(operator=operator,opportunity_id='opportunity',request=request(revision=1))
+    async with async_db() as db:
+        row=await db.get(GuardianIntervention,'intervention')
+        assert row.feedback_revision==1 and row.feedback_history_json==corrupted_history
+        assert await db.scalar(select(func.count()).select_from(AuditEvent))==1
+        summary=await feedback.opportunity_feedback_summary(db,await db.get(GuardianOpportunity,'opportunity'))
+        assert summary['reason_code']=='learning_population_incomplete'

@@ -29,6 +29,26 @@ def test_actual_public_recommendation_dto_preserves_canonical_uuid_and_zero_feed
         _recommendation_request({**wire,"extra":"unapproved"})
 
 
+def test_recommendation_input_has_required_numeric_outer_and_typed_inner_schema():
+    from pydantic import ValidationError
+    from src.guardian.opportunity_preferences import OpportunityPreferenceInput
+    from src.work_board.contracts import WorkBoardInputArtifactCreate
+    cpu_input = OpportunityPreferenceInput(schema_version="seraph.opportunity.preference-input.v1",
+        opportunity_id="original-opportunity", expected_opportunity_revision=1, expected_feedback_revision=0,
+        request_uuid="12345678-1234-4234-9234-123456789abc", generation_cutoff_at="2026-10-06T00:00:00+00:00",
+        population_digest="a"*64)
+    fields = dict(capability_id=CAPABILITY, goal_id="original-goal", goal_revision=1,
+        input=cpu_input.model_dump(mode="json"), idempotency_key="original-publication")
+    with pytest.raises(ValidationError):
+        WorkBoardInputArtifactCreate(**fields)
+    envelope = WorkBoardInputArtifactCreate(schema_version=1, **fields)
+    assert envelope.schema_version == 1
+    assert OpportunityPreferenceInput.model_validate(envelope.input) == cpu_input
+    assert envelope.input["expected_feedback_revision"] == 0
+    with pytest.raises(ValidationError):
+        WorkBoardInputArtifactCreate(schema_version=cpu_input.schema_version, **fields)
+
+
 def _sealed_metadata():
     from datetime import datetime, timedelta, timezone
     from src.work_board.opportunity_preference_native import _authorization_mac

@@ -1168,6 +1168,7 @@ def parse_opportunity_feedback_history(intervention) -> FeedbackHistoryWitness:
                 raise ValueError("closed history")
             if (type(event['revision']) is not int or event['revision'] != revision
                     or type(event['expected_feedback_revision']) is not int or event['expected_feedback_revision'] != revision-1
+                    or not isinstance(event['event_id'], str)
                     or str(UUID(event['event_id'])) != event['event_id'] or event['event_id'] in seen
                     or event['feedback_type'] not in {'helpful', 'not_helpful'}
                     or not isinstance(event['reason'], str) or len(event['reason']) > 500

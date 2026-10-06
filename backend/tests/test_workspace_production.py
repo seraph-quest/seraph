@@ -463,8 +463,12 @@ def test_managed_backup_rejects_missing_required_canonical_path(tmp_path):
     assert not workspace_backup_dir_for(root).exists()
 
 
-def test_rollback_reconciliation_preserves_existing_safety_row(tmp_path):
+def test_rollback_reconciliation_preserves_existing_safety_row(tmp_path, monkeypatch):
+    from src.workspace.production import prepare_lifecycle_directory
+
     root = _workspace(tmp_path)
+    monkeypatch.setenv("SERAPH_WORKSPACE_LIFECYCLE_PATH", str(tmp_path / "deployment-lifecycle"))
+    prepare_lifecycle_directory(ProductionWorkspace(host_root=root))
     target = tmp_path / "rollback-target"
     target.mkdir()
     with sqlite3.connect(root / "seraph.db") as database:
@@ -483,7 +487,11 @@ def test_rollback_reconciliation_preserves_existing_safety_row(tmp_path):
             """
         )
     registry = canonical_workspace_registry(root)
-    workspace = resolve_production_workspace(_env(root), base_dir=tmp_path)
+    workspace = resolve_production_workspace(
+        {**_env(root), "SERAPH_WORKSPACE_LIFECYCLE_PATH": str(tmp_path / "deployment-lifecycle")},
+        base_dir=tmp_path,
+    )
+    assert read_lifecycle_receipt(workspace)["deployment_binding"]["root_path_digest"] == workspace.identity_digest
     with maintenance_fence(workspace):
         receipt = reconcile_production_rollback(
             active=root,

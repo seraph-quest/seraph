@@ -165,7 +165,7 @@ export function DocumentComparisonPanel({ ownerPrincipalId, ownerSessionId, task
           setDerivedCsv({ scope, text: value.text });
         }).catch(failure => {if(version===generation.current)outputFailure(failure);}).finally(() => {if(version===generation.current)setBusy(false);});
       }}>Prepare verified derived CSV</button>
-      {key && csvUrl?.scope === scope && <a href={csvUrl.url} download="invoice-comparison.csv">Save verified derived CSV</a>}
+      {key && canReadOutput && derivedCsv?.scope === scope && csvUrl?.scope === scope && <a href={csvUrl.url} download="invoice-comparison.csv">Save verified derived CSV</a>}
       {key && output?.scope === scope && <pre className="whitespace-pre-wrap break-words text-xs" aria-label="Verified cited document report">{output.text}</pre>}
     </>}
   </section>;

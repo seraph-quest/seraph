@@ -583,7 +583,7 @@ describe("WorkBoardPanel M6 governed procedure controls", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Evidence is unavailable or changed. Reload the task and review its source permissions.");
     expect(invocationBodies).toHaveLength(1);
     const firstRequest = invocationBodies[0];
-    expect(screen.getByRole("button", { name: "Retry invocation and reconcile" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Retry invocation and reconcile" })).toBeInTheDocument();
 
     firstMount.unmount();
     render(<WorkBoardPanel {...owner} />);

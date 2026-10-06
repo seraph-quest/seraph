@@ -578,7 +578,7 @@ describe("WorkBoardPanel M4 review and triage controls", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Open task Unknown effect" }));
     expect(await screen.findByText(/External effect or cost is unresolved/i)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Retry/ })).not.toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Safe parent handoffs" })).toHaveTextContent("Safe structured parent result");
+    expect(await screen.findByRole("region", { name: "Safe parent handoffs" })).toHaveTextContent("Safe structured parent result");
     expect(screen.getByRole("region", { name: "Safe parent handoffs" })).toHaveTextContent("source attempt attempt-parent-1");
     expect(within(screen.getByRole("region", { name: "Safe parent handoffs" })).getByText(/do not grant authority/i)).toBeInTheDocument();
     expect(await screen.findByRole("button", { name: "Inspect parent handoff evidence parent-artifact-1" })).toBeInTheDocument();

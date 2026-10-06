@@ -1387,10 +1387,10 @@ function OpportunityFeedbackReview({ item, ownerPrincipalId, rootId, enabled, on
       onClick={() => void act("recommendation")}>Request opportunity recommendation</button>
     {request ? <button type="button" disabled={!enabled || busy} onClick={() => void act("inspect")}>Refresh existing recommendation</button> : null}
     {receipt ? <>
-      <p>CPU recommendation {receipt.status} · {receipt.reason_code} · memory not adopted</p>
+      <p>CPU recommendation {receipt.status} · {receipt.reason_code} · CPU stage does not adopt memory</p>
       <p>Task {receipt.task_id} revision {receipt.task_revision} · attempt {receipt.attempt_id ?? "not created"} · native job {receipt.job_id ?? "not created"}</p>
       {receipt.status === "no_learning" ? <p>Actual CPU result: insufficient evidence. No signed memory proposal.</p> : null}
-      {receipt.status === "proposed" ? <p>A signed proposal awaits a separate unchecked acknowledgment and adoption in Work.</p> : null}
+      {receipt.status === "proposed" ? <p>A signed proposal exists; inspect its current review and adoption state in Work.</p> : null}
       {onOpenTask ? <button type="button" onClick={() => onOpenTask(receipt.task_id, item)}>Review recommendation task in Work</button> : null}
     </> : null}
     {error ? <p role="alert">{error}</p> : null}

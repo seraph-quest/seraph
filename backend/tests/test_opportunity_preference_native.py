@@ -11,6 +11,24 @@ from src.work_board.triage import _validate_proposed_typed_inputs
 OWNER = WorkBoardOwner(principal_id="operator:test-bypass", session_id="test-auth-bypass")
 
 
+def test_actual_public_recommendation_dto_preserves_canonical_uuid_and_zero_feedback():
+    from uuid import UUID
+    from pydantic import ValidationError
+    from src.guardian.opportunity_contracts import OpportunityRecommendationRequest as PublicRequest
+    from src.work_board.opportunity_preference_native import _recommendation_request, digest
+    wire = {"expected_opportunity_revision":1, "expected_feedback_revision":0,
+        "idempotency_key":"12345678-1234-4234-9234-123456789abc"}
+    public = PublicRequest.model_validate(wire)
+    assert isinstance(public.idempotency_key,UUID)
+    internal = _recommendation_request(public)
+    assert internal.model_dump(mode="json") == wire
+    assert digest(internal.model_dump(mode="json")) == digest(wire)
+    with pytest.raises(ValidationError):
+        _recommendation_request({**wire,"idempotency_key":public.idempotency_key})
+    with pytest.raises(ValidationError):
+        _recommendation_request({**wire,"extra":"unapproved"})
+
+
 def _sealed_metadata():
     from datetime import datetime, timedelta, timezone
     from src.work_board.opportunity_preference_native import _authorization_mac

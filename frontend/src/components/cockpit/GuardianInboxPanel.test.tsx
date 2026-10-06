@@ -106,7 +106,7 @@ describe("GuardianInboxPanel", () => {
     expect(JSON.parse(posts[0][1].body).idempotency_key).not.toBe(JSON.parse(posts[1][1].body).idempotency_key);
   });
 
-  it("keeps a revision-zero CPU request through response loss and reload, inspecting only the original UUID", async () => {
+  it.each(["no_learning", "proposed"])("keeps a revision-zero CPU request through response loss and reload, inspecting only the original UUID through terminal %s", async (terminal) => {
     const row = opportunity({ feedback_summary: { intervention_id: "intervention-1", feedback_revision: 0, feedback_type: null,
       feedback_at: null, feedback_event_id: null, feedback_history_digest: null, event_count: 0, memory_status: "no_learning", reason_code: null }, allowed_actions: [] });
     let phase = "queued";
@@ -115,8 +115,9 @@ describe("GuardianInboxPanel", () => {
         if (init?.method === "POST") return Promise.reject(new TypeError("lost response"));
         return Promise.resolve(response({ opportunity_id: "opportunity-1", opportunity_revision: 3, feedback_revision: 0,
           task_id: "cpu-task-1", task_revision: 1, attempt_id: phase === "queued" ? null : "cpu-attempt-1", job_id: phase === "queued" ? null : "cpu-job-1",
-          status: phase, proposal_id: null, bundle_digest: phase === "queued" ? null : "b".repeat(64), population_digest: "a".repeat(64),
-          reason_code: phase === "queued" ? "queued" : "insufficient_evidence", idempotent_replay: true, memory_status: "no_learning" }));
+          status: phase, proposal_id: phase === "proposed" ? "signed-proposal-1" : null, bundle_digest: phase === "queued" ? null : "b".repeat(64), population_digest: "a".repeat(64),
+          reason_code: phase === "queued" ? "opportunity_recommendation_queued" : phase === "proposed" ? "opportunity_preference_proposed" : "opportunity_feedback_insufficient_or_conflicting",
+          idempotent_replay: true, memory_status: "no_learning" }));
       }
       return Promise.resolve(response({ items: [row] }));
     });
@@ -130,10 +131,13 @@ describe("GuardianInboxPanel", () => {
     render(<GuardianInboxPanel currentOwnerPrincipalId="operator:one" currentRootId="root-1" pollIntervalMs={0} />);
     fireEvent.click(await screen.findByRole("button", { name: "Refresh existing recommendation" }));
     await screen.findByText(/CPU recommendation queued/);
+    expect(screen.getByText(/CPU stage does not adopt memory/)).toBeInTheDocument();
     expect(screen.queryByText(/insufficient evidence/)).not.toBeInTheDocument();
-    phase = "no_learning";
+    phase = terminal;
     fireEvent.click(screen.getByRole("button", { name: "Refresh existing recommendation" }));
-    await screen.findByText("Actual CPU result: insufficient evidence. No signed memory proposal.");
+    await screen.findByText(terminal === "no_learning" ? "Actual CPU result: insufficient evidence. No signed memory proposal."
+      : "A signed proposal exists; inspect its current review and adoption state in Work.");
+    expect(screen.queryByText(/memory not adopted|proposal awaits/)).not.toBeInTheDocument();
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
     const inspections = fetchMock.mock.calls.filter(([url]) => String(url).includes("/recommendation?"));
     expect(inspections).toHaveLength(2);

@@ -323,6 +323,12 @@ async def recheck_task_authority(db, *, witness, execution=False):
     await recheck_population(db,witness=witness.population)
     return task,attempt
 
+def _recommendation_request(request):
+    from src.guardian.opportunity_preferences import OpportunityRecommendationRequest
+    return OpportunityRecommendationRequest.model_validate(
+        request if isinstance(request,dict) else request.model_dump(mode="json"))
+
+
 async def request_opportunity_recommendation(*, operator, opportunity_id, request):
     from src.guardian.opportunity_preferences import OpportunityRecommendationRequest, stage_population
     from src.memory.procedure_recommendations import assert_current_root
@@ -331,7 +337,7 @@ async def request_opportunity_recommendation(*, operator, opportunity_id, reques
     from src.work_board.contracts import WorkBoardTaskCreate, WorkBoardInputArtifactCreate
     from src.work_board.input_artifacts import prepare_input_artifact, stage_input_artifact
     from src.work_board.dispatcher import registered_executor_id
-    request = OpportunityRecommendationRequest.model_validate(request if isinstance(request,dict) else request.model_dump())
+    request = _recommendation_request(request)
     owner = WorkBoardOwner(principal_id=operator.principal.principal_id,session_id=operator.session_id)
     async with db_engine.get_session() as db:
         await assert_current_root(db,operator)

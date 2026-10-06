@@ -50,6 +50,7 @@ from src.work_board.dispatcher import WorkBoardDispatcher, registered_executor_i
 from src.work_board.input_artifacts import prepare_input_artifact
 from src.work_board.repository import WorkBoardRepository
 from src.workflows.job_runtime import DurableJobRepository
+from tests.test_inference_accounting import accounting_db
 
 
 def _provider_event() -> dict[str, object]:
@@ -95,6 +96,11 @@ async def _seed_vertical(async_db, monkeypatch, tmp_path: Path, *, mode: str) ->
             status="ready",
         )
     )
+    await DurableJobRepository().configure_inference_accounting(25_000)
+    from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
+    broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
+    monkeypatch.setattr("src.llm_runtime.gpu_admission_broker", broker)
+    monkeypatch.setattr("src.model_fabric.execution.gpu_admission_broker", broker)
     from src.llm_runtime import _provider_profile
 
     proof_profile = _provider_profile("openrouter")
@@ -382,10 +388,12 @@ async def _finish_background_model(ctx: SimpleNamespace) -> None:
 
 @pytest.mark.asyncio
 async def test_calendar_real_vertical_revoked_consent_blocks_second_read_without_done(
-    async_db,
+    accounting_db,
     monkeypatch,
     tmp_path,
 ):
+    tmp_path, _engine, factory = accounting_db
+    async_db = factory.accounting_sessions
     ctx = await _seed_vertical(async_db, monkeypatch, tmp_path, mode="revoke")
     try:
         result = await ctx.dispatcher._admit_execute_direct(
@@ -431,10 +439,12 @@ async def test_calendar_real_vertical_revoked_consent_blocks_second_read_without
 
 @pytest.mark.asyncio
 async def test_calendar_real_vertical_tampered_artifact_cannot_terminally_succeed(
-    async_db,
+    accounting_db,
     monkeypatch,
     tmp_path,
 ):
+    tmp_path, _engine, factory = accounting_db
+    async_db = factory.accounting_sessions
     ctx = await _seed_vertical(async_db, monkeypatch, tmp_path, mode="tamper")
     original_transition = ctx.jobs.transition_job
 
@@ -477,10 +487,12 @@ async def test_calendar_real_vertical_tampered_artifact_cannot_terminally_succee
 
 @pytest.mark.asyncio
 async def test_calendar_real_vertical_model_timeout_keeps_root_liability_without_retry(
-    async_db,
+    accounting_db,
     monkeypatch,
     tmp_path,
 ):
+    tmp_path, _engine, factory = accounting_db
+    async_db = factory.accounting_sessions
     ctx = await _seed_vertical(async_db, monkeypatch, tmp_path, mode="timeout")
     try:
         result = await ctx.dispatcher._admit_execute_direct(

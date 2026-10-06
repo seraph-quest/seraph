@@ -31,7 +31,7 @@ from src.model_fabric.remote_inference_admission import RemoteInferenceAdmission
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 
 
-OPERATOR_OWNER = "operator:single"
+OPERATOR_OWNER = "operator:root:audio-worker-test"
 OPERATOR_SESSION = "operator-session-test"
 CAPTURE_REF = "audio-consent:capture:11111111111111111111111111111111"
 MODEL_REF = "audio-consent:cloud_upload:22222222222222222222222222222222"
@@ -45,6 +45,7 @@ async def audio_worker_authority(async_db):
         db.add(
             OperatorSession(
                 id=OPERATOR_SESSION,
+                principal_id=OPERATOR_OWNER,
                 token_hash="audio-worker-test-token-hash",
                 idle_expires_at=now + timedelta(hours=1),
                 absolute_expires_at=now + timedelta(hours=1),

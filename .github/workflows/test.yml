@@ -55,6 +55,9 @@ jobs:
       - name: Install dependencies
         run: uv sync --group dev
 
+      - name: Install Chromium and system dependencies
+        run: uv run playwright install --with-deps chromium
+
       - name: List backend shard
         run: uv run python scripts/backend_test_shards.py --shard-count 10 --shard-index ${{ matrix.shard }}
 

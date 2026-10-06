@@ -1455,7 +1455,7 @@ async def test_execution_rejects_changed_admitted_action_budget_before_launch(tm
 
 
 @pytest.mark.asyncio
-async def test_execution_uses_one_context_and_persists_artifact_readback(tmp_path: Path) -> None:
+async def test_execution_uses_one_context_and_persists_artifact_readback(tmp_path: Path, async_db) -> None:
     jobs = FakeJobs()
     responses = {
         "https://fixture.example/docs": PinnedBrowserResponse(200, {"content-type": "text/html"}, b"docs", "https://fixture.example/docs", "93.184.216.34"),
@@ -1664,7 +1664,7 @@ def test_browser_artifact_writer_is_descriptor_relative_and_atomic(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_runtime_budget_caps_each_navigation_before_teardown_reserve(tmp_path: Path) -> None:
+async def test_runtime_budget_caps_each_navigation_before_teardown_reserve(tmp_path: Path, async_db) -> None:
     jobs = FakeJobs()
     responses = {
         "https://fixture.example/docs": PinnedBrowserResponse(200, {"content-type": "text/html"}, b"docs", "https://fixture.example/docs", "93.184.216.34"),

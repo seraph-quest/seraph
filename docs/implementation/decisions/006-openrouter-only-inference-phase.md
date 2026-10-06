@@ -167,5 +167,5 @@ edge, voice, and Telegram receipts are optional operational evidence; they are
 not required for merge and remain externally unverified until an authorised
 canary supplies them. #751/#752 own audio capability proof. #744 owns the
 shared remote admission extension after #743's durable job contract. The
-evolution/research work in #771 remains explicitly deferred and does not gate
-this phase.
+harness-improvement research in #771 was cancelled by the operator and closed
+as not planned, not delivered; it does not gate this phase.

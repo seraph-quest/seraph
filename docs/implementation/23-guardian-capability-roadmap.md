@@ -153,35 +153,17 @@ disables route authority, quiesces calls and retains liabilities/receipts.
 
 The target is more verified useful work per unit of operator attention, within
 the same authority and spend. Feature count and fixture success are not superiority.
-Reuse deferred [#771](https://github.com/seraph-quest/seraph/issues/771) for an
-eventual comparative evaluation; do not make a new dashboard or harness a milestone.
+The operator cancelled harness-improvement and comparative evaluation campaigns
+on 2026-10-06; [#771](https://github.com/seraph-quest/seraph/issues/771) is closed
+as not planned, not delivered. This roadmap contains no pending campaign,
+comparator protocol, model-credit prerequisite or synthetic replacement.
 
-Pre-register 12 permitted public research/maintenance journeys and 12 scripted
-watch changes (relevant, irrelevant, duplicate, stale, malicious and missing source),
-with blinded outcome rubrics before running. Use five independent repetitions per
-system/task, randomized order and clean copies of the same source corpus. Pin each
-system/release, model, prompt budget, permissions, host and tool versions; publish
-deviations. Run a matched-model/budget track where supported and a clearly separate
-native-recommended track. No missing feature is scored as a crash; report unsupported.
-
-| Metric | Fixed measurement |
-| --- | --- |
-| Task success | fraction achieving predeclared source/result readback, with failure reasons |
-| Useful proactivity | explicit helpful judgments / judged opportunities; report unjudged separately |
-| Unwanted interruption | explicit unwanted pushes / delivered pushes and pushes per operator-day |
-| Recovery burden | operator actions and minutes to recover injected restart/cancel/transport failures |
-| Memory usefulness | blinded later-task success with accepted preference vs baseline, deletion correctness separately |
-| Operator effort | active review/correction minutes and decisions per completed outcome |
-| Privacy | observed destination/payload classes against exact granted authority; any unauthorized egress is a failure |
-| Latency/cost | median/p95 time to verified result; reported billed/estimated/unknown costs separately, plus local resource use |
-
-For a claim of improvement require no unauthorized effect/egress, no material
-regression in task success or unwanted interruption, and a predeclared improvement
-in success or operator effort with uncertainty intervals. Human usefulness needs
-consented real operators; scripted relevance fixtures prove mechanics only. Report
-sample sizes, missing runs, model differences and uncertainty. **All comparative
-evaluations here are unrun.** They do not block provider-free implementation merge
-when its local acceptance is complete; external usefulness remains Partial/unverified.
+External usefulness and comparative quality remain Partial/unverified. Ordinary
+provider-free regression, security, authority, readback and recovery checks remain
+required for their owning capabilities. Deterministic fixtures establish only the
+mechanics they exercise; they do not establish usefulness, learned quality or
+harness improvement. Cancellation does not supply missing quality evidence or
+permit a superiority claim.
 
 ## Review and handoff contract
 

@@ -81,6 +81,89 @@ def evidence():
             excerpt="Public release", excerpt_sha256=digest(b"Public release"))])
 
 
+@pytest.mark.parametrize('race', [None, 'rotate', 'revoke', 'disable', 'http_missing_hash'])
+async def test_output_persistence_rechecks_original_owner_in_same_writer(async_db, monkeypatch, race):
+    """Actual output SQL boundary; source staging isolated, no native success seeded."""
+    from types import SimpleNamespace
+    from sqlalchemy import select, func
+    from src.auth import service as auth
+    from src.db.models import OperatorSession, GuardianOpportunity, WorkBoardProposal, InferenceCostReservation, WorkflowRunState
+    from src.guardian import opportunity_plans as plans
+    from src.guardian.opportunity_contracts import OpportunityPlanResult, OpportunityError
+    from src.work_board.contracts import WorkBoardOwner
+    from src.work_board.repository import BoardError
+    current = datetime.now(timezone.utc)
+    principal = 'operator:root:persist-owner'
+    original_json = '{"generation_binding":{"original":true}}'
+    async with async_db() as db:
+        db.add(OperatorSession(id='persist-root', principal_id=principal, token_hash='private-original',
+            idle_expires_at=current+timedelta(minutes=8), absolute_expires_at=current+timedelta(minutes=10)))
+        db.add(GuardianOpportunity(id='persist-opportunity', owner_principal_id=principal, original_root_id='persist-root',
+            goal_id='goal', goal_revision=1, policy_revision=1, watch_id='watch', watch_revision=1,
+            source_packet_id='packet', source_digest='a'*64, source_token_json='{}', dedupe_key='persist',
+            status='proposed', proposal_id='persist-proposal', expires_at=current+timedelta(minutes=7), assessment_deadline_at=current))
+        db.add(WorkBoardProposal(proposal_id='persist-proposal', opportunity_id='persist-opportunity',
+            owner_principal_id=principal, owner_session_id='persist-root', parent_task_id='parent', kind='opportunity_plan',
+            idempotency_key='original-request', admission_job_id='original-native', status='pending_inference',
+            provider_contact_started=True, provider_contact_state='started', expires_at=current+timedelta(minutes=5),
+            proposal_json=original_json, proposal_digest='a'*64))
+        db.add(InferenceCostReservation(operation_id='original-contact', deployment_id='deployment', job_id='original-native',
+            owner_id=principal, goal_id='goal', payload_digest='a'*64, policy_digest='b'*64, runtime_path='strategist_agent',
+            profile_id='profile', period_id='period', settings_revision=1, ceiling_microusd=100, bound_microusd=1,
+            sequence=1, priority=50, deadline_at=current+timedelta(minutes=5), state='unknown',
+            job_fencing_token=1, contact_started_at=current))
+        await db.commit()
+    monkeypatch.setattr(auth, 'get_session', async_db)
+    monkeypatch.setattr(plans.db_engine, 'get_session', async_db)
+    operator = await auth.authenticate_session('persist-root', touch=False)
+    owner = WorkBoardOwner(principal_id=principal, session_id='persist-root')
+    enabled = True
+    async def policy(*args, **kwargs):
+        return None, None, None, SimpleNamespace(auto_stage_plan=enabled), None
+    monkeypatch.setattr(plans, 'assert_opportunity_current', policy)
+    async with async_db() as db:
+        root = await db.get(OperatorSession, 'persist-root')
+        witness = plans._AutoPlanOwnerWitness('persist-opportunity', principal, root.id, 'goal', 1, 1,
+            root.token_hash, plans.utc(root.idle_expires_at).isoformat(), plans.utc(root.absolute_expires_at).isoformat())
+        await plans._recheck_plan_operator(db, owner, operator, 'persist-opportunity', server_witness=witness)
+        cost_before = (await db.get(InferenceCostReservation, 'original-contact')).model_dump(mode='json')
+    source = SimpleNamespace(opportunity_id='persist-opportunity')
+    async def stage(*args, **kwargs):
+        nonlocal enabled
+        # Authority changes AFTER original proof was captured, BEFORE output writer.
+        async with async_db() as db:
+            root = await db.get(OperatorSession, 'persist-root')
+            if race == 'rotate': root.token_hash = 'private-rotated'
+            elif race == 'revoke': root.revoked_at = current
+            elif race == 'disable': enabled = False
+            await db.commit()
+        return source
+    async def recheck(db, *args, **kwargs):
+        assert db.in_transaction()
+    monkeypatch.setattr(plans, 'stage_plan_source', stage)
+    monkeypatch.setattr(plans, 'recheck_plan_source', recheck)
+    model = OpportunityPlanResult(schema_version='seraph.opportunity.plan.v1', blueprint_id='public-browser-check',
+        title='Review public release', reason='Check cited public change', citations=[dict(source_id='public',
+            start_line=1, end_line=1, span_sha256=digest(b'Public release'))])
+    if race is None:
+        await plans._persist_plan_output(owner, 'persist-proposal', model, source, operator=operator, server_witness=witness)
+    else:
+        with pytest.raises(BoardError if race == 'http_missing_hash' else OpportunityError):
+            await plans._persist_plan_output(owner, 'persist-proposal', model, source, operator=operator,
+                server_witness=None if race == 'http_missing_hash' else witness)
+    async with async_db() as db:
+        proposal = await db.get(WorkBoardProposal, 'persist-proposal')
+        if race is None:
+            assert json.loads(proposal.proposal_json)['model_result'] == model.model_dump(mode='json')
+            assert proposal.proposal_digest == digest(proposal.proposal_json.encode())
+        else:
+            assert (proposal.proposal_json, proposal.proposal_digest) == (original_json, 'a'*64)
+        assert (proposal.provider_contact_started, proposal.provider_contact_state) == (True, 'started')
+        assert (await db.get(InferenceCostReservation, 'original-contact')).model_dump(mode='json') == cost_before
+        assert await db.scalar(select(func.count()).select_from(InferenceCostReservation)) == 1
+        assert await db.scalar(select(func.count()).select_from(WorkflowRunState)) == 0
+
+
 def test_plan_output_only_selects_offered_blueprint_and_exact_citations():
     from src.guardian.opportunity_plans import validate_plan_result
     raw = dict(schema_version="seraph.opportunity.plan.v1", blueprint_id="public-browser-check",

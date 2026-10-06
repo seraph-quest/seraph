@@ -643,7 +643,7 @@ async def _run_plan_generation(owner, operator, opportunity_id, proposal_id, sou
         await assert_known_vault_values_absent(model.model_dump(mode="json"))
         for value in (model.title, model.reason):
             assert_public_judgment_text(value, output=True)
-        await _persist_plan_output(owner, proposal_id, model, source)
+        await _persist_plan_output(owner, proposal_id, model, source, operator=operator, server_witness=server_witness)
         await _complete_plan_native(owner, proposal_id, job_binding, operator=operator, server_witness=server_witness)
         await _finalize_plan(owner, proposal_id, operator=operator, server_witness=server_witness)
     except (OpportunityError, BoardError, ValueError) as exc:
@@ -710,7 +710,7 @@ async def _invoke_plan_completion(owner, proposal_id, messages, context, binding
     return result
 
 
-async def _persist_plan_output(owner, proposal_id, model, source):
+async def _persist_plan_output(owner, proposal_id, model, source, *, operator, server_witness=None):
     async with db_engine.get_session() as db:
         opportunity = await db.get(GuardianOpportunity, source.opportunity_id)
         fresh = await stage_plan_source(db, opportunity, citations=model.citations)
@@ -719,6 +719,7 @@ async def _persist_plan_output(owner, proposal_id, model, source):
         proposal = await db.get(WorkBoardProposal, proposal_id)
         opportunity = await _owned_opportunity(db, owner, source.opportunity_id)
         await recheck_plan_source(db, opportunity, source_witness=fresh)
+        await _recheck_plan_operator(db, owner, operator, source.opportunity_id, server_witness=server_witness)
         if proposal.status != "pending_inference" or proposal.provider_contact_state != "started" or utc(proposal.expires_at) <= now():
             raise OpportunityError("proposal_stale")
         value = json.loads(proposal.proposal_json)

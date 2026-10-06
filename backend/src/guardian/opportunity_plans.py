@@ -1,10 +1,10 @@
 """Fixed advisory plans over existing Work/native owners; source prose is data."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from dataclasses import replace
 from contextvars import ContextVar
-from datetime import timedelta
+from datetime import datetime, timedelta
 import json
 import ipaddress
 from urllib.parse import urlsplit
@@ -22,6 +22,62 @@ from src.workspace import canonical_workspace_root_identity
 
 BLUEPRINTS = ("public-browser-check", "public-evidence-report")
 _contact_source = ContextVar("opportunity_plan_contact_source", default=None)
+_plan_operator = ContextVar("opportunity_plan_operator", default=None)
+
+
+@dataclass(frozen=True)
+class _AutoPlanOwnerWitness:
+    opportunity_id: str
+    owner_principal_id: str
+    original_root_id: str
+    goal_id: str
+    goal_revision: int
+    policy_revision: int
+    root_token_hash: str = field(repr=False)
+    idle_expires_at: str
+    absolute_expires_at: str
+
+
+async def _recheck_plan_operator(db, owner, operator, opportunity_id, *, server_witness=None):
+    """HTTP bearer proof stays strict; auto consent owns a separate private proof."""
+    from src.memory.evidence_execution import _current_operator
+    if server_witness is None:
+        await _current_operator(db, owner, operator)
+        return
+    from src.db.models import OperatorSession
+    if (type(server_witness) is not _AutoPlanOwnerWitness or operator is None
+            or operator.ownership_continuity != "stable"
+            or (operator.session_id, operator.principal.principal_id) != (owner.session_id, owner.principal_id)
+            or (server_witness.opportunity_id, server_witness.original_root_id, server_witness.owner_principal_id) !=
+               (opportunity_id, owner.session_id, owner.principal_id)):
+        raise OpportunityError("original_root_unavailable", 403)
+    row = await db.get(GuardianOpportunity, opportunity_id, populate_existing=True)
+    root = await db.get(OperatorSession, owner.session_id, populate_existing=True)
+    if (row is None or root is None or not server_witness.root_token_hash
+            or root.token_hash != server_witness.root_token_hash
+            or root.principal_id != owner.principal_id or root.revoked_at is not None
+            or root.replaced_by_id is not None or root.is_bearer_tombstone
+            or utc(root.idle_expires_at) <= now() or utc(root.absolute_expires_at) <= now()
+            or now() >= datetime.fromisoformat(server_witness.idle_expires_at)
+            or now() >= datetime.fromisoformat(server_witness.absolute_expires_at)
+            or utc(root.idle_expires_at).isoformat() < server_witness.idle_expires_at
+            or utc(root.absolute_expires_at).isoformat() != server_witness.absolute_expires_at
+            or (row.original_root_id, row.owner_principal_id, row.goal_id, row.goal_revision, row.policy_revision) !=
+               (owner.session_id, owner.principal_id, server_witness.goal_id,
+                server_witness.goal_revision, server_witness.policy_revision)):
+        raise OpportunityError("original_root_unavailable", 403)
+    _, _, _, policy, _ = await assert_opportunity_current(db, row)
+    if not policy.auto_stage_plan:
+        raise OpportunityError("opportunity_auto_stage_disabled", 403)
+
+
+async def _recheck_contact_operator(db, proposal):
+    binding = _plan_operator.get()
+    if binding is None:
+        raise OpportunityError("original_root_unavailable", 403)
+    owner, operator, witness = binding
+    await _recheck_plan_operator(db, owner, operator, proposal.opportunity_id, server_witness=witness)
+
 
 
 def validate_plan_result(raw, evidence, offered):
@@ -305,6 +361,7 @@ async def assert_linked_plan_native(db, run):
 
 async def guard_plan_claim(db, run):
     proposal = await assert_linked_plan_native(db, run)
+    await _recheck_contact_operator(db, proposal)
     opportunity = await db.get(GuardianOpportunity, proposal.opportunity_id)
     if (proposal.status != "pending_inference" or proposal.provider_contact_started
             or proposal.provider_contact_state != "not_started" or utc(proposal.expires_at) <= now()
@@ -319,6 +376,7 @@ async def guard_linked_plan_provider_contact(db, run):
     if proposal is None or not proposal.opportunity_id:
         return  # Preserve ordinary Specify/Decompose.
     await assert_linked_plan_native(db, run)
+    await _recheck_contact_operator(db, proposal)
     opportunity = await db.get(GuardianOpportunity, proposal.opportunity_id)
     if (opportunity is None or opportunity.status != "proposed" or opportunity.proposal_id != proposal.proposal_id
             or proposal.status != "pending_inference" or utc(proposal.expires_at) <= now()
@@ -369,29 +427,29 @@ async def generation_retry_allowed(db, proposal):
     return triage._failed_pre_contact_admission_matches(proposal, projection, task=parent)
 
 
-async def generate_plan(*, operator, opportunity_id, request):
+async def generate_plan(*, operator, opportunity_id, request, server_witness=None):
     from src.memory.evidence_execution import _current_operator
     owner = WorkBoardOwner(principal_id=operator.principal.principal_id, session_id=operator.session_id)
     request = OpportunityPlanRequest.model_validate(request)
     expected_digest = digest(json_bytes({"opportunity_id": opportunity_id, "request": request.model_dump(mode="json"),
         "principal": owner.principal_id, "root": owner.session_id}))
     async with db_engine.get_session() as db:
-        await _current_operator(db, owner, operator)
+        await _recheck_plan_operator(db, owner, operator, opportunity_id, server_witness=server_witness)
         opportunity = await _owned_opportunity(db, owner, opportunity_id)
         proposal = await db.get(WorkBoardProposal, opportunity.proposal_id) if opportunity.proposal_id else None
         if proposal is not None and proposal.request_digest != expected_digest:
             raise OpportunityError("proposal_idempotency_conflict")
         existing_id = proposal.proposal_id if proposal else None
     if existing_id is None:
-        return await _generate_plan_once(operator=operator, opportunity_id=opportunity_id, request=request)
-    return await _resume_plan(operator, owner, opportunity_id, existing_id)
+        return await _generate_plan_once(operator=operator, opportunity_id=opportunity_id, request=request, server_witness=server_witness)
+    return await _resume_plan(operator, owner, opportunity_id, existing_id, server_witness=server_witness)
 
 
-async def _resume_plan(operator, owner, opportunity_id, proposal_id):
+async def _resume_plan(operator, owner, opportunity_id, proposal_id, *, server_witness=None):
     from src.work_board import triage
     from src.memory.evidence_execution import _current_operator
     async with db_engine.get_session() as db:
-        await _current_operator(db, owner, operator)
+        await _recheck_plan_operator(db, owner, operator, opportunity_id, server_witness=server_witness)
         opportunity = await _owned_opportunity(db, owner, opportunity_id)
         proposal = await db.get(WorkBoardProposal, proposal_id)
         if proposal.status not in {"pending_inference", "blocked"} or utc(proposal.expires_at) <= now():
@@ -420,11 +478,11 @@ async def _resume_plan(operator, owner, opportunity_id, proposal_id):
         offer = {"available_blueprint_ids": binding["offered_blueprints"]}
         expires_at = utc(proposal.expires_at)
     if adopt:
-        await _finalize_plan(owner, proposal_id, operator=operator)
+        await _finalize_plan(owner, proposal_id, operator=operator, server_witness=server_witness)
     else:
         async with db_engine.get_session() as db:
             await db.execute(text("BEGIN IMMEDIATE"))
-            await _current_operator(db, owner, operator)
+            await _recheck_plan_operator(db, owner, operator, opportunity_id, server_witness=server_witness)
             opportunity = await _owned_opportunity(db, owner, opportunity_id)
             current = await db.get(WorkBoardProposal, proposal_id, populate_existing=True)
             await recheck_plan_source(db, opportunity, source_witness=source)
@@ -435,7 +493,7 @@ async def _resume_plan(operator, owner, opportunity_id, proposal_id):
                 db.add(current)
             proposal = current
         return await _run_plan_generation(owner, operator, opportunity_id, proposal_id, source, goal,
-            offered_evidence, binding, offer, card, proposal, expires_at, route)
+            offered_evidence, binding, offer, card, proposal, expires_at, route, server_witness=server_witness)
     async with db_engine.get_session() as db:
         return await _generation_response(db, await _owned_opportunity(db, owner, opportunity_id),
             await db.get(WorkBoardProposal, proposal_id))
@@ -448,7 +506,7 @@ async def _generation_response(db, opportunity, proposal):
         "proposal_ref": reference, "reason_code": json.loads(proposal.proposal_json).get("blocked_reason")}
 
 
-async def _generate_plan_once(*, operator, opportunity_id, request):
+async def _generate_plan_once(*, operator, opportunity_id, request, server_witness=None):
     """One bounded strategist invocation; never queue or execute native leaves."""
     from src.work_board import triage
     from src.work_board.repository import WorkBoardRepository, stage_safe_task_text, BoardError
@@ -460,7 +518,7 @@ async def _generate_plan_once(*, operator, opportunity_id, request):
     request_digest = digest(json_bytes({"opportunity_id": opportunity_id, "request": request.model_dump(mode="json"),
         "principal": owner.principal_id, "root": owner.session_id}))
     async with db_engine.get_session() as db:
-        await _current_operator(db, owner, operator)
+        await _recheck_plan_operator(db, owner, operator, opportunity_id, server_witness=server_witness)
         opportunity = await _owned_opportunity(db, owner, opportunity_id)
         existing = await db.get(WorkBoardProposal, opportunity.proposal_id) if opportunity.proposal_id else None
         if existing:
@@ -488,7 +546,7 @@ async def _generate_plan_once(*, operator, opportunity_id, request):
         route, version = triage._route_binding()
     async with db_engine.get_session() as db:
         await db.execute(text("BEGIN IMMEDIATE"))
-        await _current_operator(db, owner, operator)
+        await _recheck_plan_operator(db, owner, operator, opportunity_id, server_witness=server_witness)
         opportunity = await _owned_opportunity(db, owner, opportunity_id)
         if opportunity.proposal_id:
             existing = await db.get(WorkBoardProposal, opportunity.proposal_id)
@@ -529,19 +587,21 @@ async def _generate_plan_once(*, operator, opportunity_id, request):
         await db.flush()
         proposal_id = proposal.proposal_id
     return await _run_plan_generation(owner, operator, opportunity_id, proposal_id, source, goal,
-        offered_evidence, binding, offer, card, proposal, expires_at, route)
+        offered_evidence, binding, offer, card, proposal, expires_at, route, server_witness=server_witness)
 
 
 async def _run_plan_generation(owner, operator, opportunity_id, proposal_id, source, goal,
-        offered_evidence, binding, offer, card, proposal, expires_at, route):
+        offered_evidence, binding, offer, card, proposal, expires_at, route, *, server_witness=None):
     from src.work_board import triage
     from src.work_board.repository import BoardError
     from src.guardian.opportunity_runtime import assert_known_vault_values_absent, assert_public_judgment_text
     # Staging increments the opportunity revision. Admission owns a fresh
     # physical witness to that committed row, never the pre-staging revision.
     async with db_engine.get_session() as db:
+        await _recheck_plan_operator(db, owner, operator, opportunity_id, server_witness=server_witness)
         source = await stage_plan_source(db, await _owned_opportunity(db, owner, opportunity_id))
     contact_token = _contact_source.set(source)
+    operator_token = _plan_operator.set((owner, operator, server_witness))
     job_binding = None
     try:
         from src.auth.service import bind_operator_principal
@@ -574,17 +634,18 @@ async def _run_plan_generation(owner, operator, opportunity_id, proposal_id, sou
             await db.execute(text("BEGIN IMMEDIATE"))
             current = await _owned_opportunity(db, owner, opportunity_id)
             await recheck_plan_source(db, current, source_witness=source)
+            await _recheck_plan_operator(db, owner, operator, opportunity_id, server_witness=server_witness)
             result = await triage._claim_proposal_contact(db, proposal_id, now())
             if result.rowcount != 1:
                 raise OpportunityError("proposal_stale")
-        raw = await _invoke_plan_completion(owner, proposal_id, messages, context, job_binding)
+        raw = await _invoke_plan_completion(owner, proposal_id, messages, context, job_binding, operator=operator, server_witness=server_witness)
         model = validate_plan_result(raw, offered_evidence, binding["offered_blueprints"])
         await assert_known_vault_values_absent(model.model_dump(mode="json"))
         for value in (model.title, model.reason):
             assert_public_judgment_text(value, output=True)
         await _persist_plan_output(owner, proposal_id, model, source)
-        await _complete_plan_native(owner, proposal_id, job_binding, operator=operator)
-        await _finalize_plan(owner, proposal_id, operator=operator)
+        await _complete_plan_native(owner, proposal_id, job_binding, operator=operator, server_witness=server_witness)
+        await _finalize_plan(owner, proposal_id, operator=operator, server_witness=server_witness)
     except (OpportunityError, BoardError, ValueError) as exc:
         reason = getattr(exc, "code", "invalid_plan_result")
         await _block_plan(owner, proposal_id, reason, job_binding)
@@ -592,13 +653,14 @@ async def _run_plan_generation(owner, operator, opportunity_id, proposal_id, sou
         await _block_plan(owner, proposal_id, "outcome_unknown", job_binding)
     finally:
         _contact_source.reset(contact_token)
+        _plan_operator.reset(operator_token)
     async with db_engine.get_session() as db:
         current = await _owned_opportunity(db, owner, opportunity_id)
         proposal = await db.get(WorkBoardProposal, proposal_id)
         return await _generation_response(db, current, proposal)
 
 
-async def _invoke_plan_completion(owner, proposal_id, messages, context, binding):
+async def _invoke_plan_completion(owner, proposal_id, messages, context, binding, *, operator, server_witness=None):
     """Existing governed broker; fresh source proof in its actual callback context."""
     from src import llm_runtime
     from src.model_fabric.contracts import bind_final_inference_payload, finalized_openai_compatible_body
@@ -631,12 +693,14 @@ async def _invoke_plan_completion(owner, proposal_id, messages, context, binding
             opportunity = await _owned_opportunity(db, owner, proposal.opportunity_id)
             fresh = await stage_plan_source(db, opportunity)
         token = _contact_source.set(fresh)
+        operator_token = _plan_operator.set((owner, operator, server_witness))
         try:
             result, _ = await llm_runtime._governed_research_chat_completion(
                 decision=decision, context=context, body=body, api_key=api_key)
             return result.choices[0].message.content
         finally:
             _contact_source.reset(token)
+            _plan_operator.reset(operator_token)
     with bind_remote_inference_receipt(repository=durable_job_repository, job_id=binding[0], owner=binding[1], fencing_token=binding[2]):
         result = await run_preflighted_adapter(context=context, decision=decision, adapter=adapter,
             hooks=hooks, admission_priority=GpuPriority.REPORTS_RESEARCH_MEMORY)
@@ -663,17 +727,19 @@ async def _persist_plan_output(owner, proposal_id, model, source):
         db.add(proposal)
 
 
-async def _complete_plan_native(owner, proposal_id, binding, *, operator):
+async def _complete_plan_native(owner, proposal_id, binding, *, operator, server_witness=None):
     from src.workflows.job_runtime import durable_job_repository
     from src.work_board import triage
     async with db_engine.get_session() as db:
         proposal = await db.get(WorkBoardProposal, proposal_id)
+        await _recheck_plan_operator(db, owner, operator, proposal.opportunity_id, server_witness=server_witness)
         source = await stage_plan_source(db, await db.get(GuardianOpportunity, proposal.opportunity_id))
         expected_json, expected_digest = proposal.proposal_json, proposal.proposal_digest
         _assert_original_plan_output(json.loads(expected_json), expected_digest)
     async def verify(db, run):
         current = await assert_linked_plan_native(db, run)
         opportunity = await _owned_opportunity(db, owner, current.opportunity_id)
+        await _recheck_plan_operator(db, owner, operator, opportunity.id, server_witness=server_witness)
         await recheck_plan_source(db, opportunity, source_witness=source)
         if (current.status != "pending_inference" or current.proposal_json != expected_json
                 or current.proposal_digest != expected_digest or current.provider_contact_state != "started"
@@ -692,6 +758,7 @@ async def _complete_plan_native(owner, proposal_id, binding, *, operator):
     async with db_engine.get_session() as db:
         await db.execute(text("BEGIN IMMEDIATE"))
         current = await db.get(WorkBoardProposal, proposal_id, populate_existing=True)
+        await _recheck_plan_operator(db, owner, operator, current.opportunity_id, server_witness=server_witness)
         if current.proposal_json != expected_json or current.proposal_digest != expected_digest:
             raise OpportunityError("proposal_binding_conflict")
         await _assert_generated_native_sql(db, current, await db.get(GuardianOpportunity, current.opportunity_id))
@@ -771,7 +838,7 @@ async def _assert_generated_native_sql(db, proposal, opportunity):
     return run
 
 
-async def _finalize_plan(owner, proposal_id, *, operator):
+async def _finalize_plan(owner, proposal_id, *, operator, server_witness=None):
     """Settle original generation identity before finalizing same-PK report."""
     from src.work_board.contracts import WorkBoardInputArtifactCreate, WorkBoardTaskCreate
     from src.work_board.input_artifacts import prepare_input_artifact, stage_input_artifact, recheck_staged_input, bind_input_artifact
@@ -781,6 +848,7 @@ async def _finalize_plan(owner, proposal_id, *, operator):
     async with db_engine.get_session() as db:
         proposal = await db.get(WorkBoardProposal, proposal_id)
         opportunity = await _owned_opportunity(db, owner, proposal.opportunity_id)
+        await _recheck_plan_operator(db, owner, operator, opportunity.id, server_witness=server_witness)
         source = await stage_plan_source(db, opportunity)
         await _assert_generated_native_sql(db, proposal, opportunity)
         value = json.loads(proposal.proposal_json)
@@ -798,7 +866,7 @@ async def _finalize_plan(owner, proposal_id, *, operator):
         original_json, original_digest, original_revision = proposal.proposal_json, proposal.proposal_digest, proposal.revision
     async with db_engine.get_session() as db:
         await db.execute(text("BEGIN IMMEDIATE"))
-        await _current_operator(db, owner, operator)
+        await _recheck_plan_operator(db, owner, operator, source.opportunity_id, server_witness=server_witness)
         proposal = await db.get(WorkBoardProposal, proposal_id, populate_existing=True)
         opportunity = await _owned_opportunity(db, owner, proposal.opportunity_id)
         await recheck_plan_source(db, opportunity, source_witness=source)
@@ -1033,9 +1101,21 @@ async def auto_stage_plan(opportunity_id):
                 return
             root_id, revision, goal_revision = row.original_root_id, row.revision, row.goal_revision
         operator = await authenticate_session(root_id, touch=False)
+        from src.db.models import OperatorSession
+        owner = WorkBoardOwner(principal_id=operator.principal.principal_id, session_id=operator.session_id)
+        async with db_engine.get_session() as db:
+            row = await _owned_opportunity(db, owner, opportunity_id)
+            root = await db.get(OperatorSession, root_id, populate_existing=True)
+            if root is None:
+                raise OpportunityError("original_root_unavailable", 403)
+            witness = _AutoPlanOwnerWitness(opportunity_id, owner.principal_id, root_id, row.goal_id,
+                row.goal_revision, row.policy_revision, root.token_hash,
+                utc(root.idle_expires_at).isoformat(), utc(root.absolute_expires_at).isoformat())
+            await _recheck_plan_operator(db, owner, operator, opportunity_id, server_witness=witness)
         await generate_plan(operator=operator, opportunity_id=opportunity_id, request=OpportunityPlanRequest(
             expected_opportunity_revision=revision, expected_goal_revision=goal_revision,
-            idempotency_key=uuid.uuid5(uuid.NAMESPACE_URL, f"seraph:auto-plan:{opportunity_id}:{revision}")))
+            idempotency_key=uuid.uuid5(uuid.NAMESPACE_URL, f"seraph:auto-plan:{opportunity_id}:{revision}")),
+            server_witness=witness)
     except (AuthFailure, OpportunityError, ValueError):
         return  # Existing opportunity remains successful; plan owner shows its bounded blocker.
 

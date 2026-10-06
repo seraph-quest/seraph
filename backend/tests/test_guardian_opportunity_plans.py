@@ -7,6 +7,72 @@ import pytest
 from src.guardian.opportunity_contracts import OpportunityEvidence, digest
 
 
+@pytest.mark.parametrize('mutation', [None, 'rotate', 'revoke', 'replace', 'disable', 'policy_revision', 'goal_revision', 'wrong_opportunity'])
+async def test_auto_root_witness_is_separate_from_request_bearer_and_rechecks_races(async_db, monkeypatch, mutation):
+    """Real internal Root authentication; isolated policy/source prerequisite only."""
+    from types import SimpleNamespace
+    from sqlalchemy import select, func
+    from src.auth import service as auth
+    from src.db.models import OperatorSession, GuardianOpportunity, WorkBoardTask, WorkBoardProposal, WorkflowRunState
+    from src.guardian import opportunity_plans as plans
+    from src.work_board.contracts import WorkBoardOwner
+    from src.work_board.repository import BoardError
+    from src.guardian.opportunity_contracts import OpportunityError
+    principal = 'operator:root:autoplan-owner'
+    current = datetime.now(timezone.utc)
+    async with async_db() as db:
+        db.add(OperatorSession(id='auto-root', principal_id=principal, token_hash='original-private-hash',
+            idle_expires_at=current+timedelta(minutes=8), absolute_expires_at=current+timedelta(minutes=10)))
+        db.add(GuardianOpportunity(id='auto-opportunity', owner_principal_id=principal, original_root_id='auto-root',
+            goal_id='goal', goal_revision=1, policy_revision=1, watch_id='watch', watch_revision=1,
+            source_packet_id='packet', source_digest='a'*64, source_token_json='{}', dedupe_key='auto',
+            status='proposed', expires_at=current+timedelta(minutes=7), assessment_deadline_at=current))
+        await db.commit()
+    monkeypatch.setattr(auth, 'get_session', async_db)
+    monkeypatch.setattr(plans.db_engine, 'get_session', async_db)
+    enabled = True
+    async def source_policy(*args, **kwargs):
+        return None, None, None, SimpleNamespace(auto_stage_plan=enabled), None
+    monkeypatch.setattr(plans, 'assert_opportunity_current', source_policy)
+    operator = await auth.authenticate_session('auto-root', touch=False)
+    assert operator._token_hash is None
+    owner = WorkBoardOwner(principal_id=principal, session_id='auto-root')
+    async with async_db() as db:
+        with pytest.raises(BoardError):
+            await plans._recheck_plan_operator(db, owner, operator, 'auto-opportunity')
+    seen = []
+    async def generation_boundary(*, operator, opportunity_id, request, server_witness):
+        nonlocal enabled
+        seen.append(server_witness)
+        assert operator._token_hash is None
+        assert 'original-private-hash' not in repr(server_witness)
+        async with async_db() as db:
+            await plans._recheck_plan_operator(db, owner, operator, opportunity_id, server_witness=server_witness)
+        if mutation is None:
+            return  # Proof of owner seam only; no seeded native/model result.
+        async with async_db() as db:
+            root = await db.get(OperatorSession, 'auto-root')
+            row = await db.get(GuardianOpportunity, 'auto-opportunity')
+            if mutation == 'rotate': root.token_hash = 'rotated-private-hash'
+            elif mutation == 'revoke': root.revoked_at = current
+            elif mutation == 'replace': root.replaced_by_id = 'another-root'
+            elif mutation == 'policy_revision': row.policy_revision += 1
+            elif mutation == 'goal_revision': row.goal_revision += 1
+            elif mutation == 'disable': enabled = False
+            await db.commit()
+        async with async_db() as db:
+            with pytest.raises(OpportunityError):
+                await plans._recheck_plan_operator(db, owner, operator,
+                    'other-opportunity' if mutation == 'wrong_opportunity' else opportunity_id,
+                    server_witness=server_witness)
+    monkeypatch.setattr(plans, 'generate_plan', generation_boundary)
+    await plans.auto_stage_plan('auto-opportunity')
+    assert len(seen) == 1
+    async with async_db() as db:
+        for model in (WorkBoardTask, WorkBoardProposal, WorkflowRunState):
+            assert await db.scalar(select(func.count()).select_from(model)) == 0
+
+
 def evidence():
     return OpportunityEvidence(schema_version="seraph.opportunity.evidence.v1",
         packet_id="00000000-0000-0000-0000-000000000001", checkpoint_sha256="a" * 64,

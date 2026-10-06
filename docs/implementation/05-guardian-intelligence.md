@@ -1606,6 +1606,12 @@ history available for review.
 Corrupt source-proof metadata remains unavailable without preventing other ready
 Goals from being examined.
 
+Recovery views preserve the recorded assessment outcome separately from current
+authority and evidence failures. A current abstention is a judgment, not a policy
+restriction. Independent review findings required finite source-proof bounds,
+exact original-Root notification checks, once-only persisted-result adoption and
+this history/current-state separation; those corrections were accepted.
+
 Provider-intercepted native receipts establish the bounded execution path;
 the milestone also requires a managed UI journey. Neither establishes live
 provider usefulness. Secret, email/phone and invented

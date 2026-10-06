@@ -23,7 +23,8 @@ from typing import Any, Literal, Mapping
 import uuid
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
-from sqlalchemy import func, select
+from sqlalchemy import func, select, and_, or_
+from sqlalchemy.orm import aliased
 
 from src.approval.repository import approval_repository, fingerprint_tool_call
 from src.approval.runtime import reset_runtime_context, set_runtime_context
@@ -1545,6 +1546,68 @@ class WorkBoardDispatcher:
         # handle so cancellation can stop that worker before the durable root
         # is reconciled; no client supplied identifier can reach this map.
         self._active_worker_tasks = _ACTIVE_WORKER_TASKS
+        self._pipeline_recovery_after = None
+
+    async def _advance_linked_pipeline(self, task):
+        from src.work_board import pipelines
+        from src.db.models import GuardianOpportunity, WorkBoardProposal
+        if not task.pipeline_operation_id or task.capability_id not in {"browser.public-task.v1", "work.evidence-dossier.v1"}:
+            return
+        owner = WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id)
+        operation_id = task.pipeline_operation_id
+        try:
+            async with self.session_provider() as db:
+                row = await db.get(WorkBoardProposal, operation_id)
+                if row is None or row.kind != pipelines.PIPELINE_KIND or row.status != "accepted" or not row.opportunity_id:
+                    return
+                opportunity = await db.get(GuardianOpportunity, row.opportunity_id)
+                if opportunity is None or opportunity.status != "planned" or opportunity.proposal_id != row.proposal_id:
+                    return
+                value = pipelines.unpack(row)
+                retained = value.get("advance_request") or {}
+                expected = retained.get("expected_revision") if retained.get("state") == "reserved" else row.revision
+                await pipelines.advance(db, owner, operation_id, expected)
+        except Exception as exc:
+            # Producer Done is durable; a bounded handoff failure cannot undo it.
+            try:
+                async with self.session_provider() as db:
+                    await pipelines.record_recovery(db, owner, operation_id, getattr(exc, "code", None))
+            except Exception:
+                logger.warning("linked pipeline recovery receipt unavailable")
+
+    async def _recover_linked_pipelines(self):
+        from src.db.models import GuardianOpportunity, WorkBoardProposal, WorkBoardLink
+        from src.work_board.pipeline_contracts import PIPELINE_KIND, CAPABILITIES, SLOTS
+        parent, child = aliased(WorkBoardTask), aliased(WorkBoardTask)
+        base = select(WorkBoardProposal.created_at, WorkBoardProposal.proposal_id,
+                      func.min(parent.task_id)).join(GuardianOpportunity,
+            GuardianOpportunity.proposal_id == WorkBoardProposal.proposal_id).join(child,
+            child.pipeline_operation_id == WorkBoardProposal.proposal_id).join(WorkBoardLink,
+            WorkBoardLink.child_task_id == child.task_id).join(parent,
+            parent.task_id == WorkBoardLink.parent_task_id).where(
+            WorkBoardProposal.kind == PIPELINE_KIND, WorkBoardProposal.status == "accepted",
+            WorkBoardProposal.opportunity_id == GuardianOpportunity.id, GuardianOpportunity.status == "planned",
+            child.pipeline_slot.in_(SLOTS[1:]), child.capability_id.in_(CAPABILITIES[1:]),
+            child.status == WorkBoardStatus.triage, child.input_artifact_id.is_(None),
+            parent.pipeline_operation_id == WorkBoardProposal.proposal_id, parent.status == WorkBoardStatus.done
+            ).group_by(WorkBoardProposal.created_at, WorkBoardProposal.proposal_id)
+        # At most two indexed keyset pages, twenty returned candidates total.
+        after = self._pipeline_recovery_after
+        statement = base
+        if after is not None:
+            statement = statement.where(or_(WorkBoardProposal.created_at > after[0],
+                and_(WorkBoardProposal.created_at == after[0], WorkBoardProposal.proposal_id > after[1])))
+        async with self.session_provider() as db:
+            candidates = (await db.execute(statement.order_by(WorkBoardProposal.created_at, WorkBoardProposal.proposal_id).limit(20))).all()
+            if not candidates and after is not None:
+                self._pipeline_recovery_after = None
+                candidates = (await db.execute(base.order_by(WorkBoardProposal.created_at, WorkBoardProposal.proposal_id).limit(20))).all()
+        for created_at, operation_id, task_id in candidates:
+            self._pipeline_recovery_after = (created_at, operation_id)
+            async with self.session_provider() as db:
+                task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id).execution_options(populate_existing=True))
+            if task is not None:
+                await self._advance_linked_pipeline(task)
 
     async def _execute_v2_leaf_adapter(
         self,
@@ -2757,6 +2820,10 @@ class WorkBoardDispatcher:
         expired_reviews = await self._expire_review_windows(now=observed_at)
         reconciled = await self.reconcile_pending_attempts(now=observed_at)
         linked_reconciled = await self.reconcile_linked_attempts(now=observed_at)
+        try:
+            await self._recover_linked_pipelines()
+        except Exception:
+            logger.warning("bounded linked pipeline recovery unavailable")
         async with self.session_provider() as db:
             candidates = await self.repository.list_dispatch_candidates(
                 db,
@@ -3987,6 +4054,13 @@ class WorkBoardDispatcher:
         an API input or a public retry request.
         """
 
+        from src.guardian.opportunity_plans import stage_accepted_plan_task
+        try:
+            async with self.session_provider() as db:
+                await stage_accepted_plan_task(db, task, attempt=_claimed_attempt)
+        except Exception as exc:
+            code = getattr(exc, "code", "pipeline_source_changed")
+            return code, "The current linked plan authority must be reviewed"
         if task.pipeline_operation_id or task.capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
             from src.work_board.pipelines import runtime_guard
             try:
@@ -4909,10 +4983,19 @@ class WorkBoardDispatcher:
                 if task.pipeline_operation_id:
                     from src.work_board.pipelines import task_guard
                     try:
-                        await task_guard(db, task, attempt=attempt)
+                        from src.guardian.opportunity_plans import stage_accepted_plan_task
+                        source_witness = await stage_accepted_plan_task(db, task, attempt=attempt)
+                        await task_guard(db, task, attempt=attempt, source_witness=source_witness)
                     except BoardError:
                         # This session contains only fence/authority reads and
                         # the guard freeze; normal exit commits that freeze.
+                        return False
+
+                elif task.capability_id == "browser.public-task.v1":
+                    from src.guardian.opportunity_plans import stage_accepted_plan_task
+                    try:
+                        await stage_accepted_plan_task(db, task, attempt=attempt)
+                    except Exception:
                         return False
 
                 # Procedure-v2 Browser leaves are native children of the
@@ -6266,21 +6349,19 @@ class WorkBoardDispatcher:
                 if not admission_only:
                     self._active_worker_tasks.pop((task.task_id, attempt.attempt_id),None)
         if capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
-            from src.work_board.pipelines import runtime_guard, validate_cpu_current, validate_cpu_binding, utc
+            from src.work_board.pipelines import runtime_guard, validate_cpu_current, utc
             from src.work_board.pipeline_cpu import execute
             _row, operation = await runtime_guard(task, attempt=attempt, session_provider=self.session_provider)
             operation_deadline = utc(datetime.fromisoformat(operation["deadline_at"]))
             deadline = min(operation_deadline, _now() + timedelta(seconds=min(runtime_seconds, 30)))
             async def check_current(current_task, current_attempt, current_inputs):
                 await validate_cpu_current(current_task, current_attempt, current_inputs, session_provider=self.session_provider)
-            async def check_terminal(db, run):
-                await validate_cpu_binding(db, task, attempt, inputs)
             if not admission_only:
                 self._active_worker_tasks[(task.task_id, attempt.attempt_id)] = asyncio.current_task()
             try:
                 return await execute(task, attempt, inputs, jobs=self.jobs, runner=self.runner_id,
                     deadline=deadline, admission_only=admission_only, validate_current=check_current,
-                    validate_terminal=check_terminal)
+                    session_provider=self.session_provider)
             finally:
                 if not admission_only:
                     self._active_worker_tasks.pop((task.task_id, attempt.attempt_id), None)
@@ -9995,7 +10076,7 @@ class WorkBoardDispatcher:
         lease_owner: str | None = None,
     ) -> BoardAttemptProjection:
         async with self.session_provider() as db:
-            return await self.repository.project_attempt(
+            projected = await self.repository.project_attempt(
                 db,
                 task.task_id,
                 attempt.attempt_id,
@@ -10014,6 +10095,9 @@ class WorkBoardDispatcher:
                 actor_principal_id=self.runner_id,
                 actor_session_id=self.runner_session,
             )
+        if projected.task.status is WorkBoardStatus.done:
+            await self._advance_linked_pipeline(projected.task)
+        return projected
 
     async def _pause_routine_for_operator(
         self,

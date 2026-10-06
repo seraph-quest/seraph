@@ -90,6 +90,113 @@ describe("GuardianInboxPanel", () => {
     expect(screen.getByText(/normalized redacted lines 2–2/)).toHaveTextContent("a".repeat(64));
   });
 
+  it("stages one exact plan only on explicit Generate without accepting or dispatching", async () => {
+    const offer = { available_blueprint_ids: ["public-browser-check", "public-evidence-report"], unavailable_reason: null,
+      can_generate: true, generation_block_reason: null, proposal_ref: null };
+    const ref = { proposal_id: "plan-1", proposal_revision: 1, parent_task_id: "triage-1", parent_revision: 1,
+      kind: "opportunity_plan", proposal_digest: null, blueprint_id: null, expires_at: "2030-01-01T00:00:00Z", status: "pending_inference" };
+    const row = opportunity({ plan_offer: offer });
+    fetchMock.mockResolvedValueOnce(response({ items: [row] }));
+    fetchMock.mockResolvedValueOnce(response({ opportunity_id: row.opportunity_id, opportunity_revision: 4, proposal_ref: ref, reason_code: null }));
+    fetchMock.mockResolvedValueOnce(response({ items: [{ ...row, opportunity_revision: 4,
+      plan_offer: { ...offer, can_generate: false, generation_block_reason: "plan_exists", proposal_ref: ref } }] }));
+    const onOpenTask = vi.fn();
+    render(<GuardianInboxPanel pollIntervalMs={0} currentOwnerPrincipalId="operator:one" currentRootId="root-1" onOpenTask={onOpenTask} />);
+    const button = await screen.findByRole("button", { name: "Generate plan" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    fireEvent.click(button); fireEvent.click(button);
+    await screen.findByRole("button", { name: "Review staged read-only plan in Work" });
+    const posts = fetchMock.mock.calls.filter(([, init]) => init?.method === "POST");
+    expect(posts).toHaveLength(1);
+    expect(posts[0][0]).toContain("/api/guardian/opportunities/opportunity-1/plan");
+    expect(JSON.parse(posts[0][1].body)).toEqual({ expected_opportunity_revision: 3, expected_goal_revision: 4,
+      idempotency_key: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/) });
+    fireEvent.click(screen.getByRole("button", { name: "Review staged read-only plan in Work" }));
+    expect(onOpenTask).toHaveBeenCalledWith("triage-1", expect.objectContaining({ opportunity_id: "opportunity-1" }));
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it.each(["started", "succeeded", "unknown"])("reload with %s contact only inspects and never resends the retained generation", async (contact) => {
+    const row = { ...opportunity(), plan_offer: { available_blueprint_ids: ["public-browser-check"], unavailable_reason: null,
+      can_generate: true, generation_block_reason: null, proposal_ref: null } };
+    fetchMock.mockResolvedValueOnce(response({ items: [row] }));
+    fetchMock.mockRejectedValueOnce(new Error("Lost response"));
+    const mounted = render(<GuardianInboxPanel pollIntervalMs={0} currentOwnerPrincipalId="operator:one" currentRootId="root-1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Generate plan" }));
+    await screen.findByText("Lost response"); mounted.unmount();
+    fetchMock.mockResolvedValueOnce(response({ items: [{ ...row, plan_offer: { ...row.plan_offer, can_generate: false,
+      generation_block_reason: "plan_exists", proposal_ref: { proposal_id: "plan-1", kind: "opportunity_plan", proposal_revision: 1,
+        parent_task_id: "triage-1", parent_revision: 1, proposal_digest: null, blueprint_id: null,
+        expires_at: "2030-01-01T00:00:00Z", status: "pending_inference", provider_contact_state: contact } } }] }));
+    render(<GuardianInboxPanel pollIntervalMs={0} currentOwnerPrincipalId="operator:one" currentRootId="root-1" />);
+    expect(await screen.findByRole("button", { name: "Retry exact never-contacted plan request" })).toBeDisabled();
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("shows eligible blueprints after the daily cap and sends zero additional requests", async () => {
+    fetchMock.mockResolvedValueOnce(response({ items: [opportunity({ plan_offer: {
+      available_blueprint_ids: ["public-browser-check", "public-evidence-report"], unavailable_reason: null,
+      can_generate: false, generation_block_reason: "daily_plan_cap", proposal_ref: null } })] }));
+    render(<GuardianInboxPanel pollIntervalMs={0} currentOwnerPrincipalId="operator:one" currentRootId="root-1" />);
+    expect(await screen.findByRole("button", { name: "Generate plan" })).toBeDisabled();
+    expect(screen.getByText("Available read-only blueprints: public-browser-check, public-evidence-report")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("only manually replays the original UUID and revisions after canonical never-contacted proof", async () => {
+    const offer = { available_blueprint_ids: ["public-browser-check"], unavailable_reason: null, can_generate: true, generation_block_reason: null, proposal_ref: null };
+    const row = opportunity({ plan_offer: offer });
+    const ref = { proposal_id: "plan-1", kind: "opportunity_plan", proposal_revision: 1, parent_task_id: "triage-1", parent_revision: 1,
+      proposal_digest: null, blueprint_id: null, expires_at: "2030-01-01T00:00:00Z", status: "pending_inference",
+      provider_contact_state: "not_started", generation_retry_allowed: true };
+    const currentRow = { ...row, opportunity_revision: 4, plan_offer: { ...offer, can_generate: false, generation_block_reason: "plan_exists", proposal_ref: ref } };
+    fetchMock.mockResolvedValueOnce(response({ items: [row] })); fetchMock.mockRejectedValueOnce(new Error("Lost response"));
+    const mounted = render(<GuardianInboxPanel pollIntervalMs={0} currentOwnerPrincipalId="operator:one" currentRootId="root-1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Generate plan" }));
+    await screen.findByText("Lost response");
+    const originalBody = fetchMock.mock.calls[1][1].body; mounted.unmount();
+    fetchMock.mockResolvedValueOnce(response({ items: [currentRow] }));
+    fetchMock.mockResolvedValueOnce(response({ opportunity_id: "opportunity-1", opportunity_revision: 4, proposal_ref: ref, reason_code: null }));
+    fetchMock.mockResolvedValueOnce(response({ items: [currentRow] }));
+    render(<GuardianInboxPanel pollIntervalMs={0} currentOwnerPrincipalId="operator:one" currentRootId="root-1" />);
+    const retry = await screen.findByRole("button", { name: "Retry exact never-contacted plan request" });
+    await waitFor(() => expect(retry).toBeEnabled());
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    fireEvent.click(retry);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(5));
+    expect(fetchMock.mock.calls[3][1].body).toBe(originalBody);
+    expect(fetchMock.mock.calls[3][0]).toBe(fetchMock.mock.calls[1][0]);
+  });
+
+  it("aborts generation and ignores a late response when the authenticated owner or Root changes", async () => {
+    const offer = { available_blueprint_ids: ["public-browser-check"], unavailable_reason: null, can_generate: true, generation_block_reason: null, proposal_ref: null };
+    const row = opportunity({ plan_offer: offer });
+    let resolvePost: (value: ReturnType<typeof response>) => void = () => {};
+    fetchMock.mockResolvedValueOnce(response({ items: [row] }));
+    fetchMock.mockImplementationOnce(() => new Promise((resolve) => { resolvePost = resolve; }));
+    const mounted = render(<GuardianInboxPanel pollIntervalMs={0} currentOwnerPrincipalId="operator:one" currentRootId="root-1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Generate plan" }));
+    const signal = fetchMock.mock.calls[1][1].signal as AbortSignal;
+    fetchMock.mockResolvedValueOnce(response({ items: [] }));
+    mounted.rerender(<GuardianInboxPanel pollIntervalMs={0} currentOwnerPrincipalId="operator:two" currentRootId="root-2" />);
+    await waitFor(() => expect(signal.aborted).toBe(true));
+    await act(async () => resolvePost(response({ opportunity_id: "opportunity-1", opportunity_revision: 4, proposal_ref: null, reason_code: null })));
+    await waitFor(() => expect(screen.queryByTestId("guardian-inbox-row-opportunity-1")).not.toBeInTheDocument());
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+  });
+
+  it("does not submit Generate when exact session retention is unavailable", async () => {
+    fetchMock.mockResolvedValueOnce(response({ items: [opportunity({ plan_offer: { available_blueprint_ids: ["public-browser-check"],
+      unavailable_reason: null, can_generate: true, generation_block_reason: null, proposal_ref: null } })] }));
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("session storage unavailable"); });
+    render(<GuardianInboxPanel pollIntervalMs={0} currentOwnerPrincipalId="operator:one" currentRootId="root-1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Generate plan" }));
+    await screen.findByText("session storage unavailable");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("shows silent, blocked, stale, Unknown and cancelled history without inventing actions", async () => {
     fetchMock.mockResolvedValueOnce(response({ items: [
       opportunity({ id: "silent", opportunity_id: "silent", state: "silent", opportunity_status: "silent", allowed_actions: [], reason_code: "low_relevance" }),

@@ -89,6 +89,169 @@ class ResolvedInputArtifact:
         return _metadata(self.row)
 
 
+@dataclass(frozen=True)
+class InputArtifactWitness:
+    artifact_id: str
+    revision: int
+    metadata_digest: str
+    payload: bytes
+    input_bytes: bytes
+
+
+async def stage_input_artifact(db, owner, *, artifact_id, capability_id, goal_id, goal_revision):
+    resolved = await resolve_input_artifact_for_task(db, owner, artifact_id=artifact_id,
+        capability_id=capability_id, goal_id=goal_id, goal_revision=goal_revision)
+    return InputArtifactWitness(artifact_id, resolved.row.revision,
+        _metadata_digest(resolved.row), bytes(resolved.payload), _canonical_json(resolved.input))
+
+
+async def recheck_staged_input(db, owner, request, *, witness: InputArtifactWitness):
+    if not isinstance(witness, InputArtifactWitness) or request.input_artifact_id != witness.artifact_id:
+        raise BoardError("pipeline_input_changed", "The staged private input is required", status_code=409)
+    row = await db.get(WorkBoardInputArtifact, witness.artifact_id, populate_existing=True)
+    if (row is None or row.owner_principal_id != owner.principal_id
+        or row.owner_session_id != owner.session_id or row.revision != witness.revision
+        or row.metadata_digest != witness.metadata_digest or _metadata_digest(row) != witness.metadata_digest
+        or row.capability_id != request.capability_id or row.goal_id != request.goal_id
+        or row.goal_revision != request.goal_revision or row.state != "pending"
+        or row.bound_task_id is not None or _utc(row.expires_at) <= _now()
+        or hashlib.sha256(witness.payload).hexdigest() != row.payload_sha256):
+        raise BoardError("pipeline_input_changed", "The staged private input changed", status_code=409)
+    staged_input = _decode_and_validate_payload(row, witness.payload)
+    if _canonical_json(staged_input) != witness.input_bytes:
+        raise BoardError("pipeline_input_changed", "The staged input envelope changed", status_code=409)
+    return ResolvedInputArtifact(row, staged_input, witness.payload)
+
+
+@dataclass(frozen=True)
+class InputRetirementWitness:
+    artifact_id: str
+    revision: int
+    metadata_digest: str
+    task_id: str
+    task_revision: int
+    typed_input_ref: str
+    content_sha256: str
+    size_bytes: int
+    workspace_identity: bytes
+
+
+@dataclass(frozen=True)
+class RetiredInputCleanupWitness:
+    operation_id: str
+    owner_principal_id: str
+    original_root_id: str
+    proposal_request_digest: str
+    accepted_request_digest: str
+    intent_bytes: bytes
+    entry_bytes: bytes
+    workspace_identity: bytes
+    workspace_path: str
+
+
+@dataclass(frozen=True)
+class RetiredInputCleanupReadback:
+    intent_digest: str
+    artifact_id: str
+    outcome: str
+    reason_code: str | None
+
+
+def cleanup_retired_input(witness: RetiredInputCleanupWitness) -> RetiredInputCleanupReadback:
+    """Exact held-root/private-parent unlink, or narrow positive leaf absence."""
+    entry = json.loads(witness.entry_bytes)
+    identity = json.loads(witness.workspace_identity)
+    parent_fd = descriptor = -1
+    reason = None
+    try:
+        reference = entry["typed_input_ref"]
+        relative = reference.removeprefix("workspace-json:")
+        if (not reference.startswith(f"workspace-json:{INPUT_ARTIFACT_ROOT}/")
+            or any(part in {"", ".", ".."} for part in relative.split("/"))):
+            raise _InputArtifactCleanupUnverified("cleanup_reference_invalid")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        parent_fd = os.open(witness.workspace_path, flags | getattr(os, "O_DIRECTORY", 0))
+        root_stat = os.fstat(parent_fd)
+        if (root_stat.st_dev != identity["device"] or root_stat.st_ino != identity["inode"]
+            or hashlib.sha256(witness.workspace_path.encode()).hexdigest() != identity["path_digest"]
+            or not stat.S_ISDIR(root_stat.st_mode) or root_stat.st_uid not in {0, os.getuid()}):
+            raise _InputArtifactCleanupUnverified("cleanup_root_changed")
+        components = relative.split("/")
+        for component in components[:-1]:
+            next_fd = os.open(component, flags | getattr(os, "O_DIRECTORY", 0), dir_fd=parent_fd)
+            os.close(parent_fd); parent_fd = next_fd
+            metadata = os.fstat(parent_fd)
+            if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
+                raise _InputArtifactCleanupUnverified("cleanup_target_metadata_mismatch")
+        leaf = components[-1]
+        try:
+            descriptor = os.open(leaf, flags, dir_fd=parent_fd)
+        except FileNotFoundError:
+            # Only this leaf under the proved held parent may be absent.
+            os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+            raise _InputArtifactCleanupUnverified("cleanup_target_replaced")
+        metadata = os.fstat(descriptor)
+        if not _private_input_file_metadata(metadata) or metadata.st_size != entry["size_bytes"]:
+            raise _InputArtifactCleanupUnverified("cleanup_target_metadata_mismatch")
+        chunks, remaining = [], INPUT_ARTIFACT_MAX_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 65536))
+            if not chunk: break
+            chunks.append(chunk); remaining -= len(chunk)
+        raw = b"".join(chunks)
+        if len(raw) != entry["size_bytes"] or hashlib.sha256(raw).hexdigest() != entry["content_sha256"]:
+            raise _InputArtifactCleanupUnverified("cleanup_digest_mismatch")
+        named = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        if any(getattr(named, field) != getattr(metadata, field) for field in ("st_dev", "st_ino", "st_mode", "st_uid", "st_nlink", "st_size")):
+            raise _InputArtifactCleanupUnverified("cleanup_target_replaced")
+        os.unlink(leaf, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+    except FileNotFoundError:
+        # Positive only when all parent components were opened and leaf open
+        # failed. A missing root/parent never reaches this descriptor state.
+        if parent_fd < 0 or 'leaf' not in locals() or descriptor >= 0:
+            reason = "cleanup_target_missing"
+    except _InputArtifactCleanupUnverified as exc:
+        reason = exc.reason
+    except OSError:
+        reason = "cleanup_target_unavailable"
+    finally:
+        if descriptor >= 0: os.close(descriptor)
+        if parent_fd >= 0: os.close(parent_fd)
+    return RetiredInputCleanupReadback(hashlib.sha256(witness.intent_bytes).hexdigest(),
+        entry["artifact_ref"], "cleanup_required" if reason else "absent", reason)
+
+
+async def _revoke_input_artifact_locked(db, owner, *, witness: InputRetirementWitness):
+    if not isinstance(witness, InputRetirementWitness):
+        raise BoardError("pipeline_input_changed", "Input retirement proof is required", status_code=409)
+    row = await db.get(WorkBoardInputArtifact, witness.artifact_id, populate_existing=True)
+    if (row is None or row.owner_principal_id != owner.principal_id
+        or row.owner_session_id != owner.session_id or row.revision != witness.revision
+        or _metadata_digest(row) != witness.metadata_digest or row.metadata_digest != witness.metadata_digest
+        or row.bound_task_id != witness.task_id or row.typed_input_ref != witness.typed_input_ref
+        or row.payload_sha256 != witness.content_sha256 or row.size_bytes != witness.size_bytes
+        or row.state != "bound"):
+        raise BoardError("pipeline_input_changed", "The retirement binding changed", status_code=409)
+    task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == witness.task_id).execution_options(populate_existing=True))
+    if task is None or task.task_revision != witness.task_revision or task.input_artifact_id != row.artifact_id:
+        raise BoardError("pipeline_task_changed", "The retiring consumer changed", status_code=409)
+    prior_revision, prior_state = row.revision, row.state
+    row.revision, row.state = prior_revision + 1, "revoked"
+    tombstone_digest = _metadata_digest(row)
+    row.revision, row.state = prior_revision, prior_state
+    changed = await db.execute(update(WorkBoardInputArtifact).where(
+        WorkBoardInputArtifact.artifact_id == row.artifact_id,
+        WorkBoardInputArtifact.revision == witness.revision,
+        WorkBoardInputArtifact.metadata_digest == witness.metadata_digest,
+        WorkBoardInputArtifact.state == "bound").values(state="revoked", revision=prior_revision+1,
+        metadata_digest=tombstone_digest).execution_options(synchronize_session=False))
+    if changed.rowcount != 1:
+        raise BoardError("pipeline_input_changed", "The retirement CAS changed", status_code=409)
+    await db.refresh(row)
+    return row.revision, tombstone_digest
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 

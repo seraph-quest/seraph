@@ -446,6 +446,8 @@ async def _proposal_task_authority_summary(
 
 def _proposal_admission_input_digest(proposal: WorkBoardProposal) -> str:
     """Recompute the exact input envelope digest used by durable admission."""
+    if proposal.opportunity_id:
+        return _proposal_digest(_decode_json(proposal.proposal_json)["generation_binding"]["inputs"])
     return _proposal_digest(
         {
             "proposal_id": proposal.proposal_id,
@@ -535,7 +537,7 @@ async def _admit_proposal_job(
             idempotency_scope="work-board-proposal",
             idempotency_key=proposal.proposal_id,
         ),
-        inputs={
+        inputs=_decode_json(proposal.proposal_json)["generation_binding"]["inputs"] if proposal.opportunity_id else {
             "proposal_id": proposal.proposal_id,
             "kind": proposal.kind,
             "parent_task_id": proposal.parent_task_id,
@@ -555,6 +557,7 @@ async def _admit_proposal_job(
         # still permits no retry after contact or any effect is persisted.
         max_attempts=2,
         run_fingerprint=proposal.request_digest,
+        deadline_at=proposal.expires_at if proposal.opportunity_id else None,
     )
     # A prior process can fail after the deterministic row is admitted but
     # before the proposal contact marker is written.  Reconcile that exact
@@ -588,10 +591,15 @@ async def _admit_proposal_job(
     if status != "queued":
         return None
     lease_owner = f"{_PROPOSAL_RUNNER}:{proposal.proposal_id}"
+    claim_check = None
+    if proposal.opportunity_id:
+        from src.guardian.opportunity_plans import guard_plan_claim
+        claim_check = guard_plan_claim
     claimed = await durable_job_repository.claim_job(
         job_id,
         owner=lease_owner,
         lease_seconds=120,
+        claim_authority_check=claim_check,
     )
     lease = claimed.get("lease") if isinstance(claimed, Mapping) else None
     fence = int((lease or {}).get("fencing_token") or 0)
@@ -672,14 +680,14 @@ def _failed_pre_contact_admission_matches(
             or int(task.task_revision) != int(proposal.parent_revision)
             or int(task.goal_revision) != int(proposal.goal_revision)
             or str(projection.get("goal_id") or "") != str(task.goal_id or "")
-            or proposal.request_digest
+            or (not proposal.opportunity_id and proposal.request_digest
             != _proposal_request_digest(
                 task=task,
                 kind=proposal.kind,
                 idempotency_key=proposal.idempotency_key,
                 evidence_snapshot=stored_snapshot(proposal),
-            )
-            or proposal.input_digest != _proposal_input_digest(task=task, kind=proposal.kind)
+            ))
+            or (not proposal.opportunity_id and proposal.input_digest != _proposal_input_digest(task=task, kind=proposal.kind))
         ):
             return False
     expected_effect_digest = hashlib.sha256(
@@ -1418,6 +1426,7 @@ async def _invoke_governed_proposal(
     job_id: str,
     lease_owner: str,
     fencing_token: int,
+    timeout_seconds: float = 120,
 ) -> str:
     """Call one explicitly selected governed OpenRouter route only."""
     tokens = set_runtime_context(
@@ -1436,7 +1445,7 @@ async def _invoke_governed_proposal(
                 messages=messages,
                 temperature=0.1,
                 max_tokens=1_024,
-                timeout=120,
+                timeout=timeout_seconds,
                 runtime_path=context.runtime_path,
                 profile="openrouter",
                 request_context=context,
@@ -1680,17 +1689,26 @@ async def list_proposals(
 async def get_proposal(
     owner: WorkBoardOwner,
     proposal_id: str,
+    *,
+    operator: Any | None = None,
 ) -> dict[str, Any]:
     """Return one owner/session-bound proposal receipt after a reload."""
-
     async with get_session() as db:
         proposal = await _get_proposal(db, owner, proposal_id)
-        if proposal.provider_contact_started or proposal.provider_contact_state != "not_started":
-            # _reconcile_started_proposal already returns the safe API
-            # projection.  Do not pass that mapping through the ORM serializer
-            # a second time after an expiry or restart reconciliation.
-            return await _reconcile_started_proposal(db, owner, proposal)
-        return _proposal_payload(proposal)
+        linked = bool(proposal.opportunity_id)
+        if not linked:
+            if proposal.provider_contact_started or proposal.provider_contact_state != "not_started":
+                return await _reconcile_started_proposal(db, owner, proposal)
+            return _proposal_payload(proposal)
+    # Close the read session before physical staging or the sole local finalizer.
+    from src.guardian.opportunity_plans import reconcile_generated_plan, get_plan_projection
+    reason = await reconcile_generated_plan(owner, proposal_id, operator=operator)
+    async with get_session() as db:
+        proposal = await _get_proposal(db, owner, proposal_id)
+        result = await get_plan_projection(db, proposal)
+        if reason is not None:
+            result["blocked_reason"] = reason
+        return result
 
 
 async def _reconcile_started_proposal(
@@ -1996,6 +2014,10 @@ async def create_proposal(
     from src.memory.evidence_proposal import stage_context, recheck_context, stored_snapshot
     async with get_session() as preflight_db:
         evidence_task = await repository._owned_task(preflight_db, owner, task_id)
+        from src.guardian.opportunity_plans import _linked_proposal
+        linked = await _linked_proposal(preflight_db, evidence_task)
+        if linked is not None and linked.opportunity_id:
+            raise BoardError("opportunity_fixed_plan_required", "Review the bound opportunity plan; alternate planners cannot replace its lineage", status_code=409)
         staged_evidence, evidence_snapshot = await stage_context(preflight_db, owner,
             evidence_task, 'proposal-evidence-stage', operator=operator)
     async with get_session() as db:
@@ -2408,6 +2430,12 @@ async def accept_proposal(
     request: WorkBoardProposalAccept,
     *, operator: AuthenticatedOperator | None = None,
 ) -> dict[str, Any]:
+    async with get_session() as linked_db:
+        linked = await _get_proposal(linked_db, owner, proposal_id)
+        linked_plan = bool(linked.opportunity_id)
+    if linked_plan:
+        from src.guardian.opportunity_plans import accept_browser_plan
+        return await accept_browser_plan(owner=owner, proposal_id=proposal_id, request=request, operator=operator)
     repository = WorkBoardRepository()
     from src.memory.evidence_proposal import stage_proposal_context, recheck_context, stored_snapshot
     from src.memory.evidence_specification import (

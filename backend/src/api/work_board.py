@@ -71,6 +71,7 @@ from src.work_board.dispatcher import TypedInputError, _dispatcher, _parse_typed
 from src.work_board import review as review_service
 from src.work_board import triage as triage_service
 from src.work_board import pipelines as pipeline_service
+from src.guardian.opportunity_contracts import OpportunityError
 from src.work_board.pipeline_contracts import PipelinePreviewRequest, PipelineAcceptRequest, PipelineAdvanceRequest, PipelineRevisionRequest, PipelineReuseRequest, REPORT
 from src.work_board.tool_package_contracts import ToolPackageRecoverRequest
 from src.work_board.document_compare_contracts import DocumentPairReserve, DocumentPairMutation, DocumentControlRequest
@@ -226,14 +227,24 @@ async def read_artifact_pipeline(request: Request, operation_id: str):
 
 @router.post("/pipelines/{operation_id}/accept")
 async def accept_artifact_pipeline(request: Request, operation_id: str, body: PipelineAcceptRequest):
-    owner = _owner(_operator(request))
+    operator = _operator(request)
+    owner = _owner(operator)
     try:
+        async with get_session() as linked_db:
+            from src.db.models import WorkBoardProposal
+            linked = await linked_db.get(WorkBoardProposal, operation_id)
+            linked_plan = bool(linked and linked.opportunity_id)
+        if linked_plan:
+            from src.guardian.opportunity_plans import accept_report_plan
+            return await accept_report_plan(operator=operator, owner=owner, operation_id=operation_id, request=body)
         async with get_session() as db:
             result = await pipeline_service.accept(db, owner, operation_id, body)
             await db.commit()
             return result
     except BoardError as exc:
         _raise_board_error(exc)
+    except OpportunityError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
 
 
 @router.post("/pipelines/{operation_id}/advance")
@@ -254,6 +265,8 @@ async def advance_artifact_pipeline(request: Request, operation_id: str, body: P
         return result
     except BoardError as exc:
         _raise_board_error(exc)
+    except OpportunityError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
 
 
 @router.post("/pipelines/{operation_id}/revision")
@@ -2313,6 +2326,13 @@ async def get_work_board_task(request: Request, task_id: str):
                 dispatch_rank=dispatch_rank,
                 recovered_read_only=task_id in recovered,
             )
+            if task_id not in recovered:
+                from src.guardian.opportunity_plans import _linked_proposal, get_plan_projection
+                linked = await _linked_proposal(db, detail["task"])
+                if linked is not None and linked.opportunity_id:
+                    projection = await get_plan_projection(db, linked)
+                    task_payload.update({key: projection.get(key) for key in
+                        ("opportunity_id", "opportunity_revision", "proposal_ref", "plan_preview")})
             attempts_payload = []
             for item in detail["attempts"]:
                 item_payload = _attempt_payload(item)
@@ -2771,9 +2791,11 @@ async def list_work_board_proposals(
 async def get_work_board_proposal(request: Request, proposal_id: str):
     operator = _operator(request)
     try:
-        return await triage_service.get_proposal(_owner(operator), proposal_id)
+        return await triage_service.get_proposal(_owner(operator), proposal_id, operator=operator)
     except BoardError as exc:
         _raise_board_error(exc)
+    except OpportunityError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
     except SQLAlchemyError as exc:
         raise HTTPException(
             status_code=503,
@@ -2816,6 +2838,8 @@ async def accept_work_board_proposal(
         return await triage_service.accept_proposal(_owner(operator), proposal_id, body, operator=operator)
     except BoardError as exc:
         _raise_board_error(exc)
+    except OpportunityError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
     except SQLAlchemyError as exc:
         raise HTTPException(
             status_code=503,

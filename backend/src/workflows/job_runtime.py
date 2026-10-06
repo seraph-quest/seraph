@@ -3909,7 +3909,10 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if dependency_guard:
                 await recheck_run_dependencies(db, run, staged_dependencies)
             if claim_authority_check is not None:
-                if run.job_kind not in {"readonly_research_child", "document_invoice_compare_v1", "local_authored_json", "forgejo_issue_title_v1", "guardian_opportunity_assess"}:
+                if run.job_kind == "work_board_proposal":
+                    from src.guardian.opportunity_plans import assert_linked_plan_native
+                    await assert_linked_plan_native(db, run)
+                elif run.job_kind not in {"readonly_research_child", "document_invoice_compare_v1", "local_authored_json", "forgejo_issue_title_v1", "guardian_opportunity_assess"}:
                     raise DurableJobLeaseError("phase-bound claims require a fixed native capability")
                 await claim_authority_check(db, run)
             await _assert_canonical_goal_fence(

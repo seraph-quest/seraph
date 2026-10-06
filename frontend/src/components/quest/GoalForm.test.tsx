@@ -154,7 +154,7 @@ describe("GuardianPolicyForm", () => {
     expect(screen.getByText(/Policy revision 2/)).toBeInTheDocument();
     expect(screen.getByLabelText("Enable bounded public opportunity assessments")).toBeChecked();
     expect(screen.getByLabelText(`Assessment watch ${watchId}`)).toBeChecked();
-    expect(screen.getByLabelText("Enable advisory auto-stage plans")).toBeChecked();
+    expect(screen.getByLabelText("Enable silent non-executable Triage plan staging")).toBeChecked();
     expect(screen.getByLabelText("Advisory proposals per UTC day")).toHaveValue(1);
     expect(screen.getByLabelText("I separately acknowledge advisory staging never accepts or executes a plan")).not.toBeChecked();
     expect(screen.getByLabelText("I separately acknowledge optional notifications and quiet-hour limits")).not.toBeChecked();
@@ -178,7 +178,7 @@ describe("GuardianPolicyForm", () => {
     expect(screen.getByText(/Current confirmed policy: enabled/)).toBeInTheDocument();
     expect(screen.getByLabelText("Assessments per UTC day")).toHaveValue(4);
     expect(screen.getByLabelText(`Assessment watch ${watchId}`)).not.toBeChecked();
-    expect(screen.getByLabelText("Enable advisory auto-stage plans")).not.toBeChecked();
+    expect(screen.getByLabelText("Enable silent non-executable Triage plan staging")).not.toBeChecked();
     expect(screen.getByLabelText("I separately acknowledge advisory staging never accepts or executes a plan")).not.toBeChecked();
     expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(true);
     fetchMock.mockImplementationOnce(async (_url, init) => {
@@ -210,7 +210,7 @@ describe("GuardianPolicyForm", () => {
     });
     render(<GuardianPolicyForm goal={goal} />);
     expect(screen.getByLabelText("Enable bounded public opportunity assessments")).not.toBeChecked();
-    expect(screen.getByLabelText("Enable advisory auto-stage plans")).not.toBeChecked();
+    expect(screen.getByLabelText("Enable silent non-executable Triage plan staging")).not.toBeChecked();
     expect(screen.getByLabelText("I separately acknowledge advisory staging never accepts or executes a plan")).not.toBeChecked();
     expect(screen.getByLabelText("I separately acknowledge optional notifications and quiet-hour limits")).not.toBeChecked();
     await screen.findByLabelText(`Assessment watch ${watchId}`);
@@ -253,10 +253,10 @@ describe("GuardianPolicyForm", () => {
     fetchMock.mockResolvedValueOnce(policyResponse([publicWatch()]));
     render(<GuardianPolicyForm goal={policyGoal()} />);
     await screen.findByLabelText(`Assessment watch ${watchId}`);
-    expect(screen.getByText("Plan staging is not available yet. Saving this permission does not create a plan.")).toBeInTheDocument();
+    expect(screen.getByText("Separately consented staging may silently create a non-executable Triage plan. Saving this permission never accepts or executes a plan.")).toBeInTheDocument();
     fireEvent.click(screen.getByLabelText("Enable bounded public opportunity assessments"));
     fireEvent.click(screen.getByLabelText(`Assessment watch ${watchId}`));
-    fireEvent.click(screen.getByLabelText("Enable advisory auto-stage plans"));
+    fireEvent.click(screen.getByLabelText("Enable silent non-executable Triage plan staging"));
     fireEvent.change(screen.getByLabelText("Advisory proposals per UTC day"), { target: { value: "1" } });
     fireEvent.change(screen.getByLabelText("Opportunity notifications per UTC day"), { target: { value: "1" } });
     fireEvent.click(screen.getByRole("button", { name: "Save assessment policy" }));
@@ -274,6 +274,9 @@ describe("GuardianPolicyForm", () => {
     await screen.findByText(/Assessment policy saved/);
     expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toMatchObject({ acknowledge_auto_stage_plan: true, acknowledge_notifications: true,
       policy: { auto_stage_plan: true, max_plan_proposals_per_utc_day: 1, max_notification_per_utc_day: 1 } });
+    expect(fetchMock.mock.calls[1][1].method).toBe("PUT");
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("limits selection to three watches and does not dispatch or renew them", async () => {

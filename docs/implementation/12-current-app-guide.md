@@ -1206,8 +1206,24 @@ and invalid or stale evidence remains blocked. Goal edits require explicit watch
 and policy review. Accept creates a Triage review task, and cancel reports actual
 quiescence while retaining Unknown inference liability. These judgments do not
 execute a capability or update memory. Notifications remain a separate opt-in.
-Plan staging is not available yet; saving its separately acknowledged permission
-does not create a plan. New packets replace claimed work only while it has no
+Current cited opportunities offer `Generate read-only plan` for the fixed public
+browser-check and public-evidence-report blueprints. Generation makes one
+governed request and stages a non-executable Triage card; a separately
+acknowledged automatic-staging policy may stage it after assessment. Neither
+accepts the plan. Work shows the exact typed preview before explicit acceptance,
+then existing native approval and queue rules govern the browser read and, for
+reports, automatic CPU dossier/report steps. These retain verified local
+readback and `no_learning`. Two contacted generations per Goal per UTC day are
+the fixed cap; blocked generation creates no new task or reservation.
+
+Reload performs no Generate or Accept. The canonical Work proposal read may
+adopt an already verified original native result without another contact while
+the original authority and deadline remain current. Contacted Unknown retains
+its cost liability and cannot resend. `Request durable cancellation` waits for
+verified transport/context cleanup; a normal same-workspace restart preserves
+the original proposal, Root and costs without renewing permission.
+
+New packets replace claimed work only while it has no
 provider contact marker, and the existing execution owner must prove closure.
 An unowned older execution leaves the latest candidate visibly waiting until
 closure or its finite deadline. Input privacy checks include literal source
@@ -1215,8 +1231,10 @@ identifiers and URLs; excluded input blocks assessment while retaining the
 verified source-watch result.
 
 See [Guardian Intelligence](./05-guardian-intelligence.md#reviewed-goals-and-the-source-change-inbox)
-for ownership, readback, idempotency, and bounded recovery contracts. Local
-source execution and live external/provider usefulness have separate evidence
+for ownership, readback, idempotency, and bounded recovery contracts. Independent
+review corrections for current authority, original output integrity, automatic
+staging proof, canonical Work detail and cancellation cleanup were accepted.
+Local source execution and live external/provider usefulness have separate evidence
 boundaries; live external/provider usefulness remains **external-unverified**.
 This capability remains **Partial**.
 

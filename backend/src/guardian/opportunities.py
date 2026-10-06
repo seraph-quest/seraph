@@ -486,6 +486,16 @@ async def project_item(db, row, disposition=None, *, detail=False):
             and json.loads(receipt.details_json).get("result", {}).get("quiescent") is True for receipt in receipts)
     if not current:
         item["recovery_action"] = "review_goal_and_watch"
+    from src.guardian.opportunity_plans import get_plan_offer, get_plan_preview
+    item["plan_offer"] = await get_plan_offer(db, row)
+    if row.proposal_id:
+        from src.db.models import WorkBoardProposal
+        proposal = await db.get(WorkBoardProposal, row.proposal_id)
+        if proposal is not None:
+            try:
+                item["plan_preview"] = await get_plan_preview(db, row, proposal)
+            except (OpportunityError, ValueError, KeyError, TypeError):
+                item["plan_preview"] = None
     if detail:
         from src.guardian.inbox import _load_action_history
         history, truncated = await _load_action_history(db, owner_principal_id=row.owner_principal_id,

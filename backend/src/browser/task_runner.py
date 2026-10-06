@@ -1358,25 +1358,25 @@ class BrowserTaskRunner:
             raise BrowserTaskError("durable root is missing", code="durable_root_missing")
         if _text(current.get("job_id")) != job_id:
             raise BrowserTaskError("durable root identity mismatch", code="durable_identity_mismatch")
-        self._verify_durable_binding(
-            current,
-            expected_job_id=job_id,
-            task_id=task_id,
-            attempt_id=attempt_id,
-            owner_principal_id=owner_principal_id,
-            owner_session_id=owner_session_id,
-            goal_id=goal_id,
-            goal_revision=goal_revision,
-            board_task_revision=admission_board_task_revision,
-            board_fencing_token=board_fencing_token,
-            input_artifact_id=input_artifact_id,
-            input_artifact_digest=input_artifact_digest,
-            input_envelope_digest=input_envelope_digest,
-            input_model_digest=input_model_digest,
-            action_consent_digest=action_consent_digest,
-            action_count=len(model.actions),
-            task_priority=task_priority,
-        )
+        cleanup_binding = {
+            "expected_job_id": job_id,
+            "task_id": task_id,
+            "attempt_id": attempt_id,
+            "owner_principal_id": owner_principal_id,
+            "owner_session_id": owner_session_id,
+            "goal_id": goal_id,
+            "goal_revision": goal_revision,
+            "board_task_revision": admission_board_task_revision,
+            "board_fencing_token": board_fencing_token,
+            "input_artifact_id": input_artifact_id,
+            "input_artifact_digest": input_artifact_digest,
+            "input_envelope_digest": input_envelope_digest,
+            "input_model_digest": input_model_digest,
+            "action_consent_digest": action_consent_digest,
+            "action_count": len(model.actions),
+            "task_priority": task_priority,
+        }
+        self._verify_durable_binding(current, **cleanup_binding)
         self._verify_effective_limits(
             current,
             max_attempts=max_attempts,
@@ -1462,7 +1462,7 @@ class BrowserTaskRunner:
                     job_id=job_id,
                     lease_owner=lease_owner,
                     fencing_token=fencing_token,
-                    revision=int(active.get("revision") or revision),
+                    binding=cleanup_binding,
                 )
                 else "cleanup_unknown"
             )
@@ -1477,7 +1477,7 @@ class BrowserTaskRunner:
                     job_id=job_id,
                     lease_owner=lease_owner,
                     fencing_token=fencing_token,
-                    revision=int(active.get("revision") or revision),
+                    binding=cleanup_binding,
                 )
                 else "cleanup_unknown"
             )
@@ -1629,6 +1629,8 @@ class BrowserTaskRunner:
             )
             self._assert_execution_budget(state)
             self._assert_receipt_budget(state)
+            from src.guardian.opportunity_plans import stage_browser_plan_terminal
+            opportunity_terminal_check = await stage_browser_plan_terminal(task_id, attempt_id)
             transition = await self._await_with_deadline(
                 state,
                 self.jobs.transition_job(
@@ -1637,6 +1639,7 @@ class BrowserTaskRunner:
                     owner=state.lease_owner,
                     fencing_token=state.fencing_token,
                     expected_revision=state.revision,
+                    terminal_authority_check=opportunity_terminal_check,
                     result_summary="public browser extraction verified by artifact readback",
                     result={
                         "cleanup_status": cleanup_status,
@@ -1894,7 +1897,7 @@ class BrowserTaskRunner:
         job_id: str,
         lease_owner: str,
         fencing_token: int,
-        revision: int,
+        binding: Mapping[str, Any],
     ) -> bool:
         """Persist the no-context proof for a claimed root that never launched."""
 
@@ -1903,25 +1906,30 @@ class BrowserTaskRunner:
             # Lightweight runner doubles do not own a durable effect ledger;
             # the absence of a recorder cannot imply a browser was launched.
             return True
-        try:
-            await asyncio.wait_for(
-                recorder(
-                    job_id,
-                    effect_id=f"browser-cleanup:{job_id}",
-                    effect_type="browser_context_cleanup",
-                    status="succeeded",
-                    details={
-                        "cleanup_status": "not_needed",
-                        "context_not_started": True,
-                        "memory_status": "no_learning",
-                    },
-                    receipt_kind="effect",
-                    owner=lease_owner,
-                    fencing_token=fencing_token,
-                    expected_revision=revision,
-                ),
-                timeout=BROWSER_CLEANUP_TIMEOUT_SECONDS,
+
+        async def record() -> None:
+            revision = await self._refresh_cleanup_revision(
+                job_id=job_id, lease_owner=lease_owner,
+                fencing_token=fencing_token, binding=binding,
             )
+            await recorder(
+                job_id,
+                effect_id=f"browser-cleanup:{job_id}",
+                effect_type="browser_context_cleanup",
+                status="succeeded",
+                details={
+                    "cleanup_status": "not_needed",
+                    "context_not_started": True,
+                    "memory_status": "no_learning",
+                },
+                receipt_kind="effect",
+                owner=lease_owner,
+                fencing_token=fencing_token,
+                expected_revision=revision,
+            )
+
+        try:
+            await asyncio.wait_for(record(), timeout=BROWSER_CLEANUP_TIMEOUT_SECONDS)
             return True
         except Exception:
             return False
@@ -2004,6 +2012,38 @@ class BrowserTaskRunner:
         cls._assert_execution_budget(state)
         return value
 
+    async def _refresh_cleanup_revision(
+        self, *, job_id: str, lease_owner: str, fencing_token: int,
+        binding: Mapping[str, Any],
+    ) -> int:
+        """Refresh native cleanup CAS authority without authorizing execution."""
+        projection = await self.jobs.assert_active_lease(
+            job_id, owner=lease_owner, fencing_token=fencing_token,
+        )
+        self._verify_durable_binding(projection, **binding)
+        return int(projection["revision"])
+
+    @staticmethod
+    def _cleanup_binding(state: "_ExecutionState") -> dict[str, Any]:
+        return {
+            "expected_job_id": state.job_id,
+            "task_id": state.task_id,
+            "attempt_id": state.attempt_id,
+            "owner_principal_id": state.owner_principal_id,
+            "owner_session_id": state.owner_session_id,
+            "goal_id": state.goal_id,
+            "goal_revision": state.goal_revision,
+            "input_artifact_id": state.input_artifact_id,
+            "input_artifact_digest": state.input_artifact_digest,
+            "input_envelope_digest": state.input_envelope_digest,
+            "input_model_digest": state.input_model_digest,
+            "action_consent_digest": state.action_consent_digest,
+            "action_count": state.action_count,
+            "board_task_revision": state.admission_board_task_revision,
+            "board_fencing_token": state.board_fencing_token,
+            "task_priority": state.task_priority,
+        }
+
     async def _record_cleanup_effect(
         self,
         state: "_ExecutionState",
@@ -2021,6 +2061,10 @@ class BrowserTaskRunner:
             return True
         status = "succeeded" if cleanup_status in {"cleanup_verified", "not_needed"} else "unknown"
         try:
+            state.revision = await self._refresh_cleanup_revision(
+                job_id=state.job_id, lease_owner=state.lease_owner,
+                fencing_token=state.fencing_token, binding=self._cleanup_binding(state),
+            )
             receipt = await recorder(
                 state.job_id,
                 effect_id=f"browser-cleanup:{state.job_id}",

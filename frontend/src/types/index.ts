@@ -195,6 +195,8 @@ export interface GuardianInboxMailOrigin {
 
 /** Operator-safe projection of a durable, owner-scoped guardian intervention. */
 export interface GuardianInboxItem {
+  plan_offer?: OpportunityPlanOffer | null;
+  plan_preview?: OpportunityPlanPreview | null;
   opportunity_id?: string | null;
   opportunity_revision?: number | null;
   opportunity_status?: GuardianOpportunityStatus | null;
@@ -514,6 +516,10 @@ export interface WorkBoardAttempt {
 
 /** Safe task projection returned by the authenticated /api/work-board routes. */
 export interface WorkBoardTask {
+  opportunity_id?: string | null;
+  opportunity_revision?: number | null;
+  proposal_ref?: OpportunityPlanReference | null;
+  plan_preview?: OpportunityPlanPreview | null;
   ownership_access?: "recovered_read_only";
   execution_block_reason?: string;
   task_id: string;
@@ -581,6 +587,8 @@ export interface WorkBoardEvent {
 }
 
 export interface WorkBoardTaskDetail {
+  proposal_ref?: OpportunityPlanReference | null;
+  plan_preview?: OpportunityPlanPreview | null;
   task: WorkBoardTask;
   attempts: WorkBoardAttempt[];
   parents: string[];
@@ -902,13 +910,17 @@ export interface WorkBoardProposalLink {
 }
 
 export interface WorkBoardProposal {
-  kind: "specify" | "decompose";
+  opportunity_id?: string | null;
+  opportunity_revision?: number | null;
+  proposal_ref?: OpportunityPlanReference | null;
+  plan_preview?: OpportunityPlanPreview | null;
+  kind: "specify" | "decompose" | OpportunityPlanKind;
   proposal_id: string;
   proposal_revision: number;
   parent_task_id: string;
   parent_revision: number;
   idempotency_key?: string;
-  proposal_digest: string;
+  proposal_digest: string | null;
   expires_at: string;
   proposed_tasks: WorkBoardProposalTask[];
   proposed_links: WorkBoardProposalLink[];
@@ -1620,3 +1632,129 @@ export interface CalendarApiErrorDetail {
   message: string;
   recovery_action: string | null;
 }
+
+// Fixed opportunity plan projections from the governed server.
+type OpaqueId = string;
+type Sha256 = string;
+type UTC = string;
+type UUID = string;
+export type BlueprintId = 'public-browser-check' | 'public-evidence-report';
+export type OpportunityPlanKind = 'opportunity_plan' | 'public-evidence-pipeline.v1';
+export type OpportunityPlanStatus =
+  | 'pending_inference' | 'proposed' | 'accepted' | 'blocked' | 'rejected' | 'expired';
+export type PlanProviderContactState = 'not_started' | 'started' | 'succeeded' | 'unknown';
+export type PipelineRecoveryReason =
+  | 'input_artifact_cleanup_required' | 'input_artifact_write_failed'
+  | 'pipeline_recovery_required' | 'pipeline_materialization_conflict'
+  | 'pipeline_output_unverified' | 'pipeline_output_too_large'
+  | 'pipeline_handoff_changed' | 'pipeline_input_changed'
+  | 'pipeline_root_changed' | 'pipeline_goal_changed'
+  | 'pipeline_source_changed' | 'pipeline_source_permission'
+  | 'pipeline_review_required' | 'pipeline_expired'
+  | 'pipeline_attempts_exhausted' | 'pipeline_task_changed'
+  | 'pipeline_producer_changed' | 'pipeline_plan_changed'
+  | 'source_stale' | 'goal_review_required' | 'opportunity_expired';
+
+export interface OpportunityPlanRequest {
+  expected_opportunity_revision: number; // strict integer >=1
+  expected_goal_revision: number; // strict integer >=1
+  idempotency_key: UUID;
+}
+export interface OpportunityPlanReference {
+  proposal_id: OpaqueId; // report operation_id is this SAME canonical PK
+  kind: OpportunityPlanKind; // pending is opportunity_plan; report finalizes after settlement
+  proposal_revision: number; // required once atomic pending row exists
+  parent_task_id: OpaqueId; // existing staged Triage source/review card
+  parent_revision: number; // required original current review revision
+  proposal_digest: Sha256 | null; // null until verified canonical result, never zero/empty fake SHA
+  expires_at: UTC; // fixed original review expiry; replay never renews it
+  status: OpportunityPlanStatus;
+  blueprint_id: BlueprintId | null; // null before valid model result
+  provider_contact_state?: PlanProviderContactState;
+  generation_retry_allowed?: boolean; // absent=false; exact current NEVER-contacted proof only
+  recovery_reason?: PipelineRecoveryReason | null; // report only; safe current inspection
+}
+export interface OpportunityPlanOffer {
+  available_blueprint_ids: BlueprintId[]; // pure current eligible set, <=2; independent daily cap
+  unavailable_reason: string | null;
+  can_generate: boolean;
+  generation_block_reason: string | null;
+  proposal_ref: OpportunityPlanReference | null;
+}
+export interface OpportunityPlanResponse {
+  opportunity_id: OpaqueId;
+  opportunity_revision: number;
+  proposal_ref: OpportunityPlanReference | null;
+  reason_code: string | null;
+}
+export interface PlanCitation {
+  source_id: OpaqueId;
+  start_line: number; // strict 1..200
+  end_line: number; // start<=end<=exact offered LF line count
+  span_sha256: Sha256;
+}
+export interface OpportunityPlanModelResult {
+  schema_version: 'seraph.opportunity.plan.v1';
+  blueprint_id: BlueprintId; // exact server-offered subset
+  title: string; // 1..160 characters
+  reason: string; // 1..1000 characters
+  citations: PlanCitation[]; // 1..4, same offered IDs/spans; <=16KiB strict JSON
+}
+export interface BrowserCheck {
+  kind: 'url_host' | 'url_path_prefix';
+  value: string;
+}
+export interface FixedBrowserInput {
+  schema_version: 1;
+  start_url: string;
+  allowed_hosts: string[]; // exactly one current server-selected public host
+  approved_url_prefixes: string[]; // exactly the current source URL
+  actions: [
+    { kind: 'navigate'; url: string; expected_checks: BrowserCheck[] },
+    { kind: 'extract'; selector: 'body'; max_chars: 8192; expected_checks: BrowserCheck[] }
+  ];
+  final_expected_checks: BrowserCheck[];
+}
+export interface OpportunityPlanPreview {
+  opportunity_id: OpaqueId;
+  opportunity_revision: number;
+  blueprint_id: BlueprintId;
+  goal_id: OpaqueId;
+  goal_revision: number;
+  source_id: OpaqueId;
+  source_digest: Sha256;
+  watch_id: OpaqueId;
+  watch_revision: number;
+  steps: OpportunityPlanPreviewStep[]; // exact native one or fixed three
+  review_expires_at: UTC;
+  deadline_at: UTC | null; // report original operation admission deadline after acceptance
+  no_learning: true;
+  recovery_reason?: PipelineRecoveryReason | null; // report only, no authority
+}
+export interface OpportunityPlanPreviewStep {
+  slot: 'public_source' | 'evidence_dossier' | 'local_report';
+  capability_id: 'browser.public-task.v1' | 'work.evidence-dossier.v1' | 'work.local-evidence-report.v1';
+  input: FixedBrowserInput | null; // CPU remains null until real verified producer materialization
+  input_materialization: 'bound' | 'after_verified_producer';
+  output_schema: 'browser_public_task_result' | 'evidence_dossier.v1' | 'text/plain';
+  permissions: string[];
+  native_approvals: string[]; // current registered descriptions, never approval receipts
+  runtime_seconds: number;
+  output_bytes: number;
+}
+export interface BrowserPlanAcceptRequest {
+  expected_proposal_revision: number;
+  expected_parent_revision: number;
+}
+export interface ReportPlanAcceptRequest {
+  expected_revision: number;
+  expected_parent_revision: number;
+  expected_digest: Sha256;
+}
+// Preaccept report UI passes exact matched proposal_ref/plan_preview to the existing
+// ArtifactPipelineReview owner; task.pipeline_operation_id remains unbound until accept.
+// Only proposed + non-null digest/blueprint + matching kind permits the existing accept.
+// Reload/lost response: GET only. Exact manual generation replay needs retained original
+// request plus generation_retry_allowed=true; contacted/Unknown never enables resend.
+// Existing accepted pipeline replay remains keyed by its original accepted_digest;
+// do not add incoming revision/body equality requirements to that ordinary compatibility.

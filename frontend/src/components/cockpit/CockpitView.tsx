@@ -16492,6 +16492,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             <GuardianInboxPanel
               key={attentionOwner ? `${attentionOwner.principalId}:${attentionOwner.sessionId}` : "unconfirmed"}
               ref={guardianInboxRef}
+              currentOwnerPrincipalId={attentionOwner?.principalId ?? null}
+              currentRootId={attentionOwner?.sessionId ?? null}
               active
               pageSize={20}
               pollIntervalMs={0}
@@ -17073,6 +17075,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               {activeSection !== "inbox" ? (
                 <GuardianInboxPanel
                   key={attentionOwnerKey ?? "unconfirmed"}
+                  currentOwnerPrincipalId={attentionOwner?.principalId ?? null}
+                  currentRootId={attentionOwner?.sessionId ?? null}
                   active={advancedWorkspaceOpen}
                   pageSize={20}
                   onSelectItem={setSelectedGuardianCandidate}

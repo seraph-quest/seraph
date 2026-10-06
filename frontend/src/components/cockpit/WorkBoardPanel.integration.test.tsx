@@ -9,6 +9,8 @@ import type {
   WorkBoardTask,
   WorkBoardTaskDetail,
   WorkBoardTaskPage,
+  OpportunityPlanPreview,
+  OpportunityPlanReference,
 } from "../../types";
 import { WorkBoardPanel } from "./WorkBoardPanel";
 
@@ -161,6 +163,148 @@ describe("WorkBoardPanel integration", () => {
     expect(screen.getByRole("button", { name: "Add comment" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Close task details" })).not.toBeDisabled();
     expect(screen.getByRole("listitem")).toHaveAttribute("draggable", "false");
+    expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(true);
+  });
+
+  it.each([{ stale: false, report: false, detailOnly: false, foreignCanonical: false }, { stale: true, report: false, detailOnly: false, foreignCanonical: false },
+    { stale: false, report: true, detailOnly: false, foreignCanonical: false }, { stale: false, report: true, detailOnly: true, foreignCanonical: false },
+    { stale: false, report: false, detailOnly: false, foreignCanonical: true },
+    { stale: false, report: true, detailOnly: false, foreignCanonical: false, listFirst: true }])("reviews an opportunity with stale binding=$stale report=$report nested progress=$detailOnly foreign canonical=$foreignCanonical list first=$listFirst through its sole existing accept owner", async ({ stale, report, detailOnly, foreignCanonical, listFirst }) => {
+    fetchMock.mockReset();
+    window.sessionStorage.clear();
+    let currentTask = boardTask({ status: "triage", capability_id: null, goal_revision: 3, block_reason: null });
+    const checks = [{ kind: "url_host" as const, value: "example.com" }, { kind: "url_path_prefix" as const, value: "/source" }];
+    const preview: OpportunityPlanPreview = { opportunity_id: "opportunity-1", opportunity_revision: 3, blueprint_id: "public-browser-check", goal_id: "goal-1", goal_revision: 3,
+      source_id: "source-1", source_digest: "a".repeat(64), watch_id: "watch-1", watch_revision: 2,
+      review_expires_at: "2030-01-01T00:00:00Z", deadline_at: null, no_learning: true,
+      steps: [{ slot: "public_source", capability_id: "browser.public-task.v1", input_materialization: "bound", output_schema: "browser_public_task_result",
+        input: { schema_version: 1, start_url: "https://example.com/source", allowed_hosts: ["example.com"], approved_url_prefixes: ["https://example.com/source"],
+          final_expected_checks: checks, actions: [{ kind: "navigate", url: "https://example.com/source", expected_checks: checks }, { kind: "extract", selector: "body", max_chars: 8192, expected_checks: checks }] },
+        permissions: ["browser.public"], native_approvals: ["Current browser approval required"], runtime_seconds: 180, output_bytes: 65536 }] };
+    if (report) {
+      preview.blueprint_id = "public-evidence-report";
+      preview.steps.push({ slot: "evidence_dossier", capability_id: "work.evidence-dossier.v1", input_materialization: "after_verified_producer", output_schema: "evidence_dossier.v1",
+        input: null, permissions: [], native_approvals: [], runtime_seconds: 30, output_bytes: 65536 },
+      { slot: "local_report", capability_id: "work.local-evidence-report.v1", input_materialization: "after_verified_producer", output_schema: "text/plain",
+        input: null, permissions: [], native_approvals: [], runtime_seconds: 30, output_bytes: 65536 });
+    }
+    const ref: OpportunityPlanReference = { proposal_id: "proposal-1", kind: report ? "public-evidence-pipeline.v1" : "opportunity_plan", proposal_revision: 1, parent_task_id: stale ? "foreign-task" : "task-1",
+      parent_revision: 3, proposal_digest: "b".repeat(64), expires_at: preview.review_expires_at, status: "proposed", blueprint_id: preview.blueprint_id };
+    const operation = { operation_id: "proposal-1", revision: 1, parent_revision: 3, plan_version: 1, digest: ref.proposal_digest,
+      status: "proposed", deadline_at: null, no_learning: true, pending_revision: null, reused_output: null,
+      source_scope: { start_url: "https://example.com/source", allowed_hosts: ["example.com"], approved_url_prefixes: ["https://example.com/source"] },
+      steps: [{ slot: "public_source", capability_id: "browser.public-task.v1", task_id: "task-1", task_revision: 3, status: "triage", block_reason: null }] };
+    const proposal = { ...ref, parent_task_id: "task-1", opportunity_id: "opportunity-1", opportunity_revision: 3, proposal_ref: ref, plan_preview: preview,
+      proposed_tasks: [], proposed_links: [], estimated_cost: null };
+    const summary = { ...ref, parent_task_id: "task-1", proposed_tasks: [], proposed_links: [], estimated_cost: null,
+      ...(detailOnly ? { kind: "opportunity_plan", status: "pending_inference", proposal_digest: null } : {}) };
+    let resolveDetail!: (value: ReturnType<typeof response>) => void;
+    const delayedDetail = new Promise<ReturnType<typeof response>>((resolve) => { resolveDetail = resolve; });
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/pipelines/proposal-1/accept")) return Promise.resolve(response(operation));
+      if (url.endsWith("/pipelines/proposal-1")) return Promise.resolve(response(operation));
+      if (url.endsWith("/proposals/proposal-1/accept")) {
+        currentTask = { ...currentTask, status: "todo", task_revision: 4 };
+        return Promise.resolve(response({ proposal_id: "proposal-1", proposal_revision: 2, status: "accepted", task_ids: ["task-1"] }));
+      }
+      if (url.endsWith("/tasks/task-1/proposals")) return Promise.resolve(response({ proposals: [summary] }));
+      if (url.endsWith("/proposals/proposal-1")) return Promise.resolve(response(foreignCanonical ? { ...proposal, parent_task_id: "foreign-task" }
+        : detailOnly ? { ...summary, opportunity_id: "opportunity-1", opportunity_revision: 3, proposal_ref: null, plan_preview: null } : proposal));
+      if (url.endsWith("/tasks/task-1")) return listFirst ? delayedDetail : Promise.resolve(response(detail({ ...currentTask,
+        proposal_ref: ref, plan_preview: preview, opportunity_id: "opportunity-1", opportunity_revision: 3 })));
+      if (url.includes("/tasks?")) return Promise.resolve(response(page(currentTask, 1)));
+      if (url.includes("/events?")) return Promise.resolve(response(emptyEvents(1)));
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
+      if (url.endsWith("/evidence")) return Promise.resolve(response({ revision: 0, claims: [], excluded_source_ids: [], blocked_sources: [], memory_status: "no_learning" }));
+      return Promise.resolve(response({}));
+    });
+    render(<WorkBoardPanel ownerPrincipalId="operator:one" ownerSessionId="operator-session-1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Recoverable task" }));
+    if (listFirst) {
+      await screen.findByRole("region", { name: "Triage proposal preview" });
+      expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/proposals/proposal-1"))).toBe(false);
+      await act(async () => resolveDetail(response(detail({ ...currentTask, proposal_ref: ref, plan_preview: preview,
+        opportunity_id: "opportunity-1", opportunity_revision: 3 }))));
+    }
+    if (foreignCanonical) {
+      expect(await screen.findByText("The recovered proposal does not match the selected task. Refresh before accepting.")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Accept and queue this read-only plan" })).not.toBeInTheDocument();
+      expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(true);
+      return;
+    }
+    const accept = await screen.findByRole("button", { name: "Accept and queue this read-only plan" });
+    expect(screen.getByLabelText("Exact read-only opportunity plan")).toHaveTextContent("https://example.com/source");
+    expect(screen.getByLabelText("Exact read-only opportunity plan")).toHaveTextContent("Current browser approval required");
+    expect(screen.queryByRole("button", { name: "Accept proposal" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Specify for review" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Decompose for review" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve exact pipeline plan" })).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([url, init]) => String(url).endsWith("/proposals/proposal-1") && (!init?.method || init.method === "GET"))).toBe(true);
+    expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(true);
+    if (report) {
+      expect(currentTask.pipeline_operation_id).toBeUndefined();
+      expect(screen.getByLabelText("Exact report plan preview")).toHaveTextContent('"input": null');
+      expect(screen.queryByRole("button", { name: "Materialize verified next input" })).not.toBeInTheDocument();
+    }
+    if (stale) expect(accept).toBeDisabled();
+    else {
+      await waitFor(() => expect(accept).toBeEnabled()); fireEvent.click(accept);
+      await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => String(url).endsWith(report ? "/pipelines/proposal-1/accept" : "/proposals/proposal-1/accept") && init?.method === "POST")).toBe(true));
+      const posts = fetchMock.mock.calls.filter(([, init]) => init?.method === "POST");
+      expect(posts).toHaveLength(1);
+      expect(JSON.parse(posts[0][1].body)).toEqual(report ? { expected_revision: 1, expected_parent_revision: 3, expected_digest: "b".repeat(64) }
+        : { expected_proposal_revision: 1, expected_parent_revision: 3 });
+    }
+  });
+
+  it("drops a canonical opportunity response after the current owner changes without posting", async () => {
+    fetchMock.mockReset();
+    const task = boardTask({ status: "triage" });
+    let resolveCanonical!: (value: ReturnType<typeof response>) => void;
+    const canonical = new Promise<ReturnType<typeof response>>((resolve) => { resolveCanonical = resolve; });
+    let listReads = 0;
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/tasks/task-1/proposals")) return Promise.resolve(response({ proposals: ++listReads === 1
+        ? [{ kind: "opportunity_plan", proposal_id: "proposal-1", parent_task_id: "task-1", status: "proposed" }] : [] }));
+      if (url.endsWith("/proposals/proposal-1")) return canonical;
+      if (url.endsWith("/tasks/task-1")) return Promise.resolve(response(detail(task)));
+      if (url.includes("/tasks?")) return Promise.resolve(response(page(task, 1)));
+      if (url.includes("/events?")) return Promise.resolve(response(emptyEvents(1)));
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
+      return Promise.resolve(response({}));
+    });
+    const view = render(<WorkBoardPanel ownerPrincipalId="operator:one" ownerSessionId="operator-session-1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Recoverable task" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/proposals/proposal-1"))).toBe(true));
+    view.rerender(<WorkBoardPanel ownerPrincipalId="operator:two" ownerSessionId="operator-session-2" />);
+    await act(async () => resolveCanonical(response({ kind: "opportunity_plan", proposal_id: "proposal-1", parent_task_id: "task-1",
+      status: "proposed", proposed_tasks: [], proposed_links: [], estimated_cost: "late original owner preview" })));
+    expect(screen.queryByText(/late original owner preview/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Accept and queue this read-only plan" })).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(true);
+  });
+
+  it("keeps an ordinary pipeline proposal summary outside opportunity recovery", async () => {
+    fetchMock.mockReset();
+    const task = boardTask({ status: "triage" });
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/tasks/task-1/proposals")) return Promise.resolve(response({ proposals: [{ kind: "public-evidence-pipeline.v1",
+        proposal_id: "ordinary-pipeline", parent_task_id: "task-1", parent_revision: 3, proposal_revision: 1, status: "proposed",
+        expires_at: "2030-01-01T00:00:00Z", proposed_tasks: [], proposed_links: [], estimated_cost: "ordinary pipeline summary" }] }));
+      if (url.endsWith("/tasks/task-1")) return Promise.resolve(response(detail(task)));
+      if (url.includes("/tasks?")) return Promise.resolve(response(page(task, 1)));
+      if (url.includes("/events?")) return Promise.resolve(response(emptyEvents(1)));
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
+      return Promise.resolve(response({}));
+    });
+    render(<WorkBoardPanel ownerPrincipalId="operator:one" ownerSessionId="operator-session-1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Recoverable task" }));
+    expect(await screen.findByText("Estimated cost: ordinary pipeline summary")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Exact read-only opportunity plan")).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/proposals/ordinary-pipeline"))).toBe(false);
     expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(true);
   });
 

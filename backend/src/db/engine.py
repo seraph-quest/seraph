@@ -1561,6 +1561,11 @@ async def _ensure_work_board_columns(conn) -> None:
 
     proposal_result = await conn.exec_driver_sql('PRAGMA table_info(work_board_proposals)')
     proposal_columns = {row[1] for row in proposal_result.fetchall()}
+    for column, sql_type in (("opportunity_id", "VARCHAR"), ("opportunity_revision", "INTEGER")):
+        if proposal_columns and column not in proposal_columns:
+            await conn.exec_driver_sql(f"ALTER TABLE work_board_proposals ADD COLUMN {column} {sql_type}")
+    if proposal_columns:
+        await conn.exec_driver_sql("CREATE UNIQUE INDEX IF NOT EXISTS ux_work_board_proposals_opportunity ON work_board_proposals (opportunity_id)")
     if proposal_columns and 'evidence_use_snapshot_json' not in proposal_columns:
         await conn.exec_driver_sql('ALTER TABLE work_board_proposals ADD COLUMN evidence_use_snapshot_json VARCHAR')
 

@@ -1612,12 +1612,51 @@ restriction. Independent review findings required finite source-proof bounds,
 exact original-Root notification checks, once-only persisted-result adoption and
 this history/current-state separation; those corrections were accepted.
 
-Provider-intercepted native receipts establish the bounded execution path;
-the milestone also requires a managed UI journey. Neither establishes live
-provider usefulness. Secret, email/phone and invented
-reference checks are conservative filters, not complete PII detection or semantic
+Provider-intercepted native and managed UI receipts establish the bounded
+execution path. Neither establishes live provider usefulness. Secret,
+email/phone and invented reference checks are conservative filters, not complete
+PII detection or semantic
 truth verification. Public excerpts can contain misleading material; citations
 prove byte attribution. The broader proactive learning loop remains **Partial**.
+
+### Reviewed read-only opportunity plans
+
+A current cited opportunity may offer two fixed blueprints: **Public browser
+check** and **Public evidence report**. `Generate read-only plan` admits one
+governed strategist request using only the offered immutable public evidence.
+The server retains the original Root, Goal, source, revision, request and native
+cost bindings. At most two contacted plan generations per Goal per UTC day are
+allowed; reaching that limit leaves the offers visible without creating another
+task, proposal, reservation or grant.
+
+Generation stages one non-executable **Triage** card. Separately acknowledged
+automatic staging may do the same after a valid assessment, but does not accept
+or execute it. The operator reviews the exact typed plan in Work and explicitly
+accepts it. Existing Todo/Ready, native approval and dispatcher rules then own
+execution. The browser blueprint reads the exact approved public HTTPS source;
+the report blueprint follows that browser readback with automatic CPU dossier
+and local report steps. Physical artifacts and native receipts retain distinct
+identities and explicit `no_learning`; neither blueprint updates canonical
+memory or grants general browsing authority.
+
+Reload does not generate or accept a plan. Authenticated Work proposal reads
+may locally adopt an already persisted, verified original native result while
+its original authority, cost, source and deadline remain current. Proven
+never-contacted recovery reuses the original request and native lineage;
+contacted uncertainty retains Unknown liability and cannot resend. Cancellation
+uses the existing durable Work control and reports closure only after the
+original transport and Chromium context have verified quiescence. Restart
+preserves the original liability, proposal and finite bounds without renewal.
+
+Independent review corrections were accepted for exact Goal/source/revision
+checks at contact and result writes, original native-output integrity, finite
+tokenless Root proof for automatic staging, canonical Work detail recovery,
+and cancellation cleanup receipt CAS after native checkpoints. Managed UI
+receipts cover both blueprints, silent Triage staging, real cancellation and
+Unknown readback after a same-workspace restart. Named external transports were
+intercepted; live public-source and provider usefulness remain
+**external-unverified**, and the broader proactive learning loop remains
+**Partial**.
 
 This is a bounded local source-change loop, with an explicit `no_learning`
 result. It does not establish general autonomous operation or live provider

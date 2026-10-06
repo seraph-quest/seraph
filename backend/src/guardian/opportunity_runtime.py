@@ -432,10 +432,14 @@ async def adopt_persisted_assessment(opportunity_id):
         current.revision += 1
         db.add(current)
 
-    return await durable_job_repository.transition_job(row.job_id, "succeeded", owner=RUNNER,
+    receipt = await durable_job_repository.transition_job(row.job_id, "succeeded", owner=RUNNER,
         fencing_token=run.fencing_token, expected_revision=run.revision, terminal_authority_check=adopt,
         result={"opportunity_id": row.id, "result_sha256": artifact["content_sha256"], "learning": "no_learning"},
         result_summary="verified cited opportunity judgment; no learning")
+    if assessment.proposed and receipt.get("status") == "succeeded":
+        from src.guardian.opportunity_plans import auto_stage_plan
+        await auto_stage_plan(opportunity_id)
+    return receipt
 
 
 async def _contact_limits(db, row, policy):

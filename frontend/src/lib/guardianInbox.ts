@@ -1,5 +1,6 @@
 import { API_URL } from "../config/constants";
 import { apiFetch } from "./api";
+import { normalizeOpportunityFeedback } from "./opportunityPreferences";
 import type {
   GuardianInboxActionRequest,
   GuardianInboxActionResponse,
@@ -230,6 +231,7 @@ export function normalizeGuardianInboxItem(value: unknown): GuardianInboxItem | 
     || (value.plan_preview != null && (!preview || preview.opportunity_id !== value.opportunity_id || preview.goal_id !== value.goal_id
       || preview.goal_revision !== value.goal_revision));
   return {
+    feedback_summary: normalizeOpportunityFeedback(value.feedback_summary),
     plan_offer: offer,
     plan_preview: preview,
     opportunity_id: typeof value.opportunity_id === "string" ? value.opportunity_id : null,

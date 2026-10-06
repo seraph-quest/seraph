@@ -67,6 +67,7 @@ async def list_guardian_inbox(
             owner_session_id=operator.session_id,
             limit=limit,
             cursor=cursor,
+            operator=operator,
         )
     except inbox_service.InboxError as exc:
         _raise_inbox_error(exc)
@@ -80,6 +81,7 @@ async def get_guardian_inbox_item(item_id: str, request: Request) -> dict[str, A
             owner_principal_id=operator.principal.principal_id,
             owner_session_id=operator.session_id,
             item_id=item_id,
+            operator=operator,
         )
     except inbox_service.InboxError as exc:
         _raise_inbox_error(exc)

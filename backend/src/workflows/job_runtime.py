@@ -2313,6 +2313,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         self, spec: DurableJobSpec, *, repo_node_posture_expectation: dict[str, Any] | None = None,
         selected_context_admission=None,
         admission_authority_check: Callable[[Any, Any], Awaitable[None]] | None = None,
+        opportunity_preference_witness=None,
     ) -> dict[str, Any]:
         # Internal server-only copy of actual selected Node preflight facts.
         # A separate method argument cannot be supplied by spec/request
@@ -2605,7 +2606,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     now=now,
                     dialect_name=dialect_name,
                 )
-            if admission_authority_check is not None and dialect_name == "sqlite" and not transaction_started:
+            if (admission_authority_check is not None or identity.job_kind == "memory.opportunity-preference.v1") and dialect_name == "sqlite" and not transaction_started:
                 await db.execute(text("BEGIN IMMEDIATE"))
                 transaction_started = True
             await ensure_sessions_exist(db, [spec.session_id])
@@ -2725,6 +2726,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 raise DurableJobAdmissionDenied("forgejo_fixed_native_admission_required")
             if identity.job_kind == "guardian_opportunity_assess" and admission_authority_check is None:
                 raise DurableJobAdmissionDenied("guardian_opportunity_fixed_native_admission_required")
+            if identity.job_kind == "memory.opportunity-preference.v1":
+                from src.work_board.opportunity_preference_native import recheck_native
+                await recheck_native(db,run,witness=opportunity_preference_witness)
             if admission_authority_check is not None:
                 # Server-only capability guard shares the canonical Goal and
                 # new-row insert transaction. Exact immutable replay above
@@ -3091,6 +3095,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         approval_resume_receipt: Mapping[str, Any] | None = None,
         terminal_authority_check: Callable[[Any, Any], Awaitable[None]] | None = None,
         cancellation_authority_check: Callable[[Any, Any], Awaitable[None]] | None = None,
+        opportunity_preference_witness=None,
     ) -> dict[str, Any]:
         if to_status not in DURABLE_JOB_STATUSES:
             raise DurableJobTransitionError(f"unknown durable job status: {to_status}")
@@ -3120,15 +3125,19 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 'work.evidence-dossier.v1', 'work.local-evidence-report.v1'}
                 and to_status in {'queued', 'running', 'succeeded', 'degraded'})
             guardian_queue_guard = preflight_run.job_kind == "guardian_opportunity_assess" and to_status == "queued"
+            preference_guard = preflight_run.job_kind == "memory.opportunity-preference.v1" and to_status in {"queued", "succeeded", "degraded"}
             if dependency_guard:
                 staged_dependencies = await stage_run_dependencies(db, preflight_run)
             await db.rollback()
-            if (terminal_authority_check is not None and to_status in {"succeeded", "degraded"}) or dependency_guard or cancellation_authority_check is not None or guardian_queue_guard:
+            if (terminal_authority_check is not None and to_status in {"succeeded", "degraded"}) or dependency_guard or cancellation_authority_check is not None or guardian_queue_guard or preference_guard:
                 bind = db.get_bind()
                 dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
                 if dialect_name == "sqlite":
                     await db.execute(text("BEGIN IMMEDIATE"))
             run = await self._fetch(db, job_id)
+            if preference_guard:
+                from src.work_board.opportunity_preference_native import recheck_native
+                await recheck_native(db,run,witness=opportunity_preference_witness,terminal=to_status in {"succeeded","degraded"})
             if guardian_queue_guard and run.status == "blocked":
                 from src.guardian.opportunity_runtime import guard_recovered_queue
                 await guard_recovered_queue(db, run)
@@ -3876,6 +3885,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         expected_fencing_token: int | None = None,
         continue_existing_attempt: bool = False,
         claim_authority_check=None,
+        opportunity_preference_witness=None,
     ) -> dict[str, Any]:
         owner = _text(owner)
         if not owner:
@@ -3901,11 +3911,17 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 return _serialize(preflight_run, receipt={'kind': 'claim', 'status': 'terminal_noop'})
             dependency_guard = preflight_run.job_kind in {'browser_public_task',
                 'work.evidence-dossier.v1', 'work.local-evidence-report.v1'}
+            preference_guard = preflight_run.job_kind == "memory.opportunity-preference.v1"
             staged_dependencies = await stage_run_dependencies(db, preflight_run) if dependency_guard else None
             await db.rollback()
-            if claim_authority_check is not None or dependency_guard:
+            if claim_authority_check is not None or dependency_guard or preference_guard:
                 await db.execute(text("BEGIN IMMEDIATE"))
             run = await self._fetch(db, job_id)
+            if preference_guard:
+                from src.work_board.opportunity_preference_native import recheck_native
+                await recheck_native(db,run,witness=opportunity_preference_witness)
+                if run.attempt_count >= 1 or run.max_attempts != 1:
+                    raise DurableJobLeaseError("the original recommendation attempt is exhausted")
             if dependency_guard:
                 await recheck_run_dependencies(db, run, staged_dependencies)
             if claim_authority_check is not None:
@@ -4481,6 +4497,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         fencing_token: int,
         safe: bool = True,
         expected_revision: int | None = None,
+        opportunity_preference_witness=None,
     ) -> dict[str, Any]:
         if not _text(checkpoint_id):
             raise ValueError("checkpoint_id is required")
@@ -4498,6 +4515,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if getattr(getattr(bind, "dialect", None), "name", "") == "sqlite":
                 await db.execute(text("BEGIN IMMEDIATE"))
             run = await self._fetch(db, job_id)
+            if run.job_kind == "memory.opportunity-preference.v1" and checkpoint_id == "opportunity-preference-source-use":
+                from src.work_board.opportunity_preference_native import recheck_native
+                await recheck_native(db,run,witness=opportunity_preference_witness)
             await recheck_run_dependencies(db, run, staged_dependencies)
             await _assert_canonical_goal_fence(
                 db,

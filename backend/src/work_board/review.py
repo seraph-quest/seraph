@@ -384,6 +384,18 @@ async def _verified_workflow_readback(
         return None
     if not _workflow_run_binds_board_attempt(task, attempt, run):
         return None
+    if task.capability_id == "memory.opportunity-preference.v1":
+        from src.work_board.opportunity_preference_native import stage_output_source, recheck_done_source
+        try:
+            staged = db.info.get("opportunity_preference_done_source")
+            if staged is None:
+                staged = await stage_output_source(db,task,attempt)
+            else:
+                await recheck_done_source(db,witness=staged)
+            if staged.output_sha256 != proof["content_sha256"]:
+                return None
+        except (BoardError,ValueError,TypeError,KeyError,OSError):
+            return None
     if task.capability_id == "work.research-dossier.v1":
         try:
             from src.work_board.research_readback import verified_dossier
@@ -472,6 +484,9 @@ def _workflow_run_binds_board_attempt(
     safe_digest = lambda value: bool(_SAFE_DIGEST.fullmatch(str(value or "").strip()))
 
     capability_id = str(task.capability_id or "").strip()
+    if capability_id == "memory.opportunity-preference.v1":
+        from src.work_board.opportunity_preference_native import binds
+        return binds(task,attempt,run)
     if capability_id == "work.json-format.v1":
         from src.work_board.tool_package_native import binds
         return binds(task,attempt,run)

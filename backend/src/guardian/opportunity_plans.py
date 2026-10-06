@@ -293,7 +293,7 @@ def proposal_ref(row):
         "provider_contact_state": row.provider_contact_state, "generation_retry_allowed": False}
 
 
-async def get_plan_offer(db, opportunity):
+async def get_plan_offer(db, opportunity, *, operator=None):
     offer = {"available_blueprint_ids": [], "unavailable_reason": None, "can_generate": False,
              "generation_block_reason": None, "proposal_ref": None}
     proposal = await db.get(WorkBoardProposal, opportunity.proposal_id) if opportunity.proposal_id else None
@@ -304,6 +304,12 @@ async def get_plan_offer(db, opportunity):
             raise OpportunityError("opportunity_not_proposed")
         await stage_plan_source(db, opportunity, allow_planned=bool(proposal and proposal.status == "accepted"))
         offer["available_blueprint_ids"] = list(BLUEPRINTS)
+        if operator is not None:
+            from src.guardian.opportunity_preferences import current_preference, order_eligible_offers
+            preference = await current_preference(operator, goal_id=opportunity.goal_id,
+                goal_revision=opportunity.goal_revision, action="prefer_blueprint")
+            offer["available_blueprint_ids"] = [item["blueprint_id"] for item in order_eligible_offers(
+                [{"blueprint_id": blueprint_id} for blueprint_id in offer["available_blueprint_ids"]], preference)]
         _, _, _, policy, _ = await assert_opportunity_current(db, opportunity)
         count = await contacted_plan_count(db, opportunity.owner_principal_id, opportunity.goal_id)
         if proposal:

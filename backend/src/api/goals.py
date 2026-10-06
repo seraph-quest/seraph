@@ -43,7 +43,8 @@ from src.guardian.goal_conditioned_loop import (
     propose_goal_candidate_set,
 )
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
-from src.guardian.opportunity_contracts import GuardianPolicySave, OpportunityCancel, OpportunityPlanRequest
+from src.guardian.opportunity_contracts import (GuardianPolicySave, OpportunityCancel, OpportunityPlanRequest,
+    OpportunityFeedbackRequest, OpportunityFeedbackReceipt, OpportunityRecommendationRequest, OpportunityRecommendationReceipt)
 from src.guardian.opportunities import OpportunityError, policy_projection, save_policy
 
 logger = logging.getLogger(__name__)
@@ -465,7 +466,7 @@ async def get_guardian_opportunities(request: Request, goal_id: str | None = Non
     operator = _require_authenticated_operator(request)
     try:
         return await list_history(owner=operator.principal.principal_id, root_id=operator.session_id,
-            goal_id=goal_id, limit=limit, cursor=cursor)
+            goal_id=goal_id, limit=limit, cursor=cursor, operator=operator)
     except OpportunityError as exc:
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
 
@@ -488,6 +489,48 @@ async def generate_guardian_opportunity_plan(opportunity_id: str, body: Opportun
         return await generate_plan(operator=operator, opportunity_id=opportunity_id, request=body)
     except OpportunityError as exc:
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
+
+
+@router.post("/guardian/opportunities/{opportunity_id}/feedback", response_model=OpportunityFeedbackReceipt)
+async def record_guardian_opportunity_feedback(opportunity_id: str, body: OpportunityFeedbackRequest, request: Request):
+    from src.guardian.feedback import record_opportunity_feedback
+    operator = _require_authenticated_operator(request)
+    try:
+        return await record_opportunity_feedback(operator=operator, opportunity_id=opportunity_id, request=body)
+    except OpportunityError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
+
+
+@router.post("/guardian/opportunities/{opportunity_id}/recommendation", response_model=OpportunityRecommendationReceipt)
+async def request_guardian_opportunity_recommendation(opportunity_id: str, body: OpportunityRecommendationRequest, request: Request):
+    from src.work_board.opportunity_preference_native import request_opportunity_recommendation
+    from src.work_board.repository import BoardError
+    operator = _require_authenticated_operator(request)
+    try:
+        return await request_opportunity_recommendation(operator=operator, opportunity_id=opportunity_id, request=body)
+    except (OpportunityError, BoardError) as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
+    except CapabilityJournalError as exc:
+        raise HTTPException(status_code=503, detail={"code": "source_baseline_integrity_unverifiable"}) from exc
+
+
+@router.get("/guardian/opportunities/{opportunity_id}/recommendation", response_model=OpportunityRecommendationReceipt)
+async def inspect_guardian_opportunity_recommendation(opportunity_id: str, idempotency_key: str, request: Request):
+    from src.work_board.opportunity_preference_native import inspect_opportunity_recommendation
+    from src.work_board.repository import BoardError
+    from uuid import UUID
+    operator = _require_authenticated_operator(request)
+    try:
+        if str(UUID(idempotency_key)) != idempotency_key:
+            raise ValueError("Exact canonical UUID required")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"code":"invalid_idempotency_key"}) from exc
+    try:
+        return await inspect_opportunity_recommendation(operator=operator, opportunity_id=opportunity_id, request_uuid=idempotency_key)
+    except (OpportunityError, BoardError) as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
+    except CapabilityJournalError as exc:
+        raise HTTPException(status_code=503, detail={"code": "source_baseline_integrity_unverifiable"}) from exc
 
 
 @router.get("/goals/tree")

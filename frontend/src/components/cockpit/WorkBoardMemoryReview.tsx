@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
-import type { WorkBoardTask } from "../../types";
+import type { OpportunityPreferenceProposal, WorkBoardTask } from "../../types";
+import { actOnOpportunityPreference, inspectOpportunityPreference } from "../../lib/opportunityPreferences";
+import { createGuardianUuid } from "../../lib/guardianInbox";
 
 type ProposalStatus =
   | "proposed"
@@ -16,6 +18,7 @@ type ProposalStatus =
   | "accepting";
 
 export interface TaskMemoryProposal {
+  schema_version?: string;
   proposal_id: string;
   recovered_from_proposal_id?: string | null;
   task_id?: string;
@@ -252,6 +255,7 @@ function WorkBoardMemoryReview({
   }, [ownsTask, refresh, task.task_id]);
 
   const canCompare = ownsTask
+    && task.capability_id !== "memory.opportunity-preference.v1"
     && Boolean(task.goal_id)
     && (task.status === "todo" || task.status === "ready");
 
@@ -420,7 +424,7 @@ function WorkBoardMemoryReview({
     <section className="rounded border border-white/10 p-3" aria-label="Verified outcome memory review">
       <div className="flex items-center justify-between gap-2">
         <div className="font-semibold">Learning from this task</div>
-        {ownsTask && (
+        {ownsTask && task.capability_id !== "memory.opportunity-preference.v1" && (
           <button
             type="button"
             className="cockpit-feedback-button"
@@ -446,6 +450,11 @@ function WorkBoardMemoryReview({
       )}
       <div className="mt-2 grid gap-2">
         {proposals.map((proposal) => {
+          if (task.capability_id === "memory.opportunity-preference.v1" || proposal.schema_version === "opportunity_recommendation.v1"
+            || (proposal.scope ?? proposal.memory_scope)?.schema_version === "guardian_opportunity_preference.v1") {
+            return <OpportunityPreferenceReview key={`${ownerPrincipalId}:${ownerSessionId}:${task.task_id}:${proposal.proposal_id}`}
+              proposalId={proposal.proposal_id} task={task} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} />;
+          }
           const waiting = busyAction?.startsWith(`${proposal.proposal_id}:`) ?? false;
           const proposalText = proposal.proposed_text ?? proposal.preview_text ?? "";
           const editableText = edits[proposal.proposal_id] ?? proposalText;
@@ -644,6 +653,81 @@ function WorkBoardMemoryReview({
       )}
     </section>
   );
+}
+
+function OpportunityPreferenceReview({ proposalId, task, ownerPrincipalId, ownerSessionId }: WorkBoardMemoryReviewProps & { proposalId: string }) {
+  const [proposal, setProposal] = useState<OpportunityPreferenceProposal | null>(null);
+  const [acknowledged, setAcknowledged] = useState(false);
+  const [reason, setReason] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const controller = useRef<AbortController | null>(null);
+  const locked = useRef(false);
+  const gestures = useRef(new Map<string, { uuid: string; reason: string }>());
+  const reviewBinding = useRef<string | null>(null);
+  const owns = ownerPrincipalId === task.owner_principal_id && ownerSessionId === task.owner_session_id && Boolean(ownerPrincipalId && ownerSessionId);
+  const load = useCallback(async () => {
+    setAcknowledged(false);
+    controller.current?.abort();
+    const current = new AbortController(); controller.current = current;
+    try {
+      const next = await inspectOpportunityPreference(proposalId, current.signal);
+      if (current.signal.aborted) return;
+      if (!owns || next.owner_principal_id !== ownerPrincipalId || next.owner_session_id !== ownerSessionId
+        || next.source_task_id !== task.task_id || next.goal_id !== task.goal_id || next.goal_revision !== task.goal_revision) {
+        throw new Error("This preference does not match the current owner, original Root, task and Goal.");
+      }
+      const binding = `${next.revision}:${next.preview_text_digest}:${next.scope.bundle_digest}`;
+      if (reviewBinding.current !== binding) { gestures.current.clear(); reviewBinding.current = binding; }
+      setProposal(next); setError(null);
+    } catch (caught) { if (!current.signal.aborted) { setProposal(null); setError(caught instanceof Error ? caught.message : "Preference unavailable."); } }
+  }, [owns, ownerPrincipalId, ownerSessionId, proposalId, task.goal_id, task.goal_revision, task.task_id]);
+  useEffect(() => { void load(); return () => controller.current?.abort(); }, [load]);
+  const act = async (action: "accept" | "reject" | "rollback") => {
+    if (!proposal || !owns || !acknowledged || locked.current || reason.length > 500 || (action === "rollback" && !reason.trim())) return;
+    const key = `${proposal.revision}:${action}:${proposal.preview_text_digest}:${proposal.scope.bundle_digest}`;
+    const prior = gestures.current.get(key);
+    if (prior && prior.reason !== reason) { setError("The original mutation reason changed. Refresh and inspect its outcome before another action."); return; }
+    const gesture = prior ?? { uuid: createGuardianUuid(), reason };
+    gestures.current.set(key, gesture);
+    const current = new AbortController(); controller.current?.abort(); controller.current = current;
+    locked.current = true; setBusy(true); setError(null);
+    try {
+      await actOnOpportunityPreference(proposal, action, gesture.uuid, gesture.reason, current.signal);
+      if (!current.signal.aborted) { setAcknowledged(false); await load(); }
+    } catch (caught) {
+      if (!current.signal.aborted) { setError(caught instanceof Error ? caught.message : "Outcome unknown; refresh the existing preference."); setAcknowledged(false); }
+    } finally { locked.current = false; if (!current.signal.aborted || controller.current !== current) setBusy(false); }
+  };
+  const currentPreview = Boolean(proposal && proposal.status === "proposed" && proposal.expires_at && Date.parse(proposal.expires_at) > Date.now()
+    && task.status === "done" && task.task_revision === proposal.source_task_revision && task.latest_attempt?.attempt_id === proposal.source_attempt_id
+    && task.latest_attempt?.fencing_token === proposal.source_attempt_fence && task.latest_attempt?.readback_status === "verified"
+    && task.latest_attempt?.verification_status === "passed");
+  return <article className="rounded bg-black/20 p-2" aria-label="Opportunity preference review">
+    <strong>Opportunity feedback preference</strong>
+    <p>Opportunity feedback; usefulness improvement is unmeasured. Delivery and acknowledgment are not usefulness votes.</p>
+    <button type="button" disabled={busy || !owns} onClick={() => void load()}>Refresh opportunity preference</button>
+    {error ? <p role="alert">{error}</p> : null}
+    {proposal ? <>
+      <p>Status {proposal.status} · revision {proposal.revision} · memory {proposal.memory_status} · reason {proposal.reason_code}</p>
+      <p>Goal {proposal.goal_id} revision {proposal.goal_revision} · original Root {proposal.owner_session_id}</p>
+      <p>{proposal.quality_disclosure}</p>
+      <p>Current explicit opportunity feedback only · {proposal.included_count} opportunities · {proposal.feedback_event_count} feedback events</p>
+      <p>{proposal.scope.action === "prefer_blueprint" ? `Display preference: ${proposal.scope.blueprint_id}` : `Optional watch suppression: ${proposal.scope.watch_id} revision ${proposal.scope.watch_revision}`}</p>
+      <p>No execution, permission, budget or cadence changes. Review expires {safeDate(proposal.expires_at)}.</p>
+      <pre aria-label="Exact opportunity preference preview" className="whitespace-pre-wrap break-all">{proposal.preview_text}</pre>
+      <pre aria-label="Opportunity preference population" className="whitespace-pre-wrap break-all">{JSON.stringify(proposal.scope.population_members, null, 2)}</pre>
+      {(currentPreview || proposal.rollback_available) && owns ? <>
+        <label><input type="checkbox" checked={acknowledged} disabled={busy} onChange={(event) => setAcknowledged(event.currentTarget.checked)} />
+          I acknowledge this changes only reviewed opportunity offer ordering or optional watch suppression, not execution authority.</label>
+        <label>Opportunity preference reason<input maxLength={500} value={reason} disabled={busy} onChange={(event) => setReason(event.currentTarget.value)} /></label>
+        {currentPreview ? <>
+          <button type="button" disabled={busy || !acknowledged} onClick={() => void act("accept")}>Adopt this opportunity preference</button>
+          <button type="button" disabled={busy || !acknowledged} onClick={() => void act("reject")}>Reject opportunity preference</button>
+        </> : <button type="button" disabled={busy || !acknowledged || !reason.trim()} onClick={() => void act("rollback")}>Undo opportunity preference</button>}
+      </> : <p>No current adoption actions. Refresh current source, Goal and population before a new review.</p>}
+    </> : <p>Signed preference preview is unavailable; actions remain blocked.</p>}
+  </article>;
 }
 
 export { WorkBoardMemoryReview };

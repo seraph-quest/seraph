@@ -1041,6 +1041,8 @@ async def _normalise_tasks(
         )
         from src.work_board.dispatcher import REGISTERED_CAPABILITIES
 
+        if capability == "memory.opportunity-preference.v1":
+            raise BoardError("opportunity_recommendation_system_only", "The model cannot publish recommendation tasks", status_code=409)
         registered = REGISTERED_CAPABILITIES.get(capability)
         if registered is None:
             raise BoardError(
@@ -1206,6 +1208,8 @@ def _validate_proposed_typed_inputs(
 
     for item in tasks:
         capability_id = str(item.get("capability_id") or "")
+        if parent.capability_id == "memory.opportunity-preference.v1" or capability_id == "memory.opportunity-preference.v1":
+            raise BoardError("opportunity_recommendation_system_only", "Recommendations require their original authenticated request", status_code=409)
         capability = REGISTERED_CAPABILITIES.get(capability_id)
         if capability is None:
             raise BoardError(
@@ -2014,6 +2018,8 @@ async def create_proposal(
     from src.memory.evidence_proposal import stage_context, recheck_context, stored_snapshot
     async with get_session() as preflight_db:
         evidence_task = await repository._owned_task(preflight_db, owner, task_id)
+        if evidence_task.capability_id == "memory.opportunity-preference.v1":
+            raise BoardError("opportunity_recommendation_system_only", "The original recommendation cannot be replanned", status_code=409)
         from src.guardian.opportunity_plans import _linked_proposal
         linked = await _linked_proposal(preflight_db, evidence_task)
         if linked is not None and linked.opportunity_id:
@@ -2477,6 +2483,8 @@ async def accept_proposal(
         ).scalar_one_or_none()
         if preview_parent is None:
             raise BoardError("task_not_found", "The proposal parent task no longer exists", status_code=404)
+        if preview_parent.capability_id == "memory.opportunity-preference.v1":
+            raise BoardError("opportunity_recommendation_system_only", "The original recommendation cannot be replanned", status_code=409)
         if (
             preview_parent.task_revision != request.expected_parent_revision
             or preview_parent.task_revision != preview_proposal.parent_revision
@@ -2577,6 +2585,8 @@ async def accept_proposal(
         ).scalar_one_or_none()
         if parent is None:
             raise BoardError("task_not_found", "The proposal parent task no longer exists", status_code=404)
+        if parent.capability_id == "memory.opportunity-preference.v1":
+            raise BoardError("opportunity_recommendation_system_only", "The original recommendation cannot be replanned", status_code=409)
         if parent.task_revision != request.expected_parent_revision or parent.task_revision != proposal.parent_revision:
             raise BoardRevisionConflict(parent.task_id, request.expected_parent_revision, parent.task_revision)
         if stored_snapshot(proposal) != acceptance_snapshot:

@@ -522,6 +522,9 @@ def _typed_input_model(capability_id: str) -> type[BaseModel] | None:
     if capability_id in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
         from src.work_board.pipeline_contracts import EvidenceConsumerInput
         return EvidenceConsumerInput
+    if capability_id == "memory.opportunity-preference.v1":
+        from src.guardian.opportunity_preferences import OpportunityPreferenceInput
+        return OpportunityPreferenceInput
     model_type = _TYPED_INPUT_MODELS.get(capability_id)
     if model_type is not None:
         return model_type
@@ -546,6 +549,7 @@ def _typed_input_model(capability_id: str) -> type[BaseModel] | None:
 
 
 REGISTERED_CAPABILITIES: dict[str, CapabilitySpec] = {
+    "memory.opportunity-preference.v1": CapabilitySpec("memory.opportunity-preference.v1", "1", secret_like=False),
     "work.context.selected_text.v1": CapabilitySpec(
         "work.context.selected_text.v1", "browser-selected-text-v1",
         blocked_reason="selected_context_exact_operator_control_required",
@@ -3671,7 +3675,7 @@ class WorkBoardDispatcher:
                 receipts.append({"job_id":attempt.workflow_run_id,"status":"cancelled" if proven else "unknown",
                     "reason_code":"tool_package_reaped" if proven else "tool_package_cleanup_unproven"})
                 return receipts, bool(proven)
-            if capability in {"browser.public-task.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
+            if capability in {"browser.public-task.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1", "memory.opportunity-preference.v1"}:
                 worker = self._active_worker_tasks.get((task.task_id, attempt.attempt_id))
                 if worker is not None and worker is not asyncio.current_task() and not worker.done():
                     worker.cancel()
@@ -3950,6 +3954,8 @@ class WorkBoardDispatcher:
     async def _effective_runtime(self, task: WorkBoardTask) -> int:
         """Resolve the current goal admission deadline, never from card input."""
 
+        if task.capability_id == "memory.opportunity-preference.v1":
+            return 30
         if task.pipeline_operation_id:
             from src.work_board.pipelines import runtime_guard, utc, now
             _row, operation = await runtime_guard(task, session_provider=self.session_provider)
@@ -4325,6 +4331,11 @@ class WorkBoardDispatcher:
                 if snapshot["status"] != "ready" or snapshot.get("overrun_max_cost_microusd", 0):
                     return "research_accounting_blocked", "Resolve existing accounting continuity or provider overrun before research"
                 return None, None
+            if capability == "memory.opportunity-preference.v1":
+                from src.work_board.opportunity_preference_native import stage_task_authority
+                async with self.session_provider() as preference_db:
+                    await stage_task_authority(preference_db,task,session_provider=self.session_provider)
+                return None,None
             if capability in {"work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
                 from src.work_board.input_artifacts import resolve_input_artifact_for_task
                 from src.work_board.pipelines import runtime_guard
@@ -6329,6 +6340,16 @@ class WorkBoardDispatcher:
         procedure_binding: ProcedureChildBinding | None = None,
     ) -> Mapping[str, Any]:
         capability_id = _text(task.capability_id)
+        if capability_id == "memory.opportunity-preference.v1":
+            from src.work_board.opportunity_preference_native import execute
+            if not admission_only:
+                self._active_worker_tasks[(task.task_id,attempt.attempt_id)] = asyncio.current_task()
+            try:
+                return await execute(task,attempt,inputs,jobs=self.jobs,runner=self.runner_id,
+                    admission_only=admission_only,session_provider=self.session_provider)
+            finally:
+                if not admission_only:
+                    self._active_worker_tasks.pop((task.task_id,attempt.attempt_id),None)
         if capability_id == "work.document-compare.v1":
             from src.work_board.document_compare_native import execute
             if not admission_only:
@@ -8870,6 +8891,9 @@ class WorkBoardDispatcher:
 
         capability_id = _text(task.capability_id)
         binding_key = f"{task.task_id}:{attempt.attempt_id}"
+        if capability_id == "memory.opportunity-preference.v1":
+            from src.work_board.opportunity_preference_native import job_id
+            return job_id(task,attempt),task.owner_principal_id,capability_id,None,binding_key
         if capability_id == "work.document-compare.v1":
             from src.work_board.document_compare_native import job_id, JOB_KIND
             return job_id(task,attempt),task.owner_principal_id,JOB_KIND,None,binding_key
@@ -9001,6 +9025,9 @@ class WorkBoardDispatcher:
         """Compute the service input digest where the adapter contract is closed."""
 
         capability_id = _text(task.capability_id)
+        if task.capability_id == "memory.opportunity-preference.v1":
+            from src.work_board.opportunity_preference_native import spec_for
+            return _safe_digest(spec_for(task,attempt,inputs,deadline=_now()).inputs)
         if capability_id == "work.document-compare.v1":
             from src.work_board.document_compare_native import immutable_inputs
             return _safe_digest(immutable_inputs(task,inputs))
@@ -9193,6 +9220,9 @@ class WorkBoardDispatcher:
         attempt: WorkBoardAttempt,
         inputs: Mapping[str, Any],
     ) -> str:
+        if task.capability_id == "memory.opportunity-preference.v1":
+            from src.work_board.opportunity_preference_native import spec_for
+            return _safe_digest(spec_for(task,attempt,inputs,deadline=_now()).declared_authority)
         if task.capability_id == "work.document-compare.v1":
             raise DurableJobIdempotencyConflict("document expiry snapshot requires canonical admission")
         if is_tool_package(task.capability_id):
@@ -9283,6 +9313,9 @@ class WorkBoardDispatcher:
         attempt: WorkBoardAttempt,
         inputs: Mapping[str, Any],
     ) -> str:
+        if task.capability_id == "memory.opportunity-preference.v1":
+            from src.work_board.opportunity_preference_native import spec_for
+            return spec_for(task,attempt,inputs,deadline=_now()).run_fingerprint
         if task.capability_id == "work.document-compare.v1":
             raise DurableJobIdempotencyConflict("document expiry snapshot requires canonical admission")
         if is_tool_package(task.capability_id):
@@ -10096,6 +10129,10 @@ class WorkBoardDispatcher:
                 actor_session_id=self.runner_session,
             )
         if projected.task.status is WorkBoardStatus.done:
+            if projected.task.capability_id == "memory.opportunity-preference.v1":
+                from src.work_board.opportunity_preference_native import finalize_done
+                await finalize_done(task_id=projected.task.task_id,attempt_id=projected.attempt.attempt_id,
+                    job_id=projected.attempt.workflow_run_id)
             await self._advance_linked_pipeline(projected.task)
         return projected
 

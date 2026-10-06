@@ -1227,6 +1227,7 @@ async def list_owned_items(
     owner_session_id: str,
     limit: int = 50,
     cursor: str | None = None,
+    operator=None,
 ) -> dict[str, Any]:
     if limit < 1 or limit > 50:
         raise InboxError("invalid_limit", "limit must be between 1 and 50", status_code=422)
@@ -1428,7 +1429,7 @@ async def list_owned_items(
             GuardianInboxDisposition.created_at, GuardianInboxDisposition.id).limit(limit + 1))).all())
         from src.guardian.opportunities import project_item
         for disposition, opportunity in opportunity_rows[:limit]:
-            items.append(await project_item(db, opportunity, disposition))
+            items.append(await project_item(db, opportunity, disposition, operator=operator))
         items.sort(
             key=lambda item: (
                 _utc(datetime.fromisoformat(str(item.get("created_at"))))
@@ -1449,7 +1450,7 @@ async def list_owned_items(
 
 
 async def get_owned_item(
-    *, owner_principal_id: str, owner_session_id: str, item_id: str, detail: bool = True
+    *, owner_principal_id: str, owner_session_id: str, item_id: str, detail: bool = True, operator=None
 ) -> dict[str, Any]:
     async with db_engine.get_session() as db:
         opportunity_row = (await db.execute(select(GuardianInboxDisposition, GuardianOpportunity).join(
@@ -1461,7 +1462,7 @@ async def get_owned_item(
             GuardianOpportunity.original_root_id == owner_session_id))).first()
         if opportunity_row:
             from src.guardian.opportunities import project_item
-            return await project_item(db, opportunity_row[1], opportunity_row[0], detail=detail)
+            return await project_item(db, opportunity_row[1], opportunity_row[0], detail=detail, operator=operator)
         mail_row = await _load_mail_projection_row(
             db,
             item_id=item_id,

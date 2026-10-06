@@ -37,6 +37,7 @@ from src.memory.decay import summarize_memory_reconciliation_state
 from src.memory.providers import list_memory_provider_inventory
 from src.memory.repository import memory_repository
 from src.memory.procedure_preferences import ProcedurePreferenceActionRequest
+from src.guardian.opportunity_preferences import OpportunityPreferenceActionRequest
 from src.security.trust_contract import AuthorityGrant, PrincipalType
 
 router = APIRouter()
@@ -498,6 +499,36 @@ async def act_on_procedure_preference(http_request: Request, proposal_id: str, r
         return await apply_preference_action(http_request.state.operator, proposal_id, request)
     except BoardError as exc:
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@router.get("/memory/opportunity-preferences/{proposal_id}")
+async def get_opportunity_preference(http_request: Request, proposal_id: str):
+    authenticated_memory_context(http_request)
+    from src.guardian.opportunity_preferences import inspect_preference
+    from src.work_board.repository import BoardError
+    try:
+        return await inspect_preference(http_request.state.operator, proposal_id)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+    except CapabilityJournalError as exc:
+        raise HTTPException(status_code=503, detail={"code": "source_baseline_integrity_unverifiable"}) from exc
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=409, detail={"code": "opportunity_preference_binding_unverifiable"}) from exc
+
+
+@router.post("/memory/opportunity-preferences/{proposal_id}/actions")
+async def act_on_opportunity_preference(http_request: Request, proposal_id: str, request: OpportunityPreferenceActionRequest):
+    authenticated_memory_context(http_request)
+    from src.guardian.opportunity_preferences import apply_preference_action
+    from src.work_board.repository import BoardError
+    try:
+        return await apply_preference_action(http_request.state.operator, proposal_id, request)
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+    except CapabilityJournalError as exc:
+        raise HTTPException(status_code=503, detail={"code": "source_baseline_integrity_unverifiable"}) from exc
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=409, detail={"code": "opportunity_preference_binding_unverifiable"}) from exc
 
 
 @router.post("/memory/task-proposals/{proposal_id}/actions")

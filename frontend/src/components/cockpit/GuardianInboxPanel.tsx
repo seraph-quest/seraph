@@ -11,6 +11,9 @@ import {
   generateGuardianOpportunityPlan, opportunityPlanStorageKey, readOpportunityPlanRequest, retainOpportunityPlanRequest,
 } from "../../lib/guardianInbox";
 import type {
+  OpportunityFeedbackRequest,
+  OpportunityRecommendationRequest,
+  OpportunityRecommendationReceipt,
   GuardianInboxAction,
   GuardianInboxActionRequest,
   GuardianInboxEvidenceRef,
@@ -19,6 +22,7 @@ import type {
   GuardianInboxPage,
   OpportunityPlanRequest,
 } from "../../types";
+import { opportunityRecommendation, postOpportunityFeedback } from "../../lib/opportunityPreferences";
 
 export interface GuardianInboxPanelProps {
   currentOwnerPrincipalId?: string | null;
@@ -113,6 +117,7 @@ function detailMatchesListItem(listItem: GuardianInboxItem, detail: GuardianInbo
     || listItem.opportunity_id !== detail.opportunity_id
     || listItem.opportunity_revision !== detail.opportunity_revision
     || listItem.opportunity_status !== detail.opportunity_status
+    || JSON.stringify(listItem.feedback_summary) !== JSON.stringify(detail.feedback_summary)
     || listItem.state !== detail.state
     || listItem.degraded !== detail.degraded
     || listItem.evidence_status !== detail.evidence_status
@@ -1105,6 +1110,11 @@ export const GuardianInboxPanel = forwardRef<GuardianInboxPanelHandle, GuardianI
                     onClick={() => void generatePlan(item)}>Generate plan</button>}
                 {planError ? <div role="alert">{planError}</div> : null}
               </div> : null}
+              {item.source_kind === "guardian_opportunity" && item.opportunity_id ? <OpportunityFeedbackReview
+                key={`${currentOwnerPrincipalId}:${currentRootId}:${item.opportunity_id}`} item={item}
+                ownerPrincipalId={currentOwnerPrincipalId} rootId={currentRootId}
+                enabled={Boolean(planOwner && confirmedPlanOwner === planOwner && !item.degraded)}
+                onRefresh={() => load(null, false, true)} onOpenTask={onOpenTask} /> : null}
               <div className="source-watch-actions">
                 {item.cancel_allowed && item.opportunity_id && item.opportunity_revision ? <button type="button" disabled={actionDisabled} onClick={() => void cancelOpportunity(item)}>
                   {actionBusy === `${item.id}:cancel` ? "Requesting cancellation…" : "Cancel assessment"}
@@ -1301,3 +1311,88 @@ export const GuardianInboxPanel = forwardRef<GuardianInboxPanelHandle, GuardianI
     </section>
   );
 });
+
+function OpportunityFeedbackReview({ item, ownerPrincipalId, rootId, enabled, onRefresh, onOpenTask }: {
+  item: GuardianInboxItem; ownerPrincipalId?: string | null; rootId?: string | null; enabled: boolean;
+  onRefresh: () => Promise<boolean>; onOpenTask?: GuardianInboxPanelProps["onOpenTask"];
+}) {
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [request, setRequest] = useState<OpportunityRecommendationRequest | null>(null);
+  const [receipt, setReceipt] = useState<OpportunityRecommendationReceipt | null>(null);
+  const [storageError, setStorageError] = useState(false);
+  const controller = useRef<AbortController | null>(null);
+  const locked = useRef(false);
+  const feedbackRequest = useRef<OpportunityFeedbackRequest | null>(null);
+  const key = ownerPrincipalId && rootId && item.opportunity_id ? `seraph:opportunity-recommendation:${ownerPrincipalId}:${rootId}:${item.opportunity_id}` : null;
+  useEffect(() => {
+    if (!key) return;
+    try {
+      const stored = window.sessionStorage.getItem(key);
+      if (!stored) return;
+      const value: unknown = JSON.parse(stored);
+      if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid retained request.");
+      const body = value as OpportunityRecommendationRequest;
+      if (Object.keys(body).sort().join(",") !== "expected_feedback_revision,expected_opportunity_revision,idempotency_key"
+        || !Number.isSafeInteger(body.expected_feedback_revision) || body.expected_feedback_revision < 0
+        || !Number.isSafeInteger(body.expected_opportunity_revision) || body.expected_opportunity_revision < 1
+        || typeof body.idempotency_key !== "string" || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(body.idempotency_key)) throw new Error("Invalid retained request.");
+      setRequest(body);
+    } catch { setStorageError(true); setError("Exact recommendation request storage is corrupt or unavailable. No new request will be sent."); }
+    return () => controller.current?.abort();
+  }, [key]);
+  useEffect(() => () => controller.current?.abort(), []);
+  const act = async (action: "helpful" | "not_helpful" | "recommendation" | "inspect") => {
+    const summary = item.feedback_summary;
+    if (!enabled || !key || !item.opportunity_id || !item.opportunity_revision || !summary?.intervention_id || locked.current || reason.length > 500) return;
+    const current = new AbortController(); controller.current?.abort(); controller.current = current;
+    locked.current = true; setBusy(true); setError(null);
+    try {
+      if (action === "helpful" || action === "not_helpful") {
+        const prior = feedbackRequest.current;
+        if (prior && prior.expected_feedback_revision === summary.feedback_revision
+          && (prior.feedback_type !== action || prior.reason !== reason)) throw new Error("The retained feedback gesture changed. Refresh its current history first.");
+        const body = prior?.expected_feedback_revision === summary.feedback_revision ? prior : {
+          expected_feedback_revision: summary.feedback_revision, feedback_type: action, reason, idempotency_key: createGuardianUuid(),
+        };
+        feedbackRequest.current = body;
+        await postOpportunityFeedback(item.opportunity_id, body, current.signal);
+        if (!current.signal.aborted) await onRefresh();
+      } else {
+        if (action === "inspect" && !request) return;
+        if (action === "recommendation" && request) throw new Error("Refresh the existing CPU task; a retained request is never automatically replaced.");
+        const body = request ?? { expected_opportunity_revision: item.opportunity_revision,
+          expected_feedback_revision: summary.feedback_revision, idempotency_key: createGuardianUuid() };
+        if (!request) {
+          if (storageError) throw new Error("Exact recommendation request storage is unavailable.");
+          try { window.sessionStorage.setItem(key, JSON.stringify(body)); }
+          catch { setStorageError(true); throw new Error("Exact recommendation request storage is unavailable."); }
+          setRequest(body);
+        }
+        const next = await opportunityRecommendation(item.opportunity_id, body, action === "inspect", current.signal);
+        if (!current.signal.aborted) setReceipt(next);
+      }
+    } catch (caught) { if (!current.signal.aborted) setError(caught instanceof Error ? caught.message : "Outcome unknown; inspect existing receipts before another action."); }
+    finally { locked.current = false; if (!current.signal.aborted) setBusy(false); }
+  };
+  return <section aria-label="Explicit opportunity feedback" className="cockpit-outcome-note">
+    <p>Explicit usefulness feedback. Delivery, acknowledgment and plan acceptance are not votes or memory adoption.</p>
+    {item.feedback_summary ? <p>Current feedback: {item.feedback_summary.feedback_type ?? "No explicit vote"} · revision {item.feedback_summary.feedback_revision} · {item.feedback_summary.event_count} append events · no_learning</p> : <p>Current feedback projection unavailable; actions remain blocked.</p>}
+    {item.feedback_summary?.reason_code ? <p>Feedback boundary: {item.feedback_summary.reason_code}</p> : null}
+    <label>Feedback reason (optional)<input maxLength={500} value={reason} disabled={busy} onChange={(event) => setReason(event.currentTarget.value)} /></label>
+    <button type="button" disabled={!enabled || busy || !item.feedback_summary?.intervention_id} onClick={() => void act("helpful")}>Record Helpful</button>
+    <button type="button" disabled={!enabled || busy || !item.feedback_summary?.intervention_id} onClick={() => void act("not_helpful")}>Record Not helpful</button>
+    <button type="button" disabled={!enabled || busy || !item.feedback_summary?.intervention_id || Boolean(request) || storageError}
+      onClick={() => void act("recommendation")}>Request opportunity recommendation</button>
+    {request ? <button type="button" disabled={!enabled || busy} onClick={() => void act("inspect")}>Refresh existing recommendation</button> : null}
+    {receipt ? <>
+      <p>CPU recommendation {receipt.status} · {receipt.reason_code} · CPU stage does not adopt memory</p>
+      <p>Task {receipt.task_id} revision {receipt.task_revision} · attempt {receipt.attempt_id ?? "not created"} · native job {receipt.job_id ?? "not created"}</p>
+      {receipt.status === "no_learning" ? <p>Actual CPU result: insufficient evidence. No signed memory proposal.</p> : null}
+      {receipt.status === "proposed" ? <p>A signed proposal exists; inspect its current review and adoption state in Work.</p> : null}
+      {onOpenTask ? <button type="button" onClick={() => onOpenTask(receipt.task_id, item)}>Review recommendation task in Work</button> : null}
+    </> : null}
+    {error ? <p role="alert">{error}</p> : null}
+  </section>;
+}

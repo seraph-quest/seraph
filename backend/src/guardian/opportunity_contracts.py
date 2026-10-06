@@ -124,6 +124,78 @@ class OpportunityPlanRequest(Closed):
     idempotency_key: UUID
 
 
+class OpportunityFeedbackRequest(Closed):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    expected_feedback_revision: Annotated[int, Field(strict=True, ge=0)]
+    feedback_type: Literal["helpful", "not_helpful"]
+    reason: str = Field(max_length=500, strict=True)
+    idempotency_key: UUID
+
+    @field_validator("idempotency_key", mode="before")
+    @classmethod
+    def canonical_uuid(cls, value):
+        if isinstance(value, UUID):
+            return value
+        if not isinstance(value, str) or str(UUID(value)) != value:
+            raise ValueError("Exact canonical UUID required")
+        return value
+
+
+class OpportunityFeedbackReceipt(Closed):
+    opportunity_id: str
+    intervention_id: str
+    feedback_revision: PositiveInt
+    feedback_type: Literal["helpful", "not_helpful"]
+    feedback_at: datetime
+    feedback_event_id: UUID
+    feedback_event_digest: Digest
+    feedback_history_digest: Digest
+    outcome_binding_digest: Digest
+    idempotent_replay: bool
+    memory_status: Literal["no_learning"] = "no_learning"
+
+
+class OpportunityRecommendationRequest(Closed):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    expected_opportunity_revision: PositiveInt
+    expected_feedback_revision: Annotated[int, Field(strict=True, ge=0)]
+    idempotency_key: UUID
+
+    @field_validator("idempotency_key", mode="before")
+    @classmethod
+    def canonical_uuid(cls, value):
+        return OpportunityFeedbackRequest.canonical_uuid(value)
+
+
+class OpportunityRecommendationReceipt(Closed):
+    opportunity_id: str
+    opportunity_revision: PositiveInt
+    feedback_revision: Annotated[int, Field(strict=True, ge=0)]
+    task_id: str
+    task_revision: PositiveInt
+    attempt_id: str | None
+    job_id: str | None
+    proposal_id: str | None
+    status: Literal["queued", "running", "proposed", "no_learning", "blocked", "cancel_requested", "cancelled", "unknown"]
+    reason_code: str
+    population_digest: Digest
+    bundle_digest: Digest | None
+    idempotent_replay: bool
+    memory_status: Literal["no_learning"]
+
+    @model_validator(mode="after")
+    def terminal_binding(self):
+        if self.status in {"proposed", "no_learning"} and (not self.attempt_id or not self.job_id or not self.bundle_digest):
+            raise ValueError("Actual terminal CPU binding required")
+        if self.status == "proposed" and not self.proposal_id:
+            raise ValueError("Actual signed proposal required")
+        if self.status in {"queued", "running", "no_learning"} and self.proposal_id is not None:
+            raise ValueError("No signed proposal for this state")
+        if self.status in {"queued", "running"} and self.bundle_digest is not None:
+            raise ValueError("Bundle unavailable before verification")
+        return self
+
+
 class OpportunityPlanResult(Closed):
     schema_version: Literal["seraph.opportunity.plan.v1"]
     blueprint_id: Literal["public-browser-check", "public-evidence-report"]

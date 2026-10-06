@@ -249,7 +249,7 @@ def m5_registered_capability_options() -> list[dict[str, str]]:
     return [
         {"capability_id": capability_id, "version": str(spec.version)}
         for capability_id, spec in sorted(REGISTERED_CAPABILITIES.items())
-        if capability_id in _TYPED_INPUT_MODELS
+        if capability_id in _TYPED_INPUT_MODELS and capability_id != "memory.opportunity-preference.v1"
     ]
 
 
@@ -263,7 +263,7 @@ def m5_registered_capability_contracts() -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for capability_id, spec in sorted(REGISTERED_CAPABILITIES.items()):
         input_model = _TYPED_INPUT_MODELS.get(capability_id)
-        if input_model is None:
+        if input_model is None or capability_id == "memory.opportunity-preference.v1":
             continue
         result.append(
             {
@@ -335,6 +335,8 @@ def _validated_candidates(
             candidate = str(item or "").strip()
             supplied_version = ""
         spec = REGISTERED_CAPABILITIES.get(candidate)
+        if candidate == "memory.opportunity-preference.v1":
+            continue
         if spec is None or (supplied_version and supplied_version != str(spec.version)):
             continue
         raw_inputs = item.get("inputs") if isinstance(item, Mapping) else None
@@ -429,6 +431,8 @@ def _validated_goal_candidates(values: Sequence[Any]) -> list[dict[str, Any]]:
             if not isinstance(inputs, Mapping):
                 continue
             spec = REGISTERED_CAPABILITIES.get(candidate_id)
+            if candidate_id == "memory.opportunity-preference.v1":
+                continue
             if spec is None or (requested_version and requested_version != str(spec.version)):
                 continue
             input_model = _TYPED_INPUT_MODELS.get(candidate_id)
@@ -547,6 +551,8 @@ def m5_memory_scope(
     candidate_capability_ids: Sequence[Any] | None = None,
 ) -> dict[str, Any]:
     preferred = str(preferred_capability_id or task.capability_id or "").strip()
+    if preferred == "memory.opportunity-preference.v1":
+        raise ValueError("opportunity_preference_requires_specialized_review")
     candidates: list[str] = []
     for item in candidate_capability_ids or [preferred]:
         if isinstance(item, Mapping):
@@ -554,6 +560,8 @@ def m5_memory_scope(
         else:
             value = str(item).strip()
         if value:
+            if value == "memory.opportunity-preference.v1":
+                raise ValueError("opportunity_preference_requires_specialized_review")
             candidates.append(value)
     candidates = list(dict.fromkeys(candidates))[:20]
     if preferred and preferred not in candidates:
@@ -650,6 +658,9 @@ def _receipt_input_value(
 
 
 def _proposal_payload(proposal: MemoryProposal, *, include_preview: bool = True) -> dict[str, Any]:
+    if proposal.schema_version == "opportunity_recommendation.v1":
+        from src.guardian.opportunity_preferences import proposal_projection
+        return proposal_projection(proposal, include_preview=include_preview)
     scope = _decode_object(proposal.memory_scope_json)
     payload: dict[str, Any] = {
         "proposal_id": proposal.proposal_id,
@@ -1686,7 +1697,7 @@ async def _write_memory_action_audit(
     return event
 
 
-def _m5_receipt_integrity_mac_or_none(receipt: WorkBoardDecisionReceipt) -> str | None:
+def _m5_receipt_integrity_mac_or_none(receipt: WorkBoardDecisionReceipt, *, _signing_key: bytes | None = None) -> str | None:
     """Reseal a receipt without blocking a canonical rollback or deletion.
 
     When the server key is unavailable, the canonical state change remains
@@ -1695,7 +1706,7 @@ def _m5_receipt_integrity_mac_or_none(receipt: WorkBoardDecisionReceipt) -> str 
     """
 
     try:
-        return _m5_receipt_integrity_mac(receipt)
+        return _m5_receipt_integrity_mac(receipt, _signing_key=_signing_key)
     except CapabilityJournalError:
         return None
 
@@ -1706,6 +1717,7 @@ async def _write_source_baseline(
     proposal: MemoryProposal,
     *,
     allow_reseal: bool = False,
+    _signing_key: bytes | None = None,
 ) -> WorkBoardDecisionReceipt:
     action_id = f"dispatch:{proof.task.capability_id}"
     before = m5_digest(
@@ -1788,7 +1800,7 @@ async def _write_source_baseline(
             existing.receipt_binding_digest = binding
             existing.revision = max(1, int(existing.revision or 0)) + 1
             existing.updated_at = _now()
-            existing.receipt_integrity_mac = _m5_receipt_integrity_mac_or_none(existing)
+            existing.receipt_integrity_mac = _m5_receipt_integrity_mac_or_none(existing, _signing_key=_signing_key)
             if existing.receipt_integrity_mac is None:
                 raise CapabilityJournalError("source baseline signing unavailable")
             db.add(existing)
@@ -1819,7 +1831,7 @@ async def _write_source_baseline(
         existing.admission_status = WorkBoardDecisionAdmissionStatus.not_required
         existing.revision += 1
         existing.updated_at = _now()
-        existing.receipt_integrity_mac = _m5_receipt_integrity_mac_or_none(existing)
+        existing.receipt_integrity_mac = _m5_receipt_integrity_mac_or_none(existing, _signing_key=_signing_key)
         if existing.receipt_integrity_mac is None:
             existing.decision_status = WorkBoardDecisionStatus.blocked
             existing.admission_status = WorkBoardDecisionAdmissionStatus.blocked
@@ -1861,7 +1873,7 @@ async def _write_source_baseline(
         admission_status=WorkBoardDecisionAdmissionStatus.not_required,
         reason="source_baseline",
     )
-    receipt.receipt_integrity_mac = _m5_receipt_integrity_mac_or_none(receipt)
+    receipt.receipt_integrity_mac = _m5_receipt_integrity_mac_or_none(receipt, _signing_key=_signing_key)
     if receipt.receipt_integrity_mac is None:
         receipt.decision_status = WorkBoardDecisionStatus.blocked
         receipt.admission_status = WorkBoardDecisionAdmissionStatus.blocked
@@ -2103,6 +2115,8 @@ async def create_memory_proposal(
         ).scalar_one_or_none()
         if task is None:
             raise PermissionError("task owner/session binding is invalid")
+        if task.capability_id == "memory.opportunity-preference.v1":
+            raise ValueError("opportunity_preference_requires_specialized_review")
         if int(task.task_revision or 0) != int(expected_task_revision):
             raise ValueError("stale_task_revision")
         goal = (
@@ -2559,6 +2573,10 @@ async def apply_memory_proposal_action(
         schema_row = await schema_db.get(MemoryProposal, proposal_id)
         if schema_row is not None and schema_row.schema_version == "procedure_recommendation.v1":
             raise ValueError("procedure_preference_requires_specialized_review")
+        if schema_row is not None and (schema_row.schema_version == "opportunity_recommendation.v1"
+            or schema_row.capability_id == "memory.opportunity-preference.v1"
+            or _decode_object(schema_row.memory_scope_json).get("schema_version") == "guardian_opportunity_preference.v1"):
+            raise ValueError("opportunity_preference_requires_specialized_review")
     action = str(action or "").strip().lower()
     if action not in {"accept", "edit_accept", "reject", "rollback", "recover"}:
         raise ValueError("unknown_proposal_action")
@@ -2582,6 +2600,12 @@ async def apply_memory_proposal_action(
         ).scalar_one_or_none()
         if proposal is None:
             raise PermissionError("proposal_owner_mismatch")
+        if (proposal.schema_version == "opportunity_recommendation.v1"
+            or proposal.capability_id == "memory.opportunity-preference.v1"
+            or _decode_object(proposal.memory_scope_json).get("schema_version") == "guardian_opportunity_preference.v1"):
+            raise ValueError("opportunity_preference_requires_specialized_review")
+        if proposal.schema_version == "procedure_recommendation.v1":
+            raise ValueError("procedure_preference_requires_specialized_review")
         if action == "rollback" and proposal.status is MemoryProposalStatus.rolled_back:
             payload = _proposal_payload(proposal)
             payload["idempotent_replay"] = True
@@ -2610,6 +2634,8 @@ async def apply_memory_proposal_action(
             )
             if selected_capability and not _capability_version(selected_capability):
                 raise ValueError("preferred_capability_unregistered")
+            if selected_capability == "memory.opportunity-preference.v1":
+                raise ValueError("opportunity_preference_requires_specialized_review")
             acceptance_binding = m5_digest(
                 {
                     "version": M5_SCHEMA_VERSION,

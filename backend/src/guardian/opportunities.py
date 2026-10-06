@@ -141,6 +141,27 @@ async def publish_verified_packet(event):
     return identifier
 
 
+async def _stage_optional_preference(db, owner, **scope):
+    from src.guardian.opportunity_preferences import stage_preference_use
+    from src.work_board.repository import BoardError
+    from src.extensions.capability_execution import CapabilityJournalError
+    try:
+        return await stage_preference_use(db, owner=owner, action="suppress_watch", **scope)
+    except (BoardError, CapabilityJournalError, ValueError, OSError):
+        # Unavailable preference proof never hides an ordinary candidate.
+        return None
+
+
+async def _recheck_optional_preference(db, witness):
+    from src.guardian.opportunity_preferences import recheck_preference_use
+    from src.work_board.repository import BoardError
+    from src.extensions.capability_execution import CapabilityJournalError
+    try:
+        return await recheck_preference_use(db, witness=witness)
+    except (BoardError, CapabilityJournalError, ValueError, OSError):
+        return {"status": "blocked", "reason_code": "opportunity_preference_unavailable"}
+
+
 async def _publish_verified_packet(event):
     """Only the successful live publication seam calls this typed event handler.
 
@@ -162,6 +183,13 @@ async def _publish_verified_packet(event):
                 or utc(packet.created_at) < utc(published_policy.confirmed_at)):
             return None
         reference, sha = packet.opportunity_snapshot_artifact_id, packet.opportunity_snapshot_sha256
+        # This live verified publication is an optional candidate, never a
+        # security/recovery read. Stage adopted custody before the SQL writer.
+        from src.work_board.contracts import WorkBoardOwner
+        preference_owner = WorkBoardOwner(principal_id=watch.owner_principal_id, session_id=watch.owner_session_id)
+        preference_witness = await _stage_optional_preference(db, preference_owner,
+            goal_id=goal.id, goal_revision=event.goal_revision,
+            watch_id=watch.id, watch_revision=event.watch_revision)
     evidence = None
     snapshot_error = None
     try:
@@ -186,6 +214,20 @@ async def _publish_verified_packet(event):
         existing = (await db.execute(select(GuardianOpportunity).where(
             GuardianOpportunity.owner_principal_id == goal.owner_principal_id,
             GuardianOpportunity.dedupe_key == key))).scalars().first()
+        if existing is None and snapshot_error is None and preference_witness is not None:
+            preference = await _recheck_optional_preference(db, preference_witness)
+            from src.guardian.opportunity_preferences import suppress_optional_opportunity
+            if suppress_optional_opportunity(preference, optional=True):
+                receipt_id = "guardian-opportunity-suppressed:" + digest(json_bytes([
+                    packet.id, preference["proposal_id"]]))
+                if await db.get(AuditEvent, receipt_id) is None:
+                    db.add(AuditEvent(id=receipt_id, actor=watch.owner_principal_id,
+                        event_type="guardian_opportunity_preference_suppressed", details_json=json_bytes({
+                            "reason_code": "opportunity_preference_current", "source_packet_id": packet.id,
+                            "watch_id": watch.id, "watch_revision": watch.plan_revision,
+                            "goal_id": goal.id, "goal_revision": goal.revision,
+                            "proposal_id": preference["proposal_id"]}).decode()))
+                return None
         token = {"artifact_id": reference, "checkpoint_sha256": packet.observed_checkpoint_sha256,
                  "source_set_digest": watch.source_set_digest, "criteria_digest": watch.criteria_digest,
                  "read_authority_digest": digest(json_bytes(json.loads(watch.read_authority_json))),
@@ -410,7 +452,7 @@ def policy_projection(goal):
                                           or policy.review_due_at <= now() else "enabled")}
 
 
-async def project_item(db, row, disposition=None, *, detail=False):
+async def project_item(db, row, disposition=None, *, detail=False, operator=None):
     """Literal history plus current availability; judgment never becomes authority."""
     from src.guardian.opportunity_contracts import OpportunityAssessment
     reason = row.reason_code
@@ -456,7 +498,9 @@ async def project_item(db, row, disposition=None, *, detail=False):
                 and row.reason_code not in {"cancel_requested", "assessment_cancel_requested", "operator_cancelled"})
         except OpportunityError:
             pass
+    from src.guardian.feedback import opportunity_feedback_summary
     item = {"id": disposition.id if disposition else row.id,
+        "feedback_summary": await opportunity_feedback_summary(db, row),
         "revision": disposition.revision if disposition else row.revision,
         "state": state, "source_kind": "guardian_opportunity", "source_id": row.id,
         "source_digest": row.source_digest, "opportunity_id": row.id,
@@ -487,7 +531,7 @@ async def project_item(db, row, disposition=None, *, detail=False):
     if not current:
         item["recovery_action"] = "review_goal_and_watch"
     from src.guardian.opportunity_plans import get_plan_offer, get_plan_preview
-    item["plan_offer"] = await get_plan_offer(db, row)
+    item["plan_offer"] = await get_plan_offer(db, row, operator=operator)
     if row.proposal_id:
         from src.db.models import WorkBoardProposal
         proposal = await db.get(WorkBoardProposal, row.proposal_id)
@@ -521,7 +565,7 @@ async def project_item(db, row, disposition=None, *, detail=False):
     return item
 
 
-async def list_history(*, owner, root_id, goal_id=None, limit=20, cursor=None):
+async def list_history(*, owner, root_id, goal_id=None, limit=20, cursor=None, operator=None):
     from sqlalchemy import and_, or_
     from src.guardian.inbox import _decode_cursor, _encode_cursor
     if not 1 <= limit <= 20:
@@ -537,7 +581,7 @@ async def list_history(*, owner, root_id, goal_id=None, limit=20, cursor=None):
                 GuardianOpportunity.created_at == position[0], GuardianOpportunity.id > position[1])))
         rows = list((await db.execute(query.order_by(GuardianOpportunity.created_at, GuardianOpportunity.id)
             .limit(limit + 1))).scalars().all())
-        items = [await project_item(db, row, await db.get(GuardianInboxDisposition, row.id)) for row in rows[:limit]]
+        items = [await project_item(db, row, await db.get(GuardianInboxDisposition, row.id), operator=operator) for row in rows[:limit]]
     return {"items": items, "next_cursor": _encode_cursor(rows[limit-1].created_at, rows[limit-1].id)
         if len(rows) > limit else None}
 

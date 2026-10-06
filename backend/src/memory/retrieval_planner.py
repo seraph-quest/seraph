@@ -596,10 +596,12 @@ async def build_structured_memory_context_bundle(
                 MemoryKind.timeline,
             ),
             limit_per_kind=2,
+            for_model_context=True,
         )
         procedural_memories = await memory_repository.list_memories(
             kind=MemoryKind.procedural,
             limit=4,
+            for_model_context=True,
         )
 
         linked_project_entities = await memory_repository.find_entities_by_names(
@@ -618,6 +620,7 @@ async def build_structured_memory_context_bundle(
                     MemoryKind.timeline,
                 ),
                 limit=8,
+                for_model_context=True,
             )
             if linked_project_entities
             else []

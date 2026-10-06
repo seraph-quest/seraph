@@ -516,6 +516,10 @@ export interface WorkBoardAttempt {
 
 /** Safe task projection returned by the authenticated /api/work-board routes. */
 export interface WorkBoardTask {
+  opportunity_id?: string | null;
+  opportunity_revision?: number | null;
+  proposal_ref?: OpportunityPlanReference | null;
+  plan_preview?: OpportunityPlanPreview | null;
   ownership_access?: "recovered_read_only";
   execution_block_reason?: string;
   task_id: string;

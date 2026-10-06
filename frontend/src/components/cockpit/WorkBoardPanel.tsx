@@ -1012,15 +1012,18 @@ function WorkBoardPanel({
   const allGoals = useMemo(() => flattenGoals(goals), [goals]);
   const selectedDetail = selectedTaskId && detail?.task.task_id === selectedTaskId ? detail : null;
   const selectedTask = selectedDetail?.task ?? tasks.find((task) => task.task_id === selectedTaskId) ?? null;
+  const selectedPlanReference = selectedDetail?.task.proposal_ref ?? selectedDetail?.proposal_ref;
+  const selectedPlanPreview = selectedDetail?.task.plan_preview ?? selectedDetail?.plan_preview;
+  const selectedPlanProposalId = normalizeOpportunityPlanReference(selectedPlanReference)?.proposal_id;
   useEffect(() => {
-    const reference = normalizeOpportunityPlanReference(selectedDetail?.proposal_ref);
-    const preview = normalizeOpportunityPlanPreview(selectedDetail?.plan_preview);
+    const reference = normalizeOpportunityPlanReference(selectedPlanReference);
+    const preview = normalizeOpportunityPlanPreview(selectedPlanPreview);
     if (!reference || reference.parent_task_id !== selectedDetail?.task.task_id) return;
     setProposal((current) => current && current.proposal_id === reference.proposal_id
       && reference.proposal_revision >= current.proposal_revision ? { ...current, ...reference,
         proposal_ref: reference, plan_preview: preview, opportunity_id: preview?.opportunity_id ?? current.opportunity_id,
         opportunity_revision: preview?.opportunity_revision ?? current.opportunity_revision } : current);
-  }, [selectedDetail, proposal?.proposal_id, proposal?.proposal_revision]);
+  }, [selectedDetail, selectedPlanReference, selectedPlanPreview, proposal?.proposal_id, proposal?.proposal_revision, proposal?.status, proposal?.kind]);
   const selectedInboxScope = selectedTask?.idempotency_scope ?? null;
   const selectedInboxScopeMatch = selectedInboxScope?.match(GUARDIAN_INBOX_SCOPE) ?? null;
   const selectedInboxOriginKey = selectedTask && selectedInboxScopeMatch
@@ -1531,14 +1534,34 @@ function WorkBoardPanel({
     let active = true;
     void requestBoard<{ proposals: WorkBoardProposal[] }>(
       `/tasks/${encodeURIComponent(taskId)}/proposals`,
-    ).then((payload) => {
+    ).then(async (payload) => {
       if (!active || stoppedRef.current
         || proposalSelectionVersionRef.current !== selectionVersion
         || selectedTaskIdRef.current !== taskId) return;
       const proposals = Array.isArray(payload?.proposals) ? payload.proposals : [];
-      const nextProposal = proposals.find((item) => item.status === "proposed" || item.status === "pending_inference")
+      let nextProposal = proposals.find((item) => item.status === "proposed" || item.status === "pending_inference")
         ?? proposals[0]
         ?? null;
+      if (nextProposal && (nextProposal.opportunity_id || nextProposal.kind === "opportunity_plan"
+        || normalizeOpportunityPlanReference(nextProposal.proposal_ref)
+        || selectedPlanProposalId === nextProposal.proposal_id)) {
+        const summary = nextProposal;
+        const canonical = await requestBoard<WorkBoardProposal>(`/proposals/${encodeURIComponent(summary.proposal_id)}`);
+        if (!active || stoppedRef.current || proposalSelectionVersionRef.current !== selectionVersion
+          || selectedTaskIdRef.current !== taskId) return;
+        if (canonical.proposal_id !== summary.proposal_id || canonical.parent_task_id !== taskId) {
+          throw new WorkBoardSyncError("The recovered proposal does not match the selected task. Refresh before accepting.");
+        }
+        nextProposal = canonical;
+        const detailReference = normalizeOpportunityPlanReference(selectedPlanReference);
+        const detailPreview = normalizeOpportunityPlanPreview(selectedPlanPreview);
+        if (detailReference?.proposal_id === canonical.proposal_id && detailReference.parent_task_id === taskId
+          && detailReference.proposal_revision >= canonical.proposal_revision) {
+          nextProposal = { ...canonical, ...detailReference, proposal_ref: detailReference, plan_preview: detailPreview,
+            opportunity_id: detailPreview?.opportunity_id ?? canonical.opportunity_id,
+            opportunity_revision: detailPreview?.opportunity_revision ?? canonical.opportunity_revision };
+        }
+      }
       if (nextProposal?.idempotency_key) {
         const scope = `${nextProposal.parent_task_id}:${nextProposal.parent_revision}:${nextProposal.kind}`;
         proposalKeysRef.current.set(scope, nextProposal.idempotency_key);
@@ -1554,7 +1577,7 @@ function WorkBoardPanel({
       }
     });
     return () => { active = false; };
-  }, [requestBoard, selectedTaskId]);
+  }, [ownerPrincipalId, ownerSessionId, requestBoard, selectedTaskId, selectedPlanProposalId]);
 
   useEffect(() => {
     if (selectedTaskId) {
@@ -2908,10 +2931,10 @@ function WorkBoardPanel({
     && proposal.proposed_tasks.length > 0
     && proposal.proposed_tasks.every((task) => hasServerAuthorityPreview(task.authority)),
   );
-  const linkedPlan = Boolean(proposal?.opportunity_id || selectedDetail?.proposal_ref || proposal?.kind === "opportunity_plan" || proposal?.kind === "public-evidence-pipeline.v1");
+  const linkedPlan = Boolean(proposal?.opportunity_id || selectedPlanReference || proposal?.proposal_ref || proposal?.kind === "opportunity_plan");
   const linkedReference = normalizeOpportunityPlanReference(selectedTask?.pipeline_operation_id
-    ? selectedDetail?.proposal_ref ?? proposal?.proposal_ref : proposal?.proposal_ref ?? selectedDetail?.proposal_ref);
-  const linkedPreview = normalizeOpportunityPlanPreview(proposal?.plan_preview ?? selectedDetail?.plan_preview);
+    ? selectedPlanReference ?? proposal?.proposal_ref : proposal?.proposal_ref ?? selectedPlanReference);
+  const linkedPreview = normalizeOpportunityPlanPreview(proposal?.plan_preview ?? selectedPlanPreview);
   const linkedPlanReady = Boolean(linkedReference && linkedPreview && selectedTask && currentOwnerSession
     && linkedReference.proposal_id === proposal?.proposal_id && linkedReference.parent_task_id === selectedTask.task_id
     && linkedReference.parent_revision === selectedTask.task_revision && linkedReference.proposal_revision === proposal?.proposal_revision

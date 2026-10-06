@@ -2108,6 +2108,24 @@ def _canonical_memory_without_tombstone_clause(memory_model=Memory):
     return ~exists().where(MemoryTombstone.memory_id == memory_model.id)
 
 
+def _ordinary_model_memory_clause(memory_model=Memory):
+    """Offer-only learning cannot become an unrelated model instruction.
+
+    The canonical proposal link also excludes damaged/rewritten metadata.
+    This predicate is for model consumers, not canonical inspection/recovery.
+    """
+    metadata = case((func.json_valid(memory_model.metadata_json) == 1,
+        memory_model.metadata_json), else_="{}")
+    namespace = "guardian_opportunity_preference.v1"
+    return and_(
+        *(func.coalesce(func.json_extract(metadata, path), "") != namespace for path in (
+            "$.work_board_provenance.memory_scope.schema_version",
+            "$.provenance.memory_scope.schema_version", "$.memory_scope.schema_version")),
+        ~exists().where(MemoryProposal.accepted_memory_id == memory_model.id,
+            MemoryProposal.schema_version == "opportunity_recommendation.v1"),
+    )
+
+
 def _canonical_memory_without_deletion_marker_clause(memory_model=Memory):
     """Return the SQL predicate for rows without a canonical delete marker.
 
@@ -4871,6 +4889,7 @@ class MemoryRepository:
         kind: MemoryKind | str | None = None,
         limit: int = 20,
         status: MemoryStatus | str = MemoryStatus.active,
+        for_model_context: bool = False,
     ) -> list[Memory]:
         normalized_status = _coerce_enum(status, MemoryStatus)
         async with get_session() as db:
@@ -4881,6 +4900,8 @@ class MemoryRepository:
                 .limit(limit)
             )
             stmt = stmt.where(_canonical_memory_without_tombstone_clause())
+            if for_model_context:
+                stmt = stmt.where(_ordinary_model_memory_clause())
             if kind:
                 stmt = stmt.where(Memory.kind == _coerce_enum(kind, MemoryKind))
             result = await db.execute(stmt)
@@ -7500,6 +7521,7 @@ class MemoryRepository:
         kinds: tuple[MemoryKind | str, ...] = (),
         limit: int = 20,
         status: MemoryStatus | str = MemoryStatus.active,
+        for_model_context: bool = False,
     ) -> list[Memory]:
         normalized_status = _coerce_enum(status, MemoryStatus)
         normalized_subject_ids = tuple(
@@ -7525,6 +7547,8 @@ class MemoryRepository:
                 .limit(limit)
             )
             stmt = stmt.where(_canonical_memory_without_tombstone_clause())
+            if for_model_context:
+                stmt = stmt.where(_ordinary_model_memory_clause())
             filters = []
             if normalized_subject_ids:
                 filters.append(col(Memory.subject_entity_id).in_(normalized_subject_ids))
@@ -7549,6 +7573,7 @@ class MemoryRepository:
         kinds: tuple[MemoryKind | str, ...],
         limit_per_kind: int = 3,
         status: MemoryStatus | str = MemoryStatus.active,
+        for_model_context: bool = False,
     ) -> dict[str, list[Memory]]:
         normalized_status = _coerce_enum(status, MemoryStatus)
         normalized_kinds = tuple(dict.fromkeys(_coerce_enum(kind, MemoryKind) for kind in kinds))
@@ -7567,6 +7592,8 @@ class MemoryRepository:
                 )
             )
             stmt = stmt.where(_canonical_memory_without_tombstone_clause())
+            if for_model_context:
+                stmt = stmt.where(_ordinary_model_memory_clause())
             result = await db.execute(stmt)
             grouped: dict[str, list[Memory]] = {kind.value: [] for kind in normalized_kinds}
             for memory in result.scalars().all():

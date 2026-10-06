@@ -16,6 +16,7 @@ from src.db.models import Memory, MemoryEpisode, MemoryStatus
 from src.memory.repository import (
     _canonical_memory_deletion_marker,
     _canonical_memory_without_tombstone_clause,
+    _ordinary_model_memory_clause,
     memory_repository,
 )
 from src.memory.types import bucket_name_for_kind
@@ -415,6 +416,7 @@ async def _retrieve_hybrid_memory(
             select(Memory)
             .where(Memory.status == MemoryStatus.active)
             .where(_canonical_memory_without_tombstone_clause())
+            .where(_ordinary_model_memory_clause())
             .order_by(
                 col(Memory.importance).desc(),
                 col(Memory.last_confirmed_at).desc(),
@@ -439,6 +441,7 @@ async def _retrieve_hybrid_memory(
                 select(Memory)
                 .where(Memory.status == MemoryStatus.active)
                 .where(_canonical_memory_without_tombstone_clause())
+                .where(_ordinary_model_memory_clause())
                 .where(col(Memory.project_entity_id).in_(project_entity_ids))
                 .order_by(
                     col(Memory.importance).desc(),
@@ -509,6 +512,7 @@ async def _retrieve_hybrid_memory(
                     select(Memory.embedding_id, Memory.id, Memory.summary, Memory.content)
                     .where(Memory.status == MemoryStatus.active)
                     .where(_canonical_memory_without_tombstone_clause())
+                    .where(_ordinary_model_memory_clause())
                     .where(
                         or_(
                             col(Memory.embedding_id).in_(vector_hit_ids),

@@ -150,10 +150,68 @@ async def _request_receipt(db, task):
         WorkBoardEvent.owner_session_id == task.owner_session_id).order_by(WorkBoardEvent.event_id).limit(2))).scalars().all()
     if len(rows) != 1:
         raise BoardError("opportunity_recommendation_binding_invalid", "The original sealed request is required")
-    metadata = json.loads(rows[0].metadata_json)
-    if not isinstance(metadata,dict) or len(canonical(metadata)) > 8192:
-        raise BoardError("opportunity_recommendation_binding_invalid", "The original sealed request changed")
-    return rows[0], metadata
+    return rows[0], _parse_request_metadata(rows[0].metadata_json)
+
+
+def _parse_request_metadata(raw):
+    """Closed original publication contract, including malformed signed values."""
+    from uuid import UUID
+    import re
+
+    fields = {"schema_version", "request_uuid", "request_body_digest", "owner_principal_id",
+        "original_root_id", "goal_id", "goal_revision", "task_id", "task_create_digest",
+        "input_artifact_id", "input_sha256", "cpu_input_digest", "population_digest",
+        "generation_cutoff_at", "original_idle_expires_at", "original_absolute_expires_at",
+        "execution_deadline", "preview_expires_at", "key_id", "authorization_mac"}
+
+    def pairs(items):
+        result = {}
+        for name, value in items:
+            if name in result:
+                raise ValueError("duplicate field")
+            result[name] = value
+        return result
+
+    try:
+        if not isinstance(raw, str) or len(raw.encode("utf-8")) > 8192:
+            raise ValueError("metadata size")
+        value = json.loads(raw, object_pairs_hook=pairs,
+            parse_constant=lambda _value: (_ for _ in ()).throw(ValueError("nonfinite value")))
+        if not isinstance(value, dict) or set(value) != fields:
+            raise ValueError("metadata shape")
+        if type(value["schema_version"]) is not int or value["schema_version"] != 1:
+            raise ValueError("version")
+        if type(value["goal_revision"]) is not int or value["goal_revision"] < 1:
+            raise ValueError("revision")
+        if not isinstance(value["request_uuid"], str) or str(UUID(value["request_uuid"])) != value["request_uuid"]:
+            raise ValueError("request UUID")
+        for name in ("owner_principal_id", "original_root_id", "goal_id", "task_id", "input_artifact_id"):
+            item = value[name]
+            if not isinstance(item, str) or not item or len(item) > 256 or any(ord(c) < 32 for c in item):
+                raise ValueError("identity")
+        for name in ("request_body_digest", "task_create_digest", "input_sha256", "cpu_input_digest",
+            "population_digest", "authorization_mac", "key_id"):
+            length = 24 if name == "key_id" else 64
+            if not isinstance(value[name], str) or re.fullmatch(f"[0-9a-f]{{{length}}}", value[name]) is None:
+                raise ValueError("digest")
+        timestamps = {}
+        for name in ("generation_cutoff_at", "original_idle_expires_at", "original_absolute_expires_at",
+            "execution_deadline", "preview_expires_at"):
+            item = value[name]
+            if not isinstance(item, str) or len(item) > 64:
+                raise ValueError("timestamp")
+            stamp = datetime.fromisoformat(item)
+            if stamp.tzinfo is None or stamp.utcoffset() != timedelta(0):
+                raise ValueError("UTC timestamp")
+            timestamps[name] = stamp
+        cutoff = timestamps["generation_cutoff_at"]
+        root_end = min(timestamps["original_idle_expires_at"], timestamps["original_absolute_expires_at"])
+        if (not cutoff < timestamps["execution_deadline"] <= min(cutoff + timedelta(seconds=30), root_end)
+            or not cutoff < timestamps["preview_expires_at"] <= min(cutoff + timedelta(minutes=5), root_end)):
+            raise ValueError("original finite bounds")
+        return value
+    except (ValueError, TypeError, UnicodeError, OverflowError) as exc:
+        raise BoardError("opportunity_recommendation_binding_invalid", "The original sealed request changed") from exc
 
 
 def _authorization_mac(metadata, token_hash, key):
@@ -545,7 +603,7 @@ async def recheck_done_source(db,*,witness):
 async def _recheck_original_commitment(db,task,event,witness):
     """SQL-only original/current Root fence; historical Done keeps its own deadline."""
     from src.memory.repository import _m5_selection_binding_key_id
-    metadata = json.loads(event.metadata_json)
+    metadata = _parse_request_metadata(event.metadata_json)
     root = await db.get(OperatorSession,task.owner_session_id,populate_existing=True)
     if (root is None or not root.token_hash or root.principal_id != task.owner_principal_id
         or root.token_hash != witness.operator._token_hash

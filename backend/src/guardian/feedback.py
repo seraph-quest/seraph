@@ -1243,8 +1243,9 @@ async def _feedback_lineage(db, owner, opportunity, proposal, *, source):
         _, value = await pipelines.owned(db, owner, proposal.proposal_id, workspace_identity=source.workspace_identity)
         steps = value['steps']
         ids = [step['task_ref'] for step in steps]
-        capabilities = [step['capability_id'] for step in steps]
-        if capabilities != ['browser.public-task.v1', 'work.evidence-dossier.v1', 'work.local-evidence-report.v1'] or ids[0] != proposal.parent_task_id:
+        from src.work_board.pipeline_contracts import SLOTS, CAPABILITIES
+        capabilities = list(CAPABILITIES)
+        if tuple(step['slot'] for step in steps) != SLOTS or ids[0] != proposal.parent_task_id:
             raise OpportunityError('feedback_outcome_stale')
     else:
         raise OpportunityError('feedback_outcome_stale')

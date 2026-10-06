@@ -28,6 +28,7 @@ from src.memory.hybrid_retrieval import _query_terms, _term_overlap_score, _rece
 from src.memory.repository import (
     _canonical_memory_deletion_marker, _canonical_memory_without_tombstone_clause,
     _memory_record_owner_validated_provenance,
+    _ordinary_model_memory_clause,
 )
 from src.work_board.contracts import WorkBoardOwner
 from src.work_board.repository import BoardError, WorkBoardRepository, _begin_sqlite_immediate
@@ -278,6 +279,7 @@ async def _memory_sources(db, owner: WorkBoardOwner, task: WorkBoardTask,
         Memory.source_session_id == owner.session_id,
         Memory.status == MemoryStatus.active,
         _canonical_memory_without_tombstone_clause(),
+        _ordinary_model_memory_clause(),
         func.length(Memory.content) <= MAX_BYTES,
         func.length(func.coalesce(Memory.metadata_json, "")) <= MAX_BYTES,
         or_(

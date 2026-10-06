@@ -3125,10 +3125,10 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 'work.evidence-dossier.v1', 'work.local-evidence-report.v1'}
                 and to_status in {'queued', 'running', 'succeeded', 'degraded'})
             guardian_queue_guard = preflight_run.job_kind == "guardian_opportunity_assess" and to_status == "queued"
+            preference_guard = preflight_run.job_kind == "memory.opportunity-preference.v1" and to_status in {"queued", "succeeded", "degraded"}
             if dependency_guard:
                 staged_dependencies = await stage_run_dependencies(db, preflight_run)
             await db.rollback()
-            preference_guard = preflight_run.job_kind == "memory.opportunity-preference.v1" and to_status in {"queued", "succeeded", "degraded"}
             if (terminal_authority_check is not None and to_status in {"succeeded", "degraded"}) or dependency_guard or cancellation_authority_check is not None or guardian_queue_guard or preference_guard:
                 bind = db.get_bind()
                 dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
@@ -3911,12 +3911,13 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 return _serialize(preflight_run, receipt={'kind': 'claim', 'status': 'terminal_noop'})
             dependency_guard = preflight_run.job_kind in {'browser_public_task',
                 'work.evidence-dossier.v1', 'work.local-evidence-report.v1'}
+            preference_guard = preflight_run.job_kind == "memory.opportunity-preference.v1"
             staged_dependencies = await stage_run_dependencies(db, preflight_run) if dependency_guard else None
             await db.rollback()
-            if claim_authority_check is not None or dependency_guard:
+            if claim_authority_check is not None or dependency_guard or preference_guard:
                 await db.execute(text("BEGIN IMMEDIATE"))
             run = await self._fetch(db, job_id)
-            if run.job_kind == "memory.opportunity-preference.v1":
+            if preference_guard:
                 from src.work_board.opportunity_preference_native import recheck_native
                 await recheck_native(db,run,witness=opportunity_preference_witness)
                 if run.attempt_count >= 1 or run.max_attempts != 1:

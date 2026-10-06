@@ -512,6 +512,8 @@ async def get_opportunity_preference(http_request: Request, proposal_id: str):
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
     except CapabilityJournalError as exc:
         raise HTTPException(status_code=503, detail={"code": "source_baseline_integrity_unverifiable"}) from exc
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=409, detail={"code": "opportunity_preference_binding_unverifiable"}) from exc
 
 
 @router.post("/memory/opportunity-preferences/{proposal_id}/actions")
@@ -525,6 +527,8 @@ async def act_on_opportunity_preference(http_request: Request, proposal_id: str,
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
     except CapabilityJournalError as exc:
         raise HTTPException(status_code=503, detail={"code": "source_baseline_integrity_unverifiable"}) from exc
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=409, detail={"code": "opportunity_preference_binding_unverifiable"}) from exc
 
 
 @router.post("/memory/task-proposals/{proposal_id}/actions")

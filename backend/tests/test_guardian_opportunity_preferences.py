@@ -1,5 +1,6 @@
 """Closed population/signature/archive mechanics, not usefulness/native success proof."""
 from copy import deepcopy
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
@@ -12,7 +13,7 @@ from sqlalchemy import select, delete
 
 from src.guardian import opportunity_preferences as pref
 from src.memory import repository as repo
-from src.db.models import MemoryProposal, MemoryProposalStatus, MemoryProposalDecisionEffect
+from src.db.models import MemoryProposal, MemoryProposalStatus, MemoryProposalDecisionEffect, Memory, MemoryTombstone, MemoryKind, GuardianIntervention
 from tests.test_memory_local_recovery import local_memory_db, _runtime_operator
 from src.auth.service import test_bypass_operator as make_test_bypass_operator
 
@@ -246,3 +247,189 @@ async def test_later_database_idle_touch_cannot_extend_captured_root_authority(m
     monkeypatch.setattr(pref, "assert_current_root", canonical_root)
     with pytest.raises(Exception, match="captured Root authority expired"):
         await pref._assert_original_root(None, operator)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("authenticated_adoption", [True, False])
+async def test_stale_adopted_projection_only_keeps_authenticated_removal(monkeypatch, authenticated_adoption):
+    # Projection unit test: no native completion or adoption is claimed by this fixture.
+    row = _proposal()
+    row.status = MemoryProposalStatus.accepted
+    row.accepted_memory_id = "canonical-memory"
+    operator = SimpleNamespace()
+    @asynccontextmanager
+    async def session():
+        yield None
+    async def owned(*args):
+        return row
+    async def historical(*args):
+        if not authenticated_adoption:
+            raise pref.BoardError("accepted_memory_binding_mismatch", "Invalid signature")
+    async def stale(*args, **kwargs):
+        raise pref.BoardError("learning_population_incomplete", "The original population changed")
+    monkeypatch.setattr(pref.db_engine, "get_session", session)
+    monkeypatch.setattr(pref, "_owned_proposal", owned)
+    monkeypatch.setattr(pref, "_verify_historical_adoption", historical)
+    monkeypatch.setattr(pref, "stage_finalization", stale)
+    monkeypatch.setattr(pref, "_effect_mac_key", lambda: b"isolated-test-key")
+    result = await pref.inspect_preference(operator, row.proposal_id)
+    assert result["status"] == "blocked"
+    assert result["canonical_status"] == "accepted"
+    assert result["memory_status"] == "no_learning"
+    assert result["rollback_available"] is authenticated_adoption
+    assert result["bundle_digest"] == _scope()["bundle_digest"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_signed_active_memory_rejects_bad_signature_and_tombstone(async_db):
+    # Isolated keyed memory verification; this does not fabricate a Done source/proposal.
+    row = _proposal()
+    key = b"isolated-opportunity-signature-test-key"
+    text = "A narrow preference whose signature can be independently tampered."
+    row.accepted_memory_content_digest = pref.digest(text.encode())
+    row.accepted_memory_id = "canonical-memory"
+    row.status = MemoryProposalStatus.accepted
+    source = repo._m5_verified_source_binding(row)
+    provenance = {"proposal_id": row.proposal_id, "accepted_content_digest": row.accepted_memory_content_digest,
+        "owner_principal_id": row.owner_principal_id, "owner_session_id": row.owner_session_id,
+        "source_context_digest": row.source_context_digest, "memory_scope": _scope(),
+        "decision_effect": row.decision_effect.value, "lifecycle_state": "active",
+        "verified_source_binding": source,
+        "selection_binding_key_id": repo._m5_selection_binding_key_id(_signing_key=key)}
+    provenance["selection_binding_mac"] = repo._m5_selection_binding_mac(proposal_id=row.proposal_id,
+        accepted_content_digest=row.accepted_memory_content_digest, owner_principal_id=row.owner_principal_id,
+        owner_session_id=row.owner_session_id, source_context_digest=row.source_context_digest,
+        source_binding=source, decision_effect=row.decision_effect, memory_scope=_scope(), _signing_key=key)
+    memory = Memory(id=row.accepted_memory_id, content=text, source_session_id=row.owner_session_id,
+        metadata_json=pref.canonical({"work_board_provenance": provenance}).decode())
+    async with async_db() as db:
+        db.add(memory)
+        await db.flush()
+        assert await pref._verify_active_memory(db, row, key) is memory
+        tampered = deepcopy(provenance)
+        tampered["selection_binding_mac"] = "0" * 64
+        memory.metadata_json = pref.canonical({"work_board_provenance": tampered}).decode()
+        await db.flush()
+        with pytest.raises(pref.BoardError, match="signed memory source/scope changed"):
+            await pref._verify_active_memory(db, row, key)
+        memory.metadata_json = pref.canonical({"work_board_provenance": provenance}).decode()
+        db.add(MemoryTombstone(memory_id=memory.id))
+        await db.flush()
+        with pytest.raises(pref.BoardError, match="active canonical memory is unavailable"):
+            await pref._verify_active_memory(db, row, key)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_closed_snapshot_excludes_tip_appended_after_captured_cutoff(async_db, monkeypatch):
+    from src.guardian import feedback
+    cutoff = pref.now()
+    # Appended before enumeration, but AFTER the already captured generation time.
+    async with async_db() as db:
+        db.add(GuardianIntervention(id="late-tip", intervention_type="opportunity", owner_principal_id="owner",
+            original_root_id="root", goal_id="goal", goal_revision=1, opportunity_id="late-opportunity",
+            feedback_revision=1, feedback_at=cutoff + timedelta(microseconds=1)))
+    monkeypatch.setattr(feedback, "parse_opportunity_feedback_history", lambda row: SimpleNamespace(history_digest="history"))
+    async with async_db() as db:
+        rows, original = await pref._inventory(db, owner="owner", root="root", goal_id="goal", goal_revision=1, cutoff=cutoff)
+        assert rows == []
+        rows, current = await pref._inventory(db, owner="owner", root="root", goal_id="goal", goal_revision=1,
+            cutoff=cutoff + timedelta(seconds=1))
+        assert [row.id for row in rows] == ["late-tip"]
+        assert current != original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+@pytest.mark.parametrize("change", ["new_tip", "aged_out"])
+async def test_current_population_recheck_detects_new_tip_and_aging(async_db, monkeypatch, change):
+    from src.guardian import feedback
+    cutoff = pref.now()
+    monkeypatch.setattr(feedback, "parse_opportunity_feedback_history", lambda row: SimpleNamespace(history_digest="history"))
+    async with async_db() as db:
+        db.add(GuardianIntervention(id="original-tip", intervention_type="opportunity", owner_principal_id="owner",
+            original_root_id="root", goal_id="goal", goal_revision=1, opportunity_id="original-opportunity",
+            feedback_revision=1, feedback_at=(cutoff - timedelta(days=30) + timedelta(seconds=1)
+                if change == "aged_out" else cutoff - timedelta(seconds=1))))
+    async with async_db() as db:
+        _, inventory = await pref._inventory(db, owner="owner", root="root", goal_id="goal", goal_revision=1, cutoff=cutoff)
+    population = replace(_population([]), owner_principal_id="owner", original_root_id="root",
+        generation_cutoff_at=cutoff, inventory_bytes=inventory, anchor_witness=object())
+    async def root(*args):
+        return None
+    async def anchor(*args, **kwargs):
+        return SimpleNamespace(revision=population.opportunity_revision), SimpleNamespace(feedback_revision=population.feedback_revision)
+    monkeypatch.setattr(pref, "_assert_original_root", root)
+    monkeypatch.setattr(feedback, "recheck_opportunity_feedback_source", anchor)
+    monkeypatch.setattr(pref, "now", lambda: cutoff + timedelta(seconds=2))
+    if change == "new_tip":
+        async with async_db() as db:
+            db.add(GuardianIntervention(id="new-tip", intervention_type="opportunity", owner_principal_id="owner",
+                original_root_id="root", goal_id="goal", goal_revision=1, opportunity_id="new-opportunity",
+                feedback_revision=1, feedback_at=cutoff + timedelta(seconds=1)))
+    async with async_db() as db:
+        with pytest.raises(pref.BoardError, match="complete current feedback population changed"):
+            await pref.recheck_population(db, witness=population)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_specialized_memory_excluded_from_structured_hybrid_and_task_prompt_sources(async_db, monkeypatch):
+    from src.memory import hybrid_retrieval, retrieval_planner, evidence_working_set
+    from src.work_board.contracts import WorkBoardOwner
+    # Persisted namespace isolation; actual native/adoption acceptance belongs to W4.
+    specialized = Memory(id="offer-only-memory", content="Secret offer ordering preference needle",
+        kind=MemoryKind.pattern, embedding_id="offer-only-vector", source_session_id="root",
+        metadata_json=pref.canonical({"work_board_provenance": {"memory_scope": _scope()}}).decode())
+    damaged = Memory(id="damaged-offer-only-memory", content="Damaged offer preference needle", kind=MemoryKind.pattern,
+        metadata_json="not-json", embedding_id="damaged-offer-vector")
+    row = _proposal()
+    row.accepted_memory_id = specialized.id
+    row.accepted_memory_content_digest = pref.digest(specialized.content.encode())
+    row.status = MemoryProposalStatus.accepted
+    key = b"isolated-retrieval-namespace-key"
+    source = repo._m5_verified_source_binding(row)
+    provenance = {"proposal_id": row.proposal_id, "accepted_content_digest": row.accepted_memory_content_digest,
+        "owner_principal_id": row.owner_principal_id, "owner_session_id": row.owner_session_id,
+        "source_context_digest": row.source_context_digest, "memory_scope": _scope(),
+        "decision_effect": row.decision_effect.value, "lifecycle_state": "active", "verified_source_binding": source,
+        "selection_binding_key_id": repo._m5_selection_binding_key_id(_signing_key=key)}
+    provenance["selection_binding_mac"] = repo._m5_selection_binding_mac(proposal_id=row.proposal_id,
+        accepted_content_digest=row.accepted_memory_content_digest, owner_principal_id=row.owner_principal_id,
+        owner_session_id=row.owner_session_id, source_context_digest=row.source_context_digest,
+        source_binding=source, decision_effect=row.decision_effect, memory_scope=_scope(), _signing_key=key)
+    specialized.metadata_json = pref.canonical({"work_board_provenance": provenance}).decode()
+    damaged_row = _proposal()
+    damaged_row.proposal_id = "damaged-proposal"
+    damaged_row.source_task_id = "damaged-cpu-source"
+    damaged_row.accepted_memory_id = damaged.id
+    damaged_row.status = MemoryProposalStatus.accepted
+    async with async_db() as db:
+        db.add_all([specialized, damaged, row, damaged_row,
+            Memory(id="ordinary-pattern", content="Ordinary pattern needle", kind=MemoryKind.pattern),
+            Memory(id="ordinary-procedure", content="Ordinary procedure needle", kind=MemoryKind.procedural)])
+        await db.flush()
+        assert await pref._verify_active_memory(db, row, key) is specialized
+    # Canonical inspection/listing remains complete; only model consumers are filtered.
+    canonical = await repo.memory_repository.list_memories(limit=10)
+    assert {specialized.id, damaged.id} <= {memory.id for memory in canonical}
+    context, _ = await retrieval_planner.build_structured_memory_context_bundle()
+    assert "Ordinary pattern needle" in context and "Ordinary procedure needle" in context
+    assert "offer" not in context.lower()
+    monkeypatch.setattr(hybrid_retrieval, "search_with_status", lambda *args, **kwargs: ([
+        {"id": "offer-only-vector", "text": specialized.content, "score": 0.99, "category": "pattern"},
+        {"id": "damaged-offer-vector", "text": damaged.content, "score": 0.99, "category": "pattern"},
+    ], False))
+    hybrid = await hybrid_retrieval.retrieve_hybrid_memory(query="needle", limit=8)
+    assert "Ordinary pattern needle" in hybrid.context
+    assert "offer" not in hybrid.context.lower()
+    assert not {specialized.content, damaged.content} & {hit.text for hit in hybrid.hits}
+    async with async_db() as db:
+        sources = await evidence_working_set._memory_sources(db, WorkBoardOwner(principal_id="operator:scope-test", session_id="root"),
+            SimpleNamespace(goal_id="goal"))
+        assert not {specialized.id, damaged.id} & {source["identifier"] for source in sources}
+    # Deterministic dedicated effect still operates on the preserved closed scope.
+    preference = {"status": "active", "scope": _scope()}
+    assert pref.order_eligible_offers([{"blueprint_id": "public-browser-check"},
+        {"blueprint_id": _scope()["blueprint_id"]}], preference)[0]["blueprint_id"] == _scope()["blueprint_id"]

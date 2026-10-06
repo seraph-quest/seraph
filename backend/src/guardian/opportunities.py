@@ -144,9 +144,10 @@ async def publish_verified_packet(event):
 async def _stage_optional_preference(db, owner, **scope):
     from src.guardian.opportunity_preferences import stage_preference_use
     from src.work_board.repository import BoardError
+    from src.extensions.capability_execution import CapabilityJournalError
     try:
         return await stage_preference_use(db, owner=owner, action="suppress_watch", **scope)
-    except (BoardError, ValueError, OSError):
+    except (BoardError, CapabilityJournalError, ValueError, OSError):
         # Unavailable preference proof never hides an ordinary candidate.
         return None
 
@@ -154,9 +155,10 @@ async def _stage_optional_preference(db, owner, **scope):
 async def _recheck_optional_preference(db, witness):
     from src.guardian.opportunity_preferences import recheck_preference_use
     from src.work_board.repository import BoardError
+    from src.extensions.capability_execution import CapabilityJournalError
     try:
         return await recheck_preference_use(db, witness=witness)
-    except (BoardError, ValueError, OSError):
+    except (BoardError, CapabilityJournalError, ValueError, OSError):
         return {"status": "blocked", "reason_code": "opportunity_preference_unavailable"}
 
 

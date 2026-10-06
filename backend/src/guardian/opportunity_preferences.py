@@ -272,6 +272,7 @@ async def _inventory(db, *, owner, root, goal_id, goal_revision, cutoff):
         GuardianIntervention.goal_revision == goal_revision,
         GuardianIntervention.feedback_revision > 0,
         GuardianIntervention.feedback_at >= cutoff - timedelta(days=30),
+        GuardianIntervention.feedback_at <= cutoff,
     ).order_by(GuardianIntervention.feedback_at, GuardianIntervention.id).limit(101))).scalars().all())
     if len(rows) > 100:
         raise BoardError("learning_population_incomplete", "The complete opportunity population exceeds its cap")
@@ -298,7 +299,7 @@ async def stage_population(db, owner, *, anchor, request, cutoff_at, operator) -
         or anchor_witness.history.revision != request.expected_feedback_revision):
         raise BoardError("feedback_outcome_stale", "The exact opportunity and feedback revisions changed")
     rows, inventory = await _inventory(db, owner=owner.principal_id, root=owner.session_id,
-        goal_id=anchor.goal_id, goal_revision=anchor.goal_revision, cutoff=max(cutoff_at, now()))
+        goal_id=anchor.goal_id, goal_revision=anchor.goal_revision, cutoff=cutoff_at)
     members, witnesses, votes = [], [], []
     event_count = 0
     for row in rows:

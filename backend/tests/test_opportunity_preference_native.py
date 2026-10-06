@@ -11,6 +11,218 @@ from src.work_board.triage import _validate_proposed_typed_inputs
 OWNER = WorkBoardOwner(principal_id="operator:test-bypass", session_id="test-auth-bypass")
 
 
+def _sealed_metadata():
+    from datetime import datetime, timedelta, timezone
+    from src.work_board.opportunity_preference_native import _authorization_mac
+    cutoff = datetime(2026, 10, 6, tzinfo=timezone.utc)
+    value = {"schema_version":1, "goal_revision":1,
+        "request_uuid":"12345678-1234-4234-9234-123456789abc"}
+    value.update({name:"bound-identity" for name in
+        ("owner_principal_id", "original_root_id", "goal_id", "task_id", "input_artifact_id")})
+    value.update({name:"a"*64 for name in
+        ("request_body_digest", "task_create_digest", "input_sha256", "cpu_input_digest", "population_digest")})
+    value.update(generation_cutoff_at=cutoff.isoformat(),
+        original_idle_expires_at=(cutoff+timedelta(hours=1)).isoformat(),
+        original_absolute_expires_at=(cutoff+timedelta(hours=2)).isoformat(),
+        execution_deadline=(cutoff+timedelta(seconds=30)).isoformat(),
+        preview_expires_at=(cutoff+timedelta(minutes=5)).isoformat(), key_id="b"*24)
+    value["authorization_mac"] = _authorization_mac(value,"transient-original-hash",b"test-key")
+    return value
+
+
+def test_original_request_metadata_accepts_exact_closed_writer_shape():
+    import json
+    from src.work_board.opportunity_preference_native import _parse_request_metadata
+    value = _sealed_metadata()
+    assert _parse_request_metadata(json.dumps(value)) == value
+
+
+@pytest.mark.parametrize("field,value", [
+    ("schema_version",True), ("goal_revision",True), ("request_uuid","not-a-uuid"),
+    ("input_sha256","A"*64), ("key_id","x"*24), ("owner_principal_id",""),
+    ("generation_cutoff_at","2026-10-06T00:00:00"),
+    ("original_idle_expires_at","2026-10-06T00:00:00+01:00"),
+    ("execution_deadline","2026-10-06T00:00:31+00:00"),
+    ("preview_expires_at","2026-10-06T00:05:01+00:00"),
+    ("extra","unrecognized"),
+])
+def test_malformed_original_metadata_rejected_even_with_valid_mac(field,value):
+    import json
+    from src.work_board.opportunity_preference_native import _parse_request_metadata, _authorization_mac
+    metadata = _sealed_metadata()
+    metadata[field] = value
+    metadata["authorization_mac"] = _authorization_mac(metadata,"transient-original-hash",b"test-key")
+    with pytest.raises(BoardError) as denied:
+        _parse_request_metadata(json.dumps(metadata))
+    assert denied.value.code == "opportunity_recommendation_binding_invalid"
+
+
+@pytest.mark.parametrize("mutation", ["duplicate", "missing", "oversized", "nonfinite"])
+def test_original_request_metadata_raw_shape_fails_closed(mutation):
+    import json
+    from src.work_board.opportunity_preference_native import _parse_request_metadata
+    value = _sealed_metadata()
+    raw = json.dumps(value)
+    if mutation == "duplicate":
+        raw = raw[:-1] + ', "schema_version":1}'
+    elif mutation == "missing":
+        del value["task_id"]
+        raw = json.dumps(value)
+    elif mutation == "oversized":
+        raw += " "*8192
+    else:
+        raw = raw.replace('"schema_version": 1', '"schema_version": NaN')
+    with pytest.raises(BoardError) as denied:
+        _parse_request_metadata(raw)
+    assert denied.value.code == "opportunity_recommendation_binding_invalid"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation", ["idle_extension_crossing", "rotation", "revocation", "replacement", "tombstone", "mac_tamper"])
+async def test_original_sealed_root_fails_closed_in_sql_writer(async_db, monkeypatch, mutation):
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+    import json
+    from sqlalchemy import text
+    from src.db.models import OperatorSession, WorkBoardEvent
+    from src.work_board import opportunity_preference_native as native
+    from src.memory import repository as memory_repo
+
+    cutoff = datetime(2026,10,6,tzinfo=timezone.utc)
+    key = b"isolated-original-publication-key"
+    metadata = _sealed_metadata()
+    metadata["key_id"] = memory_repo._m5_selection_binding_key_id(_signing_key=key)
+    original_idle = cutoff + timedelta(hours=1)
+    absolute = cutoff + timedelta(hours=2)
+    operator = SimpleNamespace(_token_hash="original-token-hash", idle_expires_at=original_idle,
+        absolute_expires_at=absolute)
+    witness = SimpleNamespace(operator=operator, signing_key=key)
+    async with async_db() as db:
+        task = await _negative_task(db, CAPABILITY)
+        root = OperatorSession(id=OWNER.session_id, principal_id=OWNER.principal_id,
+            token_hash=operator._token_hash, idle_expires_at=original_idle, absolute_expires_at=absolute)
+        db.add(root)
+        metadata["authorization_mac"] = native._authorization_mac(metadata,operator._token_hash,key)
+        event = WorkBoardEvent(task_id=task.task_id, owner_principal_id=OWNER.principal_id,
+            owner_session_id=OWNER.session_id, actor_principal_id=OWNER.principal_id,
+            actor_session_id=OWNER.session_id, kind=native.REQUESTED_EVENT,
+            metadata_json=json.dumps(metadata))
+        db.add(event)
+        await db.commit()
+        monkeypatch.setattr(native,"now",lambda: cutoff+timedelta(seconds=1))
+        await native._recheck_original_commitment(db,task,event,witness)
+        if mutation == "idle_extension_crossing":
+            root.idle_expires_at = cutoff+timedelta(hours=3)
+            monkeypatch.setattr(native,"now",lambda: original_idle+timedelta(microseconds=1))
+        elif mutation == "rotation":
+            root.token_hash = "new-token-hash"
+        elif mutation == "revocation":
+            root.revoked_at = cutoff
+        elif mutation == "replacement":
+            root.replaced_by_id = "replacement-root"
+        elif mutation == "tombstone":
+            root.is_bearer_tombstone = True
+        else:
+            metadata["authorization_mac"] = "0"*64
+            event.metadata_json = json.dumps(metadata)
+        await db.commit()
+        # Key custody is unavailable inside the writer; only staged key bytes may be used.
+        def forbidden_key():
+            raise AssertionError("key I/O inside writer")
+        monkeypatch.setattr(memory_repo,"_effect_mac_key",forbidden_key)
+        await db.execute(text("BEGIN IMMEDIATE"))
+        with pytest.raises(BoardError) as denied:
+            await native._recheck_original_commitment(db,task,event,witness)
+        assert denied.value.code == "opportunity_recommendation_root_stale"
+        await db.rollback()
+
+
+@pytest.mark.asyncio
+async def test_preference_registration_preserves_ordinary_async_native_transition(async_db):
+    from src.workflows.job_runtime import DurableJobIdentity, DurableJobSpec, durable_job_repository
+
+    spec = DurableJobSpec(
+        identity=DurableJobIdentity(job_id="ordinary-preference-regression", owner_kind="service",
+            owner_principal_id="service:strategist", job_kind="strategist_tick", capability_version="1",
+            idempotency_scope="ordinary-regression", idempotency_key="one"),
+        inputs={"task": "ordinary"}, session_id="ordinary-session", resource_claims=("cpu",),
+        declared_authority={"principal":"service:strategist", "service_id":"service:strategist"},
+        service_id="service:strategist", max_attempts=1,
+    )
+    admitted = await durable_job_repository.admit_job(spec)
+    queued = await durable_job_repository.queue_job(admitted["job_id"])
+    assert queued["status"] == "queued"
+    claimed = await durable_job_repository.claim_job(admitted["job_id"], owner="ordinary-runner")
+    assert claimed["status"] == "running"
+    assert claimed["job_id"] == admitted["job_id"]
+    assert claimed["attempt_count"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("callback", [False, True])
+@pytest.mark.parametrize("witness", [None, object()])
+async def test_fixed_native_admission_requires_typed_authority_not_callback(async_db, callback, witness):
+    from dataclasses import replace
+    from tests.test_durable_job_runtime import _spec
+    from src.workflows.job_runtime import durable_job_repository
+    from src.db.models import WorkflowRunState
+    from sqlalchemy import select
+    base = _spec(job_id="forged-preference-admission", dedupe_key="forged")
+    spec = replace(base, identity=replace(base.identity,job_kind=CAPABILITY), max_attempts=1)
+    check = AsyncMock()
+    with pytest.raises(BoardError) as denied:
+        await durable_job_repository.admit_job(spec,
+            admission_authority_check=check if callback else None,
+            opportunity_preference_witness=witness)
+    assert denied.value.code == "opportunity_recommendation_binding_invalid"
+    check.assert_not_awaited()
+    async with async_db() as db:
+        assert await db.scalar(select(WorkflowRunState).where(
+            WorkflowRunState.run_identity == spec.identity.job_id)) is None
+
+
+@pytest.mark.asyncio
+async def test_fixed_claim_checks_typed_witness_inside_actual_sqlite_writer(async_db, monkeypatch):
+    from tests.test_durable_job_runtime import _spec
+    from src.workflows.job_runtime import durable_job_repository
+    from src.db.models import WorkflowRunState
+    from sqlalchemy import event, select
+    from src.work_board import opportunity_preference_native as native
+    admitted = await durable_job_repository.admit_job(_spec(job_id="claim-writer-negative",dedupe_key="claim-writer"))
+    await durable_job_repository.queue_job(admitted["job_id"])
+    async with async_db() as db:
+        run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == admitted["job_id"]))
+        # Corrupted legacy row must never be claimed; no positive preference result is seeded.
+        run.job_kind = CAPABILITY
+        await db.commit()
+        engine = db.get_bind()
+    statements = []
+    def trace(_connection,_cursor,statement,_parameters,_context,_many):
+        statements.append(statement.strip().upper())
+    event.listen(engine,"before_cursor_execute",trace)
+    original = native.recheck_native
+    witness = native.NativeWitness(None,None)
+    called = []
+    async def checked(db,run,*,witness,terminal=False):
+        assert "BEGIN IMMEDIATE" in statements
+        called.append(True)
+        await original(db,run,witness=witness,terminal=terminal)
+    monkeypatch.setattr(native,"recheck_native",checked)
+    try:
+        with pytest.raises(BoardError) as denied:
+            await durable_job_repository.claim_job(admitted["job_id"],owner="negative-runner",
+                opportunity_preference_witness=witness)
+        assert denied.value.code == "opportunity_recommendation_binding_invalid"
+    finally:
+        event.remove(engine,"before_cursor_execute",trace)
+    assert called == [True]
+    async with async_db() as db:
+        run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == admitted["job_id"]))
+        assert run.status == "queued"
+        assert run.attempt_count == 0
+        assert run.lease_owner is None
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["triage", "todo"])
 @pytest.mark.parametrize("callback", [False, True])

@@ -504,16 +504,20 @@ async def record_guardian_opportunity_feedback(opportunity_id: str, body: Opport
 @router.post("/guardian/opportunities/{opportunity_id}/recommendation", response_model=OpportunityRecommendationReceipt)
 async def request_guardian_opportunity_recommendation(opportunity_id: str, body: OpportunityRecommendationRequest, request: Request):
     from src.work_board.opportunity_preference_native import request_opportunity_recommendation
+    from src.work_board.repository import BoardError
     operator = _require_authenticated_operator(request)
     try:
         return await request_opportunity_recommendation(operator=operator, opportunity_id=opportunity_id, request=body)
-    except OpportunityError as exc:
+    except (OpportunityError, BoardError) as exc:
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
+    except CapabilityJournalError as exc:
+        raise HTTPException(status_code=503, detail={"code": "source_baseline_integrity_unverifiable"}) from exc
 
 
 @router.get("/guardian/opportunities/{opportunity_id}/recommendation", response_model=OpportunityRecommendationReceipt)
 async def inspect_guardian_opportunity_recommendation(opportunity_id: str, idempotency_key: str, request: Request):
     from src.work_board.opportunity_preference_native import inspect_opportunity_recommendation
+    from src.work_board.repository import BoardError
     from uuid import UUID
     operator = _require_authenticated_operator(request)
     try:
@@ -523,8 +527,10 @@ async def inspect_guardian_opportunity_recommendation(opportunity_id: str, idemp
         raise HTTPException(status_code=422, detail={"code":"invalid_idempotency_key"}) from exc
     try:
         return await inspect_opportunity_recommendation(operator=operator, opportunity_id=opportunity_id, request_uuid=idempotency_key)
-    except OpportunityError as exc:
+    except (OpportunityError, BoardError) as exc:
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
+    except CapabilityJournalError as exc:
+        raise HTTPException(status_code=503, detail={"code": "source_baseline_integrity_unverifiable"}) from exc
 
 
 @router.get("/goals/tree")

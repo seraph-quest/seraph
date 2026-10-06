@@ -189,7 +189,7 @@ async def test_populated_previous_schema_migration_repeat_is_additive(tmp_path):
 # adopted native CPU/source custody is exercised by the owned vertical suite.
 from tests.test_work_board_m6_provider_free_journey import isolated_runtime, SESSION
 
-@pytest.mark.parametrize('preference_state', ['active', 'invalid', 'rolled_back'])
+@pytest.mark.parametrize('preference_state', ['active', 'invalid', 'rolled_back', 'key_missing'])
 async def test_optional_publication_effect_rechecks_before_any_candidate_write(isolated_runtime, monkeypatch, preference_state):
     from tests.test_guardian_opportunity_policy import publish_source
     from src.guardian import opportunity_preferences as preferences
@@ -206,6 +206,9 @@ async def test_optional_publication_effect_rechecks_before_any_candidate_write(i
         assert db._session.connection().connection.driver_connection.in_transaction is False
         assert scope['watch_id'] == watch['id'] and scope['watch_revision'] == 1
         assert scope['goal_id'] == goal.id and scope['goal_revision'] == 1
+        if preference_state == 'key_missing':
+            from src.extensions.capability_execution import CapabilityJournalError
+            raise CapabilityJournalError('Server key unavailable')
         if preference_state == 'invalid':
             raise BoardError('feedback_outcome_stale', 'No current proof')
         return witnessed
@@ -226,7 +229,7 @@ async def test_optional_publication_effect_rechecks_before_any_candidate_write(i
     result = await SourceWatchService(fetcher=fetch).run_watch(watch['id'], occurrence_id='feedback-effect-third',
         expected_plan_revision=1, expected_owner_session_id=SESSION)
     assert result['status'] == 'succeeded'  # Watch read/publication still occurs.
-    assert phases == (['stage'] if preference_state == 'invalid' else ['stage','recheck'])
+    assert phases == (['stage'] if preference_state in {'invalid','key_missing'} else ['stage','recheck'])
     async with sessions() as db:
         assert await db.get(GuardianOpportunity, original.id) is not None
         candidates = await db.scalar(select(func.count()).select_from(GuardianOpportunity))
@@ -289,3 +292,98 @@ def test_report_feedback_handoff_matches_actual_staged_parent_readback(change):
         outcomes=(parent,)
     with pytest.raises(OpportunityError,match='feedback_outcome_stale'):
         feedback._validate_feedback_handoffs(inventory,outcomes)
+
+
+from tests.test_research_native_vertical import real_auth
+
+@pytest.mark.parametrize('method',['POST','GET'])
+@pytest.mark.parametrize('status,code',[(403,'original_root_unavailable'),(409,'opportunity_source_stale'),
+    (422,'invalid_recommendation_request'),(503,'native_dependency_unavailable'),
+    (503,'source_baseline_integrity_unverifiable')])
+async def test_recommendation_routes_map_typed_failures_without_side_effects(isolated_runtime, real_auth,
+    monkeypatch, method, status, code):
+    import httpx
+    from fastapi import FastAPI
+    from config.settings import settings
+    from src.api import goals
+    from src.auth.middleware import OperatorAuthMiddleware
+    from src.work_board import opportunity_preference_native as native
+    from src.work_board.repository import BoardError
+    from src.extensions.capability_execution import CapabilityJournalError
+    from src.db.models import WorkBoardTask,WorkBoardAttempt,WorkflowRunState
+    sessions,_=isolated_runtime
+    calls=[]
+    async def fail(**kwargs):
+        calls.append(kwargs)
+        assert kwargs['operator'].session_id==SESSION
+        if code=='source_baseline_integrity_unverifiable':
+            raise CapabilityJournalError('PRIVATE signing-key cause must never appear in HTTP')
+        raise BoardError(code,'PRIVATE native binding cause must never appear in HTTP',status_code=status)
+    monkeypatch.setattr(native,'request_opportunity_recommendation',fail)
+    monkeypatch.setattr(native,'inspect_opportunity_recommendation',fail)
+    async def counts():
+        async with sessions() as db:
+            return tuple([await db.scalar(select(func.count()).select_from(model)) for model in (
+                WorkBoardTask,WorkBoardAttempt,WorkflowRunState,GuardianIntervention,GuardianOpportunity)])
+    before=await counts()
+    app=FastAPI();app.add_middleware(OperatorAuthMiddleware);app.include_router(goals.router,prefix='/api')
+    request_uuid=str(uuid4())
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://test',
+        headers={'origin':'http://localhost:3001'}) as client:
+        client.cookies.set(settings.operator_auth_cookie_name,'m6-provider-free-root')
+        path='/api/guardian/opportunities/opportunity/recommendation'
+        if method=='POST':
+            response=await client.post(path,json={'expected_opportunity_revision':1,
+                'expected_feedback_revision':0,'idempotency_key':request_uuid})
+        else:
+            response=await client.get(path,params={'idempotency_key':request_uuid})
+    assert response.status_code==status,response.text
+    assert response.json()=={'detail':{'code':code}}
+    assert len(calls)==1 and calls[0]['opportunity_id']=='opportunity'
+    if method=='GET': assert calls[0]['request_uuid']==request_uuid
+    else: assert calls[0]['request'].expected_feedback_revision==0
+    assert await counts()==before
+
+
+@pytest.mark.parametrize('change',['canonical','wrong_slots','wrong_actual_capability'])
+async def test_feedback_report_uses_canonical_slot_refs_and_checks_actual_tasks(async_db, monkeypatch, change):
+    from types import SimpleNamespace
+    from src.work_board import pipelines
+    from src.work_board.contracts import WorkBoardOwner
+    from src.work_board.pipeline_contracts import SLOTS,CAPABILITIES
+    from src.db.models import WorkBoardTask,WorkBoardLink
+    operator=await setup_feedback(async_db,monkeypatch)
+    owner=WorkBoardOwner(principal_id=operator.principal.principal_id,session_id=operator.session_id)
+    ids=['browser','dossier','report']
+    steps=[{'slot':slot,'task_ref':task_id} for slot,task_id in zip(SLOTS,ids)]
+    assert all(set(step)=={'slot','task_ref'} for step in steps)
+    if change=='wrong_slots': steps[1]['slot']='local_report'
+    async def owned(db,passed_owner,operation_id,*,workspace_identity):
+        assert passed_owner==owner and operation_id=='proposal' and workspace_identity==b'workspace'
+        return None,{'steps':steps}
+    monkeypatch.setattr(pipelines,'owned',owned)
+    async with async_db() as db:
+        opportunity=await db.get(GuardianOpportunity,'opportunity')
+        opportunity.status='planned';opportunity.proposal_id='proposal'
+        for index,(task_id,capability) in enumerate(zip(ids,CAPABILITIES)):
+            db.add(WorkBoardTask(task_id=task_id,owner_principal_id=owner.principal_id,owner_session_id=owner.session_id,
+                goal_id=opportunity.goal_id,goal_revision=opportunity.goal_revision,idempotency_key='key-'+task_id,
+                capability_id=('arbitrary.other.v1' if change=='wrong_actual_capability' and index==1 else capability)))
+        await db.flush()  # Persist real FK parents before dependent links.
+        for parent,child in zip(ids,ids[1:]):
+            db.add(WorkBoardLink(owner_principal_id=owner.principal_id,owner_session_id=owner.session_id,
+                parent_task_id=parent,child_task_id=child))
+        await db.commit()
+        proposal=SimpleNamespace(status='accepted',proposal_id='proposal',parent_task_id='browser',
+            proposal_json=json.dumps({'blueprint_id':'public-evidence-report'}))
+        if change=='canonical':
+            outcomes,inventory,blueprint=await feedback._feedback_lineage(db,owner,opportunity,proposal,
+                source=SimpleNamespace(workspace_identity=b'workspace'))
+            assert outcomes==()  # Triage/no attempt is no Helpful outcome.
+            assert blueprint=='public-evidence-report'
+            assert len([entry for entry in inventory if entry[0]=='task'])==3
+            assert len([entry for entry in inventory if entry[0]=='link'])==2
+        else:
+            with pytest.raises(OpportunityError,match='feedback_outcome_stale'):
+                await feedback._feedback_lineage(db,owner,opportunity,proposal,
+                    source=SimpleNamespace(workspace_identity=b'workspace'))

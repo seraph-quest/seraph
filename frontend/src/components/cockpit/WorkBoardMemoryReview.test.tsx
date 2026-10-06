@@ -543,7 +543,8 @@ describe("WorkBoardMemoryReview", () => {
   it.each([{ rollback: false, invalid: "" }, { rollback: true, invalid: "" }, { rollback: false, invalid: "bundle" },
     { rollback: false, invalid: "population" }, { rollback: false, invalid: "owner" }, { rollback: false, invalid: "scope" },
     { rollback: false, invalid: "expiry" }, { rollback: false, invalid: "authority" }, { rollback: true, invalid: "stale" },
-    { rollback: true, invalid: "signature" }, { rollback: true, invalid: "owner" }, { rollback: false, invalid: "late_owner" }])("requires a separate literal opportunity acknowledgment and exact bundle for rollback=$rollback invalid=$invalid", async ({ rollback, invalid }) => {
+    { rollback: true, invalid: "signature" }, { rollback: true, invalid: "owner" }, { rollback: false, invalid: "late_owner" },
+    { rollback: false, invalid: "task_revision" }, { rollback: false, invalid: "summary_schema" }])("requires a separate literal opportunity acknowledgment and exact bundle for rollback=$rollback invalid=$invalid", async ({ rollback, invalid }) => {
     const review: OpportunityPreferenceProposal = {
       schema_version: "opportunity_recommendation.v1", proposal_id: "opportunity-memory-1", status: rollback ? "accepted" : "proposed",
       canonical_status: rollback ? "accepted" : "proposed", rollback_available: rollback,
@@ -581,12 +582,15 @@ describe("WorkBoardMemoryReview", () => {
       }
       if (url.endsWith("/opportunity-preferences/opportunity-memory-1")) return invalid === "late_owner"
         ? new Promise<ReturnType<typeof response>>((resolve) => { resolveCanonical = resolve; })
-        : Promise.resolve(response({ ...review, evidence_digest: "f".repeat(64) }));
-      if (url.includes("/task-proposals?")) return Promise.resolve(response({ proposals: [{ schema_version: review.schema_version, proposal_id: review.proposal_id }] }));
+        : Promise.resolve(response({ ...review, schema_version: invalid === "summary_schema" ? null : review.schema_version, evidence_digest: "f".repeat(64) }));
+      if (url.includes("/task-proposals?")) return Promise.resolve(response({ proposals: [invalid === "summary_schema"
+        ? { proposal_id: review.proposal_id, status: "proposed", preview_text: "Untrusted generic summary", reason_code: "current", recovery_action: "none" }
+        : { schema_version: review.schema_version, proposal_id: review.proposal_id }] }));
       if (url.includes("/task-decisions?")) return Promise.resolve(response({ receipts: [] }));
       throw new Error(`Unexpected request ${url} ${init?.method ?? "GET"}`);
     });
-    const view = render(<WorkBoardMemoryReview task={task({ capability_id: "memory.opportunity-preference.v1" })} ownerPrincipalId="operator:one" ownerSessionId="operator-session-1" />);
+    const view = render(<WorkBoardMemoryReview task={task({ capability_id: "memory.opportunity-preference.v1",
+      task_revision: invalid === "task_revision" || invalid === "stale" ? 7 : 6 })} ownerPrincipalId="operator:one" ownerSessionId="operator-session-1" />);
     if (invalid === "late_owner") {
       await waitFor(() => expect(resolveCanonical).toBeDefined());
       view.rerender(<WorkBoardMemoryReview task={task({ capability_id: "memory.opportunity-preference.v1" })} ownerPrincipalId="operator:one" ownerSessionId="foreign-root" />);
@@ -598,7 +602,7 @@ describe("WorkBoardMemoryReview", () => {
       return;
     }
     if (invalid && invalid !== "stale") {
-      if (invalid === "expiry" || invalid === "signature") await screen.findByText("No current adoption actions. Refresh current source, Goal and population before a new review.");
+      if (invalid === "expiry" || invalid === "signature" || invalid === "task_revision") await screen.findByText("No current adoption actions. Refresh current source, Goal and population before a new review.");
       else await screen.findByRole("alert");
       expect(screen.queryByRole("button", { name: "Adopt this opportunity preference" })).not.toBeInTheDocument();
       expect(screen.queryByRole("button", { name: "Edit and accept" })).not.toBeInTheDocument();

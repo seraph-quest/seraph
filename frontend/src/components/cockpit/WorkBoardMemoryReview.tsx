@@ -450,7 +450,7 @@ function WorkBoardMemoryReview({
       )}
       <div className="mt-2 grid gap-2">
         {proposals.map((proposal) => {
-          if (proposal.schema_version === "opportunity_recommendation.v1"
+          if (task.capability_id === "memory.opportunity-preference.v1" || proposal.schema_version === "opportunity_recommendation.v1"
             || (proposal.scope ?? proposal.memory_scope)?.schema_version === "guardian_opportunity_preference.v1") {
             return <OpportunityPreferenceReview key={`${ownerPrincipalId}:${ownerSessionId}:${task.task_id}:${proposal.proposal_id}`}
               proposalId={proposal.proposal_id} task={task} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} />;
@@ -700,7 +700,7 @@ function OpportunityPreferenceReview({ proposalId, task, ownerPrincipalId, owner
     } finally { locked.current = false; if (!current.signal.aborted || controller.current !== current) setBusy(false); }
   };
   const currentPreview = Boolean(proposal && proposal.status === "proposed" && proposal.expires_at && Date.parse(proposal.expires_at) > Date.now()
-    && task.status === "done" && task.latest_attempt?.attempt_id === proposal.source_attempt_id
+    && task.status === "done" && task.task_revision === proposal.source_task_revision && task.latest_attempt?.attempt_id === proposal.source_attempt_id
     && task.latest_attempt?.fencing_token === proposal.source_attempt_fence && task.latest_attempt?.readback_status === "verified"
     && task.latest_attempt?.verification_status === "passed");
   return <article className="rounded bg-black/20 p-2" aria-label="Opportunity preference review">

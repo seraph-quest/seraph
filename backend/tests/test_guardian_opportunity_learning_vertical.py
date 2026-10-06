@@ -25,6 +25,11 @@ async def test_one_actual_verified_report_helpful_cpu_abstains_without_memory_ad
         accounting_db, real_auth, monkeypatch):
     """One real Helpful outcome cannot satisfy the two-outcome preference rule."""
     from src.api import auth, goals
+    _, _, factory = accounting_db
+    # These imported providers must share the real auth/native file-backed DB.
+    for target in ('src.guardian.feedback.get_session', 'src.memory.m5.get_session',
+            'src.memory.repository.get_session'):
+        monkeypatch.setattr(target, factory.accounting_sessions)
     original_client = httpx.AsyncClient
     original_create = auth.create_session
     original_provider = PlanHttpBoundary.handle_async_request

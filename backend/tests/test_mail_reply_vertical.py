@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -21,7 +22,6 @@ from src.db.models import (
     MailLabelBinding,
     MailMessageBinding,
     MailReadConsent,
-    OperatorSession,
     WorkBoardStatus,
     WorkBoardTask,
     WorkflowRunState,
@@ -39,13 +39,14 @@ from src.model_fabric.proofs import build_model_route_proof
 from src.model_fabric.receipts import RouteReceipt
 from src.model_fabric.repository import model_fabric_repository
 from src.model_fabric.contracts import EndpointClass
-from src.security.trust_contract import EgressClass, AuthorityGrant, PrincipalType, TrustPrincipal
+from src.security.trust_contract import EgressClass
 from src.vault import crypto as vault_crypto
 from src.vault import encrypt
 from src.work_board.contracts import WorkBoardOwner
 from src.work_board.dispatcher import WorkBoardDispatcher
 from src.work_board.repository import WorkBoardRepository
 from src.workflows.job_runtime import DurableJobRepository
+from tests.test_inference_accounting import accounting_db
 
 
 OWNER = "operator:single"
@@ -66,21 +67,7 @@ def reset_vault_cipher(monkeypatch):
 
 
 def _operator() -> AuthenticatedOperator:
-    now = datetime.now(timezone.utc)
-    return AuthenticatedOperator(
-        session_id=SESSION,
-        principal=TrustPrincipal(
-            principal_id=OWNER,
-            principal_type=PrincipalType.OPERATOR,
-            authenticated=True,
-            revoked=False,
-            grants=(AuthorityGrant.INGRESS, AuthorityGrant.CAPABILITY_EXECUTE),
-            session_id=SESSION,
-            operator_session_id=SESSION,
-        ),
-        idle_expires_at=now + timedelta(hours=1),
-        absolute_expires_at=now + timedelta(hours=2),
-    )
+    raise AssertionError("Seed the real authenticated operator before building a request.")
 
 
 def _request(body: dict[str, object]) -> Request:
@@ -108,6 +95,16 @@ def _request(body: dict[str, object]) -> Request:
 
 async def _seed(async_db, monkeypatch, *, model_allowed: bool = True):
     monkeypatch.setattr(mail_api, "get_session", async_db)
+    monkeypatch.setattr(settings, "deployment_environment", "test")
+    monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", False)
+    monkeypatch.setattr(settings, "operator_auth_secret", "mail-reply-vertical-auth")
+    monkeypatch.setattr(settings, "operator_auth_secret_hash", "")
+    from src.auth.service import create_session
+
+    _token, operator = await create_session()
+    monkeypatch.setattr(sys.modules[__name__], "OWNER", operator.principal.principal_id)
+    monkeypatch.setattr(sys.modules[__name__], "SESSION", operator.session_id)
+    monkeypatch.setattr(sys.modules[__name__], "_operator", lambda: operator)
     now = datetime.now(timezone.utc)
     budget = GoalAdmissionBudget(
         reviewed_grant=True,
@@ -121,14 +118,6 @@ async def _seed(async_db, monkeypatch, *, model_allowed: bool = True):
         timezone="UTC",
     )
     async with async_db() as db:
-        db.add(
-            OperatorSession(
-                id=SESSION,
-                token_hash="mail-reply-vertical-session-hash",
-                idle_expires_at=now + timedelta(hours=1),
-                absolute_expires_at=now + timedelta(hours=2),
-            )
-        )
         db.add(
             Goal(
                 id=GOAL,
@@ -234,6 +223,12 @@ async def _configure_model_route(async_db, monkeypatch, tmp_path):
             status="ready",
         )
     )
+    await DurableJobRepository().configure_inference_accounting(25_000)
+    from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
+
+    broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
+    monkeypatch.setattr("src.llm_runtime.gpu_admission_broker", broker)
+    monkeypatch.setattr("src.model_fabric.execution.gpu_admission_broker", broker)
     from src.llm_runtime import _provider_profile
 
     profile = _provider_profile("openrouter")
@@ -354,7 +349,9 @@ def _body(read_index: int, *, changed: bool = False) -> GmailMessageBody:
 
 
 @pytest.mark.asyncio
-async def test_mail_reply_dispatches_two_reads_one_model_private_readback(async_db, monkeypatch, tmp_path):
+async def test_mail_reply_dispatches_two_reads_one_model_private_readback(accounting_db, monkeypatch):
+    tmp_path, _engine, factory = accounting_db
+    async_db = factory.accounting_sessions
     await _seed(async_db, monkeypatch)
     await _configure_model_route(async_db, monkeypatch, tmp_path)
     repository, owner, claim, inputs, created = await _create_claim(async_db, monkeypatch, "reply-vertical-key")
@@ -382,7 +379,7 @@ async def test_mail_reply_dispatches_two_reads_one_model_private_readback(async_
         model_calls.append(dict(kwargs["body"]))
         content = json.dumps(output, separators=(",", ":"))
         message = SimpleNamespace(role="assistant", content=content)
-        return SimpleNamespace(choices=[SimpleNamespace(message=message)]), {"choices": [{"message": {"role": "assistant", "content": content}}]}
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)]), {"choices": [{"message": {"role": "assistant", "content": content}}], "usage": {"cost": "0.000002"}}
 
     monkeypatch.setattr("src.integrations.gmail_read.GoogleGmailReadonlyAdapter", FakeAdapter)
     monkeypatch.setattr("src.llm_runtime._governed_openai_chat_completion", governed_transport)
@@ -434,7 +431,9 @@ async def test_mail_reply_dispatches_two_reads_one_model_private_readback(async_
 
 
 @pytest.mark.asyncio
-async def test_mail_reply_truncated_source_blocks_before_model_contact(async_db, monkeypatch, tmp_path):
+async def test_mail_reply_truncated_source_blocks_before_model_contact(accounting_db, monkeypatch):
+    tmp_path, _engine, factory = accounting_db
+    async_db = factory.accounting_sessions
     await _seed(async_db, monkeypatch)
     await _configure_model_route(async_db, monkeypatch, tmp_path)
     repository, _owner, claim, inputs, _created = await _create_claim(async_db, monkeypatch, "reply-truncated-key")
@@ -466,7 +465,9 @@ async def test_mail_reply_truncated_source_blocks_before_model_contact(async_db,
 
 
 @pytest.mark.asyncio
-async def test_mail_reply_oversized_source_blocks_before_model_contact(async_db, monkeypatch, tmp_path):
+async def test_mail_reply_oversized_source_blocks_before_model_contact(accounting_db, monkeypatch):
+    tmp_path, _engine, factory = accounting_db
+    async_db = factory.accounting_sessions
     await _seed(async_db, monkeypatch)
     await _configure_model_route(async_db, monkeypatch, tmp_path)
     repository, _owner, claim, inputs, _created = await _create_claim(async_db, monkeypatch, "reply-oversized-key")
@@ -498,7 +499,9 @@ async def test_mail_reply_oversized_source_blocks_before_model_contact(async_db,
 
 
 @pytest.mark.asyncio
-async def test_mail_reply_dispatches_through_normal_work_board_pass(async_db, monkeypatch, tmp_path):
+async def test_mail_reply_dispatches_through_normal_work_board_pass(accounting_db, monkeypatch):
+    tmp_path, _engine, factory = accounting_db
+    async_db = factory.accounting_sessions
     """The managed dispatcher must execute the canonical Mail task path."""
 
     await _seed(async_db, monkeypatch)
@@ -528,14 +531,10 @@ async def test_mail_reply_dispatches_through_normal_work_board_pass(async_db, mo
     def governed_transport(**kwargs):
         content = json.dumps(output, separators=(",", ":"))
         message = SimpleNamespace(role="assistant", content=content)
-        return SimpleNamespace(choices=[SimpleNamespace(message=message)]), {"choices": [{"message": {"role": "assistant", "content": content}}]}
-
-    async def authenticated(_session_id, *, touch=False):
-        return _operator()
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)]), {"choices": [{"message": {"role": "assistant", "content": content}}], "usage": {"cost": "0.000002"}}
 
     monkeypatch.setattr("src.integrations.gmail_read.GoogleGmailReadonlyAdapter", FakeAdapter)
     monkeypatch.setattr("src.llm_runtime._governed_openai_chat_completion", governed_transport)
-    monkeypatch.setattr("src.work_board.dispatcher.authenticate_session", authenticated)
     dispatcher = WorkBoardDispatcher(
         repository=WorkBoardRepository(),
         jobs=DurableJobRepository(),
@@ -557,7 +556,9 @@ async def test_mail_reply_dispatches_through_normal_work_board_pass(async_db, mo
 
 
 @pytest.mark.asyncio
-async def test_mail_reply_source_drift_after_model_quarantines_without_replay(async_db, monkeypatch, tmp_path):
+async def test_mail_reply_source_drift_after_model_quarantines_without_replay(accounting_db, monkeypatch):
+    tmp_path, _engine, factory = accounting_db
+    async_db = factory.accounting_sessions
     await _seed(async_db, monkeypatch)
     await _configure_model_route(async_db, monkeypatch, tmp_path)
     repository, _owner, claim, inputs, created = await _create_claim(async_db, monkeypatch, "reply-drift-key")
@@ -613,7 +614,9 @@ async def test_mail_reply_source_drift_after_model_quarantines_without_replay(as
 
 
 @pytest.mark.asyncio
-async def test_mail_reply_consent_revoke_after_first_read_blocks_before_model(async_db, monkeypatch, tmp_path):
+async def test_mail_reply_consent_revoke_after_first_read_blocks_before_model(accounting_db, monkeypatch):
+    tmp_path, _engine, factory = accounting_db
+    async_db = factory.accounting_sessions
     await _seed(async_db, monkeypatch)
     await _configure_model_route(async_db, monkeypatch, tmp_path)
     repository, _owner, claim, inputs, created = await _create_claim(async_db, monkeypatch, "reply-revoke-key")

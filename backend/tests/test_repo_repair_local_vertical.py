@@ -16,12 +16,14 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import time
 from types import SimpleNamespace
 from typing import Any
 import uuid
 
 import pytest
+import pytest_asyncio
 from sqlmodel import select
 
 from config.settings import RepoSandboxSettings, settings
@@ -47,9 +49,22 @@ from src.work_board.dispatcher import WorkBoardDispatcher, registered_executor_i
 from src.work_board.input_artifacts import prepare_input_artifact
 from src.work_board.repository import WorkBoardRepository
 from src.workflows.job_runtime import durable_job_repository
+from tests.conftest import _PATCH_TARGETS
+from tests.test_inference_accounting import accounting_db
 
 
 CAPABILITY = "engineering.repo-repair.v1"
+
+
+@pytest_asyncio.fixture
+async def async_db(accounting_db, monkeypatch):
+    """Route native APIs and workers to the existing canonical ledger fixture."""
+
+    _root, _engine, factory = accounting_db
+    sessions = factory.accounting_sessions
+    for target in (*_PATCH_TARGETS, "src.workflows.repo_repair.get_session"):
+        monkeypatch.setattr(target, sessions)
+    yield sessions
 
 
 def _configure_openrouter() -> Any:
@@ -62,6 +77,7 @@ def _configure_openrouter() -> Any:
         egress_class=EgressClass.CLOUD_ALLOWED_FULL,
         cloud_egress_acknowledged=True,
         spend_ceiling_microusd=25_000,
+        request_cost_bound_microusd=100,
         credential_ref="env:OPENROUTER_API_KEY",
     )
     write_model_fabric_configuration(
@@ -396,7 +412,7 @@ def _model_transport(transport_calls: list[dict[str, Any]]):
         response = SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(role="assistant", content=content))]
         )
-        return response, {"choices": [{"message": {"role": "assistant", "content": content}}]}
+        return response, {"choices": [{"message": {"role": "assistant", "content": content}}], "usage": {"cost": "0.000002"}}
 
     return transport
 
@@ -480,7 +496,7 @@ async def _prepare_native_flow(
     """Publish two real goals/tasks and pause the selected one for approval."""
 
     workspace = tmp_path / "workspace"
-    workspace.mkdir(mode=0o700)
+    workspace.mkdir(mode=0o700, exist_ok=True)
     repository_root, source_before, git_before = _init_repository(
         workspace,
         test_sleep_seconds=test_sleep_seconds,
@@ -505,6 +521,13 @@ async def _prepare_native_flow(
     monkeypatch.setattr(settings, "default_model", "openrouter/anthropic/claude-sonnet-4")
     persist_proofs = _configure_openrouter()
     await persist_proofs()
+    await durable_job_repository.configure_inference_accounting(25_000)
+    from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
+
+    broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
+    monkeypatch.setattr("src.llm_runtime.gpu_admission_broker", broker)
+    monkeypatch.setattr("src.model_fabric.execution.gpu_admission_broker", broker)
+    monkeypatch.setattr(sys.modules[__name__], "remote_inference_admission_broker", broker)
 
     preflight = await asyncio.to_thread(build_repo_repair_executor().preflight)
     assert preflight.ok, preflight.as_receipt()

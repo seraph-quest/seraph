@@ -36,13 +36,13 @@ it("reconciles a lost cancellation response after reload only with the original 
   if(options?.method==="POST"){posts++;applied=true;throw Error("Cancel response lost");}
   return new Response(JSON.stringify({...state,task_revision:applied?6:4,cancel_receipt:applied?{attempt_id:state.attempt_id,board_fence:2,requested_revision:4,applied:true,cancel_requested_at:"2026-10-03T16:00:00Z"}:null}));
  });
- const mounted=render(<JsonFormatterPanel {...props}/>);fireEvent.click(await screen.findByRole("button",{name:"Cancel formatter and verify cleanup"}));await screen.findByText("Cancel response lost");mounted.unmount();render(<JsonFormatterPanel {...props}/>);
+ const mounted=render(<JsonFormatterPanel {...props}/>);const cancel=await screen.findByRole("button",{name:"Cancel formatter and verify cleanup"});await waitFor(()=>expect(cancel).toBeEnabled());fireEvent.click(cancel);await screen.findByText("Cancel response lost");mounted.unmount();render(<JsonFormatterPanel {...props}/>);
  await screen.findByRole("button",{name:"Retry exact formatter request"});fireEvent.click(screen.getByRole("button",{name:"Refresh formatter state"}));await waitFor(()=>expect(readToolPending(key)).toBeNull());expect(posts).toBe(1);
 });
 it("retains an uncertain cancellation when readback belongs to another attempt or fence",async()=>{
  let applied=false;
  vi.mocked(apiFetch).mockImplementation(async(_url,options)=>{if(options?.method==="POST"){applied=true;throw Error("Cancel response lost");}return new Response(JSON.stringify({...state,cancel_receipt:applied?{attempt_id:"foreign-attempt",board_fence:9,requested_revision:4,applied:true,cancel_requested_at:"2026-10-03T16:00:00Z"}:null}));});
- render(<JsonFormatterPanel {...props}/>);fireEvent.click(await screen.findByRole("button",{name:"Cancel formatter and verify cleanup"}));await screen.findByText("Cancel response lost");fireEvent.click(screen.getByRole("button",{name:"Refresh formatter state"}));await waitFor(()=>expect(readToolPending(key)?.kind).toBe("control"));expect(screen.getByRole("button",{name:"Retry exact formatter request"})).toBeEnabled();
+ render(<JsonFormatterPanel {...props}/>);const cancel=await screen.findByRole("button",{name:"Cancel formatter and verify cleanup"});await waitFor(()=>expect(cancel).toBeEnabled());fireEvent.click(cancel);await screen.findByText("Cancel response lost");fireEvent.click(screen.getByRole("button",{name:"Refresh formatter state"}));await waitFor(()=>expect(readToolPending(key)?.kind).toBe("control"));expect(screen.getByRole("button",{name:"Retry exact formatter request"})).toBeEnabled();
 });
 
 it("reviews unsigned authored bytes and dispatches the server-derived capability with exact retained input",async()=>{

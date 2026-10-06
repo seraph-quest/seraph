@@ -1364,7 +1364,8 @@ describe("CockpitView", () => {
     });
 
     await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Open task Parent readback effect" }));
+    const openTask = await screen.findByRole("button", { name: "Open task Parent readback effect" });
+    await act(async () => { fireEvent.click(openTask); });
     const expectedReferenceLabel = "target_path" in referenceOverrides
       && typeof referenceOverrides.target_path === "string"
       ? referenceOverrides.target_path

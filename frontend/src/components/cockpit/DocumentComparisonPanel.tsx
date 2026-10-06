@@ -59,6 +59,10 @@ export function DocumentComparisonPanel({ ownerPrincipalId, ownerSessionId, task
     setCsvUrl({ scope, url });
     return () => URL.revokeObjectURL(url);
   }, [derivedCsv, scope, key]);
+  function updateNative(value: NativeState) {
+    setNative(value); setOutputDenied(!value.report_available);
+    if (!value.report_available) { setOutput(null); setDerivedCsv(null); }
+  }
   function outputFailure(failure: unknown) {
     setOutput(null); setDerivedCsv(null);
     if (failure instanceof DocumentRequestError && [401,403,404,409].includes(failure.status)) setOutputDenied(true);
@@ -136,25 +140,24 @@ export function DocumentComparisonPanel({ ownerPrincipalId, ownerSessionId, task
       <button type="button" disabled={busy} onClick={() => {
         const version=generation.current;setBusy(true);setError(null);
         void request(`/tasks/${task.task_id}/document-comparison`,undefined,"GET").then(value => {
-          if(version!==generation.current)return;setNative(value as NativeState);setOutputDenied(!value.report_available);
-          if(!value.report_available){setOutput(null);setDerivedCsv(null);}
+          if(version!==generation.current)return;updateNative(value as NativeState);
         }).catch(failure => {if(version===generation.current)outputFailure(failure);}).finally(() => {if(version===generation.current)setBusy(false);});
       }}>Read original parser and recovery state</button>
       {native && <p>{native.status} · {native.reason_code ?? "original attempt"} · parser cleanup {native.cleanup_proven ? "verified" : "unknown; capacity held"} · original window ends {native.deadline_at}. {native.recovery_limit}</p>}
       {native?.status === "cancelled" && <p>Comparison cancelled; no external action was performed. The blocked card preserves its cancellation record. Parser capacity is {native.quiescence_recorded ? "released with the recorded reap witness" : "held pending a recorded exact reap witness"}.</p>}
       <button type="button" disabled={busy || !native || native.quiescence_recorded} onClick={() => {
         if(!native)return;const version=generation.current;setBusy(true);setError(null);
-        void request(`/tasks/${task.task_id}/document-comparison/reconcile`,{expected_revision:native.task_revision,idempotency_key:crypto.randomUUID()}).then(value => {if(version===generation.current)setNative(value.document_comparison as NativeState);}).catch(failure => {if(version===generation.current)setError(String(failure));}).finally(() => {if(version===generation.current)setBusy(false);});
+        void request(`/tasks/${task.task_id}/document-comparison/reconcile`,{expected_revision:native.task_revision,idempotency_key:crypto.randomUUID()}).then(value => {if(version===generation.current)updateNative(value.document_comparison as NativeState);}).catch(failure => {if(version===generation.current)outputFailure(failure);}).finally(() => {if(version===generation.current)setBusy(false);});
       }}>Verify original parser reap and release capacity</button>
       <button type="button" disabled={busy || !native?.recoverable} onClick={() => {
         if(!native)return;const version=generation.current;setBusy(true);setError(null);
         recovery.current ??= {expected_revision:native.task_revision,idempotency_key:crypto.randomUUID()};
-        void request(`/tasks/${task.task_id}/document-comparison/recover`,recovery.current).then(value => {if(version===generation.current)setNative(value.document_comparison as NativeState);}).catch(failure => {if(version===generation.current)setError(String(failure));}).finally(() => {if(version===generation.current)setBusy(false);});
+        void request(`/tasks/${task.task_id}/document-comparison/recover`,recovery.current).then(value => {if(version===generation.current)updateNative(value.document_comparison as NativeState);}).catch(failure => {if(version===generation.current)outputFailure(failure);}).finally(() => {if(version===generation.current)setBusy(false);});
       }}>Adopt original verified output without reparsing</button>
       <button type="button" disabled={busy || !native?.retryable} onClick={() => {
         if(!native)return;const version=generation.current;setBusy(true);setError(null);
         recovery.current ??= {expected_revision:native.task_revision,idempotency_key:crypto.randomUUID()};
-        void request(`/tasks/${task.task_id}/document-comparison/retry`,recovery.current).then(value => {if(version===generation.current)setNative(value.document_comparison as NativeState);}).catch(failure => {if(version===generation.current)setError(String(failure));}).finally(() => {if(version===generation.current)setBusy(false);});
+        void request(`/tasks/${task.task_id}/document-comparison/retry`,recovery.current).then(value => {if(version===generation.current)updateNative(value.document_comparison as NativeState);}).catch(failure => {if(version===generation.current)outputFailure(failure);}).finally(() => {if(version===generation.current)setBusy(false);});
       }}>Retry known terminated interruption within original allowance</button>
       <button type="button" disabled={busy || !canReadOutput} onClick={() => {
         const version=generation.current;setBusy(true); void request(`/tasks/${task.task_id}/document-output/report`, undefined, "GET").then(value => {if(version===generation.current)setOutput({ scope, text: value.text });}).catch(failure => {if(version===generation.current)outputFailure(failure);}).finally(() => {if(version===generation.current)setBusy(false);});

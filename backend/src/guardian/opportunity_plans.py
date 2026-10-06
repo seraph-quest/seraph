@@ -116,9 +116,11 @@ class PlanSourceWitness:
         return OpportunityEvidence.model_validate_json(self.evidence_bytes)
 
 
-async def stage_plan_source(db, opportunity, *, citations=None):
+async def stage_plan_source(db, opportunity, *, citations=None, allow_planned=False):
     """Stage immutable physical evidence before any caller's short writer."""
     from src.guardian.opportunity_runtime import read_snapshot
+    if opportunity.status not in ({"proposed", "planned"} if allow_planned else {"proposed"}):
+        raise OpportunityError("proposal_stale")
     token = json.loads(opportunity.source_token_json)
     evidence = read_snapshot(token["artifact_id"], opportunity.source_digest)
     await assert_opportunity_current(db, opportunity, evidence=evidence)
@@ -137,7 +139,7 @@ async def stage_plan_source(db, opportunity, *, citations=None):
         token["artifact_id"], json_bytes(token), json_bytes(evidence.model_dump(mode="json")),
         source.source_key, source.identity_digest, source.target,
         json_bytes(canonical_workspace_root_identity(settings.workspace_dir)))
-    await recheck_plan_source(db, opportunity, source_witness=witness)
+    await recheck_plan_source(db, opportunity, source_witness=witness, allow_planned=allow_planned)
     return witness
 
 
@@ -161,14 +163,16 @@ async def eligible_plan_evidence(db, opportunity, evidence):
     return evidence.model_copy(update={"sources": allowed})
 
 
-async def recheck_plan_source(db, opportunity, *, source_witness):
+async def recheck_plan_source(db, opportunity, *, source_witness, allow_planned=False):
     """Pure SQL plus configured policy; never read physical files in writers."""
     if not isinstance(source_witness, PlanSourceWitness):
         raise OpportunityError("source_stale")
     witness = source_witness
     fields = ("owner_principal_id", "goal_id", "goal_revision", "policy_revision", "watch_id",
         "watch_revision", "source_packet_id", "source_digest", "original_root_id")
-    if opportunity.id != witness.opportunity_id or any(getattr(opportunity, key) != getattr(witness, key) for key in fields):
+    if (opportunity.status not in ({"proposed", "planned"} if allow_planned else {"proposed"})
+            or opportunity.id != witness.opportunity_id or opportunity.revision != witness.opportunity_revision
+            or any(getattr(opportunity, key) != getattr(witness, key) for key in fields)):
         raise OpportunityError("source_stale")
     if json_bytes(json.loads(opportunity.source_token_json)) != witness.source_token_bytes:
         raise OpportunityError("source_stale")
@@ -196,7 +200,7 @@ async def stage_accepted_plan_task(db, task, *, attempt=None):
     row = await db.get(GuardianOpportunity, proposal.opportunity_id)
     if row is None:
         raise OpportunityError("source_stale")
-    witness = await stage_plan_source(db, row)
+    witness = await stage_plan_source(db, row, allow_planned=proposal.status == "accepted")
     await recheck_accepted_plan_task(db, task, attempt=attempt, source_witness=witness)
     return witness
 
@@ -212,7 +216,7 @@ async def recheck_accepted_plan_task(db, task, *, attempt=None, source_witness=N
         raise OpportunityError("proposal_stale")
     if task.capability_id not in {"browser.public-task.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1"}:
         raise OpportunityError("proposal_stale")
-    await recheck_plan_source(db, row, source_witness=source_witness)
+    await recheck_plan_source(db, row, source_witness=source_witness, allow_planned=proposal.status == "accepted")
     if task.capability_id == "browser.public-task.v1":
         binding = json.loads(proposal.proposal_json).get("browser_input_binding")
         if not binding or binding != {"task_id": task.task_id, "capability_id": task.capability_id,
@@ -223,9 +227,12 @@ async def recheck_accepted_plan_task(db, task, *, attempt=None, source_witness=N
 
 def proposal_ref(row):
     value = json.loads(row.proposal_json)
+    finalized = bool(row.status in {"proposed", "accepted", "rejected", "expired"}
+        and value.get("browser_input_binding") and value.get("generation_result_json")
+        and value.get("generation_output_digest"))
     return {"proposal_id": row.proposal_id, "kind": row.kind, "proposal_revision": row.revision,
         "parent_task_id": row.parent_task_id, "parent_revision": row.parent_revision,
-        "proposal_digest": row.proposal_digest or None, "expires_at": utc(row.expires_at).isoformat(),
+        "proposal_digest": row.proposal_digest if finalized else None, "expires_at": utc(row.expires_at).isoformat(),
         "status": row.status, "blueprint_id": value.get("blueprint_id"),
         "provider_contact_state": row.provider_contact_state, "generation_retry_allowed": False}
 
@@ -239,11 +246,12 @@ async def get_plan_offer(db, opportunity):
     try:
         if opportunity.status not in {"proposed", "planned"}:
             raise OpportunityError("opportunity_not_proposed")
-        await stage_plan_source(db, opportunity)
+        await stage_plan_source(db, opportunity, allow_planned=bool(proposal and proposal.status == "accepted"))
         offer["available_blueprint_ids"] = list(BLUEPRINTS)
         _, _, _, policy, _ = await assert_opportunity_current(db, opportunity)
         count = await contacted_plan_count(db, opportunity.owner_principal_id, opportunity.goal_id)
         if proposal:
+            offer["proposal_ref"]["generation_retry_allowed"] = await generation_retry_allowed(db, proposal)
             offer["generation_block_reason"] = "opportunity_plan_exists"
         elif count >= policy.max_plan_proposals_per_utc_day:
             offer["generation_block_reason"] = "opportunity_plan_daily_limit"
@@ -333,7 +341,114 @@ async def _owned_opportunity(db, owner, opportunity_id):
     return row
 
 
+async def generation_retry_allowed(db, proposal):
+    """SQL-only proof of the existing never-contacted admission lineage."""
+    from src.db.models import WorkflowRunState, InferenceCostReservation
+    from src.work_board import triage
+    from src.workflows.job_runtime import _serialize
+    if (proposal.kind != "opportunity_plan" or proposal.status not in {"pending_inference", "blocked"}
+            or proposal.provider_contact_started or proposal.provider_contact_state != "not_started"
+            or proposal.proposal_digest or utc(proposal.expires_at) <= now()):
+        return False
+    if await db.scalar(select(func.count()).select_from(InferenceCostReservation).where(
+            InferenceCostReservation.job_id == proposal.admission_job_id,
+            InferenceCostReservation.contact_started_at.is_not(None))):
+        return False
+    parent = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == proposal.parent_task_id))
+    if parent is None or parent.status != WorkBoardStatus.triage or parent.task_revision != proposal.parent_revision:
+        return False
+    run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == proposal.admission_job_id))
+    if run is None:
+        return True
+    await assert_linked_plan_native(db, run)
+    projection = _serialize(run)
+    if projection["effects"]:
+        return False
+    if run.status in {"accepted", "queued"}:
+        return not run.attempt_count
+    return triage._failed_pre_contact_admission_matches(proposal, projection, task=parent)
+
+
 async def generate_plan(*, operator, opportunity_id, request):
+    from src.memory.evidence_execution import _current_operator
+    owner = WorkBoardOwner(principal_id=operator.principal.principal_id, session_id=operator.session_id)
+    request = OpportunityPlanRequest.model_validate(request)
+    expected_digest = digest(json_bytes({"opportunity_id": opportunity_id, "request": request.model_dump(mode="json"),
+        "principal": owner.principal_id, "root": owner.session_id}))
+    async with db_engine.get_session() as db:
+        await _current_operator(db, owner, operator)
+        opportunity = await _owned_opportunity(db, owner, opportunity_id)
+        proposal = await db.get(WorkBoardProposal, opportunity.proposal_id) if opportunity.proposal_id else None
+        if proposal is not None and proposal.request_digest != expected_digest:
+            raise OpportunityError("proposal_idempotency_conflict")
+        existing_id = proposal.proposal_id if proposal else None
+    if existing_id is None:
+        return await _generate_plan_once(operator=operator, opportunity_id=opportunity_id, request=request)
+    return await _resume_plan(operator, owner, opportunity_id, existing_id)
+
+
+async def _resume_plan(operator, owner, opportunity_id, proposal_id):
+    from src.work_board import triage
+    from src.memory.evidence_execution import _current_operator
+    async with db_engine.get_session() as db:
+        await _current_operator(db, owner, operator)
+        opportunity = await _owned_opportunity(db, owner, opportunity_id)
+        proposal = await db.get(WorkBoardProposal, proposal_id)
+        if proposal.status not in {"pending_inference", "blocked"} or utc(proposal.expires_at) <= now():
+            return await _generation_response(db, opportunity, proposal)
+        source = await stage_plan_source(db, opportunity)
+        adopt = False
+        if json.loads(proposal.proposal_json).get("model_result"):
+            try:
+                await _assert_generated_native_sql(db, proposal, opportunity)
+                adopt = True
+            except OpportunityError:
+                pass
+        if not adopt and not await generation_retry_allowed(db, proposal):
+            return await _generation_response(db, opportunity, proposal)
+        offered_evidence = await eligible_plan_evidence(db, opportunity, source.evidence)
+        binding = json.loads(proposal.proposal_json)["generation_binding"]
+        if (binding["inputs"]["evidence_digest"] != digest(json_bytes(offered_evidence.model_dump(mode="json")))
+                or binding["offered_source_ids"] != [item.source_key for item in offered_evidence.sources]):
+            raise OpportunityError("proposal_binding_conflict")
+        goal, _, _, _, _ = await assert_opportunity_current(db, opportunity)
+        card = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == proposal.parent_task_id))
+        route, version = triage._route_binding()
+        if (proposal.route_id != route or proposal.capability_version != version
+                or proposal.authority_digest != triage._authority_digest(owner, card, route, version)):
+            raise OpportunityError("proposal_binding_conflict")
+        offer = {"available_blueprint_ids": binding["offered_blueprints"]}
+        expires_at = utc(proposal.expires_at)
+    if adopt:
+        await _finalize_plan(owner, proposal_id, operator=operator)
+    else:
+        async with db_engine.get_session() as db:
+            await db.execute(text("BEGIN IMMEDIATE"))
+            await _current_operator(db, owner, operator)
+            opportunity = await _owned_opportunity(db, owner, opportunity_id)
+            current = await db.get(WorkBoardProposal, proposal_id, populate_existing=True)
+            await recheck_plan_source(db, opportunity, source_witness=source)
+            if not await generation_retry_allowed(db, current):
+                return await _generation_response(db, opportunity, current)
+            if current.status == "blocked":
+                triage._reopen_pre_contact_proposal(current)
+                db.add(current)
+            proposal = current
+        return await _run_plan_generation(owner, operator, opportunity_id, proposal_id, source, goal,
+            offered_evidence, binding, offer, card, proposal, expires_at, route)
+    async with db_engine.get_session() as db:
+        return await _generation_response(db, await _owned_opportunity(db, owner, opportunity_id),
+            await db.get(WorkBoardProposal, proposal_id))
+
+
+async def _generation_response(db, opportunity, proposal):
+    reference = proposal_ref(proposal)
+    reference["generation_retry_allowed"] = await generation_retry_allowed(db, proposal)
+    return {"opportunity_id": opportunity.id, "opportunity_revision": opportunity.revision,
+        "proposal_ref": reference, "reason_code": json.loads(proposal.proposal_json).get("blocked_reason")}
+
+
+async def _generate_plan_once(*, operator, opportunity_id, request):
     """One bounded strategist invocation; never queue or execute native leaves."""
     from src.work_board import triage
     from src.work_board.repository import WorkBoardRepository, stage_safe_task_text, BoardError
@@ -413,6 +528,19 @@ async def generate_plan(*, operator, opportunity_id, request):
             raise OpportunityError("proposal_stale")
         await db.flush()
         proposal_id = proposal.proposal_id
+    return await _run_plan_generation(owner, operator, opportunity_id, proposal_id, source, goal,
+        offered_evidence, binding, offer, card, proposal, expires_at, route)
+
+
+async def _run_plan_generation(owner, operator, opportunity_id, proposal_id, source, goal,
+        offered_evidence, binding, offer, card, proposal, expires_at, route):
+    from src.work_board import triage
+    from src.work_board.repository import BoardError
+    from src.guardian.opportunity_runtime import assert_known_vault_values_absent, assert_public_judgment_text
+    # Staging increments the opportunity revision. Admission owns a fresh
+    # physical witness to that committed row, never the pre-staging revision.
+    async with db_engine.get_session() as db:
+        source = await stage_plan_source(db, await _owned_opportunity(db, owner, opportunity_id))
     contact_token = _contact_source.set(source)
     job_binding = None
     try:
@@ -467,8 +595,7 @@ async def generate_plan(*, operator, opportunity_id, request):
     async with db_engine.get_session() as db:
         current = await _owned_opportunity(db, owner, opportunity_id)
         proposal = await db.get(WorkBoardProposal, proposal_id)
-        return {"opportunity_id": current.id, "opportunity_revision": current.revision,
-            "proposal_ref": proposal_ref(proposal), "reason_code": json.loads(proposal.proposal_json).get("blocked_reason")}
+        return await _generation_response(db, current, proposal)
 
 
 async def _invoke_plan_completion(owner, proposal_id, messages, context, binding):
@@ -561,6 +688,16 @@ async def _complete_plan_native(owner, proposal_id, binding, *, operator):
         readback_authority_check=verify)
     await triage._transition_proposal_job(binding[0], lease_owner=binding[1], fence=binding[2], status="succeeded",
         result_summary="verified fixed opportunity plan; no_learning", terminal_authority_check=verify)
+    async with db_engine.get_session() as db:
+        await db.execute(text("BEGIN IMMEDIATE"))
+        current = await db.get(WorkBoardProposal, proposal_id, populate_existing=True)
+        if current.proposal_json != expected_json or current.proposal_digest != expected_digest:
+            raise OpportunityError("proposal_binding_conflict")
+        await _assert_generated_native_sql(db, current, await db.get(GuardianOpportunity, current.opportunity_id))
+        value = json.loads(current.proposal_json)
+        value["generation_output_digest"], value["generation_result_json"] = expected_digest, expected_json
+        current.proposal_json = json_bytes(value).decode()
+        db.add(current)
 
 
 async def _block_plan(owner, proposal_id, reason, binding):
@@ -574,10 +711,21 @@ async def _block_plan(owner, proposal_id, reason, binding):
         proposal = await db.get(WorkBoardProposal, proposal_id)
         if proposal.status != "pending_inference":
             return
-        value = json.loads(proposal.proposal_json)
+        original_json = proposal.proposal_json
+        value = json.loads(original_json)
+        verified = False
+        try:
+            await _assert_generated_native_sql(db, proposal, await db.get(GuardianOpportunity, proposal.opportunity_id))
+            verified = True
+        except OpportunityError:
+            pass
+        if verified:
+            value.setdefault("generation_result_json", original_json)
+            value.setdefault("generation_output_digest", proposal.proposal_digest)
         value["blocked_reason"] = reason
         proposal.proposal_json = json_bytes(value).decode()
-        proposal.status, proposal.provider_contact_state = "blocked", "unknown" if proposal.provider_contact_started else "not_started"
+        proposal.status = "blocked"
+        proposal.provider_contact_state = "succeeded" if verified else "unknown" if proposal.provider_contact_started else "not_started"
         proposal.revision += 1
         db.add(proposal)
 
@@ -587,11 +735,14 @@ async def _assert_generated_native_sql(db, proposal, opportunity):
     from src.work_board import triage
     from src.workflows.job_runtime import _serialize
     run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == proposal.admission_job_id))
-    if run is None:
+    if run is None or opportunity is None or opportunity.proposal_id != proposal.proposal_id:
         raise OpportunityError("proposal_native_readback_required")
     await assert_linked_plan_native(db, run)
     value = json.loads(proposal.proposal_json)
     output_digest = value.get("generation_output_digest", proposal.proposal_digest)
+    original_output = value.get("generation_result_json", proposal.proposal_json)
+    if digest(json_bytes(json.loads(original_output))) != output_digest:
+        raise OpportunityError("proposal_native_readback_required")
     effects = _serialize(run)["effects"]
     readbacks = [effect for effect in effects if effect.get("receipt_kind") == "readback"
         and effect.get("effect_type") == "work_board_proposal_output"
@@ -641,7 +792,7 @@ async def _finalize_plan(owner, proposal_id, *, operator):
         opportunity = await _owned_opportunity(db, owner, proposal.opportunity_id)
         await recheck_plan_source(db, opportunity, source_witness=source)
         await _assert_generated_native_sql(db, proposal, opportunity)
-        if proposal.status != "pending_inference" or proposal.proposal_json != original_json or utc(proposal.expires_at) <= now():
+        if proposal.status not in {"pending_inference", "blocked"} or proposal.proposal_json != original_json or utc(proposal.expires_at) <= now():
             raise OpportunityError("proposal_stale")
         card = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == proposal.parent_task_id))
         if card.status != WorkBoardStatus.triage or card.task_revision != proposal.parent_revision or card.input_artifact_id:
@@ -655,8 +806,9 @@ async def _finalize_plan(owner, proposal_id, *, operator):
         value["browser_input_binding"] = {"task_id": card.task_id, "capability_id": card.capability_id,
             "executor_id": card.executor_id, "input_artifact_id": card.input_artifact_id,
             "typed_input_ref": card.typed_input_ref, "typed_input_digest": card.typed_input_digest}
-        value["generation_output_digest"] = original_digest
-        value["generation_result_json"] = original_json
+        value["generation_output_digest"] = value.get("generation_output_digest", original_digest)
+        value["generation_result_json"] = value.get("generation_result_json", original_json)
+        value.pop("blocked_reason", None)
         if model.blueprint_id == "public-evidence-report":
             value.update(kind=PIPELINE_KIND, plan_version=1, live_root=json.loads(source.workspace_identity),
                 source={"task_ref": card.task_id, "task_revision": card.task_revision, "input_ref": artifact.artifact_id,
@@ -676,10 +828,11 @@ async def _finalize_plan(owner, proposal_id, *, operator):
 async def get_plan_preview(db, opportunity, proposal):
     value = json.loads(proposal.proposal_json)
     blueprint = value.get("blueprint_id")
-    if blueprint is None or not proposal.proposal_digest:
+    if blueprint is None or proposal_ref(proposal)["proposal_digest"] is None:
         return None
-    source = await stage_plan_source(db, opportunity)
+    source = await stage_plan_source(db, opportunity, allow_planned=proposal.status == "accepted")
     from src.work_board.pipeline_contracts import CAPABILITIES, SLOTS
+    from src.work_board.triage import _CAPABILITY_AUTHORITY_REQUIREMENTS
     selected = list(zip(SLOTS, CAPABILITIES)) if blueprint == "public-evidence-report" else [(SLOTS[0], CAPABILITIES[0])]
     steps = []
     for index, (slot, capability) in enumerate(selected):
@@ -687,7 +840,7 @@ async def get_plan_preview(db, opportunity, proposal):
             "input_materialization": "bound" if index == 0 else "after_verified_producer",
             "output_schema": ["browser_public_task_result", "evidence_dossier.v1", "text/plain"][index],
             "permissions": ["public_https_browser", "workspace_write"] if index == 0 else ["workspace_read", "workspace_write"],
-            "native_approvals": ["Exact native capability scope approval"], "runtime_seconds": 180 if index == 0 else 30,
+            "native_approvals": [_CAPABILITY_AUTHORITY_REQUIREMENTS[capability]], "runtime_seconds": 180 if index == 0 else 30,
             "output_bytes": 65536})
     return {"opportunity_id": opportunity.id, "opportunity_revision": opportunity.revision,
         "blueprint_id": blueprint, "goal_id": opportunity.goal_id, "goal_revision": opportunity.goal_revision,
@@ -703,14 +856,14 @@ async def accept_browser_plan(*, owner, proposal_id, request, operator):
         await _current_operator(db, owner, operator)
         proposal = await db.get(WorkBoardProposal, proposal_id)
         opportunity = await _owned_opportunity(db, owner, proposal.opportunity_id)
-        source = await stage_plan_source(db, opportunity)
+        source = await stage_plan_source(db, opportunity, allow_planned=proposal.status == "accepted")
         await _assert_generated_native_sql(db, proposal, opportunity)
     async with db_engine.get_session() as db:
         await db.execute(text("BEGIN IMMEDIATE"))
         await _current_operator(db, owner, operator)
         proposal = await db.get(WorkBoardProposal, proposal_id, populate_existing=True)
         opportunity = await _owned_opportunity(db, owner, proposal.opportunity_id)
-        await recheck_plan_source(db, opportunity, source_witness=source)
+        await recheck_plan_source(db, opportunity, source_witness=source, allow_planned=proposal.status == "accepted")
         await _assert_generated_native_sql(db, proposal, opportunity)
         value = json.loads(proposal.proposal_json)
         accepted_request = request.model_dump(mode="json")
@@ -770,7 +923,7 @@ async def accept_report_plan(*, operator, owner, operation_id, request):
         await _current_operator(db, owner, operator)
         proposal = await db.get(WorkBoardProposal, operation_id)
         opportunity = await _owned_opportunity(db, owner, proposal.opportunity_id)
-        source = await stage_plan_source(db, opportunity)
+        source = await stage_plan_source(db, opportunity, allow_planned=proposal.status == "accepted")
         await _assert_generated_native_sql(db, proposal, opportunity)
         context = await pipelines.stage_accept(db, owner, operation_id, request, source_witness=source)
     async with db_engine.get_session() as db:
@@ -778,7 +931,7 @@ async def accept_report_plan(*, operator, owner, operation_id, request):
         await _current_operator(db, owner, operator)
         proposal = await db.get(WorkBoardProposal, operation_id, populate_existing=True)
         opportunity = await _owned_opportunity(db, owner, proposal.opportunity_id)
-        await recheck_plan_source(db, opportunity, source_witness=source)
+        await recheck_plan_source(db, opportunity, source_witness=source, allow_planned=proposal.status == "accepted")
         await _assert_generated_native_sql(db, proposal, opportunity)
         value = json.loads(proposal.proposal_json)
         accepted_request = request.model_dump(mode="json")
@@ -811,6 +964,11 @@ async def get_plan_projection(db, proposal):
     except (OpportunityError, ValueError, KeyError, TypeError):
         pass
     reference = proposal_ref(proposal)
+    try:
+        await stage_plan_source(db, opportunity, allow_planned=proposal.status == "accepted")
+        reference["generation_retry_allowed"] = await generation_retry_allowed(db, proposal)
+    except (OpportunityError, ValueError, KeyError):
+        pass
     return {**reference, "opportunity_id": proposal.opportunity_id,
         "opportunity_revision": opportunity.revision if opportunity else proposal.opportunity_revision,
         "proposal_ref": reference, "plan_preview": preview, "no_learning": True,

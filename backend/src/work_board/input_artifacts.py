@@ -117,7 +117,10 @@ async def recheck_staged_input(db, owner, request, *, witness: InputArtifactWitn
         or row.bound_task_id is not None or _utc(row.expires_at) <= _now()
         or hashlib.sha256(witness.payload).hexdigest() != row.payload_sha256):
         raise BoardError("pipeline_input_changed", "The staged private input changed", status_code=409)
-    return ResolvedInputArtifact(row, json.loads(witness.input_bytes), witness.payload)
+    staged_input = _decode_and_validate_payload(row, witness.payload)
+    if _canonical_json(staged_input) != witness.input_bytes:
+        raise BoardError("pipeline_input_changed", "The staged input envelope changed", status_code=409)
+    return ResolvedInputArtifact(row, staged_input, witness.payload)
 
 
 @dataclass(frozen=True)

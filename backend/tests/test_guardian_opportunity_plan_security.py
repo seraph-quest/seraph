@@ -17,6 +17,7 @@ from src.work_board import triage
 from src.workflows.job_runtime import (
     DurableJobIdentity, DurableJobSpec, durable_job_repository,
 )
+from tests.test_research_native_vertical import real_auth
 
 
 async def admitted_plan(async_db):
@@ -174,3 +175,73 @@ def test_model_output_cannot_supply_authority_steps_or_uncited_input(mutation):
         raw["citations"][0]["source_id"] = "invented"
     with pytest.raises(ValueError):
         plans.validate_plan_result(json.dumps(raw), evidence(), ("public-browser-check",))
+
+
+@pytest.mark.parametrize("action", ["advance", "accept"])
+@pytest.mark.parametrize("code,status", [("source_stale", 409), ("pipeline_source_permission", 403)])
+async def test_authenticated_pipeline_source_error_is_closed_http_failure(
+    async_db, real_auth, monkeypatch, action, code, status,
+):
+    """HTTP mapping only: inject source-staging denial, never native success."""
+    import httpx
+    from fastapi import FastAPI
+    from src.api import auth, work_board
+    from src.auth.middleware import OperatorAuthMiddleware
+
+    app = FastAPI()
+    app.add_middleware(OperatorAuthMiddleware)
+    app.include_router(auth.router, prefix="/api/auth")
+    app.include_router(work_board.router, prefix="/api")
+    observed = []
+
+    async def denied_source(db, opportunity):
+        observed.append(opportunity.id)
+        raise OpportunityError(code, status)
+
+    async def linked_advance(db, owner, operation_id, expected_revision):
+        assert operation_id == "route-operation" and expected_revision == 1
+        assert owner.principal_id == logged_in["principal_id"]
+        assert owner.session_id == logged_in["session_id"]
+        return await plans.stage_plan_source(db, SimpleNamespace(id="route-opportunity"))
+
+    monkeypatch.setattr(plans, "stage_plan_source", denied_source)
+    # The real source authority/fetch contract has its own vertical tests.
+    # This route dependency isolates the exception emitted by its staging seam.
+    monkeypatch.setattr(work_board.pipeline_service, "advance", linked_advance)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+        base_url="http://test", headers={"origin": "http://localhost:3001"}) as client:
+        path = f"/api/work-board/pipelines/route-operation/{action}"
+        body = {"expected_revision": 1}
+        if action == "accept":
+            body.update(expected_parent_revision=1, expected_digest="a" * 64)
+        unauthenticated = await client.post(path, json=body)
+        assert unauthenticated.status_code == 401
+        assert observed == []
+        login = await client.post("/api/auth/login", json={"password": "research-vertical-private-secret"})
+        assert login.status_code == 200, login.text
+        logged_in = login.json()
+        assert logged_in["principal_id"].startswith("operator:root:")
+        async with async_db() as db:
+            db.add(WorkBoardProposal(proposal_id="route-operation", opportunity_id="route-opportunity",
+                owner_principal_id=logged_in["principal_id"], owner_session_id=logged_in["session_id"],
+                parent_task_id="route-parent", kind="public-evidence-pipeline.v1", idempotency_key="route-key",
+                expires_at=datetime.now(timezone.utc)+timedelta(minutes=5)))
+            db.add(GuardianOpportunity(id="route-opportunity", owner_principal_id=logged_in["principal_id"],
+                original_root_id=logged_in["session_id"], goal_id="route-goal", goal_revision=1,
+                policy_revision=1, watch_id="route-watch", watch_revision=1, source_packet_id="route-packet",
+                source_digest="a" * 64, source_token_json="{}", dedupe_key="route-opportunity",
+                expires_at=datetime.now(timezone.utc)+timedelta(minutes=5),
+                assessment_deadline_at=datetime.now(timezone.utc)+timedelta(minutes=5)))
+        result = await client.post(path, json=body)
+        assert result.status_code == status, result.text
+        assert result.json() == {"detail": {"code": code}}
+        assert observed == ["route-opportunity"]
+    async with async_db() as db:
+        assert not (await db.scalars(select(WorkBoardTask))).all()
+        assert not (await db.scalars(select(WorkflowRunState))).all()
+        assert not (await db.scalars(select(WorkBoardEvent))).all()
+        proposal = await db.get(WorkBoardProposal, "route-operation")
+        opportunity = await db.get(GuardianOpportunity, "route-opportunity")
+        assert proposal.status == "pending_inference" and proposal.revision == 1
+        assert not proposal.provider_contact_started
+        assert opportunity.status == "queued" and opportunity.revision == 1

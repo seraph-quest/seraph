@@ -49,6 +49,14 @@ class PlanHttpBoundary(OpportunityHttpBoundary):
 
 @pytest.mark.parametrize('blueprint', ['public-browser-check', 'public-evidence-report'])
 async def test_authenticated_opportunity_generate_triage_accept_real_browser_cpu(accounting_db, real_auth, monkeypatch, blueprint):
+    await _actual_plan_journey(accounting_db, real_auth, monkeypatch, blueprint)
+
+
+async def test_actual_succeeded_generation_readback_adopted_after_local_finalizer_cut(accounting_db, real_auth, monkeypatch):
+    await _actual_plan_journey(accounting_db, real_auth, monkeypatch, 'public-browser-check', finalizer_cut=True)
+
+
+async def _actual_plan_journey(accounting_db, real_auth, monkeypatch, blueprint, *, finalizer_cut=False):
     from src.api import auth, goals, model_fabric_settings, work_board, approvals
     from src.browser.pinned_transport import PinnedBrowserTransport, PinnedBrowserResponse
     from src.guardian import source_watch
@@ -164,8 +172,32 @@ async def test_authenticated_opportunity_generate_triage_accept_real_browser_cpu
             request = dict(expected_opportunity_revision=opportunity.revision,
                 expected_goal_revision=opportunity.goal_revision,idempotency_key=str(uuid4()))
         before = len(calls)
+        if finalizer_cut:
+            from src.guardian import opportunity_plans
+            original_finalize = opportunity_plans._finalize_plan
+            cut_jobs = []
+            async def cut_once(*args, **kwargs):
+                if not cut_jobs:
+                    async with factory.accounting_sessions() as db:
+                        actual_proposal = (await db.scalars(select(WorkBoardProposal))).one()
+                        job = actual_proposal.admission_job_id
+                    native = await durable_job_repository.get_job(job)
+                    assert native['status'] == 'succeeded', native
+                    cut_jobs.append(job)
+                    raise RuntimeError('test-only local failure before finalization after actual native success')
+                return await original_finalize(*args, **kwargs)
+            monkeypatch.setattr(opportunity_plans, '_finalize_plan', cut_once)
         response = await client.post(f'/api/guardian/opportunities/{opportunity.id}/plan',json=request)
         assert response.status_code == 200, response.text
+        if finalizer_cut:
+            cut_response = response.json()
+            assert cut_jobs and len(calls) == before + 1, cut_response
+            cut_cost = await durable_job_repository.inference_accounting_snapshot()
+            response = await client.post(f'/api/guardian/opportunities/{opportunity.id}/plan', json=request)
+            assert response.status_code == 200, response.text
+            assert response.json()['proposal_ref']['proposal_id'] == cut_response['proposal_ref']['proposal_id']
+            assert len(calls) == before + 1
+            assert await durable_job_repository.inference_accounting_snapshot() == cut_cost
         reference = response.json()['proposal_ref']
         if not reference or reference['status'] != 'proposed':
             async with factory.accounting_sessions() as db:
@@ -186,6 +218,8 @@ async def test_authenticated_opportunity_generate_triage_accept_real_browser_cpu
             generation_id = proposal.admission_job_id
         generation = await durable_job_repository.get_job(generation_id)
         assert generation['status'] == 'succeeded'
+        if finalizer_cut:
+            assert cut_jobs == [generation_id]
         dispatcher = WorkBoardDispatcher(jobs=durable_job_repository,session_provider=factory.accounting_sessions)
         for _ in range(3):
             receipt = await dispatcher.run_pass()
@@ -247,3 +281,174 @@ async def test_authenticated_opportunity_generate_triage_accept_real_browser_cpu
         final_cost = await durable_job_repository.inference_accounting_snapshot()
         assert final_cost['committed_microusd'] == staged_cost['committed_microusd']
         assert (root/'seraph.db').is_file()
+
+
+async def test_actual_same_goal_three_watches_two_contacted_plan_cap(accounting_db, real_auth, monkeypatch):
+    """Focused cadence control only; this is not a managed elapsed-hour proof.
+
+    The original assessment contact-limit predicate receives a logical cadence
+    clock. Every other authority/native/source clock and stored timestamp remains
+    real. Actual governed HTTP contacts own the original Goal's UTC plan cap.
+    """
+    from contextvars import ContextVar
+    from sqlalchemy import func
+    from src.db.models import InferenceCostReservation
+    from src.api import auth, goals, model_fabric_settings
+    from src.guardian import opportunities, opportunity_runtime, source_watch
+    from src.model_fabric import remote_inference_admission
+    from src.model_fabric.configuration import write_model_fabric_configuration
+    from src.security.http_transport import fetch_pinned_https
+
+    root, _, factory = accounting_db
+    original_connect = socket.socket.connect
+    def local_connect(sock, address):
+        if isinstance(address, tuple) and address[0] not in ('127.0.0.1', '::1', 'localhost'):
+            raise AssertionError('focused cap fixture denies all nonlocal network')
+        return original_connect(sock, address)
+    monkeypatch.setattr(socket.socket, 'connect', local_connect)
+    monkeypatch.setattr(settings, 'operator_auth_idle_seconds', 7200)
+    monkeypatch.setattr(settings, 'operator_auth_absolute_seconds', 10800)
+    monkeypatch.setattr(settings, 'browser_site_allowlist', 'example.com')
+    monkeypatch.setattr('src.model_fabric.execution.gpu_admission_broker',
+        remote_inference_admission.remote_inference_admission_broker)
+    configured = setup_configuration()
+    write_model_fabric_configuration(replace(model_fabric_settings._setup_configuration(
+        replace(configured.openrouter_setup, timeout_seconds=30, capabilities=('text', 'structured_output')),
+        profiles=(), policies=()), egress_revision=configured.egress_revision+1))
+    await durable_job_repository.configure_inference_accounting(1000)
+    logical_cadence = ContextVar('focused_assessment_contact_clock', default=False)
+    original_now, original_limits = opportunities.now, opportunity_runtime._contact_limits
+    cadence_seconds = 0
+    def focused_now():
+        current = original_now()
+        return current + timedelta(seconds=cadence_seconds) if logical_cadence.get() else current
+    async def original_limits_with_focused_clock(*args, **kwargs):
+        token = logical_cadence.set(True)
+        try:
+            return await original_limits(*args, **kwargs)
+        finally:
+            logical_cadence.reset(token)
+    monkeypatch.setattr(opportunities, 'now', focused_now)
+    monkeypatch.setattr(opportunity_runtime, '_contact_limits', original_limits_with_focused_clock)
+    calls, source_calls = [], []
+    original_client = httpx.AsyncClient
+    def clients(**kwargs):
+        if kwargs.get('transport') is None:
+            kwargs['transport'] = PlanHttpBoundary(calls, {'blueprint': 'public-browser-check'})
+        return original_client(**kwargs)
+    monkeypatch.setattr(httpx, 'AsyncClient', clients)
+    source_counts = {}
+    async def source_http(request):
+        target = str(request.url)
+        assert request.method == 'GET' and target in [f'https://example.com/cap-{index}' for index in range(3)]
+        source_calls.append(target)
+        source_counts[target] = source_counts.get(target, 0) + 1
+        text = 'Stable public line\n' + ('Previous release\n' if source_counts[target] == 1 else 'Relevant new release\n')
+        return httpx.Response(200, request=request, headers={'content-type': 'text/plain'},
+            stream=ResponseBytes(text.encode()))
+    def named_dns(host, port):
+        assert host == 'example.com' and port == 443
+        return ['93.184.216.34']
+    async def pinned_source(url, **kwargs):
+        return await fetch_pinned_https(url, resolver=named_dns, transport=httpx.MockTransport(source_http), **kwargs)
+    monkeypatch.setattr(source_watch, 'fetch_pinned_https', pinned_source)
+    app = FastAPI()
+    app.add_middleware(OperatorAuthMiddleware)
+    for router, prefix in ((auth.router, '/api/auth'), (goals.router, '/api'),
+            (model_fabric_settings.router, '/api'), (source_watch.source_watch_router, '/api')):
+        app.include_router(router, prefix=prefix)
+    async with original_client(transport=httpx.ASGITransport(app=app), base_url='http://test',
+            headers={'origin': 'http://localhost:3001'}) as client:
+        login = await client.post('/api/auth/login', json={'password': 'research-vertical-private-secret'})
+        assert login.status_code == 200, login.text
+        operator = login.json()
+        for capability in ('text', 'structured_output', 'latency_ms', 'health'):
+            response = await client.post('/api/settings/model-fabric/canary', json=dict(
+                profile_id='openrouter', capability=capability, timeout_seconds=30))
+            assert response.status_code == 200 and response.json()['outcome'] == 'passed', response.text
+        started = original_now()
+        expires = started + timedelta(hours=2)
+        response = await client.post('/api/goals', json=dict(title='Review three actual public watches',
+            proactive_enabled=True, admission_budget=dict(reviewed_grant=True, grant_id='cap-original',
+                max_outstanding_jobs=2, max_attempts=2, max_runtime_seconds=300,
+                period_started_at=started.isoformat(), period_expires_at=expires.isoformat())))
+        assert response.status_code == 200, response.text
+        goal = response.json()
+        watches = []
+        for index in range(3):
+            response = await client.post('/api/capabilities/source-watches', json=dict(goal_id=goal['id'],
+                expected_goal_revision=goal['revision'], sources=[dict(source_key=f'cap-{index}',
+                    kind='public_https_text', target=f'https://example.com/cap-{index}', label='Explicit public cap source', priority=1)],
+                criteria={}, schedule=dict(cron='0 * * * *', timezone='UTC'), write_mode='standing_reviewed',
+                reviewed_grant_id='cap-original'))
+            assert response.status_code == 200, response.text
+            watches.append(response.json())
+        response = await client.put(f"/api/goals/{goal['id']}/guardian-policy", json=dict(
+            expected_goal_revision=goal['revision'], expected_policy_revision=0, idempotency_key=str(uuid4()),
+            policy=dict(schema_version='seraph.guardian.policy.v1', assessment_enabled=True, auto_stage_plan=False,
+                confirmed_at=started.isoformat(), review_due_at=expires.isoformat(), grant_id='cap-original',
+                original_root_id=operator['session_id'], goal_revision=goal['revision'],
+                source_watch_ids=[watch['id'] for watch in watches], max_assessments_per_utc_day=3,
+                max_plan_proposals_per_utc_day=2, max_notification_per_utc_day=0)))
+        assert response.status_code == 200, response.text
+        service = source_watch.SourceWatchService()
+        actual_plan_jobs = []
+        for index, watch in enumerate(watches):
+            cadence_seconds = index * 1801
+            for stage, expected in (('baseline', 'baseline_initialized'), ('material', 'succeeded')):
+                receipt = await service.run_watch(watch['id'], occurrence_id=f'cap-{index}-{stage}',
+                    expected_plan_revision=watch['plan_revision'], expected_owner_session_id=operator['session_id'])
+                assert receipt['status'] == expected, receipt
+            async with factory.accounting_sessions() as db:
+                opportunity = (await db.scalars(select(GuardianOpportunity).where(
+                    GuardianOpportunity.watch_id == watch['id']))).one()
+            await admit_assessment(opportunity.id)
+            await execute_assessment(opportunity.id)
+            async with factory.accounting_sessions() as db:
+                opportunity = await db.get(GuardianOpportunity, opportunity.id)
+                assert opportunity.status == 'proposed', opportunity.reason_code
+                request = dict(expected_opportunity_revision=opportunity.revision,
+                    expected_goal_revision=goal['revision'], idempotency_key=str(uuid4()))
+            before = len(calls)
+            before_sources = list(source_calls)
+            if index == 2:
+                before_cost = await durable_job_repository.inference_accounting_snapshot()
+                async with factory.accounting_sessions() as db:
+                    before_counts = [await db.scalar(select(func.count()).select_from(model))
+                        for model in (WorkBoardTask, WorkBoardProposal, InferenceCostReservation)]
+                    original_identity = (opportunity.id, opportunity.revision, opportunity.goal_id,
+                        opportunity.original_root_id, opportunity.expires_at, opportunity.assessment_deadline_at)
+            response = await client.post(f'/api/guardian/opportunities/{opportunity.id}/plan', json=request)
+            if index < 2:
+                assert response.status_code == 200 and response.json()['proposal_ref']['status'] == 'proposed', response.text
+                assert len(calls) == before + 1
+                reference = response.json()['proposal_ref']
+                async with factory.accounting_sessions() as db:
+                    proposal = await db.get(WorkBoardProposal, reference['proposal_id'])
+                    actual_plan_jobs.append(proposal.admission_job_id)
+                    task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == reference['parent_task_id']))
+                    assert task.status == WorkBoardStatus.triage
+                native = await durable_job_repository.get_job(actual_plan_jobs[-1])
+                assert native['status'] == 'succeeded' and native['lease']['fencing_token'] > 0, native
+            else:
+                assert response.status_code == 200 and response.json()['proposal_ref'] is None, response.text
+                assert response.json()['reason_code'] == 'opportunity_plan_daily_limit', response.text
+                assert len(calls) == before and source_calls == before_sources
+                assert await durable_job_repository.inference_accounting_snapshot() == before_cost
+                async with factory.accounting_sessions() as db:
+                    after_counts = [await db.scalar(select(func.count()).select_from(model))
+                        for model in (WorkBoardTask, WorkBoardProposal, InferenceCostReservation)]
+                    unchanged = await db.get(GuardianOpportunity, opportunity.id)
+                    assert (unchanged.id, unchanged.revision, unchanged.goal_id, unchanged.original_root_id,
+                        unchanged.expires_at, unchanged.assessment_deadline_at) == original_identity
+                    assert after_counts == before_counts and unchanged.proposal_id is None
+                offer = await client.get('/api/guardian/opportunities', params={'goal_id': goal['id']})
+                assert offer.status_code == 200
+                original_offer = next(item for item in offer.json()['items'] if item['opportunity_id'] == opportunity.id)
+                assert original_offer['plan_offer']['generation_block_reason'] == 'opportunity_plan_daily_limit', offer.text
+                assert original_offer['plan_offer']['available_blueprint_ids']
+                assert original_offer['plan_offer']['can_generate'] is False
+        assert len(set(actual_plan_jobs)) == 2 and len(source_calls) == 6
+        assert len([body for body in calls if len(body['messages']) == 2
+            and 'offered_blueprints' in json.loads(body['messages'][1]['content'])]) == 2
+        assert (root / 'seraph.db').is_file()

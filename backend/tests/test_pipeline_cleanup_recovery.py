@@ -174,10 +174,33 @@ async def test_linked_revision_and_reuse_reject_before_input_staging(async_db, m
 
 @pytest.mark.parametrize("async_db", ["file"], indirect=True)
 @pytest.mark.asyncio
+async def test_concurrent_staged_acceptance_loser_creates_no_duplicate_children(async_db, monkeypatch, tmp_path):
+    owner, preview = await unaccepted_operation(async_db, monkeypatch, tmp_path)
+    request = PipelineAcceptRequest(expected_revision=preview["revision"],
+        expected_parent_revision=preview["parent_revision"], expected_digest=preview["digest"])
+    async with async_db() as first, async_db() as second:
+        first_context = await pipelines.stage_accept(first, owner, preview["operation_id"], request, source_witness=None)
+        second_context = await pipelines.stage_accept(second, owner, preview["operation_id"], request, source_witness=None)
+        await _begin_sqlite_immediate(first)
+        await pipelines._accept_locked(first, owner, preview["operation_id"], request, staged_context=first_context)
+        await first.commit()
+        await _begin_sqlite_immediate(second)
+        with pytest.raises(BoardError) as failure:
+            await pipelines._accept_locked(second, owner, preview["operation_id"], request, staged_context=second_context)
+        assert failure.value.code == "pipeline_revision_conflict"
+        await second.rollback()
+    async with async_db() as db:
+        assert len(list((await db.scalars(select(WorkBoardTask))).all())) == 3
+        assert len(list((await db.scalars(select(WorkBoardLink))).all())) == 2
+
+
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+@pytest.mark.asyncio
 async def test_recovery_cursor_reaches_after_twenty_blocked_candidates_and_wraps(async_db, monkeypatch):
     from src.work_board.dispatcher import WorkBoardDispatcher
     stamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
     async with async_db() as db:
+        selection_engine = db.bind.sync_engine
         links = []
         for index in range(25):
             op, producer, child, opportunity = (f"{prefix}-{index:02}" for prefix in ("operation", "producer", "consumer", "opportunity"))
@@ -195,18 +218,69 @@ async def test_recovery_cursor_reaches_after_twenty_blocked_candidates_and_wraps
                 title="Never executed", capability_id="work.evidence-dossier.v1", status=WorkBoardStatus.triage,
                 pipeline_operation_id=op, pipeline_slot="evidence_dossier", idempotency_key=child))
             links.append(WorkBoardLink(parent_task_id=producer, child_task_id=child, owner_principal_id="operator", owner_session_id="root"))
+        # Duplicate eligible links must still consume only one operation slot.
+        db.add(WorkBoardTask(task_id="producer-00-duplicate", owner_principal_id="operator", owner_session_id="root",
+            goal_id="goal", goal_revision=1, title="Selection duplicate only", capability_id="browser.public-task.v1",
+            status=WorkBoardStatus.done, pipeline_operation_id="operation-00", pipeline_slot="public_source",
+            idempotency_key="selection-duplicate"))
+        links.append(WorkBoardLink(parent_task_id="producer-00-duplicate", child_task_id="consumer-00",
+            owner_principal_id="operator", owner_session_id="root"))
         await db.flush()  # FK parents precede their links; no ORM relationship.
         db.add_all(links)
     dispatcher = WorkBoardDispatcher(session_provider=async_db)
     seen = []
-    async def blocked_candidate(task): seen.append(task.pipeline_operation_id)
+    async def blocked_candidate(task):
+        seen.append(task.pipeline_operation_id)
     monkeypatch.setattr(dispatcher, "_advance_linked_pipeline", blocked_candidate)
-    await dispatcher._recover_linked_pipelines()
-    assert seen == [f"operation-{index:02}" for index in range(20)]
-    await dispatcher._recover_linked_pipelines()
-    assert seen[20:] == [f"operation-{index:02}" for index in range(20, 25)]
-    await dispatcher._recover_linked_pipelines()
-    assert seen[25:] == [f"operation-{index:02}" for index in range(20)]
+    selections = []
+    def count_selection(connection, cursor, statement, parameters, context, executemany):
+        if "GROUP BY work_board_proposals.created_at" in statement:
+            selections.append(statement)
+    event.listen(selection_engine, "before_cursor_execute", count_selection)
+    try:
+        await dispatcher._recover_linked_pipelines()
+        assert seen == [f"operation-{index:02}" for index in range(20)]
+        assert len(selections) == 1
+        selections.clear()
+        await dispatcher._recover_linked_pipelines()
+        assert seen[20:] == [f"operation-{index:02}" for index in range(20, 25)]
+        assert len(selections) == 1
+        selections.clear()
+        await dispatcher._recover_linked_pipelines()
+        assert seen[25:] == [f"operation-{index:02}" for index in range(20)]
+        assert len(selections) == 2
+    finally:
+        event.remove(selection_engine, "before_cursor_execute", count_selection)
+
+
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+@pytest.mark.asyncio
+async def test_staged_input_rejects_forged_input_bytes_without_physical_reader(async_db, monkeypatch, tmp_path):
+    from dataclasses import replace
+    from src.work_board import input_artifacts
+    from src.db.models import WorkBoardInputArtifact
+    owner, preview = await unaccepted_operation(async_db, monkeypatch, tmp_path)
+    async with async_db() as db:
+        original = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == preview["steps"][0]["task_id"]))
+        artifact = await db.get(WorkBoardInputArtifact, original.input_artifact_id)
+        # Prepare a fresh unbound artifact; an already bound source is not adoptable.
+        from tests.test_browser_task_runtime import _input
+        prepared = await prepare_input_artifact(db, owner, WorkBoardInputArtifactCreate(schema_version=1,
+            capability_id=artifact.capability_id, goal_id=artifact.goal_id, goal_revision=artifact.goal_revision,
+            input=_input(), idempotency_key="forged-witness-input"))
+        request = WorkBoardTaskCreate(title="Consumer", capability_id=artifact.capability_id,
+            goal_id=artifact.goal_id, goal_revision=artifact.goal_revision, input_artifact_id=prepared.artifact_id,
+            status=WorkBoardStatus.todo, idempotency_key="forged-witness-task")
+        witness = await input_artifacts.stage_input_artifact(db, owner, artifact_id=prepared.artifact_id,
+            capability_id=request.capability_id, goal_id=request.goal_id, goal_revision=request.goal_revision)
+        await _begin_sqlite_immediate(db)
+        def forbidden(*args, **kwargs): raise AssertionError("physical input read under writer")
+        monkeypatch.setattr(input_artifacts, "_safe_file_bytes", forbidden)
+        with pytest.raises(BoardError) as failure:
+            await input_artifacts.recheck_staged_input(db, owner, request, witness=replace(witness, input_bytes=b"{}"))
+        assert failure.value.code == "pipeline_input_changed"
+        resolved = await input_artifacts.recheck_staged_input(db, owner, request, witness=witness)
+        assert canonical_bytes(resolved.input) == witness.input_bytes
 
 
 @pytest.mark.parametrize("async_db", ["file"], indirect=True)

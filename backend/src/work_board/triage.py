@@ -680,14 +680,14 @@ def _failed_pre_contact_admission_matches(
             or int(task.task_revision) != int(proposal.parent_revision)
             or int(task.goal_revision) != int(proposal.goal_revision)
             or str(projection.get("goal_id") or "") != str(task.goal_id or "")
-            or proposal.request_digest
+            or (not proposal.opportunity_id and proposal.request_digest
             != _proposal_request_digest(
                 task=task,
                 kind=proposal.kind,
                 idempotency_key=proposal.idempotency_key,
                 evidence_snapshot=stored_snapshot(proposal),
-            )
-            or proposal.input_digest != _proposal_input_digest(task=task, kind=proposal.kind)
+            ))
+            or (not proposal.opportunity_id and proposal.input_digest != _proposal_input_digest(task=task, kind=proposal.kind))
         ):
             return False
     expected_effect_digest = hashlib.sha256(

@@ -70,6 +70,10 @@ def test_cpu_rejects_changed_digest_wrong_producer_schema_and_capability():
 
 
 async def setup_operation(async_db, monkeypatch, tmp_path):
+    # This fixture owns its finite source permission independently of private
+    # managed runtime configuration. Keep the production SitePolicy checks.
+    monkeypatch.setattr(settings, "browser_site_allowlist", "fixture.example")
+    monkeypatch.setattr(settings, "browser_site_blocklist", "")
     from tests.test_browser_task_runtime import _input
     monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
     owner = WorkBoardOwner(principal_id="operator:test-bypass", session_id="test-auth-bypass")
@@ -209,6 +213,28 @@ async def test_real_chromium_native_browser_to_cpu_dossier_to_plain_report(async
     owner, repository, operation = await setup_operation(async_db, monkeypatch, tmp_path)
     jobs = DurableJobRepository()
     dispatcher = WorkBoardDispatcher(repository=repository, jobs=jobs, session_provider=async_db)
+    # Exercise the actual native terminal callback with physical readers disabled
+    # and stale typed SQL tokens before allowing the unchanged real callback.
+    from dataclasses import replace
+    from src.work_board import input_artifacts, pipeline_cpu, dispatcher as dispatcher_module
+    original_terminal = pipelines.recheck_cpu_terminal_locked
+    terminal_checks = []
+    async def checked_terminal(db, run, *, witness):
+        def forbidden(*args, **kwargs):
+            raise AssertionError("physical terminal callback under writer")
+        async def async_forbidden(*args, **kwargs): forbidden()
+        with monkeypatch.context() as locked:
+            locked.setattr(pipelines, "root_binding", forbidden)
+            locked.setattr(pipeline_cpu, "read_output", forbidden)
+            locked.setattr(input_artifacts, "_safe_file_bytes", forbidden)
+            locked.setattr(dispatcher_module, "_parse_typed_input", forbidden)
+            locked.setattr(DurableJobRepository, "get_job", async_forbidden)
+            for field in ("task_token", "attempt_token", "input_token", "link_token", "handoff_token", "run_token", "operation_digest"):
+                with pytest.raises(BoardError):
+                    await original_terminal(db, run, witness=replace(witness, **{field: "changed"}))
+            await original_terminal(db, run, witness=witness)
+            terminal_checks.append(witness.task_id)
+    monkeypatch.setattr(pipelines, "recheck_cpu_terminal_locked", checked_terminal)
     original = browser_module.BrowserTaskRunner
     responses = _html_responses()
     async def fixture(request):
@@ -316,6 +342,26 @@ async def test_real_chromium_native_browser_to_cpu_dossier_to_plain_report(async
                         assert link.current_handoff_id is None
                         exact_accept = PipelineAcceptRequest(expected_revision=staged["revision"],
                             expected_parent_revision=staged["parent_revision"], expected_digest=staged["digest"])
+                        # Fail after the old private input is tombstoned but
+                        # before the durable retirement intent is stored. Both
+                        # lineage and tombstone must roll back together.
+                        retirement_context = await pipelines.stage_accept(db, owner, old_operation_id,
+                            exact_accept, source_witness=None)
+                        from src.work_board.repository import _begin_sqlite_immediate
+                        await _begin_sqlite_immediate(db)
+                        with monkeypatch.context() as interrupted_store:
+                            async def fail_retirement_store(*args, **kwargs):
+                                raise RuntimeError("injected after retirement before intent store")
+                            interrupted_store.setattr(pipelines, "store", fail_retirement_store)
+                            with pytest.raises(RuntimeError):
+                                await pipelines._accept_locked(db, owner, old_operation_id,
+                                    exact_accept, staged_context=retirement_context)
+                        await db.rollback()
+                        rollback_input = await db.get(WorkBoardInputArtifact, old_cpu_input_id)
+                        assert rollback_input.state == "bound"
+                        rollback_projection = await pipelines.read(db, owner, old_operation_id)
+                        assert rollback_projection["revision"] == staged["revision"]
+                        assert rollback_projection["plan_version"] == 1
                         # The retirement intent commits before physical cleanup.
                         # A real process then unlinks+fsyncs and exits without
                         # acknowledgment; exact accepted-digest replay must prove
@@ -340,9 +386,26 @@ async def test_real_chromium_native_browser_to_cpu_dossier_to_plain_report(async
                         retired_before_replay = await db.get(WorkBoardInputArtifact, old_cpu_input_id)
                         assert retired_before_replay.state == "revoked"
                         assert not (tmp_path / retired_before_replay.typed_input_ref.removeprefix("workspace-json:")).exists()
+                        loser_witness = (await pipelines.stage_retired_input_cleanup(db, owner, old_operation_id))[0]
+                        # A retained unresolved intent cannot be overwritten by
+                        # another replacement request, even after unlink.
+                        with pytest.raises(BoardError) as pending_cleanup:
+                            await pipelines.stage_revision(db, owner, old_operation_id, PipelineRevisionRequest(
+                                expected_revision=recovered_projection["revision"], source_input_artifact_id="unused",
+                                idempotency_key="overwrite-retirement"))
+                        assert pending_cleanup.value.code == "input_artifact_cleanup_required"
                         operation = await pipelines.accept(db, owner, old_operation_id, exact_accept)
                         assert operation["recovery_reason"] is None
                         replay_revision = operation["revision"]
+                        from src.work_board.input_artifacts import RetiredInputCleanupReadback
+                        from src.work_board.repository import _begin_sqlite_immediate
+                        await _begin_sqlite_immediate(db)
+                        await pipelines._ack_retired_input_cleanup_locked(db, owner, witness=loser_witness,
+                            readback=RetiredInputCleanupReadback(hashlib.sha256(loser_witness.intent_bytes).hexdigest(),
+                                old_cpu_input_id, "cleanup_required", "cleanup_target_unavailable"))
+                        await db.commit()
+                        late_projection = await pipelines.read(db, owner, old_operation_id)
+                        assert late_projection["recovery_reason"] is None and late_projection["revision"] == replay_revision
                         replay_again = await pipelines.accept(db, owner, old_operation_id,
                             exact_accept.model_copy(update={"expected_revision": 1, "expected_parent_revision": 1}))
                         assert replay_again["revision"] == replay_revision
@@ -356,6 +419,7 @@ async def test_real_chromium_native_browser_to_cpu_dossier_to_plain_report(async
             if recovery == "source_replacement" and index == 0 and recovered and operation["steps"][0]["task_id"] != task_id:
                 continue
             index += 1
+    assert len(terminal_checks) >= 2
     async with async_db() as db:
         assert len((await db.scalars(select(WorkBoardAttempt))).all()) == (4 if recovery == "source_replacement" else 3)
         assert len((await db.scalars(select(WorkBoardHandoff))).all()) == (2 if recovery == "original" else 3)

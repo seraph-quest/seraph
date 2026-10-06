@@ -222,8 +222,8 @@ async def _cleanup_binding_locked(db, owner, witness):
 
 
 async def _ack_retired_input_cleanup_locked(db, owner, *, witness, readback):
-    from src.work_board.input_artifacts import RetiredInputCleanupReadback
-    if (not isinstance(readback, RetiredInputCleanupReadback)
+    from src.work_board.input_artifacts import RetiredInputCleanupReadback, RetiredInputCleanupWitness
+    if (not isinstance(witness, RetiredInputCleanupWitness) or not isinstance(readback, RetiredInputCleanupReadback)
         or readback.intent_digest != hashlib.sha256(witness.intent_bytes).hexdigest()
         or readback.artifact_id != json.loads(witness.entry_bytes)["artifact_ref"]):
         raise BoardError("input_artifact_cleanup_required", "The cleanup readback changed", status_code=503)
@@ -406,7 +406,8 @@ async def accept(db: Any, owner: WorkBoardOwner, operation_id: str, request: Any
     source_witness = None
     if getattr(initial, "opportunity_id", None):
         from src.db.models import GuardianOpportunity
-        source_witness = await stage_plan_source(db, await db.get(GuardianOpportunity, initial.opportunity_id))
+        source_witness = await stage_plan_source(db, await db.get(GuardianOpportunity, initial.opportunity_id),
+            allow_planned=initial.status == "accepted")
     context = await stage_accept(db, owner, operation_id, request, source_witness=source_witness)
     await _begin_sqlite_immediate(db)
     result = await _accept_locked(db, owner, operation_id, request, staged_context=context)
@@ -428,7 +429,8 @@ async def _accept_locked(db, owner, operation_id, request, *, staged_context: Pi
         from src.guardian.opportunity_plans import recheck_plan_source
         from src.db.models import GuardianOpportunity
         opportunity = await db.get(GuardianOpportunity, row.opportunity_id, populate_existing=True)
-        await recheck_plan_source(db, opportunity, source_witness=context.source_witness)
+        await recheck_plan_source(db, opportunity, source_witness=context.source_witness,
+            allow_planned=row.status == "accepted")
     if value.get("pending_revision"):
         if getattr(row, "opportunity_id", None):
             raise BoardError("pipeline_review_required", "Opportunity plans retain their exact fixed source", status_code=409)
@@ -1082,7 +1084,10 @@ async def advance(db: Any, owner: WorkBoardOwner, operation_id: str, expected_re
         input_witness = await stage_input_artifact(db, owner, artifact_id=artifact.artifact_id,
             capability_id=consumer.capability_id, goal_id=consumer.goal_id, goal_revision=consumer.goal_revision)
         source_witness = await stage_accepted_plan_task(db, consumer)
-        await recheck_pipeline_producer_readback(db, owner, witness=producer_witness)
+        fresh_producer_witness = await stage_pipeline_producer_readback(db, owner, producer)
+        if fresh_producer_witness != producer_witness:
+            raise BoardError("pipeline_producer_changed", "The exact materialized producer changed", status_code=409)
+        producer_witness = fresh_producer_witness
         reserved_revision = row.revision
         await _begin_sqlite_immediate(db)
         row, current = await owned(db, owner, operation_id, revision=reserved_revision, workspace_identity=workspace)

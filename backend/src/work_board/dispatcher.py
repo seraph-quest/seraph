@@ -1580,7 +1580,7 @@ class WorkBoardDispatcher:
         from src.work_board.pipeline_contracts import PIPELINE_KIND, CAPABILITIES, SLOTS
         parent, child = aliased(WorkBoardTask), aliased(WorkBoardTask)
         base = select(WorkBoardProposal.created_at, WorkBoardProposal.proposal_id,
-                      parent.task_id).distinct().join(GuardianOpportunity,
+                      func.min(parent.task_id)).join(GuardianOpportunity,
             GuardianOpportunity.proposal_id == WorkBoardProposal.proposal_id).join(child,
             child.pipeline_operation_id == WorkBoardProposal.proposal_id).join(WorkBoardLink,
             WorkBoardLink.child_task_id == child.task_id).join(parent,
@@ -1589,7 +1589,8 @@ class WorkBoardDispatcher:
             WorkBoardProposal.opportunity_id == GuardianOpportunity.id, GuardianOpportunity.status == "planned",
             child.pipeline_slot.in_(SLOTS[1:]), child.capability_id.in_(CAPABILITIES[1:]),
             child.status == WorkBoardStatus.triage, child.input_artifact_id.is_(None),
-            parent.pipeline_operation_id == WorkBoardProposal.proposal_id, parent.status == WorkBoardStatus.done)
+            parent.pipeline_operation_id == WorkBoardProposal.proposal_id, parent.status == WorkBoardStatus.done
+            ).group_by(WorkBoardProposal.created_at, WorkBoardProposal.proposal_id)
         # At most two indexed keyset pages, twenty returned candidates total.
         after = self._pipeline_recovery_after
         statement = base

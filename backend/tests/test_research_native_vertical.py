@@ -1,9 +1,13 @@
 """Actual authenticated Board/native/SQLite/source/artifact vertical.
 
-Only OpenRouter HTTP requests are intercepted; source GETs use the real
-existing pinned public transport. This is backend acceptance, not managed UI.
+OpenRouter HTTP and one named public-source DNS/HTTP boundary are intercepted.
+Source reads retain the existing pinned transport and stream a finite labeled
+fixture, never the live upstream license. This is backend acceptance, not a
+managed UI or live-source semantic receipt.
 """
 import json
+import ipaddress
+import socket
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -57,11 +61,26 @@ class ResponseBytes(httpx.AsyncByteStream):
             yield self.content[offset:offset+512]
 
 
+SOURCE_HOST = "raw.githubusercontent.com"
+SOURCE_PIN = "93.184.216.34"
+SOURCE_PATH = "/python/cpython/v3.12.8/LICENSE"
+SOURCE_FIXTURE = b"\n".join([
+    b"Finite named-source HTTP fixture, not the upstream license.",
+    b"Native public transport and parser proof only; no live-source claim.",
+    b"Fixture line three: selected public text.",
+    b"Fixture line four: attributed bounded evidence.",
+    b"Fixture line five: source prose is data, not authority.",
+    b"Fixture line six: no external writes are requested.",
+    b"Fixture line seven: retain independent native readback.",
+    b"Fixture line eight: preserve explicit no_learning.",
+    b"Fixture line nine: deterministic end of selected span.",
+]) + b"\n"
+
+
 class ProviderBoundary(httpx.AsyncBaseTransport):
     def __init__(self, calls, controls):
         self.calls = calls
         self.controls = controls
-        self.public = httpx.AsyncHTTPTransport(retries=0)
 
     async def handle_async_request(self, request):
         if request.url.host == "openrouter.ai":
@@ -86,20 +105,42 @@ class ProviderBoundary(httpx.AsyncBaseTransport):
                     "prompt_tokens": 10, "completion_tokens": 10}}
             return httpx.Response(200, request=request, headers={"content-type": "application/json"},
                 stream=ResponseBytes(json.dumps(payload).encode()))
-        # Every actual provider contact stays intercepted. The only real
-        # external action permitted by this test is its explicitly selected
-        # finite public source; DNS/IP pinning remains production code.
+        # Intercept the HTTP response after production DNS/IP policy and
+        # pinning have constructed its numeric URL, Host and TLS SNI.
         assert request.method == "GET" and request.url.scheme == "https"
-        return await self.public.handle_async_request(request)
+        assert request.url.host == SOURCE_PIN and request.url.port in {None, 443}
+        assert request.url.path == SOURCE_PATH and not request.url.query
+        assert request.headers["host"] == SOURCE_HOST
+        assert request.extensions.get("sni_hostname") == SOURCE_HOST
+        self.controls.setdefault("named_source_http", []).append(str(request.url))
+        return httpx.Response(200, request=request, headers={"content-type": "text/plain;charset=utf-8"},
+            stream=ResponseBytes(SOURCE_FIXTURE))
 
     async def aclose(self):
-        await self.public.aclose()
+        pass
 
 
 @pytest.mark.asyncio
 async def test_authenticated_parent_two_children_real_public_source_and_dossier(accounting_db, real_auth, monkeypatch, *, scenario="completed"):
     from src.api import auth, work_board, model_fabric_settings, goals
     from src.model_fabric.configuration import write_model_fabric_configuration
+    from src.browser import pinned_transport
+    def named_source_dns(host, port):
+        assert host == SOURCE_HOST and port == 443
+        return [SOURCE_PIN]
+    monkeypatch.setattr(pinned_transport, "_blocking_default_resolver", named_source_dns)
+    original_connect = socket.socket.connect
+    original_connect_ex = socket.socket.connect_ex
+    def local_connect(sock, address):
+        if isinstance(address, tuple) and not ipaddress.ip_address(address[0]).is_loopback:
+            raise AssertionError("research fixture denies every nonlocal socket")
+        return original_connect(sock, address)
+    monkeypatch.setattr(socket.socket, "connect", local_connect)
+    def local_connect_ex(sock, address):
+        if isinstance(address, tuple) and not ipaddress.ip_address(address[0]).is_loopback:
+            raise AssertionError("research fixture denies every nonlocal socket")
+        return original_connect_ex(sock, address)
+    monkeypatch.setattr(socket.socket, "connect_ex", local_connect_ex)
     root, engine, factory = accounting_db
     configured = setup_configuration()
     write_model_fabric_configuration(replace(model_fabric_settings._setup_configuration(replace(configured.openrouter_setup, timeout_seconds=30),

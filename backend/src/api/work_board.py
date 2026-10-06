@@ -265,6 +265,8 @@ async def advance_artifact_pipeline(request: Request, operation_id: str, body: P
         return result
     except BoardError as exc:
         _raise_board_error(exc)
+    except OpportunityError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
 
 
 @router.post("/pipelines/{operation_id}/revision")

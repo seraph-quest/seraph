@@ -421,7 +421,7 @@ async def test_preflight_is_provider_free_and_does_not_launch_browser(monkeypatc
     os.environ.get("SERAPH_RUN_REAL_BROWSER") != "1",
     reason="real Chromium receipt is an explicit integration proof",
 )
-async def test_real_chromium_injected_fixture_uses_one_context_and_verified_readback(tmp_path: Path) -> None:
+async def test_real_chromium_injected_fixture_uses_one_context_and_verified_readback(tmp_path: Path, async_db) -> None:
     """Exercise the route guard through installed Chromium without public network access."""
 
     from playwright.async_api import async_playwright

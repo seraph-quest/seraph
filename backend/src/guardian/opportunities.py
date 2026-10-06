@@ -45,13 +45,16 @@ async def guard_notification_intent(db, *, intervention_id, owner, root_id, goal
         raise OpportunityError("opportunity_notification_limit")
 
 
-def _source_proof_mapping(raw):
+def _source_proof_mapping(raw, *, max_bytes=None):
     """Normalize only persisted proof JSON, object shape and canonical UTF-8."""
     try:
+        if max_bytes is not None and (not isinstance(raw, str) or len(raw) > max_bytes
+                or len(raw.encode("utf-8")) > max_bytes):
+            raise OpportunityError("source_stale")
         value = json.loads(raw)
         if isinstance(value, dict):
             json_bytes(value)  # Validate encoding before source strings reach SQL or digest checks.
-    except (json.JSONDecodeError, TypeError, UnicodeEncodeError, RecursionError) as exc:
+    except (ValueError, TypeError, RecursionError) as exc:
         raise OpportunityError("source_stale") from exc
     if not isinstance(value, dict):
         raise OpportunityError("source_stale")
@@ -68,7 +71,7 @@ async def assert_source_current(db, opportunity, *, evidence=None):
             or packet.plan_revision != opportunity.watch_revision
             or packet.goal_revision != opportunity.goal_revision):
         raise OpportunityError("source_stale")
-    token = _source_proof_mapping(opportunity.source_token_json)
+    token = _source_proof_mapping(opportunity.source_token_json, max_bytes=16384)
     if (any(not isinstance(token.get(key), str) for key in ("checkpoint_sha256", "artifact_id",
             "source_set_digest", "criteria_digest", "read_authority_digest"))
             or not isinstance(token.get("sources"), list)

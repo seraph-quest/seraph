@@ -254,7 +254,7 @@ async def test_actual_malformed_result_does_not_starve_independent_goal(accounti
 
 @pytest.mark.parametrize("corruption", ["malformed_json", "missing_key", "wrong_shape", "sources_wrong_shape",
     "source_wrong_shape", "source_missing_key", "read_authority_json", "read_authority_shape",
-    "read_authority_unicode", "deep_source_json"])
+    "read_authority_unicode", "deep_source_json", "oversized_integer", "oversized_source_json", "multibyte_source_json"])
 async def test_actual_corrupt_source_token_does_not_starve_independent_goal(accounting_db, real_auth, monkeypatch, corruption):
     async with persisted_result(accounting_db, real_auth, monkeypatch, expect_invalid=True) as (_, sessions, row, native, cost_before, contacts):
         ready = await independent_ready_goal(sessions, row)
@@ -278,6 +278,18 @@ async def test_actual_corrupt_source_token_does_not_starve_independent_goal(acco
             elif corruption == "source_missing_key":
                 del token["sources"][0]["identity_digest"]
                 current.source_token_json = json.dumps(token)
+            elif corruption == "oversized_integer":
+                current.source_token_json = current.source_token_json[:-1] + ',"proof_extra":' + "9" * 5000 + "}"
+                assert len(current.source_token_json.encode("utf-8")) <= 16384
+                with pytest.raises(ValueError, match="Exceeds the limit .*integer string conversion"):
+                    json.loads(current.source_token_json)  # Verify the finite input against the unchanged decoder limit.
+            elif corruption in {"oversized_source_json", "multibyte_source_json"}:
+                token["proof_extra"] = "x" * 16384 if corruption == "oversized_source_json" else "é" * 8192
+                current.source_token_json = json.dumps(token, ensure_ascii=False)
+                assert len(current.source_token_json.encode("utf-8")) > 16384
+                if corruption == "multibyte_source_json":
+                    assert len(current.source_token_json) < 16384
+                assert json.loads(current.source_token_json) == token  # Otherwise-valid proof exceeds the byte contract.
             elif corruption == "deep_source_json":
                 depth = 10000  # Finite input exceeding this decoder's independently verified C recursion bound.
                 current.source_token_json = current.source_token_json[:-1] + ',"proof_extra":' + "[" * depth + "0" + "]" * depth + "}"

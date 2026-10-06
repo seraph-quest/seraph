@@ -160,3 +160,89 @@ def test_unfinalized_native_output_digest_is_not_public_review_authority(status)
             'generation_output_digest': 'a'*64, 'generation_result_json': '{}'}))
     assert proposal_ref(proposal)['proposal_digest'] is None
     assert proposal.proposal_digest == 'a'*64
+
+
+async def test_optional_postcommit_auto_stage_root_revocation_has_no_new_effect(async_db, monkeypatch):
+    """Isolated optional-hook auth race; does not seed or claim M2 success."""
+    from types import SimpleNamespace
+    from sqlalchemy import select, func
+    from src.auth import service as auth
+    from src.db.models import GuardianOpportunity, WorkBoardTask, WorkBoardProposal, WorkflowRunState
+    from src.guardian import opportunity_plans as plans
+    calls = []
+    current = datetime.now(timezone.utc)
+    async with async_db() as db:
+        db.add(GuardianOpportunity(id='postcommit-opportunity', revision=2, status='proposed',
+            owner_principal_id='owner', original_root_id='original-root', goal_id='goal', goal_revision=1,
+            policy_revision=1, watch_id='watch', watch_revision=1, source_packet_id='packet',
+            source_digest='a'*64, source_token_json='{}', dedupe_key='original',
+            expires_at=current+timedelta(minutes=4), assessment_deadline_at=current))
+        await db.commit()
+    async def policy_prerequisite(*args, **kwargs):
+        return None, None, None, SimpleNamespace(auto_stage_plan=True), None
+    async def revoked_root(root_id, *, touch):
+        calls.append((root_id, touch))
+        raise auth.AuthFailure('root_revoked')
+    async def forbidden_generation(**kwargs):
+        raise AssertionError('revoked Root must not stage another card or contact')
+    monkeypatch.setattr(plans.db_engine, 'get_session', async_db)
+    monkeypatch.setattr(plans, 'assert_opportunity_current', policy_prerequisite)
+    monkeypatch.setattr(auth, 'authenticate_session', revoked_root)
+    monkeypatch.setattr(plans, 'generate_plan', forbidden_generation)
+    await plans.auto_stage_plan('postcommit-opportunity')
+    assert calls == [('original-root', False)]
+    async with async_db() as db:
+        opportunity = await db.get(GuardianOpportunity, 'postcommit-opportunity')
+        assert (opportunity.status, opportunity.revision, opportunity.proposal_id) == ('proposed', 2, None)
+        for model in (WorkBoardTask, WorkBoardProposal, WorkflowRunState):
+            assert await db.scalar(select(func.count()).select_from(model)) == 0
+
+
+@pytest.mark.parametrize('expired,expected', [(False, None), (True, 'proposal_stale')])
+async def test_work_get_does_not_finalize_expired_or_unverified_contact(async_db, monkeypatch, expired, expected):
+    """Real SQL orphan metadata cannot authorize local adoption without native proof."""
+    from src.db.models import GuardianOpportunity, WorkBoardProposal, WorkBoardTask, WorkflowRunState
+    from src.guardian import opportunity_plans as plans
+    from src.work_board.contracts import WorkBoardOwner
+    from sqlalchemy import select, func
+    current = datetime.now(timezone.utc)
+    async with async_db() as db:
+        db.add(GuardianOpportunity(id='orphan-opportunity', revision=2, status='proposed', proposal_id='orphan-proposal',
+            owner_principal_id='owner', original_root_id='root', goal_id='goal', goal_revision=1, policy_revision=1,
+            watch_id='watch', watch_revision=1, source_packet_id='packet', source_digest='a'*64,
+            source_token_json='{}', dedupe_key='orphan', expires_at=current+timedelta(minutes=4), assessment_deadline_at=current))
+        db.add(WorkBoardProposal(proposal_id='orphan-proposal', opportunity_id='orphan-opportunity',
+            owner_principal_id='owner', owner_session_id='root', parent_task_id='original-card', kind='opportunity_plan',
+            idempotency_key='original', status='pending_inference', provider_contact_started=True,
+            provider_contact_state='unknown', proposal_json=json.dumps({'model_result': {'blueprint_id': 'public-browser-check'}}),
+            expires_at=current+timedelta(minutes=-1 if expired else 4)))
+        await db.commit()
+    async def forbidden_finalizer(*args, **kwargs):
+        raise AssertionError('unverified or expired output cannot reach finalization')
+    monkeypatch.setattr(plans.db_engine, 'get_session', async_db)
+    monkeypatch.setattr(plans, '_finalize_plan', forbidden_finalizer)
+    reason = await plans.reconcile_generated_plan(WorkBoardOwner(principal_id='owner', session_id='root'),
+        'orphan-proposal', operator=object())
+    assert reason == expected
+    async with async_db() as db:
+        proposal = await db.get(WorkBoardProposal, 'orphan-proposal')
+        assert (proposal.status, proposal.revision, proposal.provider_contact_state) == ('pending_inference', 1, 'unknown')
+        for model in (WorkBoardTask, WorkflowRunState):
+            assert await db.scalar(select(func.count()).select_from(model)) == 0
+
+
+@pytest.mark.parametrize('field', ['model_result', 'generation_binding', 'blueprint_id'])
+def test_operation_metadata_cannot_replace_verified_original_generation_output(field):
+    """Pure integrity negative, not a fabricated native-success receipt."""
+    from copy import deepcopy
+    from src.guardian.opportunity_plans import _assert_original_plan_output
+    from src.guardian.opportunity_contracts import json_bytes, OpportunityError
+    original = {'model_result': {'title': 'Original', 'blueprint_id': 'public-browser-check'},
+        'generation_binding': {'inputs': {'request_digest': 'a'*64}}, 'blueprint_id': 'public-browser-check'}
+    output_digest = digest(json_bytes(original))
+    metadata = {**deepcopy(original), 'generation_result_json': json_bytes(original).decode(),
+        'generation_output_digest': output_digest, 'kind': 'public-evidence-pipeline.v1', 'steps': []}
+    _assert_original_plan_output(metadata, output_digest)  # Additive report fields preserve the original output.
+    metadata[field] = 'public-evidence-report' if field == 'blueprint_id' else {'changed': True}
+    with pytest.raises(OpportunityError, match='proposal_native_readback_required'):
+        _assert_original_plan_output(metadata, output_digest)

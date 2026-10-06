@@ -2791,9 +2791,11 @@ async def list_work_board_proposals(
 async def get_work_board_proposal(request: Request, proposal_id: str):
     operator = _operator(request)
     try:
-        return await triage_service.get_proposal(_owner(operator), proposal_id)
+        return await triage_service.get_proposal(_owner(operator), proposal_id, operator=operator)
     except BoardError as exc:
         _raise_board_error(exc)
+    except OpportunityError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
     except SQLAlchemyError as exc:
         raise HTTPException(
             status_code=503,

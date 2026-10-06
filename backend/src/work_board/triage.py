@@ -1689,20 +1689,26 @@ async def list_proposals(
 async def get_proposal(
     owner: WorkBoardOwner,
     proposal_id: str,
+    *,
+    operator: Any | None = None,
 ) -> dict[str, Any]:
     """Return one owner/session-bound proposal receipt after a reload."""
-
     async with get_session() as db:
         proposal = await _get_proposal(db, owner, proposal_id)
-        if proposal.opportunity_id:
-            from src.guardian.opportunity_plans import get_plan_projection
-            return await get_plan_projection(db, proposal)
-        if proposal.provider_contact_started or proposal.provider_contact_state != "not_started":
-            # _reconcile_started_proposal already returns the safe API
-            # projection.  Do not pass that mapping through the ORM serializer
-            # a second time after an expiry or restart reconciliation.
-            return await _reconcile_started_proposal(db, owner, proposal)
-        return _proposal_payload(proposal)
+        linked = bool(proposal.opportunity_id)
+        if not linked:
+            if proposal.provider_contact_started or proposal.provider_contact_state != "not_started":
+                return await _reconcile_started_proposal(db, owner, proposal)
+            return _proposal_payload(proposal)
+    # Close the read session before physical staging or the sole local finalizer.
+    from src.guardian.opportunity_plans import reconcile_generated_plan, get_plan_projection
+    reason = await reconcile_generated_plan(owner, proposal_id, operator=operator)
+    async with get_session() as db:
+        proposal = await _get_proposal(db, owner, proposal_id)
+        result = await get_plan_projection(db, proposal)
+        if reason is not None:
+            result["blocked_reason"] = reason
+        return result
 
 
 async def _reconcile_started_proposal(

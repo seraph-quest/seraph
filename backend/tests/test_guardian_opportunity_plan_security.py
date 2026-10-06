@@ -194,7 +194,8 @@ async def test_authenticated_pipeline_source_error_is_closed_http_failure(
     app.include_router(work_board.router, prefix="/api")
     observed = []
 
-    async def denied_source(db, opportunity):
+    async def denied_source(db, opportunity, *, allow_planned=False):
+        assert allow_planned is False
         observed.append(opportunity.id)
         raise OpportunityError(code, status)
 

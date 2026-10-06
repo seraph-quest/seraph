@@ -38,6 +38,9 @@ def real_auth(monkeypatch):
     monkeypatch.setattr(settings, "operator_auth_idle_seconds", 300)
     monkeypatch.setattr(settings, "operator_auth_absolute_seconds", 3600)
     monkeypatch.setattr(settings, "operator_auth_cookie_secure", False)
+    # Isolate the named research fixture from a copied managed example.com
+    # allowlist. Opportunity/browser fixtures explicitly override their host.
+    monkeypatch.setattr(settings, "browser_site_allowlist", SOURCE_HOST)
     monkeypatch.setattr(settings, "openrouter_api_key", "intercepted-provider-boundary-only")
     # Each accounting_db fixture is a distinct deployment/Root. Its real
     # process-local broker must also be distinct, as on an actual fresh

@@ -69,6 +69,7 @@ async def _actual_plan_journey(accounting_db, real_auth, monkeypatch, blueprint,
     from src.work_board.contracts import WorkBoardOwner
 
     root, _, factory = accounting_db
+    monkeypatch.setattr('src.work_board.triage.get_session', factory.accounting_sessions)
     original_connect = socket.socket.connect
     def local_connect(sock, address):
         if isinstance(address, tuple) and address[0] not in ('127.0.0.1', '::1', 'localhost'):
@@ -193,7 +194,7 @@ async def _actual_plan_journey(accounting_db, real_auth, monkeypatch, blueprint,
             cut_response = response.json()
             assert cut_jobs and len(calls) == before + 1, cut_response
             cut_cost = await durable_job_repository.inference_accounting_snapshot()
-            response = await client.post(f'/api/guardian/opportunities/{opportunity.id}/plan', json=request)
+            response = await client.get(f"/api/work-board/proposals/{cut_response['proposal_ref']['proposal_id']}")
             assert response.status_code == 200, response.text
             assert response.json()['proposal_ref']['proposal_id'] == cut_response['proposal_ref']['proposal_id']
             assert len(calls) == before + 1
@@ -225,7 +226,7 @@ async def _actual_plan_journey(accounting_db, real_auth, monkeypatch, blueprint,
             receipt = await dispatcher.run_pass()
             assert receipt['claimed'] == 0 and receipt['admitted'] == 0, receipt
         assert browser_calls == []
-        replay = await client.post(f'/api/guardian/opportunities/{opportunity.id}/plan',json=request)
+        replay = await client.get(f'/api/work-board/proposals/{proposal_id}') if finalizer_cut else await client.post(f'/api/guardian/opportunities/{opportunity.id}/plan',json=request)
         assert replay.status_code == 200 and len(calls) == before+1
         for _ in range(2):
             assert (await client.get('/api/guardian/opportunities')).status_code == 200

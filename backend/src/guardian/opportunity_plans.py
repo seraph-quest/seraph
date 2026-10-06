@@ -670,6 +670,7 @@ async def _complete_plan_native(owner, proposal_id, binding, *, operator):
         proposal = await db.get(WorkBoardProposal, proposal_id)
         source = await stage_plan_source(db, await db.get(GuardianOpportunity, proposal.opportunity_id))
         expected_json, expected_digest = proposal.proposal_json, proposal.proposal_digest
+        _assert_original_plan_output(json.loads(expected_json), expected_digest)
     async def verify(db, run):
         current = await assert_linked_plan_native(db, run)
         opportunity = await _owned_opportunity(db, owner, current.opportunity_id)
@@ -730,6 +731,18 @@ async def _block_plan(owner, proposal_id, reason, binding):
         db.add(proposal)
 
 
+def _assert_original_plan_output(value, output_digest):
+    """Current finalizer/operation metadata cannot replace verified model output."""
+    try:
+        original = json.loads(value.get("generation_result_json", json_bytes(value).decode()))
+        if (not isinstance(original, dict) or digest(json_bytes(original)) != output_digest
+                or any(value.get(key) != original.get(key)
+                    for key in ("model_result", "generation_binding", "blueprint_id"))):
+            raise ValueError("generation_output_changed")
+    except (TypeError, ValueError):
+        raise OpportunityError("proposal_native_readback_required") from None
+
+
 async def _assert_generated_native_sql(db, proposal, opportunity):
     from src.db.models import WorkflowRunState, InferenceCostReservation
     from src.work_board import triage
@@ -740,9 +753,7 @@ async def _assert_generated_native_sql(db, proposal, opportunity):
     await assert_linked_plan_native(db, run)
     value = json.loads(proposal.proposal_json)
     output_digest = value.get("generation_output_digest", proposal.proposal_digest)
-    original_output = value.get("generation_result_json", proposal.proposal_json)
-    if digest(json_bytes(json.loads(original_output))) != output_digest:
-        raise OpportunityError("proposal_native_readback_required")
+    _assert_original_plan_output(value, output_digest)
     effects = _serialize(run)["effects"]
     readbacks = [effect for effect in effects if effect.get("receipt_kind") == "readback"
         and effect.get("effect_type") == "work_board_proposal_output"
@@ -784,7 +795,7 @@ async def _finalize_plan(owner, proposal_id, *, operator):
         staged_input = await stage_input_artifact(db, owner, artifact_id=artifact.artifact_id,
             capability_id=request.capability_id, goal_id=request.goal_id, goal_revision=request.goal_revision)
         safe = await stage_safe_task_text(db, owner, request)
-        original_json, original_digest = proposal.proposal_json, proposal.proposal_digest
+        original_json, original_digest, original_revision = proposal.proposal_json, proposal.proposal_digest, proposal.revision
     async with db_engine.get_session() as db:
         await db.execute(text("BEGIN IMMEDIATE"))
         await _current_operator(db, owner, operator)
@@ -792,7 +803,8 @@ async def _finalize_plan(owner, proposal_id, *, operator):
         opportunity = await _owned_opportunity(db, owner, proposal.opportunity_id)
         await recheck_plan_source(db, opportunity, source_witness=source)
         await _assert_generated_native_sql(db, proposal, opportunity)
-        if proposal.status not in {"pending_inference", "blocked"} or proposal.proposal_json != original_json or utc(proposal.expires_at) <= now():
+        if (proposal.status not in {"pending_inference", "blocked"} or proposal.revision != original_revision
+                or proposal.proposal_json != original_json or utc(proposal.expires_at) <= now()):
             raise OpportunityError("proposal_stale")
         card = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == proposal.parent_task_id))
         if card.status != WorkBoardStatus.triage or card.task_revision != proposal.parent_revision or card.input_artifact_id:
@@ -956,6 +968,38 @@ async def accept_report_plan(*, operator, owner, operation_id, request):
         return await pipelines.read(db, owner, operation_id)
 
 
+async def reconcile_generated_plan(owner, proposal_id, *, operator=None):
+    """Work GET alone adopts verified local output; never re-enters inference."""
+    from src.auth.service import AuthFailure, authenticate_session
+    async with db_engine.get_session() as db:
+        proposal = await db.get(WorkBoardProposal, proposal_id)
+        if (proposal is None or (proposal.owner_principal_id, proposal.owner_session_id) !=
+                (owner.principal_id, owner.session_id)):
+            raise OpportunityError("proposal_not_found", 404)
+        if (not proposal.opportunity_id or proposal.status not in {"pending_inference", "blocked"}
+                or not json.loads(proposal.proposal_json).get("model_result")):
+            return None
+        if utc(proposal.expires_at) <= now():
+            return "proposal_stale"
+        opportunity = await _owned_opportunity(db, owner, proposal.opportunity_id)
+        try:
+            await _assert_generated_native_sql(db, proposal, opportunity)
+        except OpportunityError:
+            return None  # Unknown/unverified contact remains inspection-only.
+    if operator is None:
+        try:
+            operator = await authenticate_session(owner.session_id, touch=False)
+        except AuthFailure as exc:
+            raise OpportunityError(exc.code, 403) from exc
+    if (operator.session_id, operator.principal.principal_id) != (owner.session_id, owner.principal_id):
+        raise OpportunityError("proposal_not_found", 404)
+    try:
+        await _finalize_plan(owner, proposal_id, operator=operator)
+    except OpportunityError as exc:
+        return exc.code  # Preserve inspection and the committed native result.
+    return None
+
+
 async def get_plan_projection(db, proposal):
     opportunity = await db.get(GuardianOpportunity, proposal.opportunity_id)
     preview = None
@@ -978,7 +1022,7 @@ async def get_plan_projection(db, proposal):
 async def auto_stage_plan(opportunity_id):
     """Separately acknowledged policy only; never accept or renew authority."""
     import uuid
-    from src.auth.service import authenticate_session
+    from src.auth.service import AuthFailure, authenticate_session
     try:
         async with db_engine.get_session() as db:
             row = await db.get(GuardianOpportunity, opportunity_id)
@@ -992,7 +1036,7 @@ async def auto_stage_plan(opportunity_id):
         await generate_plan(operator=operator, opportunity_id=opportunity_id, request=OpportunityPlanRequest(
             expected_opportunity_revision=revision, expected_goal_revision=goal_revision,
             idempotency_key=uuid.uuid5(uuid.NAMESPACE_URL, f"seraph:auto-plan:{opportunity_id}:{revision}")))
-    except (OpportunityError, ValueError):
+    except (AuthFailure, OpportunityError, ValueError):
         return  # Existing opportunity remains successful; plan owner shows its bounded blocker.
 
 

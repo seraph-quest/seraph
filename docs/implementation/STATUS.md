@@ -130,7 +130,12 @@ contract checks are evidence of the checked revision, not claims of live
 execution or competitive superiority. Receipt schema v2 labels each check as
 static, configuration, integration, external-unverified, or excluded; the
 stable #771 evolution IDs and #754 comparator coverage remain explicit excluded
-checks outside Epic #736 closure.
+checks outside Epic #736 closure. The operator cancelled harness-improvement
+and comparative evaluation campaigns on 2026-10-06; #771 is closed as not planned,
+not delivered. Historical inactive evolution bookkeeping and deterministic
+mechanics receipts are not candidate-quality evaluation or harness-improvement
+proof. External usefulness remains unverified; ordinary regression and security
+checks remain required.
 Required child criteria map #750 conversation identity/outbox, #748 native
 software, #749 paired edge, #751 audio capture/decode/persistence, #752
 Telegram transport, and #755 capability-pack lifecycle. Static source checks

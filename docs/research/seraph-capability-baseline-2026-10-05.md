@@ -85,9 +85,16 @@ reopen generic model fabric, Inbox, weighted feedback or procedure foundations.
 The six #899 epics #902–#907 are closed. No exact current NEAR verifier issue was
 found; historical host isolation/attestation programs concern a different boundary.
 
-Open #771's deferred evaluation work remains the owner of comparative provider
-evaluation; this roadmap supplies a bounded study protocol without duplicating
-an evaluation platform. Existing #702, #695, #688, #666 and #664 remain unchanged.
+### 2026-10-06 evaluation cancellation addendum
+
+The operator cancelled harness-improvement and comparative evaluation campaigns;
+[#771](https://github.com/seraph-quest/seraph/issues/771) is closed as not planned,
+not delivered. This supersedes the 2026-10-05 audit's deferred evaluation ownership
+and proposed study protocol. No campaign or synthetic quality substitute is
+planned. The dated source audit remains evidence of its checked revision;
+external usefulness and comparative quality remain unverified. Ordinary
+regression and security checks remain required and do not establish improvement.
+Existing #702, #695, #688, #666 and #664 remain unchanged.
 
 The constitution's old process-local/future #743/#744 wording and STATUS's
 branch-local #753 wording predate merged work. This pass corrects only those

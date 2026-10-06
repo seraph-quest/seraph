@@ -406,6 +406,7 @@ export function GoalLoopPanel({ goal, onEdit }: Props) {
             {opportunities.map((item) => <article key={item.id} className="mt-1">
               <div>{item.opportunity_status ?? "unknown"} · {item.summary}</div>
               <div>{item.reason_code ?? "No failure reason"} · Goal revision {item.goal_revision}</div>
+              {item.policy_reason && item.policy_reason !== item.reason_code ? <div>Current policy: {item.policy_reason}</div> : null}
               {item.reason_code === "goal_review_required" ? <div>Review the current Goal and source watches before enabling future assessments.</div> : null}
               {item.opportunity_status === "unknown" ? <div>Outcome Unknown; retained inference liability. No automatic replay.</div> : null}
               <div>{item.assessment ? "Model judgment; inspect exact citations in the existing Inbox." : "No proposed intervention."} No learning recorded.</div>

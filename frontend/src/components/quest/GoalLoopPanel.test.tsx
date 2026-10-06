@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -162,6 +162,36 @@ describe("GoalLoopPanel", () => {
     expect(screen.getByText("unknown · Assessment contact uncertain")).toBeInTheDocument();
     expect(fetchMock.mock.calls[2][0]).toContain("cursor=opaque-next");
     expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+  });
+
+  it.each([
+    { status: "blocked", reason: "source_excerpt_unavailable", policy: "source_stale" },
+    { status: "proposed", reason: "goal_review_required", policy: "goal_review_required" },
+    { status: "proposed", reason: "source_stale", policy: "source_stale" },
+  ])("retains $status history reason $reason and the live $policy policy without proposing actions", async ({ status, reason, policy }) => {
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true, status: 200, json: async () => [] });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<GoalLoopPanel goal={goal} />);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    // With no stored reason, the API projects the current policy reason for proposed rows.
+    fetchMock.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ items: [{
+      id: "recovered-1", revision: 2, state: status, source_kind: "guardian_opportunity", source_id: "recovered-1",
+      opportunity_id: "recovered-1", opportunity_revision: 2, opportunity_status: status, assessment: null,
+      title: "Assessment history", summary: "Recovered assessment", why_now: reason,
+      goal_id: "g1", goal_revision: 4, watch_id: "watch-1", plan_revision: 1,
+      expires_at: "2026-10-07T12:00:00Z", evidence_refs: [], evidence_status: "unavailable",
+      allowed_actions: [], reason_code: reason, policy_reason: policy,
+    }] }) });
+    fireEvent.click(screen.getByRole("button", { name: "Review assessment history" }));
+    const summary = await screen.findByText(`${status} · Recovered assessment`);
+    const history = summary.closest("article")!;
+    expect(within(history).getByText(`${reason} · Goal revision 4`)).toBeInTheDocument();
+    if (policy !== reason) expect(within(history).getByText(`Current policy: ${policy}`)).toBeInTheDocument();
+    else expect(within(history).queryByText(/^Current policy:/)).not.toBeInTheDocument();
+    expect(within(history).getByText("No proposed intervention. No learning recorded.")).toBeInTheDocument();
+    expect(within(history).queryByRole("button")).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls[1][0]).toContain("/api/guardian/opportunities?goal_id=g1&limit=20");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("shows the invalidated Goal policy while other loop metadata is degraded", async () => {

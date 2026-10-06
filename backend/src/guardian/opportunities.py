@@ -414,6 +414,7 @@ async def project_item(db, row, disposition=None, *, detail=False):
     """Literal history plus current availability; judgment never becomes authority."""
     from src.guardian.opportunity_contracts import OpportunityAssessment
     reason = row.reason_code
+    policy_reason = reason
     from src.db.models import NativeNotificationOutbox
     delivery = (await db.execute(select(NativeNotificationOutbox).where(
         NativeNotificationOutbox.intervention_id == row.intervention_id,
@@ -425,13 +426,13 @@ async def project_item(db, row, disposition=None, *, detail=False):
     try:
         await assert_opportunity_current(db, row)
     except OpportunityError as exc:
-        current, reason = False, exc.code
+        current, policy_reason = False, exc.code
     assessment = None
     if row.assessment_json:
         try:
             assessment = OpportunityAssessment.model_validate_json(row.assessment_json).model_dump(mode="json")
         except ValueError:
-            current, reason = False, "assessment_readback_mismatch"
+            current, policy_reason = False, "assessment_readback_mismatch"
     disposition_state = disposition.state if disposition else "pending"
     state = disposition_state if row.status == "proposed" else row.status
     if utc(row.expires_at) <= now() and row.status == "proposed":
@@ -462,8 +463,8 @@ async def project_item(db, row, disposition=None, *, detail=False):
         "opportunity_revision": row.revision, "opportunity_status": row.status,
         "title": "Public evidence opportunity" if row.status == "proposed" else "Opportunity assessment history",
         "summary": assessment["summary"] if assessment else "No proposed intervention",
-        "why_now": assessment["reason"] if assessment else reason or "Awaiting bounded assessment",
-        "assessment": assessment, "reason_code": reason,
+        "why_now": assessment["reason"] if assessment else reason or policy_reason or "Awaiting bounded assessment",
+        "assessment": assessment, "reason_code": reason or policy_reason,
         "goal_id": row.goal_id, "goal_revision": row.goal_revision,
         "watch_id": row.watch_id, "plan_revision": row.watch_revision,
         "task_id": disposition.task_id if disposition else None,
@@ -473,7 +474,7 @@ async def project_item(db, row, disposition=None, *, detail=False):
         "evidence": {"dossier_artifact_id": None, "dossier_sha256": None, "task_artifact_id": None, "task_sha256": None},
         "evidence_refs": [], "evidence_status": "verified" if assessment and current else "unavailable",
         "verification_status": "passed" if assessment else "not_proposed", "memory_status": "no_learning",
-        "delivery_status": delivery.status if delivery else "not_requested", "policy_reason": reason, "allowed_actions": allowed,
+        "delivery_status": delivery.status if delivery else "not_requested", "policy_reason": policy_reason, "allowed_actions": allowed,
         "cancel_allowed": cancel_allowed,
         "cancel_requested": row.reason_code in {"cancel_requested", "assessment_cancel_requested", "operator_cancelled"},
         "quiescent": row.status == "cancelled"}
@@ -505,7 +506,7 @@ async def project_item(db, row, disposition=None, *, detail=False):
                     "text": source.excerpt, "line_count": len(source.excerpt.split("\n"))}
                     for source in evidence.sources]
             except OpportunityError as exc:
-                item.update(evidence_status="unavailable", allowed_actions=[], reason_code=exc.code,
+                item.update(evidence_status="unavailable", allowed_actions=[], reason_code=reason or exc.code,
                             policy_reason=exc.code, recovery_action="review_goal_and_watch")
     return item
 

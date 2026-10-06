@@ -110,6 +110,30 @@ describe("GuardianInboxPanel", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    { status: "blocked", reason: "source_excerpt_unavailable", policy: "source_stale" },
+    { status: "proposed", reason: "goal_review_required", policy: "goal_review_required" },
+    { status: "proposed", reason: "source_stale", policy: "source_stale" },
+  ])("shows $status recovery reason $reason alongside live policy $policy without restoring evidence or actions", async ({ status, reason, policy }) => {
+    // Proposed rows with no stored reason receive the live reason in the API projection.
+    const row = opportunity({ state: status, opportunity_status: status,
+      assessment: status === "blocked" ? null : assessment,
+      reason_code: reason, policy_reason: policy, source_freshness: "stale",
+      evidence_status: "unavailable", evidence_refs: [], allowed_actions: [], recovery_action: "review_goal_and_watch" });
+    fetchMock.mockResolvedValueOnce(response({ items: [row] }));
+    render(<GuardianInboxPanel pollIntervalMs={0} />);
+    const article = await screen.findByTestId("guardian-inbox-row-opportunity-1");
+    expect(within(article).getByText(`Assessment ${status} · reason ${reason} · delivery not_requested · no learning`)).toBeInTheDocument();
+    expect(within(article).getByText(`authority / budget boundary · ${policy}`)).toBeInTheDocument();
+    expect(within(article).getByText(/evidence unavailable/)).toBeInTheDocument();
+    expect(within(article).getByText("recovery · review_goal_and_watch")).toBeInTheDocument();
+    expect(within(article).queryByRole("button", { name: "Accept follow-up" })).not.toBeInTheDocument();
+    expect(within(article).queryByRole("button", { name: "Cancel assessment" })).not.toBeInTheDocument();
+    expect(within(article).queryByRole("button", { name: "Dismiss" })).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toContain("/api/guardian/inbox");
+  });
+
   it.each(["closed", "another row"])("does not overwrite %s selection with an in-flight detail response", async (selection) => {
     const first = opportunity();
     const second = opportunity({ id: "opportunity-2", opportunity_id: "opportunity-2", source_id: "opportunity-2", title: "Another opportunity" });

@@ -250,3 +250,78 @@ async def test_actual_malformed_result_does_not_starve_independent_goal(accounti
             assert cost.model_dump(mode="json") == cost_before
         assert (await durable_job_repository.get_job(handled.job_id))["status"] == "succeeded"
         assert (await durable_job_repository.get_job(row.job_id))["attempt_count"] == native["attempt_count"]
+
+
+@pytest.mark.parametrize("corruption", ["malformed_json", "missing_key", "wrong_shape", "sources_wrong_shape",
+    "source_wrong_shape", "source_missing_key", "read_authority_json", "read_authority_shape",
+    "read_authority_unicode", "deep_source_json"])
+async def test_actual_corrupt_source_token_does_not_starve_independent_goal(accounting_db, real_auth, monkeypatch, corruption):
+    async with persisted_result(accounting_db, real_auth, monkeypatch, expect_invalid=True) as (_, sessions, row, native, cost_before, contacts):
+        ready = await independent_ready_goal(sessions, row)
+        count = len(contacts)
+        async with sessions() as db:
+            current = await db.get(GuardianOpportunity, row.id)
+            token = json.loads(current.source_token_json)
+            if corruption == "malformed_json":
+                current.source_token_json = "{"
+            elif corruption == "missing_key":
+                del token["artifact_id"]
+                current.source_token_json = json.dumps(token)
+            elif corruption == "wrong_shape":
+                current.source_token_json = "[]"
+            elif corruption == "sources_wrong_shape":
+                token["sources"] = {}
+                current.source_token_json = json.dumps(token)
+            elif corruption == "source_wrong_shape":
+                token["sources"] = [None]
+                current.source_token_json = json.dumps(token)
+            elif corruption == "source_missing_key":
+                del token["sources"][0]["identity_digest"]
+                current.source_token_json = json.dumps(token)
+            elif corruption == "deep_source_json":
+                depth = 10000  # Finite input exceeding this decoder's independently verified C recursion bound.
+                current.source_token_json = current.source_token_json[:-1] + ',"proof_extra":' + "[" * depth + "0" + "]" * depth + "}"
+                with pytest.raises(RecursionError):
+                    json.loads(current.source_token_json)  # Verify the corruption premise without changing any limit.
+            elif corruption == "read_authority_unicode":
+                watch = await db.get(GuardianSourceWatch, row.watch_id)
+                authority = json.loads(watch.read_authority_json)
+                authority["proof_extra"] = chr(0xD800)
+                watch.read_authority_json = json.dumps(authority)
+            else:
+                watch = await db.get(GuardianSourceWatch, row.watch_id)
+                watch.read_authority_json = "{" if corruption == "read_authority_json" else "[]"
+        tick = await runtime.run_opportunity_tick()
+        assert tick == {"started": 1, "examined": 2}
+        await asyncio.wait_for(runtime._executions[ready.id], 30)
+        async with sessions() as db:
+            stopped = await db.get(GuardianOpportunity, row.id)
+            assert stopped.status == "unknown" and stopped.assessment_json is None and stopped.result_artifact_id is None
+            assert stopped.reason_code == "assessment_restart_requires_readback"
+            handled = await db.get(GuardianOpportunity, ready.id)
+            assert handled.status == "proposed" and handled.result_artifact_id is not None
+            cost = (await db.execute(select(InferenceCostReservation).where(
+                InferenceCostReservation.job_id == row.job_id))).scalar_one()
+            assert cost.model_dump(mode="json") == cost_before
+        unchanged = await durable_job_repository.get_job(row.job_id)
+        assert unchanged == native
+        assert (await durable_job_repository.get_job(handled.job_id))["status"] == "succeeded"
+        assert len(contacts) == count + 1  # Only the independent Goal's first assessment.
+        from src.guardian.opportunities import assert_source_current
+        from src.guardian.opportunity_contracts import OpportunityError
+        async with sessions() as db:
+            stopped = await db.get(GuardianOpportunity, row.id)
+            with pytest.raises(OpportunityError) as invalid:
+                await assert_source_current(db, stopped)
+            assert invalid.value.code == "source_stale"
+
+
+async def test_source_proof_validation_preserves_database_failure():
+    from unittest.mock import AsyncMock
+    from sqlalchemy.exc import OperationalError
+    from src.guardian.opportunities import assert_source_current
+    failure = OperationalError("SELECT persisted proof", {}, RuntimeError("database unavailable"))
+    db = SimpleNamespace(get=AsyncMock(side_effect=failure))
+    with pytest.raises(OperationalError) as raised:
+        await assert_source_current(db, SimpleNamespace(source_packet_id="packet", watch_id="watch"))
+    assert raised.value is failure

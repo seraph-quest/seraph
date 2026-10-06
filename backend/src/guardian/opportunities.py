@@ -45,6 +45,19 @@ async def guard_notification_intent(db, *, intervention_id, owner, root_id, goal
         raise OpportunityError("opportunity_notification_limit")
 
 
+def _source_proof_mapping(raw):
+    """Normalize only persisted proof JSON, object shape and canonical UTF-8."""
+    try:
+        value = json.loads(raw)
+        if isinstance(value, dict):
+            json_bytes(value)  # Validate encoding before source strings reach SQL or digest checks.
+    except (json.JSONDecodeError, TypeError, UnicodeEncodeError, RecursionError) as exc:
+        raise OpportunityError("source_stale") from exc
+    if not isinstance(value, dict):
+        raise OpportunityError("source_stale")
+    return value
+
+
 async def assert_source_current(db, opportunity, *, evidence=None):
     """Check immutable packet binding and current source generation in SQL only."""
     from src.guardian.inbox import _job_has_verified_readbacks
@@ -55,13 +68,21 @@ async def assert_source_current(db, opportunity, *, evidence=None):
             or packet.plan_revision != opportunity.watch_revision
             or packet.goal_revision != opportunity.goal_revision):
         raise OpportunityError("source_stale")
-    token = json.loads(opportunity.source_token_json)
+    token = _source_proof_mapping(opportunity.source_token_json)
+    if (any(not isinstance(token.get(key), str) for key in ("checkpoint_sha256", "artifact_id",
+            "source_set_digest", "criteria_digest", "read_authority_digest"))
+            or not isinstance(token.get("sources"), list)
+            or any(not isinstance(source, dict) or any(not isinstance(source.get(key), str)
+                for key in ("source_key", "identity_digest", "target", "new_hash", "excerpt_sha256"))
+                for source in token["sources"])):
+        raise OpportunityError("source_stale")
+    read_authority = _source_proof_mapping(watch.read_authority_json)
     if (packet.observed_checkpoint_sha256 != token["checkpoint_sha256"]
             or packet.opportunity_snapshot_artifact_id != token["artifact_id"]
             or packet.opportunity_snapshot_sha256 != opportunity.source_digest
             or watch.source_set_digest != token["source_set_digest"]
             or watch.criteria_digest != token["criteria_digest"]
-            or digest(json_bytes(json.loads(watch.read_authority_json))) != token["read_authority_digest"]):
+            or digest(json_bytes(read_authority)) != token["read_authority_digest"]):
         raise OpportunityError("source_stale")
     run = (await db.execute(select(WorkflowRunState).where(
         WorkflowRunState.run_identity == packet.run_identity))).scalars().first()
@@ -311,6 +332,7 @@ async def current_policy_authority(db, *, goal_id, owner, root_id, goal_revision
         # lifetime is its finite Goal grant; M2 additionally requires the live
         # original Root checked above and never borrows the service exception.
         from src.guardian.source_watch import source_watch_service, SourceWatchError
+        _source_proof_mapping(watch.read_authority_json)
         try:
             await source_watch_service._assert_read_authority(watch, db=db)
         except SourceWatchError as exc:

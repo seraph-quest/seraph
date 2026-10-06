@@ -1603,6 +1603,8 @@ while the original native lease, fence and assessment authority remain current.
 This finalizes the original job without another provider call, claim, attempt or
 lease extension. Expired authority or missing readback leaves blocked or Unknown
 history available for review.
+Corrupt source-proof metadata remains unavailable without preventing other ready
+Goals from being examined.
 
 Provider-intercepted native receipts establish the bounded execution path;
 the milestone also requires a managed UI journey. Neither establishes live

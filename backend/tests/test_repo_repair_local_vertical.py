@@ -568,6 +568,146 @@ def _publication_loaded_library_diagnostic(error: BaseException) -> dict[str, An
     return None
 
 
+# Reviewed original worker literal sites; output is a candidate attribution only.
+_PUBLICATION_WORKER_GUARD_CANDIDATES = (
+    ('process-group inspection is unavailable', 'worker_input_guard_76', '_process_group_members', 76),
+    ('worker process-group cleanup exceeded the wall deadline', 'worker_input_guard_108', '_wait_process_group_quiescent', 108),
+    ('worker process cleanup is unproven', 'worker_input_guard_127', '_terminate_and_reap_process', 127),
+    ('worker left a nested process running', 'worker_input_guard_151', '_reject_nested_process_group', 151),
+    ('snapshot directory changed or contains a symlink', 'worker_input_guard_179', '_open_directory_descriptor', 179),
+    ('trusted pytest package is unavailable', 'worker_input_guard_197', '_pytest_package_identity', 197),
+    ('trusted pytest package is not a regular file', 'worker_input_guard_201', '_pytest_package_identity', 201),
+    ('snapshot source path is invalid', 'worker_input_guard_225', '_open_source_regular_file', 225),
+    ('snapshot source is not a single-link regular file', 'worker_input_guard_238', '_open_source_regular_file', 238),
+    ('snapshot source identity changed before read', 'worker_input_guard_242', '_open_source_regular_file', 242),
+    ('snapshot source descriptor could not be opened', 'worker_input_guard_252', '_open_source_regular_file', 252),
+    ('job input could not be read', 'worker_input_guard_267', '_read_bounded_job_json', 267),
+    ('job input exceeds the fixed input limit', 'worker_input_guard_269', '_read_bounded_job_json', 269),
+    ('job input is not valid UTF-8 JSON', 'worker_input_guard_273', '_read_bounded_job_json', 273),
+    ('job input must be an object', 'worker_input_guard_275', '_read_bounded_job_json', 275),
+    ('snapshot source changed during read', 'worker_input_guard_281', '_assert_stable_file', 281),
+    ('empty or NUL path', 'worker_input_guard_287', '_safe_relative', 287),
+    ('path traversal is blocked', 'worker_input_guard_290', '_safe_relative', 290),
+    ('invalid relative path', 'worker_input_guard_293', '_safe_relative', 293),
+    ('snapshot depth limit exceeded', 'worker_input_guard_309', '_walk_tree', 309),
+    ('duplicate snapshot path', 'worker_input_guard_317', '_walk_tree', 317),
+    ('snapshot directory limit exceeded', 'worker_input_guard_328', '_walk_tree', 328),
+    ('snapshot file limit exceeded', 'worker_input_guard_334', '_walk_tree', 334),
+    ('snapshot byte limit exceeded', 'worker_input_guard_341', '_walk_tree', 341),
+    ('snapshot source could not be read', 'worker_input_guard_365', 'tree_digest', 365),
+    ('publication materialization exceeds file bound', 'worker_input_guard_386', '_publication_files', 386),
+    ('snapshot source could not be copied', 'worker_input_guard_411', '_copy_snapshot', 411),
+    ('test_args must be a non-empty list', 'worker_input_guard_420', '_validate_test_args', 420),
+    ('test argument limit exceeded', 'worker_input_guard_422', '_validate_test_args', 422),
+    ('invalid test argument', 'worker_input_guard_427', '_validate_test_args', 427),
+    ('test path is outside allowed_paths', 'worker_input_guard_435', '_validate_test_args', 435),
+    ('pytest must name an allowed test path', 'worker_input_guard_438', '_validate_test_args', 438),
+    ('allowed_paths must be a non-empty list', 'worker_input_guard_445', '_validate_allowed_paths', 445),
+    ('allowed_paths limit exceeded', 'worker_input_guard_447', '_validate_allowed_paths', 447),
+    ('allowed_paths entries must be non-empty strings', 'worker_input_guard_451', '_validate_allowed_paths', 451),
+    ('allowed_paths entry exceeds the fixed length limit', 'worker_input_guard_453', '_validate_allowed_paths', 453),
+    ('allowed_paths entry exceeds the fixed length limit', 'worker_input_guard_456', '_validate_allowed_paths', 456),
+    ('allowed_paths contains duplicate entries', 'worker_input_guard_458', '_validate_allowed_paths', 458),
+    ('patch byte limit exceeded', 'worker_input_guard_465', '_validate_patch_paths', 465),
+    ('patch must be UTF-8', 'worker_input_guard_470', '_validate_patch_paths', 470),
+    ('patch has no supported file paths', 'worker_input_guard_481', '_validate_patch_paths', 481),
+    ('changed path output exceeded limit', 'worker_input_guard_494', '_validate_changed_paths', 494),
+    ('git changed path output is missing approved patch paths', 'worker_input_guard_497', '_validate_changed_paths', 497),
+    ('git changed path output is malformed', 'worker_input_guard_500', '_validate_changed_paths', 500),
+    ('git changed path output contains an empty path', 'worker_input_guard_504', '_validate_changed_paths', 504),
+    ('git changed path is not UTF-8', 'worker_input_guard_508', '_validate_changed_paths', 508),
+    ('git changed path output is missing approved patch paths', 'worker_input_guard_514', '_validate_changed_paths', 514),
+    ('worker command is not in the fixed profile', 'worker_input_guard_532', '_run_fixed', 532),
+    ('worker wall deadline expired before process spawn', 'worker_input_guard_563', '_run_fixed', 563),
+    ('worker dispatch fence rejected process spawn', 'worker_input_guard_568', '_run_fixed', 568),
+    ('worker process identity observation failed', 'worker_input_guard_575', '_run_fixed', 575),
+    ('worker output cleanup exceeded the wall deadline', 'worker_input_guard_603', '_join_output_threads', 603),
+    ('worker wall deadline expired before process completion', 'worker_input_guard_610', '_run_fixed', 610),
+    ('worker terminal identity observation failed', 'worker_input_guard_620', '_run_fixed', 620),
+    ('worker terminal identity observation failed', 'worker_input_guard_630', '_run_fixed', 630),
+    ('output JSON limit exceeded', 'worker_input_guard_659', '_write_json', 659),
+    ('local worker output directory is not private', 'worker_input_guard_672', '_open_private_output_directory', 672),
+    ('local worker output name is invalid', 'worker_input_guard_683', '_write_private_output', 683),
+    ('local worker output file is not private', 'worker_input_guard_704', '_write_private_output', 704),
+    ('output JSON limit exceeded', 'worker_input_guard_719', '_write_worker_output_json', 719),
+    ('unsupported worker profile', 'worker_input_guard_745', 'run_job', 745),
+    ('worker backend kind is invalid', 'worker_input_guard_747', 'run_job', 747),
+    ('Docker worker executable is fixed', 'worker_input_guard_749', 'run_job', 749),
+    ('local worker executable is invalid', 'worker_input_guard_751', 'run_job', 751),
+    ('worker roots must be absolute', 'worker_input_guard_757', 'run_job', 757),
+    ('patch input could not be read', 'worker_input_guard_764', 'run_job', 764),
+    ('patch exceeds the fixed input limit', 'worker_input_guard_766', 'run_job', 766),
+    ('worker wall deadline expired before staging', 'worker_input_guard_776', 'run_job', 776),
+    ('worker wall deadline expired during staging', 'worker_input_guard_779', 'run_job', 779),
+    ('snapshot digest does not match the approved preview', 'worker_input_guard_784', 'run_job', 784),
+    ('base digest does not match the approved preview', 'worker_input_guard_787', 'run_job', 787),
+    ('worker image digest is required', 'worker_input_guard_790', 'run_job', 790),
+    ('patch digest does not match the approved artifact', 'worker_input_guard_794', 'run_job', 794),
+    ('local worker runtime identity changed', 'worker_input_guard_813', 'run_job', 813),
+    ('git init failed', 'worker_input_guard_832', 'run_job', 832),
+    ('git add failed', 'worker_input_guard_846', 'run_job', 846),
+    ('git baseline failed', 'worker_input_guard_860', 'run_job', 860),
+    ('patch check failed', 'worker_input_guard_874', 'run_job', 874),
+    ('patch apply failed', 'worker_input_guard_887', 'run_job', 887),
+    ('changed path staging failed', 'worker_input_guard_944', 'run_job', 944),
+    ('changed path export failed', 'worker_input_guard_961', 'run_job', 961),
+    ('diff export failed or exceeded limit', 'worker_input_guard_977', 'run_job', 977),
+    ('diff export is missing approved patch paths', 'worker_input_guard_979', 'run_job', 979),
+    ('actual bounded runtime execution proof invalid', 'worker_input_guard_1014', 'run_job', 1014),
+)
+
+
+def _publication_worker_receipt_projection(manifest, readback) -> dict[str, Any]:
+    unavailable = {"guard_candidate": "worker_input_diagnostic_unavailable"}
+    for receipt in (manifest, readback):
+        if (type(receipt) is not dict or set(receipt) != {"profile", "status", "reason"}
+            or any(type(receipt[key]) is not str for key in ("profile", "status", "reason"))
+            or receipt["profile"] != "repo-python-pytest-v1" or receipt["status"] != "blocked"
+            or not 0 < len(receipt["reason"]) <= 512 or "\x00" in receipt["reason"]):
+            return unavailable
+    if manifest != readback:
+        return unavailable
+    candidates = [row for row in _PUBLICATION_WORKER_GUARD_CANDIDATES if row[0] == manifest["reason"]]
+    if not candidates:
+        return {"guard_candidate": "worker_input_guard_unknown"}
+    if len(candidates) != 1:
+        return {"guard_candidate": "worker_input_guard_ambiguous"}
+    _, candidate, function, line = candidates[0]
+    return {"guard_candidate": candidate, "file": "src/execution/repo_worker.py",
+            "function": function, "line": line}
+
+
+def _publication_worker_blocked_diagnostic(error: BaseException) -> dict[str, Any]:
+    # Only already decoded original denial-frame values; never reopen receipts.
+    from src.execution.repo_sandbox import LocalRepoRepairExecutor, RepoSandboxError
+
+    unavailable = {"guard_candidate": "worker_input_diagnostic_unavailable"}
+    try:
+        cause = error
+        for _ in range(4):
+            if cause is None:
+                break
+            if (type(cause) is RepoSandboxError
+                and cause.args == ("local worker was blocked before terminal readback",)
+                and cause.phase == "output_exported"
+                and cause.terminal_status == "unknown_external_effect"):
+                traceback = cause.__traceback__
+                for _ in range(32):
+                    if traceback is None:
+                        break
+                    frame = traceback.tb_frame
+                    if (frame.f_code is LocalRepoRepairExecutor.execute_job.__code__
+                        and frame.f_globals.get("__name__") == "src.execution.repo_sandbox"
+                        and frame.f_code.co_name == "execute_job" and traceback.tb_lineno == 3478):
+                        return _publication_worker_receipt_projection(
+                            frame.f_locals.get("raw_manifest"), frame.f_locals.get("raw_readback"))
+                    traceback = traceback.tb_next
+            cause = cause.__cause__
+    except Exception:
+        return unavailable
+    return unavailable
+
+
 async def _prepare_native_flow(
     client,
     async_db,

@@ -273,3 +273,98 @@ async def test_actual_plaintext_consent_cannot_replace_reviewed_goal_grant(accou
     async with factory.accounting_sessions() as db:
         assert not list((await db.scalars(select(WorkflowRunState).where(WorkflowRunState.job_kind=='inference.near-text.v1'))).all())
         assert not list((await db.scalars(select(InferenceCostReservation))).all())
+
+@pytest.mark.asyncio
+async def test_expired_contact_finance_recovers_ended_attempt_without_current_grants(accounting_db,real_auth,monkeypatch):
+    import asyncio
+    from src.api import auth,work_board,model_fabric_settings
+    from src.work_board.near_text_native import expired_finance_binding,utc
+    from src.model_fabric.remote_inference_admission import remote_inference_admission_broker
+    monkeypatch.setattr('src.model_fabric.execution.gpu_admission_broker',remote_inference_admission_broker)
+    _,_,factory=accounting_db
+    entered=asyncio.Event();release=asyncio.Event();calls=[]
+    async def provider(request):
+        calls.append(request.url.path)
+        assert request.url.path=='/v1/chat/completions'
+        entered.set()
+        await release.wait()
+        raise httpx.ReadError('Original response permanently unavailable')
+    original=httpx.AsyncClient
+    def clients(**kwargs):
+        if 'transport' not in kwargs:kwargs['transport']=httpx.MockTransport(provider)
+        return original(**kwargs)
+    monkeypatch.setattr(httpx,'AsyncClient',clients)
+    app=FastAPI();app.add_middleware(OperatorAuthMiddleware)
+    for router,prefix in ((auth.router,'/api/auth'),(work_board.router,'/api'),(model_fabric_settings.router,'/api')):
+        app.include_router(router,prefix=prefix)
+    async with original(transport=httpx.ASGITransport(app=app),base_url='http://test',headers={'origin':'http://localhost:3001'}) as client:
+        task_id,owner=await create_actual_near_task(client,factory,goal_budget_changes={'max_runtime_seconds':3})
+        jobs=DurableJobRepository()
+        first=WorkBoardDispatcher(jobs=jobs,session_provider=factory.accounting_sessions)
+        worker=asyncio.create_task(first.run_pass())
+        try:
+            await asyncio.wait_for(entered.wait(),2)
+            restarted=WorkBoardDispatcher(jobs=jobs,session_provider=factory.accounting_sessions)
+            # A new process has no original in-memory worker registrations.
+            restarted._active_worker_tasks = {}
+            await restarted.run_pass()
+            async with factory.accounting_sessions() as db:
+                task=await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id==task_id))
+                attempt=await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id==task_id))
+                run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.job_kind=='inference.near-text.v1'))
+                row=await db.scalar(select(InferenceCostReservation))
+                assert task.status is WorkBoardStatus.blocked and attempt.ended_at is not None
+                assert run.status=='running' and row.state=='contact_started'
+                deadline=utc(run.lease_expires_at);native_id=run.run_identity;original_revision=run.revision
+                assert not await expired_finance_binding(db,task,attempt,run,observed=datetime.now(timezone.utc))
+                goal=await db.get(Goal,task.goal_id);goal.status='paused';db.add(goal)
+                root=await db.get(OperatorSession,owner['session_id']);root.revoked_at=datetime.now(timezone.utc);db.add(root)
+            await asyncio.sleep(max(0,(deadline-datetime.now(timezone.utc)).total_seconds())+0.05)
+            async with factory.accounting_sessions() as db:
+                task=await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id==task_id))
+                attempt=await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id==task_id))
+                run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==native_id))
+                observed=datetime.now(timezone.utc)
+                assert not await expired_finance_binding(db,task.model_copy(update={'owner_principal_id':'foreign'}),attempt,run,observed=observed)
+                assert not await expired_finance_binding(db,run=run.model_copy(update={'lease_expires_at':None}),task=task,attempt=attempt,observed=observed)
+                assert not await expired_finance_binding(db,run=run.model_copy(update={'lease_expires_at':observed+timedelta(seconds=10)}),task=task,attempt=attempt,observed=observed)
+                assert not await expired_finance_binding(db,task.model_copy(update={'typed_input_digest':'0'*64}),attempt,run,observed=observed)
+                row=await db.scalar(select(InferenceCostReservation))
+                ambiguous=InferenceCostReservation(**{**row.model_dump(),'operation_id':'negative-ambiguous-row'})
+                db.add(ambiguous);await db.flush()
+                assert not await expired_finance_binding(db,task,attempt,run,observed=observed)
+                await db.rollback()
+            async with factory.accounting_sessions() as db:
+                attempt=await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id==task_id))
+                newer=WorkBoardAttempt(**{**attempt.model_dump(),'attempt_id':uuid4().hex,
+                    'created_at':datetime.now(timezone.utc),'workflow_run_id':None})
+                db.add(newer);await db.flush()
+                assert not await restarted.repository.list_expired_near_attempts(db,now=datetime.now(timezone.utc))
+                await db.rollback()
+            def no_private_execution(*args,**kwargs):
+                raise AssertionError('Financial recovery must not load private input or execution grants')
+            with monkeypatch.context() as isolated:
+                isolated.setattr('src.work_board.dispatcher._parse_typed_input',no_private_execution)
+                isolated.setattr('src.work_board.near_text_native._input',no_private_execution)
+                isolated.setattr('src.model_fabric.effective_policy.current_near_text_policy',no_private_execution)
+                assert await restarted.recover_expired_near_finance(now=datetime.now(timezone.utc))==[native_id]
+            await restarted.run_pass()
+            async with factory.accounting_sessions() as db:
+                run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==native_id))
+                row=await db.scalar(select(InferenceCostReservation))
+                assert run.status=='cost_liability' and run.lease_owner is None and run.lease_expires_at is None
+                assert run.fencing_token==2 and run.revision>original_revision
+                assert row.state=='unknown' and row.bound_microusd==1000 and row.actual_cost_microusd is None
+                assert row.recovery_reason=='provider_cost_readback_required'
+                revision=row.revision;native_revision=run.revision
+                assert not json.loads(run.artifact_receipts_json)
+            await restarted.run_pass()
+            async with factory.accounting_sessions() as db:
+                run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==native_id))
+                row=await db.scalar(select(InferenceCostReservation))
+                assert row.revision==revision and run.revision==native_revision
+                assert len(list((await db.scalars(select(WorkBoardAttempt))).all()))==1
+            assert calls==['/v1/chat/completions']
+        finally:
+            release.set()
+            await asyncio.wait_for(worker,5)

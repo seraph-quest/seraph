@@ -238,6 +238,34 @@ def binds(task,attempt,run):
             and authority['runtime_path']==RUNTIME and authority['input_artifact_id']==task.input_artifact_id)
     except (ValueError,KeyError,TypeError):return False
 
+async def expired_finance_binding(db, task, attempt, run, *, observed):
+    """SQL-only original identity; expired/revoked execution grants are irrelevant."""
+    if (task.capability_id != CAPABILITY or run.status != 'running'
+        or run.lease_expires_at is None or utc(run.lease_expires_at) > observed
+        or attempt.workflow_run_id != run.run_identity or not binds(task, attempt, run)):
+        return False
+    artifact = await db.get(WorkBoardInputArtifact, task.input_artifact_id)
+    if (artifact is None or artifact.bound_task_id != task.task_id
+        or artifact.owner_principal_id != task.owner_principal_id
+        or artifact.owner_session_id != task.owner_session_id
+        or artifact.goal_id != task.goal_id or artifact.goal_revision != task.goal_revision
+        or artifact.capability_id != CAPABILITY or artifact.capability_version != '1'
+        or artifact.payload_sha256 != task.typed_input_digest
+        or artifact.typed_input_ref != task.typed_input_ref):
+        return False
+    try:
+        metadata = json.loads(artifact.document_metadata_json)
+        authority = json.loads(run.declared_authority_json)
+        if authority['publication_digest'] != digest(metadata):return False
+    except (ValueError, TypeError, KeyError):return False
+    rows = list((await db.scalars(select(InferenceCostReservation)
+        .where(InferenceCostReservation.job_id == run.run_identity))).all())
+    return bool(len(rows) == 1 and rows[0].operation_id == 'remote:' + run.run_identity
+        and rows[0].owner_id == task.owner_principal_id and rows[0].goal_id == task.goal_id
+        and rows[0].goal_revision == task.goal_revision and rows[0].runtime_path == RUNTIME
+        and rows[0].profile_id == 'near.text' and rows[0].job_fencing_token == run.fencing_token
+        and utc(rows[0].deadline_at) == utc(run.deadline_at))
+
 async def _ledger(db,receipt,*,job):
     row=await ledger_before_output(db,operation_id=receipt.operation_id,job=job)
     if row.actual_cost_microusd!=receipt.cost_microusd or row.provider_operation_id!=receipt.provider_request_id:

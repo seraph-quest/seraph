@@ -2829,6 +2829,7 @@ class WorkBoardDispatcher:
             inbox_expired = 0
             inbox_repaired = 0
         expired_reviews = await self._expire_review_windows(now=observed_at)
+        await self.recover_expired_near_finance(now=observed_at)
         reconciled = await self.reconcile_pending_attempts(now=observed_at)
         linked_reconciled = await self.reconcile_linked_attempts(now=observed_at)
         try:
@@ -10605,6 +10606,33 @@ class WorkBoardDispatcher:
         if not isinstance(projection, Mapping):
             return None
         return _text(projection.get("job_id") or projection.get("run_identity")) or None
+
+    async def recover_expired_near_finance(self, *, now):
+        # Finance classification precedes question loading and current execution
+        # grants. An expired grant cannot erase an already contacted liability.
+        from src.work_board.near_text_native import expired_finance_binding
+        async with self.session_provider() as db:
+            try:
+                candidates = await self.repository.list_expired_near_attempts(db, now=now)
+            except (ValueError, TypeError):
+                # A malformed persisted timestamp cannot authorize finance
+                # recovery or abort the rest of the dispatch pass.
+                return []
+            identities = []
+            for task, attempt, run in candidates:
+                try:
+                    if await expired_finance_binding(db, task, attempt, run, observed=now):
+                        identities.append(run.run_identity)
+                except (ValueError, TypeError, KeyError):
+                    # Malformed historical metadata cannot grant recovery.
+                    continue
+        for identity in identities:
+            try:
+                await self.jobs.recover_stale_job(identity, now=now)
+            except DurableJobLeaseError:
+                # A renewed/current lease or competing recovery owns the CAS.
+                continue
+        return identities
 
     async def reconcile_linked_attempts(self, *, now: datetime | None = None) -> list[str]:
         """Reconcile already-linked roots after a dispatcher restart.

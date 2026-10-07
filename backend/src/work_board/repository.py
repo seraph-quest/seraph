@@ -4058,6 +4058,24 @@ class WorkBoardRepository:
         )
         return list(result.scalars().all())
 
+    async def list_expired_near_attempts(self, db, *, now, limit=20):
+        """Historical finance inventory; never a grant to resume execution."""
+        newer = aliased(WorkBoardAttempt)
+        rows = await db.execute(select(WorkBoardTask, WorkBoardAttempt, WorkflowRunState)
+            .join(WorkBoardAttempt, WorkBoardAttempt.task_id == WorkBoardTask.task_id)
+            .join(WorkflowRunState, WorkflowRunState.run_identity == WorkBoardAttempt.workflow_run_id)
+            .where(WorkBoardTask.capability_id == "inference.near-text.v1",
+                WorkflowRunState.job_kind == "inference.near-text.v1",
+                WorkflowRunState.status == "running",
+                WorkflowRunState.lease_expires_at.is_not(None),
+                WorkflowRunState.lease_expires_at <= now,
+                ~select(newer.attempt_id).where(newer.task_id == WorkBoardTask.task_id,
+                    or_(newer.created_at > WorkBoardAttempt.created_at,
+                        (newer.created_at == WorkBoardAttempt.created_at) & (newer.attempt_id > WorkBoardAttempt.attempt_id))).exists())
+            .order_by(WorkBoardAttempt.created_at, WorkBoardAttempt.attempt_id)
+            .limit(max(1, min(int(limit), 100))))
+        return list(rows.all())
+
     async def list_linked_active_attempts(
         self,
         db: AsyncSession,

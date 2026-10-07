@@ -525,6 +525,49 @@ def _publication_link_escape_diagnostic(error: BaseException) -> dict[str, Any] 
     return None
 
 
+def _publication_loaded_library_diagnostic(error: BaseException) -> dict[str, Any] | None:
+    from src.execution.repo_publication_runtime import RuntimeUnavailable, loaded_libpython
+
+    cause: BaseException | None = error
+    for _ in range(4):
+        if cause is None:
+            break
+        if isinstance(cause, RuntimeUnavailable) and str(cause) == "publication_loaded_library_identity_unproven":
+            traceback = cause.__traceback__
+            for _ in range(32):
+                if traceback is None:
+                    break
+                frame = traceback.tb_frame
+                if (frame.f_code is loaded_libpython.__code__
+                    and frame.f_globals.get("__name__") == "src.execution.repo_publication_runtime"
+                    and frame.f_code.co_name == "loaded_libpython"):
+                    path = frame.f_locals.get("path")
+                    device = frame.f_locals.get("device")
+                    before = frame.f_locals.get("before")
+                    rows = frame.f_locals.get("rows")
+                    if (type(path) is not type(Path()) or not 0 < len(str(path)) <= 4096 or "\x00" in str(path)
+                        or not isinstance(device, str) or not 0 < len(device) <= 32 or "\x00" in device
+                        or not isinstance(before, os.stat_result)
+                        or any(type(value) is not int or not 0 <= value < 2 ** 64 for value in (before.st_dev, before.st_ino))
+                        or not isinstance(rows, list) or len(rows) > 64):
+                        return None
+                    projected_rows = []
+                    for row in rows:
+                        if (not isinstance(row, list) or len(row) != 6
+                            or any(not isinstance(value, str) for value in row)
+                            or not 0 < len(row[3]) <= 32 or "\x00" in row[3]
+                            or not 0 < len(row[4]) <= 20 or not row[4].isdigit() or int(row[4]) >= 2 ** 64
+                            or not 0 < len(row[5]) <= 4096 or "\x00" in row[5]):
+                            return None
+                        projected_rows.append({"device": row[3], "inode": row[4], "path": row[5]})
+                    return {"selected_path": str(path), "expected_device": device,
+                            "opened_device": before.st_dev, "opened_inode": before.st_ino,
+                            "mapped_libraries": projected_rows}
+                traceback = traceback.tb_next
+        cause = cause.__cause__
+    return None
+
+
 async def _prepare_native_flow(
     client,
     async_db,
@@ -608,6 +651,9 @@ async def _prepare_native_flow(
             link_escape = _publication_link_escape_diagnostic(exc)
             if link_escape is not None:
                 runtime_diagnostic["original_link_escape"] = link_escape
+            loaded_library = _publication_loaded_library_diagnostic(exc)
+            if loaded_library is not None:
+                runtime_diagnostic["original_loaded_library"] = loaded_library
         paths = {"interpreter_entry": Path(sys.executable).absolute()}
         try:
             pytest_executable = executor._local_pytest_executable()
@@ -1339,11 +1385,12 @@ async def test_local_native_cancel_and_fresh_instance_reconcile(tmp_path: Path, 
 
 
 @pytest.mark.parametrize("async_db", ["file"], indirect=True)
+@pytest.mark.parametrize("failure_kind", ["link_escape", "empty_loaded_library_rows"])
 async def test_blocked_runtime_preflight_exposes_diagnostic_without_admission(
-    client, async_db, tmp_path: Path, monkeypatch, capsys,
+    client, async_db, tmp_path: Path, monkeypatch, capsys, failure_kind,
 ):
     from src.execution.repo_sandbox import RepoSandboxPreflight
-    from src.execution.repo_publication_runtime import RuntimeUnavailable, metadata, resolve_entry
+    from src.execution.repo_publication_runtime import RuntimeUnavailable, loaded_libpython, metadata, resolve_entry
 
     trusted_root = tmp_path / "diagnostic-runtime"
     trusted_root.mkdir()
@@ -1351,6 +1398,10 @@ async def test_blocked_runtime_preflight_exposes_diagnostic_without_admission(
     rejected_path = tmp_path / "outside-unattested-python"
     linked_entry.symlink_to(rejected_path)
     link_identity = list(metadata(linked_entry.lstat()))
+    library_path = trusted_root / "libpython-diagnostic.so"
+    library_path.write_bytes(b"finite-diagnostic-library")
+    library_metadata = library_path.stat()
+    original_read_text = Path.read_text
 
     def blocked_preflight(self):
         return RepoSandboxPreflight(
@@ -1359,7 +1410,14 @@ async def test_blocked_runtime_preflight_exposes_diagnostic_without_admission(
 
     def unavailable_identity(self):
         try:
-            resolve_entry(linked_entry, [trusted_root])
+            if failure_kind == "link_escape":
+                resolve_entry(linked_entry, [trusted_root])
+            else:
+                def empty_maps(path, *args, **kwargs):
+                    return "" if path == Path("/proc/self/maps") else original_read_text(path, *args, **kwargs)
+                with monkeypatch.context() as original_rows:
+                    original_rows.setattr(Path, "read_text", empty_maps)
+                    loaded_libpython(library_path)
         except RuntimeUnavailable as exc:
             raise RuntimeError("syntheticRuntimeUnavailable") from exc
 
@@ -1375,11 +1433,21 @@ async def test_blocked_runtime_preflight_exposes_diagnostic_without_admission(
         "class": "RuntimeError", "message": "syntheticRuntimeUnavailable",
     }
     assert diagnostic["caller_uid"] == os.getuid()
-    assert diagnostic["original_link_escape"] == {
-        "rejected_path": str(rejected_path), "allowed_roots": [str(trusted_root)],
-        "verified_links": [{"path": str(linked_entry), "target": str(rejected_path),
-                            "identity": link_identity}],
-    }
+    if failure_kind == "link_escape":
+        assert diagnostic["original_link_escape"] == {
+            "rejected_path": str(rejected_path), "allowed_roots": [str(trusted_root)],
+            "verified_links": [{"path": str(linked_entry), "target": str(rejected_path),
+                                "identity": link_identity}],
+        }
+        assert "original_loaded_library" not in diagnostic
+    else:
+        assert diagnostic["original_loaded_library"] == {
+            "selected_path": str(library_path),
+            "expected_device": f"{os.major(library_metadata.st_dev):02x}:{os.minor(library_metadata.st_dev):02x}",
+            "opened_device": library_metadata.st_dev, "opened_inode": library_metadata.st_ino,
+            "mapped_libraries": [],
+        }
+        assert "original_link_escape" not in diagnostic
     assert not rejected_path.exists()
     import sysconfig
 

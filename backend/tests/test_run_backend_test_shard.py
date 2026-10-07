@@ -4,10 +4,79 @@ from subprocess import CompletedProcess, TimeoutExpired
 from unittest.mock import patch
 
 from scripts.run_backend_test_shard import (
+    main,
     pytest_invocations_for_target,
     run_shard_files,
     timeout_for_file,
 )
+
+
+def test_ci_retirement_skips_exact_module_before_invocation(tmp_path, capsys):
+    with patch("scripts.run_backend_test_shard.subprocess.run") as run, patch(
+        "scripts.run_backend_test_shard.pytest_invocations_for_target",
+        return_value=[("ordinary", ["tests/test_alpha.py"])],
+    ) as invocations:
+        run.return_value = CompletedProcess(args=["pytest"], returncode=0)
+        result = run_shard_files(tmp_path, ["tests/test_eval_harness.py", "tests/test_alpha.py"],
+                                 exclude_cancelled_eval_harness=True)
+    assert result == 0
+    invocations.assert_called_once_with("tests/test_alpha.py")
+    run.assert_called_once()
+    assert "tests/test_eval_harness.py" not in run.call_args.args[0]
+    output = capsys.readouterr().out
+    assert "RETIRED/NOT RUN tests/test_eval_harness.py" in output
+    assert "228 top-level test definitions, including 13 ordinary contracts" in output
+    assert "not selected for execution; not passed (source-definition counts)" in output
+
+
+def test_ci_retirement_does_not_skip_similar_module_names(tmp_path):
+    files = ["tests/test_eval_harness_extra.py", "tests/subdir/test_eval_harness.py"]
+    with patch("scripts.run_backend_test_shard.subprocess.run") as run:
+        run.return_value = CompletedProcess(args=["pytest"], returncode=0)
+        assert run_shard_files(tmp_path, files, exclude_cancelled_eval_harness=True) == 0
+    assert [call.args[0][4] for call in run.call_args_list] == files
+
+
+def test_ci_retirement_only_shard_reports_unrun_without_subprocess(tmp_path, capsys):
+    with patch("scripts.run_backend_test_shard.subprocess.run") as run:
+        assert run_shard_files(tmp_path, ["tests/test_eval_harness.py"],
+                               exclude_cancelled_eval_harness=True) == 0
+    run.assert_not_called()
+    assert "RETIRED/NOT RUN" in capsys.readouterr().out
+
+
+def test_ci_retirement_preserves_ordinary_failure_propagation(tmp_path):
+    with patch("scripts.run_backend_test_shard.subprocess.run") as run:
+        run.return_value = CompletedProcess(args=["pytest"], returncode=1)
+        result = run_shard_files(tmp_path, ["tests/test_eval_harness.py", "tests/test_alpha.py",
+                                           "tests/test_beta.py"], exclude_cancelled_eval_harness=True)
+    assert result == 1
+    run.assert_called_once()
+    assert "tests/test_alpha.py" in run.call_args.args[0]
+
+
+def test_ci_retirement_preserves_ordinary_timeout_propagation(tmp_path):
+    with patch("scripts.run_backend_test_shard.subprocess.run") as run:
+        run.side_effect = TimeoutExpired(cmd=["pytest"], timeout=900)
+        result = run_shard_files(tmp_path, ["tests/test_eval_harness.py", "tests/test_alpha.py",
+                                           "tests/test_beta.py"], file_timeout_seconds=900,
+                                 exclude_cancelled_eval_harness=True)
+    assert result == 124
+    run.assert_called_once()
+    assert run.call_args.kwargs["timeout"] == 900
+
+
+def test_ci_retirement_cli_forwards_fixed_policy_and_preserves_arguments():
+    with patch.object(sys, "argv", ["runner", "--shard-count", "10", "--shard-index", "2",
+                                   "--file-timeout-seconds", "900", "--exclude-cancelled-eval-harness",
+                                   "--", "-x"]), patch(
+        "scripts.run_backend_test_shard.shard_for_index", return_value=["tests/test_alpha.py"],
+    ) as shard, patch("scripts.run_backend_test_shard.run_shard_files", return_value=1) as run:
+        assert main() == 1
+    assert shard.call_args.kwargs == {"shard_count": 10, "shard_index": 2}
+    assert run.call_args.args[1] == ["tests/test_alpha.py"]
+    assert run.call_args.kwargs == {"pytest_args": ["-x"], "file_timeout_seconds": 900,
+                                    "exclude_cancelled_eval_harness": True}
 
 
 def test_run_shard_files_executes_each_file_in_isolation(tmp_path: Path):

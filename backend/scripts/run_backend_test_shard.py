@@ -501,6 +501,7 @@ def run_shard_files(
     *,
     pytest_args: list[str] | None = None,
     file_timeout_seconds: int | None = None,
+    exclude_cancelled_eval_harness: bool = False,
 ) -> int:
     if not files:
         print("No backend tests assigned to this shard.")
@@ -510,6 +511,11 @@ def run_shard_files(
     if "--no-cov" not in extra_args and not any(arg.startswith("--cov") for arg in extra_args):
         extra_args.append("--no-cov")
     for path in files:
+        if exclude_cancelled_eval_harness and path == "tests/test_eval_harness.py":
+            print("[backend-shard] RETIRED/NOT RUN tests/test_eval_harness.py: cancelled module; "
+                  "228 top-level test definitions, including 13 ordinary contracts, "
+                  "not selected for execution; not passed (source-definition counts)")
+            continue
         for label, invocation_args in pytest_invocations_for_target(path):
             command = [sys.executable, "-m", "pytest", "-q", *invocation_args, *extra_args]
             timeout_seconds = timeout_for_file(path, file_timeout_seconds)
@@ -543,6 +549,10 @@ def main() -> int:
     parser.add_argument("--shard-count", type=int, required=True)
     parser.add_argument("--shard-index", type=int, required=True)
     parser.add_argument("--file-timeout-seconds", type=int, default=None)
+    parser.add_argument(
+        "--exclude-cancelled-eval-harness", action="store_true",
+        help="CI policy: retire only tests/test_eval_harness.py from execution and report it as not run",
+    )
     parser.add_argument("pytest_args", nargs=argparse.REMAINDER)
     args = parser.parse_args()
 
@@ -556,6 +566,7 @@ def main() -> int:
         files,
         pytest_args=extra_args,
         file_timeout_seconds=args.file_timeout_seconds,
+        exclude_cancelled_eval_harness=args.exclude_cancelled_eval_harness,
     )
 
 

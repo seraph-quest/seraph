@@ -1667,7 +1667,7 @@ async def _seed_sqlite_watch_replay(
     from src.guardian.source_watch import _dump, _sha, parse_sources
 
     source = parse_sources(
-        [{"source_key": "local", "kind": "workspace_text", "target": "m6/native-watch.txt"}]
+        [{"source_key": "public", "kind": "public_https_text", "target": "https://example.com/native-watch.txt"}]
     )[0]
     source_projection = [
         {
@@ -1694,15 +1694,15 @@ async def _seed_sqlite_watch_replay(
         revision=1,
         owner_principal_id=owner,
         owner_session_id=session,
-        admission_budget_json=json.dumps(
-            {
-                "reviewed_grant": True,
-                "grant_id": "native-watch-replay-grant",
-                "max_outstanding_jobs": 2,
-                "max_attempts": 1,
-                "max_runtime_seconds": 300,
-            }
-        ),
+        admission_budget_json=serialize_admission_budget(GoalAdmissionBudget(
+            reviewed_grant=True,
+            grant_id="native-watch-replay-grant",
+            max_outstanding_jobs=2,
+            max_attempts=1,
+            max_runtime_seconds=300,
+            period_started_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+            period_expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        )),
     )
     watch = GuardianSourceWatch(
         id=watch_id,
@@ -1735,6 +1735,13 @@ async def _seed_sqlite_watch_replay(
         state="ready",
     )
     async with async_db() as db:
+        db.add(OperatorSession(
+            id=session,
+            principal_id=owner,
+            token_hash="native-watch-token-" + session,
+            idle_expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+            absolute_expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        ))
         db.add(Session(id=session, owner_principal_id=owner))
         db.add(goal)
         db.add(watch)
@@ -1753,7 +1760,7 @@ async def test_native_watch_sqlite_material_restart_replay_rejects_tamper_and_de
     monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
     watch_id = "watch-native-sqlite-material"
     goal_id = "goal-native-sqlite-material"
-    owner = "operator:native-sqlite-material"
+    owner = "operator:root:native-sqlite-material"
     session = "session:native-sqlite-material"
     await _seed_sqlite_watch_replay(
         async_db,
@@ -1765,6 +1772,7 @@ async def test_native_watch_sqlite_material_restart_replay_rejects_tamper_and_de
     )
 
     async def fetcher(_source: Any) -> tuple[str, dict[str, Any]]:
+        assert _source.kind == "public_https_text" and _source.target == "https://example.com/native-watch.txt"
         return "new material", {}
 
     service = source_watch_module.SourceWatchService(fetcher=fetcher)
@@ -1841,7 +1849,7 @@ async def test_native_watch_sqlite_no_change_restart_replay_requires_verified_re
     monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
     watch_id = "watch-native-sqlite-no-change"
     goal_id = "goal-native-sqlite-no-change"
-    owner = "operator:native-sqlite-no-change"
+    owner = "operator:root:native-sqlite-no-change"
     session = "session:native-sqlite-no-change"
     await _seed_sqlite_watch_replay(
         async_db,
@@ -1856,6 +1864,7 @@ async def test_native_watch_sqlite_no_change_restart_replay_requires_verified_re
 
     async def fetcher(_source: Any) -> tuple[str, dict[str, Any]]:
         nonlocal calls
+        assert _source.kind == "public_https_text" and _source.target == "https://example.com/native-watch.txt"
         calls += 1
         return "unchanged", {}
 
@@ -1899,7 +1908,7 @@ async def test_native_watch_parent_board_guard_blocks_before_source_contact(
     monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
     watch_id = "watch-native-parent-guard"
     goal_id = "goal-native-parent-guard"
-    owner = "operator:native-parent-guard"
+    owner = "operator:root:native-parent-guard"
     session = "session:native-parent-guard"
     await _seed_sqlite_watch_replay(
         async_db,
@@ -2740,8 +2749,8 @@ async def test_real_dispatcher_watch_no_change_skips_browser_leaf(
     monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
     watch_id = "watch-procedure-dispatcher-no-change"
     goal_id = "goal-procedure-dispatcher-no-change"
-    owner = "operator:test-bypass"
-    session = "test-auth-bypass"
+    owner = "operator:root:watch-dispatcher-no-change"
+    session = "watch-dispatcher-no-change-root"
     await _seed_sqlite_watch_replay(
         async_db,
         watch_id=watch_id,
@@ -2750,9 +2759,11 @@ async def test_real_dispatcher_watch_no_change_skips_browser_leaf(
         session=session,
         baseline_text="old material",
     )
-    source_path = tmp_path / "m6/native-watch.txt"
-    source_path.parent.mkdir(parents=True, exist_ok=True)
-    source_path.write_text("old material", encoding="utf-8")
+    from src.guardian.source_watch import source_watch_service
+    async def public_source_bytes(source):
+        assert source.kind == "public_https_text" and source.target == "https://example.com/native-watch.txt"
+        return "old material", {}
+    monkeypatch.setattr(source_watch_service, "_fetcher", public_source_bytes)
 
     budget = GoalAdmissionBudget(
         reviewed_grant=True,
@@ -2947,7 +2958,7 @@ async def test_dispatcher_parent_boundary_rejects_revoked_goal_cancel_and_expire
     from src.workflows import procedure_v2_runtime as runtime_module
 
     monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
-    owner_principal = "operator:single"
+    owner_principal = "operator:root:terminal-guard"
     owner_session = "terminal-guard-session"
     goal_id = "goal-terminal-guard"
     routine_id = "routine-terminal-guard-v2"
@@ -2972,6 +2983,7 @@ async def test_dispatcher_parent_boundary_rejects_revoked_goal_cancel_and_expire
         db.add(
             OperatorSession(
                 id=owner_session,
+                principal_id=owner_principal,
                 token_hash="terminal-guard-token-hash",
                 idle_expires_at=now + timedelta(hours=1),
                 absolute_expires_at=now + timedelta(hours=2),

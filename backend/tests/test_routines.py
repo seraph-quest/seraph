@@ -2342,24 +2342,31 @@ async def test_followthrough_wrapper_uses_only_persisted_m3_child(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_generated_followthrough_stale_parent_fence_preserves_m3_child(monkeypatch):
+async def test_generated_followthrough_stale_parent_fence_preserves_m3_child(client, async_db, monkeypatch):
     """A stale wrapper fence must leave M3 for fenced recovery/reconciliation."""
 
+    from tests.test_github_connection_consent import active_connection
+
+    operator, connection, _, _ = await active_connection(client, monkeypatch)
+    principal, root = operator["principal_id"], operator["session_id"]
     parent_id = "routine-invocation-1"
     child_id = _child_job_id("01234567-89ab-cdef-0123-456789abcdef", "publication")
     parent = {
         "job_id": parent_id,
         "job_kind": "routine_invocation",
         "status": "running",
-        "owner": {"principal_id": "principal-1"},
-        "session_id": "session-1",
-        "operator_session_id": "session-1",
+        "owner": {"principal_id": principal},
+        "session_id": root,
+        "operator_session_id": root,
         "lease": {"owner": "routine:parent", "fencing_token": 7},
         "declared_authority": {
             "owner_kind": "user",
-            "goal_owner_principal_id": "principal-1",
-            "goal_owner_session_id": "session-1",
-            "session_id": "session-1",
+            "goal_owner_principal_id": principal,
+            "goal_owner_session_id": root,
+            "session_id": root,
+            "github_action": "create_issue",
+            "github_repository": connection.repository,
+            "github_connection_revision": connection.revision,
             "routine_id": ROUTINE_ID,
             "routine_revision": 3,
             "invocation_uuid": "01234567-89ab-cdef-0123-456789abcdef",
@@ -2368,8 +2375,8 @@ async def test_generated_followthrough_stale_parent_fence_preserves_m3_child(mon
     child = {
         "job_id": child_id,
         "status": "blocked",
-        "owner": {"principal_id": "principal-1"},
-        "session_id": "session-1",
+        "owner": {"principal_id": principal},
+        "session_id": root,
         "parent_fencing_token": 6,
         "lease": {"owner": None, "expires_at": None, "fencing_token": 2},
         "declared_authority": {
@@ -2403,8 +2410,8 @@ async def test_generated_followthrough_stale_parent_fence_preserves_m3_child(mon
         parent_id,
         "github_followthrough",
         context=RoutineStepContext(
-            "principal-1",
-            "session-1",
+            principal,
+            root,
             "routine:parent",
             7,
             external_mutation_granted=True,
@@ -2424,6 +2431,9 @@ async def test_generated_followthrough_stale_parent_fence_preserves_m3_child(mon
         "learning": "no_learning",
     }
     cancel.assert_not_awaited()
+    assert child["status"] == "blocked"
+    assert child["parent_fencing_token"] == 6
+    assert child["checkpoints"][0]["payload"]["m3_job_id"] == "ghfollow_1"
 
 
 @pytest.mark.asyncio

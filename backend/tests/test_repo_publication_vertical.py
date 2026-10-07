@@ -19,6 +19,11 @@ ORIGIN = {"Origin": "http://localhost:3001"}
 
 
 async def actual_repair(client, async_db, tmp_path, monkeypatch):
+    with native._publication_worker_diagnostic_context(monkeypatch):
+        return await _actual_repair(client, async_db, tmp_path, monkeypatch)
+
+
+async def _actual_repair(client, async_db, tmp_path, monkeypatch):
     async def default_login():
         from src.auth.service import authenticate_session
         response = await client.post("/api/auth/login", json={"password": "native-vertical-auth-secret"}, headers=ORIGIN)
@@ -29,8 +34,6 @@ async def actual_repair(client, async_db, tmp_path, monkeypatch):
     monkeypatch.setattr(native, "create_session", default_login)
     monkeypatch.setattr(native, "RepoSandboxSettings", lambda **values: RepoSandboxSettings(profile=PROFILE, **values))
     monkeypatch.setenv("SERAPH_WORKSPACE_LIFECYCLE_PATH", str(tmp_path / "deployment-lifecycle"))
-    from src.model_fabric.configuration import OpenRouterSetup
-    monkeypatch.setattr(native, "OpenRouterSetup", lambda **values: OpenRouterSetup(request_cost_bound_microusd=25_000, **values))
     original_configuration = native._configure_openrouter
     def managed_configuration():
         from src.workspace.production import ProductionWorkspace, prepare_lifecycle_directory

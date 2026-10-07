@@ -201,7 +201,7 @@ describe("RepoRepairForm", () => {
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Exact request is retained"));
     expect(screen.queryByRole("button", { name: /Discard exact request/i })).not.toBeInTheDocument();
     const firstBody = String(postCalls(fetchMock)[0]?.[1]?.body);
-    fireEvent.click(screen.getByRole("button", { name: "Retry exact request" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Retry exact request" }));
     await waitFor(() => expect(onCreated).toHaveBeenCalled());
     const calls = postCalls(fetchMock);
     expect(calls).toHaveLength(3);

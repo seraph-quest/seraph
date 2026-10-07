@@ -64,16 +64,20 @@ def _issue_ref_for_session(session_id: str) -> str:
     with patch("src.tools.secret_ref_tools.vault_repository") as mock_repo, \
          patch("src.tools.vault_tools.audit_repository") as mock_audit, \
          patch("src.tools.secret_ref_tools.get_current_session_id", return_value=session_id), \
+         patch("src.tools.secret_ref_tools.get_current_trust_principal", return_value=_secret_principal(session_id)), \
          patch("src.tools.vault_tools.get_current_session_id", return_value=session_id), \
          patch("src.tools.vault_tools.get_current_tool_policy_mode", return_value="full"):
         mock_repo.get = AsyncMock(return_value="super-secret-value")
         mock_audit.log_event = AsyncMock()
-        return get_secret_ref.forward(
+        reference = get_secret_ref.forward(
             "api_token",
             tool_name="mcp_http_request",
             field_name="headers",
             destination_url="https://api.example.com/v1",
         )
+        mock_repo.get.assert_awaited_once_with("api_token", owner_principal_id="operator:secret-test")
+        assert reference.startswith("secret://")
+        return reference
 
 
 def _secret_principal(session_id: str = "s1") -> TrustPrincipal:
@@ -97,7 +101,8 @@ def test_get_secret_ref_returns_opaque_reference_without_leaking_value():
 def test_get_secret_ref_rejects_unscoped_reference_requests():
     with patch("src.tools.secret_ref_tools.vault_repository") as mock_repo, \
          patch("src.tools.vault_tools.audit_repository") as mock_audit, \
-         patch("src.tools.secret_ref_tools.get_current_session_id", return_value="s1"):
+         patch("src.tools.secret_ref_tools.get_current_session_id", return_value="s1"), \
+         patch("src.tools.secret_ref_tools.get_current_trust_principal", return_value=_secret_principal()):
         mock_repo.get = AsyncMock(return_value="super-secret-value")
         mock_audit.log_event = AsyncMock()
         result = get_secret_ref.forward("api_token")

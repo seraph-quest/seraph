@@ -73,7 +73,9 @@ def test_closed_runtime():
     monkeypatch.setenv("SERAPH_EXECUTOR_SECRET", "not-exposed")
     job = _job(runner, repo, patch, allowed + ("pytest.py", "py.py", "tests/test_environment.py"), job_id="publication-profile-real", deadline=60)
     job = replace(job, test_args=("tests/test_value.py", "tests/test_environment.py"))
-    result = runner.execute_job(job)
+    from tests.test_repo_repair_local_vertical import _publication_worker_diagnostic_context
+    with _publication_worker_diagnostic_context(monkeypatch):
+        result = runner.execute_job(job)
     assert result["status"] == "succeeded", result
     attestation = result["manifest"]["publication_test_input"]
     assert attestation == result["readback"]["publication_test_input"]

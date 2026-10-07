@@ -17,6 +17,7 @@ from src.work_board.contracts import (
     WorkBoardRoutinePublicationRecoverRequest,
 )
 from src.workflows.routines import RoutinePublicationRequest
+from tests.test_github_connection_consent import active_connection
 
 
 OWNER = "operator:m6-publication"
@@ -100,7 +101,20 @@ async def _empty_db_session():
     yield object()
 
 
-def _patch_route_context(monkeypatch, *contexts):
+async def _bind_publication_consent(client, monkeypatch):
+    owner, connection, _binding, _request = await active_connection(client, monkeypatch)
+    monkeypatch.setitem(globals(), "OWNER", owner["principal_id"])
+    monkeypatch.setitem(globals(), "SESSION", owner["session_id"])
+    return {
+        "github_action": "create_issue",
+        "github_repository": connection.repository,
+        "github_connection_revision": connection.revision,
+    }
+
+
+def _patch_route_context(monkeypatch, *contexts, authority):
+    for context in contexts:
+        context["parent"]["declared_authority"] = authority
     monkeypatch.setattr(api, "_operator", lambda _request: _operator())
     monkeypatch.setattr(api, "get_session", _empty_db_session)
     # These route-contract tests must not consult the live workspace vault;
@@ -123,7 +137,8 @@ def _patch_route_context(monkeypatch, *contexts):
 
 
 @pytest.mark.asyncio
-async def test_prepare_publication_uses_same_card_binding_and_never_approves(monkeypatch):
+async def test_prepare_publication_uses_same_card_binding_and_never_approves(client, async_db, monkeypatch):
+    authority = await _bind_publication_consent(client, monkeypatch)
     initial = _context()
     prepared = _context(
         m3_job_id="github-followthrough:m6",
@@ -131,7 +146,7 @@ async def test_prepare_publication_uses_same_card_binding_and_never_approves(mon
         approval_status="pending",
         preview={"title": "Updated source", "body": "Verified operator supplied summary"},
     )
-    _patch_route_context(monkeypatch, initial, prepared)
+    _patch_route_context(monkeypatch, initial, prepared, authority=authority)
     prepare = AsyncMock(return_value={"status": "awaiting_approval"})
     monkeypatch.setattr(api.routine_service, "prepare_publication", prepare)
     resume = AsyncMock()
@@ -265,14 +280,15 @@ async def test_missing_grant_preserves_blocked_open_attempt_for_same_run_recover
 
 
 @pytest.mark.asyncio
-async def test_recover_requires_approved_preview_before_resuming_same_parent(monkeypatch):
+async def test_recover_requires_approved_preview_before_resuming_same_parent(client, async_db, monkeypatch):
+    authority = await _bind_publication_consent(client, monkeypatch)
     context = _context(
         m3_job_id="github-followthrough:m6",
         approval_id="approval-m6",
         approval_status="approved",
         preview={"title": "Updated source", "body": "Verified operator supplied summary"},
     )
-    _patch_route_context(monkeypatch, context)
+    _patch_route_context(monkeypatch, context, authority=authority)
     running_task = context["task"].model_copy(update={"status": WorkBoardStatus.running})
     running_detail = {**context["detail"], "task": running_task}
     monkeypatch.setattr(api.repository, "get_detail", AsyncMock(return_value=running_detail))
@@ -308,14 +324,15 @@ async def test_recover_requires_approved_preview_before_resuming_same_parent(mon
 
 
 @pytest.mark.asyncio
-async def test_recover_does_not_resume_pending_approval(monkeypatch):
+async def test_recover_does_not_resume_pending_approval(client, async_db, monkeypatch):
+    authority = await _bind_publication_consent(client, monkeypatch)
     context = _context(
         m3_job_id="github-followthrough:m6",
         approval_id="approval-m6",
         approval_status="pending",
         preview={"title": "Updated source", "body": "Verified operator supplied summary"},
     )
-    _patch_route_context(monkeypatch, context)
+    _patch_route_context(monkeypatch, context, authority=authority)
     recover = AsyncMock()
     monkeypatch.setattr(api.routine_service, "recover", recover)
     reconcile = AsyncMock()

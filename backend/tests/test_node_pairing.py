@@ -148,7 +148,8 @@ async def test_authenticated_edge_ingress_returns_persisted_owner_principal(monk
     credential_key = paired_edge._credential_key(extension_id, reference, PAIRING_ID, credential)
     entry = paired_edge.pairing_entry_from_state(
         state,
-        base_entry={"name": name, "reference": reference},
+        base_entry={"name": name, "reference": reference,
+            "credential_owner_scope_version": "owner-v1", "credential_vault_key": credential_key},
         credential_ref=(
             f"{paired_edge.PAIRING_CREDENTIAL_PREFIX}"
             f"{hashlib.sha256(credential_key.encode()).hexdigest()[:24]}"
@@ -158,10 +159,9 @@ async def test_authenticated_edge_ingress_returns_persisted_owner_principal(monk
     )
     payload = {"revision": 7, "extensions": {extension_id: {"node_pairings": {reference: entry}}}}
 
-    async def get_credential(key: str) -> str | None:
-        return credential if key == credential_key else None
-
-    monkeypatch.setattr(paired_edge.vault_repository, "get", get_credential)
+    await paired_edge.vault_repository.store(
+        credential_key, credential, owner_principal_id="operator:root:test-edge"
+    )
     authenticated = await paired_edge.authenticate_edge_request(
         payload,
         extension_id=extension_id,

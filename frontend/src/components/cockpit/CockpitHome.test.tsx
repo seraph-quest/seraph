@@ -116,7 +116,7 @@ describe("CockpitHome", () => {
     render(<CockpitHome onOpenSection={vi.fn()} />);
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(6));
-    fireEvent.click(screen.getByRole("button", { name: "Refresh Home" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Refresh Home" }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(12));
 
     const retryDelays = timeoutSpy.mock.calls

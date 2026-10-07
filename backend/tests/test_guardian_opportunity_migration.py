@@ -85,6 +85,8 @@ async def test_populated_previous_database_survives_two_actual_startups(monkeypa
         async with engine.begin() as connection:
             await connection.run_sync(SQLModel.metadata.create_all)
             await connection.exec_driver_sql("DROP TABLE guardian_opportunities")
+            # This M4 index did not exist in the pre-M2 schema being reconstructed.
+            await connection.exec_driver_sql("DROP INDEX ix_guardian_interventions_opportunity_feedback")
             for table, columns in {
                 "goals": ("guardian_policy_json", "guardian_policy_revision"),
                 "guardian_decision_packets": ("opportunity_snapshot_artifact_id", "opportunity_snapshot_sha256"),

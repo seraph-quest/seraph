@@ -290,7 +290,12 @@ async def test_adopted_m3_persists_parent_and_child_prepared_checkpoints(monkeyp
 @pytest.mark.asyncio
 async def test_recover_adopts_same_approved_m3_after_parent_fence_rollover_and_readback(
     monkeypatch,
+    client,
+    async_db,
 ):
+    from tests.test_github_connection_consent import active_connection
+    owner, connection, consent, _request = await active_connection(client, monkeypatch)
+    OWNER, SESSION = owner["principal_id"], owner["session_id"]
     service = RoutineService()
     parent_id = "routine-invocation:routine-recovery:invocation-1"
     child_id = "routine-child:publication-recovery"
@@ -309,9 +314,9 @@ async def test_recover_adopts_same_approved_m3_after_parent_fence_rollover_and_r
         "package_digest": "d" * 64,
         "invocation_uuid": invocation_uuid,
         "source_watch_id": "watch-recovery",
-        "github_connection_id": "connection-recovery",
-        "github_connection_revision": 4,
-        "github_repository": "seraph-quest/seraph",
+        "github_connection_id": connection.id,
+        "github_connection_revision": connection.revision,
+        "github_repository": connection.repository,
         "github_action": "create_issue",
     }
     checkpoint = {
@@ -377,7 +382,13 @@ async def test_recover_adopts_same_approved_m3_after_parent_fence_rollover_and_r
         "job_id": m3_id,
         "job_kind": "github_followthrough_v1",
         "status": "awaiting_approval",
-        "declared_authority": {"approval_id": "approval-recovery"},
+        "declared_authority": {
+            "approval_id": "approval-recovery",
+            "action": "create_issue",
+            "repository": connection.repository,
+            "connection_revision": connection.revision,
+            "github_consent": consent,
+        },
         "effects": [],
     }
     verified_readback = {

@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -1055,6 +1055,7 @@ describe("ProcedureV2Review", () => {
 
     render(<ProcedureV2Review ownerPrincipalId="operator:one" ownerSessionId="session-1" goals={[goal]} />);
     const selector = await screen.findByLabelText("Existing reviewed procedure");
+    await waitFor(() => expect(within(selector).getByRole("option", { name: /Reusable public check/ })).toHaveValue(pausedRoutine.id));
     fireEvent.change(selector, { target: { value: pausedRoutine.id } });
     await waitFor(() => expect(getRoutine).toHaveBeenCalledWith(pausedRoutine.id));
     expect(await screen.findByRole("button", { name: "Resume procedure" })).toBeInTheDocument();
@@ -1615,6 +1616,7 @@ describe("ProcedureV2Review", () => {
     render(<ProcedureV2Review ownerPrincipalId="operator:one" ownerSessionId="session-1" goals={[goal]} />);
     const selector = await screen.findByLabelText("Existing reviewed procedure");
     expect(listRoutines).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(within(selector).getByRole("option", { name: /Reusable public check/ })).toHaveValue("routine-existing"));
     fireEvent.change(selector, { target: { value: "routine-existing" } });
     await waitFor(() => expect(getRoutine).toHaveBeenCalledWith("routine-existing"));
     expect(await screen.findByText(/Loaded the server-owned procedure Reusable public check/)).toBeInTheDocument();
@@ -1641,6 +1643,7 @@ describe("ProcedureV2Review", () => {
 
     render(<ProcedureV2Review ownerPrincipalId="operator:one" ownerSessionId="session-1" goals={[goal]} />);
     const selector = await screen.findByLabelText("Existing reviewed procedure");
+    await waitFor(() => expect(within(selector).getByRole("option", { name: /Reusable public check/ })).toHaveValue("routine-existing"));
     fireEvent.change(selector, { target: { value: "routine-existing" } });
 
     expect(await screen.findByRole("alert")).toHaveTextContent("not bound to the current operator");

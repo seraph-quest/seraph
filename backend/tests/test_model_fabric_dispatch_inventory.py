@@ -303,6 +303,15 @@ def _review(
 
 _CANONICAL_ADAPTERS = (
     _review(
+        "model_fabric/near_text.py",
+        87,
+        "_read_response",
+        "client.stream",
+        "canonical_adapter",
+        "ADR-025 fixed HTTPS nonstreaming NEAR leaf, called through run_preflighted_adapter after current native authority, plaintext policy, final-payload preflight and durable accounting ownership; transfer has deadline/byte bounds with TLS verification and redirects disabled.",
+        "Retain as the dedicated near_text_native/near.text admitted leaf; preserve shared serial admission, policy rechecks and accounting ownership before extending callers.",
+    ),
+    _review(
         "llm_runtime.py",
         1671,
         "_governed_research_chat_completion",
@@ -407,7 +416,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        1278,
+        1464,
         "_execute_canary_transport",
         "client.post",
         "capability_probe",
@@ -416,7 +425,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        1291,
+        1477,
         "_execute_canary_transport",
         "client.stream",
         "capability_probe",
@@ -425,7 +434,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        1306,
+        1492,
         "_execute_canary_transport",
         "client.post",
         "capability_probe",

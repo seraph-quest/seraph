@@ -9,7 +9,7 @@ worker process, artifacts, and readback all remain real.
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -18,6 +18,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import threading
 from types import SimpleNamespace
 from typing import Any
 import uuid
@@ -677,6 +678,21 @@ def _publication_worker_receipt_projection(manifest, readback) -> dict[str, Any]
             "function": function, "line": line}
 
 
+from src.execution import repo_worker as _publication_worker_module
+from src.execution.repo_publication_runtime import BOOTSTRAP as _PUBLICATION_BOOTSTRAP
+
+_PUBLICATION_ORIGINAL_EXECUTE = LocalRepoRepairExecutor.execute_job
+_PUBLICATION_ORIGINAL_EXECUTE_CODE = _PUBLICATION_ORIGINAL_EXECUTE.__code__
+_PUBLICATION_ORIGINAL_RUN_JOB_CODE = _publication_worker_module.run_job.__code__
+_PUBLICATION_ORIGINAL_RUN_FIXED = _publication_worker_module._run_fixed
+_PUBLICATION_BOOTSTRAP_CANDIDATES = (
+    (b"actual copied libpython binding unavailable\n", "copied_runtime_bootstrap_candidate_12"),
+    (b"actual copied libpython bytes changed\n", "copied_runtime_bootstrap_candidate_14"),
+    (b"trusted pytest origin unavailable\n", "copied_runtime_bootstrap_candidate_21"),
+    (b"undeclared trusted runner import origin\n", "copied_runtime_bootstrap_candidate_24"),
+)
+
+
 def _publication_worker_blocked_diagnostic(error: BaseException) -> dict[str, Any]:
     # Only already decoded original denial-frame values; never reopen receipts.
     from src.execution.repo_sandbox import LocalRepoRepairExecutor, RepoSandboxError
@@ -696,7 +712,7 @@ def _publication_worker_blocked_diagnostic(error: BaseException) -> dict[str, An
                     if traceback is None:
                         break
                     frame = traceback.tb_frame
-                    if (frame.f_code is LocalRepoRepairExecutor.execute_job.__code__
+                    if (frame.f_code is _PUBLICATION_ORIGINAL_EXECUTE_CODE
                         and frame.f_globals.get("__name__") == "src.execution.repo_sandbox"
                         and frame.f_code.co_name == "execute_job" and traceback.tb_lineno == 3478):
                         return _publication_worker_receipt_projection(
@@ -706,6 +722,86 @@ def _publication_worker_blocked_diagnostic(error: BaseException) -> dict[str, An
     except Exception:
         return unavailable
     return unavailable
+
+
+def _publication_bootstrap_projection(result):
+    if (type(result) is not tuple or len(result) != 4 or type(result[0]) is not int
+        or type(result[1]) is not bytes or type(result[2]) is not bytes or type(result[3]) is not bool
+        or result[3]):
+        return "copied_runtime_bootstrap_unavailable"
+    if result[0] == 0:
+        return None
+    if len(result[2]) <= 512:
+        for stderr, candidate in _PUBLICATION_BOOTSTRAP_CANDIDATES:
+            if result[2] == stderr:
+                return candidate
+    return "copied_runtime_bootstrap_unknown"
+
+
+def _publication_bootstrap_call_matches(frame, argv):
+    if (frame.f_code is not _PUBLICATION_ORIGINAL_RUN_JOB_CODE
+        or frame.f_globals.get("__name__") != "src.execution.repo_worker"
+        or frame.f_code.co_name != "run_job" or frame.f_lineno != 908
+        or type(argv) is not list or not 8 <= len(argv) <= 128
+        or any(type(value) is not str or len(value) > 8192 for value in argv)
+        or argv[1:6] != ["-I", "-S", "-B", "-c", _PUBLICATION_BOOTSTRAP]):
+        return False
+    values = frame.f_locals
+    root, proof = values.get("runtime_root"), values.get("runtime_readback_path")
+    return (values.get("pytest_argv") is argv and type(values.get("publication_runtime")) is dict
+            and type(root) is type(Path()) and type(proof) is type(Path())
+            and argv[0] == str(root / "bin/python") and argv[7] == str(proof))
+
+
+@contextmanager
+def _publication_worker_diagnostic_context(monkeypatch):
+    # Class patch is scoped to an explicit fixture journey, never autouse.
+    local = threading.local()
+
+    def observed_run_fixed(*args, **kwargs):
+        matches = False
+        try:
+            argv = args[0] if args else kwargs.get("argv")
+            matches = (getattr(local, "active", False)
+                       and _publication_bootstrap_call_matches(sys._getframe(1), argv))
+        except Exception:
+            pass
+        result = _PUBLICATION_ORIGINAL_RUN_FIXED(*args, **kwargs)
+        if matches:
+            try:
+                candidate = _publication_bootstrap_projection(result)
+                if candidate is not None:
+                    local.bootstrap = (candidate if local.bootstrap is None
+                                       else "copied_runtime_bootstrap_ambiguous")
+            except Exception:
+                local.bootstrap = "copied_runtime_bootstrap_unavailable"
+        return result
+
+    def observed_execute(self, *args, **kwargs):
+        previous = (getattr(local, "active", False), getattr(local, "bootstrap", None))
+        local.active, local.bootstrap = True, None
+        try:
+            return _PUBLICATION_ORIGINAL_EXECUTE(self, *args, **kwargs)
+        except RepoSandboxError as exc:
+            try:
+                diagnostic = _publication_worker_blocked_diagnostic(exc)
+            except Exception:
+                diagnostic = {"guard_candidate": "worker_input_diagnostic_unavailable"}
+            try:
+                diagnostic = dict(diagnostic)
+                diagnostic["bootstrap_candidate"] = local.bootstrap or "copied_runtime_bootstrap_unknown"
+                print("PUBLICATION_WORKER_BLOCKED_DIAGNOSTIC=" + json.dumps(diagnostic, sort_keys=True))
+            except Exception:
+                pass
+            raise
+        finally:
+            local.active, local.bootstrap = previous
+
+    from src.execution.repo_sandbox import RepoSandboxError
+    with monkeypatch.context() as scoped:
+        scoped.setattr(LocalRepoRepairExecutor, "execute_job", observed_execute)
+        scoped.setattr(_publication_worker_module, "_run_fixed", observed_run_fixed)
+        yield
 
 
 async def _prepare_native_flow(

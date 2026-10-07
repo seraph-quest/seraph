@@ -19,6 +19,11 @@ ORIGIN = {"Origin": "http://localhost:3001"}
 
 
 async def actual_repair(client, async_db, tmp_path, monkeypatch):
+    with native._publication_worker_diagnostic_context(monkeypatch):
+        return await _actual_repair(client, async_db, tmp_path, monkeypatch)
+
+
+async def _actual_repair(client, async_db, tmp_path, monkeypatch):
     async def default_login():
         from src.auth.service import authenticate_session
         response = await client.post("/api/auth/login", json={"password": "native-vertical-auth-secret"}, headers=ORIGIN)

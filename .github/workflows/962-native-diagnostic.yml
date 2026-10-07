@@ -1,0 +1,72 @@
+# Temporary #962 diagnostic probe; remove before reviewed #962 merge.
+name: Native publication diagnostic
+
+on:
+  pull_request:
+    branches: [develop]
+    paths:
+      - .github/workflows/962-native-diagnostic.yml
+      - .github/workflows/test.yml
+      - backend/scripts/prepare_ci_shared_python.py
+      - backend/tests/test_repo_publication_runtime.py
+      - backend/tests/test_repo_repair_local_vertical.py
+      - backend/tests/test_repo_worker_blocked_diagnostic.py
+      - backend/tests/test_repo_publication_vertical.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-publication-diagnostic-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  native-publication-diagnostic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      OPENROUTER_API_KEY: ""
+      OPENAI_API_KEY: ""
+      ANTHROPIC_API_KEY: ""
+      WORKSPACE_DIR: ${{ runner.temp }}/seraph-native-diagnostic
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact pull request head
+        timeout-minutes: 1
+        working-directory: .
+        env:
+          EXPECTED_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          actual_head="$(git rev-parse --verify HEAD)"
+          test "$actual_head" = "$EXPECTED_PR_HEAD_SHA"
+          printf 'NATIVE_DIAGNOSTIC_SOURCE_HEAD=%s\n' "$actual_head"
+
+      - name: Install shared Python 3.12.15
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.15"
+          architecture: x64
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Prepare shared Python runtime
+        timeout-minutes: 2
+        run: |
+          "${pythonLocation}/bin/python3.12" scripts/prepare_ci_shared_python.py
+
+      - name: Install dependencies
+        run: uv sync --group dev --python "${pythonLocation}/bin/python3.12" --python-preference only-system
+
+      - name: Run original native publication test and diagnostic fixtures
+        timeout-minutes: 5
+        run: |
+          uv run pytest -q tests/test_repo_publication_runtime.py::test_actual_bounded_profile_repair_has_full_runtime_and_closed_environment tests/test_repo_worker_blocked_diagnostic.py

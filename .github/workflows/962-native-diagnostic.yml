@@ -31,7 +31,6 @@ jobs:
       OPENROUTER_API_KEY: ""
       OPENAI_API_KEY: ""
       ANTHROPIC_API_KEY: ""
-      WORKSPACE_DIR: ${{ runner.temp }}/seraph-native-diagnostic
     steps:
       - uses: actions/checkout@v4
         with:
@@ -68,5 +67,7 @@ jobs:
 
       - name: Run original native publication test and diagnostic fixtures
         timeout-minutes: 5
+        env:
+          WORKSPACE_DIR: ${{ runner.temp }}/seraph-native-diagnostic
         run: |
           uv run pytest -q tests/test_repo_publication_runtime.py::test_actual_bounded_profile_repair_has_full_runtime_and_closed_environment tests/test_repo_worker_blocked_diagnostic.py

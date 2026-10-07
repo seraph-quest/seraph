@@ -562,6 +562,35 @@ async def _activate_v2_routine(
     return routines, prepared, int(active["revision"])
 
 
+async def _print_browser_canonical_failure(async_db: Any, task_id: str,
+    *, attempt_id: str | None = None) -> None:
+    # Failure-only scalar custody; never print input, checkpoint text or secrets.
+    async with async_db() as db:
+        task = (await db.execute(select(WorkBoardTask).where(
+            WorkBoardTask.task_id == task_id))).scalar_one()
+        query = select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == task_id)
+        if attempt_id is not None:
+            query = query.where(WorkBoardAttempt.attempt_id == attempt_id)
+        else:
+            query = query.order_by(WorkBoardAttempt.fencing_token.desc(),
+                WorkBoardAttempt.attempt_id.desc()).limit(1)
+        attempt = (await db.execute(query)).scalar_one_or_none()
+        run = None
+        if attempt is not None and attempt.workflow_run_id:
+            run = (await db.execute(select(WorkflowRunState).where(
+                WorkflowRunState.run_identity == attempt.workflow_run_id))).scalar_one_or_none()
+        from src.api.work_board import _attempt_payload
+        print("browser-source-canonical-failure " + json.dumps({
+            "task_id": task.task_id, "task_status": task.status.value,
+            "block_kind": task.block_kind, "block_reason": task.block_reason,
+            "readback_status": _attempt_payload(attempt)["readback_status"] if attempt else None,
+            "attempt_id": attempt.attempt_id if attempt else None,
+            "native_job_id": attempt.workflow_run_id if attempt else None,
+            "native_status": run.status if run else None,
+            "native_failure_reason": run.failure_reason if run else None,
+        }, sort_keys=True), flush=True)
+
+
 async def _seed_browser_source(
     *,
     async_db: Any,
@@ -676,7 +705,39 @@ async def _seed_browser_source(
     async def fixture_resolver(*_: Any) -> list[str]:
         return ["93.184.216.34"]
 
-    real_runner = BrowserTaskRunner
+    from src.browser.task_runner import BrowserTaskError
+
+    class DiagnosticBrowserTaskRunner(BrowserTaskRunner):
+        async def _execute(self, **kwargs: Any) -> dict[str, Any]:
+            try:
+                return await super()._execute(**kwargs)
+            except BrowserTaskError as exc:
+                causes = []
+                lease_frames = []
+                cause = exc.__cause__
+                while cause is not None and len(causes) < 4:
+                    causes.append(type(cause).__name__)
+                    from src.workflows.job_runtime import DurableJobLeaseError
+                    if isinstance(cause, DurableJobLeaseError):
+                        frame = cause.__traceback__
+                        while frame is not None:
+                            try:
+                                relative = Path(frame.tb_frame.f_code.co_filename).resolve().relative_to(
+                                    Path(__file__).resolve().parents[1])
+                            except ValueError:
+                                pass
+                            else:
+                                lease_frames.append({"file": relative.as_posix(),
+                                    "function": frame.tb_frame.f_code.co_name, "line": frame.tb_lineno})
+                            frame = frame.tb_next
+                    cause = cause.__cause__
+                print("browser-execution-exception-class " + json.dumps({
+                    "code": exc.code, "class": type(exc).__name__,
+                    "cause_classes": causes, "lease_frames": lease_frames[-5:],
+                }, sort_keys=True), flush=True)
+                raise
+
+    real_runner = DiagnosticBrowserTaskRunner
 
     def runner_factory(**kwargs: Any) -> Any:
         kwargs["browser_launcher"] = browser if callable(browser) else (lambda: browser)
@@ -694,23 +755,8 @@ async def _seed_browser_source(
     # roots.
     result = await dispatcher._admit_execute_project(claim)
     if result["completed"] is not True:
-        # Failure-only scalar custody; never print input, checkpoint text or secrets.
-        async with async_db() as db:
-            failed_task = (await db.execute(select(WorkBoardTask).where(
-                WorkBoardTask.task_id == mutation.task.task_id))).scalar_one()
-            failed_attempt = (await db.execute(select(WorkBoardAttempt).where(
-                WorkBoardAttempt.attempt_id == claim.attempt.attempt_id))).scalar_one()
-            failed_run = (await db.execute(select(WorkflowRunState).where(
-                WorkflowRunState.run_identity == failed_attempt.workflow_run_id))).scalar_one_or_none()
-            from src.api.work_board import _attempt_payload
-            print("browser-source-canonical-failure " + json.dumps({
-                "task_id": failed_task.task_id, "task_status": failed_task.status.value,
-                "block_kind": failed_task.block_kind, "block_reason": failed_task.block_reason,
-                "readback_status": _attempt_payload(failed_attempt)["readback_status"],
-                "attempt_id": failed_attempt.attempt_id, "native_job_id": failed_attempt.workflow_run_id,
-                "native_status": failed_run.status if failed_run else None,
-                "native_failure_reason": failed_run.failure_reason if failed_run else None,
-            }, sort_keys=True), flush=True)
+        await _print_browser_canonical_failure(async_db, mutation.task.task_id,
+            attempt_id=claim.attempt.attempt_id)
     assert result["completed"] is True, result
 
     async with async_db() as db:

@@ -22,6 +22,8 @@ import { ResearchDossierPanel } from "./ResearchDossierPanel";
 import { JsonFormatterPanel } from "./JsonFormatterPanel";
 import { isAuthoredCapability } from "../../lib/toolPackage";
 import { DocumentComparisonPanel } from "./DocumentComparisonPanel";
+import { NearTextWorkPanel } from "./NearTextWorkPanel";
+import { NEAR_TEXT_CAPABILITY } from "../../lib/nearText";
 import { TaskEffectRecovery } from "./TaskEffectRecovery";
 import { TaskEvidencePanel } from "./TaskEvidencePanel";
 import { TelegramTaskNotice } from "./TelegramTaskNotice";
@@ -853,6 +855,7 @@ function WorkBoardPanel({
   const [formatterOpen, setFormatterOpen] = useState(false);
   const [authoredPackageOpen, setAuthoredPackageOpen] = useState(false);
   const [documentOpen, setDocumentOpen] = useState(false);
+  const [nearTextOpen, setNearTextOpen] = useState(false);
   const [browserTaskReceipt, setBrowserTaskReceipt] = useState<BrowserTaskSubmissionReceipt | null>(null);
   const [calendarPrepOpen, setCalendarPrepOpen] = useState(Boolean(pendingCalendarAtMount));
   const [calendarPrepReceipt, setCalendarPrepReceipt] = useState<CalendarPrepResponse | null>(null);
@@ -2910,6 +2913,7 @@ function WorkBoardPanel({
 
   const canRetry = Boolean(
     selectedTask
+    && selectedTask.capability_id !== NEAR_TEXT_CAPABILITY
     && selectedTask.status === "blocked"
     && ["retry", "restore_prerequisite"].includes(selectedTask.recovery_action ?? "")
     && !isActiveAttempt(selectedTask)
@@ -3213,6 +3217,7 @@ function WorkBoardPanel({
           <button type="button" className="cockpit-feedback-button" onClick={() => setFormatterOpen(true)}>Isolated JSON formatter</button>
           <button type="button" className="cockpit-feedback-button" onClick={() => setAuthoredPackageOpen(true)}>Reviewed authored package</button>
           <button type="button" className="cockpit-feedback-button" onClick={() => setDocumentOpen(true)}>Private invoice comparison</button>
+          <button type="button" className="cockpit-feedback-button" onClick={() => setNearTextOpen(true)}>NEAR text question</button>
           <button type="button" className="cockpit-feedback-button" onClick={() => { setCalendarPrepReceipt(null); setCalendarPrepOpen(true); }}>
             Calendar meeting prep
           </button>
@@ -3597,7 +3602,7 @@ function WorkBoardPanel({
                       <button type="submit" className="cockpit-feedback-button self-start" disabled={busyAction || !unblockResolution.trim() || unblockResolution.trim().length > 1000}>Unblock after rechecking authority</button>
                     </form>
                   )}
-                  {selectedTask.status === "blocked" && ["retry", "restore_prerequisite"].includes(selectedTask.recovery_action ?? "") && !isActiveAttempt(selectedTask) && (
+                  {selectedTask.capability_id !== NEAR_TEXT_CAPABILITY && selectedTask.status === "blocked" && ["retry", "restore_prerequisite"].includes(selectedTask.recovery_action ?? "") && !isActiveAttempt(selectedTask) && (
                     <button
                       type="button"
                       className="cockpit-feedback-button"
@@ -3606,7 +3611,7 @@ function WorkBoardPanel({
                       onClick={() => void performAction("retry", {}, true)}
                     >{selectedTask.recovery_action === "restore_prerequisite" ? "Retry after rechecking prerequisites (new attempt)" : "Retry (new attempt)"}</button>
                   )}
-                  {selectedTask.status === "blocked" && ["retry", "restore_prerequisite"].includes(selectedTask.recovery_action ?? "") && !canRetry && (
+                  {selectedTask.capability_id !== NEAR_TEXT_CAPABILITY && selectedTask.status === "blocked" && ["retry", "restore_prerequisite"].includes(selectedTask.recovery_action ?? "") && !canRetry && (
                     <div className="w-full text-amber-200" role="status">
                       Retry stays disabled until the current goal revision limit is loaded and acknowledged. {detailLimitError ?? "Check the current runtime limit above."}
                     </div>
@@ -4094,7 +4099,7 @@ function WorkBoardPanel({
                         return (
                           <div key={`${attempt.attempt_id}:receipt:${index}`} className="mt-1 border-t border-white/10 pt-1">
                             <div>{receiptTitle(receipt)} · {safeReferenceLabel(inspectReference)}</div>
-                            <div>{receipt.status ?? receipt.outcome ?? "Receipt"}{receipt.verified === true ? " · verified" : ""}{receipt.readback_status ? ` · readback ${READBACK_LABELS[receipt.readback_status]}` : ""}</div>
+                            <div>{receipt.status ?? receipt.outcome ?? "Receipt"}{receipt.verified === true ? selectedTask.capability_id === NEAR_TEXT_CAPABILITY ? " · local readback passed" : " · verified" : ""}{receipt.readback_status ? ` · readback ${READBACK_LABELS[receipt.readback_status]}` : ""}</div>
                             {(receipt.checkpoint_id || typeof receipt.action_index === "number" || typeof receipt.action_count === "number" || typeof receipt.request_count === "number") && (
                               <div className="mt-1 text-[10px]" aria-label="Browser execution progress">
                                 Browser progress
@@ -4137,7 +4142,7 @@ function WorkBoardPanel({
                     return (
                       <div key={`task-ref:${index}`} className="rounded bg-black/20 p-2">
                         <div>{receiptTitle(reference)} · {safeReferenceLabel(inspectReference)}</div>
-                        <div>{reference.status ?? reference.outcome ?? "Reference"}{reference.verified === true ? " · verified" : ""}</div>
+                        <div>{reference.status ?? reference.outcome ?? "Reference"}{reference.verified === true ? selectedTask.capability_id === NEAR_TEXT_CAPABILITY ? " · local readback passed" : " · verified" : ""}</div>
                         {(reference.checkpoint_id || typeof reference.action_index === "number" || typeof reference.action_count === "number" || typeof reference.request_count === "number") && (
                           <div className="mt-1 text-[10px]" aria-label="Browser execution progress">
                             Browser progress
@@ -4162,8 +4167,8 @@ function WorkBoardPanel({
               </section>
 
               <SelectedContextInspector key={`selected-context:${ownerPrincipalId}:${ownerSessionId}:${selectedTask.task_id}`} task={selectedTask} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}/>
-              {selectedTask.capability_id === "work.document-compare.v1" || selectedTask.capability_id === "work.json-format.v1" || isAuthoredCapability(selectedTask.capability_id??"") ? <section aria-label="Private native memory policy" className="mt-3 text-xs">
-                This private native capability has an explicit no_learning policy. Its native receipt and verified output record that result; no memory proposal is created.
+              {selectedTask.capability_id === "work.document-compare.v1" || selectedTask.capability_id === "work.json-format.v1" || selectedTask.capability_id === NEAR_TEXT_CAPABILITY || isAuthoredCapability(selectedTask.capability_id??"") ? <section aria-label="Private native memory policy" className="mt-3 text-xs">
+                This capability has an explicit no_learning policy. Its native receipt records that result; no memory proposal is created.
               </section> : <WorkBoardMemoryReview
                 task={selectedTask}
                 ownerPrincipalId={ownerPrincipalId}
@@ -4175,6 +4180,10 @@ function WorkBoardPanel({
                 onChanged={async () => { await refreshSnapshot(); }} />}
               {selectedTask.capability_id === "work.document-compare.v1" && <DocumentComparisonPanel
                 ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} task={selectedTask} />}
+              {selectedTask.capability_id === NEAR_TEXT_CAPABILITY && <NearTextWorkPanel
+                key={`near-text-inspector:${ownerPrincipalId}:${ownerSessionId}:${selectedTask.task_id}`}
+                ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} task={selectedTask}
+                onOpenAccounting={onOpenAccounting} />}
               {(selectedTask.capability_id === "work.json-format.v1" || isAuthoredCapability(selectedTask.capability_id??"")) && <JsonFormatterPanel
                 key={`formatter-inspector:${ownerPrincipalId}:${ownerSessionId}:${selectedTask.task_id}`}
                 task={selectedTask} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
@@ -4303,6 +4312,12 @@ function WorkBoardPanel({
         goals={allGoals} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
         onClose={() => setDocumentOpen(false)} onCreated={async (task) => {
           setDocumentOpen(false); await refreshSnapshot(); if (!stoppedRef.current) openTask(task.task_id);
+      }} />}
+      {nearTextOpen && <NearTextWorkPanel key={`${ownerPrincipalId}:${ownerSessionId}:near-text-create`}
+        goals={allGoals} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
+        onOpenAccounting={onOpenAccounting} onOpenApprovals={onOpenApprovals}
+        onClose={() => setNearTextOpen(false)} onCreated={async (task) => {
+          setNearTextOpen(false); await refreshSnapshot(); if (!stoppedRef.current) openTask(task.task_id);
         }} />}
       {researchOpen && <ResearchDossierPanel key={`${ownerPrincipalId}:${ownerSessionId}:research-create`}
         goals={allGoals} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}

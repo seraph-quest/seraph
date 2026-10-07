@@ -295,7 +295,7 @@ def _metadata_digest(row: WorkBoardInputArtifact) -> str:
                 "revision": row.revision,
                 **({"document_metadata_json": row.document_metadata_json,
                     "document_reserved_bytes": row.document_reserved_bytes}
-                    if row.capability_id == "work.document-compare.v1" else {}),
+                    if row.capability_id in {"work.document-compare.v1", "inference.near-text.v1"} else {}),
             }
         )
     ).hexdigest()
@@ -815,6 +815,10 @@ async def prepare_input_artifact(
     observed_at = _utc(now or _now())
     if request.capability_id == "work.document-compare.v1":
         raise BoardError("document_pair_reservation_required", "Select and stream a private document pair first", status_code=422)
+    near_authority = None
+    if request.capability_id == "inference.near-text.v1":
+        from src.work_board.near_text_native import seal_input_authority
+        near_authority = await seal_input_authority(db,owner,request)
     inputs, _payload_hex, payload_digest = await _validate_request(
         db,
         owner,
@@ -957,6 +961,7 @@ async def prepare_input_artifact(
         state="pending",
         expires_at=expires_at,
         revision=1,
+        document_metadata_json=near_authority,
     )
     db.add(row)
     await db.flush()

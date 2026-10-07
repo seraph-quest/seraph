@@ -2722,7 +2722,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 effect_receipts_json="[]",
             )
             await recheck_run_dependencies(db, run, admission_dependencies)
-            if identity.job_kind == "forgejo_issue_title_v1" and admission_authority_check is None:
+            if identity.job_kind in {"forgejo_issue_title_v1", "inference.near-text.v1"} and admission_authority_check is None:
                 raise DurableJobAdmissionDenied("forgejo_fixed_native_admission_required")
             if identity.job_kind == "guardian_opportunity_assess" and admission_authority_check is None:
                 raise DurableJobAdmissionDenied("guardian_opportunity_fixed_native_admission_required")
@@ -3096,6 +3096,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         terminal_authority_check: Callable[[Any, Any], Awaitable[None]] | None = None,
         cancellation_authority_check: Callable[[Any, Any], Awaitable[None]] | None = None,
         opportunity_preference_witness=None,
+        near_text_witness=None,
     ) -> dict[str, Any]:
         if to_status not in DURABLE_JOB_STATUSES:
             raise DurableJobTransitionError(f"unknown durable job status: {to_status}")
@@ -3124,17 +3125,21 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             dependency_guard = (preflight_run.job_kind in {'browser_public_task',
                 'work.evidence-dossier.v1', 'work.local-evidence-report.v1'}
                 and to_status in {'queued', 'running', 'succeeded', 'degraded'})
+            near_queue_guard = preflight_run.job_kind == "inference.near-text.v1" and to_status == "queued"
             guardian_queue_guard = preflight_run.job_kind == "guardian_opportunity_assess" and to_status == "queued"
             preference_guard = preflight_run.job_kind == "memory.opportunity-preference.v1" and to_status in {"queued", "succeeded", "degraded"}
             if dependency_guard:
                 staged_dependencies = await stage_run_dependencies(db, preflight_run)
             await db.rollback()
-            if (terminal_authority_check is not None and to_status in {"succeeded", "degraded"}) or dependency_guard or cancellation_authority_check is not None or guardian_queue_guard or preference_guard:
+            if (terminal_authority_check is not None and to_status in {"succeeded", "degraded"}) or dependency_guard or cancellation_authority_check is not None or guardian_queue_guard or preference_guard or near_queue_guard:
                 bind = db.get_bind()
                 dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
                 if dialect_name == "sqlite":
                     await db.execute(text("BEGIN IMMEDIATE"))
             run = await self._fetch(db, job_id)
+            if near_queue_guard:
+                from src.work_board.near_text_native import recheck_native_queue
+                await recheck_native_queue(db,run,witness=near_text_witness)
             if preference_guard:
                 from src.work_board.opportunity_preference_native import recheck_native
                 await recheck_native(db,run,witness=opportunity_preference_witness,terminal=to_status in {"succeeded","degraded"})
@@ -3360,7 +3365,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                         to_status, recovery_reason = _effect_recovery_state(effect_ledger)
                         reason = reason or f"{recovery_reason}_pending_before_transition"
             if to_status in {"succeeded", "degraded"}:
-                if run.job_kind == "forgejo_issue_title_v1" and terminal_authority_check is None:
+                if run.job_kind in {"forgejo_issue_title_v1", "inference.near-text.v1"} and terminal_authority_check is None:
                     raise DurableJobTransitionError("Forgejo terminalization requires its fixed native authority callback")
                 if run.job_kind == "guardian_opportunity_assess" and terminal_authority_check is None:
                     raise DurableJobTransitionError("Opportunity terminalization requires its fixed native authority callback")
@@ -3898,7 +3903,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         async with self._session() as db:
             from src.memory.evidence_dependencies import stage_run_dependencies, recheck_run_dependencies
             preflight_run = await self._fetch(db, job_id)
-            if preflight_run.job_kind == "forgejo_issue_title_v1" and claim_authority_check is None:
+            if preflight_run.job_kind in {"forgejo_issue_title_v1", "inference.near-text.v1"} and claim_authority_check is None:
                 raise DurableJobLeaseError("Forgejo claims require the fixed native authority callback")
             if preflight_run.job_kind == "guardian_opportunity_assess" and claim_authority_check is None:
                 raise DurableJobLeaseError("Opportunity claims require the fixed native authority callback")
@@ -3928,7 +3933,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 if run.job_kind == "work_board_proposal":
                     from src.guardian.opportunity_plans import assert_linked_plan_native
                     await assert_linked_plan_native(db, run)
-                elif run.job_kind not in {"readonly_research_child", "document_invoice_compare_v1", "local_authored_json", "forgejo_issue_title_v1", "guardian_opportunity_assess"}:
+                elif run.job_kind not in {"readonly_research_child", "document_invoice_compare_v1", "local_authored_json", "forgejo_issue_title_v1", "guardian_opportunity_assess", "inference.near-text.v1"}:
                     raise DurableJobLeaseError("phase-bound claims require a fixed native capability")
                 await claim_authority_check(db, run)
             await _assert_canonical_goal_fence(

@@ -113,7 +113,7 @@ def _assert_credential_free_configuration(payload):
                 normalized = str(key).lower().replace("-", "").replace("_", "")
                 if normalized in {"apikey", "authorization", "password", "secret", "token", "accesstoken", "refreshtoken"}:
                     raise ProductionWorkspaceReconciliationError("provider policy inline credential unavailable")
-                if key in {"endpoint", "base_url"} and isinstance(item, str) and urlsplit(item).username is not None:
+                if key in {"endpoint", "base_url", "api_base"} and isinstance(item, str) and urlsplit(item).username is not None:
                     raise ProductionWorkspaceReconciliationError("provider policy endpoint credential unavailable")
                 inspect(item)
         elif isinstance(value, list):
@@ -122,6 +122,9 @@ def _assert_credential_free_configuration(payload):
     if not isinstance(payload, dict):
         raise ProductionWorkspaceReconciliationError("provider policy configuration unavailable")
     inspect(payload)
+    near = payload.get("near_text")
+    if near is not None and (not isinstance(near, dict) or near.get("api_base") != "https://cloud-api.near.ai/v1"):
+        raise ProductionWorkspaceReconciliationError("provider policy endpoint unavailable")
 
 
 def policy_continuity(workspace, payload):
@@ -210,7 +213,7 @@ def revoke_restored_policy(*, active, target):
     candidate = target / "model-fabric-settings.json"
     if not existing.get("provider_policy", {}).get("revision", 0) and candidate.is_file() and not candidate.is_symlink():
         contents = json.loads(candidate.read_text())
-        if not isinstance(contents, dict) or not contents.get("openrouter_setup"):
+        if not isinstance(contents, dict) or not (contents.get("openrouter_setup") or contents.get("near_text")):
             return {"state": "uninitialized"}
     with maintenance_accounting_lock(active) as workspace:
         receipt = read_lifecycle_receipt(workspace) or {}
@@ -220,7 +223,7 @@ def revoke_restored_policy(*, active, target):
                 raise ProductionWorkspaceReconciliationError("provider policy restore configuration unavailable")
             return {"state": "uninitialized"}
         payload = json.loads(path.read_text())
-        if not isinstance(payload, dict) or not payload.get("openrouter_setup"):
+        if not isinstance(payload, dict) or not (payload.get("openrouter_setup") or payload.get("near_text")):
             if receipt.get("provider_policy", {}).get("revision", 0):
                 raise ProductionWorkspaceReconciliationError("provider policy restore configuration unavailable")
             return {"state": "uninitialized"}

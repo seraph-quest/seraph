@@ -139,6 +139,39 @@ export interface OpenRouterSetupStatus {
   provider_calls: string;
 }
 
+export const NEAR_TEXT_PROFILE = "near.text";
+export const NEAR_TEXT_MODEL = "z-ai/glm-5.3-flash";
+export const NEAR_TEXT_API_BASE = "https://cloud-api.near.ai/v1";
+export const NEAR_TEXT_DISCLOSURE = "NEAR receives the question in plaintext over HTTPS.";
+
+export interface NearTextSetupInput {
+  schema_version: "seraph.near.text.v1";
+  enabled: boolean;
+  profile_id: typeof NEAR_TEXT_PROFILE;
+  model_id: typeof NEAR_TEXT_MODEL;
+  api_base: typeof NEAR_TEXT_API_BASE;
+  max_output_tokens: number;
+  timeout_seconds: number;
+  request_cost_bound_microusd: number;
+  spend_ceiling_microusd: number;
+  plaintext_provider_egress_acknowledged: boolean;
+  api_key?: string;
+}
+
+export interface NearTextSetupStatus extends Omit<NearTextSetupInput, "api_key" | "plaintext_provider_egress_acknowledged"> {
+  credential_ref: "vault:near_text_api_key";
+  credential_fingerprint: string | null;
+  plaintext_egress_consent_revision: number | null;
+  key_present: boolean;
+  consent_current: boolean;
+  status: "disabled" | "configuration_required" | "blocked" | "configured";
+  reason_code: string | null;
+  tls_transport: true;
+  tee_verified: false;
+  e2ee: false;
+  provider_plaintext_disclosure: typeof NEAR_TEXT_DISCLOSURE;
+}
+
 export interface ModelFabricSettingsStatus {
   schema_version: string;
   status: string;
@@ -159,6 +192,9 @@ export interface ModelFabricSettingsStatus {
   defaults: { egress_class: string; fallback_allowed: boolean };
   canary_endpoint: string;
   openrouter_setup?: OpenRouterSetupStatus | null;
+  near_text?: NearTextSetupStatus | null;
+  /** Local metadata failure marker; unrelated settings remain usable. */
+  near_text_metadata_unavailable?: boolean;
   inference_accounting?: InferenceAccountingStatus | null;
   egress_revision?: number;
   egress_revoked?: boolean;
@@ -281,6 +317,43 @@ function recordOf(value: unknown): Record<string, unknown> | null {
 
 function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+export function normalizeNearTextSetup(value: unknown): NearTextSetupStatus | null {
+  const row = recordOf(value);
+  const integer = (field: string, min: number, max: number) => typeof row?.[field] === "number"
+    && Number.isSafeInteger(row[field]) && (row[field] as number) >= min && (row[field] as number) <= max;
+  if (!row || row.schema_version !== "seraph.near.text.v1" || row.profile_id !== NEAR_TEXT_PROFILE
+    || row.model_id !== NEAR_TEXT_MODEL || row.api_base !== NEAR_TEXT_API_BASE
+    || typeof row.enabled !== "boolean" || !integer("max_output_tokens", 1, 1024)
+    || typeof row.timeout_seconds !== "number" || !Number.isFinite(row.timeout_seconds)
+    || row.timeout_seconds < 1 || row.timeout_seconds > 45
+    || !integer("request_cost_bound_microusd", 1, 1_000_000_000)
+    || !integer("spend_ceiling_microusd", 1, 1_000_000_000)
+    || (row.request_cost_bound_microusd as number) > (row.spend_ceiling_microusd as number)
+    || row.credential_ref !== "vault:near_text_api_key" || typeof row.key_present !== "boolean"
+    || typeof row.consent_current !== "boolean"
+    || !["disabled", "configuration_required", "blocked", "configured"].includes(String(row.status))
+    || !(row.credential_fingerprint === null || typeof row.credential_fingerprint === "string")
+    || !(row.plaintext_egress_consent_revision === null || integer("plaintext_egress_consent_revision", 1, Number.MAX_SAFE_INTEGER))
+    || !(row.reason_code === null || typeof row.reason_code === "string")
+    || row.tls_transport !== true || row.tee_verified !== false || row.e2ee !== false
+    || row.provider_plaintext_disclosure !== NEAR_TEXT_DISCLOSURE) return null;
+  // Whitelist read-only metadata so a secret accidentally returned by GET cannot
+  // enter the retained settings cache or become a subsequent PUT field.
+  return {
+    schema_version: "seraph.near.text.v1", enabled: row.enabled,
+    profile_id: NEAR_TEXT_PROFILE, model_id: NEAR_TEXT_MODEL, api_base: NEAR_TEXT_API_BASE,
+    max_output_tokens: row.max_output_tokens as number, timeout_seconds: row.timeout_seconds,
+    request_cost_bound_microusd: row.request_cost_bound_microusd as number,
+    spend_ceiling_microusd: row.spend_ceiling_microusd as number,
+    credential_ref: "vault:near_text_api_key",
+    credential_fingerprint: row.credential_fingerprint as string | null,
+    plaintext_egress_consent_revision: row.plaintext_egress_consent_revision as number | null,
+    key_present: row.key_present, consent_current: row.consent_current,
+    status: row.status as NearTextSetupStatus["status"], reason_code: row.reason_code as string | null,
+    tls_transport: true, tee_verified: false, e2ee: false, provider_plaintext_disclosure: NEAR_TEXT_DISCLOSURE,
+  };
 }
 
 function normalizeOpenRouterSetup(value: unknown): OpenRouterSetupStatus | null {
@@ -479,6 +552,7 @@ export function normalizeModelFabricSettings(value: unknown): ModelFabricSetting
   if (!record || typeof record.schema_version !== "string" || typeof record.status !== "string") return null;
   const defaults = recordOf(record.defaults);
   const policies = Array.isArray(record.workload_policies) ? record.workload_policies : [];
+  const nearText = normalizeNearTextSetup(record.near_text);
   return {
     schema_version: record.schema_version,
     status: record.status,
@@ -512,6 +586,8 @@ export function normalizeModelFabricSettings(value: unknown): ModelFabricSetting
       ? record.canary_endpoint
       : "/api/settings/model-fabric/canary",
     openrouter_setup: normalizeOpenRouterSetup(record.openrouter_setup),
+    near_text: nearText,
+    near_text_metadata_unavailable: record.near_text_metadata_unavailable === true || (record.near_text != null && !nearText),
     inference_accounting: normalizeInferenceAccounting(record.inference_accounting),
     egress_revision: typeof record.egress_revision === "number" ? record.egress_revision : undefined,
     egress_revoked: record.egress_revoked === true,

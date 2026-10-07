@@ -503,6 +503,9 @@ def _reject_authority_input_keys(value: Any, *, path: str = "input") -> None:
 
 
 def _typed_input_model(capability_id: str) -> type[BaseModel] | None:
+    if capability_id == "inference.near-text.v1":
+        from src.model_fabric.near_text_contracts import NearTextInput
+        return NearTextInput
     if capability_id == "work.context.selected_text.v1":
         from src.workflows.selected_context_contract import Metadata
         return Metadata
@@ -549,6 +552,7 @@ def _typed_input_model(capability_id: str) -> type[BaseModel] | None:
 
 
 REGISTERED_CAPABILITIES: dict[str, CapabilitySpec] = {
+    "inference.near-text.v1": CapabilitySpec("inference.near-text.v1", "1", secret_like=False),
     "memory.opportunity-preference.v1": CapabilitySpec("memory.opportunity-preference.v1", "1", secret_like=False),
     "work.context.selected_text.v1": CapabilitySpec(
         "work.context.selected_text.v1", "browser-selected-text-v1",
@@ -4209,9 +4213,9 @@ class WorkBoardDispatcher:
             return "executor_lane_mismatch", "The task executor does not match the registered capability lane"
         if not _text(task.typed_input_ref) or not _text(task.typed_input_digest):
             return "typed_input_missing", "The task has no complete typed input reference"
-        if (capability_id in {"browser.public-task.v1", "work.research-dossier.v1", "work.json-format.v1", "work.document-compare.v1"} or is_authored(capability_id)) and not _text(task.input_artifact_id):
+        if (capability_id in {"browser.public-task.v1", "work.research-dossier.v1", "work.json-format.v1", "work.document-compare.v1", "inference.near-text.v1"} or is_authored(capability_id)) and not _text(task.input_artifact_id):
             return "browser_input_artifact_required", "Public browser tasks require a server-bound input artifact"
-        if capability_id in {"browser.public-task.v1", "work.research-dossier.v1", "work.json-format.v1", "work.document-compare.v1"} or is_authored(capability_id):
+        if capability_id in {"browser.public-task.v1", "work.research-dossier.v1", "work.json-format.v1", "work.document-compare.v1", "inference.near-text.v1"} or is_authored(capability_id):
             # Browser inputs are resolved through the owner-bound artifact
             # lifecycle before promotion. This checks the current state,
             # expiry, task/goal/capability binding and bounded nofollow
@@ -4331,6 +4335,13 @@ class WorkBoardDispatcher:
                 if snapshot["status"] != "ready" or snapshot.get("overrun_max_cost_microusd", 0):
                     return "research_accounting_blocked", "Resolve existing accounting continuity or provider overrun before research"
                 return None, None
+            if capability == "inference.near-text.v1":
+                from src.model_fabric.effective_policy import current_near_text_policy
+                from src.model_fabric.near_text_contracts import NearTextInput
+                configuration,_policy=current_near_text_policy()
+                if NearTextInput.model_validate(inputs).max_output_tokens>configuration.near_text.max_output_tokens:
+                    return "near_output_limit_exceeded", "The configured output cap changed"
+                return None,None
             if capability == "memory.opportunity-preference.v1":
                 from src.work_board.opportunity_preference_native import stage_task_authority
                 async with self.session_provider() as preference_db:
@@ -5988,6 +5999,11 @@ class WorkBoardDispatcher:
                     result["blocked"] = True
                     return result
             if direct_proof is not None:
+                if task.capability_id == "inference.near-text.v1":
+                    from src.work_board.near_text_native import read_output
+                    async with self.session_provider() as near_db:
+                        near_run = await near_db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == job_id))
+                        read_output(task,attempt,near_run)
                 if task.capability_id == "work.document-compare.v1":
                     from src.work_board.document_compare_native import read_output, stage_current
                     await stage_current(self.jobs,task,attempt,inputs)
@@ -6340,6 +6356,15 @@ class WorkBoardDispatcher:
         procedure_binding: ProcedureChildBinding | None = None,
     ) -> Mapping[str, Any]:
         capability_id = _text(task.capability_id)
+        if capability_id == "inference.near-text.v1":
+            from src.work_board.near_text_native import execute
+            if not admission_only:
+                self._active_worker_tasks[(task.task_id,attempt.attempt_id)] = asyncio.current_task()
+            try:
+                return await execute(task,attempt,inputs,jobs=self.jobs,runner=self.runner_id,
+                    admission_only=admission_only,session_provider=self.session_provider)
+            finally:
+                if not admission_only:self._active_worker_tasks.pop((task.task_id,attempt.attempt_id),None)
         if capability_id == "memory.opportunity-preference.v1":
             from src.work_board.opportunity_preference_native import execute
             if not admission_only:
@@ -8891,6 +8916,9 @@ class WorkBoardDispatcher:
 
         capability_id = _text(task.capability_id)
         binding_key = f"{task.task_id}:{attempt.attempt_id}"
+        if capability_id == "inference.near-text.v1":
+            from src.work_board.near_text_native import job_id, CAPABILITY
+            return job_id(task,attempt),task.owner_principal_id,CAPABILITY,None,binding_key
         if capability_id == "memory.opportunity-preference.v1":
             from src.work_board.opportunity_preference_native import job_id
             return job_id(task,attempt),task.owner_principal_id,capability_id,None,binding_key
@@ -9025,6 +9053,9 @@ class WorkBoardDispatcher:
         """Compute the service input digest where the adapter contract is closed."""
 
         capability_id = _text(task.capability_id)
+        if capability_id == "inference.near-text.v1":
+            from src.work_board.near_text_native import immutable_inputs
+            return _safe_digest(immutable_inputs(task,inputs))
         if task.capability_id == "memory.opportunity-preference.v1":
             from src.work_board.opportunity_preference_native import spec_for
             return _safe_digest(spec_for(task,attempt,inputs,deadline=_now()).inputs)
@@ -9159,7 +9190,7 @@ class WorkBoardDispatcher:
         *,
         procedure_binding: ProcedureChildBinding | None = None,
     ) -> dict[str, Any]:
-        if task.capability_id == "work.document-compare.v1" or is_tool_package(task.capability_id):
+        if task.capability_id in {"work.document-compare.v1", "inference.near-text.v1"} or is_tool_package(task.capability_id):
             if not isinstance(projection, Mapping):
                 raise DurableJobIdempotencyConflict("document expiry snapshot requires canonical admission")
             return WorkBoardDispatcher._canonical_identity_from_projection(task, attempt, inputs, projection)
@@ -9406,7 +9437,16 @@ class WorkBoardDispatcher:
             raise DurableJobIdempotencyConflict(
                 "adapter admission projection is missing canonical immutable digests"
             )
-        if task.capability_id == "work.document-compare.v1":
+        if task.capability_id == "inference.near-text.v1":
+            from src.work_board.near_text_native import immutable_inputs, digest
+            expected_input = _safe_digest(immutable_inputs(task,inputs))
+            if (digests["input_digest"] != expected_input or digests["authority_digest"] != _safe_digest(authority)
+                or digests["run_fingerprint"] != digest([immutable_inputs(task,inputs),authority])
+                or authority.get("input_digest") != task.typed_input_digest
+                or authority.get("task_id") != task.task_id or authority.get("attempt_id") != attempt.attempt_id
+                or authority.get("runtime_path") != "near_text_native"):
+                raise DurableJobIdempotencyConflict("NEAR original immutable admission changed")
+        elif task.capability_id == "work.document-compare.v1":
             from src.work_board.document_compare_native import spec_for
             original_deadline = _utc_datetime(datetime.fromisoformat(str(projection.get("deadline_at"))))
             expected_spec = spec_for(task, attempt, inputs, deadline=original_deadline,

@@ -8,6 +8,8 @@ on:
       - .github/workflows/962-native-diagnostic.yml
       - .github/workflows/test.yml
       - backend/scripts/prepare_ci_shared_python.py
+      - backend/scripts/prepare_ci_python_loader.py
+      - backend/tests/test_prepare_ci_python_loader.py
       - backend/tests/test_repo_publication_runtime.py
       - backend/tests/test_repo_repair_local_vertical.py
       - backend/tests/test_repo_worker_blocked_diagnostic.py
@@ -58,9 +60,10 @@ jobs:
         uses: astral-sh/setup-uv@v4
 
       - name: Prepare shared Python runtime
-        timeout-minutes: 2
+        timeout-minutes: 3
         run: |
-          "${pythonLocation}/bin/python3.12" scripts/prepare_ci_shared_python.py
+          /usr/bin/python3 -I -S -B scripts/prepare_ci_python_loader.py
+          "${pythonLocation}/bin/python3.12" -I -S -B scripts/prepare_ci_shared_python.py
 
       - name: Install dependencies
         run: uv sync --group dev --python "${pythonLocation}/bin/python3.12" --python-preference only-system

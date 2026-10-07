@@ -56,9 +56,10 @@ jobs:
         uses: astral-sh/setup-uv@v4
 
       - name: Prepare shared Python runtime
-        timeout-minutes: 2
+        timeout-minutes: 3
         run: |
-          "${pythonLocation}/bin/python3.12" scripts/prepare_ci_shared_python.py
+          /usr/bin/python3 -I -S -B scripts/prepare_ci_python_loader.py
+          "${pythonLocation}/bin/python3.12" -I -S -B scripts/prepare_ci_shared_python.py
 
       - name: Install dependencies
         run: uv sync --group dev --python "${pythonLocation}/bin/python3.12" --python-preference only-system

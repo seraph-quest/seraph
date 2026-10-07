@@ -29,7 +29,7 @@ it("keeps uncertain delivery on the same outbox and makes replacement explicit",
   fireEvent.click(screen.getByRole("button", { name: "Retry same notice" }));
   await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
   expect(fetchMock.mock.calls[2][0]).toMatch(/outbox-a\/deliver$/);
-  expect(screen.getByRole("button", { name: "Send fresh notice and retire old controls" })).toBeInTheDocument();
+  expect(await screen.findByRole("button", { name: "Send fresh notice and retire old controls" })).toBeInTheDocument();
 });
 
 it("keeps recovered history read-only and ignores late results after task changes", async () => {

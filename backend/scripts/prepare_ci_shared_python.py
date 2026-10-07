@@ -1,7 +1,8 @@
-"""CI-only preparation of the authenticated Actions CPython 3.12.15 runtime.
+"""CI-only preparation of Actions CPython's shared/stdlib runtime.
 
-Candidate for backend/scripts; not installed or executed during preparation.
-No product capture predicate, Python runtime content or feature is changed.
+Loader packaging is a separate system-interpreter step with a new derived
+executable identity. This step proves the actual selected library and preserves
+the remaining runtime bytes. Product capture predicates remain unchanged.
 """
 import hashlib
 import json
@@ -165,17 +166,17 @@ def raise_walk_error(error):
     raise error
 
 
-def plan(prefix, maps):
+def plan(prefix, maps, executable_pin=None):
     """Complete unsupported-case checks before chmod/unlink is possible."""
     tree = HeldDirectories(prefix)
     try:
-        return RuntimePlan(_plan(prefix, maps, tree), tree)
+        return RuntimePlan(_plan(prefix, maps, tree, executable_pin), tree)
     except BaseException:
         tree.close()
         raise
 
 
-def _plan(prefix, maps, tree):
+def _plan(prefix, maps, tree, executable_pin=None, verify_loaded=True):
     libfd = tree.hold(prefix / 'lib')
     alias = os.stat('libpython3.12.so', dir_fd=libfd, follow_symlinks=False)
     require(stat.S_ISLNK(alias.st_mode) and alias.st_uid == os.geteuid()
@@ -183,16 +184,16 @@ def _plan(prefix, maps, tree):
             'genuine shared-library alias mismatch')
     tree.alias_identity = identity(alias)
     pinned = {}
-    for relative, size, digest in (EXECUTABLE, SHARED, ARCHIVE):
+    for relative, size, digest in (executable_pin or EXECUTABLE, SHARED, ARCHIVE):
         info, actual = read_regular(prefix / relative, prefix, tree)
         require(info.st_size == size and actual == digest, 'authenticated distribution bytes mismatch')
         pinned[relative] = (info, actual)
     library = pinned[SHARED[0]][0]
     device = f'{os.major(library.st_dev):02x}:{os.minor(library.st_dev):02x}'
     rows = [line.split(maxsplit=5) for line in maps.splitlines() if 'libpython' in line]
-    require(rows and all(len(row) == 6 for row in rows), 'malformed/empty shared Python maps')
-    require(any('x' in row[1] for row in rows), 'no actual loaded shared Python')
-    require(all(len(row) == 6 and row[5] == str(prefix / SHARED[0])
+    require(not verify_loaded or rows and all(len(row) == 6 for row in rows), 'malformed/empty shared Python maps')
+    require(not verify_loaded or any('x' in row[1] for row in rows), 'no actual loaded shared Python')
+    require(not verify_loaded or all(len(row) == 6 and row[5] == str(prefix / SHARED[0])
                 and row[3] == device and int(row[4]) == library.st_ino for row in rows),
             'loaded library inode/device/path mismatch')
     records = {relative: pinned[relative] for relative in (EXECUTABLE[0], SHARED[0])}
@@ -345,9 +346,19 @@ def apply_plan(prefix, records):
 
 def prepare():
     prefix = selected_prefix()
-    records = plan(prefix, Path('/proc/self/maps').read_text())
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('ci_loader', Path(__file__).with_name('prepare_ci_python_loader.py'))
+    loader = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(loader)
+    derivation = loader.read_receipt(prefix)
+    records = plan(prefix, Path('/proc/self/maps').read_text(),
+                   (EXECUTABLE[0], derivation['derived']['bytes'], derivation['derived']['sha256']))
     try:
-        print(json.dumps(apply_plan(prefix, records)))
+        receipt = apply_plan(prefix, records)
+        receipt.pop('runtime_content_preserved')
+        receipt['shared_and_stdlib_content_preserved'] = True
+        receipt['executable_loader_derivation'] = derivation
+        print(json.dumps(receipt))
     finally:
         records.tree.close()
 

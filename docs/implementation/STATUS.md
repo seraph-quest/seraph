@@ -42,7 +42,7 @@ the Constitution and ADRs remain the target authority.
 
 Readiness remains specific to the selected profile. The CPU core, canonical
 workspace and operator controls work without a local model, GPU, VLM service or
-optional companion. Remote inference uses the governed OpenRouter route and
+optional companion. Ordinary remote inference uses the governed OpenRouter route and
 stays configuration-required without explicit credentials, upstream policy,
 consent, verified capability and budget. Linux optional isolation proof does not
 establish macOS execution: macOS remains a peer core-host target with unexecuted
@@ -95,12 +95,14 @@ it or resend inference. Every outcome records `no_learning`.
 
 ## Epic #736/#775 OpenRouter inference phase
 
-This section records the accepted OpenRouter-only inference phase and its
-provider-free implementation contract. The active route is the governed
+This section records the accepted ordinary OpenRouter inference phase and its
+provider-free implementation contract. The ordinary route is the governed
 OpenRouter gateway; CPU-local canonical state, storage, tools, and operator UI
 remain usable without a local model server, CUDA, downloaded weights, or the VLM
 wrapper. Missing key, consent, approved upstream, model-fabric bounds/proofs,
 or budget is reported as blocked or configuration-required.
+ADR-025 permits only the separate optional NEAR HTTPS text capability described
+above; it retains its own explicit authority and shared accounting gates.
 
 Purpose-specific OpenRouter setup remains **Partial** for operational
 acceptance. Existing settings provides independent text, vision, and embedding

@@ -536,8 +536,27 @@ async def _prepare_native_flow(
         # Observe the original trust check without replacing its result.
         import importlib.util
         import stat
+        import sysconfig
 
-        runtime_diagnostic: dict[str, Any] = {"caller_uid": os.getuid()}
+        entry = Path(sys.executable).absolute()
+        base = Path(sys.base_prefix).absolute()
+        library_dir = sysconfig.get_config_var("LIBDIR")
+        library_name = sysconfig.get_config_var("LDLIBRARY")
+        library = Path(library_dir) / library_name if library_dir and library_name else None
+        allowed_roots = [base, entry.parent.parent]
+        runtime_diagnostic: dict[str, Any] = {
+            "caller_uid": os.getuid(),
+            "sys_executable": sys.executable,
+            "sys_base_prefix": sys.base_prefix,
+            "sysconfig_libdir": library_dir,
+            "sysconfig_ldlibrary": library_name,
+            "sysconfig_stdlib": sysconfig.get_path("stdlib"),
+            "allowed_roots": [str(root) for root in allowed_roots],
+            "configured_library_path": str(library.absolute()) if library is not None else None,
+            "configured_library_within_roots": library is not None and any(
+                library.absolute().is_relative_to(root) for root in allowed_roots
+            ),
+        }
         try:
             await asyncio.to_thread(executor._local_runtime_identity)
         except (OSError, ValueError, RuntimeError) as exc:
@@ -1300,6 +1319,21 @@ async def test_blocked_runtime_preflight_exposes_diagnostic_without_admission(
         "class": "RuntimeError", "message": "syntheticRuntimeUnavailable",
     }
     assert diagnostic["caller_uid"] == os.getuid()
+    import sysconfig
+
+    assert diagnostic["sys_executable"] == sys.executable
+    assert diagnostic["sys_base_prefix"] == sys.base_prefix
+    assert diagnostic["sysconfig_libdir"] == sysconfig.get_config_var("LIBDIR")
+    assert diagnostic["sysconfig_ldlibrary"] == sysconfig.get_config_var("LDLIBRARY")
+    assert diagnostic["sysconfig_stdlib"] == sysconfig.get_path("stdlib")
+    assert diagnostic["allowed_roots"] == [
+        str(Path(sys.base_prefix).absolute()), str(Path(sys.executable).absolute().parent.parent),
+    ]
+    library = Path(sysconfig.get_config_var("LIBDIR")) / sysconfig.get_config_var("LDLIBRARY")
+    assert diagnostic["configured_library_path"] == str(library.absolute())
+    assert diagnostic["configured_library_within_roots"] == any(
+        library.absolute().is_relative_to(Path(root)) for root in diagnostic["allowed_roots"]
+    )
     assert diagnostic["interpreter_entry"]["entry"] == str(Path(sys.executable).absolute())
     for label in ("interpreter_entry", "pytest_executable", "pytest_package"):
         assert diagnostic[label]["regular_file"] is True

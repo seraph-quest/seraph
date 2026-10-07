@@ -529,8 +529,47 @@ async def _prepare_native_flow(
     monkeypatch.setattr("src.model_fabric.execution.gpu_admission_broker", broker)
     monkeypatch.setattr(sys.modules[__name__], "remote_inference_admission_broker", broker)
 
-    preflight = await asyncio.to_thread(build_repo_repair_executor().preflight)
-    assert preflight.ok, preflight.as_receipt()
+    executor = build_repo_repair_executor()
+    preflight = await asyncio.to_thread(executor.preflight)
+    preflight_diagnostic = preflight.as_receipt()
+    if not preflight.ok and preflight.reason == "local_runtime_unavailable":
+        # Observe the original trust check without replacing its result.
+        import importlib.util
+        import stat
+
+        runtime_diagnostic: dict[str, Any] = {"caller_uid": os.getuid()}
+        try:
+            await asyncio.to_thread(executor._local_runtime_identity)
+        except (OSError, ValueError, RuntimeError) as exc:
+            runtime_diagnostic["error"] = {
+                "class": type(exc).__name__, "message": str(exc)[:512],
+            }
+        paths = {"interpreter_entry": Path(sys.executable).absolute()}
+        try:
+            pytest_executable = executor._local_pytest_executable()
+            if pytest_executable is not None:
+                paths["pytest_executable"] = Path(pytest_executable)
+            spec = importlib.util.find_spec("pytest")
+            if spec is not None and spec.origin not in {None, "built-in", "frozen"}:
+                paths["pytest_package"] = Path(spec.origin)
+        except (OSError, ValueError, ImportError) as exc:
+            runtime_diagnostic["path_error"] = type(exc).__name__
+        for label, path in paths.items():
+            try:
+                resolved = path.resolve(strict=True)
+                metadata = resolved.stat()
+                runtime_diagnostic[label] = {
+                    "entry": str(path), "resolved": str(resolved),
+                    "uid": metadata.st_uid, "gid": metadata.st_gid,
+                    "nlink": metadata.st_nlink,
+                    "mode": oct(stat.S_IMODE(metadata.st_mode)),
+                    "regular_file": stat.S_ISREG(metadata.st_mode),
+                    "executable": os.access(resolved, os.X_OK),
+                }
+            except OSError as exc:
+                runtime_diagnostic[label] = {"error_class": type(exc).__name__}
+        preflight_diagnostic["runtime_diagnostic"] = runtime_diagnostic
+    assert preflight.ok, preflight_diagnostic
     assert preflight.executor_kind == "local"
     assert preflight.posture["isolation_claim"] == "none"
     assert preflight.posture["network_isolation"] == "not_verified"

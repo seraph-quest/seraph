@@ -122,32 +122,31 @@ new contrary feedback invalidates it and rollback restores ordinary order. Deliv
 alone yields no_learning. Rollout suggestion-only until adoption; preserve history
 and tombstones on rollback. Actual benefit remains an unrun human outcome question.
 
-## M5: Verified NEAR inference
+<a id="m5-verified-near-inference"></a>
 
-**Issue:** [#959](https://github.com/seraph-quest/seraph/issues/959). Optional **blocked** target: one encrypted, nonstreaming,
-text-only canonical-model request to the NEAR Cloud gateway, verified before Seraph
-releases plaintext output. No tools, images, embeddings, streaming, Responses API,
-fallback, agent hosting or exact-serving-instance claim.
+## M5: Optional NEAR HTTPS text inference
 
-The [NEAR boundary research](/research/near-ai-trust-boundary-2026-10-05) is
-the evidence contract. A future reviewed ADR-006 exception must include exact SDK
-artifact/hash, deployment measurements/build identities, trust-root versions,
-strict advisory policy and replayable cryptographic fixture provenance. These
-external trust facts are not invented in this task. Until fixed and independently
-reviewed, the implementation agent stops before adding a transport/dependency.
+**Issue:** [#959](https://github.com/seraph-quest/seraph/issues/959). Optional Planned
+capability: one bounded private question to the fixed NEAR Cloud HTTPS endpoint,
+canonical z-ai/glm-5.3-flash, through dedicated inference.near-text.v1/near.text.
+[ADR-025](./decisions/025-near-https-text-inference.md) defines the narrow proposed
+ADR-006 exception, effective on independently reviewed milestone merge. Ordinary
+OpenRouter slots remain unchanged. Provider reads plaintext; no TEE, E2EE,
+measured deployment, response-signature or exact-instance assurance is claimed.
 
-The ticket fixes the smallest integration and fail-closed behavior; its unblock
-checklist supplies the remaining exact acceptance requirements. Fresh gateway,
-model/GPU, same-connection identity and provider_tee response checks plus E2EE are
-mandatory. Failed/missing/stale verification produces blocked/unknown, zero
-released answer and no memory/tool use. Existing admission/accounting owns all
-costs, including response-verification failure after contact. Local fixture
-acceptance and later separately authorized live operation remain separate.
+Existing current Root/Goal grants, witnessed plaintext consent, separate vault key,
+shared one-active broker and deployment accounting bound the request. One inference
+attempt, finite original deadline, private artifact/readback and explicit no_learning
+are required. Authoritative billing settlement gates answer release and Done;
+missing cost retains Unknown/full reserve, discards plaintext and never replays.
+Keyless managed UI/runtime and intercepted HTTP/serial/revocation/accounting negatives
+provide local acceptance. No paid call or harness campaign is merge acceptance.
 
-This could offer an explicit confidentiality choice. It does not make Seraph's
-host, local storage, logs or connectors confidential, nor repair the protocol's
-documented incomplete response chain/shared signing-key limitation. Rollback
-disables route authority, quiesces calls and retains liabilities/receipts.
+The [dated NEAR research](/research/near-ai-trust-boundary-2026-10-05) preserves the
+historical verified-inference investigation; its TEE corpus prerequisites no longer
+block this revised HTTPS scope. Rollback disables NEAR and preserves debt/audit.
+Live availability, price and answer usefulness remain unverified without separate
+operator-authorized operational evidence.
 
 ## What better means
 

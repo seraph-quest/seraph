@@ -61,7 +61,7 @@ Public entry points: [docs](https://docs.seraph.quest),
 | --- | --- | --- |
 | **Guardian kernel** | Goals, policy, planning, prioritization, intervention, memory coordination, audit, and operator-visible state | Provider-specific behavior or unbounded side effects |
 | **Capability runtime** | Typed capabilities, durable jobs, checkpoints, artifacts, approvals, sandbox/policy enforcement, and bounded remote-inference admission | Product goals or hidden provider fallback |
-| **Model fabric** | OpenRouter-only active inference for the Epic #736 phase, with explicit routing, consent, budgets, and receipts | Agent identity, durable state, shell orchestration, or product policy |
+| **Model fabric** | OpenRouter ordinary inference with explicit routing, consent, budgets and receipts; narrow optional NEAR HTTPS exception under ADR-025 only after reviewed milestone merge | Agent identity, durable state, shell orchestration, or product policy |
 | **Interfaces and edges** | Browser cockpit, API, consented local or paired desktop context, voice, and paired messaging adapters | Canonical memory, authority, or an independent agent runtime |
 
 The guardian kernel decides **why and what**. The capability runtime controls
@@ -100,9 +100,10 @@ The next additive target decisions are [ADR-023: Evidence-bound guardian
 opportunities](./decisions/023-evidence-bound-guardian-opportunities.md) and
 [ADR-024: Purpose-specific OpenRouter routes](./decisions/024-purpose-specific-openrouter-routes.md).
 They take effect after the independently reviewed #954 documentation PR merges;
-their capability milestones remain Planned. The optional NEAR target is blocked
-on a separate reviewed ADR-006 exception and concrete trust prerequisites; this
-roadmap does not authorize a direct-provider route.
+their capability milestones remain Planned. The optional NEAR HTTPS text target is defined by
+[ADR-025](./decisions/025-near-https-text-inference.md), a narrow proposed ADR-006
+exception under #959, effective on independently reviewed milestone merge. It
+remains Planned, discloses provider plaintext access and claims no verified TEE.
 
 Changing a locked decision requires a superseding ADR, a tracked issue, an
 independent Critic/Contrarian review, and updates to every affected active doc.

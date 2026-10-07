@@ -6,7 +6,14 @@ title: NEAR AI trust boundary — 5 October 2026
 
 # NEAR AI trust boundary
 
-**Research date:** 5 October 2026, Europe/Warsaw. **Owning request:** [#954](https://github.com/seraph-quest/seraph/issues/954). This research does not change [ADR-006](/decisions/openrouter-only-inference-phase). The [conditional M5 milestone](/guardian-capability-roadmap#m5-verified-near-inference) requires a reviewed exception before any direct NEAR route can execute.
+**Research date:** 5 October 2026, Europe/Warsaw. **Owning request:** [#954](https://github.com/seraph-quest/seraph/issues/954). This research does not change [ADR-006](/decisions/openrouter-only-inference-phase). The original conditional M5 proposal required a reviewed exception before direct NEAR execution.
+
+**October 7, 2026 disposition:** The operator revised #959 to standard NEAR over
+HTTPS with provider plaintext disclosure and no verified-TEE claim. Proposed
+[ADR-025](/decisions/near-https-text-inference) and the
+[revised M5 target](/guardian-capability-roadmap#m5-optional-near-https-text-inference)
+own that narrow scope. The dated research and original blocked TEE prerequisites
+below remain historical evidence, not current #959 implementation requirements.
 
 NEAR has an official client verification protocol and Python SDK. Seraph currently has no implemented NEAR attestation verifier. Selecting a NEAR upstream through OpenRouter would not establish the same protection as a client-verified direct NEAR Cloud gateway request.
 

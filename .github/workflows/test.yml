@@ -65,7 +65,10 @@ jobs:
         run: uv sync --group dev --python "${pythonLocation}/bin/python3.12" --python-preference only-system
 
       - name: Install Chromium and system dependencies
-        run: uv run playwright install --with-deps chromium
+        timeout-minutes: 10
+        run: |
+          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,ImageOS /usr/bin/python3 -I -S -B scripts/prepare_ci_apt_mirrors.py
+          uv run playwright install --with-deps chromium
 
       - name: List backend shard
         run: uv run python scripts/backend_test_shards.py --shard-count 10 --shard-index ${{ matrix.shard }}

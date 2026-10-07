@@ -605,7 +605,10 @@ class InferenceAccountingRepositoryMixin:
                         opportunity_denial = "near_contact_authority_required"
                     else:
                         try:
-                            await recheck_provider_contact(db, run, witness=near_contact_witness)
+                            await recheck_provider_contact(
+                                db, run, witness=near_contact_witness,
+                                contact_operation_id=row.operation_id,
+                            )
                         except (BoardError, ValueError, PermissionError) as exc:
                             opportunity_denial = getattr(exc, "code", "near_contact_authority_changed")
                 try:

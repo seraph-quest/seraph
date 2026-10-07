@@ -869,8 +869,18 @@ async def settle_inference_accounting(body: InferenceSettlementInput, request: R
             operator_id=principal.principal_id, reason="explicit_operator_account_settlement")
     except InferenceAccountingError as exc:
         raise HTTPException(status_code=409, detail=exc.code) from exc
-    return {"status": row["state"], "operation": row, "memory_status": "no_learning",
+    result = {"status": row["state"], "operation": row, "memory_status": "no_learning",
         "authority_scope": "deployment_accounting", "job_authority_changed": False}
+    if row.get("runtime_path") == "near_text_native" and row.get("profile_id") == "near.text":
+        try:
+            result["lane_recovery"] = await remote_inference_admission_broker.reconcile_settled_near_operation(
+                operation_id=row["operation_id"], job_id=row["job_id"],
+                expected_revision=row["revision"], operator=getattr(request.state, "operator", None),
+            )
+        except Exception:
+            # Debt settlement already committed; local lane recovery cannot undo it.
+            result["lane_recovery"] = {"status": "deferred", "reason_code": "lane_recovery_unavailable"}
+    return result
 
 
 @router.post("/settings/model-fabric/canary")

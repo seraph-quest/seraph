@@ -120,6 +120,75 @@ class _AccountingHandle:
 class DurableInferenceBrokerMixin:
     """No independent executor: delegates scheduling to the existing broker."""
 
+    async def reconcile_settled_near_operation(
+        self, *, operation_id: str, job_id: str, expected_revision: int, operator,
+    ) -> dict[str, str]:
+        """Release only a completed local lease after canonical debt settlement.
+
+        This changes no job authority and never restores a provider result.
+        An absent local operation after restart requires no process-local action.
+        """
+        from src.workflows.job_runtime import durable_job_repository
+        from src.memory.procedure_recommendations import assert_current_root
+        from src.work_board.repository import BoardError
+        from .gpu_admission import GpuAdmissionError
+
+        def deferred(reason):
+            return {"status": "deferred", "reason_code": reason}
+
+        if (not isinstance(operation_id, str) or not operation_id or len(operation_id) > 256
+            or not isinstance(job_id, str) or not job_id or len(job_id) > 256
+            or type(expected_revision) is not int or expected_revision < 1):
+            return deferred("settled_operation_invalid")
+        try:
+            snapshot = await durable_job_repository.inference_accounting_snapshot(job_id=job_id)
+            if snapshot.get("accounting_continuity_verified") is not True:
+                return deferred("accounting_continuity_unavailable")
+            rows = [row for row in snapshot.get("operations", ())
+                if row.get("operation_id") == operation_id]
+            if len(rows) != 1:
+                return deferred("settled_operation_unavailable")
+            row = rows[0]
+            if (row.get("job_id") != job_id or row.get("revision") != expected_revision
+                or row.get("runtime_path") != "near_text_native" or row.get("profile_id") != "near.text"):
+                return deferred("settled_operation_changed")
+            actual = row.get("actual_cost_microusd")
+            if (row.get("state") != "settled" or row.get("contact_started_at") is None
+                or type(actual) is not int or not 0 <= actual <= 1_000_000_000):
+                return deferred("settled_charge_required")
+            async with durable_job_repository._session() as db:
+                await assert_current_root(db, operator)
+            if row.get("owner_id") != operator.principal.principal_id:
+                return deferred("original_owner_required")
+            try:
+                receipt = self.receipt_for(operation_id)
+            except KeyError:
+                return {"status": "absent", "reason_code": "no_local_operation"}
+            if (receipt.operation_id != operation_id or receipt.job_id != job_id
+                or receipt.owner_id != row["owner_id"] or receipt.runtime_path != "near_text_native"):
+                return deferred("broker_identity_changed")
+            if (receipt.status == "failed" and not receipt.reconciliation_required
+                and receipt.callback_completed and receipt.cost_settled_microusd == actual):
+                return {"status": "reconciled", "reason_code": "already_reconciled"}
+            if not receipt.callback_completed:
+                return deferred("provider_callback_running")
+            if (receipt.status != "blocked" or receipt.active_operation_id != operation_id
+                or not receipt.reconciliation_required or type(receipt.fencing_token) is not int
+                or receipt.fencing_token < 1):
+                return deferred("broker_reconciliation_unavailable")
+            # Existing condition-locked reconcile rechecks the actual fence,
+            # callback completion and revoked-owner recovery rules atomically.
+            await self.reconcile(operation_id, owner_id=receipt.owner_id, job_id=receipt.job_id,
+                fencing_token=receipt.fencing_token, outcome="failed",
+                reason_code="settled_liability_reconciled", actual_cost_microusd=actual)
+            return {"status": "reconciled", "reason_code": "settled_liability_reconciled"}
+        except BoardError:
+            return deferred("original_root_inactive")
+        except GpuAdmissionError:
+            return deferred("broker_reconciliation_deferred")
+        except (AttributeError, TypeError, ValueError):
+            return deferred("settled_operation_invalid")
+
     async def enqueue(self, request, **kwargs):
         receipt = await super().enqueue(request, **kwargs)
         with self._condition:

@@ -22,7 +22,7 @@ const setup = {
 const task = {
   task_id: "near-task", capability_id: NEAR_TEXT_CAPABILITY, task_revision: 3,
   owner_principal_id: props.ownerPrincipalId, owner_session_id: props.ownerSessionId,
-  goal_id: goal.id, goal_revision: 4, title: "NEAR text question", body: "",
+  goal_id: goal.id, goal_revision: 4, title: "NEAR text question", body: "", requires_review: true,
   input_artifact_id: "input-one", typed_input_digest: "b".repeat(64), status: "review",
   block_kind: null, block_reason: null, readback_status: "verified", verification_status: "passed",
   latest_attempt: { attempt_id: "attempt-one", workflow_run_id: "job-one", readback_status: "verified", outcome: "verified",
@@ -75,11 +75,20 @@ it("prepares the question privately then creates one ordinary Goal-bound Todo wi
   expect(input).toEqual({ schema_version: 1, capability_id: NEAR_TEXT_CAPABILITY, goal_id: goal.id, goal_revision: 4,
     idempotency_key: expect.any(String), input: { schema_version: "seraph.near.text.input.v1", question: "Private operator question", max_output_tokens: 256 } });
   expect(create).toEqual({ title: "NEAR text question", capability_id: NEAR_TEXT_CAPABILITY, goal_id: goal.id,
-    goal_revision: 4, status: "todo", input_artifact_id: "input-one", idempotency_key: expect.any(String) });
+    goal_revision: 4, status: "todo", requires_review: true, input_artifact_id: "input-one", idempotency_key: expect.any(String) });
   for (const value of [input.idempotency_key, create.idempotency_key]) expect(value).toMatch(/^[0-9a-f-]{36}$/);
   expect(input.idempotency_key).not.toBe(create.idempotency_key);
   expect(String(calls[1][1]?.body)).not.toContain("Private operator question");
   expect(store).not.toHaveBeenCalled(); store.mockRestore();
+});
+
+it.each([false, undefined])("rejects a task receipt with unsafe requires_review=%s", async requiresReview => {
+  creationMocks(response({ task: { ...task, requires_review: requiresReview } }));
+  await expect(createNearTextTask({ goal, question: "Private question", maxOutputTokens: 256,
+    configuredCap: 512, ...props })).rejects.toThrow("Task receipt could not be confirmed");
+  const calls = vi.mocked(apiFetch).mock.calls.filter(([, init]) => init?.method === "POST");
+  expect(calls).toHaveLength(2);
+  expect(JSON.parse(String(calls[1][1]?.body)).requires_review).toBe(true);
 });
 
 it("rejects UTF-8 and configured token limits before any private input or task POST", async () => {

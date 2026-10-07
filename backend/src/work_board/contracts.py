@@ -121,6 +121,19 @@ class WorkBoardTaskCreate(WorkBoardBaseModel):
     reviewer_id: str | None = Field(default=None, min_length=1, max_length=128)
     origin_thread_id: str | None = Field(default=None, min_length=1, max_length=256)
 
+    @model_validator(mode="before")
+    @classmethod
+    def validate_near_canonical_uuid(cls,value):
+        if isinstance(value,dict) and str(value.get('capability_id','')).strip()=='inference.near-text.v1':
+            from uuid import UUID
+            key=value.get('idempotency_key')
+            try:
+                if not isinstance(key,str) or str(UUID(key))!=key:
+                    raise ValueError('near_idempotency_invalid: canonical UUID required')
+            except (TypeError,ValueError,AttributeError):
+                raise ValueError('near_idempotency_invalid: canonical UUID required') from None
+        return value
+
     @field_validator("scheduled_at")
     @classmethod
     def normalize_scheduled_at(cls, value: datetime | None) -> datetime | None:
@@ -187,6 +200,19 @@ class WorkBoardInputArtifactCreate(BaseModel):
     goal_revision: int = Field(gt=0)
     input: dict[str, Any]
     idempotency_key: str = Field(min_length=1, max_length=256)
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_near_canonical_uuid(cls,value):
+        if isinstance(value,dict) and str(value.get('capability_id','')).strip()=='inference.near-text.v1':
+            from uuid import UUID
+            key=value.get('idempotency_key')
+            try:
+                if not isinstance(key,str) or str(UUID(key))!=key:
+                    raise ValueError('near_idempotency_invalid: canonical UUID required')
+            except (TypeError,ValueError,AttributeError):
+                raise ValueError('near_idempotency_invalid: canonical UUID required') from None
+        return value
 
     @field_validator("capability_id", "idempotency_key")
     @classmethod

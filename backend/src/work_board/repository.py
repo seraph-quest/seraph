@@ -1156,6 +1156,17 @@ class WorkBoardRepository:
                            publication_authority_check=None, staged_text=None,
                            staged_input=None, publication_witness=None) -> BoardMutation:
         self._validate_task_fields(request)
+        if request.capability_id == "inference.near-text.v1":
+            from uuid import UUID
+            try:
+                canonical_key=str(UUID(request.idempotency_key))
+            except (TypeError,ValueError,AttributeError):
+                raise BoardError('near_idempotency_invalid','A canonical task UUID idempotency key is required',status_code=422) from None
+            if canonical_key!=request.idempotency_key:
+                raise BoardError('near_idempotency_invalid','A canonical task UUID idempotency key is required',status_code=422)
+            if 'requires_review' in request.model_fields_set and request.requires_review is not True:
+                raise BoardError('near_human_review_required','NEAR answers require explicit human review',status_code=422)
+            request=request.model_copy(update={'requires_review':True})
         if request.capability_id == "memory.opportunity-preference.v1":
             from src.work_board.opportunity_preference_native import recheck_publication
             await recheck_publication(db, owner, request, witness=publication_witness)
@@ -2192,7 +2203,7 @@ class WorkBoardRepository:
             )
             or 0
         )
-        max_attempts = 1 if task.capability_id == "memory.opportunity-preference.v1" else 2
+        max_attempts = 1 if task.capability_id in {"memory.opportunity-preference.v1", "inference.near-text.v1"} else 2
         if task.capability_id == _BROWSER_CAPABILITY_ID:
             max_attempts, _max_outstanding_jobs = effective_browser_limits(live_goal)
         if attempt_count >= max_attempts:
@@ -3046,7 +3057,7 @@ class WorkBoardRepository:
             )
             or 0
         )
-        attempt_limit = (1 if task.capability_id == "memory.opportunity-preference.v1" else
+        attempt_limit = (1 if task.capability_id in {"memory.opportunity-preference.v1", "inference.near-text.v1"} else
             browser_max_attempts if task.capability_id == _BROWSER_CAPABILITY_ID else 2)
         if attempt_count >= attempt_limit:
             safe_reason = await self._safe_text("The board attempt limit has been exhausted")
@@ -4266,7 +4277,7 @@ class WorkBoardRepository:
             )
             or 0
         )
-        attempt_limit = 1 if task.capability_id == "memory.opportunity-preference.v1" else 2
+        attempt_limit = 1 if task.capability_id in {"memory.opportunity-preference.v1", "inference.near-text.v1"} else 2
         if task.capability_id == _BROWSER_CAPABILITY_ID:
             live_goal = await db.scalar(
                 select(Goal).where(

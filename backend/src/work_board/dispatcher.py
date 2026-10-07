@@ -41,6 +41,7 @@ from src.db.models import (
     WorkBoardLink,
     WorkBoardStatus,
     WorkBoardTask,
+    WorkflowRunState,
 )
 from src.guardian.goal_snapshot_to_file import (
     CAPABILITY_ID as GOAL_SNAPSHOT_CAPABILITY,
@@ -1275,6 +1276,8 @@ _STABLE_REASON_CODES = frozenset(
         "dependency_unfinished",
         "dispatcher_failure",
         "execution_blocked",
+        "near_cost_readback_required",
+        "near_owner_outstanding_limit",
         "executor_missing",
         "executor_lane_mismatch",
         "executor_requires_capability",
@@ -3679,7 +3682,7 @@ class WorkBoardDispatcher:
                 receipts.append({"job_id":attempt.workflow_run_id,"status":"cancelled" if proven else "unknown",
                     "reason_code":"tool_package_reaped" if proven else "tool_package_cleanup_unproven"})
                 return receipts, bool(proven)
-            if capability in {"browser.public-task.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1", "memory.opportunity-preference.v1"}:
+            if capability in {"browser.public-task.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1", "memory.opportunity-preference.v1", "inference.near-text.v1"}:
                 worker = self._active_worker_tasks.get((task.task_id, attempt.attempt_id))
                 if worker is not None and worker is not asyncio.current_task() and not worker.done():
                     worker.cancel()
@@ -4339,6 +4342,15 @@ class WorkBoardDispatcher:
                 from src.model_fabric.effective_policy import current_near_text_policy
                 from src.model_fabric.near_text_contracts import NearTextInput
                 configuration,_policy=current_near_text_policy()
+                async with self.session_provider() as near_db:
+                    other=await near_db.scalar(select(WorkflowRunState.run_identity).outerjoin(
+                        WorkBoardAttempt,WorkBoardAttempt.workflow_run_id==WorkflowRunState.run_identity).where(
+                        WorkflowRunState.job_kind=='inference.near-text.v1',
+                        WorkflowRunState.owner_principal_id==task.owner_principal_id,
+                        WorkflowRunState.status.in_(('accepted','queued','running','awaiting_approval','paused')),
+                        or_(WorkBoardAttempt.task_id!=task.task_id,WorkBoardAttempt.task_id.is_(None))).limit(1))
+                if other:
+                    return 'near_owner_outstanding_limit','near_owner_outstanding_limit'
                 if NearTextInput.model_validate(inputs).max_output_tokens>configuration.near_text.max_output_tokens:
                     return "near_output_limit_exceeded", "The configured output cap changed"
                 return None,None
@@ -10670,6 +10682,12 @@ class WorkBoardDispatcher:
                 snapshot_fence = snapshot_lease.get("fencing_token")
                 snapshot_owner = _text(snapshot_lease.get("owner"))
 
+                if task.capability_id == 'inference.near-text.v1' and attempt.cancel_requested_at is None:
+                    worker=self._active_worker_tasks.get((task.task_id,attempt.attempt_id))
+                    if worker is not None and not worker.done():
+                        # The original worker owns its one paid contact; another
+                        # reconciliation pass cannot execute or adopt its answer.
+                        continue
                 if is_tool_package(task.capability_id) and attempt.cancel_requested_at is None:
                     from src.work_board.tool_package_native import live_original_owner
                     if await live_original_owner(self.jobs,task,attempt):
@@ -11340,6 +11358,10 @@ class WorkBoardDispatcher:
                 ).scalar_one_or_none()
             if task is None:
                 continue
+            if task.capability_id == 'inference.near-text.v1' and attempt.cancel_requested_at is None:
+                worker=self._active_worker_tasks.get((task.task_id,attempt.attempt_id))
+                if worker is not None and not worker.done():
+                    continue
             try:
                 if _text(task.capability_id) != GOAL_SNAPSHOT_CAPABILITY:
                     admission = await self._lookup_direct_admission(task, attempt)

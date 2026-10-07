@@ -68,12 +68,12 @@ export async function createNearTextTask({ goal, question, maxOutputTokens, conf
     || artifact.goal_id !== goal.id || artifact.goal_revision !== goal.revision || !sha(artifact.typed_input_digest)) throw new Error("Private input receipt could not be confirmed. Inspect Work before submitting another request.");
   const taskRequest: WorkBoardTaskCreateRequest = {
     title: "NEAR text question", capability_id: NEAR_TEXT_CAPABILITY, goal_id: goal.id,
-    goal_revision: goal.revision, status: "todo", input_artifact_id: artifact.artifact_id,
+    goal_revision: goal.revision, status: "todo", requires_review: true, input_artifact_id: artifact.artifact_id,
     idempotency_key: crypto.randomUUID(),
   };
   const result = await jsonRequest("/api/work-board/tasks", taskRequest, signal);
   if (!record(result) || !record(result.task) || !id(result.task.task_id) || result.task.capability_id !== NEAR_TEXT_CAPABILITY
-    || result.task.title !== "NEAR text question" || result.task.body !== ""
+    || result.task.title !== "NEAR text question" || result.task.body !== "" || result.task.requires_review !== true
     || result.task.input_artifact_id !== artifact.artifact_id || result.task.goal_id !== goal.id
     || result.task.goal_revision !== goal.revision || result.task.owner_principal_id !== ownerPrincipalId
     || result.task.owner_session_id !== ownerSessionId) throw new Error("Task receipt could not be confirmed. Inspect Work before submitting another request.");

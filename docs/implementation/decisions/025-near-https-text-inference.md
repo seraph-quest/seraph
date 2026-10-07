@@ -29,7 +29,7 @@ ADR-006 ordinary routes and ADR-024's three OpenRouter slots remain unchanged.
 - Ordinary verified TLS, `trust_env=False`, no redirects or automatic HTTP retries.
 - No NEAR SDK, native crypto dependencies, attestation or verified-TEE/E2EE claims.
 - Provider receives plaintext; private input/output means Seraph artifact custody.
-- No operational provider calls, paid calls, credentials, deployment, main promotion
+- No operational provider calls, paid calls, live provider credentials, deployment, main promotion
   or harness evaluation campaigns during implementation/acceptance.
 
 ## Configuration, credential and budget

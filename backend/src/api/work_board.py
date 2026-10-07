@@ -2968,11 +2968,8 @@ async def read_near_text_output(request: Request, task_id: str):
             goal=await WorkBoardRepository._validate_goal(db,owner,goal_id=task.goal_id,goal_revision=task.goal_revision)
             from src.memory.procedure_recommendations import assert_current_root
             await assert_current_root(db,_operator(request))
-            from src.goals.repository import deserialize_admission_budget
-            from src.work_board.near_text_native import now,utc
-            budget=deserialize_admission_budget(goal)
-            if budget is None or not budget.reviewed_grant or any(now()>=utc(bound) for bound in (goal.due_date,budget.period_expires_at) if bound is not None):
-                raise BoardError("near_output_unavailable","The current finite Goal grant is required")
+            from src.work_board.near_text_native import finite_goal_budget
+            finite_goal_budget(goal)
             checkpoints=json.loads(run.checkpoint_receipts_json or '[]')
             proof=[c.get('payload',{}) for c in checkpoints if c.get('checkpoint_id')=='near-private-output']
             if len(proof)!=1 or not isinstance(proof[0].get('operation_id'),str):

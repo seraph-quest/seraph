@@ -122,9 +122,7 @@ new contrary feedback invalidates it and rollback restores ordinary order. Deliv
 alone yields no_learning. Rollout suggestion-only until adoption; preserve history
 and tombstones on rollback. Actual benefit remains an unrun human outcome question.
 
-<a id="m5-verified-near-inference"></a>
-
-## M5: Optional NEAR HTTPS text inference
+## M5: Optional NEAR HTTPS text inference {#m5-verified-near-inference}
 
 **Issue:** [#959](https://github.com/seraph-quest/seraph/issues/959). Optional Planned
 capability: one bounded private question to the fixed NEAR Cloud HTTPS endpoint,

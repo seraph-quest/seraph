@@ -11,7 +11,7 @@ title: NEAR AI trust boundary — 5 October 2026
 **October 7, 2026 disposition:** The operator revised #959 to standard NEAR over
 HTTPS with provider plaintext disclosure and no verified-TEE claim. Proposed
 [ADR-025](/decisions/near-https-text-inference) and the
-[revised M5 target](/guardian-capability-roadmap#m5-optional-near-https-text-inference)
+[revised M5 target](/guardian-capability-roadmap#m5-verified-near-inference)
 own that narrow scope. The dated research and original blocked TEE prerequisites
 below remain historical evidence, not current #959 implementation requirements.
 

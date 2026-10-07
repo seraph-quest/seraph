@@ -569,6 +569,7 @@ async def _prepare_native_flow(
             except OSError as exc:
                 runtime_diagnostic[label] = {"error_class": type(exc).__name__}
         preflight_diagnostic["runtime_diagnostic"] = runtime_diagnostic
+        print("local_runtime_diagnostic=" + json.dumps(runtime_diagnostic, sort_keys=True))
     assert preflight.ok, preflight_diagnostic
     assert preflight.executor_kind == "local"
     assert preflight.posture["isolation_claim"] == "none"
@@ -1271,3 +1272,40 @@ async def test_local_native_cancel_and_fresh_instance_reconcile(tmp_path: Path, 
     assert reconciled["status"] == "cancelled"
     assert reconciled["cleanup_proven"] is True
     assert not any((workspace / "artifacts" / "repo-sandbox" / "staging").iterdir())
+
+
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_blocked_runtime_preflight_exposes_diagnostic_without_admission(
+    client, async_db, tmp_path: Path, monkeypatch, capsys,
+):
+    from src.execution.repo_sandbox import RepoSandboxPreflight
+
+    def blocked_preflight(self):
+        return RepoSandboxPreflight(
+            False, "blocked", "local_runtime_unavailable", executor_kind="local",
+        )
+
+    def unavailable_identity(self):
+        raise RuntimeError("syntheticRuntimeUnavailable")
+
+    monkeypatch.setattr(LocalRepoRepairExecutor, "preflight", blocked_preflight)
+    monkeypatch.setattr(LocalRepoRepairExecutor, "_local_runtime_identity", unavailable_identity)
+    with pytest.raises(AssertionError) as failure:
+        await _prepare_native_flow(client, async_db, tmp_path, monkeypatch)
+    assert "local_runtime_unavailable" in str(failure.value)
+    output = capsys.readouterr().out
+    line = next(line for line in output.splitlines() if line.startswith("local_runtime_diagnostic="))
+    diagnostic = json.loads(line.partition("=")[2])
+    assert diagnostic["error"] == {
+        "class": "RuntimeError", "message": "syntheticRuntimeUnavailable",
+    }
+    assert diagnostic["caller_uid"] == os.getuid()
+    assert diagnostic["interpreter_entry"]["entry"] == str(Path(sys.executable).absolute())
+    for label in ("interpreter_entry", "pytest_executable", "pytest_package"):
+        assert diagnostic[label]["regular_file"] is True
+        assert diagnostic[label]["nlink"] >= 1
+        assert isinstance(diagnostic[label]["uid"], int)
+        assert diagnostic[label]["mode"].startswith("0o")
+    async with async_db() as db:
+        assert (await db.execute(select(WorkBoardTask))).scalars().all() == []
+        assert (await db.execute(select(WorkBoardAttempt))).scalars().all() == []

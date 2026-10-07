@@ -693,6 +693,24 @@ async def _seed_browser_source(
     # rather than the direct-adapter path reserved for Calendar/procedure
     # roots.
     result = await dispatcher._admit_execute_project(claim)
+    if result["completed"] is not True:
+        # Failure-only scalar custody; never print input, checkpoint text or secrets.
+        async with async_db() as db:
+            failed_task = (await db.execute(select(WorkBoardTask).where(
+                WorkBoardTask.task_id == mutation.task.task_id))).scalar_one()
+            failed_attempt = (await db.execute(select(WorkBoardAttempt).where(
+                WorkBoardAttempt.attempt_id == claim.attempt.attempt_id))).scalar_one()
+            failed_run = (await db.execute(select(WorkflowRunState).where(
+                WorkflowRunState.run_identity == failed_attempt.workflow_run_id))).scalar_one_or_none()
+            from src.api.work_board import _attempt_payload
+            print("browser-source-canonical-failure " + json.dumps({
+                "task_id": failed_task.task_id, "task_status": failed_task.status.value,
+                "block_kind": failed_task.block_kind, "block_reason": failed_task.block_reason,
+                "readback_status": _attempt_payload(failed_attempt)["readback_status"],
+                "attempt_id": failed_attempt.attempt_id, "native_job_id": failed_attempt.workflow_run_id,
+                "native_status": failed_run.status if failed_run else None,
+                "native_failure_reason": failed_run.failure_reason if failed_run else None,
+            }, sort_keys=True), flush=True)
     assert result["completed"] is True, result
 
     async with async_db() as db:

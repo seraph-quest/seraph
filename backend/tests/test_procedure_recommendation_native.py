@@ -366,3 +366,25 @@ async def test_two_real_manual_invocations_yield_verified_feedback_bundle(async_
         proof_path = tmp_path / "native-stage-receipt.json"
         proof_path.write_text(json.dumps(receipt, indent=2))
         proof_path.chmod(0o600)
+
+async def test_browser_source_failure_diagnostic_preserves_actual_blocked_assertion(async_db,monkeypatch,tmp_path,capsys):
+    tmp_path.chmod(0o700)
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "deployment_environment", "test")
+    monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", False)
+    monkeypatch.setattr(settings, "operator_auth_secret", "isolated-procedure-native-test")
+    monkeypatch.setattr(settings, "operator_auth_secret_hash", "")
+    async def unavailable_browser():
+        raise RuntimeError("Intentional browser launcher failure for diagnostic coverage")
+    with pytest.raises(AssertionError):
+        await _seed_browser_source(async_db=async_db,monkeypatch=monkeypatch,
+            tmp_path=tmp_path,browser=unavailable_browser)
+    output=capsys.readouterr().out
+    prefix="browser-source-canonical-failure "
+    diagnostic=json.loads(next(line[len(prefix):] for line in output.splitlines() if line.startswith(prefix)))
+    assert diagnostic['task_status']=='blocked'
+    assert diagnostic['block_reason']
+    assert diagnostic['readback_status']!='verified'
+    assert diagnostic['native_status']!='succeeded'
+    assert set(diagnostic)=={'task_id','task_status','block_kind','block_reason','readback_status',
+        'attempt_id','native_job_id','native_status','native_failure_reason'}

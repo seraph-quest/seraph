@@ -5,10 +5,11 @@ title: Guardian capability roadmap
 
 # Guardian capability roadmap
 
-**Document class:** Target, reviewed architecture and capability sequence under
-[#954](https://github.com/seraph-quest/seraph/issues/954). All new capabilities
-below are **Planned**; no implementation, deployment or superiority result is
-claimed. GitHub owns queue, assignee, review and completion state.
+**Document class:** Target, accepted architecture and capability sequence under
+[#954](https://github.com/seraph-quest/seraph/issues/954).
+[Development Status](./STATUS.md) owns implemented capability scope and validation
+limits. This roadmap supplies no deployment or superiority result; GitHub owns
+queue, assignee, review and completion state.
 
 Read the [baseline](/research/seraph-capability-baseline-2026-10-05),
 [Hermes overview](/research/seraph-vs-hermes-overview) /
@@ -26,10 +27,10 @@ memory, scheduler, browser, coding, research or integrations.
 
 [ADR-023](./decisions/023-evidence-bound-guardian-opportunities.md) fixes M2–M4.
 [ADR-024](./decisions/024-purpose-specific-openrouter-routes.md) fixes M1.
-Both are branch-local target decisions until the independently reviewed #954
-documentation PR is merged. The implementation agent must not silently adopt
-an unmerged change to a locked contract. ADR-006 remains active; M5's exception
-is deliberately not adopted by this roadmap.
+Both decisions were accepted through the reviewed #954 documentation merge.
+ADR-006 retains ordinary OpenRouter inference; the accepted ADR-025 decision
+permits only the separate optional M5 NEAR HTTPS capability. This roadmap does
+not broaden those locked contracts.
 
 Recommended delivery order is **M1, M2, M3, M4**. M2 technically uses the existing
 strategist route and does not depend on M1; M3 depends on M2, M4 on M3. M5 is an
@@ -61,8 +62,9 @@ namespace/tombstone history and requires explicit compatible configuration.
 
 Competitive value is simpler honest setup, not provider-count parity. Risk is
 the save/accounting boundary, addressed by the explicit fixed protocol and fault
-tests in the ticket. First implementation ticket: **[#955](https://github.com/seraph-quest/seraph/issues/955)**, after the #954
-ADR adoption prerequisite is merged.
+tests in the ticket. The bounded implementation is owned by
+**[#955](https://github.com/seraph-quest/seraph/issues/955)**; Development Status
+records its implemented scope and evidence limits.
 
 ## M2: Evidence-cited opportunities
 
@@ -124,11 +126,11 @@ and tombstones on rollback. Actual benefit remains an unrun human outcome questi
 
 ## M5: Optional NEAR HTTPS text inference {#m5-verified-near-inference}
 
-**Issue:** [#959](https://github.com/seraph-quest/seraph/issues/959). Optional Planned
-capability: one bounded private question to the fixed NEAR Cloud HTTPS endpoint,
-canonical z-ai/glm-5.3-flash, through dedicated inference.near-text.v1/near.text.
-[ADR-025](./decisions/025-near-https-text-inference.md) defines the narrow proposed
-ADR-006 exception, effective on independently reviewed milestone merge. Ordinary
+**Issue:** [#959](https://github.com/seraph-quest/seraph/issues/959). The optional
+capability accepts one bounded private question at the fixed NEAR Cloud HTTPS
+endpoint, canonical z-ai/glm-5.3-flash, through inference.near-text.v1/near.text.
+[ADR-025](./decisions/025-near-https-text-inference.md) defines the accepted narrow
+ADR-006 exception; Development Status owns its implemented scope. Ordinary
 OpenRouter slots remain unchanged. Provider reads plaintext; no TEE, E2EE,
 measured deployment, response-signature or exact-instance assurance is claimed.
 

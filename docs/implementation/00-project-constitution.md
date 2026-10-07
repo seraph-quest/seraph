@@ -61,7 +61,7 @@ Public entry points: [docs](https://docs.seraph.quest),
 | --- | --- | --- |
 | **Guardian kernel** | Goals, policy, planning, prioritization, intervention, memory coordination, audit, and operator-visible state | Provider-specific behavior or unbounded side effects |
 | **Capability runtime** | Typed capabilities, durable jobs, checkpoints, artifacts, approvals, sandbox/policy enforcement, and bounded remote-inference admission | Product goals or hidden provider fallback |
-| **Model fabric** | OpenRouter ordinary inference with explicit routing, consent, budgets and receipts; narrow optional NEAR HTTPS exception under ADR-025 only after reviewed milestone merge | Agent identity, durable state, shell orchestration, or product policy |
+| **Model fabric** | OpenRouter ordinary inference with explicit routing, consent, budgets and receipts; one dedicated optional NEAR HTTPS text capability under ADR-025 | Agent identity, durable state, shell orchestration, or product policy |
 | **Interfaces and edges** | Browser cockpit, API, consented local or paired desktop context, voice, and paired messaging adapters | Canonical memory, authority, or an independent agent runtime |
 
 The guardian kernel decides **why and what**. The capability runtime controls
@@ -95,15 +95,17 @@ The following architecture decisions are normative:
 22. [ADR-022: Portable selected-text context](./decisions/022-portable-selected-text-context.md)
 20. [ADR-020: Reviewed authored capability packages](./decisions/020-reviewed-authored-capability-packages.md)
 21. [ADR-021: Exact Forgejo issue title transaction](./decisions/021-exact-forgejo-issue-title.md)
+23. [ADR-023: Evidence-bound guardian opportunities](./decisions/023-evidence-bound-guardian-opportunities.md)
+24. [ADR-024: Purpose-specific OpenRouter routes](./decisions/024-purpose-specific-openrouter-routes.md)
+25. [ADR-025: Optional NEAR HTTPS text inference](./decisions/025-near-https-text-inference.md)
 
-The next additive target decisions are [ADR-023: Evidence-bound guardian
-opportunities](./decisions/023-evidence-bound-guardian-opportunities.md) and
-[ADR-024: Purpose-specific OpenRouter routes](./decisions/024-purpose-specific-openrouter-routes.md).
-They take effect after the independently reviewed #954 documentation PR merges;
-their capability milestones remain Planned. The optional NEAR HTTPS text target is defined by
-[ADR-025](./decisions/025-near-https-text-inference.md), a narrow proposed ADR-006
-exception under #959, effective on independently reviewed milestone merge. It
-remains Planned, discloses provider plaintext access and claims no verified TEE.
+ADR-023 defines evidence-bound Guardian opportunities and ADR-024 defines
+purpose-specific OpenRouter routes. ADR-025 permits one separate optional NEAR
+HTTPS text capability with explicit provider plaintext access. These accepted
+decisions retain the existing authority, serial admission and accounting
+boundaries. [Development Status](./STATUS.md) owns the implemented capability
+scope and its limits; acceptance alone does not establish live provider quality
+or availability.
 
 Changing a locked decision requires a superseding ADR, a tracked issue, an
 independent Critic/Contrarian review, and updates to every affected active doc.
@@ -157,10 +159,11 @@ Open branches describe intended post-merge truth and must be identified as such.
 
 - Model providers are inference-only. Seraph does not depend on Codex CLI,
   Claude Code, or another coding-agent runtime to operate.
-- During Epic #736's active implementation phase, model inference uses only the
-  governed OpenRouter HTTPS route. Exact model/modalities and upstream policy
-  must be verified before dispatch; unsupported capabilities remain blocked or
-  degraded rather than falling back silently.
+- Ordinary model inference uses the governed OpenRouter HTTPS route; ADR-025
+  permits only the separate fixed optional NEAR HTTPS text capability. Exact
+  model/modalities and upstream policy must be verified before dispatch;
+  unsupported capabilities remain blocked or degraded rather than falling back
+  silently.
 - Remote inference uses one shared bounded admission contract with owner,
   priority, deadline, cancellation, budget, idempotency, and reconciliation
   receipts. The initial in-flight limit is one; this is an API admission bound,

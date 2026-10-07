@@ -5,17 +5,16 @@ title: "ADR-025: Optional NEAR HTTPS text inference"
 
 # ADR-025: Optional NEAR HTTPS text inference
 
-**Status:** Target decision proposed under [#959](https://github.com/seraph-quest/seraph/issues/959), subject to independent architecture/security review and effective on the reviewed milestone merge to `develop`. The capability remains Planned. This draft does not activate provider access or claim Shipped behavior.
+**Status:** Accepted under [#959](https://github.com/seraph-quest/seraph/issues/959), effective on the independently reviewed milestone merge to `develop`. [Development Status](../STATUS.md) owns the implemented capability scope and validation limits. Provider access remains disabled by default and requires current explicit authority.
 
 **Decision class:** Narrow exception to ADR-006 for one optional native capability. ADR-024's three OpenRouter slots and ordinary model routing remain unchanged.
 
 ## Context
 
 The operator explicitly revised #959 on October 7, 2026 to standard NEAR over
-HTTPS with no verified-TEE claim. This decision grants a narrow conditional
-implementation exception after independent review and becomes effective on the
-reviewed milestone merge to develop. The capability remains Planned. Earlier
-TEE/SDK/crypto research is historical evidence, not this milestone's prerequisite.
+HTTPS with no verified-TEE claim. This accepted decision grants one narrow
+exception for the fixed optional native text capability. Earlier TEE/SDK/crypto
+research is historical evidence, not this capability's prerequisite.
 ADR-006 ordinary routes and ADR-024's three OpenRouter slots remain unchanged.
 
 ## Decision

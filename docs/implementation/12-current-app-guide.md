@@ -8,15 +8,15 @@ title: Current App Guide
 ## Optional NEAR HTTPS text question
 
 [ADR-025](./decisions/025-near-https-text-inference.md) defines the optional
-target operator path tracked by [#959](https://github.com/seraph-quest/seraph/issues/959).
-It remains **Planned** until the reviewed milestone merges with its required
-runtime and UI receipts; these instructions describe the target path and do not
-establish current provider availability on `develop`.
+native text capability implemented under [#959](https://github.com/seraph-quest/seraph/issues/959).
+It is available on `develop`, disabled by default. Its keyless managed and
+intercepted receipts do not establish live provider availability or model quality.
 
 In Settings, configure the optional NEAR text route with its dedicated write-only
 credential and explicitly acknowledge provider plaintext access. The fixed
-model is `z-ai/glm-5.3-flash` at `https://cloud-api.near.ai/v1`; ordinary verified
-TLS is used, without verified TEE or end-to-end encryption. A local `configured`
+model is `z-ai/glm-5.3-flash` at `https://cloud-api.near.ai/v1`. The adapter uses
+ordinary HTTPS certificate validation; no live provider TLS-handshake proof,
+verified TEE or end-to-end encryption claim is supplied by the local receipts. A local `configured`
 label reports credential, current consent and accounting readiness only.
 The request reserve is a local hold rather than a provider-enforced maximum.
 NEAR shares the deployment ledger, budget ceiling, serial inference lane and
@@ -25,10 +25,10 @@ global egress revocation fence with OpenRouter.
 Use Work to submit one private text question against an active owned Goal and
 finite purpose authority. The browser does not retain the question for automatic
 replay. Review the native job and open its private result through current-owner
-readback after real billing settlement. Success does not approve human review
-or change memory: the outcome records `no_learning`. Missing or invalid billing
-withholds the answer and keeps the original liability visible. Restart and exact
-request replay preserve the original job without another inference. Manual debt
+readback after authoritative billing settlement. The task requires human Review;
+success does not approve it or change memory: the outcome records `no_learning`. Missing or invalid billing
+withholds the answer and keeps the original liability visible. Restart and idempotent
+request recovery preserve the original job without resending inference. Manual debt
 settlement cannot recover discarded output or grant result adoption. Revoke or
 expired authority blocks private reads; configuration alone grants no execution.
 
@@ -1281,8 +1281,9 @@ This capability remains **Partial**.
 
 ## Models And Runtime
 
-The accepted #775 phase changes the active contract to OpenRouter-only
-inference. The UI and `/api/runtime/status` report the effective gateway,
+Ordinary inference follows the accepted #775 OpenRouter route; ADR-025 permits
+only the separate optional NEAR text capability described above. The UI and
+`/api/runtime/status` report the effective gateway,
 model, verified-or-unknown upstream, consent, budget, and degraded state; a
 configured key or model is not proof of a live route. Model-fabric settings,
 canaries, proof, receipt, and runtime-path status surfaces are explicit

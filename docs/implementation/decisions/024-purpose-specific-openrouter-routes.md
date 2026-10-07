@@ -5,7 +5,7 @@ title: "ADR-024: Purpose-specific OpenRouter routes"
 
 # ADR-024: Purpose-specific OpenRouter routes
 
-**Status:** Target decision under [#954](https://github.com/seraph-quest/seraph/issues/954), effective only when independently reviewed [PR #960](https://github.com/seraph-quest/seraph/pull/960) merges to `develop`. All new capabilities remain Planned; no implementation or Shipped claim.
+**Status:** Accepted under [#954](https://github.com/seraph-quest/seraph/issues/954), effective on the reviewed [PR #960](https://github.com/seraph-quest/seraph/pull/960) merge to `develop` on October 5, 2026. [Development Status](../STATUS.md) owns the implemented capability scope and validation limits.
 
 **Decision class:** Additive model-fabric setup contract. ADR-006 remains the active provider boundary.
 
@@ -145,8 +145,8 @@ proof reuse is allowed, even for the same model. New contact separately checks
 current global policy epoch and purpose consent; queued old-epoch requests block.
 Missing/stale/failed proof
 blocks only dependent workloads. Ordinary slot routing still rejects direct NEAR or other endpoints under ADR-006.
-[ADR-025](./025-near-https-text-inference.md) proposes only a separate dedicated
-NEAR capability, not a fourth slot, effective on reviewed milestone merge. Slot readiness must never display verified TEE.
+[ADR-025](./025-near-https-text-inference.md) permits only a separate dedicated
+NEAR capability, not a fourth slot. Slot readiness must never display verified TEE.
 
 Reuse existing `EmbeddingMetadata.namespace`, whose identity hashes embedding
 schema, provider, model and measured dimension, and the namespaced tables in
@@ -199,8 +199,9 @@ and re-save. Verify uncertain final-publication credential compensation from
 configuration/witness readback rather than assuming publication failed.
 Provider-free checks do not establish model usefulness, availability or TEE.
 
-Record and resolve the current focused setup failures in the same milestone
-before calling it complete; do not weaken assertions or authorize real provider
-calls. New fields/tests are Planned until implemented. Required future local
-and managed UI receipts and exact-pushed cumulative review are in the owning
-milestone. This ADR introduces no claim of shipped behavior.
+Validation requires provider-free setup, migration, race/fault, accounting and
+managed UI receipts with independent review. The implementation evidence is
+owned by [#955](https://github.com/seraph-quest/seraph/issues/955) and
+[Development Status](../STATUS.md); this decision does not establish live
+provider availability or measured model usefulness. Ordinary release CI remains
+a separate gate and never authorizes provider calls.

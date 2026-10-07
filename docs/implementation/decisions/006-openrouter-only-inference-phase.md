@@ -14,21 +14,21 @@ Epic #736 currently carries a GPU-hosted model server and VLM wrapper as
 runtime prerequisites. That hardware dependency prevents the authenticated
 Seraph core, canonical workspace, and operator cockpit from running on a
 CPU-capable host when inference capacity is unavailable. The user has selected
-OpenRouter as the only active inference gateway for the current product phase.
+OpenRouter as the gateway for ordinary inference in the current product phase.
 
 The decision changes the active provider target. It does not claim that
 OpenRouter supports every modality or upstream policy without a capability
 check, and it does not make the gateway the authority for goals, tools,
 approvals, memory, or canonical state.
 
-The proposed narrow [ADR-025](./025-near-https-text-inference.md) exception permits
-only dedicated optional NEAR HTTPS text inference after reviewed milestone merge;
-all other provider boundaries below remain unchanged.
+The accepted narrow [ADR-025](./025-near-https-text-inference.md) exception permits
+only dedicated optional NEAR HTTPS text inference; all other provider boundaries
+below remain unchanged.
 
 ## Decision
 
-For the Epic #736 implementation phase, all active model inference goes through
-the governed OpenRouter HTTPS API. The active profile rejects local, Ollama,
+Ordinary model inference goes through the governed OpenRouter HTTPS API.
+ADR-025 permits only its fixed separate optional NEAR HTTPS text capability. The active profile rejects local, Ollama,
 direct OpenAI, Anthropic, and arbitrary OpenAI-compatible inference routes.
 The server validates the fixed `https://openrouter.ai/api/v1` destination,
 keeps the API key in the trusted backend transport, and applies explicit

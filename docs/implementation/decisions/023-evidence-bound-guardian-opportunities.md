@@ -5,7 +5,7 @@ title: "ADR-023: Evidence-bound guardian opportunities and follow-through"
 
 # ADR-023: Evidence-bound guardian opportunities and follow-through
 
-**Status:** Target decision under [#954](https://github.com/seraph-quest/seraph/issues/954), effective only when independently reviewed [PR #960](https://github.com/seraph-quest/seraph/pull/960) merges to `develop`. All new capabilities remain Planned; no implementation or Shipped claim.
+**Status:** Accepted under [#954](https://github.com/seraph-quest/seraph/issues/954), effective on the reviewed [PR #960](https://github.com/seraph-quest/seraph/pull/960) merge to `develop` on October 5, 2026. [Development Status](../STATUS.md) owns the implemented capability scope and validation limits.
 
 **Decision class:** Additive guardian contract over the existing four layers.
 

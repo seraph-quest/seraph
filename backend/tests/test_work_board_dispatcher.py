@@ -2108,6 +2108,7 @@ async def test_dispatch_pass_admits_at_most_two_in_priority_fifo_order():
             return BoardDispatchClaim(task, attempt, SimpleNamespace(event_id=1))
 
     dispatcher = WorkBoardDispatcher(repository=Repository(), session_provider=lambda: _Session())
+    dispatcher.recover_expired_near_finance = _empty_reconcile
     dispatcher.reconcile_pending_attempts = _empty_reconcile
     dispatcher.reconcile_linked_attempts = _empty_reconcile
     dispatcher._readiness = lambda _task: _ready()
@@ -2161,6 +2162,7 @@ async def test_post_claim_authority_race_closes_pending_attempt_before_admission
         return 0
 
     dispatcher._expire_review_windows = no_expired_reviews
+    dispatcher.recover_expired_near_finance = _empty_reconcile
     dispatcher.reconcile_pending_attempts = _empty_reconcile
     dispatcher.reconcile_linked_attempts = _empty_reconcile
     dispatcher._effective_runtime = _runtime
@@ -2373,6 +2375,7 @@ async def test_two_racing_dispatch_passes_can_create_only_one_claim():
 
     def make_dispatcher():
         dispatcher = WorkBoardDispatcher(repository=Repository(), session_provider=lambda: _Session())
+        dispatcher.recover_expired_near_finance = _empty_reconcile
         dispatcher.reconcile_pending_attempts = _empty_reconcile
         dispatcher.reconcile_linked_attempts = _empty_reconcile
         dispatcher._readiness = lambda _task: _ready()
@@ -2542,6 +2545,7 @@ async def test_goal_snapshot_missing_success_contract_blocks_before_claim_or_adm
         jobs=jobs,
         session_provider=async_db,
     )
+    dispatcher.recover_expired_near_finance = _empty_reconcile
     dispatcher.reconcile_pending_attempts = _empty_reconcile
     dispatcher.reconcile_linked_attempts = _empty_reconcile
     receipt = await dispatcher.run_pass()
@@ -2876,6 +2880,7 @@ async def test_racing_passes_create_one_attempt(tmp_path: Path):
         for _ in range(2)
     ]
     for dispatcher in dispatchers:
+        dispatcher.recover_expired_near_finance = empty_reconcile
         dispatcher.reconcile_pending_attempts = empty_reconcile
         dispatcher.reconcile_linked_attempts = empty_reconcile
         dispatcher._readiness = ready

@@ -1,13 +1,88 @@
+import ast
 import sys
 from pathlib import Path
 from subprocess import CompletedProcess, TimeoutExpired
 from unittest.mock import patch
 
+import pytest
+from _pytest.mark.expression import Expression
+
 from scripts.run_backend_test_shard import (
+    CANCELLED_EVAL_CONSUMER_NODES,
+    FULLY_RETIRED_EVAL_INVOCATIONS,
+    main,
     pytest_invocations_for_target,
     run_shard_files,
     timeout_for_file,
 )
+
+
+def test_ci_retirement_skips_exact_module_before_invocation(tmp_path, capsys):
+    with patch("scripts.run_backend_test_shard.subprocess.run") as run, patch(
+        "scripts.run_backend_test_shard.pytest_invocations_for_target",
+        return_value=[("ordinary", ["tests/test_alpha.py"])],
+    ) as invocations:
+        run.return_value = CompletedProcess(args=["pytest"], returncode=0)
+        result = run_shard_files(tmp_path, ["tests/test_eval_harness.py", "tests/test_alpha.py"],
+                                 exclude_cancelled_eval_harness=True)
+    assert result == 0
+    invocations.assert_called_once_with("tests/test_alpha.py")
+    run.assert_called_once()
+    assert "tests/test_eval_harness.py" not in run.call_args.args[0]
+    output = capsys.readouterr().out
+    assert "RETIRED/NOT RUN tests/test_eval_harness.py" in output
+    assert "228 top-level test definitions, including 13 ordinary contracts" in output
+    assert "not selected for execution; not passed (source-definition counts)" in output
+
+
+def test_ci_retirement_does_not_skip_similar_module_names(tmp_path):
+    files = ["tests/test_eval_harness_extra.py", "tests/subdir/test_eval_harness.py"]
+    with patch("scripts.run_backend_test_shard.subprocess.run") as run:
+        run.return_value = CompletedProcess(args=["pytest"], returncode=0)
+        assert run_shard_files(tmp_path, files, exclude_cancelled_eval_harness=True) == 0
+    assert [call.args[0][4] for call in run.call_args_list] == files
+
+
+def test_ci_retirement_only_shard_reports_unrun_without_subprocess(tmp_path, capsys):
+    with patch("scripts.run_backend_test_shard.subprocess.run") as run:
+        assert run_shard_files(tmp_path, ["tests/test_eval_harness.py"],
+                               exclude_cancelled_eval_harness=True) == 0
+    run.assert_not_called()
+    assert "RETIRED/NOT RUN" in capsys.readouterr().out
+
+
+def test_ci_retirement_preserves_ordinary_failure_propagation(tmp_path):
+    with patch("scripts.run_backend_test_shard.subprocess.run") as run:
+        run.return_value = CompletedProcess(args=["pytest"], returncode=1)
+        result = run_shard_files(tmp_path, ["tests/test_eval_harness.py", "tests/test_alpha.py",
+                                           "tests/test_beta.py"], exclude_cancelled_eval_harness=True)
+    assert result == 1
+    run.assert_called_once()
+    assert "tests/test_alpha.py" in run.call_args.args[0]
+
+
+def test_ci_retirement_preserves_ordinary_timeout_propagation(tmp_path):
+    with patch("scripts.run_backend_test_shard.subprocess.run") as run:
+        run.side_effect = TimeoutExpired(cmd=["pytest"], timeout=900)
+        result = run_shard_files(tmp_path, ["tests/test_eval_harness.py", "tests/test_alpha.py",
+                                           "tests/test_beta.py"], file_timeout_seconds=900,
+                                 exclude_cancelled_eval_harness=True)
+    assert result == 124
+    run.assert_called_once()
+    assert run.call_args.kwargs["timeout"] == 900
+
+
+def test_ci_retirement_cli_forwards_fixed_policy_and_preserves_arguments():
+    with patch.object(sys, "argv", ["runner", "--shard-count", "10", "--shard-index", "2",
+                                   "--file-timeout-seconds", "900", "--exclude-cancelled-eval-harness",
+                                   "--", "-x"]), patch(
+        "scripts.run_backend_test_shard.shard_for_index", return_value=["tests/test_alpha.py"],
+    ) as shard, patch("scripts.run_backend_test_shard.run_shard_files", return_value=1) as run:
+        assert main() == 1
+    assert shard.call_args.kwargs == {"shard_count": 10, "shard_index": 2}
+    assert run.call_args.args[1] == ["tests/test_alpha.py"]
+    assert run.call_args.kwargs == {"pytest_args": ["-x"], "file_timeout_seconds": 900,
+                                    "exclude_cancelled_eval_harness": True}
 
 
 def test_run_shard_files_executes_each_file_in_isolation(tmp_path: Path):
@@ -530,3 +605,216 @@ def test_pytest_invocations_for_target_splits_observer_api_contract():
             ],
         ),
     ]
+
+
+def test_ci_consumer_retirement_is_fixed_exact_source_inventory():
+    assert len(CANCELLED_EVAL_CONSUMER_NODES) == 37
+    assert sum(map(len, CANCELLED_EVAL_CONSUMER_NODES.values())) == 109
+    assert "tests/test_operator_api.py::test_operator_computer_use_benchmark_surface_reports_policy_and_receipts" in CANCELLED_EVAL_CONSUMER_NODES["tests/test_operator_api.py"]
+    assert "tests/test_continuous_orchestration_slo.py::test_continuous_orchestration_slo_report_runs_batch_cs_suites" in CANCELLED_EVAL_CONSUMER_NODES["tests/test_continuous_orchestration_slo.py"]
+    assert "tests/test_memory_providers.py" not in CANCELLED_EVAL_CONSUMER_NODES
+    assert "tests/test_memory_benchmark.py" not in CANCELLED_EVAL_CONSUMER_NODES
+    assert "tests/test_post_dx_reach_voice_media_parity.py" not in CANCELLED_EVAL_CONSUMER_NODES
+    assert "tests/test_operator_api.py::test_operator_computer_use_benchmark_surface_degrades_summary_on_failures" not in CANCELLED_EVAL_CONSUMER_NODES["tests/test_operator_api.py"]
+
+
+def test_ci_consumer_retirement_appends_exact_nodes_without_changing_original_groups(tmp_path, capsys):
+    path = "tests/test_operator_api.py"
+    original = [(label, args) for label, args in pytest_invocations_for_target(path)
+                if (path, label) not in FULLY_RETIRED_EVAL_INVOCATIONS]
+    with patch("scripts.run_backend_test_shard.subprocess.run") as run:
+        run.return_value = CompletedProcess(args=["pytest"], returncode=0)
+        assert run_shard_files(tmp_path, [path], pytest_args=["-x"], exclude_cancelled_eval_harness=True) == 0
+    expected_retired = [f"--deselect={node}" for node in CANCELLED_EVAL_CONSUMER_NODES[path]]
+    assert len(run.call_args_list) == len(original)
+    for call, (_, args) in zip(run.call_args_list, original):
+        assert call.args[0] == [sys.executable, "-m", "pytest", "-q", *args, "-x", "--no-cov", *expected_retired]
+    output = capsys.readouterr().out
+    for node in CANCELLED_EVAL_CONSUMER_NODES[path]:
+        assert f"RETIRED/NOT RUN {node}:" in output
+
+
+def test_ci_consumer_retirement_does_not_apply_to_similar_or_unmapped_modules(tmp_path):
+    files = ["tests/test_operator_api_extra.py", "tests/test_memory_providers.py", "tests/test_memory_benchmark.py"]
+    with patch("scripts.run_backend_test_shard.subprocess.run") as run:
+        run.return_value = CompletedProcess(args=["pytest"], returncode=0)
+        assert run_shard_files(tmp_path, files, exclude_cancelled_eval_harness=True) == 0
+    assert len(run.call_args_list) == 3
+    assert all(not arg.startswith("--deselect=") for call in run.call_args_list for arg in call.args[0])
+
+
+def test_ci_consumer_retirement_disabled_preserves_original_invocation(tmp_path):
+    path = "tests/test_continuous_orchestration_slo.py"
+    with patch("scripts.run_backend_test_shard.subprocess.run") as run:
+        run.return_value = CompletedProcess(args=["pytest"], returncode=0)
+        assert run_shard_files(tmp_path, [path]) == 0
+    assert run.call_args.args[0] == [sys.executable, "-m", "pytest", "-q", path, "--no-cov"]
+
+
+def test_ci_consumer_retirement_keeps_mapped_failure_failfast(tmp_path):
+    with patch("scripts.run_backend_test_shard.subprocess.run") as run:
+        run.return_value = CompletedProcess(args=["pytest"], returncode=1)
+        assert run_shard_files(tmp_path, ["tests/test_operator_api.py", "tests/test_alpha.py"], exclude_cancelled_eval_harness=True) == 1
+    run.assert_called_once()
+    assert any(arg.startswith("--deselect=tests/test_operator_api.py::") for arg in run.call_args.args[0])
+
+
+def test_ci_consumer_retirement_keeps_mapped_timeout_failfast(tmp_path):
+    with patch("scripts.run_backend_test_shard.subprocess.run") as run:
+        run.side_effect = TimeoutExpired(cmd=["pytest"], timeout=900)
+        assert run_shard_files(tmp_path, ["tests/test_operator_api.py", "tests/test_alpha.py"], file_timeout_seconds=900, exclude_cancelled_eval_harness=True) == 124
+    run.assert_called_once()
+    assert run.call_args.kwargs["timeout"] == 900
+
+
+def test_ci_consumer_retirement_retains_all_reviewed_mock_and_false_branch_contracts():
+    retained = ['tests/test_certified_secure_host.py::test_certified_secure_host_report_runs_all_batch_db_suites',
+     'tests/test_cockpit_efficiency_benchmark.py::test_cockpit_efficiency_benchmark_report_summarizes_successful_run',
+     'tests/test_cockpit_efficiency_benchmark.py::test_cockpit_efficiency_benchmark_report_surfaces_failures_without_overclaiming',
+     'tests/test_container_grade_secure_host.py::test_container_grade_secure_host_report_runs_all_batch_ct_suites',
+     'tests/test_guardian_benchmark.py::test_guardian_user_model_benchmark_report_reflects_suite_failures',
+     'tests/test_guardian_benchmark.py::test_guardian_user_model_benchmark_report_stays_ci_gated_when_suite_passes',
+     'tests/test_independent_secure_host_review.py::test_independent_secure_host_review_report_runs_all_batch_ck_suites',
+     'tests/test_live_long_horizon_replay_benchmark.py::test_live_replay_benchmark_report_summarizes_success_and_failures',
+     'tests/test_m6_memory_superiority_benchmark.py::test_m6_memory_superiority_benchmark_report_reflects_suite_failures',
+     'tests/test_m6_memory_superiority_benchmark.py::test_m6_memory_superiority_benchmark_report_stays_ci_gated_when_suite_passes',
+     'tests/test_m8_guardian_brain.py::test_m8_guardian_brain_benchmark_report_reflects_suite_failures',
+     'tests/test_m8_guardian_brain.py::test_m8_guardian_brain_benchmark_report_stays_ci_gated_when_suite_passes',
+     'tests/test_memory_benchmark.py::test_guardian_memory_benchmark_report_exposes_gate_a_baseline_receipt',
+     'tests/test_memory_benchmark.py::test_guardian_memory_benchmark_report_marks_embedded_mode_as_not_run',
+     'tests/test_memory_benchmark.py::test_guardian_memory_benchmark_report_reflects_suite_failures',
+     'tests/test_memory_benchmark.py::test_guardian_memory_benchmark_report_stays_ci_gated_when_suite_passes',
+     'tests/test_memory_provider_quality_gate.py::test_memory_provider_quality_gate_report_reflects_suite_failures',
+     'tests/test_memory_provider_quality_gate.py::test_memory_provider_quality_gate_report_stays_ci_gated_when_suite_passes',
+     'tests/test_memory_providers.py::test_memory_provider_inventory_endpoint_lists_configured_additive_provider',
+     'tests/test_memory_providers.py::test_memory_provider_inventory_surfaces_capability_governance_states',
+     'tests/test_memory_providers.py::test_plan_memory_retrieval_tolerates_provider_health_failures',
+     'tests/test_operator_api.py::test_operator_cockpit_efficiency_benchmark_surface_degrades_summary_on_failures',
+     'tests/test_operator_api.py::test_operator_computer_use_benchmark_surface_degrades_summary_on_failures',
+     'tests/test_operator_api.py::test_operator_durable_workflow_engine_surface_delegates_to_state_report',
+     'tests/test_operator_api.py::test_operator_durable_workflow_engine_v2_surface_delegates_to_report',
+     'tests/test_operator_api.py::test_operator_live_replay_benchmark_surface_degrades_summary_on_failures',
+     'tests/test_operator_api.py::test_operator_live_workflow_endurance_canary_surface_degrades_summary_on_failures',
+     'tests/test_operator_api.py::test_operator_m6_memory_superiority_surface_delegates_to_memory_payload',
+     'tests/test_operator_api.py::test_operator_m7_cockpit_composes_dense_control_surface',
+     'tests/test_operator_api.py::test_operator_memory_provider_quality_gate_surface_degrades_summary_on_failures',
+     'tests/test_operator_api.py::test_operator_one_reach_channel_canary_surface_degrades_summary_on_failures',
+     'tests/test_operator_api.py::test_operator_trust_boundary_benchmark_surface_degrades_summary_on_failures',
+     'tests/test_operator_api.py::test_operator_workflow_endurance_benchmark_surface_degrades_summary_on_failures',
+     'tests/test_post_dp_durable_orchestration.py::test_post_dp_durable_orchestration_report_degrades_on_failures',
+     'tests/test_post_dp_durable_orchestration.py::test_post_dp_durable_orchestration_report_ignores_unrelated_persisted_runs',
+     'tests/test_post_dp_durable_orchestration.py::test_post_dp_durable_orchestration_report_keeps_receipt_story_on_pass',
+     'tests/test_post_dp_operator_debugging_recovery.py::test_post_dp_operator_debugging_recovery_report_exposes_scenario_names',
+     'tests/test_post_dp_reach_channel_gap_closure.py::test_post_dp_reach_channel_report_runs_all_ds_suites',
+     'tests/test_post_dp_secure_host_gap_closure.py::test_post_dp_secure_host_report_runs_all_dr_suites',
+     'tests/test_post_dx_formal_secure_runtime_isolation.py::test_post_dx_formal_secure_runtime_report_runs_all_dz_suites',
+     'tests/test_post_dx_reach_voice_media_parity.py::test_post_dx_reach_voice_media_report_runs_all_suites',
+     'tests/test_production_grade_secure_host.py::test_production_grade_secure_host_report_runs_all_dj_suites',
+     'tests/test_production_isolation.py::test_production_isolation_security_report_runs_all_batch_cd_suites',
+     'tests/test_workflow_benchmark.py::test_live_workflow_endurance_canary_report_degrades_on_failures',
+     'tests/test_workflow_benchmark.py::test_live_workflow_endurance_canary_report_keeps_receipt_story_on_pass',
+     'tests/test_workflow_benchmark.py::test_workflow_endurance_benchmark_report_degrades_summary_states_on_failures',
+     'tests/test_workflow_benchmark.py::test_workflow_endurance_benchmark_report_keeps_healthy_summary_states_on_pass']
+    retired = {node for nodes in CANCELLED_EVAL_CONSUMER_NODES.values() for node in nodes}
+    assert len(retained) == 47
+    assert retired.isdisjoint(retained)
+
+
+def _source_selected_test_nodes(source, path, expression):
+    definitions = []
+
+    def collect(body, parents=()):
+        for node in body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
+                definitions.append((*parents, node.name))
+            elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+                collect(node.body, (*parents, node.name))
+
+    collect(ast.parse(source).body)
+    predicate = Expression.compile(expression)
+    selected = set()
+    for names in definitions:
+        # Pytest -k matches each parent/node name case-insensitively, including
+        # conventional Test* classes. This is source inspection, not collection.
+        keywords = (*Path(path).parts, *names)
+        if predicate.evaluate(lambda identifier: any(identifier.lower() in name.lower() for name in keywords)):
+            selected.add("::".join((path, *names)))
+    return selected
+
+
+def _assert_source_group_retired(selected, retired, expected_count):
+    assert selected <= retired, "Selected source group includes an ordinary definition"
+    assert len(selected) == expected_count
+
+
+def test_source_guard_rejects_ordinary_method_selected_by_class_name():
+    source = """
+def test_marketplace_retired():
+    pass
+
+class TestMarketplaceOrdinary:
+    def test_health(self):
+        pass
+
+    class TestNested:
+        async def test_status(self):
+            pass
+
+class HelperMarketplace:
+    def test_not_a_conventional_test_class(self):
+        pass
+"""
+    path = "tests/test_toy.py"
+    selected = _source_selected_test_nodes(source, path, "marketplace or capability_pack or governed_ecosystem or governed_improvement")
+    assert selected == {
+        path + "::test_marketplace_retired",
+        path + "::TestMarketplaceOrdinary::test_health",
+        path + "::TestMarketplaceOrdinary::TestNested::test_status",
+    }
+    with pytest.raises(AssertionError, match="ordinary definition"):
+        _assert_source_group_retired(selected, {path + "::test_marketplace_retired"}, 1)
+
+
+def test_fully_retired_group_is_fixed_and_current_source_has_no_ordinary_selected_definition():
+    assert FULLY_RETIRED_EVAL_INVOCATIONS == {
+        ("tests/test_operator_api.py", "tests/test_operator_api.py::marketplace_and_ecosystem"),
+    }
+    root = Path(__file__).resolve().parents[1]
+    for path, label in FULLY_RETIRED_EVAL_INVOCATIONS:
+        args = dict(pytest_invocations_for_target(path))[label]
+        expression = args[args.index("-k") + 1]
+        selected = _source_selected_test_nodes((root / path).read_text(), path, expression)
+        _assert_source_group_retired(selected, set(CANCELLED_EVAL_CONSUMER_NODES[path]), 10)
+
+
+def test_fully_retired_group_skips_before_subprocess_and_reports_not_run(tmp_path, capsys):
+    path, label = next(iter(FULLY_RETIRED_EVAL_INVOCATIONS))
+    with patch("scripts.run_backend_test_shard.pytest_invocations_for_target", return_value=[(label, [path])]), patch("scripts.run_backend_test_shard.subprocess.run") as run:
+        assert run_shard_files(tmp_path, [path], exclude_cancelled_eval_harness=True) == 0
+    run.assert_not_called()
+    assert f"RETIRED/NOT RUN {label}:" in capsys.readouterr().out
+
+
+def test_fully_retired_group_does_not_skip_similar_label(tmp_path):
+    path, label = next(iter(FULLY_RETIRED_EVAL_INVOCATIONS))
+    with patch("scripts.run_backend_test_shard.pytest_invocations_for_target", return_value=[(label + "_ordinary", [path])]), patch("scripts.run_backend_test_shard.subprocess.run") as run:
+        run.return_value = CompletedProcess(args=["pytest"], returncode=0)
+        assert run_shard_files(tmp_path, [path], exclude_cancelled_eval_harness=True) == 0
+    run.assert_called_once()
+
+
+def test_fully_retired_group_default_runner_still_invokes_original_groups(tmp_path):
+    path, label = next(iter(FULLY_RETIRED_EVAL_INVOCATIONS))
+    with patch("scripts.run_backend_test_shard.subprocess.run") as run:
+        run.return_value = CompletedProcess(args=["pytest"], returncode=0)
+        assert run_shard_files(tmp_path, [path]) == 0
+    assert len(run.call_args_list) == len(pytest_invocations_for_target(path))
+    expected = [args for _, args in pytest_invocations_for_target(path)]
+    assert [call.args[0][4:-1] for call in run.call_args_list] == expected
+
+
+def test_ci_retirement_does_not_swallow_no_tests_exit_code(tmp_path):
+    with patch("scripts.run_backend_test_shard.subprocess.run") as run:
+        run.return_value = CompletedProcess(args=["pytest"], returncode=5)
+        assert run_shard_files(tmp_path, ["tests/test_operator_api.py", "tests/test_alpha.py"], exclude_cancelled_eval_harness=True) == 5
+    run.assert_called_once()

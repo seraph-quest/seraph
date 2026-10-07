@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { useLayoutEffect, type ComponentProps } from "react";
+import { Profiler, useLayoutEffect, type ComponentProps } from "react";
 import { beforeEach, expect, it, vi } from "vitest";
 import { apiFetch } from "../../lib/api";
 import type { WorkBoardTask } from "../../types";
@@ -109,4 +109,79 @@ it.each([
   atCommit.length = 0;
   view.rerender(<CommitInspector panelProps={next} inspect={inspect} />);
   expect(atCommit[0]).toEqual({ report: null, link: false });
+});
+
+const recoveryActions = [
+  { action: "reconcile", label: "Verify original parser reap and release capacity" },
+  { action: "recover", label: "Adopt original verified output without reparsing" },
+  { action: "retry", label: "Retry known terminated interruption within original allowance" },
+] as const;
+it.each(recoveryActions.flatMap(action => [
+  { ...action, response: "unavailable" },
+  { ...action, response: "denied" },
+]))("clears current output on $action $response readback without changing its request", async ({ action, label, response }) => {
+  const initial = {
+    task_revision: 5, status: action === "reconcile" ? "succeeded" : action === "recover" ? "unknown_external_effect" : "blocked",
+    cleanup_proven: action === "retry", quiescence_recorded: action === "retry",
+    recoverable: action === "recover", retryable: action === "retry", report_available: action === "reconcile",
+    reason_code: action === "retry" ? "document_supervisor_interrupted" : null,
+    recovery_limit: "Original bounded attempt only", deadline_at: "2099-01-01T00:00:00Z",
+  };
+  const unavailable = { ...initial, status: action === "retry" ? "queued" : "succeeded",
+    report_available: false, recoverable: false, retryable: false,
+    reason_code: action === "retry" ? null : "document_output_readback_required" };
+  const requests: Record<string, unknown>[] = [];
+  let acted = false;
+  const revoke = vi.fn();
+  vi.stubGlobal("URL", class extends URL { static createObjectURL = vi.fn().mockReturnValue("blob:recovery-bound"); static revokeObjectURL = revoke; });
+  vi.mocked(apiFetch).mockImplementation(async (url, init) => {
+    if (String(url).endsWith(`/document-comparison/${action}`)) {
+      expect(init?.method).toBe("POST");
+      requests.push(JSON.parse(String(init?.body)));
+      acted = true;
+      return response === "denied"
+        ? new Response(JSON.stringify({ detail: { code: "stale_goal_revision" } }), { status: 409 })
+        : new Response(JSON.stringify({ document_comparison: unavailable }));
+    }
+    if (String(url).endsWith("/document-comparison")) return new Response(JSON.stringify(acted ? unavailable : initial));
+    return new Response(JSON.stringify({ text: "cached private recovery output" }));
+  });
+  const denialCommits: { report: boolean; csv: boolean }[] = [];
+  render(<Profiler id="document-output" onRender={() => {
+    if (action === "reconcile" && /stale_goal_revision|document_output_readback_required/.test(document.body.textContent ?? "")) {
+      denialCommits.push({ report: Boolean(document.querySelector('[aria-label="Verified cited document report"]')),
+        csv: Boolean(document.querySelector('a[download="invoice-comparison.csv"]')) });
+    }
+  }}><DocumentComparisonPanel {...props} /></Profiler>);
+  fireEvent.click(screen.getByRole("button", { name: "Read original parser and recovery state" }));
+  const control = screen.getByRole("button", { name: label });
+  await waitFor(() => expect(control).toBeEnabled());
+  if (action === "reconcile") {
+    fireEvent.click(screen.getByRole("button", { name: "Read verified cited report" }));
+    await screen.findByText("cached private recovery output");
+    fireEvent.click(screen.getByRole("button", { name: "Prepare verified derived CSV" }));
+    await screen.findByRole("link", { name: "Save verified derived CSV" });
+  } else {
+    // Canonical recover/retry snapshots are unreadable; a cached prestate is
+    // not applicable to these actions. Preserve their exact request boundary.
+    expect(screen.getByRole("button", { name: "Read verified cited report" })).toBeDisabled();
+    expect(screen.queryByRole("link", { name: "Save verified derived CSV" })).toBeNull();
+  }
+  fireEvent.click(control);
+  if (response === "denied") expect(await screen.findByRole("alert")).toHaveTextContent("stale_goal_revision");
+  else await screen.findByText(new RegExp(`${unavailable.status} · ${unavailable.reason_code ?? "original attempt"}`));
+  expect(requests).toHaveLength(1);
+  expect(requests[0]).toEqual({ expected_revision: 5, idempotency_key: expect.stringMatching(/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/) });
+  expect(screen.queryByText("cached private recovery output")).toBeNull();
+  expect(screen.queryByRole("link", { name: "Save verified derived CSV" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Read verified cited report" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Prepare verified derived CSV" })).toBeDisabled();
+  if (action === "reconcile") {
+    expect(denialCommits.length).toBeGreaterThan(0);
+    expect(denialCommits.every(commit => !commit.report && !commit.csv)).toBe(true);
+    await waitFor(() => expect(revoke).toHaveBeenCalledWith("blob:recovery-bound"));
+  }
+  fireEvent.click(screen.getByRole("button", { name: "Read original parser and recovery state" }));
+  await screen.findByText(new RegExp(`${unavailable.status} · ${unavailable.reason_code ?? "original attempt"}`));
+  expect(screen.queryByRole("link", { name: "Save verified derived CSV" })).toBeNull();
 });

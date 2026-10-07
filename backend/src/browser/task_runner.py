@@ -2290,37 +2290,40 @@ class BrowserTaskRunner:
             raise cls._receipt_limit_error(state)
 
     async def _assert_current(self, state: "_ExecutionState") -> Mapping[str, Any]:
-        if state.heartbeat_error:
-            raise BrowserTaskError(
-                "durable lease heartbeat failed",
-                code="durable_heartbeat_failed",
-                dispatched=state.network_dispatched,
+        # Lease snapshots and revision writes share the checkpoint/heartbeat
+        # boundary so a delayed read cannot replace a newer local revision.
+        async with state.lock:
+            if state.heartbeat_error:
+                raise BrowserTaskError(
+                    "durable lease heartbeat failed",
+                    code="durable_heartbeat_failed",
+                    dispatched=state.network_dispatched,
+                )
+            projection = await self.jobs.assert_active_lease(
+                state.job_id,
+                owner=state.lease_owner,
+                fencing_token=state.fencing_token,
             )
-        projection = await self.jobs.assert_active_lease(
-            state.job_id,
-            owner=state.lease_owner,
-            fencing_token=state.fencing_token,
-        )
-        self._verify_durable_binding(
-            projection,
-            expected_job_id=state.job_id,
-            task_id=state.task_id,
-            attempt_id=state.attempt_id,
-            owner_principal_id=state.owner_principal_id,
-            owner_session_id=state.owner_session_id,
-            goal_id=state.goal_id,
-            goal_revision=state.goal_revision,
-            input_artifact_id=state.input_artifact_id,
-            input_artifact_digest=state.input_artifact_digest,
-            input_envelope_digest=state.input_envelope_digest,
-            input_model_digest=state.input_model_digest,
-            action_consent_digest=state.action_consent_digest,
-            action_count=state.action_count,
-            board_task_revision=state.admission_board_task_revision,
-            board_fencing_token=state.board_fencing_token,
-            task_priority=state.task_priority,
-        )
-        state.revision = int(projection.get("revision") or state.revision)
+            self._verify_durable_binding(
+                projection,
+                expected_job_id=state.job_id,
+                task_id=state.task_id,
+                attempt_id=state.attempt_id,
+                owner_principal_id=state.owner_principal_id,
+                owner_session_id=state.owner_session_id,
+                goal_id=state.goal_id,
+                goal_revision=state.goal_revision,
+                input_artifact_id=state.input_artifact_id,
+                input_artifact_digest=state.input_artifact_digest,
+                input_envelope_digest=state.input_envelope_digest,
+                input_model_digest=state.input_model_digest,
+                action_consent_digest=state.action_consent_digest,
+                action_count=state.action_count,
+                board_task_revision=state.admission_board_task_revision,
+                board_fencing_token=state.board_fencing_token,
+                task_priority=state.task_priority,
+            )
+            state.revision = int(projection.get("revision") or state.revision)
         control = self.runtime_controls
         if control is not None:
             callback = getattr(control, "assert_current", None)
@@ -2599,41 +2602,43 @@ class BrowserTaskRunner:
         if readback != content or hashlib.sha256(readback).hexdigest() != digest:
             raise BrowserVerificationError("browser artifact readback digest mismatch", code="artifact_readback_mismatch")
         self._assert_receipt_budget(state)
-        artifact = await self.jobs.record_artifact(
-            state.job_id,
-            file_path=relative,
-            artifact_type="browser_public_task_result",
-            content=readback,
-            owner=state.lease_owner,
-            fencing_token=state.fencing_token,
-            expected_revision=state.revision,
-        )
-        state.revision = int(artifact.get("revision") or state.revision)
+        async with state.lock:
+            artifact = await self.jobs.record_artifact(
+                state.job_id,
+                file_path=relative,
+                artifact_type="browser_public_task_result",
+                content=readback,
+                owner=state.lease_owner,
+                fencing_token=state.fencing_token,
+                expected_revision=state.revision,
+            )
+            state.revision = int(artifact.get("revision") or state.revision)
         self._assert_receipt_budget(state)
         verified_at = datetime.now(timezone.utc).isoformat()
         readback_id = "readback-" + _digest(
             {"job_id": state.job_id, "path": relative, "digest": digest}
         )[:32]
-        receipt = await self.jobs.record_readback(
-            state.job_id,
-            target_path=relative,
-            effect_type="browser_public_task_result",
-            target_digest=digest,
-            content_sha256=digest,
-            readback_id=readback_id,
-            verified_at=verified_at,
-            status="succeeded",
-            details={
-                "verified": True,
-                "size_bytes": len(readback),
-                "request_count": state.request_count,
-                "action_count": len(model.actions),
-            },
-            owner=state.lease_owner,
-            fencing_token=state.fencing_token,
-            expected_revision=state.revision,
-        )
-        state.revision = int(receipt.get("revision") or state.revision)
+        async with state.lock:
+            receipt = await self.jobs.record_readback(
+                state.job_id,
+                target_path=relative,
+                effect_type="browser_public_task_result",
+                target_digest=digest,
+                content_sha256=digest,
+                readback_id=readback_id,
+                verified_at=verified_at,
+                status="succeeded",
+                details={
+                    "verified": True,
+                    "size_bytes": len(readback),
+                    "request_count": state.request_count,
+                    "action_count": len(model.actions),
+                },
+                owner=state.lease_owner,
+                fencing_token=state.fencing_token,
+                expected_revision=state.revision,
+            )
+            state.revision = int(receipt.get("revision") or state.revision)
         return relative, digest, readback_id, verified_at
 
     def _verify_durable_binding(

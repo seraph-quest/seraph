@@ -41,8 +41,8 @@ class TestGetOrCreate:
         s2 = await sm.get_or_create("s1")
         assert s1.id == s2.id
 
-    async def test_authenticated_owner_claims_existing_ownerless_session(self, async_db, sm):
-        await sm.get_or_create("legacy-conversation")
+    async def test_authenticated_owner_continues_existing_owned_session(self, async_db, sm):
+        await sm.get_or_create("legacy-conversation", owner_principal_id="operator:single")
 
         claimed = await sm.get_or_create(
             "legacy-conversation",
@@ -53,6 +53,17 @@ class TestGetOrCreate:
         persisted = await sm.get("legacy-conversation")
         assert persisted is not None
         assert persisted.owner_principal_id == "operator:single"
+
+    async def test_authenticated_owner_cannot_claim_ownerless_history(self, async_db, sm):
+        await sm.get_or_create("ownerless-conversation")
+        await sm.add_message("ownerless-conversation", "user", "Unattributed historical message")
+        with pytest.raises(SessionOwnerMismatchError):
+            await sm.get_or_create("ownerless-conversation", owner_principal_id="operator:single")
+        persisted = await sm.get("ownerless-conversation")
+        assert persisted is not None
+        assert persisted.owner_principal_id is None
+        messages = await sm.get_messages("ownerless-conversation")
+        assert [message["content"] for message in messages] == ["Unattributed historical message"]
 
     async def test_authenticated_owner_cannot_claim_other_owned_session(self, async_db, sm):
         await sm.get_or_create(

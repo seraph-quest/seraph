@@ -535,11 +535,12 @@ describe("WorkBoardPanel", () => {
     fireEvent.dragStart(triageCard, { dataTransfer: { setData: vi.fn(), getData: vi.fn(() => "task-1"), effectAllowed: "move" } });
     fireEvent.drop(screen.getByRole("region", { name: "Running column" }), { dataTransfer: { getData: () => "task-1" } });
     await waitFor(() => expect(screen.getAllByRole("alert").some((alert) => alert.textContent?.includes("directly to Running"))).toBe(true));
+    await waitFor(() => expect(screen.getAllByRole("alert").find((alert) => alert.textContent?.includes("directly to Running"))).toHaveTextContent(/board was refreshed from the server/i));
     fireEvent.drop(screen.getByRole("region", { name: "Done column" }), { dataTransfer: { getData: () => "task-1" } });
 
     expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === "POST")).toBe(false);
     await waitFor(() => expect(screen.getAllByRole("alert").some((alert) => alert.textContent?.includes("directly to Done"))).toBe(true));
-    expect(screen.getAllByRole("alert").find((alert) => alert.textContent?.includes("directly to Done"))).toHaveTextContent(/board was refreshed from the server/i);
+    await waitFor(() => expect(screen.getAllByRole("alert").find((alert) => alert.textContent?.includes("directly to Done"))).toHaveTextContent(/board was refreshed from the server/i));
     await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => String(input).includes("/api/work-board/tasks?")).length).toBeGreaterThanOrEqual(2));
   });
 

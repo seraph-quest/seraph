@@ -18,6 +18,122 @@ except ModuleNotFoundError:  # pragma: no cover - CI script entrypoint fallback
     from backend_test_shards import shard_for_index
 
 
+CANCELLED_EVAL_CONSUMER_NODES: dict[str, list[str]] = {'tests/test_always_available_reach_media.py': ['tests/test_always_available_reach_media.py::test_always_available_reach_media_report_exposes_ci_gated_posture'],
+ 'tests/test_broad_reach_field_ops.py': ['tests/test_broad_reach_field_ops.py::test_broad_reach_field_ops_report_exposes_ci_gated_posture'],
+ 'tests/test_browser_computer_use_parity_depth.py': ['tests/test_browser_computer_use_parity_depth.py::test_browser_computer_use_parity_depth_report_runs_all_cy_suites'],
+ 'tests/test_browser_computer_use_production.py': ['tests/test_browser_computer_use_production.py::test_browser_computer_use_production_report_runs_all_gates'],
+ 'tests/test_browser_provider_usability.py': ['tests/test_browser_provider_usability.py::test_browser_provider_usability_report_runs_all_batch_ch_suites'],
+ 'tests/test_continuous_orchestration_slo.py': ['tests/test_continuous_orchestration_slo.py::test_continuous_orchestration_slo_report_runs_batch_cs_suites'],
+ 'tests/test_dense_operator_recovery.py': ['tests/test_dense_operator_recovery.py::test_dense_operator_recovery_report_exposes_ci_gated_posture'],
+ 'tests/test_durable_workflow_state.py': ['tests/test_durable_workflow_state.py::test_durable_workflow_state_report_includes_persisted_snapshots',
+                                          'tests/test_durable_workflow_state.py::test_durable_workflow_v2_contract_and_report_expose_recovery_receipts'],
+ 'tests/test_final_parity_audit.py': ['tests/test_final_parity_audit.py::test_final_parity_readiness_report_runs_all_batch_ci_suites',
+                                      'tests/test_final_parity_audit.py::test_post_cq_claim_readiness_report_runs_all_batch_cz_suites',
+                                      'tests/test_final_parity_audit.py::test_final_production_parity_report_runs_all_batch_dh_suites'],
+ 'tests/test_generalized_guardian_outcomes.py': ['tests/test_generalized_guardian_outcomes.py::test_generalized_guardian_outcomes_report_exposes_ci_gated_posture'],
+ 'tests/test_independent_learning_memory_parity.py': ['tests/test_independent_learning_memory_parity.py::test_independent_learning_memory_parity_report_exposes_ci_gated_posture'],
+ 'tests/test_live_external_orchestration.py': ['tests/test_live_external_orchestration.py::test_live_external_orchestration_report_runs_batch_cc_suites'],
+ 'tests/test_live_guardian_memory_field_program.py': ['tests/test_live_guardian_memory_field_program.py::test_live_guardian_memory_report_exposes_ci_gated_posture'],
+ 'tests/test_live_human_outcome_learning.py': ['tests/test_live_human_outcome_learning.py::test_live_human_outcome_learning_report_exposes_ci_gated_posture'],
+ 'tests/test_live_learning_quality.py': ['tests/test_live_learning_quality.py::test_live_guardian_learning_quality_report_exposes_ci_gated_posture'],
+ 'tests/test_live_marketplace_attestation.py': ['tests/test_live_marketplace_attestation.py::test_live_marketplace_attestation_report_runs_all_batch_cg_suites'],
+ 'tests/test_live_reach_media.py': ['tests/test_live_reach_media.py::test_live_reach_media_report_exposes_ci_gated_posture'],
+ 'tests/test_longitudinal_guardian_outcomes.py': ['tests/test_longitudinal_guardian_outcomes.py::test_longitudinal_guardian_outcomes_report_exposes_ci_gated_posture'],
+ 'tests/test_marketplace_lifecycle.py': ['tests/test_marketplace_lifecycle.py::test_marketplace_lifecycle_report_runs_all_batch_ca_suites'],
+ 'tests/test_marketplace_production_security.py': ['tests/test_marketplace_production_security.py::test_marketplace_production_security_report_runs_all_batch_dn_suites'],
+ 'tests/test_marketplace_security_corpus.py': ['tests/test_marketplace_security_corpus.py::test_marketplace_security_corpus_report_runs_all_batch_cx_suites'],
+ 'tests/test_operator_api.py': ['tests/test_operator_api.py::test_operator_production_parity_readiness_surface_blocks_completion_claims',
+                                'tests/test_operator_api.py::test_operator_governed_improvement_benchmark_surface_reports_policy_and_receipts',
+                                'tests/test_operator_api.py::test_operator_m9_governed_ecosystem_benchmark_surface_reports_policy_receipts_and_claim_boundary',
+                                'tests/test_operator_api.py::test_operator_governed_capability_pack_hardening_reports_policy_receipts_and_claim_boundary',
+                                'tests/test_operator_api.py::test_operator_marketplace_lifecycle_maturity_surface_reports_batch_ca_receipts',
+                                'tests/test_operator_api.py::test_operator_live_marketplace_attestation_surface_reports_batch_cg_receipts',
+                                'tests/test_operator_api.py::test_operator_production_marketplace_security_surface_reports_batch_co_receipts',
+                                'tests/test_operator_api.py::test_operator_marketplace_security_corpus_surface_reports_batch_cx_receipts',
+                                'tests/test_operator_api.py::test_operator_production_secure_marketplace_surface_reports_batch_df_receipts',
+                                'tests/test_operator_api.py::test_operator_marketplace_production_security_surface_reports_batch_dn_receipts',
+                                'tests/test_operator_api.py::test_operator_post_dp_marketplace_lifecycle_surface_reports_batch_dv_receipts',
+                                'tests/test_operator_api.py::test_operator_browser_provider_usability_surface_reports_batch_ch_receipts',
+                                'tests/test_operator_api.py::test_operator_safe_autonomous_browser_computer_use_surface_reports_batch_cp_receipts',
+                                'tests/test_operator_api.py::test_operator_browser_computer_use_parity_depth_surface_reports_batch_cy_receipts',
+                                'tests/test_operator_api.py::test_operator_browser_computer_use_production_surface_reports_batch_do_receipts',
+                                'tests/test_operator_api.py::test_operator_post_dp_browser_computer_use_reliability_surface_reports_batch_dw_receipts',
+                                'tests/test_operator_api.py::test_operator_production_control_parity_surface_reports_batch_cb_receipts',
+                                'tests/test_operator_api.py::test_operator_final_parity_readiness_surface_reports_batch_ci_receipts',
+                                'tests/test_operator_api.py::test_operator_post_cq_claim_readiness_surface_reports_batch_cz_receipts',
+                                'tests/test_operator_api.py::test_operator_final_production_parity_surface_reports_batch_dh_receipts',
+                                'tests/test_operator_api.py::test_operator_live_external_orchestration_surface_reports_batch_cc_receipts',
+                                'tests/test_operator_api.py::test_operator_production_sla_orchestration_surface_reports_batch_cj_receipts',
+                                'tests/test_operator_api.py::test_operator_continuous_orchestration_slo_surface_reports_batch_cs_receipts',
+                                'tests/test_operator_api.py::test_operator_production_workflow_guarantees_surface_reports_batch_da_receipts',
+                                'tests/test_operator_api.py::test_operator_m7_cockpit_legibility_benchmark_surface_reports_receipts_controls_and_claim_boundary',
+                                'tests/test_operator_api.py::test_operator_cockpit_efficiency_benchmark_surface_reports_policy_metrics_and_claim_boundary',
+                                'tests/test_operator_api.py::test_operator_memory_provider_quality_gate_surface_reports_policy_and_claim_boundary',
+                                'tests/test_operator_api.py::test_operator_live_guardian_learning_quality_surface_reports_batch_bz_receipts',
+                                'tests/test_operator_api.py::test_operator_live_human_outcome_learning_surface_reports_batch_cf_receipts',
+                                'tests/test_operator_api.py::test_operator_independent_learning_memory_parity_surface_reports_batch_cm_receipts',
+                                'tests/test_operator_api.py::test_operator_longitudinal_guardian_outcomes_surface_reports_batch_cv_receipts',
+                                'tests/test_operator_api.py::test_operator_generalized_guardian_outcomes_surface_reports_batch_dd_receipts',
+                                'tests/test_operator_api.py::test_operator_live_guardian_memory_field_program_surface_reports_batch_dl_receipts',
+                                'tests/test_operator_api.py::test_operator_dense_operator_recovery_control_surface_reports_batch_cn_receipts',
+                                'tests/test_operator_api.py::test_operator_control_population_study_surface_reports_batch_cw_receipts',
+                                'tests/test_operator_api.py::test_operator_control_certification_surface_reports_batch_de_receipts',
+                                'tests/test_operator_api.py::test_operator_control_production_certification_surface_reports_batch_dm_receipts',
+                                'tests/test_operator_api.py::test_post_dp_operator_debugging_recovery_surface_reports_batch_du_receipts',
+                                'tests/test_operator_api.py::test_operator_m8_guardian_intervention_benchmark_surface_reports_policy_and_receipts',
+                                'tests/test_operator_api.py::test_operator_guardian_safe_multimodal_voice_surface_reports_policy_receipts_and_claim_boundary',
+                                'tests/test_operator_api.py::test_operator_production_reach_browser_voice_surface_reports_batch_by_receipts',
+                                'tests/test_operator_api.py::test_operator_live_reach_media_surface_reports_batch_ce_receipts',
+                                'tests/test_operator_api.py::test_operator_production_reach_voice_mobile_surface_reports_batch_cl_receipts',
+                                'tests/test_operator_api.py::test_operator_broad_reach_field_ops_surface_reports_batch_cu_receipts',
+                                'tests/test_operator_api.py::test_operator_always_available_reach_media_surface_reports_batch_dc_receipts',
+                                'tests/test_operator_api.py::test_operator_reach_voice_production_ops_surface_reports_batch_dk_receipts',
+                                'tests/test_operator_api.py::test_operator_post_dp_durable_orchestration_surface_reports_batch_dq_receipts',
+                                'tests/test_operator_api.py::test_operator_post_dp_reach_channel_surface_reports_batch_ds_receipts',
+                                'tests/test_operator_api.py::test_operator_post_dx_reach_voice_media_surface_reports_batch_ea_receipts',
+                                'tests/test_operator_api.py::test_operator_post_dp_guardian_memory_surface_reports_batch_dt_receipts',
+                                'tests/test_operator_api.py::test_operator_guardian_learning_arbitration_surface_reports_policy_receipts_and_claim_boundary',
+                                'tests/test_operator_api.py::test_operator_live_replay_benchmark_surface_reports_policy_receipts_and_claim_boundary',
+                                'tests/test_operator_api.py::test_operator_memory_benchmark_surface_reports_failure_taxonomy_and_policy',
+                                'tests/test_operator_api.py::test_operator_m6_memory_superiority_benchmark_surface_reports_policy_and_receipts',
+                                'tests/test_operator_api.py::test_operator_workflow_endurance_benchmark_surface_reports_policy_and_state',
+                                'tests/test_operator_api.py::test_operator_live_workflow_endurance_canary_surface_reports_story_and_claim_boundary',
+                                'tests/test_operator_api.py::test_operator_one_reach_channel_canary_surface_reports_story_and_claim_boundary',
+                                'tests/test_operator_api.py::test_operator_trust_boundary_benchmark_surface_reports_policy_and_receipts',
+                                'tests/test_operator_api.py::test_operator_secure_capability_host_benchmark_surface_reports_policy_and_receipts',
+                                'tests/test_operator_api.py::test_operator_secure_capability_host_hardening_surface_reports_v2_policy_and_receipts',
+                                'tests/test_operator_api.py::test_operator_production_isolation_hardening_surface_reports_batch_cd_receipts',
+                                'tests/test_operator_api.py::test_operator_independent_secure_host_review_surface_reports_batch_ck_receipts',
+                                'tests/test_operator_api.py::test_operator_container_grade_secure_host_surface_reports_batch_ct_receipts',
+                                'tests/test_operator_api.py::test_operator_certified_secure_host_surface_reports_batch_db_receipts',
+                                'tests/test_operator_api.py::test_operator_production_grade_secure_host_surface_reports_batch_dj_receipts',
+                                'tests/test_operator_api.py::test_operator_post_dp_secure_host_surface_reports_batch_dr_receipts',
+                                'tests/test_operator_api.py::test_operator_post_dx_formal_secure_runtime_surface_reports_batch_dz_receipts',
+                                'tests/test_operator_api.py::test_operator_computer_use_benchmark_surface_reports_policy_and_receipts',
+                                'tests/test_operator_api.py::test_operator_m2_execution_benchmark_surface_reports_completion_policy'],
+ 'tests/test_operator_control_certification.py': ['tests/test_operator_control_certification.py::test_operator_control_certification_report_runs_de_suites'],
+ 'tests/test_operator_control_production_certification.py': ['tests/test_operator_control_production_certification.py::test_operator_control_production_certification_report_runs_dm_suites'],
+ 'tests/test_operator_mission_control.py': ['tests/test_operator_mission_control.py::test_operator_mission_control_report_runs_cw_suites'],
+ 'tests/test_post_dp_browser_computer_use_reliability.py': ['tests/test_post_dp_browser_computer_use_reliability.py::test_post_dp_browser_computer_use_reliability_report_runs_all_gates'],
+ 'tests/test_post_dp_guardian_memory_gap_closure.py': ['tests/test_post_dp_guardian_memory_gap_closure.py::test_post_dp_guardian_memory_report_runs_all_dt_suites'],
+ 'tests/test_post_dp_marketplace_lifecycle_gap_closure.py': ['tests/test_post_dp_marketplace_lifecycle_gap_closure.py::test_post_dp_marketplace_lifecycle_report_runs_all_dv_suites'],
+ 'tests/test_production_marketplace_security.py': ['tests/test_production_marketplace_security.py::test_production_marketplace_security_report_runs_all_batch_co_suites'],
+ 'tests/test_production_operator_control.py': ['tests/test_production_operator_control.py::test_production_operator_control_report_runs_cb_suites'],
+ 'tests/test_production_reach_hardening.py': ['tests/test_production_reach_hardening.py::test_production_reach_browser_voice_report_exposes_ci_gated_posture'],
+ 'tests/test_production_reach_voice_mobile.py': ['tests/test_production_reach_voice_mobile.py::test_production_reach_voice_mobile_report_exposes_ci_gated_posture'],
+ 'tests/test_production_secure_marketplace.py': ['tests/test_production_secure_marketplace.py::test_production_secure_marketplace_report_runs_all_batch_df_suites'],
+ 'tests/test_production_sla_orchestration.py': ['tests/test_production_sla_orchestration.py::test_production_sla_orchestration_report_runs_batch_cj_suites'],
+ 'tests/test_production_workflow_guarantees.py': ['tests/test_production_workflow_guarantees.py::test_production_workflow_guarantees_report_exposes_persisted_runtime_snapshot',
+                                                  'tests/test_production_workflow_guarantees.py::test_production_workflow_guarantees_report_runs_da_suites'],
+ 'tests/test_reach_voice_production_ops.py': ['tests/test_reach_voice_production_ops.py::test_reach_voice_production_ops_report_exposes_ci_gated_posture'],
+ 'tests/test_safe_browser_computer_use.py': ['tests/test_safe_browser_computer_use.py::test_safe_browser_computer_use_report_runs_all_batch_cp_suites']}
+
+
+FULLY_RETIRED_EVAL_INVOCATIONS = {
+    ("tests/test_operator_api.py", "tests/test_operator_api.py::marketplace_and_ecosystem"),
+}
+
+
 RUNTIME_HEAVY_FILE_TIMEOUTS: dict[str, int] = {
     "tests/test_approvals_api.py": 1_200,
     "tests/test_context_window.py": 1_200,
@@ -501,6 +617,7 @@ def run_shard_files(
     *,
     pytest_args: list[str] | None = None,
     file_timeout_seconds: int | None = None,
+    exclude_cancelled_eval_harness: bool = False,
 ) -> int:
     if not files:
         print("No backend tests assigned to this shard.")
@@ -510,8 +627,22 @@ def run_shard_files(
     if "--no-cov" not in extra_args and not any(arg.startswith("--cov") for arg in extra_args):
         extra_args.append("--no-cov")
     for path in files:
+        if exclude_cancelled_eval_harness and path == "tests/test_eval_harness.py":
+            print("[backend-shard] RETIRED/NOT RUN tests/test_eval_harness.py: cancelled module; "
+                  "228 top-level test definitions, including 13 ordinary contracts, "
+                  "not selected for execution; not passed (source-definition counts)")
+            continue
+        retired_nodes = CANCELLED_EVAL_CONSUMER_NODES.get(path, []) if exclude_cancelled_eval_harness else []
+        for node in retired_nodes:
+            print(f"[backend-shard] RETIRED/NOT RUN {node}: cancelled campaign consumer; "
+                  "one source definition not selected for execution; not passed")
         for label, invocation_args in pytest_invocations_for_target(path):
-            command = [sys.executable, "-m", "pytest", "-q", *invocation_args, *extra_args]
+            if exclude_cancelled_eval_harness and (path, label) in FULLY_RETIRED_EVAL_INVOCATIONS:
+                print(f"[backend-shard] RETIRED/NOT RUN {label}: "
+                      "all 10 selected source definitions are cancelled campaign consumers; not passed")
+                continue
+            command = [sys.executable, "-m", "pytest", "-q", *invocation_args, *extra_args,
+                       *(f"--deselect={node}" for node in retired_nodes)]
             timeout_seconds = timeout_for_file(path, file_timeout_seconds)
             started_at = time.perf_counter()
             try:
@@ -543,6 +674,10 @@ def main() -> int:
     parser.add_argument("--shard-count", type=int, required=True)
     parser.add_argument("--shard-index", type=int, required=True)
     parser.add_argument("--file-timeout-seconds", type=int, default=None)
+    parser.add_argument(
+        "--exclude-cancelled-eval-harness", action="store_true",
+        help="CI policy: retire only tests/test_eval_harness.py from execution and report it as not run",
+    )
     parser.add_argument("pytest_args", nargs=argparse.REMAINDER)
     args = parser.parse_args()
 
@@ -556,6 +691,7 @@ def main() -> int:
         files,
         pytest_args=extra_args,
         file_timeout_seconds=args.file_timeout_seconds,
+        exclude_cancelled_eval_harness=args.exclude_cancelled_eval_harness,
     )
 
 

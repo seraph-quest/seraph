@@ -37,10 +37,18 @@ describe("fixed Forgejo title controls", () => {
   it("requires unchecked finite read consent and resets acknowledgment on another Root", async () => {
     const fetch = vi.fn((url: unknown, _init?: RequestInit) => response(metadata(url))); vi.stubGlobal("fetch", fetch);
     const view = render(<ForgejoTitlePanel ownerPrincipalId="owner" ownerSessionId="root" />);
-    await screen.findByText(/Connection: active/);
+    await waitFor(() => {
+      expect(screen.getByText(/Connection: active/)).toBeTruthy();
+      expect(screen.getByRole("option", { name: "Finite title" })).toBeTruthy();
+      expect(screen.getByRole("option", { name: "owned-input" })).toBeTruthy();
+      expect((screen.getByLabelText("Acknowledge Forgejo finite private reads") as HTMLInputElement).checked).toBe(false);
+    });
     expect(screen.getByRole("button", { name: "Grant finite read consent" }).hasAttribute("disabled")).toBe(true);
     fireEvent.click(screen.getByLabelText("Acknowledge Forgejo finite private reads"));
-    expect((screen.getByLabelText("Acknowledge Forgejo finite private reads") as HTMLInputElement).checked).toBe(true);
+    await waitFor(() => {
+      expect((screen.getByLabelText("Acknowledge Forgejo finite private reads") as HTMLInputElement).checked).toBe(true);
+      expect(screen.getByRole("button", { name: "Grant finite read consent" }).hasAttribute("disabled")).toBe(false);
+    });
     view.rerender(<ForgejoTitlePanel ownerPrincipalId="owner" ownerSessionId="other" />);
     await waitFor(() => expect((screen.getByLabelText("Acknowledge Forgejo finite private reads") as HTMLInputElement).checked).toBe(false));
     expect(fetch.mock.calls.every(([, init]) => !(init as RequestInit | undefined)?.method)).toBe(true);
@@ -83,15 +91,24 @@ describe("fixed Forgejo title controls", () => {
       return response(metadata(url));
     }); vi.stubGlobal("fetch", fetch);
     const view = render(<ForgejoTitlePanel ownerPrincipalId="owner" ownerSessionId="root" />);
-    await screen.findByText(/Connection: active/);
+    await waitFor(() => {
+      expect(screen.getByText(/Connection: active/)).toBeTruthy();
+      expect(screen.getByRole("option", { name: "Finite title" })).toBeTruthy();
+      expect(screen.getByRole("option", { name: "owned-input" })).toBeTruthy();
+      expect((screen.getByLabelText("Acknowledge Forgejo finite private reads") as HTMLInputElement).checked).toBe(false);
+    });
     fireEvent.click(screen.getByLabelText("Acknowledge Forgejo finite private reads"));
+    await waitFor(() => {
+      expect((screen.getByLabelText("Acknowledge Forgejo finite private reads") as HTMLInputElement).checked).toBe(true);
+      expect(screen.getByRole("button", { name: "Grant finite read consent" }).hasAttribute("disabled")).toBe(false);
+    });
     fireEvent.click(screen.getByRole("button", { name: "Grant finite read consent" }));
     await screen.findByRole("button", { name: "Retry exact retained request" });
     expect(JSON.parse(bodies[0])).toEqual({ expected_revision: 1, duration_seconds: 900, read_ack: true });
     view.unmount(); render(<ForgejoTitlePanel ownerPrincipalId="owner" ownerSessionId="root" />);
     await screen.findByText(/Connection: active/);
     expect(bodies).toHaveLength(1);
-    fireEvent.click(screen.getByRole("button", { name: "Retry exact retained request" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Retry exact retained request" }));
     await waitFor(() => expect(bodies).toHaveLength(2));
     expect(bodies[1]).toBe(bodies[0]);
     await waitFor(() => expect(sessionStorage.getItem(scope + ".pending")).toBeNull());

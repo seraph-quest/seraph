@@ -460,7 +460,7 @@ def test_operator_api_routes_are_registered_for_readback_and_local_controls():
 
 
 @pytest.mark.asyncio
-async def test_lifecycle_api_routes_bind_authenticated_owner_and_approval(monkeypatch: pytest.MonkeyPatch):
+async def test_lifecycle_api_routes_bind_authenticated_owner_and_approval(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     from src.api.capability_packs import (
         CapabilityPackApprovalRequest,
         CapabilityPackRevokeRequest,
@@ -480,7 +480,7 @@ async def test_lifecycle_api_routes_bind_authenticated_owner_and_approval(monkey
     )
     captured: list[tuple[str, dict[str, object]]] = []
 
-    class FakeStore:
+    class FakeStore(CapabilityPackLifecycle):
         def _result(self, action: str, **kwargs: object):
             captured.append((action, kwargs))
             return {"status": "active", "pointer": {"pack_id": "seraph.local-proof-pack"}, "receipt": {"action": action}}
@@ -504,7 +504,8 @@ async def test_lifecycle_api_routes_bind_authenticated_owner_and_approval(monkey
             return self._result("uninstall", pack_id=pack_id, **kwargs)
 
     monkeypatch.setattr("src.api.capability_packs._require_authenticated_capability_operator", lambda _request: operator)
-    monkeypatch.setattr("src.api.capability_packs._store", lambda: FakeStore())
+    store = FakeStore(tmp_path / "route-lifecycle.json")
+    monkeypatch.setattr("src.api.capability_packs._store", lambda: store)
     request = SimpleNamespace()
     version = CapabilityPackVersionRequest(
         manifest={"id": "seraph.local-proof-pack"},

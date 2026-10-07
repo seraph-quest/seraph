@@ -232,6 +232,7 @@ async def test_node_pair_inventory_and_foreign_replace_are_owner_fenced(client,a
 
 @pytest.mark.asyncio
 async def test_connection_cannot_adopt_global_or_foreign_vault_key(client,app,monkeypatch):
+    from src.extensions.github_consent import GitHubConsentRequest
     from src.extensions.github_followthrough import GitHubFollowthroughService,GitHubFollowthroughError,CONNECTION_MODE_ACTIVE
     from src.vault.repository import vault_repository
     first=await login(client)
@@ -240,14 +241,16 @@ async def test_connection_cannot_adopt_global_or_foreign_vault_key(client,app,mo
     await vault_repository.store('global-provider-secret','PRIVATE')
     await vault_repository.store('current-connection-secret','PRIVATE',owner_principal_id=first['principal_id'])
     service=GitHubFollowthroughService()
+    consent=GitHubConsentRequest(acknowledged=True,duration_seconds=60,actions=['github_issue_write'])
     with pytest.raises(GitHubFollowthroughError,match='credential_not_configured'):
-        await service.put_connection(owner_principal_id=first['principal_id'],repository='example/repository',vault_key='global-provider-secret',mode=CONNECTION_MODE_ACTIVE,expected_revision=0)
+        await service.put_connection(owner_principal_id=first['principal_id'],owner_session_id=first['session_id'],repository='example/repository',vault_key='global-provider-secret',mode=CONNECTION_MODE_ACTIVE,expected_revision=0,consent=consent)
     async with AsyncClient(transport=ASGITransport(app=app),base_url='http://test') as outsider:
         other=await login(outsider)
         with pytest.raises(GitHubFollowthroughError,match='credential_not_configured'):
-            await service.put_connection(owner_principal_id=other['principal_id'],repository='example/repository',vault_key='current-connection-secret',mode=CONNECTION_MODE_ACTIVE,expected_revision=0)
-    own=await service.put_connection(owner_principal_id=first['principal_id'],repository='example/repository',vault_key='current-connection-secret',mode=CONNECTION_MODE_ACTIVE,expected_revision=0)
+            await service.put_connection(owner_principal_id=other['principal_id'],owner_session_id=other['session_id'],repository='example/repository',vault_key='current-connection-secret',mode=CONNECTION_MODE_ACTIVE,expected_revision=0,consent=consent)
+    own=await service.put_connection(owner_principal_id=first['principal_id'],owner_session_id=first['session_id'],repository='example/repository',vault_key='current-connection-secret',mode=CONNECTION_MODE_ACTIVE,expected_revision=0,consent=consent)
     assert own['credential_configured'] is True
+    assert own['consent']['state']=='active' and own['consent']['root_bound'] is True
 
 @pytest.mark.asyncio
 async def test_recovered_memory_citation_requires_accepted_exact_project_task_provenance(client,async_db):

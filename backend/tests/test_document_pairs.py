@@ -183,13 +183,15 @@ async def test_authenticated_private_pair_reserve_stream_seal_and_exact_bind(acc
                     traceback.print_exc()
                     raise
             monkeypatch.setattr(document_compare_native,"execute",traced_execute)
-            ready=asyncio.Event();release=asyncio.Event();stage_calls=0
+            ready=asyncio.Event();release=asyncio.Event()
             original_stage=document_compare_native.stage_current
             if mode in {"interruption","cancel"}:
                 async def barrier_stage(*args,**kwargs):
-                    nonlocal stage_calls
-                    stage_calls+=1
-                    if stage_calls==2:
+                    # Stop after the actual supervisor/parser identity is
+                    # persisted, before delivering either private source.
+                    # Admission and prelaunch staging may also call this seam.
+                    projection=await args[0].get_job(document_compare_native.job_id(args[1],args[2]))
+                    if "document-child" in document_compare_native.checkpoints(projection) and not ready.is_set():
                         ready.set()
                         if mode=="cancel":await release.wait()
                         else:

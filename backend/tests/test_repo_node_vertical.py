@@ -45,8 +45,6 @@ def _prepare_accounting_fixture(tmp_path,monkeypatch):
             return _retained(original_path(args[0]).name)
         return original_path(*args,**kwargs)
     monkeypatch.setattr(native,"Path",retained_native_path)
-    original_setup=native.OpenRouterSetup
-    monkeypatch.setattr(native,"OpenRouterSetup",lambda **kwargs:original_setup(**kwargs,request_cost_bound_microusd=1_000))
     original_configuration=native._configure_openrouter
     def configure():
         prepare_lifecycle_directory(ProductionWorkspace(host_root=Path(native.settings.workspace_dir)))

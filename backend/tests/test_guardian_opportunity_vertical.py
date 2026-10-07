@@ -66,6 +66,9 @@ class OpportunityHttpBoundary(httpx.AsyncBaseTransport):
 @pytest.mark.parametrize("scenario", ["completed", "silent", "citation_tampered", "invented_reference",
     "pii_output", "secret_output", "missing_snapshot", "cancel_contacted", "coalesce_uncontacted", "outstanding_one", "cancel_uncontacted", "startup_recovery"])
 async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_auth, monkeypatch, scenario):
+    from config.settings import settings
+    # The current feedback source witness requires actual active membership.
+    monkeypatch.setattr(settings, "browser_site_allowlist", "example.com")
     from src.api import auth, goals, model_fabric_settings
     from src.guardian import source_watch, inbox
     from src.db.models import Goal
@@ -374,8 +377,16 @@ async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_aut
         async def forbid_memory_refresh(**kwargs):
             raise AssertionError("opportunity feedback cannot refresh canonical memory")
         monkeypatch.setattr(feedback.guardian_feedback_repository, "_refresh_learning_memories", forbid_memory_refresh)
-        await feedback.guardian_feedback_repository.record_feedback(final.intervention_id,
-            feedback_type="helpful", owner_principal_id=owner["principal_id"], original_root_id=owner["session_id"])
+        # Assessment success is not a completed plan outcome and cannot vote Helpful.
+        rejected = await client.post(f"/api/guardian/opportunities/{final.id}/feedback", json=dict(
+            expected_feedback_revision=0, feedback_type="helpful", reason="Review assessment only",
+            idempotency_key=str(uuid4())))
+        assert rejected.status_code == 409 and rejected.json()["detail"]["code"] == "feedback_outcome_stale", rejected.text
+        judged = await client.post(f"/api/guardian/opportunities/{final.id}/feedback", json=dict(
+            expected_feedback_revision=0, feedback_type="not_helpful", reason="This assessed opportunity is unwanted",
+            idempotency_key=str(uuid4())))
+        assert judged.status_code == 200 and judged.json()["feedback_revision"] == 1
+        assert judged.json()["memory_status"] == "no_learning"
         learning = await feedback.guardian_feedback_repository.get_learning_signal(intervention_type="opportunity")
         assert learning.helpful_count == 0 and learning.not_helpful_count == 0
         snooze_request = dict(owner_principal_id=owner["principal_id"], owner_session_id=owner["session_id"],

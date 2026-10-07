@@ -4,6 +4,25 @@ title: 09. Benchmark Status
 
 # 09. Benchmark Status
 
+## Cancelled harness evaluations and automatic CI (2026-10-07)
+
+The user cancelled harness evaluation campaigns. Automatic backend CI and
+routine agent validation must exclude that retired work; ordinary regression
+and security checks remain required. Use the reviewed shard runner with
+`--exclude-cancelled-eval-harness`, or focused ordinary test targets.
+The runner omits the exact `tests/test_eval_harness.py` target before pytest
+starts and appends literal full-node `--deselect` arguments for the mapped
+direct and indirect campaign consumers. The exact exclusion catalog lives in
+`backend/scripts/run_backend_test_shard.py`; this page does not duplicate it.
+The literal wholly retired marketplace group is omitted before pytest; a source guard protects newly added ordinary tests, and all other nonzero exits remain failures.
+Test sources and assertions remain intact. Discovery, group filters, failure
+reporting and timeout limits are preserved, as are ordinary mocked and metadata-only
+checks outside the explicitly retired module and mapped campaign consumers.
+The retired whole module includes 13 ordinary helper contracts intentionally unrun.
+Excluded work is **Retired / NOT RUN**, never green scenario or quality proof.
+Bare full-suite pytest still includes legacy campaign code and must not be run
+for routine validation under the cancellation policy. Use the exclusions above.
+
 ## Epic #736 keyless health receipt (2026-09-10)
 
 `scripts/epic_736_health.py` emits schema v2 receipts without opening provider,

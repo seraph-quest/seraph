@@ -1067,7 +1067,8 @@ async def test_unconfigured_websocket_closes_before_accept(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_authenticated_operator_can_read_runtime_and_settings_without_provider_transport(client, monkeypatch):
+async def test_authenticated_operator_can_read_runtime_and_settings_without_provider_transport(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
     _, token = await _login(client)
     monkeypatch.setattr(
         "src.api.model_fabric_settings.httpx.AsyncClient",
@@ -1079,7 +1080,14 @@ async def test_authenticated_operator_can_read_runtime_and_settings_without_prov
 
     assert runtime.status_code == 200
     assert settings_response.status_code == 200
-    assert runtime.json()["model_fabric"]["status"] in {"configuration_required", "ready", "degraded"}
+    fabric = runtime.json()["model_fabric"]
+    assert fabric["status"] == "blocked"
+    assert fabric["inference_readiness"]["status"] == "blocked"
+    assert "chat_cloud_consent_missing" in fabric["inference_readiness"]["reasons"]
+    assert fabric["inference_accounting"]["status"] == "blocked"
+    assert fabric["inference_accounting"]["reason_code"] == "accounting_continuity_unavailable"
+    assert fabric["inference_accounting"]["reason_code"] in fabric["inference_readiness"]["reasons"]
+    assert fabric["inference_accounting"]["remaining_microusd"] is None
     # Metadata may expose the boolean ``api_key_configured`` flag; raw key
     # material must never be returned.
     assert "test-key" not in runtime.text

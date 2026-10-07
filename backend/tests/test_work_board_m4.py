@@ -905,9 +905,11 @@ async def test_unverified_done_parent_cannot_be_linked(async_db):
 @pytest.mark.asyncio
 async def test_missing_openrouter_route_blocks_without_provider_call(async_db, monkeypatch):
     async with async_db() as db:
+        await _goal(db, goal_id="goal-m4-no-provider")
         task = await _task(
             db,
             task_id="triage-no-provider",
+            goal_id="goal-m4-no-provider",
             status=WorkBoardStatus.triage,
             requires_review=False,
         )
@@ -1064,9 +1066,11 @@ async def test_post_marker_provider_timeout_remains_unknown(async_db, monkeypatc
 @pytest.mark.asyncio
 async def test_openrouter_policy_lookup_failure_returns_blocked_proposal(async_db, monkeypatch):
     async with async_db() as db:
+        await _goal(db, goal_id="goal-m4-policy-unavailable")
         task = await _task(
             db,
             task_id="triage-policy-unavailable",
+            goal_id="goal-m4-policy-unavailable",
             status=WorkBoardStatus.triage,
             requires_review=False,
         )
@@ -1103,9 +1107,11 @@ async def test_started_duplicate_proposal_reconciles_without_second_job_or_provi
     monkeypatch,
 ):
     async with async_db() as db:
+        await _goal(db, goal_id="goal-m4-unknown-provider")
         task = await _task(
             db,
             task_id="triage-unknown-provider",
+            goal_id="goal-m4-unknown-provider",
             status=WorkBoardStatus.triage,
             requires_review=False,
         )

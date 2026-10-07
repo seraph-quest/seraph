@@ -1504,6 +1504,7 @@ async def test_admit_proposal_job_retries_exact_failed_pre_contact_binding_once(
         proposal.admission_job_id,
         owner="work-board-proposal:proposal-injected-retry",
         lease_seconds=120,
+        claim_authority_check=None,
     )
 
 
@@ -2089,6 +2090,14 @@ async def test_worker_review_stale_fence_and_duplicate_are_bounded(async_db):
 @pytest.mark.asyncio
 async def test_pre_contact_proposal_binding_cannot_change_under_same_key(async_db, monkeypatch):
     async with async_db() as db:
+        db.add(Goal(
+            id="goal-followup",
+            title="Proposal binding goal",
+            owner_principal_id=OWNER.principal_id,
+            owner_session_id=OWNER.session_id,
+            revision=1,
+            status="active",
+        ))
         task = WorkBoardTask(
             task_id="m4-proposal-binding",
             owner_principal_id=OWNER.principal_id,

@@ -228,7 +228,9 @@ def main(request_file: Path) -> int:
         return result
     try:
         for args in (["init","--initial-branch=main"],["config","user.email","seraph-worker@localhost"],["config","user.name","Seraph worker"],["add","--all"],["commit","--allow-empty","-m","seraph snapshot"],["apply","--check",str(stage/"patch.diff")],["apply","--whitespace=nowarn",str(stage/"patch.diff")]):
-            result=command(["/usr/bin/git",*args])
+            # Temporary bootstrap Git must not spawn detached maintenance;
+            # every descendant remains subject to the strict cleanup oracle.
+            result=command(["/usr/bin/git","-c","maintenance.auto=false","-c","gc.auto=0",*args])
             if result["exit_code"]!=0:raise ValueError("node_git_stage_failed")
         before_inputs={path:hash_file(workspace/path) for path in ("package.json","package-lock.json")}
         for entry in plan["commands"]:

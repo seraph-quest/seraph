@@ -1064,7 +1064,7 @@ async def test_authenticated_browser_rest_requires_persisted_conversation_owner(
     unowned_conversation = "unowned-conversation"
     await session_manager.get_or_create(
         owned_conversation,
-        owner_principal_id="operator:single",
+        owner_principal_id=login_response.json()["principal_id"],
     )
     await session_manager.get_or_create(unowned_conversation)
 
@@ -1177,7 +1177,7 @@ async def test_authenticated_chat_ingress_binds_browser_provider_and_read_owner(
     conversation_id = chat_response.json()["session_id"]
     conversation = await session_manager.get(conversation_id)
     assert conversation is not None
-    assert conversation.owner_principal_id == "operator:single"
+    assert conversation.owner_principal_id == login_response.json()["principal_id"]
 
     ownerless_response = await client.get("/api/browser/providers")
     assert ownerless_response.status_code == 422
@@ -1219,7 +1219,7 @@ async def test_authenticated_chat_ingress_binds_browser_provider_and_read_owner(
 
 
 @pytest.mark.asyncio
-async def test_authenticated_chat_claims_legacy_conversation_for_browser_restart(
+async def test_authenticated_chat_continues_owned_conversation_for_browser_restart(
     client,
     monkeypatch,
 ):
@@ -1238,12 +1238,12 @@ async def test_authenticated_chat_claims_legacy_conversation_for_browser_restart
     assert login_response.status_code == 200
 
     legacy_id = "legacy-cockpit-conversation"
-    await session_manager.get_or_create(legacy_id)
+    await session_manager.get_or_create(legacy_id, owner_principal_id=login_response.json()["principal_id"])
     await session_manager.add_message(legacy_id, "user", "Previous cockpit turn")
     await session_manager.add_message(legacy_id, "assistant", "Previous cockpit reply")
     legacy_before_claim = await session_manager.get(legacy_id)
     assert legacy_before_claim is not None
-    assert legacy_before_claim.owner_principal_id is None
+    assert legacy_before_claim.owner_principal_id == login_response.json()["principal_id"]
 
     agent = MagicMock()
     agent.run.return_value = "continued conversation"
@@ -1260,7 +1260,7 @@ async def test_authenticated_chat_claims_legacy_conversation_for_browser_restart
     assert chat_response.status_code == 200
     claimed = await session_manager.get(legacy_id)
     assert claimed is not None
-    assert claimed.owner_principal_id == "operator:single"
+    assert claimed.owner_principal_id == login_response.json()["principal_id"]
 
     provider_response = await client.get(
         "/api/browser/providers",
@@ -1296,7 +1296,8 @@ async def test_authenticated_chat_claims_legacy_conversation_for_browser_restart
 
 
 @pytest.mark.asyncio
-async def test_authenticated_chat_cannot_claim_other_owned_conversation(client, monkeypatch):
+@pytest.mark.parametrize("stored_owner", ["operator:other", None], ids=["foreign", "ownerless"])
+async def test_authenticated_chat_cannot_claim_other_owned_conversation(client, monkeypatch, stored_owner):
     origin = "http://localhost:3001"
     monkeypatch.setattr(settings, "operator_auth_secret", "correct horse battery staple")
     monkeypatch.setattr(settings, "operator_auth_secret_hash", "")
@@ -1312,7 +1313,7 @@ async def test_authenticated_chat_cannot_claim_other_owned_conversation(client, 
     assert login_response.status_code == 200
 
     foreign_id = "other-operator-conversation"
-    await session_manager.get_or_create(foreign_id, owner_principal_id="operator:other")
+    await session_manager.get_or_create(foreign_id, owner_principal_id=stored_owner)
     with patch("src.api.chat.create_onboarding_agent") as create_agent:
         response = await client.post(
             "/api/chat",
@@ -1323,6 +1324,8 @@ async def test_authenticated_chat_cannot_claim_other_owned_conversation(client, 
     assert response.status_code == 403
     assert response.json()["detail"]["code"] == "chat_session_owner_forbidden"
     create_agent.assert_not_called()
+    unchanged = await session_manager.get(foreign_id)
+    assert unchanged is not None and unchanged.owner_principal_id == stored_owner
 
 
 @pytest.mark.asyncio

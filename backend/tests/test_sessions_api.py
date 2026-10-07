@@ -1,16 +1,34 @@
 """Tests for session HTTP endpoints (src/api/sessions.py)."""
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
 
 from config.settings import settings
 from src.agent.session import SessionManager
+from src.auth.service import create_session
+from src.db.models import Session
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.tools.process_tools import process_runtime_manager, start_process
 
 _TEST_OPERATOR_ID = "operator:test-bypass"
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def session_operator(client, async_db, monkeypatch):
+    """Bind positive session fixtures to a persisted authenticated Root."""
+
+    monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", False)
+    monkeypatch.setattr(settings, "operator_auth_secret", "sessions-api-test-secret")
+    monkeypatch.setattr(settings, "operator_auth_secret_hash", "")
+    token, operator = await create_session()
+    monkeypatch.setattr(sys.modules[__name__], "_TEST_OPERATOR_ID", operator.principal.principal_id)
+    client.cookies.set(settings.operator_auth_cookie_name, token)
+    client.headers["Origin"] = "http://localhost:3001"
+    return operator
 
 
 @pytest.fixture
@@ -90,7 +108,7 @@ class TestSearchSessions:
 class TestGetMessages:
     async def test_success(self, client, async_db):
         sm = SessionManager()
-        await sm.get_or_create("s1")
+        await sm.get_or_create("s1", owner_principal_id=_TEST_OPERATOR_ID)
         await sm.add_message("s1", "user", "hello")
         res = await client.get("/api/sessions/s1/messages")
         assert res.status_code == 200
@@ -106,7 +124,7 @@ class TestGetMessages:
 class TestGetTodos:
     async def test_success(self, client, async_db):
         sm = SessionManager()
-        await sm.get_or_create("s1")
+        await sm.get_or_create("s1", owner_principal_id=_TEST_OPERATOR_ID)
         await sm.replace_todos("s1", [{"content": "Ship Wave 1", "completed": False}])
         res = await client.get("/api/sessions/s1/todos")
         assert res.status_code == 200
@@ -122,7 +140,7 @@ class TestGetTodos:
 class TestUpdateTitle:
     async def test_success(self, client, async_db):
         sm = SessionManager()
-        await sm.get_or_create("s1")
+        await sm.get_or_create("s1", owner_principal_id=_TEST_OPERATOR_ID)
         res = await client.patch(
             "/api/sessions/s1",
             json={"title": "New Title"},
@@ -140,11 +158,11 @@ class TestUpdateTitle:
 class TestDeleteSession:
     async def test_success(self, client, async_db):
         sm = SessionManager()
-        await sm.get_or_create("s1")
+        await sm.get_or_create("s1", owner_principal_id=_TEST_OPERATOR_ID)
         res = await client.delete("/api/sessions/s1")
         assert res.status_code == 200
 
-    async def test_success_stops_session_owned_processes(self, client, async_db):
+    async def test_success_stops_session_owned_processes(self, client, async_db, session_operator):
         script_path = Path(settings.workspace_dir) / "session_owned_process.py"
         script_path.write_text(
             "import time\nprint('session-owned', flush=True)\ntime.sleep(30)\n",
@@ -152,9 +170,9 @@ class TestDeleteSession:
         )
 
         sm = SessionManager()
-        await sm.get_or_create("s1")
+        await sm.get_or_create("s1", owner_principal_id=_TEST_OPERATOR_ID)
 
-        tokens = set_runtime_context("s1", "high_risk")
+        tokens = set_runtime_context("s1", "high_risk", trust_principal=session_operator.principal)
         try:
             started = start_process(command="python3", args_json=f'["{script_path.name}"]')
             process_id = started.split("process=")[1].split(",")[0]
@@ -178,3 +196,19 @@ class TestDeleteSession:
     async def test_not_found(self, client):
         res = await client.delete("/api/sessions/nonexistent")
         assert res.status_code == 404
+
+
+@pytest.mark.parametrize("owner", [None, "operator:other"])
+async def test_ownerless_and_foreign_session_endpoints_remain_forbidden(client, async_db, owner):
+    sm = SessionManager()
+    await sm.get_or_create("protected", owner_principal_id=owner)
+    for method, path, body in (
+        ("GET", "/api/sessions/protected/messages", None),
+        ("GET", "/api/sessions/protected/todos", None),
+        ("PATCH", "/api/sessions/protected", {"title": "Forbidden edit"}),
+        ("DELETE", "/api/sessions/protected", None),
+    ):
+        response = await client.request(method, path, json=body)
+        assert response.status_code == 403
+    async with async_db() as db:
+        assert await db.get(Session, "protected") is not None

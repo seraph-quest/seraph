@@ -1166,12 +1166,20 @@ def test_registered_typed_artifact_capabilities_have_an_explicit_opt_in_allowlis
         "browser.public-task.v1",
         "calendar.meeting-prep.v1",
         "calendar.observe_due_events.v1",
+        "calendar.event.reschedule.v1",
         "engineering.repo-repair.v1",
         "gmail.scan_metadata.v1",
         "guardian-routine.v2",
+        "memory.opportunity-preference.v1",
         "workflow.goal-snapshot-to-file",
         "guardian.research-watch.v1",
         "work.mail-reply-draft.v1",
+        "work.context.selected_text.v1",
+        "work.document-compare.v1",
+        "work.json-format.v1",
+        "work.research-dossier.v1",
+        "work.evidence-dossier.v1",
+        "work.local-evidence-report.v1",
     }
     assert {
         capability_id

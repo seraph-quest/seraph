@@ -144,8 +144,9 @@ invalidates that slot's old proof. No fabricated proof migration or cross-slot
 proof reuse is allowed, even for the same model. New contact separately checks
 current global policy epoch and purpose consent; queued old-epoch requests block.
 Missing/stale/failed proof
-blocks only dependent workloads. Direct NEAR or any other endpoint is still
-rejected by ADR-006. Slot readiness must never display verified TEE.
+blocks only dependent workloads. Ordinary slot routing still rejects direct NEAR or other endpoints under ADR-006.
+[ADR-025](./025-near-https-text-inference.md) proposes only a separate dedicated
+NEAR capability, not a fourth slot, effective on reviewed milestone merge. Slot readiness must never display verified TEE.
 
 Reuse existing `EmbeddingMetadata.namespace`, whose identity hashes embedding
 schema, provider, model and measured dimension, and the namespaced tables in

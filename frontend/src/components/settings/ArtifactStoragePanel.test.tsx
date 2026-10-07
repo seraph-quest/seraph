@@ -175,6 +175,27 @@ describe("ArtifactStoragePanel", () => {
     vi.restoreAllMocks();
   });
 
+  it("mounts optional NEAR settings beside all OpenRouter controls and excludes NEAR from generic canaries", async () => {
+    const artifactStorage = settingsFromScreenAnalysisFixture({ enabled: false, provider: "inactive", model: "",
+      preserve_captures: false, archive_dir: "/tmp/seraph/artifacts", capture_mode: "manual",
+      cadence_seconds: null, daemon_connected: false, artifact_count: 0, last_artifact_at: null });
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/settings/artifact-storage")) return Promise.resolve(mockResponse(artifactStorage));
+      if (url.endsWith("/api/settings/model-fabric")) return Promise.resolve(mockResponse({
+        schema_version: "seraph.model-fabric.settings.v1", status: "configured", egress_revision: 7,
+        near_text: null, profiles: [{ id: "near.text", provider_kind: "near", model: "z-ai/glm-5.3-flash", enabled: true }],
+      }));
+      return Promise.resolve(mockResponse({ model_fabric: { status: "configured" } }));
+    });
+    render(<ArtifactStoragePanel />);
+    await screen.findByRole("region", { name: "NEAR text settings" });
+    for (const slot of ["text", "vision", "embedding"]) expect(screen.getByLabelText("OpenRouter " + slot + " model ID")).toBeEnabled();
+    await waitFor(() => expect(screen.getByLabelText("Canary profile").querySelectorAll("option")).toHaveLength(1));
+    expect(screen.getByRole("button", { name: "Run canary" })).toBeDisabled();
+    expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(true);
+  });
+
   it("shows configured, attempted, actual text and VLM routes without probing on status reads", async () => {
     const artifactStorage = settingsFromScreenAnalysisFixture({
       enabled: true,
@@ -259,7 +280,7 @@ describe("ArtifactStoragePanel", () => {
     render(<ArtifactStoragePanel />);
 
     expect(await screen.findByText("Model fabric")).toBeInTheDocument();
-    expect(screen.getByText("text: interactive, background, report · VLM: vision")).toBeInTheDocument();
+    expect(await screen.findByText("text: interactive, background, report · VLM: vision")).toBeInTheDocument();
     expect(screen.getByText(/local-text\/gemma-text:routable/)).toBeInTheDocument();
     const textRoute = screen.getByText(/selected local-text · attempted local-text:succeeded · actual local-text\/gemma-text/);
     expect(textRoute).toHaveClass("text-green-400");

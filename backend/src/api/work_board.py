@@ -2947,3 +2947,37 @@ async def list_work_board_events(
 
 
 __all__ = ["repository", "router"]
+
+
+@router.get("/tasks/{task_id}/near-text/output")
+async def read_near_text_output(request: Request, task_id: str):
+    from src.work_board.near_text_native import read_output,ledger_before_output,_ledger
+    from src.work_board.dispatcher import _parse_typed_input
+    owner=_owner(_operator(request))
+    try:
+        async with get_session() as db:
+            task=await WorkBoardRepository().get_task(db,owner,task_id)
+            if task.capability_id!="inference.near-text.v1" or task.status not in {WorkBoardStatus.review,WorkBoardStatus.done}:
+                raise BoardError("near_output_unavailable","A verified settled NEAR result is required")
+            attempt=await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id==task_id)
+                .order_by(WorkBoardAttempt.created_at.desc(),WorkBoardAttempt.attempt_id.desc()).limit(1))
+            run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==attempt.workflow_run_id)) if attempt else None
+            if run is None or run.status!="succeeded":raise BoardError("near_output_unavailable","The actual succeeded native source is required")
+            # Current authenticated ownership/Goal is mandatory; historical execution TTL cannot renew contact.
+            from src.model_fabric.near_text_contracts import NearTextReceipt
+            goal=await WorkBoardRepository._validate_goal(db,owner,goal_id=task.goal_id,goal_revision=task.goal_revision)
+            from src.memory.procedure_recommendations import assert_current_root
+            await assert_current_root(db,_operator(request))
+            from src.work_board.near_text_native import finite_goal_budget
+            finite_goal_budget(goal)
+            checkpoints=json.loads(run.checkpoint_receipts_json or '[]')
+            proof=[c.get('payload',{}) for c in checkpoints if c.get('checkpoint_id')=='near-private-output']
+            if len(proof)!=1 or not isinstance(proof[0].get('operation_id'),str):
+                raise BoardError("near_output_unavailable","The original charge checkpoint is required")
+            await ledger_before_output(db,operation_id=proof[0]['operation_id'],job=run.run_identity)
+            output=read_output(task,attempt,run)
+            await _ledger(db,NearTextReceipt.model_validate(output["receipt"]),job=run.run_identity)
+            return output
+    except BoardError as exc:_raise_board_error(exc)
+    except (OSError,ValueError,TypeError,KeyError):
+        raise HTTPException(status_code=409,detail={"code":"near_output_readback_required"})

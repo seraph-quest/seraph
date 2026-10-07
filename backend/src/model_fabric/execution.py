@@ -360,7 +360,8 @@ async def run_preflighted_adapter(
             profile_id=decision.selected.profile.id,
             fallback=decision.attempt_id or f"{context.request_id}:{decision.selected.profile.id}",
         ),
-        uncertain_on_error=(decision.selected.profile.provider_kind == "openrouter"),
+        uncertain_on_error=(decision.selected.profile.provider_kind == "openrouter"
+            or context.runtime_path == "near_text_native" and decision.selected.profile.id == "near.text"),
     )
     await prepare_bound_remote_inference(
         admission_request,

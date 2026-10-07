@@ -9,12 +9,14 @@ import {
   normalizeModelFabricCanary,
   normalizeModelFabricRuntime,
   normalizeModelFabricSettings,
+  NEAR_TEXT_PROFILE,
   retainModelFabricSettings,
   type ModelFabricCanaryResult,
   type ModelFabricRuntimeStatus,
   type ModelFabricSettingsStatus,
 } from "../../lib/modelFabric";
 import { OpenRouterSetupPanel } from "./OpenRouterSetupPanel";
+import { NearTextPanel } from "./NearTextPanel";
 
 interface VlmRuntimeStatus {
   mode: string;
@@ -691,7 +693,7 @@ export function ArtifactStoragePanel() {
       setModelFabricRuntime(nextRuntime);
       setModelFabricStale(false);
       setModelFabricError(nextRuntime ? null : "Runtime route receipts are unavailable; configuration remains usable.");
-      setCanaryProfile((current) => current || nextSettings.profiles.find((profile) => profile.enabled)?.id || "");
+      setCanaryProfile((current) => current && current !== NEAR_TEXT_PROFILE ? current : nextSettings.profiles.find((profile) => profile.enabled && profile.id !== NEAR_TEXT_PROFILE)?.id || "");
     } catch {
       if (isCancelled()) return;
       setModelFabricStale(true);
@@ -700,7 +702,7 @@ export function ArtifactStoragePanel() {
   }
 
   async function runModelFabricCanary() {
-    if (!modelFabric || !canaryProfile || canaryRunning) return;
+    if (!modelFabric || !canaryProfile || canaryProfile === NEAR_TEXT_PROFILE || canaryRunning) return;
     setCanaryRunning(true);
     setCanaryResult(null);
     setCanaryError(null);
@@ -733,13 +735,13 @@ export function ArtifactStoragePanel() {
       body: JSON.stringify(payload),
     });
     const nextSettings = normalizeModelFabricSettings(response);
-    if (!nextSettings) throw new Error("OpenRouter setup response is invalid.");
+    if (!nextSettings) throw new Error("Model-fabric settings response is invalid.");
     if (!mountedRef.current) return nextSettings;
     retainModelFabricSettings(nextSettings);
     setModelFabric(nextSettings);
     setModelFabricStale(false);
     setModelFabricError(null);
-    setCanaryProfile((current) => current || nextSettings.profiles.find((profile) => profile.enabled)?.id || "");
+    setCanaryProfile((current) => current && current !== NEAR_TEXT_PROFILE ? current : nextSettings.profiles.find((profile) => profile.enabled && profile.id !== NEAR_TEXT_PROFILE)?.id || "");
     return nextSettings;
   }
   useEffect(() => {
@@ -1300,6 +1302,15 @@ export function ArtifactStoragePanel() {
                 policyRevision={modelFabric?.egress_revision}
                 policyRevoked={modelFabric?.egress_revoked}
               />
+              <NearTextPanel
+                setup={modelFabric?.near_text}
+                stale={modelFabricStale || Boolean(modelFabric?.near_text_metadata_unavailable)}
+                onSave={saveOpenRouterSetup}
+                policyRevision={modelFabric?.egress_revision}
+                policyRevoked={modelFabric?.egress_revoked}
+                sharedCeilingMicrousd={modelFabric?.openrouter_setup?.spend_ceiling_microusd ?? modelFabric?.near_text?.spend_ceiling_microusd ?? modelFabric?.inference_accounting?.ceiling_microusd}
+                sharedCeilingLocked={Boolean(modelFabric?.openrouter_setup)}
+              />
               <InferenceAccountingPanel accounting={modelFabric?.inference_accounting} stale={modelFabricStale} onRefresh={fetchModelFabric} />
               <div className="mt-2 border border-retro-text/10 px-2 py-2">
                 <div className="text-[9px] text-retro-text/50 mb-1">
@@ -1316,7 +1327,7 @@ export function ArtifactStoragePanel() {
                     className="min-w-0 border border-retro-text/20 bg-retro-bg px-1 py-0.5 text-[9px] text-retro-text disabled:opacity-40"
                   >
                     <option value="">choose profile</option>
-                    {modelFabric?.profiles.map((profile) => (
+                    {modelFabric?.profiles.filter((profile) => profile.id !== NEAR_TEXT_PROFILE).map((profile) => (
                       <option key={profile.id} value={profile.id}>
                         {profile.id} · {profile.transport_adapter}
                       </option>
@@ -1337,7 +1348,7 @@ export function ArtifactStoragePanel() {
                   </select>
                   <button
                     type="button"
-                    disabled={canaryRunning || !canaryProfile || modelFabricStale}
+                    disabled={canaryRunning || !canaryProfile || canaryProfile === NEAR_TEXT_PROFILE || modelFabricStale}
                     onClick={() => void runModelFabricCanary()}
                     className="border border-retro-text/20 px-2 py-1 text-[9px] uppercase tracking-wider text-retro-text/70 hover:text-retro-text disabled:opacity-40"
                   >

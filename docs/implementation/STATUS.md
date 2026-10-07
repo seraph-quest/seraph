@@ -71,6 +71,25 @@ reliability, comparative advantage or universal security. Independent program
 review and the combined documentation build gate promotion to `develop`;
 milestone review and PR state belong to GitHub, not this inventory.
 
+## Optional NEAR HTTPS text inference
+
+The narrow [#959](https://github.com/seraph-quest/seraph/issues/959) profile under
+[ADR-025](./decisions/025-near-https-text-inference.md) remains **Planned** until
+its reviewed milestone merges with the required operator receipts. Branch-local
+implementation and intercepted HTTP acceptance do not establish availability
+on `develop`, live provider billing or model quality.
+
+The declared operator path is one private text question through the fixed
+`near.text` HTTPS route and `z-ai/glm-5.3-flash` model. Ordinary verified TLS
+protects transport; the provider receives plaintext. No verified TEE or
+end-to-end encryption claim applies. Local `configured` status means current
+credential, consent and accounting readiness, never provider availability.
+NEAR uses the existing shared deployment ledger and serial inference broker;
+global egress revocation covers both NEAR and OpenRouter. Missing or invalid
+billing retains liability, withholds answer adoption and never replays inference.
+Private output requires current authority and settled-cost readback; every
+outcome records `no_learning`.
+
 ## Epic #736/#775 OpenRouter inference phase
 
 This section records the accepted OpenRouter-only inference phase and its

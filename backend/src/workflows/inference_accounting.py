@@ -430,7 +430,8 @@ class InferenceAccountingRepositoryMixin:
                     if any("remote_inference" in str(effects or "") for effects in legacy):
                         raise InferenceAccountingError("accounting_legacy_reconciliation_required")
                     prior_route = (await db.execute(select(ModelRouteAttemptReceiptRecord.id).where(
-                        ModelRouteAttemptReceiptRecord.endpoint.like("https://openrouter.ai/%")).limit(1))).first()
+                        (ModelRouteAttemptReceiptRecord.endpoint.like("https://openrouter.ai/%")
+                         | ModelRouteAttemptReceiptRecord.endpoint.like("https://cloud-api.near.ai/%"))).limit(1))).first()
                     if prior_route is not None:
                         raise InferenceAccountingError("accounting_legacy_reconciliation_required")
                     now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -480,6 +481,13 @@ class InferenceAccountingRepositoryMixin:
                 if run.status != "running" or run.owner_principal_id != owner_id or deadline <= observed:
                     raise InferenceAccountingError("accounting_job_authority_invalid")
                 prior = next((row for row in rows if row.operation_id == operation_id), None)
+                if runtime_path == "near_text_native":
+                    if profile_id != "near.text" or run.job_kind != "inference.near-text.v1":
+                        raise InferenceAccountingError("near_native_binding_invalid")
+                    if any(row.operation_id != operation_id and row.owner_id == owner_id
+                        and row.runtime_path == "near_text_native"
+                        and row.state in {"reserved", "contact_started", "unknown"} for row in rows):
+                        raise InferenceAccountingError("near_owner_outstanding_limit")
                 if prior is not None:
                     if (prior.state == "reserved" and prior.recovery_reason == "typed_owner_precontact_resume"
                         and prior.job_id == job_id and prior.owner_id == owner_id and prior.payload_digest == payload_digest
@@ -526,7 +534,8 @@ class InferenceAccountingRepositoryMixin:
                 return _operation_payload(row)
 
     async def contact_inference_provider(self, operation_id: str, *, owner: str,
-                                         fencing_token: int, policy_digest: str) -> dict[str, object]:
+                                         fencing_token: int, policy_digest: str,
+                                         near_contact_witness: object = None) -> dict[str, object]:
         denial = None
         result = None
         denial_binding = None
@@ -587,9 +596,27 @@ class InferenceAccountingRepositoryMixin:
                 # Recheck the canonical ledger under this SAME writer and
                 # witness lock before recording contact, including prefunding.
                 from src.model_fabric.effective_policy import current_inference_policy
+                from src.model_fabric.configuration import deployment_spend_ceiling
                 from src.workspace.accounting_witness import period_state, unreviewed_overruns
+                if row.runtime_path == "near_text_native":
+                    from src.work_board.near_text_native import recheck_provider_contact
+                    from src.work_board.repository import BoardError
+                    if row.profile_id != "near.text" or near_contact_witness is None:
+                        opportunity_denial = "near_contact_authority_required"
+                    else:
+                        try:
+                            await recheck_provider_contact(
+                                db, run, witness=near_contact_witness,
+                                contact_operation_id=row.operation_id,
+                            )
+                        except (BoardError, ValueError, PermissionError) as exc:
+                            opportunity_denial = getattr(exc, "code", "near_contact_authority_changed")
                 try:
-                    configured, current_digest = current_inference_policy()
+                    if row.runtime_path == "near_text_native":
+                        from src.model_fabric.effective_policy import current_near_text_policy
+                        configured, current_digest = current_near_text_policy()
+                    else:
+                        configured, current_digest = current_inference_policy()
                 except PermissionError:
                     configured, current_digest = None, None
                 owner_data = account.model_dump(mode="json")
@@ -602,7 +629,7 @@ class InferenceAccountingRepositoryMixin:
                 denial = (opportunity_denial or ("provider_contact_denied" if _provider_contact_denied(row)
                     else "provider_policy_revision_changed" if current_digest != policy_digest
                     else "accounting_settings_revision_unavailable" if (
-                        account.ceiling_microusd != configured.openrouter_setup.spend_ceiling_microusd
+                        account.ceiling_microusd != deployment_spend_ceiling(configured)
                         or row.settings_revision != account.settings_revision)
                     else period_status["reason_code"]
                     or ("provider_charge_exceeded_reservation" if unreviewed_overruns(owner_data, operations) else None)
@@ -642,6 +669,7 @@ class InferenceAccountingRepositoryMixin:
         return result
 
     async def settle_inference_cost(self, operation_id: str, *, payload: object = None,
+                                    near_billing_evidence: object = None,
                                     actual_cost_microusd: int | None = None,
                                     evidence_digest: str | None = None,
                                     operator_id: str | None = None,
@@ -662,6 +690,26 @@ class InferenceAccountingRepositoryMixin:
                 row = next((item for item in rows if item.operation_id == operation_id), None)
                 if row is None:
                     raise InferenceAccountingError("accounting_operation_not_found")
+                near = row.runtime_path == "near_text_native"
+                billing = None
+                if near_billing_evidence is not None:
+                    from src.model_fabric.near_text_billing import validate_near_billing_evidence
+                    try:
+                        billing = validate_near_billing_evidence(near_billing_evidence, original_operation_id=operation_id)
+                    except (ValueError, TypeError) as exc:
+                        raise InferenceAccountingError("near_billing_evidence_invalid") from exc
+                    if not near or row.profile_id != "near.text" or actual_cost_microusd is not None or operator_id is not None or payload is not None:
+                        raise InferenceAccountingError("near_billing_operation_invalid")
+                    if row.state not in {"contact_started", "unknown", "settled"}:
+                        raise InferenceAccountingError("near_billing_contact_required")
+                    actual, provider_id = billing.cost_microusd, billing.provider_request_id
+                    previous = next((item for item in json.loads(row.evidence_json)
+                        if item.get("provenance") == "near_billing_costs"), None)
+                    if previous is not None and (previous.get("provider_operation_id"), previous.get("actual_cost_microusd"), previous.get("billing_response_sha256")) != (provider_id, actual, billing.response_sha256):
+                        raise InferenceAccountingError("accounting_settlement_conflict")
+                elif near and actual_cost_microusd is None:
+                    # OpenRouter-shaped usage can never settle a NEAR call.
+                    actual, provider_id = None, None
                 if job_id is not None and row.job_id != job_id:
                     raise InferenceAccountingError("accounting_job_binding_invalid")
                 if actual_cost_microusd is not None:
@@ -705,7 +753,9 @@ class InferenceAccountingRepositoryMixin:
                 now = datetime.now(timezone.utc).replace(tzinfo=None)
                 history = json.loads(row.evidence_json)
                 history.append({"kind": row.state, "reason": reason, "actual_cost_microusd": actual,
-                    "provenance": "manual_externally_unverified" if operator_id else "provider_account_usage" if actual is not None else "unresolved_provider_contact",
+                    "provenance": "manual_externally_unverified" if operator_id else "near_billing_costs" if billing is not None else "provider_account_usage" if actual is not None else "unresolved_provider_contact",
+                    **({"billing_response_sha256": billing.response_sha256,
+                        "cost_nano_usd": billing.cost_nano_usd} if billing is not None else {}),
                     "provider_charge_verified": actual is not None and operator_id is None,
                     "upstream_cost_evidence": (str(payload.get("usage", {}).get("cost_details", {}).get("upstream_inference_cost"))[:64]
                         if isinstance(payload, Mapping) and isinstance(payload.get("usage"), Mapping)

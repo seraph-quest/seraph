@@ -143,6 +143,31 @@ describe("WorkBoardPanel integration", () => {
     vi.restoreAllMocks();
   });
 
+  it("uses the existing NEAR Work inspector and withholds unknown-cost answer/retry controls", async () => {
+    const nearTask = boardTask({ title: "NEAR text question", capability_id: "inference.near-text.v1",
+      block_kind: "cost_liability", block_reason: "cost_liability", recovery_action: "retry", readback_status: "unknown" });
+    fetchMock.mockReset();
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/work-board/tasks/task-1")) return Promise.resolve(response(detail(nearTask)));
+      if (url.includes("/api/work-board/tasks?")) return Promise.resolve(response(page(nearTask, 1)));
+      if (url.includes("/api/work-board/events?")) return Promise.resolve(response(emptyEvents(1)));
+      if (url.endsWith("/api/goals/tree")) return Promise.resolve(response([]));
+      return Promise.resolve(response({}));
+    });
+    const onOpenAccounting = vi.fn();
+    render(<WorkBoardPanel ownerPrincipalId="operator:one" ownerSessionId="operator-session-1" onOpenAccounting={onOpenAccounting} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task NEAR text question" }));
+    await screen.findByRole("region", { name: "NEAR text question" });
+    expect(screen.getByRole("button", { name: "Read NEAR answer" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: /Retry \(new attempt\)/ })).toBeNull();
+    expect(screen.getByRole("region", { name: "Private native memory policy" })).toHaveTextContent("no_learning");
+    fireEvent.click(screen.getByRole("button", { name: "Open existing cost settlement" }));
+    expect(onOpenAccounting).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/near-text/output"))).toBe(false);
+    expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(true);
+  });
+
   it("shows the recovered original task and disables historical actions", async () => {
     const historical = boardTask({ ownership_access: "recovered_read_only", execution_block_reason: "current_scope_review_required", recovery_action: null });
     fetchMock.mockImplementation((input: RequestInfo | URL) => {

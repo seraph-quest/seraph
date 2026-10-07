@@ -404,6 +404,12 @@ async def _verified_workflow_readback(
                 return None
         except (ValueError, TypeError, KeyError, OSError, BoardError):
             return None
+    if task.capability_id == "inference.near-text.v1":
+        from src.work_board.near_text_native import read_output
+        try:
+            read_output(task,attempt,run)
+        except (OSError,ValueError,TypeError,KeyError,BoardError):
+            return None
     if task.capability_id == "work.json-format.v1":
         try:
             from src.work_board.tool_package_native import verified_output
@@ -484,6 +490,9 @@ def _workflow_run_binds_board_attempt(
     safe_digest = lambda value: bool(_SAFE_DIGEST.fullmatch(str(value or "").strip()))
 
     capability_id = str(task.capability_id or "").strip()
+    if capability_id == "inference.near-text.v1":
+        from src.work_board.near_text_native import binds
+        return binds(task,attempt,run)
     if capability_id == "memory.opportunity-preference.v1":
         from src.work_board.opportunity_preference_native import binds
         return binds(task,attempt,run)

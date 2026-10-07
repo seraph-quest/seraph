@@ -41,6 +41,7 @@ from src.db.models import (
     WorkBoardLink,
     WorkBoardStatus,
     WorkBoardTask,
+    WorkflowRunState,
 )
 from src.guardian.goal_snapshot_to_file import (
     CAPABILITY_ID as GOAL_SNAPSHOT_CAPABILITY,
@@ -503,6 +504,9 @@ def _reject_authority_input_keys(value: Any, *, path: str = "input") -> None:
 
 
 def _typed_input_model(capability_id: str) -> type[BaseModel] | None:
+    if capability_id == "inference.near-text.v1":
+        from src.model_fabric.near_text_contracts import NearTextInput
+        return NearTextInput
     if capability_id == "work.context.selected_text.v1":
         from src.workflows.selected_context_contract import Metadata
         return Metadata
@@ -549,6 +553,7 @@ def _typed_input_model(capability_id: str) -> type[BaseModel] | None:
 
 
 REGISTERED_CAPABILITIES: dict[str, CapabilitySpec] = {
+    "inference.near-text.v1": CapabilitySpec("inference.near-text.v1", "1", secret_like=False),
     "memory.opportunity-preference.v1": CapabilitySpec("memory.opportunity-preference.v1", "1", secret_like=False),
     "work.context.selected_text.v1": CapabilitySpec(
         "work.context.selected_text.v1", "browser-selected-text-v1",
@@ -1271,6 +1276,8 @@ _STABLE_REASON_CODES = frozenset(
         "dependency_unfinished",
         "dispatcher_failure",
         "execution_blocked",
+        "near_cost_readback_required",
+        "near_owner_outstanding_limit",
         "executor_missing",
         "executor_lane_mismatch",
         "executor_requires_capability",
@@ -2822,6 +2829,7 @@ class WorkBoardDispatcher:
             inbox_expired = 0
             inbox_repaired = 0
         expired_reviews = await self._expire_review_windows(now=observed_at)
+        await self.recover_expired_near_finance(now=observed_at)
         reconciled = await self.reconcile_pending_attempts(now=observed_at)
         linked_reconciled = await self.reconcile_linked_attempts(now=observed_at)
         try:
@@ -3675,7 +3683,7 @@ class WorkBoardDispatcher:
                 receipts.append({"job_id":attempt.workflow_run_id,"status":"cancelled" if proven else "unknown",
                     "reason_code":"tool_package_reaped" if proven else "tool_package_cleanup_unproven"})
                 return receipts, bool(proven)
-            if capability in {"browser.public-task.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1", "memory.opportunity-preference.v1"}:
+            if capability in {"browser.public-task.v1", "work.evidence-dossier.v1", "work.local-evidence-report.v1", "memory.opportunity-preference.v1", "inference.near-text.v1"}:
                 worker = self._active_worker_tasks.get((task.task_id, attempt.attempt_id))
                 if worker is not None and worker is not asyncio.current_task() and not worker.done():
                     worker.cancel()
@@ -4209,9 +4217,9 @@ class WorkBoardDispatcher:
             return "executor_lane_mismatch", "The task executor does not match the registered capability lane"
         if not _text(task.typed_input_ref) or not _text(task.typed_input_digest):
             return "typed_input_missing", "The task has no complete typed input reference"
-        if (capability_id in {"browser.public-task.v1", "work.research-dossier.v1", "work.json-format.v1", "work.document-compare.v1"} or is_authored(capability_id)) and not _text(task.input_artifact_id):
+        if (capability_id in {"browser.public-task.v1", "work.research-dossier.v1", "work.json-format.v1", "work.document-compare.v1", "inference.near-text.v1"} or is_authored(capability_id)) and not _text(task.input_artifact_id):
             return "browser_input_artifact_required", "Public browser tasks require a server-bound input artifact"
-        if capability_id in {"browser.public-task.v1", "work.research-dossier.v1", "work.json-format.v1", "work.document-compare.v1"} or is_authored(capability_id):
+        if capability_id in {"browser.public-task.v1", "work.research-dossier.v1", "work.json-format.v1", "work.document-compare.v1", "inference.near-text.v1"} or is_authored(capability_id):
             # Browser inputs are resolved through the owner-bound artifact
             # lifecycle before promotion. This checks the current state,
             # expiry, task/goal/capability binding and bounded nofollow
@@ -4331,6 +4339,22 @@ class WorkBoardDispatcher:
                 if snapshot["status"] != "ready" or snapshot.get("overrun_max_cost_microusd", 0):
                     return "research_accounting_blocked", "Resolve existing accounting continuity or provider overrun before research"
                 return None, None
+            if capability == "inference.near-text.v1":
+                from src.model_fabric.effective_policy import current_near_text_policy
+                from src.model_fabric.near_text_contracts import NearTextInput
+                configuration,_policy=current_near_text_policy()
+                async with self.session_provider() as near_db:
+                    other=await near_db.scalar(select(WorkflowRunState.run_identity).outerjoin(
+                        WorkBoardAttempt,WorkBoardAttempt.workflow_run_id==WorkflowRunState.run_identity).where(
+                        WorkflowRunState.job_kind=='inference.near-text.v1',
+                        WorkflowRunState.owner_principal_id==task.owner_principal_id,
+                        WorkflowRunState.status.in_(('accepted','queued','running','awaiting_approval','paused')),
+                        or_(WorkBoardAttempt.task_id!=task.task_id,WorkBoardAttempt.task_id.is_(None))).limit(1))
+                if other:
+                    return 'near_owner_outstanding_limit','near_owner_outstanding_limit'
+                if NearTextInput.model_validate(inputs).max_output_tokens>configuration.near_text.max_output_tokens:
+                    return "near_output_limit_exceeded", "The configured output cap changed"
+                return None,None
             if capability == "memory.opportunity-preference.v1":
                 from src.work_board.opportunity_preference_native import stage_task_authority
                 async with self.session_provider() as preference_db:
@@ -5988,6 +6012,11 @@ class WorkBoardDispatcher:
                     result["blocked"] = True
                     return result
             if direct_proof is not None:
+                if task.capability_id == "inference.near-text.v1":
+                    from src.work_board.near_text_native import read_output
+                    async with self.session_provider() as near_db:
+                        near_run = await near_db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == job_id))
+                        read_output(task,attempt,near_run)
                 if task.capability_id == "work.document-compare.v1":
                     from src.work_board.document_compare_native import read_output, stage_current
                     await stage_current(self.jobs,task,attempt,inputs)
@@ -6340,6 +6369,15 @@ class WorkBoardDispatcher:
         procedure_binding: ProcedureChildBinding | None = None,
     ) -> Mapping[str, Any]:
         capability_id = _text(task.capability_id)
+        if capability_id == "inference.near-text.v1":
+            from src.work_board.near_text_native import execute
+            if not admission_only:
+                self._active_worker_tasks[(task.task_id,attempt.attempt_id)] = asyncio.current_task()
+            try:
+                return await execute(task,attempt,inputs,jobs=self.jobs,runner=self.runner_id,
+                    admission_only=admission_only,session_provider=self.session_provider)
+            finally:
+                if not admission_only:self._active_worker_tasks.pop((task.task_id,attempt.attempt_id),None)
         if capability_id == "memory.opportunity-preference.v1":
             from src.work_board.opportunity_preference_native import execute
             if not admission_only:
@@ -8891,6 +8929,9 @@ class WorkBoardDispatcher:
 
         capability_id = _text(task.capability_id)
         binding_key = f"{task.task_id}:{attempt.attempt_id}"
+        if capability_id == "inference.near-text.v1":
+            from src.work_board.near_text_native import job_id, CAPABILITY
+            return job_id(task,attempt),task.owner_principal_id,CAPABILITY,None,binding_key
         if capability_id == "memory.opportunity-preference.v1":
             from src.work_board.opportunity_preference_native import job_id
             return job_id(task,attempt),task.owner_principal_id,capability_id,None,binding_key
@@ -9025,6 +9066,9 @@ class WorkBoardDispatcher:
         """Compute the service input digest where the adapter contract is closed."""
 
         capability_id = _text(task.capability_id)
+        if capability_id == "inference.near-text.v1":
+            from src.work_board.near_text_native import immutable_inputs
+            return _safe_digest(immutable_inputs(task,inputs))
         if task.capability_id == "memory.opportunity-preference.v1":
             from src.work_board.opportunity_preference_native import spec_for
             return _safe_digest(spec_for(task,attempt,inputs,deadline=_now()).inputs)
@@ -9159,7 +9203,7 @@ class WorkBoardDispatcher:
         *,
         procedure_binding: ProcedureChildBinding | None = None,
     ) -> dict[str, Any]:
-        if task.capability_id == "work.document-compare.v1" or is_tool_package(task.capability_id):
+        if task.capability_id in {"work.document-compare.v1", "inference.near-text.v1"} or is_tool_package(task.capability_id):
             if not isinstance(projection, Mapping):
                 raise DurableJobIdempotencyConflict("document expiry snapshot requires canonical admission")
             return WorkBoardDispatcher._canonical_identity_from_projection(task, attempt, inputs, projection)
@@ -9406,7 +9450,16 @@ class WorkBoardDispatcher:
             raise DurableJobIdempotencyConflict(
                 "adapter admission projection is missing canonical immutable digests"
             )
-        if task.capability_id == "work.document-compare.v1":
+        if task.capability_id == "inference.near-text.v1":
+            from src.work_board.near_text_native import immutable_inputs, digest
+            expected_input = _safe_digest(immutable_inputs(task,inputs))
+            if (digests["input_digest"] != expected_input or digests["authority_digest"] != _safe_digest(authority)
+                or digests["run_fingerprint"] != digest([immutable_inputs(task,inputs),authority])
+                or authority.get("input_digest") != task.typed_input_digest
+                or authority.get("task_id") != task.task_id or authority.get("attempt_id") != attempt.attempt_id
+                or authority.get("runtime_path") != "near_text_native"):
+                raise DurableJobIdempotencyConflict("NEAR original immutable admission changed")
+        elif task.capability_id == "work.document-compare.v1":
             from src.work_board.document_compare_native import spec_for
             original_deadline = _utc_datetime(datetime.fromisoformat(str(projection.get("deadline_at"))))
             expected_spec = spec_for(task, attempt, inputs, deadline=original_deadline,
@@ -10554,6 +10607,33 @@ class WorkBoardDispatcher:
             return None
         return _text(projection.get("job_id") or projection.get("run_identity")) or None
 
+    async def recover_expired_near_finance(self, *, now):
+        # Finance classification precedes question loading and current execution
+        # grants. An expired grant cannot erase an already contacted liability.
+        from src.work_board.near_text_native import expired_finance_binding
+        async with self.session_provider() as db:
+            try:
+                candidates = await self.repository.list_expired_near_attempts(db, now=now)
+            except (ValueError, TypeError):
+                # A malformed persisted timestamp cannot authorize finance
+                # recovery or abort the rest of the dispatch pass.
+                return []
+            identities = []
+            for task, attempt, run in candidates:
+                try:
+                    if await expired_finance_binding(db, task, attempt, run, observed=now):
+                        identities.append(run.run_identity)
+                except (ValueError, TypeError, KeyError):
+                    # Malformed historical metadata cannot grant recovery.
+                    continue
+        for identity in identities:
+            try:
+                await self.jobs.recover_stale_job(identity, now=now)
+            except DurableJobLeaseError:
+                # A renewed/current lease or competing recovery owns the CAS.
+                continue
+        return identities
+
     async def reconcile_linked_attempts(self, *, now: datetime | None = None) -> list[str]:
         """Reconcile already-linked roots after a dispatcher restart.
 
@@ -10630,6 +10710,12 @@ class WorkBoardDispatcher:
                 snapshot_fence = snapshot_lease.get("fencing_token")
                 snapshot_owner = _text(snapshot_lease.get("owner"))
 
+                if task.capability_id == 'inference.near-text.v1' and attempt.cancel_requested_at is None:
+                    worker=self._active_worker_tasks.get((task.task_id,attempt.attempt_id))
+                    if worker is not None and not worker.done():
+                        # The original worker owns its one paid contact; another
+                        # reconciliation pass cannot execute or adopt its answer.
+                        continue
                 if is_tool_package(task.capability_id) and attempt.cancel_requested_at is None:
                     from src.work_board.tool_package_native import live_original_owner
                     if await live_original_owner(self.jobs,task,attempt):
@@ -11300,6 +11386,10 @@ class WorkBoardDispatcher:
                 ).scalar_one_or_none()
             if task is None:
                 continue
+            if task.capability_id == 'inference.near-text.v1' and attempt.cancel_requested_at is None:
+                worker=self._active_worker_tasks.get((task.task_id,attempt.attempt_id))
+                if worker is not None and not worker.done():
+                    continue
             try:
                 if _text(task.capability_id) != GOAL_SNAPSHOT_CAPABILITY:
                     admission = await self._lookup_direct_admission(task, attempt)

@@ -21,6 +21,10 @@ OpenRouter supports every modality or upstream policy without a capability
 check, and it does not make the gateway the authority for goals, tools,
 approvals, memory, or canonical state.
 
+The proposed narrow [ADR-025](./025-near-https-text-inference.md) exception permits
+only dedicated optional NEAR HTTPS text inference after reviewed milestone merge;
+all other provider boundaries below remain unchanged.
+
 ## Decision
 
 For the Epic #736 implementation phase, all active model inference goes through

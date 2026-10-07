@@ -5,6 +5,33 @@ title: Current App Guide
 
 # Current App Guide
 
+## Optional NEAR HTTPS text question
+
+[ADR-025](./decisions/025-near-https-text-inference.md) defines the optional
+target operator path tracked by [#959](https://github.com/seraph-quest/seraph/issues/959).
+It remains **Planned** until the reviewed milestone merges with its required
+runtime and UI receipts; these instructions describe the target path and do not
+establish current provider availability on `develop`.
+
+In Settings, configure the optional NEAR text route with its dedicated write-only
+credential and explicitly acknowledge provider plaintext access. The fixed
+model is `z-ai/glm-5.3-flash` at `https://cloud-api.near.ai/v1`; ordinary verified
+TLS is used, without verified TEE or end-to-end encryption. A local `configured`
+label reports credential, current consent and accounting readiness only.
+The request reserve is a local hold rather than a provider-enforced maximum.
+NEAR shares the deployment ledger, budget ceiling, serial inference lane and
+global egress revocation fence with OpenRouter.
+
+Use Work to submit one private text question against an active owned Goal and
+finite purpose authority. The browser does not retain the question for automatic
+replay. Review the native job and open its private result through current-owner
+readback after real billing settlement. Success does not approve human review
+or change memory: the outcome records `no_learning`. Missing or invalid billing
+withholds the answer and keeps the original liability visible. Restart and exact
+request replay preserve the original job without another inference. Manual debt
+settlement cannot recover discarded output or grant result adoption. Revoke or
+expired authority blocks private reads; configuration alone grants no execution.
+
 ## From a goal to a verified result
 
 The [#899 program](https://github.com/seraph-quest/seraph/issues/899) extends the

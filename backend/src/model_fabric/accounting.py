@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -18,6 +19,45 @@ from src.workflows.inference_accounting import InferenceAccountingError
 _current_usage: ContextVar[dict[str, object] | None] = ContextVar("inference_account_usage", default=None)
 _current_policy_digest: ContextVar[str | None] = ContextVar("inference_contact_policy_digest", default=None)
 _profile_bindings: ContextVar[dict[str, str]] = ContextVar("inference_accounting_profiles", default={})
+_current_runtime: ContextVar[str | None] = ContextVar("inference_accounting_runtime", default=None)
+_near_billing: ContextVar[dict[str, object] | None] = ContextVar("near_billing_evidence", default=None)
+_near_contact: ContextVar[object | None] = ContextVar("near_contact_authority", default=None)
+
+
+@contextmanager
+def bind_near_contact_authority(witness):
+    from src.work_board.near_text_native import NearContactWitness
+    if not isinstance(witness, NearContactWitness):
+        raise InferenceAccountingError("near_contact_authority_required")
+    token = _near_contact.set(witness)
+    try:
+        yield
+    finally:
+        _near_contact.reset(token)
+
+
+def _policy_for_runtime(runtime_path):
+    if runtime_path == "near_text_native":
+        from .effective_policy import current_near_text_policy
+        return current_near_text_policy()
+    return current_inference_policy()
+
+
+def current_near_accounting_operation_id() -> str:
+    collector = _near_billing.get()
+    if _current_runtime.get() != "near_text_native" or collector is None:
+        raise InferenceAccountingError("near_accounting_context_required")
+    return collector["operation_id"]
+
+
+def capture_near_billing_evidence(evidence) -> None:
+    from .near_text_billing import validate_near_billing_evidence
+    operation_id = current_near_accounting_operation_id()
+    validated = validate_near_billing_evidence(evidence, original_operation_id=operation_id)
+    collector = _near_billing.get()
+    if collector.get("evidence") is not None and collector["evidence"] != validated:
+        raise InferenceAccountingError("near_billing_evidence_conflict")
+    collector["evidence"] = validated
 
 
 def bind_accounting_profile(operation_id: str, profile_id: str):
@@ -58,7 +98,7 @@ def assert_current_inference_policy() -> None:
     if expected is not None:
         from src.auth.cancellation import assert_runtime_not_revoked
         assert_runtime_not_revoked()
-        _configured, actual = current_inference_policy()
+        _configured, actual = _policy_for_runtime(_current_runtime.get())
         if expected != actual:
             raise InferenceAccountingError("provider_policy_revision_changed")
 
@@ -79,6 +119,75 @@ class _AccountingHandle:
 
 class DurableInferenceBrokerMixin:
     """No independent executor: delegates scheduling to the existing broker."""
+
+    async def reconcile_settled_near_operation(
+        self, *, operation_id: str, job_id: str, expected_revision: int, operator,
+    ) -> dict[str, str]:
+        """Release only a completed local lease after canonical debt settlement.
+
+        This changes no job authority and never restores a provider result.
+        An absent local operation after restart requires no process-local action.
+        """
+        from src.workflows.job_runtime import durable_job_repository
+        from src.memory.procedure_recommendations import assert_current_root
+        from src.work_board.repository import BoardError
+        from .gpu_admission import GpuAdmissionError
+
+        def deferred(reason):
+            return {"status": "deferred", "reason_code": reason}
+
+        if (not isinstance(operation_id, str) or not operation_id or len(operation_id) > 256
+            or not isinstance(job_id, str) or not job_id or len(job_id) > 256
+            or type(expected_revision) is not int or expected_revision < 1):
+            return deferred("settled_operation_invalid")
+        try:
+            snapshot = await durable_job_repository.inference_accounting_snapshot(job_id=job_id)
+            if snapshot.get("accounting_continuity_verified") is not True:
+                return deferred("accounting_continuity_unavailable")
+            rows = [row for row in snapshot.get("operations", ())
+                if row.get("operation_id") == operation_id]
+            if len(rows) != 1:
+                return deferred("settled_operation_unavailable")
+            row = rows[0]
+            if (row.get("job_id") != job_id or row.get("revision") != expected_revision
+                or row.get("runtime_path") != "near_text_native" or row.get("profile_id") != "near.text"):
+                return deferred("settled_operation_changed")
+            actual = row.get("actual_cost_microusd")
+            if (row.get("state") != "settled" or row.get("contact_started_at") is None
+                or type(actual) is not int or not 0 <= actual <= 1_000_000_000):
+                return deferred("settled_charge_required")
+            async with durable_job_repository._session() as db:
+                await assert_current_root(db, operator)
+            if row.get("owner_id") != operator.principal.principal_id:
+                return deferred("original_owner_required")
+            try:
+                receipt = self.receipt_for(operation_id)
+            except KeyError:
+                return {"status": "absent", "reason_code": "no_local_operation"}
+            if (receipt.operation_id != operation_id or receipt.job_id != job_id
+                or receipt.owner_id != row["owner_id"] or receipt.runtime_path != "near_text_native"):
+                return deferred("broker_identity_changed")
+            if (receipt.status == "failed" and not receipt.reconciliation_required
+                and receipt.callback_completed and receipt.cost_settled_microusd == actual):
+                return {"status": "reconciled", "reason_code": "already_reconciled"}
+            if not receipt.callback_completed:
+                return deferred("provider_callback_running")
+            if (receipt.status != "blocked" or receipt.active_operation_id != operation_id
+                or not receipt.reconciliation_required or type(receipt.fencing_token) is not int
+                or receipt.fencing_token < 1):
+                return deferred("broker_reconciliation_unavailable")
+            # Existing condition-locked reconcile rechecks the actual fence,
+            # callback completion and revoked-owner recovery rules atomically.
+            await self.reconcile(operation_id, owner_id=receipt.owner_id, job_id=receipt.job_id,
+                fencing_token=receipt.fencing_token, outcome="failed",
+                reason_code="settled_liability_reconciled", actual_cost_microusd=actual)
+            return {"status": "reconciled", "reason_code": "settled_liability_reconciled"}
+        except BoardError:
+            return deferred("original_root_inactive")
+        except GpuAdmissionError:
+            return deferred("broker_reconciliation_deferred")
+        except (AttributeError, TypeError, ValueError):
+            return deferred("settled_operation_invalid")
 
     async def enqueue(self, request, **kwargs):
         receipt = await super().enqueue(request, **kwargs)
@@ -109,11 +218,16 @@ class DurableInferenceBrokerMixin:
             persisted = read_model_fabric_configuration()
             if persisted.status == "degraded":
                 raise InferenceAccountingError(persisted.error_code or "provider_policy_continuity_unavailable")
-            configured, policy_digest = current_inference_policy()
-            setup = configured.openrouter_setup
+            configured, policy_digest = _policy_for_runtime(request.runtime_path)
+            near = request.runtime_path == "near_text_native"
+            setup = configured.near_text if near else configured.openrouter_setup
             bound = setup.request_cost_bound_microusd or setup.spend_ceiling_microusd
             from .configuration import OPENROUTER_SETUP_V2_SCHEMA_VERSION, route_slot_for_task_class
-            if setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+            if near:
+                if _profile_bindings.get().get(request.operation_id) != "near.text":
+                    raise InferenceAccountingError("accounting_profile_binding_invalid")
+                bound = setup.request_cost_bound_microusd
+            elif setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
                 from .caller_context import canonical_route_spec
                 profile_id = _profile_bindings.get().get(request.operation_id)
                 if request.runtime_path == "capability_probe":
@@ -131,6 +245,10 @@ class DurableInferenceBrokerMixin:
             request = replace(request, estimated_cost_microusd=bound)
             binding = current_remote_inference_receipt_binding()
             ephemeral = binding is None or not binding.job_id
+            if near and ephemeral:
+                raise InferenceAccountingError("near_native_binding_required")
+            if near and _near_contact.get() is None:
+                raise InferenceAccountingError("near_contact_authority_required")
             repository = binding.repository if not ephemeral else durable_job_repository
             if not ephemeral:
                 native = await repository.get_job(binding.job_id)
@@ -149,7 +267,8 @@ class DurableInferenceBrokerMixin:
             snapshot = await repository.inference_accounting_snapshot()
             if snapshot["status"] != "ready":
                 raise InferenceAccountingError(str(snapshot.get("reason_code") or "accounting_continuity_unavailable"))
-            if snapshot["ceiling_microusd"] != setup.spend_ceiling_microusd:
+            from .configuration import deployment_spend_ceiling
+            if snapshot["ceiling_microusd"] != deployment_spend_ceiling(configured):
                 raise InferenceAccountingError("accounting_settings_revision_unavailable")
             if snapshot.get("overrun_max_cost_microusd", 0) > 0:
                 raise InferenceAccountingError("provider_charge_exceeded_reservation")
@@ -206,8 +325,9 @@ class DurableInferenceBrokerMixin:
     async def _contact_accounting(self, handle):
         from src.workflows.inference_accounting import InferenceProviderContactDenied
         try:
+            contact_kwargs = {"near_contact_witness": _near_contact.get()} if handle.request.runtime_path == "near_text_native" else {}
             await handle.repository.contact_inference_provider(handle.request.operation_id,
-                owner=handle.owner, fencing_token=handle.fence, policy_digest=handle.policy_digest)
+                owner=handle.owner, fencing_token=handle.fence, policy_digest=handle.policy_digest, **contact_kwargs)
         except InferenceProviderContactDenied as error:
             error.bind_broker_handle(handle)
             handle.committed_denial = error
@@ -223,17 +343,29 @@ class DurableInferenceBrokerMixin:
             proof = _completed_denial_quiescence(handle.committed_denial, handle.request, self)
             if proof is not None:
                 await handle.repository.record_provider_denial_quiescence(proof)
+        near = handle.request.runtime_path == "near_text_native"
+        billing = (_near_billing.get() or {}).get("evidence") if near else None
+        billing_kwargs = {"near_billing_evidence": billing} if near else {}
         row = await handle.repository.settle_inference_cost(handle.request.operation_id,
-            payload=payload, reason=reason or ("provider_account_usage" if handle.contacted else "blocked_before_contact"))
+            payload=None if near else payload, **billing_kwargs,
+            reason=reason or ("provider_account_usage" if handle.contacted else "blocked_before_contact"))
         adoption_allowed = True
         try:
-            adoption_allowed = current_inference_policy()[1] == handle.policy_digest
+            adoption_allowed = _policy_for_runtime(handle.request.runtime_path)[1] == handle.policy_digest
             if handle.request.owner_id.startswith("operator:"):
                 from src.auth.service import authenticate_session
                 operator = await authenticate_session(handle.request.session_id, touch=False)
                 adoption_allowed = adoption_allowed and operator.principal.principal_id == handle.request.owner_id
         except Exception:
             adoption_allowed = False
+        if near:
+            snapshot = await handle.repository.inference_accounting_snapshot(job_id=handle.job_id)
+            adoption_allowed = (adoption_allowed and billing is not None and row["state"] == "settled"
+                and row.get("provider_operation_id") == billing.provider_request_id
+                and row.get("actual_cost_microusd") == billing.cost_microusd
+                and snapshot.get("accounting_continuity_verified") is True
+                and snapshot.get("status") == "ready"
+                and snapshot.get("overrun_max_cost_microusd", 0) == 0)
         if handle.ephemeral:
             state = ("succeeded" if adoption_allowed else "blocked") if row["state"] == "settled" else "cost_liability" if handle.contacted else "blocked"
             if state == "succeeded":
@@ -269,6 +401,8 @@ class DurableInferenceBrokerMixin:
         usage: dict[str, object] = {}
         usage_token = _current_usage.set(usage)
         policy_token = _current_policy_digest.set(handle.policy_digest)
+        runtime_token = _current_runtime.set(handle.request.runtime_path)
+        billing_token = _near_billing.set({"operation_id": handle.request.operation_id} if handle.request.runtime_path == "near_text_native" else None)
         completed = False
 
         async def callback():
@@ -296,8 +430,12 @@ class DurableInferenceBrokerMixin:
             finally:
                 _current_usage.reset(usage_token)
                 _current_policy_digest.reset(policy_token)
+                _current_runtime.reset(runtime_token)
+                _near_billing.reset(billing_token)
 
     def execute_sync(self, request, operation, **kwargs):
+        if request.runtime_path == "near_text_native":
+            raise InferenceAccountingError("near_async_nonstreaming_required")
         if not self.durable_accounting:
             return super().execute_sync(request, operation, **kwargs)
         from .execution import _run_awaitable_sync
@@ -335,6 +473,8 @@ class DurableInferenceBrokerMixin:
                 _current_policy_digest.reset(policy_token)
 
     async def stream(self, request, operation, **kwargs):
+        if request.runtime_path == "near_text_native":
+            raise InferenceAccountingError("near_async_nonstreaming_required")
         if not self.durable_accounting:
             async for item in super().stream(request, operation, **kwargs):
                 yield item

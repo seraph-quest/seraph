@@ -1,9 +1,11 @@
 import ast
-import re
 import sys
 from pathlib import Path
 from subprocess import CompletedProcess, TimeoutExpired
 from unittest.mock import patch
+
+import pytest
+from _pytest.mark.expression import Expression
 
 from scripts.run_backend_test_shard import (
     CANCELLED_EVAL_CONSUMER_NODES,
@@ -718,6 +720,61 @@ def test_ci_consumer_retirement_retains_all_reviewed_mock_and_false_branch_contr
     assert retired.isdisjoint(retained)
 
 
+def _source_selected_test_nodes(source, path, expression):
+    definitions = []
+
+    def collect(body, parents=()):
+        for node in body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
+                definitions.append((*parents, node.name))
+            elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+                collect(node.body, (*parents, node.name))
+
+    collect(ast.parse(source).body)
+    predicate = Expression.compile(expression)
+    selected = set()
+    for names in definitions:
+        # Pytest -k matches each parent/node name case-insensitively, including
+        # conventional Test* classes. This is source inspection, not collection.
+        keywords = (*Path(path).parts, *names)
+        if predicate.evaluate(lambda identifier: any(identifier.lower() in name.lower() for name in keywords)):
+            selected.add("::".join((path, *names)))
+    return selected
+
+
+def _assert_source_group_retired(selected, retired, expected_count):
+    assert selected <= retired, "Selected source group includes an ordinary definition"
+    assert len(selected) == expected_count
+
+
+def test_source_guard_rejects_ordinary_method_selected_by_class_name():
+    source = """
+def test_marketplace_retired():
+    pass
+
+class TestMarketplaceOrdinary:
+    def test_health(self):
+        pass
+
+    class TestNested:
+        async def test_status(self):
+            pass
+
+class HelperMarketplace:
+    def test_not_a_conventional_test_class(self):
+        pass
+"""
+    path = "tests/test_toy.py"
+    selected = _source_selected_test_nodes(source, path, "marketplace or capability_pack or governed_ecosystem or governed_improvement")
+    assert selected == {
+        path + "::test_marketplace_retired",
+        path + "::TestMarketplaceOrdinary::test_health",
+        path + "::TestMarketplaceOrdinary::TestNested::test_status",
+    }
+    with pytest.raises(AssertionError, match="ordinary definition"):
+        _assert_source_group_retired(selected, {path + "::test_marketplace_retired"}, 1)
+
+
 def test_fully_retired_group_is_fixed_and_current_source_has_no_ordinary_selected_definition():
     assert FULLY_RETIRED_EVAL_INVOCATIONS == {
         ("tests/test_operator_api.py", "tests/test_operator_api.py::marketplace_and_ecosystem"),
@@ -726,29 +783,8 @@ def test_fully_retired_group_is_fixed_and_current_source_has_no_ordinary_selecte
     for path, label in FULLY_RETIRED_EVAL_INVOCATIONS:
         args = dict(pytest_invocations_for_target(path))[label]
         expression = args[args.index("-k") + 1]
-        definitions = [node.name for node in ast.parse((root / path).read_text()).body
-                       if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_")]
-        def matches(name):
-            tokens = re.findall(r"\w+|[()]", expression)
-            parsed = ast.parse(" ".join(token if token in {"and", "or", "not", "(", ")"}
-                                       else str(token.lower() in (path + "::" + name).lower())
-                                       for token in tokens), mode="eval")
-            def evaluate(node):
-                if isinstance(node, ast.Expression):
-                    return evaluate(node.body)
-                if isinstance(node, ast.Constant) and type(node.value) is bool:
-                    return node.value
-                if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-                    return not evaluate(node.operand)
-                if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.And):
-                    return all(evaluate(value) for value in node.values)
-                if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
-                    return any(evaluate(value) for value in node.values)
-                raise AssertionError("Unsupported source predicate")
-            return evaluate(parsed)
-        selected = {path + "::" + name for name in definitions if matches(name)}
-        assert len(selected) == 10
-        assert selected <= set(CANCELLED_EVAL_CONSUMER_NODES[path])
+        selected = _source_selected_test_nodes((root / path).read_text(), path, expression)
+        _assert_source_group_retired(selected, set(CANCELLED_EVAL_CONSUMER_NODES[path]), 10)
 
 
 def test_fully_retired_group_skips_before_subprocess_and_reports_not_run(tmp_path, capsys):

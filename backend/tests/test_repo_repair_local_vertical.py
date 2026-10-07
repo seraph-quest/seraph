@@ -483,6 +483,48 @@ async def _create_goal_task(
     return mutation.task.task_id, metadata.artifact_id
 
 
+def _publication_link_escape_diagnostic(error: BaseException) -> dict[str, Any] | None:
+    # Read only the original denial's whitelisted frame values, never probe
+    # the rejected path or inspect unrelated exception/frame locals.
+    from src.execution.repo_publication_runtime import RuntimeUnavailable, resolve_entry
+
+    cause: BaseException | None = error
+    for _ in range(4):
+        if cause is None:
+            break
+        if isinstance(cause, RuntimeUnavailable) and str(cause) == "publication_runtime_link_escape":
+            traceback = cause.__traceback__
+            for _ in range(32):
+                if traceback is None:
+                    break
+                frame = traceback.tb_frame
+                if (frame.f_code is resolve_entry.__code__
+                    and frame.f_globals.get("__name__") == "src.execution.repo_publication_runtime"
+                    and frame.f_code.co_name == "resolve_entry"):
+                    current = frame.f_locals.get("current")
+                    roots = frame.f_locals.get("roots")
+                    links = frame.f_locals.get("links")
+                    def bounded_path(value):
+                        return isinstance(value, str) and 0 < len(value) <= 4096 and "\x00" not in value
+                    if (type(current) is not type(Path()) or not bounded_path(str(current))
+                        or not isinstance(roots, list) or not 1 <= len(roots) <= 2
+                        or any(type(root) is not type(Path()) or not bounded_path(str(root)) for root in roots)
+                        or not isinstance(links, list) or len(links) > 8):
+                        return None
+                    for link in links:
+                        if (not isinstance(link, dict) or set(link) != {"path", "target", "identity"}
+                            or not bounded_path(link["path"]) or not bounded_path(link["target"])
+                            or not isinstance(link["identity"], list) or len(link["identity"]) != 9
+                            or any(type(value) is not int or not 0 <= value < 2 ** 64 for value in link["identity"])):
+                            return None
+                    return {"rejected_path": str(current), "allowed_roots": [str(root) for root in roots],
+                            "verified_links": [{"path": link["path"], "target": link["target"],
+                                                "identity": list(link["identity"])} for link in links]}
+                traceback = traceback.tb_next
+        cause = cause.__cause__
+    return None
+
+
 async def _prepare_native_flow(
     client,
     async_db,
@@ -563,6 +605,9 @@ async def _prepare_native_flow(
             runtime_diagnostic["error"] = {
                 "class": type(exc).__name__, "message": str(exc)[:512],
             }
+            link_escape = _publication_link_escape_diagnostic(exc)
+            if link_escape is not None:
+                runtime_diagnostic["original_link_escape"] = link_escape
         paths = {"interpreter_entry": Path(sys.executable).absolute()}
         try:
             pytest_executable = executor._local_pytest_executable()
@@ -1298,6 +1343,14 @@ async def test_blocked_runtime_preflight_exposes_diagnostic_without_admission(
     client, async_db, tmp_path: Path, monkeypatch, capsys,
 ):
     from src.execution.repo_sandbox import RepoSandboxPreflight
+    from src.execution.repo_publication_runtime import RuntimeUnavailable, metadata, resolve_entry
+
+    trusted_root = tmp_path / "diagnostic-runtime"
+    trusted_root.mkdir()
+    linked_entry = trusted_root / "python"
+    rejected_path = tmp_path / "outside-unattested-python"
+    linked_entry.symlink_to(rejected_path)
+    link_identity = list(metadata(linked_entry.lstat()))
 
     def blocked_preflight(self):
         return RepoSandboxPreflight(
@@ -1305,7 +1358,10 @@ async def test_blocked_runtime_preflight_exposes_diagnostic_without_admission(
         )
 
     def unavailable_identity(self):
-        raise RuntimeError("syntheticRuntimeUnavailable")
+        try:
+            resolve_entry(linked_entry, [trusted_root])
+        except RuntimeUnavailable as exc:
+            raise RuntimeError("syntheticRuntimeUnavailable") from exc
 
     monkeypatch.setattr(LocalRepoRepairExecutor, "preflight", blocked_preflight)
     monkeypatch.setattr(LocalRepoRepairExecutor, "_local_runtime_identity", unavailable_identity)
@@ -1319,6 +1375,12 @@ async def test_blocked_runtime_preflight_exposes_diagnostic_without_admission(
         "class": "RuntimeError", "message": "syntheticRuntimeUnavailable",
     }
     assert diagnostic["caller_uid"] == os.getuid()
+    assert diagnostic["original_link_escape"] == {
+        "rejected_path": str(rejected_path), "allowed_roots": [str(trusted_root)],
+        "verified_links": [{"path": str(linked_entry), "target": str(rejected_path),
+                            "identity": link_identity}],
+    }
+    assert not rejected_path.exists()
     import sysconfig
 
     assert diagnostic["sys_executable"] == sys.executable

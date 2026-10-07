@@ -150,8 +150,10 @@ Use the [documentation site](https://docs.seraph.quest),
 work. Epic #736 is the current product-reset program.
 
 The current published release is available from
-[GitHub Releases](https://github.com/seraph-quest/seraph/releases/latest), with
-[release notes](docs/implementation/21-release-2026-07-04.md). The repository
+[GitHub Releases](https://github.com/seraph-quest/seraph/releases/latest).
+Version-specific notes are available for
+[v2026.10.7](docs/implementation/22-release-2026-10-07.md) and
+[v2026.7.5](docs/implementation/21-release-2026-07-04.md). The repository
 also has an uploaded social-preview asset used by the docs site. The
 [workspace demo](https://github.com/user-attachments/assets/b4624170-0982-475e-b1ad-709a92a21f24)
 shows an earlier cockpit build; use the Current App Guide for current UI truth.

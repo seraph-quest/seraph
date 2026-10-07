@@ -8,15 +8,15 @@ title: Current App Guide
 ## Optional NEAR HTTPS text question
 
 [ADR-025](./decisions/025-near-https-text-inference.md) defines the optional
-target operator path tracked by [#959](https://github.com/seraph-quest/seraph/issues/959).
-It remains **Planned** until the reviewed milestone merges with its required
-runtime and UI receipts; these instructions describe the target path and do not
-establish current provider availability on `develop`.
+native text capability implemented under [#959](https://github.com/seraph-quest/seraph/issues/959).
+It is available on `develop`, disabled by default. Its keyless managed and
+intercepted receipts do not establish live provider availability or model quality.
 
 In Settings, configure the optional NEAR text route with its dedicated write-only
 credential and explicitly acknowledge provider plaintext access. The fixed
-model is `z-ai/glm-5.3-flash` at `https://cloud-api.near.ai/v1`; ordinary verified
-TLS is used, without verified TEE or end-to-end encryption. A local `configured`
+model is `z-ai/glm-5.3-flash` at `https://cloud-api.near.ai/v1`. The adapter uses
+ordinary HTTPS certificate validation; no live provider TLS-handshake proof,
+verified TEE or end-to-end encryption claim is supplied by the local receipts. A local `configured`
 label reports credential, current consent and accounting readiness only.
 The request reserve is a local hold rather than a provider-enforced maximum.
 NEAR shares the deployment ledger, budget ceiling, serial inference lane and
@@ -25,10 +25,10 @@ global egress revocation fence with OpenRouter.
 Use Work to submit one private text question against an active owned Goal and
 finite purpose authority. The browser does not retain the question for automatic
 replay. Review the native job and open its private result through current-owner
-readback after real billing settlement. Success does not approve human review
-or change memory: the outcome records `no_learning`. Missing or invalid billing
-withholds the answer and keeps the original liability visible. Restart and exact
-request replay preserve the original job without another inference. Manual debt
+readback after authoritative billing settlement. The task requires human Review;
+success does not approve it or change memory: the outcome records `no_learning`. Missing or invalid billing
+withholds the answer and keeps the original liability visible. Restart and idempotent
+request recovery preserve the original job without resending inference. Manual debt
 settlement cannot recover discarded output or grant result adoption. Revoke or
 expired authority blocks private reads; configuration alone grants no execution.
 
@@ -139,12 +139,14 @@ open integration branches describe intended post-merge truth and label any
 remaining partial boundaries inline
 
 > **Epic #736/#775 OpenRouter phase:** the accepted active inference contract
-> routes text, vision, and embedding work through the governed OpenRouter path
+> routes ordinary text, vision, and embedding work through the governed OpenRouter path
 > and removes the GPU/model-server/VLM wrapper prerequisite. The historical GPU
 > topology below remains documented as pre-#775 `develop` evidence and rollback
 > diagnostics. On an open integration branch, the final reviewed Epic PR is the
 > merge gate; after it lands, the active sections are shipped `develop` truth.
 > The target contract is defined by [ADR-006](./decisions/006-openrouter-only-inference-phase.md).
+> [ADR-025](./decisions/025-near-https-text-inference.md) permits only the separate
+> optional NEAR HTTPS text capability described above.
 
 This is the short operator-facing description of the current application. For
 the target product and locked decisions, read the
@@ -1281,8 +1283,9 @@ This capability remains **Partial**.
 
 ## Models And Runtime
 
-The accepted #775 phase changes the active contract to OpenRouter-only
-inference. The UI and `/api/runtime/status` report the effective gateway,
+Ordinary inference follows the accepted #775 OpenRouter route; ADR-025 permits
+only the separate optional NEAR text capability described above. The UI and
+`/api/runtime/status` report the effective gateway,
 model, verified-or-unknown upstream, consent, budget, and degraded state; a
 configured key or model is not proof of a live route. Model-fabric settings,
 canaries, proof, receipt, and runtime-path status surfaces are explicit

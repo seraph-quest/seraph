@@ -42,7 +42,7 @@ the Constitution and ADRs remain the target authority.
 
 Readiness remains specific to the selected profile. The CPU core, canonical
 workspace and operator controls work without a local model, GPU, VLM service or
-optional companion. Remote inference uses the governed OpenRouter route and
+optional companion. Ordinary remote inference uses the governed OpenRouter route and
 stays configuration-required without explicit credentials, upstream policy,
 consent, verified capability and budget. Linux optional isolation proof does not
 establish macOS execution: macOS remains a peer core-host target with unexecuted
@@ -73,31 +73,36 @@ milestone review and PR state belong to GitHub, not this inventory.
 
 ## Optional NEAR HTTPS text inference
 
-The narrow [#959](https://github.com/seraph-quest/seraph/issues/959) profile under
-[ADR-025](./decisions/025-near-https-text-inference.md) remains **Planned** until
-its reviewed milestone merges with the required operator receipts. Branch-local
-implementation and intercepted HTTP acceptance do not establish availability
-on `develop`, live provider billing or model quality.
+The narrow [#959](https://github.com/seraph-quest/seraph/issues/959) native text
+capability under [ADR-025](./decisions/025-near-https-text-inference.md) is
+**Shipped** on `develop`, disabled by default. Its named keyless managed UI/runtime
+and intercepted native/accounting/readback receipts cover local mechanics;
+they do not establish live provider availability, billing or model quality.
 
 The declared operator path is one private text question through the fixed
-`near.text` HTTPS route and `z-ai/glm-5.3-flash` model. Ordinary verified TLS
-protects transport; the provider receives plaintext. No verified TEE or
+`near.text` HTTPS route and `z-ai/glm-5.3-flash` model. The adapter uses ordinary
+HTTPS certificate validation; NEAR receives plaintext. The keyless/intercepted
+receipts do not prove a live provider TLS handshake. No verified TEE or
 end-to-end encryption claim applies. Local `configured` status means current
 credential, consent and accounting readiness, never provider availability.
 NEAR uses the existing shared deployment ledger and serial inference broker;
 global egress revocation covers both NEAR and OpenRouter. Missing or invalid
 billing retains liability, withholds answer adoption and never replays inference.
-Private output requires current authority and settled-cost readback; every
-outcome records `no_learning`.
+Private output requires current authority and settled-cost readback. The task
+requires human Review; successful execution supplies no automatic approval.
+Unknown cost discards the withheld answer, and debt reconciliation cannot recover
+it or resend inference. Every outcome records `no_learning`.
 
 ## Epic #736/#775 OpenRouter inference phase
 
-This section records the accepted OpenRouter-only inference phase and its
-provider-free implementation contract. The active route is the governed
+This section records the accepted ordinary OpenRouter inference phase and its
+provider-free implementation contract. The ordinary route is the governed
 OpenRouter gateway; CPU-local canonical state, storage, tools, and operator UI
 remain usable without a local model server, CUDA, downloaded weights, or the VLM
 wrapper. Missing key, consent, approved upstream, model-fabric bounds/proofs,
 or budget is reported as blocked or configuration-required.
+ADR-025 permits only the separate optional NEAR HTTPS text capability described
+above; it retains its own explicit authority and shared accounting gates.
 
 Purpose-specific OpenRouter setup remains **Partial** for operational
 acceptance. Existing settings provides independent text, vision, and embedding
@@ -175,8 +180,9 @@ multi-process, production-restore, and semantic-quality limits. This bounded
 implementation is present on `develop`; the broader recovery/quality claim
 remains **Partial**. The [5 October baseline](/research/seraph-capability-baseline-2026-10-05)
 separates released main, integrated programs and current test failures. The
-[capability roadmap](./23-guardian-capability-roadmap.md) is Planned work and
-does not upgrade any runtime or comparative evidence claim.
+[capability roadmap](./23-guardian-capability-roadmap.md) defines the accepted
+bounded sequence; this page owns its implemented scope and remaining limits.
+Neither the roadmap nor merged source upgrades comparative evidence claims.
 
 The bounded #920 profile adds neutral paired Telegram task notices, explicit bounded
 status review, exact pending-approval denial and original-attempt cancellation.

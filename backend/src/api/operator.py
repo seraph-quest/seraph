@@ -1321,8 +1321,8 @@ def _runtime_status_payload() -> dict[str, Any]:
     except ExternalAgentRuntimeRemovedError as exc:
         raise HTTPException(status_code=410, detail=exc.payload()) from exc
     return {
-        "version": "2026.4.11",
-        "build_id": "SERAPH_PRIME_v2026.4.11",
+        "version": "2026.10.7",
+        "build_id": "SERAPH_PRIME_v2026.10.7",
         **runtime,
         "provider_profiles": provider_profile_statuses(),
         "timezone": settings.user_timezone,

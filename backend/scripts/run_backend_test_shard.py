@@ -129,6 +129,11 @@ CANCELLED_EVAL_CONSUMER_NODES: dict[str, list[str]] = {'tests/test_always_availa
  'tests/test_safe_browser_computer_use.py': ['tests/test_safe_browser_computer_use.py::test_safe_browser_computer_use_report_runs_all_batch_cp_suites']}
 
 
+FULLY_RETIRED_EVAL_INVOCATIONS = {
+    ("tests/test_operator_api.py", "tests/test_operator_api.py::marketplace_and_ecosystem"),
+}
+
+
 RUNTIME_HEAVY_FILE_TIMEOUTS: dict[str, int] = {
     "tests/test_approvals_api.py": 1_200,
     "tests/test_context_window.py": 1_200,
@@ -632,6 +637,10 @@ def run_shard_files(
             print(f"[backend-shard] RETIRED/NOT RUN {node}: cancelled campaign consumer; "
                   "one source definition not selected for execution; not passed")
         for label, invocation_args in pytest_invocations_for_target(path):
+            if exclude_cancelled_eval_harness and (path, label) in FULLY_RETIRED_EVAL_INVOCATIONS:
+                print(f"[backend-shard] RETIRED/NOT RUN {label}: "
+                      "all 10 selected source definitions are cancelled campaign consumers; not passed")
+                continue
             command = [sys.executable, "-m", "pytest", "-q", *invocation_args, *extra_args,
                        *(f"--deselect={node}" for node in retired_nodes)]
             timeout_seconds = timeout_for_file(path, file_timeout_seconds)

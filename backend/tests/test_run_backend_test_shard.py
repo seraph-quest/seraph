@@ -1,3 +1,5 @@
+import ast
+import re
 import sys
 from pathlib import Path
 from subprocess import CompletedProcess, TimeoutExpired
@@ -5,6 +7,7 @@ from unittest.mock import patch
 
 from scripts.run_backend_test_shard import (
     CANCELLED_EVAL_CONSUMER_NODES,
+    FULLY_RETIRED_EVAL_INVOCATIONS,
     main,
     pytest_invocations_for_target,
     run_shard_files,
@@ -615,7 +618,8 @@ def test_ci_consumer_retirement_is_fixed_exact_source_inventory():
 
 def test_ci_consumer_retirement_appends_exact_nodes_without_changing_original_groups(tmp_path, capsys):
     path = "tests/test_operator_api.py"
-    original = pytest_invocations_for_target(path)
+    original = [(label, args) for label, args in pytest_invocations_for_target(path)
+                if (path, label) not in FULLY_RETIRED_EVAL_INVOCATIONS]
     with patch("scripts.run_backend_test_shard.subprocess.run") as run:
         run.return_value = CompletedProcess(args=["pytest"], returncode=0)
         assert run_shard_files(tmp_path, [path], pytest_args=["-x"], exclude_cancelled_eval_harness=True) == 0
@@ -712,3 +716,69 @@ def test_ci_consumer_retirement_retains_all_reviewed_mock_and_false_branch_contr
     retired = {node for nodes in CANCELLED_EVAL_CONSUMER_NODES.values() for node in nodes}
     assert len(retained) == 47
     assert retired.isdisjoint(retained)
+
+
+def test_fully_retired_group_is_fixed_and_current_source_has_no_ordinary_selected_definition():
+    assert FULLY_RETIRED_EVAL_INVOCATIONS == {
+        ("tests/test_operator_api.py", "tests/test_operator_api.py::marketplace_and_ecosystem"),
+    }
+    root = Path(__file__).resolve().parents[1]
+    for path, label in FULLY_RETIRED_EVAL_INVOCATIONS:
+        args = dict(pytest_invocations_for_target(path))[label]
+        expression = args[args.index("-k") + 1]
+        definitions = [node.name for node in ast.parse((root / path).read_text()).body
+                       if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_")]
+        def matches(name):
+            tokens = re.findall(r"\w+|[()]", expression)
+            parsed = ast.parse(" ".join(token if token in {"and", "or", "not", "(", ")"}
+                                       else str(token.lower() in (path + "::" + name).lower())
+                                       for token in tokens), mode="eval")
+            def evaluate(node):
+                if isinstance(node, ast.Expression):
+                    return evaluate(node.body)
+                if isinstance(node, ast.Constant) and type(node.value) is bool:
+                    return node.value
+                if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+                    return not evaluate(node.operand)
+                if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.And):
+                    return all(evaluate(value) for value in node.values)
+                if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
+                    return any(evaluate(value) for value in node.values)
+                raise AssertionError("Unsupported source predicate")
+            return evaluate(parsed)
+        selected = {path + "::" + name for name in definitions if matches(name)}
+        assert len(selected) == 10
+        assert selected <= set(CANCELLED_EVAL_CONSUMER_NODES[path])
+
+
+def test_fully_retired_group_skips_before_subprocess_and_reports_not_run(tmp_path, capsys):
+    path, label = next(iter(FULLY_RETIRED_EVAL_INVOCATIONS))
+    with patch("scripts.run_backend_test_shard.pytest_invocations_for_target", return_value=[(label, [path])]), patch("scripts.run_backend_test_shard.subprocess.run") as run:
+        assert run_shard_files(tmp_path, [path], exclude_cancelled_eval_harness=True) == 0
+    run.assert_not_called()
+    assert f"RETIRED/NOT RUN {label}:" in capsys.readouterr().out
+
+
+def test_fully_retired_group_does_not_skip_similar_label(tmp_path):
+    path, label = next(iter(FULLY_RETIRED_EVAL_INVOCATIONS))
+    with patch("scripts.run_backend_test_shard.pytest_invocations_for_target", return_value=[(label + "_ordinary", [path])]), patch("scripts.run_backend_test_shard.subprocess.run") as run:
+        run.return_value = CompletedProcess(args=["pytest"], returncode=0)
+        assert run_shard_files(tmp_path, [path], exclude_cancelled_eval_harness=True) == 0
+    run.assert_called_once()
+
+
+def test_fully_retired_group_default_runner_still_invokes_original_groups(tmp_path):
+    path, label = next(iter(FULLY_RETIRED_EVAL_INVOCATIONS))
+    with patch("scripts.run_backend_test_shard.subprocess.run") as run:
+        run.return_value = CompletedProcess(args=["pytest"], returncode=0)
+        assert run_shard_files(tmp_path, [path]) == 0
+    assert len(run.call_args_list) == len(pytest_invocations_for_target(path))
+    expected = [args for _, args in pytest_invocations_for_target(path)]
+    assert [call.args[0][4:-1] for call in run.call_args_list] == expected
+
+
+def test_ci_retirement_does_not_swallow_no_tests_exit_code(tmp_path):
+    with patch("scripts.run_backend_test_shard.subprocess.run") as run:
+        run.return_value = CompletedProcess(args=["pytest"], returncode=5)
+        assert run_shard_files(tmp_path, ["tests/test_operator_api.py", "tests/test_alpha.py"], exclude_cancelled_eval_harness=True) == 5
+    run.assert_called_once()

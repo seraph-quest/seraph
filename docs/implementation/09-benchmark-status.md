@@ -14,6 +14,7 @@ The runner omits the exact `tests/test_eval_harness.py` target before pytest
 starts and appends literal full-node `--deselect` arguments for the mapped
 direct and indirect campaign consumers. The exact exclusion catalog lives in
 `backend/scripts/run_backend_test_shard.py`; this page does not duplicate it.
+The literal wholly retired marketplace group is omitted before pytest; a source guard protects newly added ordinary tests, and all other nonzero exits remain failures.
 Test sources and assertions remain intact. Discovery, group filters, failure
 reporting and timeout limits are preserved, as are ordinary mocked and metadata-only
 checks outside the explicitly retired module and mapped campaign consumers.

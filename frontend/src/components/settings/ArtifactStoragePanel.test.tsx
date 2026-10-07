@@ -280,7 +280,7 @@ describe("ArtifactStoragePanel", () => {
     render(<ArtifactStoragePanel />);
 
     expect(await screen.findByText("Model fabric")).toBeInTheDocument();
-    expect(screen.getByText("text: interactive, background, report · VLM: vision")).toBeInTheDocument();
+    expect(await screen.findByText("text: interactive, background, report · VLM: vision")).toBeInTheDocument();
     expect(screen.getByText(/local-text\/gemma-text:routable/)).toBeInTheDocument();
     const textRoute = screen.getByText(/selected local-text · attempted local-text:succeeded · actual local-text\/gemma-text/);
     expect(textRoute).toHaveClass("text-green-400");

@@ -319,11 +319,13 @@ async def test_failed_recovery_does_not_starve_ordinary_dispatch(monkeypatch):
     dispatcher = module.WorkBoardDispatcher(session_provider=session)
     async def zero(*args, **kwargs): return 0
     async def empty(*args, **kwargs): return []
+    async def recover_near_finance(*, now: datetime) -> list[str]: return []
     async def candidates(*args, **kwargs): called.append("ordinary"); return []
     async def blocked(): raise BoardError("pipeline_output_unverified", "blocked recovery")
     monkeypatch.setattr(module, "expire_inbox_items", zero)
     monkeypatch.setattr(module, "repair_inbox_dispositions", zero)
     monkeypatch.setattr(dispatcher, "_expire_review_windows", zero)
+    monkeypatch.setattr(dispatcher, "recover_expired_near_finance", recover_near_finance)
     monkeypatch.setattr(dispatcher, "reconcile_pending_attempts", empty)
     monkeypatch.setattr(dispatcher, "reconcile_linked_attempts", empty)
     monkeypatch.setattr(dispatcher, "_recover_linked_pipelines", blocked)

@@ -304,6 +304,7 @@ async def test_dispatch_pass_keeps_ready_task_when_lane_identity_fails(monkeypat
         session_provider=lambda: Session(),
     )
     dispatcher._expire_review_windows = no_rows
+    dispatcher.recover_expired_near_finance = no_reconcile
     dispatcher.reconcile_pending_attempts = no_reconcile
     dispatcher.reconcile_linked_attempts = no_reconcile
 
@@ -1170,6 +1171,7 @@ def test_registered_typed_artifact_capabilities_have_an_explicit_opt_in_allowlis
         "engineering.repo-repair.v1",
         "gmail.scan_metadata.v1",
         "guardian-routine.v2",
+        "inference.near-text.v1",
         "memory.opportunity-preference.v1",
         "workflow.goal-snapshot-to-file",
         "guardian.research-watch.v1",

@@ -191,6 +191,12 @@ Deployment inference accounting remains **Partial**. The canonical durable job
 repository owns finite reservations, immutable UTC-month attribution, account
 usage settlement, and unknown liabilities that carry across rollover and
 restore. The existing remote broker remains the sole serial executor. Paid
+execution on revisions containing the reviewed
+[#1031](https://github.com/seraph-quest/seraph/issues/1031) repair includes durable
+settlement and canonical readback before that serial lease can release; failure
+retains its existing reconciliation hold. Scripted local receipts establish the
+async/sync/stream ordering and preserve original debt, deadline and denied-contact
+proof, without external inference or provider-availability claims. Paid
 egress requires a retained lifecycle witness outside root snapshots; stale or
 missing continuity blocks inference while deterministic CPU features remain
 usable. Settings exposes exact-operation manual reconciliation, explicitly

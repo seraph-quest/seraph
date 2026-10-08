@@ -1814,6 +1814,17 @@ The accepted #775 phase uses one shared bounded `remote_inference`
 admission lane: the active request finishes, then the highest-priority ready
 request runs. Interactive work outranks scheduled and background work. Queue,
 consent, cancellation, and uncertain remote outcomes remain operator-visible.
+On revisions containing the independently reviewed
+[#1031](https://github.com/seraph-quest/seraph/issues/1031) repair, async,
+synchronous and streaming execution retain that same serial lease after positive
+provider callback completion until charge or liability settlement and canonical
+readback finish. A queued sibling cannot contact while an overrun is still being
+committed. Failed settlement/readback retains the existing reconciliation hold;
+an elapsed deadline or returned coroutine does not release it. Known charges stay
+known when current authority later prevents result adoption. Positive
+never-contacted denial proof retains its existing quiescence journal. Isolated
+scripted-transport receipts establish these ownership mechanics, not provider
+availability or model quality.
 The canonical job repository owns deployment accounting reservations and their
 original UTC calendar month and settings revision. The deployment owner does
 not change with login, enrollment, or root identity. Actual OpenRouter account

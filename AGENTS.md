@@ -1,515 +1,331 @@
 # Agent Guidelines
 
-## Canonical Project Contract
+## Start Here
 
-Before substantial work, read the
-[Project Constitution](docs/implementation/00-project-constitution.md) and its
-ADRs. Use [Current App Guide](docs/implementation/12-current-app-guide.md) for
-the current topology, [Development Status](docs/implementation/STATUS.md) for
-shipped/partial truth, and
-[Documentation Contract](docs/implementation/08-docs-contract.md) for ownership
-and status vocabulary. GitHub issues, PRs, and the Project remain the execution
-layer; these docs do not replace tracked work.
+Seraph is a local-first proactive guardian and operator cockpit. It owns goals,
+policy, capabilities, memory, durable work and audit; model providers supply
+inference only. The current implementation is a Python/FastAPI backend and
+React/TypeScript cockpit with optional context and service adapters.
 
-For Epic #736, [ADR-005](docs/implementation/decisions/005-epic-integration-branch-workflow.md)
-locks the integration workflow: milestone branches start from the latest epic
-branch, ready PRs target it, and only the final reviewed epic PR targets
-`develop`.
+The accepted direction is an **all-plugin Cordis agent architecture**, defined
+by [ADR-026](docs/implementation/decisions/026-all-plugin-cordis-architecture.md).
+The agent loop, tools, model integration, persistence, scheduling and interfaces
+will be plugins; only necessary bootstrap/composition machinery stays outside
+them. Migration capabilities are **Planned**, not implemented by this guide.
+Extend current owning modules until a reviewed migration milestone replaces
+them; do not mix an unapproved rewrite into ordinary fixes.
 
-## What Seraph Is
+Before substantial work, read the following owners and relevant ADRs:
 
-Seraph is a local-first operator cockpit and agent runtime. The repo spans a
-FastAPI backend, React cockpit/settings UI, scheduler jobs, screen observation
-storage, local model routing, VLM screenshot analysis, reports, skills,
-workflows, and external service adapters.
-
-### Active Epic #736/#775 inference phase
-
-On the OpenRouter-only migration branch, the GPU/VLM topology described below
-is historical `develop` baseline evidence. Active text, vision, and embedding
-inference must use the governed `https://openrouter.ai/api/v1` route with
-explicit upstream, consent, budget, and capability checks. The Seraph backend,
-canonical workspace, storage, tools, scheduler, and operator UI must remain
-usable on a CPU host with local model services and the VLM wrapper absent.
-Status and settings must show local inference as inactive or blocked rather than
-probing those services. The final reviewed migration PR is required before
-this branch-local target becomes shipped `develop` truth.
-
-The pre-#775 `develop` topology below is retained as historical evidence and
-GPU administration guidance, not as an active inference prerequisite on this
-branch:
-
-```text
-Seraph frontend       http://127.0.0.1:3001
-  -> Seraph backend   http://127.0.0.1:8004
-  -> GPU VLM wrapper  http://192.168.1.26:8001
-  -> GPU model server http://192.168.1.26:8000/v1
-```
-
-The VLM wrapper is run through Docker on the GPU server from
-`/home/pawel/repos/vlm-screenshot-server`. The GPU model server is a separate
-process on the same machine and may already be running. Seraph agents are
-responsible for Seraph and the VLM wrapper lifecycle. SSH is for GPU
-administration only: inventory, Docker deploy/restart, process inspection, and
-logs. Seraph runtime traffic must go over the documented HTTP APIs.
-
-Operator-shell reachability is authoritative for this topology. A normal
-Terminal-launched receipt on July 3, 2026 proved
-`ssh -o BatchMode=yes -o ConnectTimeout=5 jupyter true` exits `0` even though
-Codex/Desktop-launched direct SSH can report `No route to host` for the same
-alias. Seraph should not require the user to set up an SSH tunnel to reach the
-GPU VLM API. If Codex/Desktop commands report `No route to host` or connection
-failures for `192.168.1.26` while the operator shell can reach `jupyter`, treat
-that as a Codex/app network limitation until proven otherwise. Document it in
-the ticket receipt, but do not redesign the Seraph runtime around a tunnel.
-
-Codex GPU administration is a separate access path from Seraph runtime traffic.
-Use `ssh jupyter` only for GPU-host inventory and maintenance. That path has
-confirmed host `jupyter`, user `pawel`, and
-`/home/pawel/repos/vlm-screenshot-server`. Do not translate this admin route
-into a Seraph user requirement or a `.env.dev` runtime base URL.
-
-Two properties shape most Seraph decisions:
-
-- Runtime truth must be operator-visible. If chat, screenshots, reports, or
-  settings use local Gemma/VLM/GPU paths, the UI and APIs must say that, not a
-  stale default model or fallback provider.
-- Work should be queued, bounded, and priority-aware. On the active #775
-  branch, the serial resource is the governed remote-inference lane, not a
-  physical GPU. At most one remote inference may be admitted until durable
-  queue and cost ownership land; the next accepted job must be the highest-
-  priority ready job, and background screenshot work stays disabled unless its
-  explicit consent, budget, and capability gates are ready.
-
-## Contribution Rubric
-
-### What We Want
-
-- Fix real reported behavior and the whole bug class. Reproduce the symptom on
-  the current branch, identify the line or contract that makes it happen, and
-  cover sibling paths that would fail the same way.
-- Preserve Seraph's runtime contracts. Settings, status badges, scheduler
-  receipts, API health, and docs must agree with the actually running backend,
-  VLM wrapper, and GPU edge.
-- Prefer explicit operational receipts over plausible code inspection. For
-  lifecycle, model routing, Docker/VLM, queueing, or settings work, prove the
-  live endpoint or command path before saying it works.
-- Keep the core narrow and capability at the right layer. Extend existing
-  scheduler jobs, settings APIs, runtime profiles, skills, or wrappers before
-  adding new broad agent surfaces.
-- Make failures visible and bounded. A missing Docker wrapper, broken GPU edge,
-  invalid env value, stale settings fetch, or unavailable metadata path should
-  fail loudly enough for the operator to recover without killing the app.
-- Document shipped truth in `docs/implementation/` when runtime topology,
-  workflow contracts, settings behavior, queueing, or user-visible operations
-  change.
-
-### What We Do Not Want
-
-- Silent fallbacks that make the UI lie. Do not show OpenRouter, Grok, Codex, or
-  any other default when the effective runtime path is local Gemma/VLM, and do
-  not hide missing local runtime proof behind "configured" labels.
-- New raw env knobs as the first solution for operator behavior. Prefer existing
-  settings surfaces, runtime profile contracts, managed scripts, or documented
-  config groups. If an env var is necessary, quote shell-sensitive values in
-  `.env.*` and add a launcher guard or test when parsing would be fragile.
-- Detached process tricks that only work in one terminal. Use the repo lifecycle
-  commands and verify the managed status. In Codex/Desktop managed shells,
-  foreground `local run` is the reliable observation mode.
-- Poll loops, schedulers, or retries that can DoS the backend, starve chat, or
-  leave the GPU idle while accepted work exists.
-- "Fixes" that remove the feature instead of preserving the contract. If
-  settings metadata is slow, keep controls usable with last-known state; do not
-  solve it by disabling configuration.
-- Claims that issues, project fields, PR review, services, or tests changed
-  unless a tool confirmed the change.
-
-## Standard Intake For User Requests
-
-Every non-trivial user request that changes code, docs truth, workflow,
-runtime behavior, strategy, tickets, settings, tests, or operator-visible state
-must go through the tracked work route before it is called done.
-
-If there is no existing ticket:
-
-1. Search open and closed issues for the same bug, capability, workflow, or
-   batch scope.
-2. Reuse or refine an existing issue when it genuinely matches.
-3. Create a new tracked issue only when no suitable issue exists.
-4. Set or verify the GitHub Project fields required by Project Board Flow.
-5. Use the issue body or a comment to capture the symptom/request, intended
-   behavior, root cause or plan, acceptance criteria, and validation plan.
-
-Emergency investigation can happen before ticket creation when the app is down
-or evidence would disappear, but no commit, PR, merge, or completion claim may
-happen before the issue exists unless the user explicitly says not to create a
-ticket.
-
-If the request is a bug report, reproduce or inspect the root cause before
-patching. If the request is a feature or UX change, define the user-facing
-behavior first, then implement the smallest complete version that satisfies it.
-Tiny mechanical edits may share an existing ticket or PR only when they are
-directly related; otherwise create a separate tracked issue so the board reflects
-the actual work being done.
-
-Do not mark work complete from code changes alone. Completion means the ticket
-and PR are updated, focused tests or checks were run, runtime/UI behavior was
-verified when relevant, critic findings were handled, and merge/project state is
-accurate unless the user explicitly scoped completion to local implementation.
-
-## Verify The Premise Before Fixing
-
-Before treating something as a bug, verify both the symptom and the intended
-design:
-
-- Check the live surface the user sees. If the screenshot shows a status label,
-  query the endpoint that feeds that label and inspect the frontend binding.
-- Check runtime configuration as loaded by the actual launcher, not just the
-  file on disk. Values with semicolons, quotes, shell expansion, Docker env
-  files, and process managers can change what the backend receives.
-- Trace the intended path before patching. For chat, distinguish direct local
-  chat, onboarding, orchestrator, tool-using agent, and fallback routes. For
-  screenshots, distinguish folder scan, pending observation storage, VLM
-  analysis, digest/report synthesis, and settings summaries.
-- Verify local services with concrete probes:
-
-```bash
-./manage.sh -e dev local status
-curl -sS http://127.0.0.1:8004/health
-curl -sS http://127.0.0.1:8004/api/runtime/status
-curl -sS http://127.0.0.1:8004/api/settings/artifact-storage
-curl -sS http://192.168.1.26:8001/health
-curl -sS http://192.168.1.26:8001/health/backend
-curl -sS http://192.168.1.26:8001/queue/status
-```
-
-If sandboxed localhost checks fail but the app is supposed to be running on the
-host, rerun the same probe with the proper approval instead of assuming the
-service is down.
-
-If approved Codex/Desktop probes still fail against the GPU LAN address while
-the operator shell succeeds, ask for or use an operator-shell receipt from the
-same environment that launches Seraph. Do not count a local SSH forward as the
-product proof; use it only to inspect GPU-side state.
-
-For GPU-server inventory from Codex, `ssh jupyter` is acceptable only as the GPU
-administration route. Use it to inspect
-`/home/pawel/repos/vlm-screenshot-server`, Docker Compose, running model
-processes, listeners, logs, and firewall state. Keep any output clearly labeled
-as admin evidence, not direct Seraph runtime acceptance.
-
-## Footprint Ladder For New Capability
-
-Choose the smallest durable surface that solves the problem:
-
-1. Extend an existing function, endpoint, scheduler job, or UI state path.
-2. Extend an existing runtime profile, settings API, or managed script.
-3. Add a focused helper module behind an existing API or job.
-4. Add a skill or documented operator workflow.
-5. Add a plugin/MCP/service adapter when the capability is optional or
-   integration-specific.
-6. Add a new core tool, broad API, or global scheduler lane only when the
-   capability is fundamental and cannot fit the layers above.
-
-When multiple features want the same category of behavior, design the shared
-contract first. Do not merge one-off settings panels, queue semantics, provider
-switches, or lifecycle paths that will fight each other later.
-
-Feature-first discipline: do not spend a user-facing feature batch building
-proof scaffolding, broad docs reconciliation, or claim gates while the actual
-capability is still missing. Ship the capability with the focused receipts it
-needs, then track broader proof work separately when necessary.
-
-### Capability Completion Contract
-
-A capability is not **Shipped** merely because its registry entry, settings
-surface, deterministic scenario, or benchmark endpoint exists. Where the
-capability crosses the relevant boundaries, completion requires one observable
-vertical slice:
-
-1. a stable capability identity with typed inputs and outputs;
-2. declared permissions, limits, policy, approval, and runtime dependencies;
-3. an accepted bounded job with owner, priority, retry/cancel behavior, and
-   idempotency expectations;
-4. real execution through the governed runtime rather than a receipt fixture;
-5. durable artifact, checkpoint, audit, and effective-route receipts;
-6. verification or external readback of the intended outcome;
-7. an explicit canonical-memory update or an explicit no-learning result; and
-8. operator-visible success, degraded, blocked, and recovery states.
-
-Mark a non-applicable element explicitly instead of silently omitting it.
-Proof-only endpoints and deterministic fixtures may validate a capability, but
-they do not count as the capability. Prefer one complete operator journey over
-several disconnected surfaces.
-
-For proactive behavior, prove the bounded loop end to end: goal or standing
-intent -> candidate intervention -> admission and priority -> approval or
-reservation -> capability execution -> evidence/readback -> outcome evaluation
--> governed memory update. Periodic model calls or delivered messages alone do
-not satisfy the proactive-agent contract.
-
-## Runtime And Lifecycle Rules
-
-- Use `./manage.sh -e dev local run` for live observation in managed Codex
-  sessions. Use `./manage.sh -e dev local up/down/status/logs` for normal local
-  lifecycle. Do not start backend/frontend directly with `uvicorn`, `npm run
-  dev`, or Vite unless the user explicitly asks.
-- Keep `.env.*` shell-safe. Any value containing semicolons must be quoted
-  because `manage.sh` sources env files as shell.
-- Runtime status must report the effective path for the current operator
-  surface. `/api/runtime/status` should describe `chat_agent`, while default
-  model/provider values belong in explicit `default_*` fields.
-- The Docker VLM wrapper health is not the same as GPU backend health. Check
-  both `/health` and `/health/backend`.
-- One-GPU scheduling is serial at the GPU. Seraph may keep a tiny feeder window
-  to avoid idle time, but queue priority determines the next job.
-- Background screenshot analysis must not block interactive chat. Chat and
-  onboarding routes using local Gemma must be configured alongside screenshot
-  and report routes.
-- Settings pages must remain usable through partial metadata failures. Preserve
-  last-known values and surface degraded metadata instead of disabling controls
-  or crashing the modal.
-
-## Module Routing Map
-
-- Chat and WebSocket turns: `backend/src/api/ws.py`,
-  `backend/src/api/chat.py`, `backend/src/agent/`.
-- Local runtime/provider selection: `backend/src/local_runtime_profiles.py`,
-  `backend/config/settings.py`, runtime status endpoints, and `.env.*`.
-- Scheduler and GPU/VLM queue behavior: `backend/src/scheduler/`,
-  `backend/src/observer/`, and VLM wrapper integration points.
-- Screenshot folder and semantic analysis: `backend/src/observer/`,
-  `backend/tests/test_observer_screen_artifacts.py`, and screenshot
-  intelligence tests.
-- Settings metadata and operator controls: `backend/src/api/settings.py`,
-  `frontend/src/components/SettingsPanel.tsx`, and settings subcomponents.
-- Chat transcript and streaming UI: `frontend/src/hooks/useWebSocket.ts`,
-  `frontend/src/components/chat/`, and related tests.
-- Lifecycle scripts and env loading: `manage.sh`, `env.dev.example`,
-  `env.prod.example`, Docker/VLM wrapper docs.
-- Shipped-truth docs: `docs/implementation/`; evidence and alternatives:
-  `docs/research/`; historical/archive docs: `docs/docs/`.
-
-Prefer these extension points before adding new broad modules or parallel UI
-surfaces.
-
-## Validation Matrix
-
-| Change type | Required proof |
+| Document | Authority |
 | --- | --- |
-| Runtime topology or lifecycle | `./manage.sh -e dev local status`, relevant `/health` checks, and logs or live URL receipt. |
-| Chat/local model routing | API or WebSocket probe proving effective provider/model path, plus transcript persistence check when turn behavior changes. |
-| Streaming chat UI | Backend frame test, frontend reducer/rendering test, and live or mocked delta/final receipt. |
-| Settings/UI truth | Endpoint payload inspection plus frontend binding or component test. |
-| Scheduler/remote inference queue | Priority/non-starvation test and proof that one-remote-inference serial semantics are preserved; GPU receipts are historical on #775. |
-| Screenshot/OpenRouter vision analysis | OpenRouter policy/admission/ingestion tests and operator-visible status receipt; local wrapper health is historical and must not be a readiness prerequisite. |
-| Docs-only workflow change | Link to owning doc, contradiction scan for stale guidance, and no claims of runtime change. |
-| GitHub/project mutation | Duplicate issue search, issue/PR/project item IDs, and field verification after mutation. |
-| Security/privacy/trust boundary | Focused negative tests or proof of fail-closed behavior, plus explicit residual risk. |
+| [Project Constitution](docs/implementation/00-project-constitution.md) and ADRs | Sole product-definition and accepted-target authority |
+| [Current App Guide](docs/implementation/12-current-app-guide.md) | Current topology, operator journeys and lifecycle |
+| [Development Status](docs/implementation/STATUS.md) | Shipped/Partial truth on `develop` and proof limits |
+| [Documentation Contract](docs/implementation/08-docs-contract.md) | Ownership, status vocabulary and required docs checks |
+| [.agents/README.md](.agents/README.md) and role files | Delegation packets, handoffs and durable recovery |
 
-Skipped checks must be named with a reason and residual risk. Do not substitute
-generic "tests pass" for the proof surface above.
+GitHub issues, PRs and the Project own execution state; docs are not a queue or
+branch tracker. `docs/research/` contains dated evidence and alternatives, never
+accepted targets. `docs/docs/` is historical archive. `CLAUDE.md` is a
+compatibility pointer to this guide, not a second instruction authority.
 
-## Git Branching Strategy
+## Repository Layout
 
-**Never commit directly to `develop` or `main`.**
-**Never create draft pull requests.**
-**Pull requests should complete whole milestones or batch-sized work, not tiny slices.**
-**When the user directs a stacked batch train, do all selected board batches as stacked ready PRs and report back only when the stack is complete.**
-
-1. **Feature/fix branches**: Always create a `feat/` or `fix/` branch for your work. By default branch from `develop`.
-2. **Stacked batch trains**: If the user explicitly asks to stack board batches, create the first batch branch from `develop`, then create each following batch branch from the previous batch branch. Open each PR against the previous branch so the stack can be reviewed and merged in order.
-3. **Merge to develop**: For normal unstacked work, merge the feature branch into `develop` via PR. For stacked trains, merge the stack in order until the first branch lands in `develop`.
-4. **Merge to main**: Only merge `develop` into `main` when explicitly requested by the user.
-5. **Ready PRs only**: Pull requests must be opened ready for review unless the user explicitly requests a draft.
-6. **Batch scope**: Default PR scope is a complete milestone or substantial batch. Use issue checklists, child issues, and internal commits for slices, but keep the team working until the batch acceptance criteria are complete.
-
-### CI And Release Gates
-
-- Hosted CI is not the authoritative gate for ordinary feature/fix PRs. When
-  GitHub Actions is slow, flaky, or blocked by runner/dependency noise, do not
-  burn the batch trying to make CI perfect; run the required local validation
-  from the Validation Matrix and record the local receipts in the PR.
-- Do not ignore local failures. Focused local tests and relevant runtime probes
-  must pass before implementation is called complete or a merge is requested.
-- If hosted CI exposes a real product regression or deterministic test failure
-  in the changed scope, fix it in the current PR. If it is unrelated
-  infrastructure or stale test-suite behavior, document it as deferred
-  release-gate work instead of expanding the feature PR indefinitely.
-- CI failures become release blockers at the `develop` -> `main` boundary.
-  Before merging `develop` into `main` or cutting a new product release,
-  inspect current CI failures, fix real regressions or stale CI tests, and
-  rerun the affected local and hosted checks.
+These are current paths, not a proposed Cordis package layout:
 
 ```text
-feat/my-feature  ->  develop  ->  main
-fix/my-bugfix    ->  develop  ->  main
-
-feat/batch-one   -> develop
-feat/batch-two   -> feat/batch-one
-feat/batch-three -> feat/batch-two
+backend/
+  src/                 FastAPI application and Seraph runtime modules
+  config/              Typed settings and configuration
+  tests/               Backend tests and bounded fixtures
+  scripts/             Backend validation, native-profile and CI helpers
+  containers/          Optional execution-container definitions
+  pyproject.toml       Python dependencies and pytest configuration
+  uv.lock              Locked Python dependencies
+frontend/
+  src/components/      React cockpit, task inspectors, chat and settings
+  src/hooks/           UI state and WebSocket hooks; colocated tests
+  src/lib/             API contracts/helpers and colocated tests
+  package.json         Frontend build and test commands
+daemon/                Optional desktop context daemon, OCR adapters and tests
+companions/            Optional browser companion (selected-text)
+mcp-servers/           External-service MCP adapter implementations
+examples/              Example extension/capability material
+assets/                Shared source assets
+artifacts/             Checked-in project artifacts, not the canonical workspace
+docs/
+  implementation/      Constitution, ADRs and shipped operator contracts
+  research/            Dated evidence, uncertainty and alternatives
+  docs/                Historical archive served under /legacy
+  src/                 Documentation site components
+scripts/               Repository checks and managed operations helpers
+.agents/               Agent roles, packets and handoff/recovery protocol
+.codex/                Repository Codex skills and environment setup
+.github/               CI, issue and PR templates
+manage.sh              Supported environment and service lifecycle entry point
+env.dev.example        Development configuration template
+env.prod.example       Production configuration template
+docker-compose.*.yaml  Development and production container topology
 ```
 
-## Docs And Execution Contract
+Ignored `.agent-worktrees/` and `.agent-evidence/` hold durable local agent
+checkouts and private receipts; create them as needed. They are not backups.
 
-- `docs/implementation/00-project-constitution.md` and its ADRs are the sole
-  product-definition and accepted-target authority.
-- `docs/research/` is the evidence, alternatives, and dated comparative-analysis layer; it cannot accept a target or claim shipping.
-- other `docs/implementation/` pages own shipped/partial truth and durable operator contracts for `develop`.
-- `docs/docs/` is the archive and historical layer.
-- The GitHub Project is the execution layer.
-- GitHub issues and PRs are the active work-tracking layer.
-- PR bodies carry branch-specific scope, validation, and review receipts.
-- Do not use docs as a live queue, branch tracker, or kanban mirror.
+## Commands And Prerequisites
 
-## Team Lead Operating Model
+Use Python 3.12+ and `uv` for the backend. The frontend lockfile requires Node
+`^20.19.0 || ^22.12.0 || >=24.0.0` through its test dependencies; docs declares
+Node >=20. Native repair tests have separately pinned runtime requirements.
+Docker and native sandbox/browser dependencies belong to selected execution
+profiles, not CPU-core or documentation prerequisites.
 
-For substantial planning, roadmap, architecture, implementation, or review work,
-Codex acts as the team lead.
+These commands are grounded in `manage.sh`, package manifests and
+`.github/workflows/test.yml`. A command reference is not a passing-test receipt.
 
-Substantial work includes any task that changes strategy or docs truth, touches
-two or more modules, affects security, memory, runtime, agent behavior, project
-tracking, or requires validation beyond a single narrow check.
+| Purpose | Working directory | Command / prerequisite |
+| --- | --- | --- |
+| Create dev configuration | Repository root | `cp env.dev.example .env.dev` only when `.env.dev` is absent; preserve existing configuration, then set intended local workspace/auth settings |
+| Install backend dependencies | `backend/` | `uv sync --locked --group dev` |
+| Install frontend or docs dependencies | `frontend/` or `docs/` | `npm ci` using that directory's lockfile |
+| Observe managed local app | Repository root | `./manage.sh -e dev local run`; requires dev config and backend/frontend dependencies; keep session open |
+| Normal lifecycle | Repository root | `./manage.sh -e dev local up`, `./manage.sh -e dev local down`, `./manage.sh -e dev local status` |
+| Follow service logs | Repository root | `./manage.sh -e dev local logs backend` or `./manage.sh -e dev local logs frontend` |
+| Focused backend test example | `backend/` | `uv run pytest tests/test_model_fabric_selector.py`; choose the owning test for the change |
+| Focused frontend test example | `frontend/` | `npm test -- src/hooks/useWebSocket.test.ts --maxWorkers=1` |
+| Frontend typecheck and build | `frontend/` | `npm run build` runs `tsc -b` then Vite |
+| Docs ownership and claim checks | Repository root | `python3 scripts/check_docs_contract.py` and `python3 scripts/check_strategy_claims.py` |
+| Docs typecheck and build/link check | `docs/` | `npm run typecheck` and `npm run build` |
+| Diff whitespace check | Repository root | `git diff --check` |
 
-- The lead owns the plan, decomposition, sequencing, scope boundaries, tradeoff
-  calls, and final synthesis.
-- The lead must create or update the agent team to fit the task, plan, and risk
-  profile before execution starts.
-- The agent team should fit the work. Typical roles include Planner, Explorer,
-  Worker, Security, Memory, Docs, Integrator, and Critic/Contrarian. If subagent
-  tooling is unavailable, the lead must run separate named passes and state that
-  limitation.
-- The lead must delegate bounded work to agents with explicit ownership, file or
-  module scope, acceptance criteria, proof requirements, and expected output.
-- The lead must plan batches around whole milestones or substantial milestone
-  slices, then keep the team working until the batch is complete rather than
-  opening partial PRs for individual micro-slices.
-- The lead must not directly implement substantial feature slices when a
-  suitable worker agent can own them; the lead coordinates, reviews, integrates,
-  and decides. The lead may directly implement small surgical changes, emergency
-  fixes, or work where delegation tooling is unavailable, but must state the
-  reason.
-- If agent capacity or tooling prevents delegation, the lead must state that
-  limitation and keep any direct edits tightly scoped.
-- Before execution starts, the lead must confirm the branch is not `develop` or
-  `main` and follows the `feat/` or `fix/` branch rule.
-- Delegated agents are not alone in the codebase. They must not revert unrelated
-  edits, rewrite strategy, broaden scope, or change milestone order without lead
-  direction.
-- The lead owns GitHub Project correctness when creating or refining tracked
-  work, including the fields defined in Project Board Flow.
-- The lead must verify material subagent claims before using them for code
-  changes, commits, PRs, project updates, issue updates, release notes, roadmap
-  decisions, or strategic claims.
-- PR bodies for substantial work should summarize the agent team used, the
-  Critic/Contrarian result, and the verification performed.
+There is no dedicated frontend lint script or configured backend lint/typecheck
+command in these manifests. Do not invent one or claim a build is a lint pass.
+Use focused tests first; native/browser suites have additional profile-specific
+requirements documented by their owners. Never weaken assertions, deadlines or
+fixtures to make a check pass. Do not run tests against an operator workspace.
 
-### Agent Team Execution Packet
+Core startup does not require a provider key. Inference requires explicit
+configuration, consent, verified capability and budget; a configured route is
+not proof of live provider availability. The default local browser is
+`http://127.0.0.1:3001`, backend `http://127.0.0.1:8004`. Use managed lifecycle
+commands, not direct `uvicorn`, Vite or `npm run dev`, unless explicitly asked.
+Production requires the documented private compose/HTTPS deployment; the plain
+HTTP `local` stack is development-only.
 
-Every delegated task must include:
+## Find The Owning Module
 
-- role and owner name
-- scope and non-goals
-- files, modules, or surfaces owned
-- acceptance criteria
-- proof required before the result can be used
-- expected output format
-- timeout or fallback behavior
+| Task | Start here |
+| --- | --- |
+| Chat, turns and streaming | `backend/src/api/chat.py`, `backend/src/api/ws.py`, `backend/src/agent/`, `frontend/src/hooks/useWebSocket.ts`, `frontend/src/components/chat/` |
+| Governed inference, routes and accounting | `backend/src/model_fabric/`, `backend/src/llm_runtime.py`, `backend/src/api/model_fabric_settings.py`, `backend/config/settings.py` |
+| Durable tasks, scheduling and intervention | `backend/src/work_board/`, `backend/src/scheduler/`, `backend/src/guardian/`, `backend/src/workflows/` |
+| Goals, canonical memory and persistence | `backend/src/goals/`, `backend/src/memory/`, `backend/src/db/`, `backend/src/workspace/`, `backend/src/artifacts/` |
+| Permissions, approvals, secrets and audit | `backend/src/auth/`, `backend/src/security/`, `backend/src/approval/`, `backend/src/vault/`, `backend/src/audit/` |
+| Tools, capability packs and integrations | `backend/src/tools/`, `backend/src/native_tools/`, `backend/src/extensions/`, `backend/src/execution/`, `backend/src/integrations/`, `mcp-servers/` |
+| Screenshots and selected context | `backend/src/observer/`, `backend/src/api/selected_context.py`, `daemon/`, `companions/selected-text/`; tests include `backend/tests/test_observer_screen_artifacts.py` |
+| Settings and UI truth | `backend/src/api/settings.py`, `frontend/src/components/SettingsPanel.tsx`, settings subcomponents and `frontend/src/lib/` |
+| Lifecycle and configuration loading | `manage.sh`, `env.dev.example`, `env.prod.example`, `backend/production_preflight.py` |
 
-Use `.agents/README.md` and the role files in `.agents/` for reusable packet and
-handoff formats.
+## Implementation And Runtime Rules
 
-### Required Critic / Contrarian Role
+- Reproduce a bug or inspect its root cause before patching. Query the endpoint
+  behind the visible symptom and trace the frontend binding. Distinguish chat,
+  onboarding and orchestrator paths, or capture, ingestion, analysis and report
+  paths. Verify configuration as loaded by the real launcher, not only on disk.
+- Define user-facing behavior before implementation. Fix sibling paths in the
+  same bug class and keep the smallest complete capability. Extend an existing
+  function, job or UI path first, then configuration/lifecycle, then a focused
+  helper, skill, or adapter. A new broad tool/API/queue needs a reason existing
+  owners cannot serve it. Share contracts before parallel features introduce
+  competing settings, provider or queue semantics.
+- Update the owning `docs/implementation/` guide and status when runtime
+  topology, lifecycle, queueing, settings or user-visible operations change.
+  Keep branch-specific scope and validation in the PR; never present an open
+  branch's behavior as shipped `develop` truth.
+- Follow neighboring Python typing/async conventions and strict TypeScript
+  contracts. Keep authority and side effects in backend owners; the cockpit
+  projects state and recovery. Separate validation, policy, transport and durable
+  adoption. Avoid hidden global state and import-time side effects in new seams
+  intended for later plugin lifecycle ownership.
+- Add dependencies through the owning manifest and lockfile only when needed.
+  Do not introduce another package manager or install Cordis as part of ordinary
+  fixes. The migration decides package/version and bridging strategy under ADR-026.
+- Prefer existing settings/profile surfaces over raw env knobs. `manage.sh`
+  sources `.env.*` as shell: quote shell-sensitive values, especially semicolons,
+  and cover fragile parsing with a launcher guard or test. Never commit secrets,
+  private captures, databases, credentials or private evidence; use the existing
+  vault and redacted receipts. Do not print secrets to prove configuration.
+- Preserve canonical workspace ownership, additive migration and backup/restore
+  contracts. Do not reset operator data to repair a test. Use existing repository,
+  transaction, lifecycle-lock and artifact-adoption seams; preserve their lock
+  ordering and current-authority checks. A storage/plugin adapter does not
+  authorize a second canonical store or migration framework.
+- Ordinary text, vision and embedding inference uses governed OpenRouter.
+  [ADR-025](docs/implementation/decisions/025-near-https-text-inference.md) permits
+  only the separate optional NEAR HTTPS text capability, not a general route or
+  fallback. Providers remain inference-only; no coding-agent runtime may replace
+  Seraph authority.
+- Preserve one shared bounded remote-inference lane, highest-priority ready
+  admission, original deadlines/cancellation/idempotency, durable reservations,
+  cost accounting and unknown-liability recovery. Its in-flight bound is one;
+  do not add a lane per plugin/provider. Background analysis must not starve chat
+  and requires its own current consent, budget and capability gates.
+- CPU hosts remain usable without GPU/model services or the VLM wrapper.
+  macOS/Linux are peer core-host targets; optional native profiles require their
+  own actual platform receipts. Local inference stays inactive/blocked rather
+  than being probed as a prerequisite. Historical GPU/admin diagnostics belong
+  in the [Current App Guide](docs/implementation/12-current-app-guide.md#historical-develop-topology),
+  not startup acceptance. SSH is administration only, never runtime transport
+  or a user-required tunnel; app-network failures do not disprove operator-shell
+  reachability.
+- Report effective runtime/model/queue/degraded state. `/api/runtime/status`
+  describes `chat_agent`; defaults belong in explicit `default_*` fields. Never
+  substitute a configured provider label for the actual path. Preserve last-known
+  settings through metadata failures with visible recovery; do not disable
+  configuration as the fix. Bound retries and polling.
+- All-plugin composition does not make enforcement optional. Mandatory trusted
+  policy/authority services fail closed if absent, unhealthy or disposed. Typed
+  dependencies and lifecycle cleanup are required; dependency injection is not
+  sandboxing. Runtime plugins, reviewed authored packs (ADR-013/020), and
+  external/MCP adapters have different trust boundaries. Loading/installing a
+  plugin grants no observation, egress, execution or learning authority.
 
-Every non-trivial plan, roadmap, competitive analysis, architecture change,
-security-sensitive change, memory change, or PR-sized slice must include at
-least one Critic/Contrarian agent pass.
+## Intake, Branches And Project Flow
 
-The Critic/Contrarian must be independent from the worker assumptions. No
-same-pass self-approval: the critic receives the plan, diff, evidence, or issue
-set and produces a separate critique.
+Every non-trivial change to code, docs truth, workflow, runtime, strategy,
+tickets, settings, tests or operator-visible state needs tracked work before
+completion. Search open **and closed** issues, reuse/refine a genuine match, or
+create one parent batch issue. Capture request/symptom, intended behavior,
+root cause or plan, acceptance criteria and validation. Emergency investigation
+may precede intake, but no commit, PR, merge or completion claim precedes the
+issue unless the user explicitly waives ticket creation. Tiny unrelated edits
+need their own tracking; directly related mechanical edits may share a ticket.
 
-The Critic/Contrarian agent checks:
+- Confirm a `feat/` or `fix/` branch before execution. Never commit directly to
+  `develop` or `main`. Normally branch from and target current `develop`.
+- Follow an applicable epic integration ADR when the owning issue requires it.
+  [ADR-005](docs/implementation/decisions/005-epic-integration-branch-workflow.md)
+  defines the completed #736 epic's workflow; it does not make that historical
+  integration branch the base for new unrelated work.
+- Use one complete milestone/substantial batch and aggregate **ready** PR,
+  never a draft unless explicitly requested. Internal commits and issue
+  checklists may represent smaller slices; do not open partial micro-PRs.
+- For a user-directed stacked train, first branch from `develop`, then each
+  branch from its predecessor and target the predecessor. Complete all selected
+  batches before reporting the stack ready; integrate in order. Only promote
+  `develop` to `main` on explicit user request.
 
-- hallucinations, weak evidence, and unsupported competitive claims
-- stale assumptions about current products, agents, models, APIs, or security posture
-- missing current-source verification for any competitive or modern technical claim likely to have changed; temporally unstable claims about competitors, models, APIs, security posture, releases, or current product capabilities require official/current source URLs and dates
-- missing acceptance criteria, proof, evals, or operator-visible receipts
-- security, privacy, memory, and trust-boundary gaps
-- scope creep, vague milestones, duplicate issues, and time-bounded roadmap drift; before creating issues, search open and closed issues for similar scope
-- contradictions between docs, GitHub Project state, issues, PRs, and shipped behavior where relevant
-- weak evidence standards: competitive claims need source URLs, code claims need file paths or line numbers, and GitHub/Project claims need issue, PR, or project item IDs
-- false completion claims; do not imply files, issues, tests, project fields, or PR state changed unless tools confirm it
+The lead owns and verifies these Project transitions:
 
-The lead must run the Critic/Contrarian pass before irreversible project actions
-such as issue creation, PR creation, branch merge, roadmap finalization, or
-public superiority claims.
+| Event | Required fields/state |
+| --- | --- |
+| Create/refine issue | Set `Queue`, `Lane`, `Priority`, `Size`, `Status=Todo`, `Code Review=Not Ready`, `PR=Not Ready` |
+| Start active work | `Status=In Progress`, `Queue=Now` |
+| Open aggregate PR | Link parent issue; `PR=Open`, `Code Review=Pending` |
+| Independent review | `Code Review=Running`, then `Changes Requested` or `Passed` according to evidence |
+| Merge | `PR=Merged`, `Status=Done` |
 
-The lead should incorporate the critique, explicitly reject it with rationale,
-or turn it into follow-up issues before finalizing. Record the disposition as
-accepted, rejected, or deferred in the PR body, issue comment, final response, or
-relevant docs.
+Keep the issue as the Project item and use linked PRs, not a duplicate PR item.
+The parent checklist owns slices. Create children only for separate ownership,
+blockers, independent acceptance or reprioritization. Children may have their
+own Queue/Status, but keep PR/Code Review Not Ready unless they own a PR; never
+mirror one aggregate PR across every child. Verify field mutations with IDs.
 
-## Project Board Flow
+Reuse scoped GitHub/Git approvals. Write multiline bodies with `apply_patch` to
+a workspace file, then use `--body-file`; avoid shell-expanded inline bodies.
+Skip and report optional receipts that cannot use existing approvals. Request
+only narrow reusable permission when required to complete the task.
 
-- When a tracked issue is created or refined, set `Queue`, `Lane`, `Priority`,
-  `Size`, `Status=Todo`, `Code Review=Not Ready`, and `PR=Not Ready`.
-- Default batch mode: use one parent batch issue as the project item and one
-  aggregate PR linked to that parent issue.
-- Track internal slices in the parent batch issue itself by default. That parent
-  issue checklist is the authoritative slice list unless a slice becomes its own
-  child issue.
-- Create child slice issues only when a slice has separate ownership, is a
-  blocker, has independent acceptance criteria, or could be reprioritized
-  separately.
-- If child slice issues exist, they may carry their own `Queue` and `Status`,
-  but keep `PR=Not Ready` and `Code Review=Not Ready` unless they get their own
-  PR. Do not mirror one aggregate PR across every child issue.
-- When work starts, set `Status=In Progress` and move `Queue=Now` if the task is
-  active now.
-- The issue remains the project item. Use built-in linked pull requests for the
-  PR relationship instead of creating a second standalone project item for the
-  same tracked work.
-- When an aggregate PR opens, link it to the parent batch issue, set that issue
-  `PR=Open`, and set that issue `Code Review=Pending`.
-- While review is running, set `Code Review=Running`, then move to
-  `Changes Requested` or `Passed`.
-- When the PR merges, set `PR=Merged` and `Status=Done`.
+## Team, Review And Recovery
 
-### GitHub Approval Discipline
+For substantial planning, roadmap, architecture, implementation or review work,
+Codex is team lead. This includes strategy/docs-truth changes, two or more
+modules, security, memory, runtime, agent behavior, tracking, or validation
+beyond a single narrow check.
 
-- Reuse the operator's existing scoped approvals for routine `gh issue`,
-  `gh pr`, `gh project`, `gh api`, and related Git operations. Do not request
-  repeated approval for operations already covered by those scopes.
-- For issue comments, PR bodies, and other multiline GitHub text, write the
-  content to a workspace or `/tmp` file with `apply_patch`, then pass it with
-  `--body-file`. Avoid shell-expanded inline bodies such as `$'...'`, command
-  substitution, or heredocs that turn a routine `gh` call into a new approval
-  shape.
-- If an optional GitHub receipt cannot run under the existing scoped approvals,
-  skip it and report the omission instead of interrupting the operator. Request
-  a new permission only when the operation is required to complete the task;
-  keep that request narrow and reusable.
+- Before execution, form a team that fits the risks. Delegate substantial
+  implementation to a suitable worker; the lead plans, sequences, integrates
+  and verifies. Direct implementation is limited to surgical/emergency work or
+  unavailable delegation, with the reason stated. Agents must not revert
+  unrelated edits, rewrite strategy, broaden scope or reorder milestones.
+- Every delegation specifies role/owner, scope/non-goals, files/surfaces,
+  acceptance, proof, expected output and timeout/fallback. Use `.agents/` packet
+  and handoff formats. Verify material agent claims before commits, PRs, Project
+  mutations, roadmap decisions or completion statements.
+- Use an independent Critic/Contrarian for every non-trivial plan, roadmap,
+  competitive analysis, architecture/security/memory change and PR-sized slice.
+  Review before issue creation, PR creation, merge, roadmap finalization or
+  public superiority claims. Self-approval is not a substitute; if agents are
+  unavailable, run separately named passes and state the limitation.
+- The critic checks unsupported claims, current official sources and dates for
+  unstable technical/competitive claims, acceptance/proof gaps, trust/privacy/
+  memory boundaries, scope and duplicate issues, docs/code/Project contradictions
+  and false completion. Code claims need paths/lines; GitHub claims need IDs.
+  Accept, reject with rationale, or defer findings to tracked work and record
+  their disposition. No material finding may disappear silently.
+- Every PR-sized slice is reviewed before merge. Every substantive pushed
+  update requires fresh independent cumulative or follow-up review before
+  claiming review passed or asking to merge, including tests, docs truth and
+  workflow changes. Record team, verification and material findings (or explicit
+  no-findings) in the PR and affected implementation docs when shipped truth or
+  workflow changes. Do not claim review from a stale revision.
+- Use repository-local ignored `.agent-worktrees/` and `.agent-evidence/`, with
+  private evidence permissions. Do not use `/tmp` for retained work/evidence.
+  Disposable private fixtures may use temporary storage when the runtime
+  contract requires; retain needed receipts before cleanup. Checkpoint source
+  frequently and push recoverable feature-branch checkpoints; never push private
+  data. Handoffs record exact commit/base, ownership and validation. After an
+  interruption verify surviving work and rerun missing receipts. A checkpoint
+  is not review, completion or permission for a partial PR.
 
-## Review Rule
+## Validation And Completion
 
-- Every PR-sized slice must be reviewed before merge. Non-trivial PR-sized
-  slices require an independent subagent review.
-- Every pushed update to an open PR that changes behavior, security/privacy
-  posture, runtime wiring, settings, docs truth, tests, or workflow contract must
-  receive a fresh independent Critic/Contrarian pass before the lead claims the
-  PR is reviewed, updates the PR as review-passed, or asks to merge.
-- Small follow-up commits are not exempt when they affect the same PR's
-  acceptance criteria or operator-visible behavior. Treat them as part of the
-  PR-sized slice and re-run the critic on the cumulative diff or the changed
-  follow-up scope.
-- A lead's own named "critic pass" is not a substitute when subagent tooling is
-  available. Use an independent subagent critic; only fall back to a separate
-  self-run critic pass when subagent tooling is unavailable, and state that
-  limitation in the PR/final response.
-- Verify subagent claims before acting on them.
-- Record material review findings, or an explicit no-findings result, in the PR
-  body and in affected implementation docs when the slice changes shipped truth
-  or workflow contract.
-- Do not merge a PR until material review findings are either fixed, explicitly
-  rejected with rationale, or turned into tracked follow-up work.
+Prefer observable receipts to plausible code inspection. For live checks start
+with managed status and `/health`; use authenticated `/api/runtime/status` and
+`/api/settings/artifact-storage` for runtime/settings truth. An unauthenticated
+denial is not a broken service. If sandboxed localhost fails while the host app
+should be running, retry the same probe with proper approval before claiming it
+is down. Keep local, mocked, hosted and live-provider proof distinct.
+
+| Change | Required proof |
+| --- | --- |
+| Topology/lifecycle | Managed status, relevant health and logs/live URL |
+| Chat/model routing | API or WebSocket effective-route receipt; transcript persistence when turns change |
+| Streaming UI | Backend frames, frontend reducer/render test, live or mocked delta/final receipt |
+| Settings/UI truth | Endpoint payload and frontend binding/component test |
+| Scheduling/inference admission | Priority/non-starvation, shared serial bound and relevant durable recovery tests |
+| Screenshot/OpenRouter vision | Policy/admission/ingestion tests and operator-visible state; no local wrapper readiness prerequisite |
+| Docs/workflow/architecture | Owning-doc links, path/command and contradiction checks, both docs scripts and docs typecheck/build; no runtime-change claim |
+| GitHub/Project | Duplicate search, issue/PR/item IDs and post-mutation field readback |
+| Security/privacy/trust | Focused negative/fail-closed proof and explicit residual risk |
+
+Name skipped checks, reasons and residual risk. Hosted CI is advisory for
+ordinary feature/fix PRs when runners/dependencies are noisy; required local
+checks and relevant runtime probes must pass. Fix deterministic in-scope product
+failures; track unrelated infrastructure/stale-suite work separately. At
+`develop` → `main` or release, CI failures become blockers: inspect, fix real
+regressions/stale tests and rerun affected local and hosted checks.
+
+A capability is **Shipped** only with an observable vertical slice, not a
+registry entry, settings surface, deterministic scenario or benchmark endpoint:
+
+1. Stable identity and typed inputs/outputs.
+2. Declared permissions, limits, policy, approvals and runtime dependencies.
+3. Bounded accepted job with owner, priority, retry/cancel and idempotency.
+4. Real execution through the governed runtime.
+5. Durable artifact/checkpoint/audit/effective-route receipts.
+6. Verification or external readback of the intended outcome.
+7. Explicit canonical-memory update or explicit no-learning result.
+8. Operator-visible success, degraded, blocked and recovery states.
+
+Mark non-applicable elements explicitly. Proactive behavior must prove goal or
+standing intent → candidate → admission/priority → approval/reservation →
+execution → evidence/readback → evaluation → governed memory update. Periodic
+model calls or delivered messages alone do not satisfy that contract.
+
+Keep feature batches focused on the actual capability with its necessary proof;
+do not substitute broad proof scaffolding or docs reconciliation for delivery.
+Completion means issue/PR state, focused validation, relevant runtime/UI proof,
+critic disposition and merge/Project state agree, unless explicitly scoped to
+local work or a ready PR. Never claim a file, test, service, issue, review or
+Project state changed without a confirming tool receipt.

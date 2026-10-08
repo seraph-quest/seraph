@@ -69,6 +69,24 @@ The guardian kernel decides **why and what**. The capability runtime controls
 and edges provide **where the operator interacts and what consented context is
 available**.
 
+### All-plugin Cordis Composition
+
+[ADR-026](./decisions/026-all-plugin-cordis-architecture.md) defines the accepted
+composition target: the agent loop, goals/policy/authority services, capability
+execution and tools, model integration, persistence and memory, scheduling,
+audit, and interface/edge adapters are Cordis plugins. Only necessary
+bootstrap/composition machinery remains outside runtime plugins; shared types
+and pure libraries are not independent runtime components.
+
+The four layers describe logical responsibilities, not a non-plugin guardian
+kernel or a prescribed package tree. Mandatory trusted enforcement services must
+be ready before dependent work is admitted; plugin loading never grants authority
+and dependency injection is not sandboxing. Reviewed authored capability packs
+retain ADR-013/020 protections and are not trusted runtime plugins. All existing
+provider, canonical-state, admission, consent, audit, recovery and portability
+boundaries remain in force. Migration capabilities are **Planned**; the current
+Python/FastAPI runtime and React cockpit are not retroactively Cordis-based.
+
 ## Locked Decisions
 
 The following architecture decisions are normative:
@@ -98,6 +116,7 @@ The following architecture decisions are normative:
 23. [ADR-023: Evidence-bound guardian opportunities](./decisions/023-evidence-bound-guardian-opportunities.md)
 24. [ADR-024: Purpose-specific OpenRouter routes](./decisions/024-purpose-specific-openrouter-routes.md)
 25. [ADR-025: Optional NEAR HTTPS text inference](./decisions/025-near-https-text-inference.md)
+26. [ADR-026: All-plugin Cordis agent architecture](./decisions/026-all-plugin-cordis-architecture.md)
 
 ADR-023 defines evidence-bound Guardian opportunities and ADR-024 defines
 purpose-specific OpenRouter routes. ADR-025 permits one separate optional NEAR

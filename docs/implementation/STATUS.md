@@ -10,9 +10,17 @@ Seraph is an AI guardian that remembers, watches, and acts. This page is the fas
 **Document class:** Shipped and Partial implementation inventory.
 **Target authority:** [Project Constitution](./00-project-constitution.md).
 
-The detailed inventory below records the large existing baseline. Some shipped runtime contracts and implementations remain transitional;
-Epic #736 tracks their migration while macOS and Linux remain peer core-host targets. New target capabilities remain **Planned** until
+The detailed inventory below records the existing baseline after the completed
+Epic #736 foundation. Some implementations remain transitional while macOS and
+Linux remain peer core-host targets. New capabilities remain **Planned** until
 merged to `develop` with the required validation receipts.
+
+**Cordis runtime migration: Planned.**
+[ADR-026](./decisions/026-all-plugin-cordis-architecture.md) records the accepted
+all-plugin composition target. The existing Python/FastAPI runtime and React
+cockpit remain the implementation described here. The architecture documentation
+adds no Cordis dependency, runtime plugin loader or stored-data migration;
+existing extension/capability-pack support does not establish that migration.
 
 For a shorter reader-facing overview of the current app, start with
 [Current App Guide](./12-current-app-guide.md). This status page remains the

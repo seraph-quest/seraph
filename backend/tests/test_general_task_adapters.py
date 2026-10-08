@@ -86,7 +86,7 @@ class LocalMCPTool(Tool):
     description = "Local typed MCP repository adapter fixture"
     inputs = {"query": {"type": "string", "description": "query"}}
     output_type = "string"
-    output_schema = {"type": "object", "properties": {"value": {"type": "string"}},
+    output_schema = {"type": "object", "properties": {"value": {"type": "string", "maxLength": 1000}},
                      "required": ["value"], "additionalProperties": False}
     def __init__(self):
         super().__init__()
@@ -115,6 +115,8 @@ def mcp_registry(tmp_path, registry):
     manager._tools["local"] = [tool]
     manager._connection_revisions["local"] = 1
     manager._status["local"] = {"status": "connected", "error": None}
+    from src.tools.mcp_manager import _TaskOutputGuard
+    manager._task_output_guards["local"] = _TaskOutputGuard()
     declaration = {"version": "1", "input_schema": {"type": "object",
         "properties": {"query": {"type": "string", "maxLength": 100}},
         "required": ["query"], "additionalProperties": False}, "output_schema": tool.output_schema,
@@ -219,6 +221,31 @@ async def test_metadata_hook_cannot_forge_wrapper_precontact_proof(mcp_registry,
     assert tool.calls == 0
 
 
+async def test_oversized_result_is_rejected_before_task_or_audit_result_parsing(mcp_registry, principal, monkeypatch):
+    from src.approval.repository import approval_repository
+    from src.native_tools.task_adapters import TaskToolApprovalRequired
+    from src.tools.mcp_manager import MCPTaskOutputLimit, TASK_OUTPUT_BYTES
+    registry, _, tool, _, _ = mcp_registry
+    selected = descriptor(registry, "mcp:local:repo_read")
+    with pytest.raises(TaskToolApprovalRequired) as pending:
+        await registry.invoke(selected, {"query": "effect"}, principal=principal,
+            job_id="test-job", fencing_token=1)
+    assert await approval_repository.resolve(pending.value.approval_id, "approved")
+    tool.result = '{"value":"PRIVATE_FIXTURE_SENTINEL' + "x" * TASK_OUTPUT_BYTES + '"}'
+    original_parse = json.loads
+    parsed = []
+    def parse(value, *args, **kwargs):
+        if value is tool.result:
+            parsed.append(True)
+        return original_parse(value, *args, **kwargs)
+    monkeypatch.setattr(json, "loads", parse)
+    with pytest.raises(MCPTaskOutputLimit) as failure:
+        await registry.invoke(selected, {"query": "effect"}, principal=principal,
+            job_id="test-job", fencing_token=1)
+    assert tool.calls == 1 and parsed == []
+    assert "PRIVATE_FIXTURE_SENTINEL" not in str(failure.value)
+
+
 def test_mcp_unknown_missing_changed_contracts_are_excluded(mcp_registry):
     registry, manager, tool, path, declaration = mcp_registry
     assert descriptor(registry, "mcp:local:repo_read")
@@ -237,3 +264,11 @@ def test_mcp_unknown_missing_changed_contracts_are_excluded(mcp_registry):
     manager._status["local"] = {"status": "connected", "error": None}
     manager._connection_revisions["local"] = 2
     assert not [item for item in registry.descriptors() if item.server_id]
+
+
+def test_sessionful_transport_exclusion_has_operator_visible_reason(mcp_registry):
+    registry, manager, _, _, _ = mcp_registry
+    manager._task_output_guards["local"].inline_supported = False
+    assert not [item for item in registry.descriptors() if item.server_id]
+    assert registry.blocked_tools() == [{"tool_id": "mcp:local:repo_read",
+        "reason": "mcp_task_stateless_inline_transport_required"}]

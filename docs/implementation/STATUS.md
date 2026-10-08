@@ -42,8 +42,12 @@ and execution owners. Planning uses the governed interactive text consumer
 retains current tool permissions, approvals, descriptor revisions, durable
 effects and private artifact readback. Output contracts are checked before
 effects; mediated approval waits require explicit exact continuation of the
-same attempt and original deadline, with generic resume blocked. Provider-free
-isolated integration receipts prove the current native file-read journey,
+same attempt and original deadline, with generic resume blocked.
+The approval wait commits its exact binding, no-contact proof and task/Root
+pause together; a fast approval preserves the same continuation. MCP task
+response bytes and parsed output are bounded before result adoption; oversized
+contacted responses retain visible unresolved liability.
+Provider-free isolated integration receipts prove the current native file-read journey,
 mediated MCP approval continuation and replay boundaries, not
 model quality or improved outcomes. Tasks explicitly record no learning.
 The fuller interpreter and specialist delegation in

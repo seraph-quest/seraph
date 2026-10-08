@@ -611,6 +611,13 @@ effect journal and verified readback. Current owner, Goal, evidence, strategy
 binding and descriptor policy/revision are checked before admission and each
 step. Native tools retain current approval, audit and secret wrappers; MCP tools
 require a complete trusted typed contract and current connection revision.
+Task MCP output requires a finite schema and a bounded owned transport: raw
+response bytes are capped before SDK/result JSON parsing, with strict depth,
+node and serialized-output bounds. Oversized contacted output retains its
+unresolved effect and cannot be adopted as an artifact or automatically retried.
+The current task adapter requires a stateless inline identity-encoded MCP
+response; sessionful, compressed or deferred responses and GET resumption are
+blocked through the existing capability/recovery surface.
 Unavailable or changed contracts block execution. An unknown contacted effect
 is retained for reconciliation instead of automatic replay. Successful output
 is a bounded private artifact with physical hash readback, and the card enters
@@ -619,8 +626,14 @@ does not update canonical memory.
 
 A mediated tool approval pauses the same durable Root only after the existing
 approval wrapper proves it has not contacted the tool. The card shows its exact
-pending approval and original deadline. Approval alone does not queue work:
-the owner explicitly continues the current task and plan revisions, original
+pending approval and original deadline. The exact unconsumed pending or already
+approved request is bound without
+changing its arguments, scope, fingerprint or expiry. One existing SQLite
+writer commits that binding, the no-contact checkpoint/readback, paused Root
+and blocked open attempt together. An interruption rolls the whole wait back;
+an approved row without the wrapper proof is insufficient to recover a wait.
+Approval alone does not queue work. The owner explicitly continues the current
+task and plan revisions, original
 attempt, approval, workflow revision and fence. Generic paused-job resume cannot
 cross this wait. The canonical writer checks the current approval, policy,
 inputs, descriptor and already verified physical outputs, then reacquires the

@@ -3689,6 +3689,11 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 receipts.append(dict(cancelled))
         return receipts
 
+    async def pause_general_task_for_approval(self, **bindings):
+        """Commit the exact native no-contact wait in one canonical writer."""
+        from src.work_board.general_task_approval import publish_approval_wait
+        return await publish_approval_wait(self, **bindings)
+
     async def pause_job(
         self,
         job_id: str,

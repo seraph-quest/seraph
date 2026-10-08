@@ -505,6 +505,7 @@ class GeneralTaskService:
         if (approval is None or approval.status != "approved" or not approval.expires_at or approval.expires_at.replace(tzinfo=timezone.utc) <= datetime.now(timezone.utc)
             or approval.owner_principal_id != owner.principal_id or approval.operator_session_id != owner.session_id or approval.session_id != owner.session_id
             or approval.tool_name != metadata["tool_name"] or approval.fingerprint != metadata["fingerprint"] or details.get("approval_context") != metadata["approval_context"]
+            or details.get("general_task_wait_binding") != wait
             or wait.get("approval_id") != request.approval_id or wait.get("job_id") != request.workflow_run_id or wait.get("fence") != request.fencing_token
             or wait.get("input_digest") != digest(inputs) or wait.get("descriptor_digest") != digest(descriptor.model_dump(mode="json")) or wait.get("fingerprint") != approval.fingerprint
             or wait.get("authority_digest") != projection.get("authority_digest") or wait.get("deadline_at") != projection.get("deadline_at")
@@ -679,33 +680,51 @@ class GeneralTaskService:
                     or exc.binding.descriptor_digest != digest(descriptor.model_dump(mode="json"))
                     or exc.binding.input_digest != digest(inputs)):
                     raise BoardError("general_task_unresolved_step", "Contact proof binding changed", status_code=409) from exc
-                from src.approval.repository import approval_repository
                 metadata = self.registry.approval_context(descriptor, inputs, job_id=job_id)
-                updated = await approval_repository.update_pending_details(exc.approval_id,
-                    owner_principal_id=principal.principal_id, operator_session_id=principal.operator_session_id,
-                    updates={"scope": {"workflow_run_identity": job_id,
-                        "goal_id": envelope.task_input.goal_ref,
-                        "goal_revision": projection.get("goal_revision")},
-                        "general_task_step_id": step.step_id})
-                if updated is None or updated.fingerprint != metadata["fingerprint"]:
-                    raise BoardError("general_task_unresolved_step", "Exact pending approval is unavailable", status_code=409) from exc
                 pending = {"phase": "approval_precontact", "step_id": step.step_id,
                     "tool_id": descriptor.tool_id, "approval_id": exc.approval_id, "job_id": job_id,
                     "fence": fence, "descriptor_digest": exc.binding.descriptor_digest,
                     "input_digest": exc.binding.input_digest, "fingerprint": metadata["fingerprint"],
                     "authority_digest": projection["authority_digest"], "deadline_at": projection["deadline_at"],
                     "plan_digest": digest(envelope.model_dump(mode="json")), "effect_id": effect_id}
-                await jobs.record_checkpoint(job_id, checkpoint_id=checkpoint_id, state=pending,
-                    checkpoint_payload=pending, owner=owner, fencing_token=fence)
-                await jobs.record_readback(job_id, effect_type="general_tool_call", effect_id=effect_id,
-                    target_path="general-step:" + digest([job_id, step.step_id]), status="succeeded",
-                    content_sha256=digest(pending), readback_id="general-precontact:" + digest(pending)[:32],
-                    verified_at=datetime.now(timezone.utc).isoformat(),
-                    details={"verified": True, "never_contacted": True,
-                        "approval_precontact": True, "step_id": step.step_id, "no_learning": True},
-                    owner=owner, fencing_token=fence)
-                await jobs.transition_job(job_id, "paused", owner=owner, fencing_token=fence,
-                    reason="general_task_approval_required")
+                async def verify_current(db, run):
+                    from sqlalchemy import select
+                    from src.work_board.dispatcher import _parse_typed_input, _safe_digest, WorkBoardDispatcher
+                    from src.db.models import WorkBoardAttempt
+                    current_owner = WorkBoardOwner(principal_id=principal.principal_id,
+                        session_id=principal.operator_session_id)
+                    await self.recheck_authority(db, current_owner, envelope)
+                    current_attempt = (await db.execute(select(WorkBoardAttempt).where(
+                        WorkBoardAttempt.workflow_run_id == job_id))).scalar_one_or_none()
+                    if current_attempt is None:
+                        raise BoardError("general_task_unresolved_step", "Original task attempt changed", status_code=409)
+                    current_task = await self.repository.get_task(db, current_owner,
+                        current_attempt.task_id)
+                    parsed = _parse_typed_input(current_task)
+                    expected_inputs = {"task_id": current_task.task_id,
+                        "attempt_id": current_attempt.attempt_id,
+                        "capability_id": current_task.capability_id,
+                        "typed_input_ref": current_task.typed_input_ref,
+                        "typed_input_digest": current_task.typed_input_digest, **parsed}
+                    handoffs = WorkBoardDispatcher._attempt_parent_handoffs(current_attempt)
+                    if handoffs:
+                        expected_inputs.update(parent_handoff_context=handoffs,
+                            parent_handoff_digest=current_attempt.parent_handoff_digest)
+                    if (digest(GeneralTaskEnvelope.model_validate(parsed).model_dump(mode="json")) != pending["plan_digest"]
+                        or run.input_digest != _safe_digest(expected_inputs)
+                        or run.authority_digest != _safe_digest(json.loads(run.declared_authority_json))
+                        or current_task.goal_id != run.goal_id or current_task.goal_revision != run.goal_revision
+                        or current_attempt is None or current_attempt.task_id != current_task.task_id
+                        or current_attempt.workflow_run_id != job_id or current_attempt.ended_at is not None
+                        or current_attempt.cancel_requested_at is not None):
+                        raise BoardError("general_task_unresolved_step", "Original task binding changed", status_code=409)
+                    return current_task, current_attempt
+                await jobs.pause_general_task_for_approval(service=self,
+                    proof=exc, checkpoint_id=checkpoint_id, binding=pending,
+                    owner_principal_id=principal.principal_id, operator_session_id=principal.operator_session_id,
+                    runtime_owner=owner, tool_name=metadata["tool_name"],
+                    approval_context=metadata["approval_context"],
+                    original_input_digest=projection["input_digest"], verify_current=verify_current)
                 return {"verified": False, "awaiting_approval": True, "approval_id": exc.approval_id,
                     "reason": "awaiting_approval", "no_learning": True}
             validate_schema(descriptor.output_schema, operator_result)

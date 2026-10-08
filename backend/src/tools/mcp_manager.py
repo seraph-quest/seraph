@@ -14,10 +14,16 @@ import json
 import logging
 import os
 import re
+import math
+import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
+from types import MethodType
 from pathlib import Path
 from urllib.parse import urlparse
 
 from smolagents import MCPClient
+import httpx
 
 from src.audit.formatting import redact_for_audit
 from src.audit.runtime import log_integration_event_sync
@@ -28,22 +34,303 @@ logger = logging.getLogger(__name__)
 
 _ENV_VAR_RE = re.compile(r"\$\{(\w+)\}")
 _VAULT_SECRET_RE = re.compile(r"\$\{vault:([A-Za-z0-9_.:-]+)\}")
+TASK_OUTPUT_BYTES = 64 * 1024
+TASK_OUTPUT_POLICY = {"max_bytes": TASK_OUTPUT_BYTES, "max_depth": 32,
+                      "max_nodes": 4096, "max_container_items": 256,
+                      "transport": "stateless_inline_post_only", "content_encoding": "identity"}
+
+
+class MCPTaskOutputLimit(ValueError):
+    """Content-free post-contact failure, never a retry or verification receipt."""
+
+
+def _bounded_utf8_size(value):
+    if len(value) > TASK_OUTPUT_BYTES:
+        raise MCPTaskOutputLimit("mcp_task_output_byte_limit")
+    size = 0
+    for offset in range(0, len(value), 1024):
+        size += len(value[offset:offset + 1024].encode("utf-8"))
+        if size > TASK_OUTPUT_BYTES:
+            raise MCPTaskOutputLimit("mcp_task_output_byte_limit")
+    return size
+
+
+def _check_json_frame(raw):
+    """Lexical allocation limits before either SDK or task JSON parsing."""
+    if len(raw) > TASK_OUTPUT_BYTES:
+        raise MCPTaskOutputLimit("mcp_task_output_byte_limit")
+    depth = nodes = 0
+    quoted = escaped = token = False
+    for byte in raw:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif byte == 92:
+                escaped = True
+            elif byte == 34:
+                quoted = False
+        elif byte == 34:
+            quoted = True
+            token = False
+            nodes += 1
+        elif byte in (123, 91):
+            depth += 1
+            nodes += 1
+            token = False
+        elif byte in (125, 93):
+            depth -= 1
+            token = False
+        elif byte in (32, 9, 10, 13, 44, 58):
+            token = False
+        elif not token:
+            nodes += 1
+            token = True
+        if depth > 32 or depth < 0 or nodes > 4096:
+            raise MCPTaskOutputLimit("mcp_task_output_shape_limit")
+
+
+def check_task_output(value):
+    """Strict finite JSON tree and serialized-byte budget before serialization."""
+    nodes = 0
+    size = 0
+    ancestors = set()
+    def string_size(text):
+        _bounded_utf8_size(text)
+        total = 2
+        for char in text:
+            code = ord(char)
+            total += (2 if char in '\\"\b\f\n\r\t' else 6 if code < 32
+                      else 1 if code < 128 else 2 if code < 2048 else 3 if code < 65536 else 4)
+            if total > TASK_OUTPUT_BYTES:
+                raise MCPTaskOutputLimit("mcp_task_output_byte_limit")
+        return total
+    def visit(item, depth):
+        nonlocal nodes, size
+        nodes += 1
+        if nodes > 4096 or depth > 32:
+            raise MCPTaskOutputLimit("mcp_task_output_shape_limit")
+        kind = type(item)
+        if kind is str:
+            size += string_size(item)
+        elif item is None:
+            size += 4
+        elif kind is bool:
+            size += 5
+        elif kind is int:
+            if item.bit_length() > 256:
+                raise MCPTaskOutputLimit("mcp_task_output_number_limit")
+            size += len(str(item))
+        elif kind is float:
+            if not math.isfinite(item):
+                raise MCPTaskOutputLimit("mcp_task_output_number_limit")
+            size += len(str(item))
+        elif kind in (dict, list):
+            if len(item) > 256 or id(item) in ancestors:
+                raise MCPTaskOutputLimit("mcp_task_output_shape_limit")
+            ancestors.add(id(item))
+            size += 2 + max(0, len(item) - 1)
+            if kind is dict:
+                for key, child in item.items():
+                    if type(key) is not str:
+                        raise MCPTaskOutputLimit("mcp_task_output_non_json")
+                    size += string_size(key) + 1
+                    visit(child, depth + 1)
+            else:
+                for child in item:
+                    visit(child, depth + 1)
+            ancestors.remove(id(item))
+        else:
+            raise MCPTaskOutputLimit("mcp_task_output_non_json")
+        if size > TASK_OUTPUT_BYTES:
+            raise MCPTaskOutputLimit("mcp_task_output_byte_limit")
+    visit(value, 0)
+
+
+def check_task_raw_output(raw):
+    if type(raw) is str:
+        _bounded_utf8_size(raw)
+        _check_json_frame(raw.encode("utf-8"))
+    else:
+        check_task_output(raw)
+
+
+class _BoundedMCPStream(httpx.AsyncByteStream):
+    def __init__(self, stream, *, sse):
+        self.stream = stream
+        self.sse = sse
+
+    async def __aiter__(self):
+        total = 0
+        pending = bytearray()
+        try:
+            async for chunk in self.stream:
+                total += len(chunk)
+                if total > TASK_OUTPUT_BYTES:
+                    raise MCPTaskOutputLimit("mcp_task_output_byte_limit")
+                pending.extend(chunk)
+                if self.sse:
+                    while match := re.search(rb"\r\n\r\n|\n\n|\r\r", pending):
+                        event = bytes(pending[:match.end()])
+                        del pending[:match.end()]
+                        self._check_event(event)
+                        yield event
+            if pending:
+                if self.sse:
+                    self._check_event(pending)
+                else:
+                    _check_json_frame(pending)
+                yield bytes(pending)
+        except BaseException:
+            await self.stream.aclose()
+            raise
+
+    @staticmethod
+    def _check_event(event):
+        if event.count(b"\n") > 256:
+            raise MCPTaskOutputLimit("mcp_task_output_shape_limit")
+        data = b"\n".join(line[5:].lstrip(b" ") for line in event.splitlines() if line.startswith(b"data:"))
+        if data:
+            _check_json_frame(data)
+
+    async def aclose(self):
+        await self.stream.aclose()
+
+
+class _TaskOutputGuard:
+    """Per-connection collection ownership; SDK request IDs bind exact calls."""
+    def __init__(self):
+        self.scope_binding = ContextVar("mcp_task_output_binding", default=None)
+        self.request_bindings = {}
+        self.lock = threading.Lock()
+        self.bound = False
+        self.inline_supported = True
+
+    @contextmanager
+    def scope(self, binding):
+        token = self.scope_binding.set(binding)
+        try:
+            yield
+        finally:
+            self.scope_binding.reset(token)
+
+    def bind_session(self, session):
+        from mcp import ClientSession
+        if type(session) is not ClientSession:
+            return False
+        original = session.send_request
+        if (not self.inline_supported
+            or getattr(original, "__func__", None) is not ClientSession.send_request
+            or type(session._request_id) is not int):
+            return False
+        async def send_request(owned_session, request, result_type, *args, **kwargs):
+            binding = self.scope_binding.get()
+            guarded = binding is not None and request.root.method == "tools/call"
+            request_id = None
+            if guarded:
+                if not self.inline_supported:
+                    raise MCPTaskOutputLimit("mcp_task_stateless_inline_transport_required")
+                from mcpadapt.smolagents_adapter import _sanitize_function_name
+                from src.work_board.general_task import canonical
+                params = request.root.params
+                if (_sanitize_function_name(params.name) != binding["tool_name"]
+                    or hashlib.sha256(canonical(params.arguments)).hexdigest() != binding["input_digest"]):
+                    raise MCPTaskOutputLimit("mcp_task_output_request_binding_changed")
+                if type(owned_session._request_id) is not int:
+                    raise MCPTaskOutputLimit("mcp_task_output_sdk_unavailable")
+                # Original SDK increments this integer before its first await.
+                # Registration and delegation therefore have no async gap.
+                request_id = owned_session._request_id
+                with self.lock:
+                    if len(self.request_bindings) >= 16 or request_id in self.request_bindings:
+                        raise MCPTaskOutputLimit("mcp_task_output_binding_limit")
+                    self.request_bindings[request_id] = binding
+            try:
+                return await original(request, result_type, *args, **kwargs)
+            finally:
+                if request_id is not None:
+                    with self.lock:
+                        self.request_bindings.pop(request_id, None)
+        session.send_request = MethodType(send_request, session)
+        self.bound = True
+        return True
+
+    def http_client_factory(self, headers=None, timeout=None, auth=None):
+        from mcp.shared._httpx_utils import create_mcp_http_client
+        client = create_mcp_http_client(headers=headers, timeout=timeout, auth=auth)
+        client.event_hooks["request"].append(self._request_hook)
+        client.event_hooks["response"].append(self._response_hook)
+        return client
+
+    async def _request_hook(self, request):
+        if request.method == "GET":
+            self.inline_supported = False
+            with self.lock:
+                active = bool(self.request_bindings)
+            if active:
+                # A guarded inline SSE request must not silently move its
+                # contacted result onto the unbounded shared GET transport.
+                raise MCPTaskOutputLimit("mcp_task_stateless_inline_transport_required")
+        if request.method != "POST" or len(request.content) > TASK_OUTPUT_BYTES + 4096:
+            return
+        with self.lock:
+            active = bool(self.request_bindings)
+        if not active:
+            return
+        message = json.loads(request.content)  # bounded, SDK-owned outgoing envelope
+        with self.lock:
+            bound = self.request_bindings.get(message.get("id"))
+        if bound is not None and message.get("method") == "tools/call":
+            request.extensions["seraph_task_output_bounded"] = True
+            request.headers["Accept-Encoding"] = "identity"
+
+    async def _response_hook(self, response):
+        if "mcp-session-id" in response.headers:
+            self.inline_supported = False
+        if not response.request.extensions.get("seraph_task_output_bounded"):
+            return
+        encoding = response.headers.get("content-encoding", "identity").strip().lower()
+        if response.status_code == 202 or encoding != "identity":
+            await response.aclose()
+            raise MCPTaskOutputLimit("mcp_task_output_inline_identity_required")
+        length = response.headers.get("content-length")
+        if length is not None and (len(length) > 20 or not length.isdigit() or int(length) > TASK_OUTPUT_BYTES):
+            await response.aclose()
+            raise MCPTaskOutputLimit("mcp_task_output_byte_limit")
+        if response.is_stream_consumed:
+            # A custom prebuffering client is not the owned SDK transport.
+            await response.aclose()
+            raise MCPTaskOutputLimit("mcp_task_output_transport_unavailable")
+        response.stream = _BoundedMCPStream(response.stream,
+            sse="text/event-stream" in response.headers.get("content-type", "").lower())
 
 
 def _check_closed_task_schema(schema, depth=0):
     """Require local, closed typed objects at every task schema boundary."""
-    if depth > 32 or not isinstance(schema, dict) or schema.get("type") not in {
-        "object", "array", "string", "integer", "number", "boolean", "null"}:
+    supported = {"type", "properties", "required", "additionalProperties", "items",
+        "minItems", "maxItems", "uniqueItems", "minLength", "maxLength", "pattern",
+        "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
+        "minProperties", "maxProperties", "enum", "const", "title", "description",
+        "default", "examples", "$comment"}
+    if (depth > 32 or not isinstance(schema, dict) or set(schema) - supported
+        or schema.get("type") not in {
+        "object", "array", "string", "integer", "number", "boolean", "null"}):
         raise ValueError("task schema must declare a bounded local type")
     if schema["type"] == "object":
-        if schema.get("additionalProperties") is not False or not isinstance(schema.get("properties"), dict):
+        if (schema.get("additionalProperties") is not False or not isinstance(schema.get("properties"), dict)
+            or len(schema["properties"]) > 256):
             raise ValueError("task object schemas must be closed")
         for child in schema["properties"].values():
             _check_closed_task_schema(child, depth + 1)
     if schema["type"] == "array":
-        if not isinstance(schema.get("maxItems"), int) or not 0 <= schema["maxItems"] <= 256:
+        if type(schema.get("maxItems")) is not int or not 0 <= schema["maxItems"] <= 256:
             raise ValueError("task arrays must be bounded")
         _check_closed_task_schema(schema.get("items"), depth + 1)
+    if schema["type"] == "string":
+        if type(schema.get("maxLength")) is not int or not 0 <= schema["maxLength"] <= TASK_OUTPUT_BYTES:
+            raise ValueError("task strings must be bounded")
+    if ("items" in schema and schema["type"] != "array") or (
+        "properties" in schema and schema["type"] != "object"):
+        raise ValueError("unsupported task schema branch")
 
 
 class _InstrumentedMCPTool:
@@ -94,6 +381,8 @@ class MCPManager:
         self._config: dict[str, dict] = {}
         self._status: dict[str, dict] = {}
         self._connection_revisions: dict[str, int] = {}
+        self._task_output_guards: dict[str, _TaskOutputGuard] = {}
+        self._task_output_block_reasons: dict[str, str] = {}
         # Each: {"status": "connected"|"disconnected"|"auth_required"|"error", "error": str|None}
 
     # --- Config loading ---
@@ -459,9 +748,28 @@ class MCPManager:
                 return
 
             params: dict = {"url": url, "transport": "streamable-http"}
+            output_guard = _TaskOutputGuard()
+            # MCPAdapt deep-copies params. A local function keeps the one
+            # connection's guard identity without copying locks or state.
+            def bounded_factory(headers=None, timeout=None, auth=None):
+                return output_guard.http_client_factory(headers, timeout, auth)
+            params["httpx_client_factory"] = bounded_factory
             if resolved_headers:
                 params["headers"] = resolved_headers
             client = MCPClient(params, structured_output=False)
+            try:
+                adapter = vars(client).get("_adapter")
+                sessions = vars(adapter).get("sessions") if adapter is not None else None
+            except TypeError:
+                sessions = None
+            if isinstance(sessions, list) and len(sessions) == 1 and output_guard.bind_session(sessions[0]):
+                self._task_output_guards[name] = output_guard
+                self._task_output_block_reasons.pop(name, None)
+            else:
+                self._task_output_guards.pop(name, None)
+                self._task_output_block_reasons[name] = (
+                    "mcp_task_stateless_inline_transport_required" if not output_guard.inline_supported
+                    else "mcp_task_transport_sdk_unavailable")
             source_context = self._build_source_context(
                 name=name,
                 url=url,
@@ -535,6 +843,8 @@ class MCPManager:
     def disconnect(self, name: str) -> None:
         """Disconnect a specific named MCP server."""
         self._connection_revisions[name] = self._connection_revisions.get(name, 0) + 1
+        self._task_output_guards.pop(name, None)
+        self._task_output_block_reasons.pop(name, None)
         client = self._clients.pop(name, None)
         self._tools.pop(name, None)
         self._status[name] = {"status": "disconnected", "error": None}
@@ -588,6 +898,8 @@ class MCPManager:
             server_id = metadata.get("name")
             config = self._config.get(server_id, {})
             if (not server_id or not self.is_connected(server_id)
+                or server_id not in self._task_output_guards
+                or not self._task_output_guards[server_id].inline_supported
                 or self._status.get(server_id, {}).get("status") != "connected"
                 or not config.get("enabled", True)
                 or config.get("extension_id") != contribution.extension_id
@@ -596,7 +908,7 @@ class MCPManager:
                 continue
             path = Path(str(metadata.get("resolved_path") or ""))
             try:
-                if not path.is_file() or path.is_symlink():
+                if not path.is_file() or path.is_symlink() or path.stat().st_size > TASK_OUTPUT_BYTES:
                     continue
                 payload = load_connector_payload(path)
                 declarations = payload.get("task_tools", {})
@@ -612,6 +924,8 @@ class MCPManager:
                     try:
                         input_schema = declaration["input_schema"]
                         output_schema = declaration["output_schema"]
+                        check_task_output(input_schema)
+                        check_task_output(output_schema)
                         if input_schema.get("type") != "object":
                             continue
                         _check_closed_task_schema(input_schema)
@@ -655,6 +969,7 @@ class MCPManager:
                             "mode": mcp_mode, "extension_id": contribution.extension_id,
                             "reference": contribution.reference, "advertised_inputs": advertised,
                             "advertised_output": getattr(tool, "output_schema", None),
+                            "output_allowance": TASK_OUTPUT_POLICY,
                             "config_digest": digest(config)}
                         descriptor = ToolDescriptor(tool_id=f"mcp:{server_id}:{tool.name}",
                             version=declaration["version"], input_schema=input_schema,
@@ -668,6 +983,21 @@ class MCPManager:
             except (OSError, ValueError, TypeError, AttributeError):
                 continue
         return entries
+
+    def task_output_scope(self, descriptor, inputs, *, job_id, fencing_token, tool_name):
+        guard = self._task_output_guards.get(descriptor.server_id)
+        if (guard is None or not guard.inline_supported
+            or self._connection_revisions.get(descriptor.server_id) != descriptor.connection_revision):
+            raise MCPTaskOutputLimit("mcp_task_output_transport_unavailable")
+        from src.work_board.general_task import canonical
+        return guard.scope({"job_id": job_id, "fencing_token": fencing_token,
+            "tool_name": tool_name, "input_digest": hashlib.sha256(canonical(inputs)).hexdigest()})
+
+    def task_tool_block_reason(self, server_id):
+        guard = self._task_output_guards.get(server_id)
+        if guard is not None and not guard.inline_supported:
+            return "mcp_task_stateless_inline_transport_required"
+        return self._task_output_block_reasons.get(server_id, "trusted_typed_contract_or_policy_unavailable")
 
     def get_server_tools(self, name: str) -> list:
         """Return tools for a specific named server."""

@@ -85,6 +85,27 @@ class _InvocationMarker(Tool):
         return hook(arguments) if callable(hook) else None
 
 
+class _MCPResultGuard(_InvocationMarker):
+    """Bound the raw result before the existing audit/secret serializers."""
+    def __call__(self, *args, **kwargs):
+        from src.tools.mcp_manager import check_task_raw_output
+        raw = super().__call__(*args, **kwargs)
+        check_task_raw_output(raw)
+        return raw
+
+    def get_audit_call_payload(self, arguments):
+        hook = getattr(self.wrapped_tool, "get_audit_call_payload", None)
+        return hook(arguments) if callable(hook) else None
+
+    def get_audit_result_payload(self, arguments, result):
+        hook = getattr(self.wrapped_tool, "get_audit_result_payload", None)
+        return hook(arguments, result) if callable(hook) else None
+
+    def get_audit_failure_payload(self, arguments, error):
+        hook = getattr(self.wrapped_tool, "get_audit_failure_payload", None)
+        return hook(arguments, error) if callable(hook) else None
+
+
 def _object(properties, required=None):
     return {"type": "object", "properties": properties,
             "required": required or list(properties), "additionalProperties": False}
@@ -170,7 +191,7 @@ class ToolRegistry:
                 identity = f"mcp:{source.get('server_name', 'unknown')}:{tool.name}"
                 if identity not in active:
                     blocked.append({"tool_id": identity,
-                        "reason": "trusted_typed_contract_or_policy_unavailable"})
+                        "reason": self.mcp_runtime.task_tool_block_reason(source.get("server_name"))})
         return sorted(blocked, key=lambda item: item["tool_id"])
 
     def approval_context(self, descriptor, inputs, *, job_id):
@@ -239,16 +260,21 @@ class ToolRegistry:
         if current is None or current[0].model_dump(mode="json") != descriptor.model_dump(mode="json"):
             raise PermissionError("task tool contract changed before execution")
         _, tool, is_mcp = current
-        tools = wrap_tools_for_audit(wrap_tools_for_secret_refs([tool]), treat_all_as_mcp=is_mcp)
+        tools = wrap_tools_for_audit(wrap_tools_for_secret_refs([_MCPResultGuard(tool) if is_mcp else tool]),
+                                    treat_all_as_mcp=is_mcp)
         marker = _InvocationMarker(tools[0])
         tools = [marker]
         wrapper = (wrap_tools_with_forced_approval if is_mcp and get_current_mcp_policy_mode() == "approval"
                    else wrap_tools_for_approval)(tools, treat_all_as_mcp=is_mcp)[0]
         tokens = set_runtime_context(principal.session_id, "high_risk", trust_principal=principal)
         fence = set_runtime_fencing_token(str(fencing_token))
+        from contextlib import nullcontext
         try:
+            output_scope = (self.mcp_runtime.task_output_scope(descriptor, inputs,
+                job_id=job_id, fencing_token=fencing_token, tool_name=tool.name) if is_mcp else nullcontext())
             try:
-                raw = wrapper(**inputs)
+                with output_scope:
+                    raw = wrapper(**inputs)
             except ApprovalRequired as approval:
                 # Adopted native effects dispatch through the durable host,
                 # which intentionally bypasses the inner Tool chain. Without
@@ -270,7 +296,12 @@ class ToolRegistry:
                         for name in _APPROVAL_FIELDS}) from approval
                 raise
             if is_mcp:
-                result = json.loads(raw) if isinstance(raw, str) else raw
+                from src.tools.mcp_manager import check_task_raw_output, check_task_output
+                check_task_raw_output(raw)
+                def non_json_constant(_constant):
+                    raise ValueError("mcp_task_output_number_limit")
+                result = json.loads(raw, parse_constant=non_json_constant) if type(raw) is str else raw
+                check_task_output(result)
             else:
                 result = self._native_output(descriptor.tool_id, inputs, raw)
             canonical(result)

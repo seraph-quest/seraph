@@ -45,6 +45,8 @@ async def approval_journey(accounting_db, monkeypatch):
         request.state.operator = await authenticate_session(owner.session_id, touch=False)
         return await call_next(request)
     app.include_router(api.router, prefix="/api")
+    from src.api.approvals import router as approvals_router
+    app.include_router(approvals_router, prefix="/api")
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://fixture") as client:
         yield SimpleNamespace(jobs=jobs, owner=owner, workspace=workspace,
             sessions=sessions, registry=registry, manager=manager, tool=tool,
@@ -53,7 +55,7 @@ async def approval_journey(accounting_db, monkeypatch):
     registry.stop()
 
 
-async def create_and_pause(journey, *, steps=1):
+async def create_and_run(journey, *, steps=1):
     descriptors, tool_digest = journey.service.snapshot()
     descriptor = next(item for item in descriptors if item.tool_id == "mcp:local:repo_read")
     plan_steps = []
@@ -75,15 +77,21 @@ async def create_and_pause(journey, *, steps=1):
     result = await journey.dispatcher.run_pass()
     assert journey.tool.calls == 0, result
     task_id = card["task_id"]
+    return task_id, result
+
+
+async def create_and_pause(journey, *, steps=1, expected_status="pending"):
+    task_id, result = await create_and_run(journey, steps=steps)
     plan = await get_plan(journey, task_id)
     pause = plan["approval_pause"]
     if pause is None:
         async with journey.sessions() as db:
             roots = list((await db.execute(select(WorkflowRunState))).scalars())
-        raise AssertionError([(item.status, item.failure_reason, item.error,
-            item.checkpoint_receipts_json, item.effect_receipts_json) for item in roots])
-    assert pause and pause["approval_status"] == "pending", (result, plan)
-    assert pause["can_resume"] is False
+            tasks = list((await db.execute(select(WorkBoardTask))).scalars())
+        raise AssertionError((result, [(item.block_reason, item.result_refs_json) for item in tasks], [(item.status, item.failure_reason, item.error,
+            item.checkpoint_receipts_json, item.effect_receipts_json) for item in roots]))
+    assert pause and pause["approval_status"] == expected_status, (result, plan)
+    assert pause["can_resume"] is (expected_status == "approved")
     detail = await journey.client.get(f"/api/work-board/tasks/{task_id}")
     assert detail.status_code == 200, detail.text
     assert detail.json()["attempts"][0]["readback_status"] == "pending"
@@ -158,6 +166,7 @@ async def test_api_exact_approval_continues_same_root_attempt_once(approval_jour
     artifact_hash = hashlib.sha256(content).hexdigest()
     proof = journey.dispatcher._workflow_readback(root, original["job_id"])
     assert proof["content_sha256"] == artifact_hash
+
     detail = await journey.client.get(f"/api/work-board/tasks/{task_id}")
     assert detail.status_code == 200, detail.text
     attempt_payload = detail.json()["attempts"][0]
@@ -177,6 +186,260 @@ async def test_api_exact_approval_continues_same_root_attempt_once(approval_jour
     accounting = await journey.jobs.inference_accounting_snapshot()
     assert accounting["operation_count"] == 0
     assert accounting["committed_microusd"] == accounting["unknown_microusd"] == 0
+
+
+@pytest.mark.asyncio
+async def test_fast_approval_before_wait_publication_continues_same_attempt(approval_journey, monkeypatch):
+    journey = approval_journey
+    create = approval_repository.get_or_create_pending
+    inspected = {}
+    async def decide_before_publication(**kwargs):
+        request = await create(**kwargs)
+        root = await journey.jobs.get_job(json.loads(request.details_json)["workflow_run_identity"])
+        assert root["status"] == "running"
+        assert not any(item.get("payload", {}).get("phase") == "approval_precontact" for item in root["checkpoints"])
+        inspected.update(fingerprint=request.fingerprint, details=json.loads(request.details_json),
+            summary=request.summary, risk_level=request.risk_level, expires_at=request.expires_at)
+        # Actual durable decision in the interval between request creation
+        # and the owner's publication, before the wrapper returns its proof.
+        decision = await journey.client.post(f"/api/approvals/{request.id}/approve")
+        assert decision.status_code == 200, decision.text
+        assert decision.json()["status"] == "approved"
+        assert journey.tool.calls == 0
+        return request
+    monkeypatch.setattr(approval_repository, "get_or_create_pending", decide_before_publication)
+    task_id, plan, original = await create_and_pause(journey, expected_status="approved")
+    row = await approval_repository.get(plan["approval_pause"]["approval_id"])
+    assert row.status == "approved"
+    assert row.fingerprint == inspected["fingerprint"]
+    assert row.summary == inspected["summary"] and row.risk_level == inspected["risk_level"]
+    assert row.expires_at.replace(tzinfo=timezone.utc) == inspected["expires_at"].replace(tzinfo=timezone.utc)
+    details = json.loads(row.details_json)
+    assert all(details[key] == value for key, value in inspected["details"].items())
+    continued = await resume(journey, task_id, resume_body(plan))
+    assert continued.status_code == 200, continued.text
+    root = await journey.jobs.get_job(original["job_id"])
+    assert root["status"] == "succeeded" and root["attempt_count"] == 1
+    assert root["deadline_at"] == original["deadline_at"]
+    assert journey.tool.calls == 1
+    verified_file(journey, root, "read-0")
+    assert (await resume(journey, task_id, resume_body(plan))).status_code == 409
+    assert journey.tool.calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("race", ["denied", "revoked", "expired", "context", "fingerprint",
+    "root_input", "root_authority", "root_deadline", "goal_revision"])
+async def test_fast_noncurrent_decision_never_publishes_resumable_wait(approval_journey, monkeypatch, race):
+    journey = approval_journey
+    create = approval_repository.get_or_create_pending
+    async def change_before_publication(**kwargs):
+        request = await create(**kwargs)
+        if race == "denied":
+            assert await approval_repository.resolve(request.id, "denied")
+        else:
+            assert await approval_repository.resolve(request.id, "approved")
+            if race == "revoked":
+                current = await approval_repository.get(request.id)
+                assert await approval_repository.revoke_unconsumed(request.id,
+                    expected_revision=approval_state_revision(current),
+                    owner_principal_id=journey.owner.principal_id,
+                    operator_session_id=journey.owner.session_id) == "revoked"
+            else:
+                async with journey.sessions() as db:
+                    current = await db.get(ApprovalRequest, request.id)
+                    if race == "expired":
+                        current.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+                    elif race == "context":
+                        details = json.loads(current.details_json)
+                        details["approval_context"] = {"workflow_run_identity": "unrelated"}
+                        current.details_json = json.dumps(details)
+                    elif race == "fingerprint":
+                        current.fingerprint = "0" * 64
+                    else:
+                        root = (await db.execute(select(WorkflowRunState))).scalar_one()
+                        if race == "root_input":
+                            root.input_digest = "0" * 64
+                        elif race == "root_authority":
+                            root.declared_authority_json = "{}"
+                        elif race == "root_deadline":
+                            root.deadline_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+                        else:
+                            from src.db.models import Goal
+                            goal = await db.get(Goal, journey.goal.id)
+                            goal.revision += 1
+                            db.add(goal)
+                        db.add(root)
+                    db.add(current)
+        return request
+    monkeypatch.setattr(approval_repository, "get_or_create_pending", change_before_publication)
+    task_id, _result = await create_and_run(journey)
+    plan = await get_plan(journey, task_id)
+    assert plan["approval_pause"] is None
+    assert journey.tool.calls == 0
+    async with journey.sessions() as db:
+        root = (await db.execute(select(WorkflowRunState))).scalar_one()
+        request = (await db.execute(select(ApprovalRequest))).scalar_one()
+        assert "general_task_wait_binding" not in json.loads(request.details_json)
+        assert not any(item.get("payload", {}).get("phase") == "approval_precontact"
+            for item in json.loads(root.checkpoint_receipts_json))
+        assert request.status != "consumed"
+    assert not list(journey.workspace.glob("artifacts/work-board/general-tasks/*.json"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("barrier", ["binding", "job", "board", "event"])
+async def test_wait_publication_rolls_back_and_retries_only_retained_proof(approval_journey, monkeypatch, barrier):
+    from sqlalchemy.ext.asyncio import AsyncSession
+    journey = approval_journey
+    class PublicationInterrupted(Exception):
+        pass
+    fired = False
+    async def interrupt():
+        nonlocal fired
+        if not fired:
+            fired = True
+            raise PublicationInterrupted()
+    if barrier == "binding":
+        original = approval_repository.attach_general_task_wait_binding_in_session
+        async def attach(*args, **kwargs):
+            result = await original(*args, **kwargs)
+            await interrupt()
+            return result
+        monkeypatch.setattr(approval_repository, "attach_general_task_wait_binding_in_session", attach)
+    elif barrier == "job":
+        original = AsyncSession.execute
+        async def execute(db, statement, *args, **kwargs):
+            result = await original(db, statement, *args, **kwargs)
+            if str(statement).startswith("UPDATE workflow_run_states") and statement.compile().params.get("failure_reason") == "general_task_approval_required":
+                await interrupt()
+            return result
+        monkeypatch.setattr(AsyncSession, "execute", execute)
+    elif barrier == "board":
+        original = journey.service.repository._cas_task_update
+        async def board(*args, **kwargs):
+            result = await original(*args, **kwargs)
+            if kwargs["values"].get("block_reason") == "awaiting_approval":
+                await interrupt()
+            return result
+        monkeypatch.setattr(journey.service.repository, "_cas_task_update", board)
+    else:
+        original = journey.service.repository._event
+        async def event(*args, **kwargs):
+            result = await original(*args, **kwargs)
+            if kwargs["kind"] == "task.approval_wait":
+                await interrupt()
+            return result
+        monkeypatch.setattr(journey.service.repository, "_event", event)
+    publish = journey.dispatcher.jobs.pause_general_task_for_approval
+    async def retained_proof_retry(**kwargs):
+        try:
+            return await publish(**kwargs)
+        except PublicationInterrupted:
+            # The owner still holds the actual wrapper proof. This retries
+            # publication only, never the tool invocation or an approved row.
+            async with journey.sessions() as db:
+                row = (await db.execute(select(ApprovalRequest))).scalar_one()
+                root = (await db.execute(select(WorkflowRunState))).scalar_one()
+                task = (await db.execute(select(WorkBoardTask))).scalar_one()
+                attempt = (await db.execute(select(WorkBoardAttempt))).scalar_one()
+                assert "general_task_wait_binding" not in json.loads(row.details_json)
+                assert root.status == "running" and task.status.value == "running"
+                assert attempt.lease_owner and attempt.ended_at is None
+                assert all(item["status"] == "intent" for item in json.loads(root.effect_receipts_json))
+                assert not any(item.get("payload", {}).get("phase") == "approval_precontact"
+                    for item in json.loads(root.checkpoint_receipts_json))
+            assert journey.tool.calls == 0
+            return await publish(**kwargs)
+    monkeypatch.setattr(journey.dispatcher.jobs, "pause_general_task_for_approval", retained_proof_retry)
+    task_id, plan, root = await create_and_pause(journey)
+    assert fired
+    await approval_repository.resolve(plan["approval_pause"]["approval_id"], "approved")
+    assert (await resume(journey, task_id, resume_body(await get_plan(journey, task_id)))).status_code == 200
+    completed = await journey.jobs.get_job(root["job_id"])
+    assert completed["status"] == "succeeded" and completed["attempt_count"] == 1
+    assert completed["deadline_at"] == root["deadline_at"]
+    assert journey.tool.calls == 1
+    verified_file(journey, completed, "read-0")
+
+
+@pytest.mark.asyncio
+async def test_oversized_contacted_mcp_output_preserves_liability_without_replay(approval_journey):
+    journey = approval_journey
+    task_id, plan, original = await create_and_pause(journey)
+    journey.tool.result = '{"value":"' + "x" * (64 * 1024) + '"}'
+    await approval_repository.resolve(plan["approval_pause"]["approval_id"], "approved")
+    current = await get_plan(journey, task_id)
+    response = await resume(journey, task_id, resume_body(current))
+    assert response.status_code == 409, response.text
+    detail = await journey.client.get(f"/api/work-board/tasks/{task_id}")
+    assert detail.status_code == 200
+    assert detail.json()["task"]["status"] == "blocked"
+    assert journey.tool.calls == 1
+    root = await journey.jobs.get_job(original["job_id"])
+    assert any(item["status"] in {"intent", "unknown", "dispatched"} for item in root["effects"])
+    assert not any(item["checkpoint_id"].startswith("general:verified:") for item in root["checkpoints"])
+    assert not list(journey.workspace.glob("artifacts/work-board/general-tasks/*.json"))
+    assert (await resume(journey, task_id, resume_body(current))).status_code == 409
+    await journey.dispatcher.run_pass()
+    assert journey.tool.calls == 1
+    async with journey.sessions() as db:
+        assert len(list((await db.execute(select(WorkflowRunState))).scalars())) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["step_id", "input_digest", "descriptor_digest", "plan_digest", "effect_id", "deadline_at"])
+async def test_approved_wait_attachment_is_exact_and_idempotent(approval_journey, monkeypatch, field):
+    journey = approval_journey
+    create = approval_repository.get_or_create_pending
+    async def fast_approve(**kwargs):
+        request = await create(**kwargs)
+        assert await approval_repository.resolve(request.id, "approved")
+        return request
+    monkeypatch.setattr(approval_repository, "get_or_create_pending", fast_approve)
+    attach = approval_repository.attach_general_task_wait_binding_in_session
+    async def attach_and_check(*args, **kwargs):
+        request = await attach(*args, **kwargs)
+        assert request is not None and request.status == "approved"
+        original_details = request.details_json
+        repeated = await attach(*args, **kwargs)
+        assert repeated is not None and repeated.details_json == original_details
+        changed = dict(kwargs)
+        changed["binding"] = {**kwargs["binding"], field: "unrelated"}
+        assert await attach(*args, **changed) is None
+        return request
+    monkeypatch.setattr(approval_repository, "attach_general_task_wait_binding_in_session", attach_and_check)
+    task_id, plan, original = await create_and_pause(journey, expected_status="approved")
+    assert (await resume(journey, task_id, resume_body(plan))).status_code == 200
+    assert journey.tool.calls == 1
+    assert (await journey.jobs.get_job(original["job_id"]))["attempt_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_lost_precontact_proof_is_visible_and_cannot_resume_from_approved_row(approval_journey, monkeypatch):
+    journey = approval_journey
+    create = approval_repository.get_or_create_pending
+    async def fast_approve(**kwargs):
+        request = await create(**kwargs)
+        assert await approval_repository.resolve(request.id, "approved")
+        return request
+    monkeypatch.setattr(approval_repository, "get_or_create_pending", fast_approve)
+    async def lose_publication(**kwargs):
+        raise RuntimeError("owner interrupted before publication")
+    monkeypatch.setattr(journey.dispatcher.jobs, "pause_general_task_for_approval", lose_publication)
+    task_id, _result = await create_and_run(journey)
+    detail = await journey.client.get(f"/api/work-board/tasks/{task_id}")
+    assert detail.json()["task"]["status"] == "blocked"
+    assert detail.json()["task"]["block_reason"] == "reconcile_external_effect"
+    assert (await get_plan(journey, task_id))["approval_pause"] is None
+    async with journey.sessions() as db:
+        request = (await db.execute(select(ApprovalRequest))).scalar_one()
+        assert request.status == "approved"
+        assert "general_task_wait_binding" not in json.loads(request.details_json)
+    fresh = WorkBoardDispatcher(session_provider=journey.sessions, general_tasks=journey.service)
+    await fresh.run_pass()
+    assert journey.tool.calls == 0
+    assert (await get_plan(journey, task_id))["approval_pause"] is None
 
 
 def test_no_contact_settlement_cannot_prove_intended_task_output():

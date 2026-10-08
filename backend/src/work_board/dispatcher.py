@@ -10255,6 +10255,26 @@ class WorkBoardDispatcher:
         if projection.get("status") != "paused" or projection.get("failure_reason") != "general_task_approval_required":
             raise BoardError("general_task_resume_binding_changed", "Exact native approval pause is required", status_code=409)
         async with self.session_provider() as db:
+            # Native approval publication already committed the joint wait.
+            # Read it back without applying the stale pre-publication revision.
+            from src.work_board.repository import BoardAttemptProjection
+            current_task = await db.scalar(select(WorkBoardTask).where(
+                WorkBoardTask.task_id == task.task_id))
+            current_attempt = await db.get(WorkBoardAttempt, attempt.attempt_id)
+            if (current_task is not None and current_attempt is not None
+                and current_task.status is WorkBoardStatus.blocked
+                and current_task.block_reason == "awaiting_approval"
+                and current_task.task_revision == task.task_revision + 1
+                and current_task.owner_principal_id == task.owner_principal_id
+                and current_task.owner_session_id == task.owner_session_id
+                and current_task.typed_input_digest == task.typed_input_digest
+                and current_task.goal_id == task.goal_id and current_task.goal_revision == task.goal_revision
+                and current_attempt.task_id == task.task_id
+                and current_attempt.workflow_run_id == projection.get("job_id") == attempt.workflow_run_id
+                and current_attempt.fencing_token == attempt.fencing_token == (projection.get("lease") or {}).get("fencing_token")
+                and current_attempt.ended_at is None and current_attempt.cancel_requested_at is None
+                and current_attempt.lease_owner is None and current_attempt.lease_expires_at is None):
+                return BoardAttemptProjection(current_task, current_attempt, None)
             return await self.repository.pause_routine_attempt_for_operator(db,
                 task.task_id, attempt.attempt_id, expected_revision=task.task_revision,
                 board_fence=attempt.fencing_token, lease_owner=attempt.lease_owner,

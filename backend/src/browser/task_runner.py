@@ -2113,7 +2113,6 @@ class BrowserTaskRunner:
                 return
 
     async def _launch_session(self, resources: _BrowserLaunchResources) -> _BrowserSession:
-        resources.launch_attempted = True
         options = {
             "java_script_enabled": False,
             "accept_downloads": False,
@@ -2123,6 +2122,7 @@ class BrowserTaskRunner:
             "permissions": [],
         }
         if self.browser_launcher is not None:
+            resources.launch_attempted = True
             browser = self.browser_launcher()
             if inspect.isawaitable(browser):
                 browser = await browser
@@ -2133,6 +2133,11 @@ class BrowserTaskRunner:
             return resources.session
         from playwright.async_api import async_playwright
 
+        if not _playwright_browser_executable_present():
+            raise BrowserTaskError("Playwright browser executable is unavailable", code="browser_runtime_unavailable")
+        # Imports and local file preflight are proven pre-child failures. Only
+        # entering the driver/launcher crosses the unknown resource boundary.
+        resources.launch_attempted = True
         playwright = await async_playwright().start()
         resources.playwright = playwright
         browser = await playwright.chromium.launch(headless=True)
@@ -3170,7 +3175,12 @@ class ProfiledInteractionPage:
         await self.authority()
         # Reuse v1's positively owned launch/teardown with identical isolation.
         launcher = BrowserTaskRunner(browser_launcher=self.browser_launcher)
-        await launcher._launch_session(self.resources)
+        try:
+            await launcher._launch_session(self.resources)
+        except (ImportError, BrowserTaskError):
+            if self.resources.context_not_started:
+                raise InteractionError("browser_interaction_runtime_unavailable", status_code=503) from None
+            raise
         self.page = await self.resources.context.new_page()
 
         async def reject_page(new_page):

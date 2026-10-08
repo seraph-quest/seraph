@@ -68,11 +68,22 @@ async def _interaction_response(call):
 
 @router.get("/capabilities/browser-interactions/profiles")
 async def interaction_profiles(request: Request):
-    _interaction_owner(request)
+    owner = _interaction_owner(request)
     from src.browser.task_lane import browser_task_lane_wait_reason
+    from src.browser.task_runner import _playwright_browser_executable_present
+    from src.db import engine
+    continuity_reason = None
+    async with engine.get_session() as db:
+        try:
+            await profiled_interaction_sessions._stable_root(db, owner)
+        except InteractionError as exc:
+            continuity_reason = exc.code
+    ready = profiled_interaction_sessions.started and (
+        profiled_interaction_sessions.browser_launcher is not None or _playwright_browser_executable_present()) and not continuity_reason
     return {"capability_id": "browser.interact.v2",
-        "runtime_state": "active" if profiled_interaction_sessions.started else "inactive",
-        "blocked_reason": browser_task_lane_wait_reason(settings.workspace_dir), "profiles": [{
+        "runtime_state": "active" if ready else "inactive",
+        "blocked_reason": continuity_reason or browser_task_lane_wait_reason(settings.workspace_dir) or (
+            "browser_interaction_runtime_unavailable" if profiled_interaction_sessions.started and not ready else None), "profiles": [{
         "id": "httpbin.forms.v1", "url": "https://httpbin.org/forms/post",
         "name": "HTTPBin public form preview", "authenticated": False,
         "read_effect": "One public document contact and site access logging",

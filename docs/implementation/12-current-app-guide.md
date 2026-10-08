@@ -995,8 +995,10 @@ filesystem race limits remain relevant.
 ### Profiled public form preparation (#1012)
 
 `browser.interact.v2` adds a separate registered HTTPBin public form preview
-under [ADR-029](./decisions/029-profiled-browser-interactions.md). This branch's
-implementation is **Planned** until its independently reviewed merge to develop.
+under [ADR-029](./decisions/029-profiled-browser-interactions.md). The capability
+is **Partial**: bounded public-form preparation and preview are available;
+authenticated exact transactions (#1013), downloads and selected local desktop
+draft actions (#1014) remain **Planned**.
 The existing public browser v1 remains navigate/extract only. From the public
 browser Work form, explicitly open the HTTPBin preparation controls, select a
 current Goal, acknowledge one public document contact/site access logging, and
@@ -1011,13 +1013,27 @@ JavaScript, service workers, requests, WebSockets, downloads and popups. Fresh
 DOM revisions and original Root/Goal authority are checked before every action.
 At most 20 actions and 180 seconds occupy the existing shared browser lane.
 Stale or ambiguous nodes stop with a fresh-snapshot requirement. Explicit
-snapshot refresh consumes one bounded action and never replays a click.
+**Refresh current page snapshot** captures the original live page, consumes one
+bounded action and replaces every opaque node reference. Cached history
+inspection does not resolve an uncertain action. Refresh clears private input
+and action acknowledgement; continuing requires a new explicit action against
+the fresh nodes. At the action bound, only history and cleanup remain available.
 
 Reload uses the read-only owned-job list or exact request-key lookup to inspect
 completed/blocked history; it does not reopen a page or renew consent. Private
 inputs and preview artifacts are encrypted and excluded from generic journals.
 Success requires a current literal preview, private artifact readback and
 positive browser cleanup. Closing without a current preview cancels the job.
+Missing local Playwright files report inactive before any child starts and do
+not retain browser capacity. Positive physical closure releases the exact
+original resource witness even when stale authority or a durable CAS conflict
+prevents success settlement; unresolved durable state remains available for
+reconciliation and never grants success from stale Root/Goal authority.
+Exact cleanup-receipt reconciliation after a durable revision conflict is
+currently unsupported: the closed resource releases capacity, but the original
+job can remain `running` with read-only history. History inspection does not
+settle that job or replay any action. This remains a recoverable-cleanup
+acceptance gap alongside lost-process recovery.
 Unknown cleanup retains the physical lane witness, including after owner death;
 absence of a process, time or an unlocked file cannot clear it. Recovering a
 lost owning process's context is unsupported and remains visibly blocked rather

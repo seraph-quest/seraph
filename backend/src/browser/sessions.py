@@ -875,6 +875,16 @@ class ProfiledInteractionSessions:
             raise InteractionError("browser_original_root_inactive", status_code=403)
         return row
 
+    @classmethod
+    async def _stable_root(cls, db, owner):
+        from src.db.models import OperatorIdentity
+        from .interaction_contracts import InteractionError
+        row = await cls._root(db, owner)
+        identity = await db.get(OperatorIdentity, row.operator_identity_id) if row.operator_identity_id else None
+        if identity is None or identity.revoked_at is not None:
+            raise InteractionError("browser_operator_continuity_required", status_code=403)
+        return row
+
     async def _current(self, owner, job_id, *, db=None, run=None, historical=False):
         from src.db import engine
         from src.work_board.repository import WorkBoardRepository
@@ -901,6 +911,7 @@ class ProfiledInteractionSessions:
             or authority.get("root_binding_digest") != hashlib.sha256(owner.authenticated_token_hash.encode()).hexdigest()):
             raise InteractionError("browser_original_authority_changed")
         if not historical:
+            await self._stable_root(db, owner)
             await WorkBoardRepository._validate_goal(db, owner, goal_id=run.goal_id, goal_revision=run.goal_revision)
             deadline = run.deadline_at
             if deadline is None or deadline.replace(tzinfo=deadline.tzinfo or timezone.utc) <= datetime.now(timezone.utc):
@@ -947,7 +958,7 @@ class ProfiledInteractionSessions:
                 raise InteractionError("browser_request_key_body_changed")
             return await self.inspect(owner, job_id)
         async with engine.get_session() as db:
-            root = await self._root(db, owner)
+            root = await self._stable_root(db, owner)
             await WorkBoardRepository._validate_goal(db, owner, goal_id=inputs.goal_id, goal_revision=inputs.goal_revision)
             deadline = min(datetime.now(timezone.utc) + timedelta(seconds=180),
                 root.absolute_expires_at.replace(tzinfo=root.absolute_expires_at.tzinfo or timezone.utc),
@@ -1160,23 +1171,46 @@ class ProfiledInteractionSessions:
                 clean = state["page"] is None or await asyncio.wait_for(state["page"].stop(), timeout=cleanup_remaining)
             except BaseException:
                 clean = False
+            # Physical resource closure is independent from job CAS/authority.
+            # A failed audit write cannot turn a positively closed browser into
+            # an unknown live context. Exact marker confirmation still gates
+            # capacity release.
+            if clean:
+                try:
+                    state["lane"].confirm_positive_cleanup(state["cleanup_witness"])
+                except Exception:
+                    clean = False
             try:
                 row = await self.jobs.record_effect(job_id, effect_type="browser_context_cleanup",
                     status="succeeded" if clean else "unknown", effect_id="browser-cleanup:" + job_id,
                     details={"cleanup_status": "closed" if clean else "cleanup_unknown", "no_learning": True},
                     owner=state["lease_owner"], fencing_token=state["fence"], expected_revision=state["revision"])
                 state["revision"] = row["revision"]
-                if clean:
-                    state["lane"].confirm_positive_cleanup(state["cleanup_witness"])
                 completed = clean and reason == "operator_closed" and preview_current
                 terminal = "succeeded" if completed else "cancelled" if clean and reason == "operator_closed" else "blocked"
-                await self.jobs.transition_job(job_id, terminal,
-                    owner=state["lease_owner"], fencing_token=state["fence"], expected_revision=state["revision"],
-                    reason=reason if clean else "browser_cleanup_required", result={"no_learning": True},
-                    terminal_authority_check=lambda db, run: self._current(state["owner"], job_id, db=db, run=run))
+                try:
+                    await self.jobs.transition_job(job_id, terminal,
+                        owner=state["lease_owner"], fencing_token=state["fence"], expected_revision=state["revision"],
+                        reason=reason if clean else "browser_cleanup_required", result={"no_learning": True},
+                        terminal_authority_check=lambda db, run: self._current(state["owner"], job_id, db=db, run=run))
+                except Exception:
+                    if terminal != "succeeded":
+                        raise
+                    # Original success authority may have expired or changed
+                    # during positive teardown. Never grant success in that case.
+                    await self.jobs.transition_job(job_id, "cancelled",
+                        owner=state["lease_owner"], fencing_token=state["fence"], expected_revision=state["revision"],
+                        reason="browser_closed_success_authority_unavailable", result={"no_learning": True})
             except Exception:
-                # Positive local closure does not erase an unknown durable receipt.
-                clean = False
+                # Preserve unresolved durable state for reconciliation without
+                # re-quarantining a positively closed original resource.
+                if clean:
+                    try:
+                        await self.jobs.transition_job(job_id, "cancelled",
+                            owner=state["lease_owner"], fencing_token=state["fence"], expected_revision=state["revision"],
+                            reason="browser_closed_settlement_unresolved", result={"no_learning": True})
+                    except Exception:
+                        pass
             if clean:
                 state["lane"].release()
             else:

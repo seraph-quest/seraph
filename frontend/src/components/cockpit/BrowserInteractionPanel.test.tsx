@@ -90,5 +90,89 @@ it("discovers durable original jobs after reload without admitting a browser con
   fireEvent.click(await screen.findByRole("button", { name: "job · running · read-only history" }));
   expect(screen.getByText(/read-only history · read_only_history_new_job_required/)).toBeInTheDocument();
   expect(screen.queryByLabelText("Private prepared value")).toBeNull();
+  expect(screen.getByRole("button", { name: "Refresh current page snapshot" })).toBeDisabled();
   expect(vi.mocked(apiFetch).mock.calls.every(([, init]) => !init?.method)).toBe(true);
+});
+it("keeps cached inspection uncertain and refreshes the original page with a current fence and new opaque nodes", async () => {
+  const current = { ...snapshot, revision: 3, history: [...snapshot.history,
+    { sequence: 2, kind: "fill", status: "intent" }, { sequence: 3, kind: "fill", status: "blocked" }] };
+  const freshId = "node-" + "c".repeat(32);
+  const fresh = { ...current, revision: 5, page: { ...snapshot.page, document_digest: "d".repeat(64), accessible_nodes: [{ ...snapshot.page.accessible_nodes[0], node_id: freshId }] }, history: [...current.history,
+    { sequence: 4, kind: "snapshot", status: "intent" }, { sequence: 5, kind: "snapshot", status: "completed" }] };
+  vi.mocked(apiFetch).mockResolvedValueOnce(response(profiles)).mockResolvedValueOnce(response(snapshot))
+    .mockResolvedValueOnce(response({ detail: { code: "browser_fresh_snapshot_required" } }, 409))
+    .mockResolvedValueOnce(response(current)).mockResolvedValueOnce(response(current)).mockResolvedValueOnce(response(fresh));
+  render(<BrowserInteractionPanel {...owner} goals={[goal]} />); await open(); await prepare();
+  fireEvent.click(screen.getByRole("button", { name: "Run reviewed browser action" })); await screen.findByRole("alert");
+  fireEvent.click(screen.getByRole("button", { name: "Inspect original browser history" })); await screen.findByText("Job job · revision 3");
+  expect(screen.getByLabelText("Snapshot field")).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "Refresh current page snapshot" })); await screen.findByText("Job job · revision 5");
+  expect(vi.mocked(apiFetch).mock.calls[4][1]?.method).toBeUndefined();
+  expect(vi.mocked(apiFetch).mock.calls[5][0]).toMatch(/\/jobs\/job\/snapshot$/);
+  expect(JSON.parse(String(vi.mocked(apiFetch).mock.calls[5][1]?.body))).toEqual({ expected_revision: 3, fencing_token: 7 });
+  expect(screen.getByLabelText("Snapshot field")).toBeEnabled();
+  expect(screen.getByLabelText("Snapshot field")).toHaveValue("");
+  expect(screen.getByLabelText("Private prepared value")).toHaveValue("");
+  expect(screen.getByRole("option", { name: "textbox: Customer name" })).toHaveValue(freshId);
+  expect(screen.getByRole("button", { name: "Run reviewed browser action" })).toBeDisabled();
+});
+it("rejects cached snapshot evidence and never replays a private value after a lost refresh", async () => {
+  vi.mocked(apiFetch).mockResolvedValueOnce(response(profiles)).mockResolvedValueOnce(response(snapshot))
+    .mockResolvedValueOnce(response(snapshot)).mockResolvedValueOnce(response({ ...snapshot, revision: 2 }));
+  render(<BrowserInteractionPanel {...owner} goals={[goal]} />); await open(); await prepare();
+  fireEvent.click(screen.getByRole("button", { name: "Refresh current page snapshot" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Fresh browser snapshot evidence is unavailable");
+  expect(screen.getByLabelText("Snapshot field")).toBeDisabled();
+  expect(screen.getByLabelText("Private prepared value")).toHaveValue("");
+  expect(JSON.parse(String(vi.mocked(apiFetch).mock.calls[3][1]?.body))).not.toHaveProperty("private_input");
+  vi.mocked(apiFetch).mockResolvedValueOnce(response(snapshot)).mockRejectedValueOnce(Error("Snapshot receipt lost"));
+  fireEvent.click(screen.getByRole("button", { name: "Refresh current page snapshot" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Snapshot receipt lost");
+  expect(screen.getByLabelText("Snapshot field")).toBeDisabled();
+  expect(apiFetch).toHaveBeenCalledTimes(6);
+});
+it("disables actions and refresh at the durable action bound while retaining history and cleanup", async () => {
+  const exhausted = { ...snapshot, history: Array.from({ length: 20 }, (_, i) => ({ sequence: i + 1, kind: "wait", status: "intent" })) };
+  vi.mocked(apiFetch).mockResolvedValueOnce(response(profiles)).mockResolvedValueOnce(response(exhausted));
+  render(<BrowserInteractionPanel {...owner} goals={[goal]} />); await open();
+  expect(screen.getByLabelText("Snapshot field")).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Refresh current page snapshot" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Inspect original browser history" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Close private browser context" })).toBeEnabled();
+  expect(apiFetch).toHaveBeenCalledTimes(2);
+});
+it("records only explicitly approved physical cleanup without original history or effect adoption", async () => {
+  vi.mocked(apiFetch).mockResolvedValueOnce(response(profiles)).mockResolvedValueOnce(response({ candidates: [
+    { job_id: "old-job", durable_status: "unknown_external_effect", physical_proof_state: "linux_boot_changed" }], has_more: false }))
+    .mockResolvedValueOnce(response({ job_id: "old-job", revision: 9, status: "unknown_external_effect",
+      receipt: { scope: "physical_cleanup_only", proof_kind: "linux_boot_changed", no_learning: true } }));
+  render(<BrowserInteractionPanel {...owner} goals={[goal]} />);
+  fireEvent.click(screen.getByRole("button", { name: "Find physical browser cleanup" }));
+  const cleanup = await screen.findByRole("button", { name: "Record physical cleanup for old-job" });
+  expect(cleanup).toBeDisabled(); expect(screen.queryByLabelText("Browser action history")).toBeNull();
+  fireEvent.click(screen.getByText("Approve physical cleanup only for the displayed original browser job.")); fireEvent.click(cleanup);
+  await screen.findByText(/original durable status remains unknown_external_effect/);
+  expect(vi.mocked(apiFetch).mock.calls[2][0]).toMatch(/\/jobs\/old-job\/cleanup$/);
+  expect(JSON.parse(String(vi.mocked(apiFetch).mock.calls[2][1]?.body))).toEqual({ cleanup_ack: true });
+  expect(screen.queryByLabelText("Private prepared value")).toBeNull();
+});
+it("keeps same-boot and unsupported boot cleanup blocked with explicit recovery guidance", async () => {
+  vi.mocked(apiFetch).mockResolvedValueOnce(response(profiles)).mockResolvedValueOnce(response({ candidates: [
+    { job_id: "old-linux", durable_status: "running", physical_proof_state: "linux_reboot_required" },
+    { job_id: "old-mac", durable_status: "running", physical_proof_state: "boot_proof_unavailable" }], has_more: false }));
+  render(<BrowserInteractionPanel {...owner} goals={[goal]} />);
+  fireEvent.click(screen.getByRole("button", { name: "Find physical browser cleanup" }));
+  await screen.findByText(/operator-managed reboot is required/);
+  expect(screen.getByText(/macOS boot recovery is unsupported/)).toBeInTheDocument();
+  fireEvent.click(screen.getByText("Approve physical cleanup only for the displayed original browser job."));
+  expect(screen.getByRole("button", { name: "Record physical cleanup for old-linux" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Record physical cleanup for old-mac" })).toBeDisabled();
+  expect(apiFetch).toHaveBeenCalledTimes(2);
+});
+it("blocks public contact until existing operator ownership enrollment is ready", async () => {
+  vi.mocked(apiFetch).mockResolvedValueOnce(response({ ...profiles, runtime_state: "inactive", blocked_reason: "browser_operator_continuity_required" }));
+  render(<BrowserInteractionPanel {...owner} goals={[goal]} />);
+  await screen.findByText(/Enroll the current operator in the existing ownership controls/);
+  expect(screen.getByRole("button", { name: "Open reviewed public page" })).toBeDisabled();
+  expect(apiFetch).toHaveBeenCalledTimes(1);
 });

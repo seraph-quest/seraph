@@ -5,7 +5,8 @@ title: "ADR-029: Profiled browser interactions"
 # ADR-029: Profiled browser interactions
 
 **Status:** Accepted target on independently reviewed merge to `develop`.
-Branch-local implementation remains Planned until that merge.
+Capability availability and remaining boundaries are owned by STATUS and the
+Current App Guide.
 
 **Decision class:** Target architecture
 

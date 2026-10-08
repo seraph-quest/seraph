@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 from config.settings import settings
 from src.runtime_plugins.bridge import CordisHost
 from src.runtime_plugins.composition import CompositionBlocked
+from tests.test_browser_interactions_v2 import local_form
 from src.app import (
     _active_chat_runtime_status,
     _augment_inference_readiness,
@@ -417,7 +418,8 @@ async def test_optional_cordis_app_lifespan_missing_node_keeps_core_open_and_run
 
 
 @pytest.mark.asyncio
-async def test_actual_cordis_app_lifespan_authenticated_status_and_positive_cleanup(client, monkeypatch, tmp_path):
+@pytest.mark.parametrize("host_failure", ["none", "start", "stop", "cancel"])
+async def test_actual_cordis_app_lifespan_authenticated_status_and_positive_cleanup(client, monkeypatch, tmp_path, local_form, host_failure):
     """One real stock host crosses actual app startup, authenticated RPC and reap."""
     import os
     import json
@@ -427,11 +429,27 @@ async def test_actual_cordis_app_lifespan_authenticated_status_and_positive_clea
     from unittest.mock import Mock
     import src.app as app_module
 
+    from src.browser.sessions import ProfiledInteractionSessions
+    from src.browser.interaction_contracts import digest
+    from src.browser.task_lane import BrowserTaskLane
+    from tests.test_browser_interactions_v2 import FORM
+    from contextlib import nullcontext
+    import uuid
+    request, contacts, denied = local_form
+    browser_service = ProfiledInteractionSessions(request=request, source_digest=digest(FORM))
+    monkeypatch.setattr("src.browser.sessions.profiled_interaction_sessions", browser_service)
+    monkeypatch.setattr("src.api.browser.profiled_interaction_sessions", browser_service)
     selected = os.environ.get("SERAPH_CORDIS_TEST_NODE")
     if not selected:
         pytest.skip("explicit reviewed Node required for native app-lifespan proof")
     host = CordisHost(node_path=Path(selected).resolve())
     monkeypatch.setattr(app_module, "cordis_host", host)
+    from src.work_board.dispatcher import _dispatcher
+    source_runtimes = []
+    async def close_after_source_cleanup():
+        assert _dispatcher.connection_sync_runtime is None
+        assert not browser_service.started
+        assert source_runtimes and not source_runtimes[-1].started
     monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
     monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", False)
     monkeypatch.setattr(settings, "operator_auth_secret", "isolated-cordis-auth-fixture")
@@ -458,32 +476,114 @@ async def test_actual_cordis_app_lifespan_authenticated_status_and_positive_clea
         monkeypatch.setattr(target, AsyncMock(return_value=[]))
     profile = SimpleNamespace(interruption_mode=None, capture_mode=None, tool_policy_mode=None, mcp_policy_mode=None, approval_mode=None)
     monkeypatch.setattr("src.api.profile.get_or_create_profile", AsyncMock(return_value=profile))
+    monkeypatch.setattr(app_module, "close_db", AsyncMock(side_effect=close_after_source_cleanup))
     assert (await client.get("/api/runtime/status")).status_code == 401
     login = await client.post("/api/auth/login", json={"password":"isolated-cordis-auth-fixture"},
                               headers={"origin":"http://localhost:3001"})
     assert login.status_code == 200
+    assert (await client.post("/api/auth/ownership/enroll", headers={"origin":"http://localhost:3001"})).status_code == 200
+    goal_response = await client.post("/api/goals", json={"title":"Preview the registered form during managed lifespan"}, headers={"origin":"http://localhost:3001"})
+    assert goal_response.status_code == 200, goal_response.text
+    goal = goal_response.json()
+    actual_host_stop = host.stop
+    async def stop_with_late_failure(*args, **kwargs):
+        assert browser_service.started
+        assert bool(browser_service.active) is (host_failure != "cancel")
+        await actual_host_stop(*args, **kwargs)
+        if host_failure == "stop":
+            raise RuntimeError("fixture late Cordis stop failure after positive reap")
+    monkeypatch.setattr(host, "stop", stop_with_late_failure)
+    actual_host_start = host.start
+    startup_resources = []
+    async def start_with_late_failure(*args, **kwargs):
+        source_runtime = client._transport.app.state.connection_sync_runtime
+        assert source_runtime.started and _dispatcher.connection_sync_runtime is source_runtime
+        assert not source_runtimes or source_runtimes[-1] is not source_runtime
+        source_runtimes.append(source_runtime)
+        started = await actual_host_start(*args, **kwargs)
+        startup_resources.append((host.process, host.boot_nonce))
+        if host_failure == "cancel":
+            import asyncio
+            asyncio.current_task().cancel()
+            await asyncio.sleep(0)
+        if host_failure == "start":
+            raise RuntimeError("fixture late Cordis startup failure with owned child")
+        return started
+    monkeypatch.setattr(host, "start", start_with_late_failure)
+    async def goal_stop_after_browser():
+        assert not browser_service.started and browser_service.active == {}
+        assert source_runtimes[-1].started
+        assert _dispatcher.connection_sync_runtime is source_runtimes[-1]
+    monkeypatch.setattr("src.guardian.goal_programmes.goal_programme_service.stop",
+        AsyncMock(side_effect=goal_stop_after_browser))
+    from src.guardian.goal_programmes import goal_programme_service
     previous_boot = None
     receipts = []
     for _ in range(2):
-        async with app_module.lifespan(client._transport.app):
-            assert host.admitting
-            assert host.boot_nonce is not None and host.boot_nonce != previous_boot
-            previous_boot = host.boot_nonce
-            process = host.process
-            pid = process.pid
-            assert host.snapshot()["readiness"]["state"] == "unknown"
-            started = int(time.time()*1000)
-            response = await client.get("/api/runtime/status")
-            assert response.status_code == 200
-            actual = response.json()["cordis_runtime"]
-            assert actual["state"] == "ready" and actual["reason"] is None
-            assert actual["runtime_role"] == "lifecycle_host"
-            assert actual["readiness"]["state"] == "verified"
-            assert started <= actual["readiness"]["checked_at"] <= int(time.time()*1000)
-            assert actual["plugins"] == [{"id":"seraph.host-lifecycle@1.0.0", "state":"ready", "reason":None}]
-            assert not {"boot_nonce", "pid", "stderr", "env"} & actual.keys()
-            assert host.boot_nonce not in response.text
-            assert (await client.get("/health")).json() == {"status":"ok"}
+        import asyncio
+        expected = pytest.raises(asyncio.CancelledError) if host_failure == "cancel" else pytest.raises(RuntimeError, match="late Cordis stop failure") if host_failure == "stop" else nullcontext()
+        with expected:
+            async with app_module.lifespan(client._transport.app):
+                assert host.admitting
+                assert host.boot_nonce is not None and host.boot_nonce != previous_boot
+                previous_boot = host.boot_nonce
+                process = host.process
+                pid = process.pid
+                assert host.snapshot()["readiness"]["state"] == "unknown"
+                started = int(time.time()*1000)
+                response = await client.get("/api/runtime/status")
+                assert response.status_code == 200
+                actual = response.json()["cordis_runtime"]
+                assert actual["state"] == "ready" and actual["reason"] is None
+                assert actual["runtime_role"] == "lifecycle_host"
+                assert actual["readiness"]["state"] == "verified"
+                assert started <= actual["readiness"]["checked_at"] <= int(time.time()*1000)
+                assert actual["plugins"] == [{"id":"seraph.host-lifecycle@1.0.0", "state":"ready", "reason":None}]
+                assert not {"boot_nonce", "pid", "stderr", "env"} & actual.keys()
+                assert host.boot_nonce not in response.text
+                assert (await client.get("/health")).json() == {"status":"ok"}
+                assert browser_service.started
+                prepared = await client.post("/api/capabilities/browser-interactions/jobs", json={
+                    "profile_id":"httpbin.forms.v1", "goal_id":goal["id"], "goal_revision":goal["revision"],
+                    "request_key":str(uuid.uuid4()), "read_ack":True}, headers={"origin":"http://localhost:3001"})
+                assert prepared.status_code == 200, prepared.text
+                job_id = prepared.json()["job_id"]
+                page = browser_service.active[job_id]["page"]
+                assert page.latest is not None and not page.page.is_closed()
+        assert not source_runtimes[-1].started
+        assert _dispatcher.connection_sync_runtime is None
+        if host_failure == "cancel":
+            process, boot_nonce = startup_resources[-1]
+            try:
+                assert not browser_service.started and browser_service.active == {}
+                assert host.snapshot()["cleanup"]["process_reaped"] is True
+            finally:
+                # Keep even the deliberately failing pre-fix receipt leak-free.
+                if browser_service.started:
+                    await actual_host_stop()
+                    await browser_service.stop()
+                    from src.guardian.goal_programmes import goal_programme_service
+                    await goal_programme_service.stop()
+            assert boot_nonce is not None and boot_nonce != previous_boot
+            previous_boot = boot_nonce
+            assert process.returncode == 0
+            with pytest.raises(ProcessLookupError): os.kill(process.pid, 0)
+            assert (await client.get("/api/capabilities/browser-interactions/jobs")).json()["jobs"] == []
+            lane = BrowserTaskLane(tmp_path).acquire()
+            lane.release()
+            receipts.append({"host_failure":"cancel", "process_exit_code":process.returncode,
+                "process_reaped":True, "browser_started":False, "browser_contexts":0,
+                "browser_jobs":0, "shared_lane_available":True, "cancellation_propagated":True})
+            continue
+        assert not browser_service.started and browser_service.active == {}
+        assert page.page.is_closed() and not page.resources.browser.is_connected()
+        cleanup_row = await browser_service.jobs.get_job(job_id)
+        assert cleanup_row["status"] == "blocked"
+        assert any(c["checkpoint_id"] == "native-physical-resource-cleanup" for c in cleanup_row["checkpoints"])
+        lane = BrowserTaskLane(tmp_path).acquire()
+        lane.release()
+        from src.guardian.goal_programmes import goal_programme_service
+        goal_programme_service.stop.assert_awaited()
         cleanup = host.snapshot()["cleanup"]
         assert cleanup == {"state":"clean", "process_reaped":True,
                            "resources_remaining":0, "cordis_disposal":"confirmed"}
@@ -491,5 +591,10 @@ async def test_actual_cordis_app_lifespan_authenticated_status_and_positive_clea
         with pytest.raises(ProcessLookupError): os.kill(pid, 0)
         receipts.append({"runtime_status":actual, "cleanup":cleanup,
                          "fresh_boot":True, "process_exit_code":process.returncode,
-                         "owned_pid_absent":True})
+                         "owned_pid_absent":True, "browser_positive_cleanup":True,
+                         "browser_durable_status":cleanup_row["status"], "host_failure":host_failure})
+    assert len(source_runtimes) == 2 and all(not runtime.started for runtime in source_runtimes)
+    assert _dispatcher.connection_sync_runtime is None
+    assert goal_programme_service.stop.await_count == 2
+    assert contacts == ([] if host_failure == "cancel" else [("GET", "/forms/post"), ("GET", "/forms/post")]) and denied == []
     (tmp_path / "cordis-app-lifecycle-proof.json").write_text(json.dumps({"authenticated":True, "cycles":receipts}, indent=2))

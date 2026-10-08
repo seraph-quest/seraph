@@ -631,6 +631,13 @@ class GpuAdmissionBroker(Generic[T]):
                 with self._condition:
                     self._async_waiters.discard(waiter)
 
+    async def _before_release(self, lease: GpuAdmissionLease) -> bool:
+        """Protected owner finalization, outside the broker condition lock."""
+        return True
+
+    def _before_release_sync(self, lease: GpuAdmissionLease) -> bool:
+        return True
+
     async def release(
         self,
         lease: GpuAdmissionLease,
@@ -644,6 +651,7 @@ class GpuAdmissionBroker(Generic[T]):
             raise ValueError("GPU release outcome must be succeeded, failed, or cancelled")
         if reason_code is not None:
             reason_code = _normalize_reason_code(reason_code, field_name="reason_code")
+        finalized = await self._before_release(lease)
         with self._condition:
             operation = self._operations.get(lease.operation_id)
             if (
@@ -657,6 +665,10 @@ class GpuAdmissionBroker(Generic[T]):
             ):
                 receipt = self._receipt_for_lease_locked(lease, reason_code="stale_owner_or_fencing_token")
                 raise GpuAdmissionLeaseError("GPU lease owner or fencing token is stale", receipt=receipt)
+            if not finalized:
+                return self._hold_for_reconciliation_locked(operation,
+                    reason_code="accounting_settlement_unavailable",
+                    observed_at=self._observed_at_locked(operation))
             if operation.status == "blocked":
                 return self._finish_blocked_callback_locked(operation)
             observed_at = self._observed_at_locked(operation)
@@ -1129,6 +1141,7 @@ class GpuAdmissionBroker(Generic[T]):
             raise ValueError("GPU release outcome must be succeeded, failed, or cancelled")
         if reason_code is not None:
             reason_code = _normalize_reason_code(reason_code, field_name="reason_code")
+        finalized = self._before_release_sync(lease)
         with self._condition:
             operation = self._operations.get(lease.operation_id)
             if (
@@ -1142,6 +1155,10 @@ class GpuAdmissionBroker(Generic[T]):
             ):
                 receipt = self._receipt_for_lease_locked(lease, reason_code="stale_owner_or_fencing_token")
                 raise GpuAdmissionLeaseError("GPU lease owner or fencing token is stale", receipt=receipt)
+            if not finalized:
+                return self._hold_for_reconciliation_locked(operation,
+                    reason_code="accounting_settlement_unavailable",
+                    observed_at=self._observed_at_locked(operation))
             if operation.status == "blocked":
                 return self._finish_blocked_callback_locked(operation)
             observed_at = self._observed_at_locked(operation)

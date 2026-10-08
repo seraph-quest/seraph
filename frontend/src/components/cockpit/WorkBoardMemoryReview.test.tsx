@@ -130,6 +130,24 @@ const changedReceipt = {
 
 describe("WorkBoardMemoryReview", () => {
   const fetchMock = vi.fn();
+  it("routes task method candidates to exact private inspection with no generic adoption controls", async () => {
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/memory/task-proposals?")) return response({ proposals: [{ ...proposal, schema_version: "task_method_proposal.v1" }] });
+      if (url.endsWith("/api/memory/task-lessons/proposal-1")) return response({ schema_version: "task_method_proposal.v1", proposal_id: "proposal-1", task_id: "task-1", attempt_id: "attempt-1", revision: 1, status: "proposed", result: "candidate_inert", reason_code: "explicit_correction", behavior_changed: false, source_current: true, correction: "Verify readback", scope: { goal_id: "goal-1", goal_revision: 4, family: "general" }, old_method: { steps: [{ kind: "registered_tool", tool_id: "write_note" }] }, new_method: { steps: [{ kind: "guard", check: "verified_readback" }, { kind: "registered_tool", tool_id: "write_note" }] } });
+      if (url.includes("/api/memory/task-decisions?")) return response({ receipts: [] });
+      if (url.endsWith("/api/memory/task-decision-capabilities")) return response({ capabilities: [] });
+      return response({});
+    });
+    render(<WorkBoardMemoryReview task={task()} ownerPrincipalId="operator:one" ownerSessionId="operator-session-1" />);
+    await screen.findByRole("article", { name: "Inert task method proposal" });
+    expect(screen.queryByText("Edit before acceptance")).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Accept|Edit and accept/i })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Inspect exact task method change" }));
+    await screen.findByRole("region", { name: "Exact private lesson change" });
+    expect(screen.getByLabelText("Proposed task method")).toHaveTextContent("verified_readback");
+    expect(fetchMock.mock.calls.every(([, init]) => init?.method !== "POST")).toBe(true);
+  });
 
   beforeEach(() => {
     fetchMock.mockReset();

@@ -743,6 +743,78 @@ Availability of these bounded work-board profiles requires the installed
 reviewed program revision. They do not claim full Hermes parity, autonomous
 execution, memory superiority, or production readiness.
 
+### Task lesson drafts (proposal-only)
+
+The supported proposal-only **Learn this** path is provider-free. It accepts an ordinary
+completed or failed task with a verified current attempt and recorded native
+tool steps or an exact current formatter capability contract snapshot. The
+formatter draft preserves its registered identity, version and typed contract
+digests; it never copies the task's JSON input or output. The source-discovery
+endpoint returns the authoritative task
+revision, attempt, references and Goal scope. An ordinary text correction can
+draft a closed `TaskMethod.v1`: an existence check before using the source,
+a verified-readback check, or preservation of source attribution. Unsupported
+corrections and missing method receipts return explicit `no_change`; they are
+preserved as private correction evidence and do not become executable steps.
+
+The Inspector separates the observed outcome, explicit correction and inferred
+draft, and displays the exact old and new method. `ResearchStrategy.v1` and
+`TaskMethod.v1` are closed data schemas; candidate input cannot install tools,
+change permissions, runtime limits, providers or credentials. Candidate content
+is a private artifact; the existing `MemoryProposal` owns the inert review row,
+and `EvolutionRuntime` records only content-free lesson receipts. Neither a
+successful task nor a failure creates a positive preference vote. Changes to
+the task, Goal, run, receipts or method steps block the old preview.
+
+Automatic proposals require a separate per-task opt-in bound to the original
+current operator, task intent and Goal revision. Enable and disable require the
+exact authoritative policy revision; a stale request cannot overwrite a later
+consent change. The terminal dispatcher callback
+reauthenticates that exact Root without renewing it. Automatic creation uses only
+the finite missing-source failure rule and is limited to two durable proposal starts per UTC
+day across the owner; consent renewal does not renew that cap. It performs no
+inference, source-body projection or trace egress. The callback is bounded to
+five seconds and cannot undo an ordinary task's committed result. Private
+staging runs off the event loop in a single retained worker. Timeout stops
+proposal progression, records a content-free outcome for the exact original
+attempt even after Root revocation, and retains staging capacity until the
+actual worker finishes. Thread cancellation is never treated as cleanup.
+After restart, recovery requires proof that the original process ended and
+checks the exact private artifact; it records no-change and releases the
+original slot without making a proposal. Replays and recovered starts still
+count toward the daily cap.
+Linux recovery uses the original kernel boot/process identity. macOS uses the
+fixed native boot-session UUID and exact PID start seconds/microseconds; a
+missing PID or failed native read remains unknown. A same-process retained
+worker can complete even when native witness acquisition is unavailable.
+Unknown restart witnesses retain capacity and expose `restart_witness_unknown`;
+manual lesson review remains available. Native macOS execution was not verified
+on the Linux validation host; finite ABI and recovery fixtures cover its contract.
+Automatic outcomes have content-free, original-owner task events; source
+discovery returns the latest matching outcome, including no-change, cap and
+failure states. Automatic completion uses the canonical proposal and task event
+receipt and performs no evolution-file work. Explicit inspection or manual
+request replay repairs a missing evolution receipt off-loop from the canonical
+proposal without another daily-cap charge; mirror work is capped at 1 MiB and
+4096 entries. The canonical proposal remains inspectable if this advisory mirror
+is oversized or unavailable; readback exposes a degraded mirror status and
+preserves its existing bytes for recovery through the evolution owner.
+Model reflection remains unavailable because no existing consent authorizes task-trace
+egress. No model call or spend is needed to draft a supported lesson.
+
+This section records the intended supported scope after merge; it makes no
+pre-merge Shipped claim. Strategy adoption, rollback and next-task use (#1001)
+remain **Planned**. Generic memory acceptance rejects `task_method_proposal.v1`; drafts never
+change task execution. Isolated local checks establish these mechanics, not
+learned quality or general usefulness.
+
+The actual authenticated formatter-to-lesson failure journey is verified on the
+implementation host: bubblewrap exits with `Failed RTM_NEWADDR: Operation not
+permitted`, process cleanup is proven, no formatted output is adopted, and an
+explicit correction creates an inspectable private inert method. The positive
+formatter journey remains blocked by that host sandbox limitation; this receipt
+does not establish successful formatter execution or lesson quality.
+
 ### Reviewed procedures v2 (M6 #889) {#reviewed-procedures-v2-m6-889-branch-local-target}
 
 [ADR-015](./decisions/015-reviewed-procedure-preferences.md) accepts a narrow
@@ -1116,6 +1188,70 @@ target. Local source/output and current policy metadata reads inside selected
 SQLite writers are bounded by their contracts; their lock duration and physical
 filesystem race limits remain relevant.
 
+### Profiled public form preparation (#1012)
+
+`browser.interact.v2` adds a separate registered HTTPBin public form preview
+under [ADR-029](./decisions/029-profiled-browser-interactions.md). The capability
+is **Partial**: bounded public-form preparation and preview are available;
+authenticated exact transactions (#1013), downloads and selected local desktop
+draft actions (#1014) remain **Planned**.
+The existing public browser v1 remains navigate/extract only. From the public
+browser Work form, explicitly open the HTTPBin preparation controls, select a
+current Goal, acknowledge one public document contact/site access logging, and
+open the bounded job. Fill fields using the displayed current opaque nodes,
+check/radio controls, and request the literal private preview. Submission stays
+blocked; this public echo form does not place an order or mutate a business
+object. It imports no credentials, cookies or authenticated session.
+
+The profile pins the reviewed source bytes and exact GET `/forms/post`; any
+source drift blocks before Chromium receives the document. Preparation disables
+JavaScript, service workers, requests, WebSockets, downloads and popups. Fresh
+DOM revisions and original Root/Goal authority are checked before every action.
+At most 20 actions and 180 seconds occupy the existing shared browser lane.
+Stale or ambiguous nodes stop with a fresh-snapshot requirement. Explicit
+**Refresh current page snapshot** captures the original live page, consumes one
+bounded action and replaces every opaque node reference. Cached history
+inspection does not resolve an uncertain action. Refresh clears private input
+and action acknowledgement; continuing requires a new explicit action against
+the fresh nodes. At the action bound, only history and cleanup remain available.
+
+Reload uses the read-only owned-job list or exact request-key lookup to inspect
+completed/blocked history; it does not reopen a page or renew consent. Private
+inputs and preview artifacts are encrypted and excluded from generic journals.
+Success requires a current literal preview, private artifact readback and
+positive browser cleanup. Closing without a current preview cancels the job.
+Admission first requires the existing **Operator ownership and recovery**
+control's **Enroll this authenticated scope** action and a live stable operator
+identity. Refresh profiles after enrollment. Missing local Playwright files or
+a verified native kernel boot UUID report inactive before any child starts.
+The canonical physical reservation commits before the same-inode positive
+marker is synced and the driver starts. A crash between reservation and marker
+keeps unresolved read-only history; inspecting or replaying the request never
+launches another browser or infers no-child proof from missing metadata.
+
+Positive physical closure retains the exact lane witness until its cleanup-only
+journal receipt commits. A durable CAS conflict keeps capacity reserved.
+**Find physical browser cleanup** exposes only original job identity, proof
+state and unchanged durable status to the same stable authenticated operator,
+including after authenticating through existing ownership recovery. Explicit
+acknowledgement records exact physical cleanup; it never adopts output, grants
+success, renews old Root/Goal authority, retries an action or resolves an
+external outcome. Exact receipt replay cannot clear a later job's reservation.
+
+After lost owner-process cleanup, a changed verified native kernel boot UUID
+proves original resources are gone; the same boot stays blocked and requires an
+operator-managed reboot if no positive closure witness exists. Linux reads its
+kernel boot UUID; Darwin uses the fixed read-only `kern.bootsessionuuid`.
+Unavailable native proof or mismatched workspace/inode/job remains blocked.
+Process absence, elapsed time and an unlocked file are never cleanup proof.
+Every outcome records `no_learning`.
+
+The local Linux Chromium/TCP/SQLite receipts exercise multi-field preparation,
+select/check controls, policy denial, DOM drift, private readback and reloaded
+history with external sockets/inference denied. These receipts establish those
+mechanics; they do not establish a useful business form workflow or production
+HTTPBin availability. macOS execution is unverified.
+
 ### Bounded public browser tasks
 
 The bounded capability adds `browser.public-task.v1` through the existing Work
@@ -1370,7 +1506,11 @@ references never enter the primary model prompt. Only classified related
 references, coverage and freshness enter the existing result (encrypted Mail
 draft; Calendar metadata). Missing lifecycle binding or stale/revoked authority
 blocks execution without a source-provider fallback. Empty selections preserve
-legacy input and authority digests. These paths record explicit `no_learning`.
+legacy input and authority digests. These paths record explicit `no_learning`. The app's owned
+shutdown stops Cordis, profiled browser sessions, the Goal programme and the
+source runtime in order, including startup cancellation and preceding stop
+failures. It clears only the exact source dispatcher pointer before ordinary
+DB shutdown; optional host failures do not replace source authority.
 
 Isolated regression/security checks use disposable SQLite/workspaces, a local
 paginated HTTP source fixture, separate-process reservation contention,
@@ -1839,6 +1979,17 @@ The accepted #775 phase uses one shared bounded `remote_inference`
 admission lane: the active request finishes, then the highest-priority ready
 request runs. Interactive work outranks scheduled and background work. Queue,
 consent, cancellation, and uncertain remote outcomes remain operator-visible.
+On revisions containing the independently reviewed
+[#1031](https://github.com/seraph-quest/seraph/issues/1031) repair, async,
+synchronous and streaming execution retain that same serial lease after positive
+provider callback completion until charge or liability settlement and canonical
+readback finish. A queued sibling cannot contact while an overrun is still being
+committed. Failed settlement/readback retains the existing reconciliation hold;
+an elapsed deadline or returned coroutine does not release it. Known charges stay
+known when current authority later prevents result adoption. Positive
+never-contacted denial proof retains its existing quiescence journal. Isolated
+scripted-transport receipts establish these ownership mechanics, not provider
+availability or model quality.
 The canonical job repository owns deployment accounting reservations and their
 original UTC calendar month and settings revision. The deployment owner does
 not change with login, enrollment, or root identity. Actual OpenRouter account

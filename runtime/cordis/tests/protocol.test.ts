@@ -32,6 +32,19 @@ test('oversized lengths and incomplete frames never yield a dispatch', async () 
     assert.equal(dispatched, 0);
   }
 });
+test('nested status and shutdown integers reject float, exponent and unsafe tokens', () => {
+  for (const method of ['runtime.status', 'runtime.shutdown'] as const) {
+    const payload = method === 'runtime.status'
+      ? { state: 'ready', plugins: [], resources_remaining: 1 }
+      : { state: 'stopped', resources_remaining: 1, cordis_disposal: 'confirmed' };
+    const source = JSON.stringify({ ...frame, kind: 'response', method, payload });
+    assert.equal(validateFrame(decodeJson(Buffer.from(source))).payload.resources_remaining, 1);
+    for (const token of ['1.0', '1e0', '9007199254740993']) {
+      const malformed = source.replace('"resources_remaining":1', `"resources_remaining":${token}`);
+      assert.throws(() => validateFrame(decodeJson(Buffer.from(malformed))), /integer/, `${method}: ${token}`);
+    }
+  }
+});
 test('cleanup errors retain owned resources instead of falsely passing disposal', async () => {
   const resources = new Resources();
   resources.track('owned', () => { throw Error('cleanup unavailable'); });

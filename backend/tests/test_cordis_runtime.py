@@ -60,6 +60,19 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ProtocolError):
                 await read_frame(reader)
 
+    def test_nested_status_and_shutdown_integer_token_parity(self):
+        for method in ["runtime.status", "runtime.shutdown"]:
+            payload = ({"state": "ready", "plugins": [], "resources_remaining": 1}
+                       if method == "runtime.status" else
+                       {"state": "stopped", "resources_remaining": 1, "cordis_disposal": "confirmed"})
+            source = json.dumps({**hello(), "kind": "response", "method": method,
+                                 "payload": payload}, separators=(",", ":"))
+            self.assertEqual(validate_frame(decode_json(source.encode()))["payload"]["resources_remaining"], 1)
+            for token in ["1.0", "1e0", "9007199254740993"]:
+                malformed = source.replace('"resources_remaining":1', f'"resources_remaining":{token}')
+                with self.subTest(method=method, token=token), self.assertRaises(ProtocolError):
+                    validate_frame(decode_json(malformed.encode()))
+
     def test_literal_profiles_reject_imports_config_and_missing_required_plugin(self):
         base = json.loads((PACKAGE_ROOT / "profile.json").read_text())
         for change in [{"plugins": []}, {"module": "arbitrary"},

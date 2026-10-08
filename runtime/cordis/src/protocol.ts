@@ -92,7 +92,10 @@ export function decodeJson(data: Uint8Array): Json {
     offset += number.length;
     const value = Number(number);
     if (!Number.isFinite(value)) throw new ProtocolError('nonfinite number');
-    if (depth === 2 && key && ['protocol', 'seq', 'deadline_at', 'composition_epoch'].includes(key) && !/^-?(?:0|[1-9][0-9]*)$/.test(number)) throw new ProtocolError('integer used float syntax');
+    if (key && ['protocol', 'seq', 'deadline_at', 'composition_epoch', 'resources_remaining'].includes(key)) {
+      if (!/^-?(?:0|[1-9][0-9]*)$/.test(number)) throw new ProtocolError('integer used float syntax');
+      if (!Number.isSafeInteger(value)) throw new ProtocolError('unsafe integer');
+    }
     return value;
   };
   const result = parse(1); space();
